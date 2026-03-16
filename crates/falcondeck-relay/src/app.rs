@@ -797,11 +797,51 @@ impl SessionRecord {
 
 async fn load_state(path: &Path) -> Result<PersistedState, RelayError> {
     match fs::read_to_string(path).await {
-        Ok(contents) => serde_json::from_str(&contents)
-            .map_err(|error| RelayError::StateLoad(error.to_string())),
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(state) => Ok(state),
+            Err(error) => {
+                warn!("failed to parse persisted relay state directly: {error}; attempting legacy migration");
+                load_compatible_state(&contents)
+            }
+        },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PersistedState::default()),
         Err(error) => Err(RelayError::StateLoad(error.to_string())),
     }
+}
+
+fn load_compatible_state(contents: &str) -> Result<PersistedState, RelayError> {
+    let raw: serde_json::Value =
+        serde_json::from_str(contents).map_err(|error| RelayError::StateLoad(error.to_string()))?;
+
+    let mut state = PersistedState::default();
+
+    if let Some(pairings) = raw.get("pairings").and_then(serde_json::Value::as_object) {
+        for (pairing_id, pairing_value) in pairings {
+            match serde_json::from_value::<PairingRecord>(pairing_value.clone()) {
+                Ok(pairing) => {
+                    state.pairings.insert(pairing_id.clone(), pairing);
+                }
+                Err(error) => {
+                    warn!("skipping incompatible legacy pairing record {pairing_id}: {error}");
+                }
+            }
+        }
+    }
+
+    if let Some(sessions) = raw.get("sessions").and_then(serde_json::Value::as_object) {
+        for (session_id, session_value) in sessions {
+            match serde_json::from_value::<SessionRecord>(session_value.clone()) {
+                Ok(session) => {
+                    state.sessions.insert(session_id.clone(), session);
+                }
+                Err(error) => {
+                    warn!("skipping incompatible legacy session record {session_id}: {error}");
+                }
+            }
+        }
+    }
+
+    Ok(state)
 }
 
 async fn persist_state(path: &Path, state: &PersistedState) -> Result<(), RelayError> {

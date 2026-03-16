@@ -357,6 +357,54 @@ async fn persisted_state_does_not_store_plaintext_session_markers() {
     );
 }
 
+#[tokio::test]
+async fn legacy_plaintext_state_is_skipped_instead_of_crashing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("relay-state.json");
+    std::fs::write(
+        &state_path,
+        r#"{
+  "pairings": {
+    "pairing-old": {
+      "pairing_id": "pairing-old",
+      "pairing_code": "ABC12345",
+      "daemon_token": "daemon-old",
+      "label": "legacy",
+      "session_id": "session-old",
+      "daemon_bundle": {"daemonVersion":"0.1.0"},
+      "client_bundle": null,
+      "created_at": "2026-03-15T12:51:18.340992458Z",
+      "expires_at": "2026-03-15T13:01:18.340992458Z"
+    }
+  },
+  "sessions": {
+    "session-old": {
+      "session_id": "session-old",
+      "pairing_id": "pairing-old",
+      "daemon_token": "daemon-old",
+      "client_token": "client-old",
+      "created_at": "2026-03-15T12:51:18.804798247Z",
+      "updated_at": "2026-03-15T12:51:21.511622140Z",
+      "updates": [{
+        "id":"update-old",
+        "seq":1,
+        "body":{"kind":"daemon-event","event":{"seq":0}},
+        "created_at":"2026-03-15T12:51:21.511622140Z"
+      }]
+    }
+  }
+}"#,
+    )
+    .unwrap();
+
+    let state = AppState::load("test".to_string(), state_path, Duration::seconds(300))
+        .await
+        .unwrap();
+    let health = state.health().await;
+    assert_eq!(health.pending_pairings, 0);
+    assert_eq!(health.active_sessions, 0);
+}
+
 async fn create_claimed_session(
     client: &reqwest::Client,
     http_base: &str,
