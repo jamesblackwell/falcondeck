@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react'
 import * as React from 'react'
 
 import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
@@ -24,7 +25,7 @@ function threadStatusDisplay(status: ThreadSummary['status']) {
   }
 }
 
-export function SessionHeader({
+export const SessionHeader = memo(function SessionHeader({
   workspace,
   thread,
   selectedModel,
@@ -32,6 +33,10 @@ export function SessionHeader({
   children,
 }: SessionHeaderProps) {
   const pathLabel = workspace?.path.split('/').pop()
+  const modelLabel = useMemo(
+    () => workspace?.models.find((m) => m.id === selectedModel)?.label ?? selectedModel,
+    [workspace?.models, selectedModel],
+  )
 
   return (
     <Toolbar className="bg-surface-1">
@@ -55,13 +60,11 @@ export function SessionHeader({
 
       <ToolbarGroup align="end">
         {selectedModel ? (
-          <Badge>
-            {workspace?.models.find((m) => m.id === selectedModel)?.label ?? selectedModel}
-          </Badge>
+          <Badge>{modelLabel}</Badge>
         ) : null}
         {selectedEffort ? <Badge>{selectedEffort}</Badge> : null}
         {children}
       </ToolbarGroup>
     </Toolbar>
   )
-}
+})

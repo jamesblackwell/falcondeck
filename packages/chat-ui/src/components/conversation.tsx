@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { memo, useEffect, useRef } from 'react'
 import { MessageSquare } from 'lucide-react'
 
 import type { ConversationItem } from '@falcondeck/client-core'
@@ -6,14 +6,14 @@ import { EmptyState } from '@falcondeck/ui'
 
 import { MessageCard } from './message'
 
-export function Conversation({ items }: { items: ConversationItem[] }) {
+export const Conversation = memo(function Conversation({ items }: { items: ConversationItem[] }) {
   const endRef = useRef<HTMLDivElement>(null)
 
   const lastItemId = items.length > 0 ? items[items.length - 1].id : null
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [items.length, lastItemId])
+  }, [lastItemId])
 
   return (
     <div data-selectable className="min-h-0 flex-1 overflow-y-auto">
@@ -32,4 +32,4 @@ export function Conversation({ items }: { items: ConversationItem[] }) {
       </div>
     </div>
   )
-}
+})

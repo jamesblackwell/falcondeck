@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { AlertTriangle, ChevronRight, CheckCircle2, Circle, Loader2, Brain } from 'lucide-react'
@@ -9,60 +9,61 @@ import { cn } from '@falcondeck/ui'
 
 import { CodeBlock } from './code-block'
 
+const remarkPlugins = [remarkGfm]
+
+const markdownComponents = {
+  code(props: { children?: React.ReactNode; className?: string }) {
+    const { children, className } = props
+    const match = /language-(\w+)/.exec(className ?? '')
+    const code = String(children).replace(/\n$/, '')
+    const isBlock = Boolean(match) || code.includes('\n')
+    if (isBlock) {
+      return <CodeBlock code={code} language={match?.[1] ?? null} />
+    }
+    return (
+      <code className="rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-0.5 font-mono text-[0.9em]">
+        {children}
+      </code>
+    )
+  },
+  p({ children }: { children?: React.ReactNode }) {
+    return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>
+  },
+  ul({ children }: { children?: React.ReactNode }) {
+    return <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
+  },
+  ol({ children }: { children?: React.ReactNode }) {
+    return <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
+  },
+  li({ children }: { children?: React.ReactNode }) {
+    return <li className="leading-relaxed">{children}</li>
+  },
+  h1({ children }: { children?: React.ReactNode }) {
+    return <h1 className="mb-3 mt-5 first:mt-0 text-[1.4em] font-semibold text-fg-primary">{children}</h1>
+  },
+  h2({ children }: { children?: React.ReactNode }) {
+    return <h2 className="mb-2 mt-4 first:mt-0 text-[1.2em] font-semibold text-fg-primary">{children}</h2>
+  },
+  h3({ children }: { children?: React.ReactNode }) {
+    return <h3 className="mb-2 mt-3 first:mt-0 text-[1.1em] font-semibold text-fg-primary">{children}</h3>
+  },
+  blockquote({ children }: { children?: React.ReactNode }) {
+    return <blockquote className="mb-3 border-l-2 border-border-emphasis pl-4 text-fg-secondary italic last:mb-0">{children}</blockquote>
+  },
+  strong({ children }: { children?: React.ReactNode }) {
+    return <strong className="font-semibold text-fg-primary">{children}</strong>
+  },
+  a({ href, children }: { href?: string; children?: React.ReactNode }) {
+    return <a href={href} className="text-accent underline decoration-accent/40 underline-offset-2" target="_blank" rel="noopener noreferrer">{children}</a>
+  },
+  hr() {
+    return <hr className="my-4 border-border-subtle" />
+  },
+} as const
+
 function renderMarkdown(text: string) {
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        code(props) {
-          const { children, className } = props
-          const match = /language-(\w+)/.exec(className ?? '')
-          const code = String(children).replace(/\n$/, '')
-          const isBlock = Boolean(match) || code.includes('\n')
-          if (isBlock) {
-            return <CodeBlock code={code} language={match?.[1] ?? null} />
-          }
-          return (
-            <code className="rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-0.5 font-mono text-[0.9em]">
-              {children}
-            </code>
-          )
-        },
-        p({ children }) {
-          return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>
-        },
-        ul({ children }) {
-          return <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
-        },
-        ol({ children }) {
-          return <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
-        },
-        li({ children }) {
-          return <li className="leading-relaxed">{children}</li>
-        },
-        h1({ children }) {
-          return <h1 className="mb-3 mt-5 first:mt-0 text-[1.4em] font-semibold text-fg-primary">{children}</h1>
-        },
-        h2({ children }) {
-          return <h2 className="mb-2 mt-4 first:mt-0 text-[1.2em] font-semibold text-fg-primary">{children}</h2>
-        },
-        h3({ children }) {
-          return <h3 className="mb-2 mt-3 first:mt-0 text-[1.1em] font-semibold text-fg-primary">{children}</h3>
-        },
-        blockquote({ children }) {
-          return <blockquote className="mb-3 border-l-2 border-border-emphasis pl-4 text-fg-secondary italic last:mb-0">{children}</blockquote>
-        },
-        strong({ children }) {
-          return <strong className="font-semibold text-fg-primary">{children}</strong>
-        },
-        a({ href, children }) {
-          return <a href={href} className="text-accent underline decoration-accent/40 underline-offset-2" target="_blank" rel="noopener noreferrer">{children}</a>
-        },
-        hr() {
-          return <hr className="my-4 border-border-subtle" />
-        },
-      }}
-    >
+    <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>
       {text}
     </ReactMarkdown>
   )
@@ -251,7 +252,7 @@ function ServiceMessage({ item }: { item: Extract<ConversationItem, { kind: 'ser
   )
 }
 
-export function MessageCard({ item }: { item: ConversationItem }) {
+export const MessageCard = memo(function MessageCard({ item }: { item: ConversationItem }) {
   switch (item.kind) {
     case 'user_message':
       return <UserMessage item={item} />
@@ -270,4 +271,4 @@ export function MessageCard({ item }: { item: ConversationItem }) {
     case 'service':
       return <ServiceMessage item={item} />
   }
-}
+})

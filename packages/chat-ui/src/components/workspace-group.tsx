@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { FolderOpen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
@@ -10,7 +11,7 @@ export type WorkspaceGroupProps = {
   children: React.ReactNode
 }
 
-export function WorkspaceGroup({ workspace, isSelected, onSelect, children }: WorkspaceGroupProps) {
+export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelected, onSelect, children }: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
 
   return (
@@ -33,4 +34,4 @@ export function WorkspaceGroup({ workspace, isSelected, onSelect, children }: Wo
       </div>
     </section>
   )
-}
+})

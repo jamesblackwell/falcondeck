@@ -15,6 +15,7 @@ export function useGitStatus(
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const initialFetchDone = useRef(false)
 
   const fetchStatus = useCallback(async () => {
     if (!api || !workspaceId) {
@@ -33,20 +34,30 @@ export function useGitStatus(
     }
   }, [api, workspaceId])
 
+  // Single effect: initial fetch + debounced refresh
   useEffect(() => {
-    void fetchStatus()
-  }, [fetchStatus])
+    if (!api || !workspaceId) {
+      setStatus(null)
+      initialFetchDone.current = false
+      return
+    }
 
-  useEffect(() => {
-    if (refreshTrigger === 0) return
+    if (!initialFetchDone.current) {
+      initialFetchDone.current = true
+      void fetchStatus()
+      return
+    }
+
+    // Subsequent triggers are debounced
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
       void fetchStatus()
     }, 500)
+
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [refreshTrigger, fetchStatus])
+  }, [api, workspaceId, refreshTrigger, fetchStatus])
 
   return { status, isLoading, error, refresh: fetchStatus }
 }

@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react'
 import { LoaderCircle } from 'lucide-react'
 
 import type { ThreadSummary } from '@falcondeck/client-core'
@@ -21,8 +22,9 @@ function timeAgo(dateStr: string) {
   return `${days}d`
 }
 
-export function ThreadItem({ thread, isSelected, onSelect }: ThreadItemProps) {
+export const ThreadItem = memo(function ThreadItem({ thread, isSelected, onSelect }: ThreadItemProps) {
   const isRunning = thread.status === 'running'
+  const timeString = useMemo(() => timeAgo(thread.updated_at), [thread.updated_at])
 
   return (
     <button
@@ -44,8 +46,8 @@ export function ThreadItem({ thread, isSelected, onSelect }: ThreadItemProps) {
         {thread.title}
       </span>
       <span className="shrink-0 text-[length:var(--fd-text-xs)] text-fg-faint">
-        {timeAgo(thread.updated_at)}
+        {timeString}
       </span>
     </button>
   )
-}
+})

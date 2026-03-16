@@ -387,6 +387,50 @@ export default function App() {
 
   const conversationItems: ConversationItem[] = threadDetail?.items ?? []
 
+  const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(threadId)
+  }, [])
+
+  const handleSelectThread = useCallback((workspaceId: string, threadId: string) => {
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(threadId)
+  }, [])
+
+  const handleApprovalCallback = useCallback(
+    (requestId: string, decision: 'allow' | 'deny' | 'always_allow') => {
+      void handleApproval(requestId, decision)
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [api, selectedWorkspaceId],
+  )
+
+  const handleSubmitCallback = useCallback(() => {
+    void handleSubmit()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, selectedWorkspace, selectedThreadId, draft, attachments, selectedModel, selectedEffort, selectedCollaborationMode])
+
+  const handlePickImages = useCallback(
+    (files: FileList | null) => {
+      void filesToImageInputs(files).then((next) => setAttachments((c) => [...c, ...next]))
+    },
+    [],
+  )
+
+  const handleStartPairingCallback = useCallback(() => {
+    void handleStartRemotePairing()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api, relayUrl])
+
+  const currentReasoningOptions = useMemo(
+    () => reasoningOptions(selectedThread, selectedWorkspace, selectedModel),
+    [selectedThread, selectedWorkspace, selectedModel],
+  )
+
+  const models = useMemo(() => selectedWorkspace?.models ?? [], [selectedWorkspace?.models])
+  const collaborationModes = useMemo(() => selectedWorkspace?.collaboration_modes ?? [], [selectedWorkspace?.collaboration_modes])
+  const isDisabled = !selectedWorkspace || isSending
+
   return (
     <DesktopShell
       sidebar={
@@ -397,14 +441,8 @@ export default function App() {
           groups={groups}
           selectedWorkspaceId={selectedWorkspaceId}
           selectedThreadId={selectedThreadId}
-          onSelectWorkspace={(workspaceId, threadId) => {
-            setSelectedWorkspaceId(workspaceId)
-            setSelectedThreadId(threadId)
-          }}
-          onSelectThread={(workspaceId, threadId) => {
-            setSelectedWorkspaceId(workspaceId)
-            setSelectedThreadId(threadId)
-          }}
+          onSelectWorkspace={handleSelectWorkspace}
+          onSelectThread={handleSelectThread}
           onAddProject={handleAddProject}
           isAddingProject={isAddingProject}
         />
@@ -422,32 +460,32 @@ export default function App() {
               pairingLink={pairingLink}
               relayUrl={relayUrl}
               onRelayUrlChange={setRelayUrl}
-              onStartPairing={() => void handleStartRemotePairing()}
+              onStartPairing={handleStartPairingCallback}
               isStartingRemote={isStartingRemote}
             />
           </SessionHeader>
           <ApprovalBar
             approvals={approvals}
-            onApproval={(requestId, decision) => void handleApproval(requestId, decision)}
+            onApproval={handleApprovalCallback}
           />
           <Conversation items={conversationItems} />
           <PromptInput
             value={draft}
             onValueChange={setDraft}
-            onSubmit={() => void handleSubmit()}
-            onPickImages={(files) => void filesToImageInputs(files).then((next) => setAttachments((c) => [...c, ...next]))}
+            onSubmit={handleSubmitCallback}
+            onPickImages={handlePickImages}
             attachments={attachments}
-            models={selectedWorkspace?.models ?? []}
+            models={models}
             selectedModelId={selectedModel}
             onModelChange={handleModelChange}
-            reasoningOptions={reasoningOptions(selectedThread, selectedWorkspace, selectedModel)}
+            reasoningOptions={currentReasoningOptions}
             selectedEffort={selectedEffort}
             onEffortChange={handleEffortChange}
-            collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
+            collaborationModes={collaborationModes}
             selectedCollaborationModeId={selectedCollaborationMode}
             onCollaborationModeChange={handleCollaborationModeChange}
             approvalPolicy="on-request"
-            disabled={!selectedWorkspace || isSending}
+            disabled={isDisabled}
           />
         </section>
       }

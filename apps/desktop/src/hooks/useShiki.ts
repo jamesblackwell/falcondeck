@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { HighlighterCore, ThemedToken } from 'shiki'
 
 let highlighterPromise: Promise<HighlighterCore> | null = null
@@ -82,17 +82,21 @@ function langFromPath(filePath: string): string | null {
 
 /**
  * Returns token arrays for each line of code, syntax-highlighted via shiki.
- * Lines should be the raw code strings (without +/- prefix).
+ * Uses content hashing to avoid re-tokenizing identical code.
  */
 export function useShikiTokens(
   lines: string[],
   filePath: string | null,
 ): ThemedToken[][] | null {
   const [tokens, setTokens] = useState<ThemedToken[][] | null>(null)
+  const prevCodeRef = useRef<string | null>(null)
+  const prevLangRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!filePath || lines.length === 0) {
       setTokens(null)
+      prevCodeRef.current = null
+      prevLangRef.current = null
       return
     }
 
@@ -101,6 +105,16 @@ export function useShikiTokens(
       setTokens(null)
       return
     }
+
+    const code = lines.join('\n')
+
+    // Skip if code and language haven't changed
+    if (code === prevCodeRef.current && lang === prevLangRef.current) {
+      return
+    }
+
+    prevCodeRef.current = code
+    prevLangRef.current = lang
 
     let cancelled = false
 
@@ -113,7 +127,6 @@ export function useShikiTokens(
           return
         }
 
-        const code = lines.join('\n')
         const result = highlighter.codeToTokens(code, {
           lang,
           theme: 'github-dark-default',
