@@ -10,6 +10,7 @@ import {
   generateBoxKeyPair,
   projectLabel,
   publicKeyToBase64,
+  reconcileSnapshotSelection,
   shouldReusePersistedRemoteSession,
   upsertConversationItem,
   type ConversationItem,
@@ -250,5 +251,34 @@ describe('client-core remote session persistence', () => {
     }
 
     expect(shouldReusePersistedRemoteSession(new URLSearchParams(), persisted)).toEqual(persisted)
+  })
+})
+
+describe('client-core selection reconciliation', () => {
+  it('falls back to the restored current thread when a stale selection disappears', () => {
+    const currentWorkspace = workspace({
+      id: 'workspace-2',
+      path: '/Users/james/quizgecko',
+      current_thread_id: 'thread-2',
+      updated_at: '2026-03-15T12:00:00Z',
+    })
+    const currentThread = thread({
+      id: 'thread-2',
+      workspace_id: 'workspace-2',
+      updated_at: '2026-03-15T12:00:00Z',
+    })
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace(), currentWorkspace],
+      threads: [currentThread, thread()],
+      approvals: [],
+    }
+
+    expect(
+      reconcileSnapshotSelection(snapshot, 'workspace-stale', 'thread-stale'),
+    ).toEqual({
+      workspaceId: 'workspace-2',
+      threadId: 'thread-2',
+    })
   })
 })

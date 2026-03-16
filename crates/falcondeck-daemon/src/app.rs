@@ -17,7 +17,7 @@ use falcondeck_core::{
     RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
     StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
     StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
-    TurnInputItem, UnifiedEvent, WorkspaceStatus, WorkspaceSummary,
+    TurnInputItem, UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -640,6 +640,45 @@ impl AppState {
         })
     }
 
+    pub async fn update_thread(
+        &self,
+        request: UpdateThreadRequest,
+    ) -> Result<ThreadHandle, DaemonError> {
+        let (thread, workspace_summary) = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get_mut(&request.workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let thread = workspace
+                .threads
+                .get_mut(&request.thread_id)
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+            let now = Utc::now();
+
+            thread.summary.codex.model_id = request.model_id.clone();
+            thread.summary.codex.reasoning_effort = request.reasoning_effort.clone();
+            thread.summary.codex.collaboration_mode_id = request.collaboration_mode_id.clone();
+            thread.summary.updated_at = now;
+            workspace.summary.current_thread_id = Some(request.thread_id.clone());
+            workspace.summary.updated_at = now;
+
+            (thread.summary.clone(), workspace.summary.clone())
+        };
+
+        self.emit(
+            Some(request.workspace_id.clone()),
+            Some(request.thread_id.clone()),
+            UnifiedEvent::ThreadUpdated {
+                thread: thread.clone(),
+            },
+        );
+
+        Ok(ThreadHandle {
+            workspace: workspace_summary,
+            thread,
+        })
+    }
+
     pub async fn start_review(
         &self,
         request: StartReviewRequest,
@@ -1119,6 +1158,61 @@ impl AppState {
                                             format!("failed to encrypt rpc error: {encrypt_error}")
                                         },
                                     )?,
+                                ),
+                            },
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "thread.update" => {
+                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
+                    .ok_or_else(|| "thread.update missing workspaceId".to_string())?;
+                let thread_id = extract_string(&params, &["threadId", "thread_id"])
+                    .ok_or_else(|| "thread.update missing threadId".to_string())?;
+                let request = UpdateThreadRequest {
+                    workspace_id,
+                    thread_id,
+                    model_id: extract_string(&params, &["modelId", "model_id"]),
+                    reasoning_effort: extract_string(
+                        &params,
+                        &["reasoningEffort", "reasoning_effort"],
+                    ),
+                    collaboration_mode_id: extract_string(
+                        &params,
+                        &["collaborationModeId", "collaboration_mode_id"],
+                    ),
+                };
+                match self.update_thread(request).await {
+                    Ok(handle) => {
+                        send_relay_message(
+                            writer,
+                            &RelayClientMessage::RpcResult {
+                                request_id,
+                                ok: true,
+                                result: Some(encrypt_json(data_key, &handle).map_err(|error| {
+                                    format!("failed to encrypt rpc result: {error}")
+                                })?),
+                                error: None,
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(error) => {
+                        send_relay_message(
+                            writer,
+                            &RelayClientMessage::RpcResult {
+                                request_id,
+                                ok: false,
+                                result: None,
+                                error: Some(
+                                    encrypt_json(
+                                        data_key,
+                                        &json!({ "message": error.to_string() }),
+                                    )
+                                    .map_err(|encrypt_error| {
+                                        format!("failed to encrypt rpc error: {encrypt_error}")
+                                    })?,
                                 ),
                             },
                         )

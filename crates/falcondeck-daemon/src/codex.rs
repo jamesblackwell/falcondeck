@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    fs::File,
+    io::{BufRead, BufReader as StdBufReader},
     path::PathBuf,
     process::Stdio,
     sync::{
@@ -30,6 +32,11 @@ pub struct CodexBootstrap {
     pub models: Vec<ModelSummary>,
     pub collaboration_modes: Vec<CollaborationModeSummary>,
     pub threads: Vec<HydratedThread>,
+}
+
+struct ParsedThreadRecord {
+    summary: ThreadSummary,
+    session_path: Option<String>,
 }
 
 pub struct HydratedThread {
@@ -159,17 +166,33 @@ impl CodexSession {
                 }),
             )
             .await?;
-        let thread_summaries = parse_threads(&workspace_id, &threads_value);
-        let mut threads = Vec::with_capacity(thread_summaries.len());
-        for summary in thread_summaries {
+        let thread_records = parse_threads(&workspace_id, &workspace_path, &threads_value);
+        let mut threads = Vec::with_capacity(thread_records.len());
+        for record in thread_records {
+            let ParsedThreadRecord {
+                summary,
+                session_path,
+            } = record;
             let (summary, items) = match session.read_thread(&summary.id).await {
                 Ok(value) => {
-                    let items = hydrate_thread_items(&value);
+                    let mut items = hydrate_thread_items(&value);
+                    if items.is_empty() {
+                        if let Some(path) =
+                            extract_thread_session_path(&value).or(session_path.clone())
+                        {
+                            items = hydrate_thread_items_from_session_file(&path, &workspace_path);
+                        }
+                    }
                     (hydrate_thread_summary(summary, &value, &items), items)
                 }
                 Err(error) => {
                     warn!("failed to read codex thread {}: {error}", summary.id);
-                    (summary, Vec::new())
+                    let items = session_path
+                        .as_deref()
+                        .map(|path| hydrate_thread_items_from_session_file(path, &workspace_path))
+                        .unwrap_or_default();
+                    let summary = hydrate_thread_summary(summary, &Value::Null, &items);
+                    (summary, items)
                 }
             };
             threads.push(HydratedThread { summary, items });
@@ -465,59 +488,101 @@ fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
         .collect()
 }
 
-fn parse_threads(workspace_id: &str, value: &Value) -> Vec<ThreadSummary> {
-    let entries = value
-        .get("threads")
-        .and_then(Value::as_array)
-        .or_else(|| value.as_array());
+fn parse_threads(
+    workspace_id: &str,
+    workspace_path: &str,
+    value: &Value,
+) -> Vec<ParsedThreadRecord> {
+    let entries = extract_thread_entries(value);
     let now = Utc::now();
 
     entries
         .into_iter()
-        .flatten()
+        .filter(|entry| {
+            extract_string(entry, &["cwd"])
+                .map(|cwd| cwd == workspace_path)
+                .unwrap_or(true)
+        })
         .filter_map(|entry| {
             let id = extract_thread_id(entry)?;
-            Some(ThreadSummary {
-                id,
-                workspace_id: workspace_id.to_string(),
-                title: extract_thread_title(entry).unwrap_or_else(|| "Untitled thread".to_string()),
-                status: ThreadStatus::Idle,
-                updated_at: extract_datetime(
-                    entry,
-                    &[
-                        "updatedAt",
-                        "updated_at",
-                        "lastUpdatedAt",
-                        "last_updated_at",
-                        "completedAt",
-                        "completed_at",
-                        "startedAt",
-                        "started_at",
-                    ],
-                )
-                .unwrap_or(now),
-                last_message_preview: None,
-                latest_turn_id: None,
-                latest_plan: None,
-                latest_diff: None,
-                last_tool: None,
-                last_error: None,
-                codex: ThreadCodexParams {
-                    model_id: extract_string(entry, &["model", "modelId", "model_id"]),
-                    reasoning_effort: extract_string(
+            let preview = extract_string(entry, &["preview"]);
+            Some(ParsedThreadRecord {
+                summary: ThreadSummary {
+                    id,
+                    workspace_id: workspace_id.to_string(),
+                    title: extract_thread_title(entry)
+                        .or(preview.clone())
+                        .map(|title| truncate_preview(&title))
+                        .unwrap_or_else(|| "Untitled thread".to_string()),
+                    status: ThreadStatus::Idle,
+                    updated_at: extract_datetime_or_timestamp(
                         entry,
-                        &["effort", "reasoningEffort", "reasoning_effort"],
-                    ),
-                    collaboration_mode_id: extract_string(
-                        entry,
-                        &["collaborationModeId", "collaboration_mode_id"],
-                    ),
-                    approval_policy: extract_string(entry, &["approvalPolicy", "approval_policy"]),
-                    service_tier: extract_string(entry, &["serviceTier", "service_tier"]),
+                        &[
+                            "updatedAt",
+                            "updated_at",
+                            "lastUpdatedAt",
+                            "last_updated_at",
+                            "completedAt",
+                            "completed_at",
+                            "startedAt",
+                            "started_at",
+                        ],
+                    )
+                    .unwrap_or(now),
+                    last_message_preview: preview.map(|value| truncate_preview(&value)),
+                    latest_turn_id: None,
+                    latest_plan: None,
+                    latest_diff: None,
+                    last_tool: None,
+                    last_error: None,
+                    codex: ThreadCodexParams {
+                        model_id: extract_string(entry, &["model", "modelId", "model_id"]),
+                        reasoning_effort: extract_string(
+                            entry,
+                            &["effort", "reasoningEffort", "reasoning_effort"],
+                        ),
+                        collaboration_mode_id: extract_string(
+                            entry,
+                            &["collaborationModeId", "collaboration_mode_id"],
+                        ),
+                        approval_policy: extract_string(
+                            entry,
+                            &["approvalPolicy", "approval_policy"],
+                        ),
+                        service_tier: extract_string(entry, &["serviceTier", "service_tier"]),
+                    },
                 },
+                session_path: extract_string(entry, &["path"]),
             })
         })
         .collect()
+}
+
+fn extract_thread_entries(value: &Value) -> Vec<&Value> {
+    fn walk<'a>(value: &'a Value) -> Vec<&'a Value> {
+        if let Some(array) = value.get("threads").and_then(Value::as_array) {
+            return array.iter().collect();
+        }
+        if let Some(array) = value.get("data").and_then(Value::as_array) {
+            return array.iter().collect();
+        }
+        if let Some(array) = value.as_array() {
+            return array.iter().collect();
+        }
+        if let Some(object) = value.as_object() {
+            for key in ["result", "items", "results"] {
+                if let Some(nested) = object.get(key) {
+                    let found = walk(nested);
+                    if !found.is_empty() {
+                        return found;
+                    }
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    walk(value)
 }
 
 fn extract_thread_record(value: &Value) -> Option<&Value> {
@@ -584,6 +649,55 @@ fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
     items
 }
 
+fn extract_thread_session_path(value: &Value) -> Option<String> {
+    extract_thread_record(value).and_then(|thread| extract_string(thread, &["path"]))
+}
+
+fn hydrate_thread_items_from_session_file(
+    session_path: &str,
+    workspace_path: &str,
+) -> Vec<ConversationItem> {
+    let file = match File::open(session_path) {
+        Ok(file) => file,
+        Err(_) => return Vec::new(),
+    };
+    let mut items = Vec::new();
+    let mut matches_workspace = false;
+
+    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
+        if line.len() > 512_000 {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let entry_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if matches!(entry_type, "session_meta" | "turn_context") {
+            if let Some(cwd) = extract_cwd(&value) {
+                matches_workspace = cwd == workspace_path;
+                if !matches_workspace {
+                    return Vec::new();
+                }
+            }
+        }
+
+        if !matches_workspace {
+            continue;
+        }
+
+        if let Some(item) = build_conversation_item_from_session_entry(&value) {
+            items.push(item);
+        }
+    }
+
+    items.sort_by_key(conversation_item_created_at);
+    items
+}
+
 fn hydrate_thread_summary(
     mut summary: ThreadSummary,
     value: &Value,
@@ -631,7 +745,7 @@ fn hydrate_thread_summary(
             if let Some(status) = extract_string(last_turn, &["status"]) {
                 summary.status = thread_status_from_turn_status(&status);
             }
-            if let Some(updated_at) = extract_datetime(
+            if let Some(updated_at) = extract_datetime_or_timestamp(
                 last_turn,
                 &["completedAt", "completed_at", "startedAt", "started_at"],
             ) {
@@ -705,7 +819,7 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
                     .and_then(Value::as_i64)
                     .map(|value| value as i32),
                 created_at,
-                completed_at: extract_datetime(item, &["completedAt", "completed_at"]),
+                completed_at: extract_datetime_or_timestamp(item, &["completedAt", "completed_at"]),
             })
         }
         "enteredReviewMode" | "exitedReviewMode" => Some(ConversationItem::Service {
@@ -720,6 +834,152 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
         }),
         _ => None,
     }
+}
+
+fn build_conversation_item_from_session_entry(value: &Value) -> Option<ConversationItem> {
+    let created_at =
+        extract_datetime_or_timestamp(value, &["timestamp", "createdAt", "created_at"])
+            .unwrap_or_else(Utc::now);
+    let entry_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let payload = value.get("payload")?;
+
+    match entry_type {
+        "event_msg" => match payload.get("type").and_then(Value::as_str)? {
+            "user_message" => Some(ConversationItem::UserMessage {
+                id: extract_string(payload, &["id"])
+                    .unwrap_or_else(|| format!("session-user-{}", created_at.timestamp_millis())),
+                text: extract_string(payload, &["message"]).unwrap_or_default(),
+                attachments: session_entry_attachments(payload),
+                created_at,
+            }),
+            "agent_message" => Some(ConversationItem::AssistantMessage {
+                id: extract_string(payload, &["id"])
+                    .unwrap_or_else(|| format!("session-agent-{}", created_at.timestamp_millis())),
+                text: extract_string(payload, &["message"]).unwrap_or_default(),
+                created_at,
+            }),
+            _ => None,
+        },
+        "response_item" => match payload.get("type").and_then(Value::as_str)? {
+            "message" => {
+                let role = extract_string(payload, &["role"]).unwrap_or_default();
+                let text = response_item_message_text(payload);
+                if text.is_empty() {
+                    return None;
+                }
+                match role.as_str() {
+                    "assistant" => Some(ConversationItem::AssistantMessage {
+                        id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                            format!("response-assistant-{}", created_at.timestamp_millis())
+                        }),
+                        text,
+                        created_at,
+                    }),
+                    "user" => Some(ConversationItem::UserMessage {
+                        id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                            format!("response-user-{}", created_at.timestamp_millis())
+                        }),
+                        text,
+                        attachments: Vec::new(),
+                        created_at,
+                    }),
+                    _ => None,
+                }
+            }
+            "reasoning" => Some(ConversationItem::Reasoning {
+                id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                    format!("response-reasoning-{}", created_at.timestamp_millis())
+                }),
+                summary: payload
+                    .get("summary")
+                    .and_then(Value::as_array)
+                    .map(|parts| {
+                        parts
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::trim)
+                            .filter(|part| !part.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .filter(|summary| !summary.is_empty()),
+                content: payload
+                    .get("content")
+                    .and_then(|content| thread_item_text(Some(content)))
+                    .unwrap_or_default(),
+                created_at,
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn response_item_message_text(payload: &Value) -> String {
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|content| {
+            content
+                .iter()
+                .filter_map(|entry| {
+                    let entry_type = extract_string(entry, &["type"])?;
+                    match entry_type.as_str() {
+                        "output_text" | "input_text" | "text" => extract_string(entry, &["text"]),
+                        _ => None,
+                    }
+                })
+                .map(|text| text.trim().to_string())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn session_entry_attachments(payload: &Value) -> Vec<ImageInput> {
+    let mut attachments = Vec::new();
+
+    if let Some(images) = payload.get("images").and_then(Value::as_array) {
+        for (index, image) in images.iter().enumerate() {
+            if let Some(url) = image.as_str().filter(|value| !value.is_empty()) {
+                attachments.push(ImageInput {
+                    id: format!("session-image-{index}"),
+                    name: None,
+                    mime_type: None,
+                    url: url.to_string(),
+                    local_path: None,
+                });
+            }
+        }
+    }
+
+    if let Some(images) = payload.get("local_images").and_then(Value::as_array) {
+        for (index, image) in images.iter().enumerate() {
+            if let Some(path) = image.as_str().filter(|value| !value.is_empty()) {
+                attachments.push(ImageInput {
+                    id: format!("session-local-image-{index}"),
+                    name: None,
+                    mime_type: None,
+                    url: path.to_string(),
+                    local_path: Some(path.to_string()),
+                });
+            }
+        }
+    }
+
+    attachments
+}
+
+fn extract_cwd(value: &Value) -> Option<String> {
+    value
+        .get("payload")
+        .and_then(|payload| payload.get("cwd"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn parse_user_message_content(item_id: &str, content: &[Value]) -> (String, Vec<ImageInput>) {
@@ -768,6 +1028,21 @@ fn extract_datetime(value: &Value, keys: &[&str]) -> Option<chrono::DateTime<Utc
     chrono::DateTime::parse_from_rfc3339(&raw)
         .map(|dt| dt.with_timezone(&Utc))
         .ok()
+}
+
+fn extract_datetime_or_timestamp(value: &Value, keys: &[&str]) -> Option<chrono::DateTime<Utc>> {
+    extract_datetime(value, keys).or_else(|| extract_unix_timestamp(value, keys))
+}
+
+fn extract_unix_timestamp(value: &Value, keys: &[&str]) -> Option<chrono::DateTime<Utc>> {
+    let raw = keys.iter().find_map(|key| value.get(*key))?;
+    let value = raw.as_i64()?;
+    let (seconds, nanos) = if value >= 1_000_000_000_000 {
+        (value / 1000, ((value % 1000) * 1_000_000) as u32)
+    } else {
+        (value, 0)
+    };
+    chrono::DateTime::<Utc>::from_timestamp(seconds, nanos)
 }
 
 fn thread_item_text(value: Option<&Value>) -> Option<String> {
@@ -874,6 +1149,8 @@ pub fn parse_thread_plan(value: &Value) -> Option<ThreadPlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn prefers_account_identity_over_requires_auth_flag() {
@@ -911,6 +1188,7 @@ mod tests {
     fn parses_thread_codex_params_from_thread_list_entries() {
         let threads = parse_threads(
             "workspace-1",
+            "/Users/james/workspace-1",
             &json!([{
                 "id": "thread-1",
                 "title": "Hello",
@@ -924,21 +1202,135 @@ mod tests {
         );
 
         assert_eq!(threads.len(), 1);
-        assert_eq!(threads[0].codex.model_id.as_deref(), Some("gpt-5.4"));
-        assert_eq!(threads[0].codex.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(
-            threads[0].codex.collaboration_mode_id.as_deref(),
+            threads[0].summary.codex.model_id.as_deref(),
+            Some("gpt-5.4")
+        );
+        assert_eq!(
+            threads[0].summary.codex.reasoning_effort.as_deref(),
+            Some("high")
+        );
+        assert_eq!(
+            threads[0].summary.codex.collaboration_mode_id.as_deref(),
             Some("plan")
         );
         assert_eq!(
-            threads[0].codex.approval_policy.as_deref(),
+            threads[0].summary.codex.approval_policy.as_deref(),
             Some("on-request")
         );
-        assert_eq!(threads[0].codex.service_tier.as_deref(), Some("fast"));
         assert_eq!(
-            threads[0].updated_at.to_rfc3339(),
+            threads[0].summary.codex.service_tier.as_deref(),
+            Some("fast")
+        );
+        assert_eq!(
+            threads[0].summary.updated_at.to_rfc3339(),
             "2026-03-16T11:00:00+00:00"
         );
+    }
+
+    #[test]
+    fn parses_nested_thread_list_and_filters_by_workspace_path() {
+        let threads = parse_threads(
+            "workspace-1",
+            "/Users/james/project-a",
+            &json!({
+                "data": [
+                    {
+                        "id": "thread-a",
+                        "preview": "latest project a thread",
+                        "cwd": "/Users/james/project-a",
+                        "updatedAt": 1773667619
+                    },
+                    {
+                        "id": "thread-b",
+                        "preview": "other workspace thread",
+                        "cwd": "/Users/james/project-b",
+                        "updatedAt": 1773667600
+                    }
+                ]
+            }),
+        );
+
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].summary.id, "thread-a");
+        assert_eq!(threads[0].summary.title, "latest project a thread");
+        assert_eq!(
+            threads[0].summary.updated_at.to_rfc3339(),
+            "2026-03-16T13:26:59+00:00"
+        );
+    }
+
+    #[test]
+    fn hydrates_session_file_when_thread_is_not_loaded() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:50.840Z",
+                "type": "session_meta",
+                "payload": {
+                    "cwd": "/Users/james/project-a"
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:51.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "How does this work?",
+                    "images": [],
+                    "local_images": []
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:52.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "It works from native storage."
+                        }
+                    ]
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+
+        let items = hydrate_thread_items_from_session_file(
+            file.path().to_str().unwrap(),
+            "/Users/james/project-a",
+        );
+
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            ConversationItem::UserMessage { text, .. } => {
+                assert_eq!(text, "How does this work?");
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+        match &items[1] {
+            ConversationItem::AssistantMessage { text, .. } => {
+                assert_eq!(text, "It works from native storage.");
+            }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
     }
 
     #[test]
