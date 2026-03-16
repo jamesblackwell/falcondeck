@@ -24,12 +24,12 @@ import {
   type SessionCryptoState,
   type ThreadHandle,
 } from '@falcondeck/client-core'
-import { Conversation, PromptInput } from '@falcondeck/chat-ui'
-import { AppShell, Badge, StatusIndicator, Toolbar, ToolbarGroup } from '@falcondeck/ui'
+import { ApprovalCard, Conversation, PromptInput, ThreadItem, WorkspaceGroup } from '@falcondeck/chat-ui'
+import { Badge, Button, EmptyState, Input, ScrollArea, StatusIndicator } from '@falcondeck/ui'
 
-import { PairingFlow } from './components/PairingFlow'
-import { RemoteSidebar } from './components/Sidebar'
-import { RemoteContextPanel } from './components/ContextPanel'
+import { Lock, Smartphone, Wifi, WifiOff } from 'lucide-react'
+
+// ── Helpers ──────────────────────────────────────────────────────────
 
 function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
@@ -68,6 +68,17 @@ function sendRelayMessage(socket: WebSocket, message: RelayClientMessage) {
   socket.send(JSON.stringify(message))
 }
 
+function connectionLabel(status: string) {
+  if (status.includes('encrypted')) return 'Connected'
+  if (status.includes('connected')) return 'Connected'
+  if (status === 'connecting') return 'Connecting...'
+  if (status === 'disconnected') return 'Disconnected'
+  if (status.includes('claimed')) return 'Pairing...'
+  return 'Not connected'
+}
+
+// ── Session persistence ──────────────────────────────────────────────
+
 const STORAGE_KEY = 'falcondeck.remote.session.v1'
 
 function loadPersistedRemoteSession(): PersistedRemoteSession | null {
@@ -87,6 +98,8 @@ function persistRemoteSession(value: PersistedRemoteSession | null) {
     window.localStorage.removeItem(STORAGE_KEY)
   }
 }
+
+// ── App ──────────────────────────────────────────────────────────────
 
 export default function App() {
   const params = new URLSearchParams(window.location.search)
@@ -112,6 +125,7 @@ export default function App() {
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [showProjects, setShowProjects] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
 
   const requestCounter = useRef(1)
@@ -122,6 +136,9 @@ export default function App() {
   const pendingRpc = useRef(
     new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: number }>(),
   )
+
+  const isConnected = !!sessionId
+  const isEncrypted = connectionStatus.includes('encrypted') || connectionStatus.includes('connected')
 
   useEffect(() => {
     if (persistedSession?.clientSecretKey) {
@@ -161,7 +178,8 @@ export default function App() {
     [selectedThreadId, threadItems],
   )
 
-  // WebSocket relay connection
+  // ── WebSocket relay connection ─────────────────────────────────────
+
   useEffect(() => {
     if (!sessionId || !clientToken) return
     const socket = new WebSocket(
@@ -308,6 +326,8 @@ export default function App() {
     }
   }
 
+  // ── Actions ────────────────────────────────────────────────────────
+
   async function handleClaimPairing() {
     const keyPair = generateBoxKeyPair()
     clientKeyPairRef.current = keyPair
@@ -401,7 +421,8 @@ export default function App() {
     }).catch((e) => setError(e instanceof Error ? e.message : 'Approval action failed'))
   }
 
-  // Sync model/effort/mode from thread/workspace
+  // ── Sync model/effort/mode ─────────────────────────────────────────
+
   useEffect(() => {
     if (!selectedWorkspace) {
       setSelectedModel(null)
@@ -411,9 +432,7 @@ export default function App() {
       return
     }
     const seedKey = `${selectedWorkspace.id}:${selectedThread?.id ?? 'workspace'}`
-    if (selectionSeedRef.current === seedKey) {
-      return
-    }
+    if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
 
     const fallbackModelId =
@@ -443,7 +462,6 @@ export default function App() {
     }
   }, [selectedEffort, selectedModel, selectedWorkspace, snapshot])
 
-  // Clean stale thread items
   useEffect(() => {
     if (!snapshot) return
     const valid = new Set(snapshot.threads.map((t) => t.id))
@@ -453,86 +471,170 @@ export default function App() {
     })
   }, [snapshot])
 
+  // ── Pairing screen (not connected) ─────────────────────────────────
+
+  if (!isConnected) {
+    return (
+      <div className="flex h-[100dvh] flex-col items-center justify-center bg-surface-0 p-6">
+        <div className="w-full max-w-sm space-y-6">
+          <div className="text-center">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-surface-2">
+              <Smartphone className="h-7 w-7 text-fg-tertiary" />
+            </div>
+            <h1 className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary">FalconDeck Remote</h1>
+            <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+              Connect to your desktop session
+            </p>
+          </div>
+
+          <div className="space-y-3">
+            <Input
+              value={relayUrl}
+              onChange={(event) => setRelayUrl(event.target.value)}
+              placeholder="Relay URL"
+            />
+            <Input
+              value={pairingCode}
+              onChange={(event) => setPairingCode(event.target.value.toUpperCase())}
+              placeholder="Pairing code"
+              className="text-center font-mono tracking-widest"
+            />
+            <Button
+              type="button"
+              disabled={!relayUrl.trim() || !pairingCode.trim()}
+              onClick={() => void handleClaimPairing()}
+              className="w-full"
+            >
+              Connect
+            </Button>
+          </div>
+
+          <div className="flex items-center justify-center gap-2 text-[length:var(--fd-text-xs)] text-fg-muted">
+            <Lock className="h-3 w-3" />
+            End-to-end encrypted
+          </div>
+
+          {error ? (
+            <p className="text-center text-[length:var(--fd-text-sm)] text-danger">{error}</p>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
+
+  // ── Connected session ──────────────────────────────────────────────
+
   const pathLabel = selectedWorkspace?.path.split('/').pop()
 
   return (
-    <AppShell
-      sidebar={
-        <RemoteSidebar
-          groups={groups}
-          selectedWorkspaceId={selectedWorkspaceId}
-          selectedThreadId={selectedThreadId}
-          onSelectWorkspace={(wId, tId) => { setSelectedWorkspaceId(wId); setSelectedThreadId(tId) }}
-          onSelectThread={(wId, tId) => { setSelectedWorkspaceId(wId); setSelectedThreadId(tId) }}
-          headerContent={
-            <PairingFlow
-              relayUrl={relayUrl}
-              onRelayUrlChange={setRelayUrl}
-              pairingCode={pairingCode}
-              onPairingCodeChange={setPairingCode}
-              onConnect={() => void handleClaimPairing()}
-              connectionStatus={connectionStatus}
-              isConnected={!!sessionId}
-              error={error}
-            />
-          }
-          error={null}
-        />
-      }
-      main={
-        <section className="flex h-[calc(100vh-24px)] flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
-          <Toolbar className="rounded-t-[var(--fd-radius-xl)]">
-            <div className="flex items-center gap-2">
-              <StatusIndicator
-                status={connectionStatus.includes('connected') ? 'connected' : 'active'}
-                size="md"
-              />
-              <div>
-                <p className="text-[length:var(--fd-text-2xs)] uppercase tracking-[0.12em] text-fg-muted">
-                  {pathLabel ?? 'Session'}
-                </p>
-                <p className="text-[length:var(--fd-text-md)] font-semibold text-fg-primary">
-                  {selectedThread?.title ?? 'Waiting for daemon snapshot'}
-                </p>
-              </div>
-            </div>
-            <ToolbarGroup align="end">
-              <Badge variant={connectionStatus.includes('connected') ? 'success' : 'warning'} dot>
-                {connectionStatus}
-              </Badge>
-            </ToolbarGroup>
-          </Toolbar>
-
-          <Conversation items={items} />
-
-          <PromptInput
-            value={draft}
-            onValueChange={setDraft}
-            onSubmit={() => void handleSubmit()}
-            onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
-            attachments={attachments}
-            models={selectedWorkspace?.models ?? []}
-            selectedModelId={selectedModel}
-            onModelChange={setSelectedModel}
-            reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedModel)}
-            selectedEffort={selectedEffort}
-            onEffortChange={setSelectedEffort}
-            collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
-            selectedCollaborationModeId={selectedCollaborationMode}
-            onCollaborationModeChange={setSelectedCollaborationMode}
-            approvalPolicy="on-request"
-            disabled={!selectedWorkspace || isSubmitting || connectionStatus === 'connecting'}
-            compact
+    <div className="flex h-[100dvh] flex-col bg-surface-0">
+      {/* Header bar */}
+      <header className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-4 py-3">
+        <button
+          type="button"
+          onClick={() => setShowProjects((v) => !v)}
+          className="flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-left transition-colors hover:bg-surface-2"
+        >
+          <StatusIndicator
+            status={isEncrypted ? 'connected' : connectionStatus === 'disconnected' ? 'disconnected' : 'active'}
+            size="md"
+            pulse={connectionStatus === 'connecting'}
           />
-        </section>
-      }
-      rail={
-        <RemoteContextPanel
-          approvals={approvals}
-          onApproval={handleApproval}
-          thread={selectedThread}
+          <div className="min-w-0">
+            <p className="truncate text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
+              {pathLabel ?? 'FalconDeck'}
+            </p>
+          </div>
+        </button>
+
+        <div className="ml-auto flex items-center gap-2">
+          <Badge
+            variant={isEncrypted ? 'success' : connectionStatus === 'disconnected' ? 'danger' : 'warning'}
+            dot
+          >
+            {connectionLabel(connectionStatus)}
+          </Badge>
+        </div>
+      </header>
+
+      {/* Project switcher drawer */}
+      {showProjects ? (
+        <div className="shrink-0 border-b border-border-subtle bg-surface-1">
+          <ScrollArea className="max-h-64">
+            <div className="space-y-2 p-3">
+              {groups.map((group) => (
+                <WorkspaceGroup
+                  key={group.workspace.id}
+                  workspace={group.workspace}
+                  isSelected={selectedWorkspaceId === group.workspace.id}
+                  onSelect={() => {
+                    setSelectedWorkspaceId(group.workspace.id)
+                    setSelectedThreadId(group.workspace.current_thread_id ?? group.threads[0]?.id ?? null)
+                    setShowProjects(false)
+                  }}
+                >
+                  {group.threads.map((thread) => (
+                    <ThreadItem
+                      key={thread.id}
+                      thread={thread}
+                      isSelected={selectedThreadId === thread.id}
+                      onSelect={() => {
+                        setSelectedWorkspaceId(group.workspace.id)
+                        setSelectedThreadId(thread.id)
+                        setShowProjects(false)
+                      }}
+                      compact
+                    />
+                  ))}
+                </WorkspaceGroup>
+              ))}
+              {groups.length === 0 ? (
+                <EmptyState title="Waiting for projects" className="py-6" />
+              ) : null}
+            </div>
+          </ScrollArea>
+        </div>
+      ) : null}
+
+      {/* Approval banners */}
+      {approvals.length > 0 ? (
+        <div className="shrink-0 space-y-2 border-b border-border-subtle p-3">
+          {approvals.map((approval) => (
+            <ApprovalCard
+              key={approval.request_id}
+              approval={approval}
+              onAllow={() => handleApproval(approval.request_id, 'allow')}
+              onDeny={() => handleApproval(approval.request_id, 'deny')}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {/* Conversation */}
+      <Conversation items={items} />
+
+      {/* Prompt input */}
+      <div className="shrink-0">
+        <PromptInput
+          value={draft}
+          onValueChange={setDraft}
+          onSubmit={() => void handleSubmit()}
+          onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
+          attachments={attachments}
+          models={selectedWorkspace?.models ?? []}
+          selectedModelId={selectedModel}
+          onModelChange={setSelectedModel}
+          reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedModel)}
+          selectedEffort={selectedEffort}
+          onEffortChange={setSelectedEffort}
+          collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
+          selectedCollaborationModeId={selectedCollaborationMode}
+          onCollaborationModeChange={setSelectedCollaborationMode}
+          approvalPolicy="on-request"
+          disabled={!selectedWorkspace || isSubmitting || !isEncrypted}
+          compact
         />
-      }
-    />
+      </div>
+    </div>
   )
 }
