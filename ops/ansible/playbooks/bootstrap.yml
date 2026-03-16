@@ -1,0 +1,7 @@
+---
+- name: Bootstrap FalconDeck relay host
+  hosts: relay
+  become: true
+
+  roles:
+    - role: common

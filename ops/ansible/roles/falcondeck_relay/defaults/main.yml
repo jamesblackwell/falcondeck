@@ -1,0 +1,11 @@
+---
+falcondeck_relay_service_name: falcondeck-relay
+falcondeck_relay_user: falcondeck
+falcondeck_relay_group: falcondeck
+falcondeck_relay_install_dir: /opt/falcondeck/bin
+falcondeck_relay_config_dir: /etc/falcondeck
+falcondeck_relay_data_dir: /var/lib/falcondeck/relay
+falcondeck_repo_dest: /usr/local/src/falcondeck
+falcondeck_relay_bind_host: 127.0.0.1
+falcondeck_relay_port: 8787
+falcondeck_relay_env: {}

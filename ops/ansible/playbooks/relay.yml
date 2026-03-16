@@ -1,0 +1,13 @@
+---
+- name: Deploy FalconDeck relay
+  hosts: relay
+  become: true
+
+  roles:
+    - role: common
+    - role: falcondeck_relay
+    - role: falcondeck_remote_web
+      vars:
+        falcondeck_remote_web_relay_url: "{{ falcondeck_relay_public_url }}"
+    - role: falcondeck_site
+    - role: caddy

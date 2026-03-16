@@ -1,0 +1,79 @@
+---
+- name: Install base packages
+  ansible.builtin.apt:
+    name:
+      - build-essential
+      - curl
+      - git
+      - pkg-config
+      - libssl-dev
+      - ca-certificates
+      - rsync
+      - ufw
+    update_cache: true
+    state: present
+
+- name: Install Node.js 22 for web builds
+  ansible.builtin.shell: |
+    set -euo pipefail
+    current_major=""
+    if command -v node >/dev/null 2>&1; then
+      current_major="$(node -p "process.versions.node.split('.')[0]")"
+    fi
+    if [ "$current_major" != "22" ]; then
+      curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+      apt-get install -y nodejs
+    fi
+  args:
+    executable: /bin/bash
+
+- name: Create falcondeck group
+  ansible.builtin.group:
+    name: falcondeck
+    state: present
+
+- name: Create falcondeck user
+  ansible.builtin.user:
+    name: falcondeck
+    group: falcondeck
+    system: true
+    home: /var/lib/falcondeck
+    create_home: true
+    shell: /usr/sbin/nologin
+
+- name: Create relay directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: falcondeck
+    group: falcondeck
+    mode: "0755"
+  loop:
+    - /opt/falcondeck/bin
+    - /etc/falcondeck
+    - /var/lib/falcondeck
+    - /var/lib/falcondeck/relay
+    - /var/www/falcondeck-app
+    - /var/www/falcondeck-site
+
+- name: Allow OpenSSH through firewall
+  community.general.ufw:
+    rule: allow
+    name: OpenSSH
+
+- name: Allow HTTP through firewall
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+
+- name: Allow HTTPS through firewall
+  community.general.ufw:
+    rule: allow
+    port: "443"
+    proto: tcp
+
+- name: Enable firewall
+  community.general.ufw:
+    state: enabled
+    policy: deny

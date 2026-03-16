@@ -1,0 +1,32 @@
+---
+- name: Build marketing site bundle
+  ansible.builtin.shell: |
+    set -euo pipefail
+    rm -rf apps/site/node_modules
+    (cd apps/site && npm install)
+    npm --workspace apps/site run build
+  args:
+    chdir: "{{ falcondeck_repo_dest }}"
+    executable: /bin/bash
+
+- name: Clear previous site assets
+  ansible.builtin.file:
+    path: "{{ falcondeck_site_build_dir }}"
+    state: absent
+
+- name: Recreate site directory
+  ansible.builtin.file:
+    path: "{{ falcondeck_site_build_dir }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Install site assets
+  ansible.builtin.copy:
+    src: "{{ falcondeck_repo_dest }}/apps/site/dist/"
+    dest: "{{ falcondeck_site_build_dir }}/"
+    remote_src: true
+    owner: www-data
+    group: www-data
+    mode: preserve

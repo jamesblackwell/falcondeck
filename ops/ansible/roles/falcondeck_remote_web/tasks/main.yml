@@ -1,0 +1,40 @@
+---
+- name: Install root workspace dependencies
+  ansible.builtin.shell: |
+    set -euo pipefail
+    npm ci
+    rm -rf apps/remote-web/node_modules
+    (cd apps/remote-web && npm install)
+  args:
+    chdir: "{{ falcondeck_repo_dest }}"
+    executable: /bin/bash
+
+- name: Build remote web bundle
+  ansible.builtin.shell: |
+    set -euo pipefail
+    VITE_FALCONDECK_RELAY_URL="{{ falcondeck_remote_web_relay_url }}" npm --workspace apps/remote-web run build
+  args:
+    chdir: "{{ falcondeck_repo_dest }}"
+    executable: /bin/bash
+
+- name: Clear previous remote web assets
+  ansible.builtin.file:
+    path: "{{ falcondeck_remote_web_build_dir }}"
+    state: absent
+
+- name: Recreate remote web directory
+  ansible.builtin.file:
+    path: "{{ falcondeck_remote_web_build_dir }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+
+- name: Install remote web assets
+  ansible.builtin.copy:
+    src: "{{ falcondeck_repo_dest }}/apps/remote-web/dist/"
+    dest: "{{ falcondeck_remote_web_build_dir }}/"
+    remote_src: true
+    owner: www-data
+    group: www-data
+    mode: preserve

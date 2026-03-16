@@ -1,0 +1,5 @@
+---
+falcondeck_app_domain: app.example.com
+falcondeck_repo_dest: /usr/local/src/falcondeck
+falcondeck_remote_web_build_dir: /var/www/falcondeck-app
+falcondeck_remote_web_relay_url: https://connect.example.com

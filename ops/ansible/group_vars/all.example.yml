@@ -1,0 +1,27 @@
+---
+# Public hostname for the relay, e.g. relay.falcondeck.com
+falcondeck_relay_domain: relay.example.com
+
+# Email Caddy uses for ACME registration
+falcondeck_tls_email: ops@example.com
+
+# Bind port for the relay process behind Caddy
+falcondeck_relay_port: 8787
+
+# Public https endpoint used by clients
+falcondeck_relay_public_url: https://relay.example.com
+
+# Public hostname for the hosted remote web client
+falcondeck_app_domain: app.example.com
+
+# Public hostname for the marketing site
+falcondeck_site_domain: example.com
+
+# Optional local workspace path to sync to the server before building
+falcondeck_repo_src: ~/src/falcondeck
+
+# Remote checkout/build path used by Ansible
+falcondeck_repo_dest: /usr/local/src/falcondeck
+
+# Optional extra env vars for the relay service
+falcondeck_relay_env: {}

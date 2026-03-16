@@ -1,0 +1,6 @@
+---
+- name: restart falcondeck relay
+  ansible.builtin.systemd:
+    name: "{{ falcondeck_relay_service_name }}"
+    daemon_reload: true
+    state: restarted

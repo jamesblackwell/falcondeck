@@ -1,0 +1,3 @@
+---
+falcondeck_repo_dest: /usr/local/src/falcondeck
+falcondeck_site_build_dir: /var/www/falcondeck-site

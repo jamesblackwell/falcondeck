@@ -1,0 +1,27 @@
+{{ falcondeck_app_domain }} {
+  encode zstd gzip
+
+  tls {{ falcondeck_tls_email }}
+
+  root * /var/www/falcondeck-app
+  try_files {path} /index.html
+  file_server
+}
+
+{{ falcondeck_relay_domain }} {
+  encode zstd gzip
+
+  tls {{ falcondeck_tls_email }}
+
+  reverse_proxy 127.0.0.1:{{ falcondeck_relay_port }}
+}
+
+{{ falcondeck_site_domain }} {
+  encode zstd gzip
+
+  tls {{ falcondeck_tls_email }}
+
+  root * /var/www/falcondeck-site
+  try_files {path} /index.html
+  file_server
+}

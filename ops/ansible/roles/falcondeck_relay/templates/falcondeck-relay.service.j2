@@ -1,0 +1,17 @@
+[Unit]
+Description=FalconDeck Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ falcondeck_relay_user }}
+Group={{ falcondeck_relay_group }}
+WorkingDirectory={{ falcondeck_relay_data_dir }}
+EnvironmentFile={{ falcondeck_relay_config_dir }}/relay.env
+ExecStart={{ falcondeck_relay_install_dir }}/falcondeck-relay
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

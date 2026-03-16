@@ -1,0 +1,94 @@
+---
+- name: Assert local repo source is configured
+  ansible.builtin.assert:
+    that:
+      - falcondeck_repo_src is defined
+    fail_msg: Set falcondeck_repo_src to the local FalconDeck workspace path before deploying.
+
+- name: Check local repo source exists
+  ansible.builtin.stat:
+    path: "{{ falcondeck_repo_src }}"
+  delegate_to: localhost
+  become: false
+  register: falcondeck_repo_src_stat
+
+- name: Fail if local repo source is missing
+  ansible.builtin.assert:
+    that:
+      - falcondeck_repo_src_stat.stat.exists
+      - falcondeck_repo_src_stat.stat.isdir
+    fail_msg: >-
+      falcondeck_repo_src must point at a local FalconDeck checkout.
+
+- name: Sync FalconDeck source tree to the server
+  ansible.posix.synchronize:
+    src: "{{ falcondeck_repo_src }}/"
+    dest: "{{ falcondeck_repo_dest }}/"
+    delete: true
+    rsync_opts:
+      - --exclude=.git
+      - --exclude=target
+      - --exclude=node_modules
+      - --exclude=dist
+      - --exclude=ops/ansible/inventory/local
+      - --exclude=ops/ansible/group_vars/*.local.yml
+      - --exclude=.DS_Store
+  delegate_to: localhost
+  become: false
+
+- name: Install Rust toolchain for relay builds
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! command -v cargo >/dev/null 2>&1; then
+      curl https://sh.rustup.rs -sSf | sh -s -- -y
+    fi
+    . "$HOME/.cargo/env"
+    rustup toolchain install stable --profile minimal
+  args:
+    executable: /bin/bash
+    creates: /root/.cargo/bin/cargo
+
+- name: Build Linux relay binary on the server
+  ansible.builtin.shell: |
+    set -euo pipefail
+    . "$HOME/.cargo/env"
+    cargo build --release -p falcondeck-relay
+  args:
+    chdir: "{{ falcondeck_repo_dest }}"
+    executable: /bin/bash
+  notify: restart falcondeck relay
+
+- name: Install relay binary
+  ansible.builtin.copy:
+    src: "{{ falcondeck_repo_dest }}/target/release/falcondeck-relay"
+    dest: "{{ falcondeck_relay_install_dir }}/falcondeck-relay"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  notify: restart falcondeck relay
+
+- name: Write relay environment file
+  ansible.builtin.template:
+    src: falcondeck-relay.env.j2
+    dest: "{{ falcondeck_relay_config_dir }}/relay.env"
+    owner: root
+    group: root
+    mode: "0640"
+  notify: restart falcondeck relay
+
+- name: Write relay systemd unit
+  ansible.builtin.template:
+    src: falcondeck-relay.service.j2
+    dest: "/etc/systemd/system/{{ falcondeck_relay_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart falcondeck relay
+
+- name: Ensure relay service is enabled
+  ansible.builtin.systemd:
+    name: "{{ falcondeck_relay_service_name }}"
+    daemon_reload: true
+    enabled: true
+    state: started
