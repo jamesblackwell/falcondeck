@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   applyEventToThreadDetail,
@@ -6,21 +6,25 @@ import {
   buildProjectGroups,
   createDaemonApiClient,
   filesToImageInputs,
+  reconcileSnapshotSelection,
   type ConversationItem,
   type DaemonSnapshot,
+  type EventEnvelope,
   type ImageInput,
   type RemoteStatusResponse,
   type ThreadDetail,
   type TurnInputItem,
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput } from '@falcondeck/chat-ui'
-import { AppShell } from '@falcondeck/ui'
 
 import { detectApiBaseUrl } from './api'
 import { defaultModelId, reasoningOptions } from './utils'
 import { DesktopSidebar } from './components/Sidebar'
+import { DesktopShell } from './components/DesktopShell'
 import { SessionHeader } from './components/SessionHeader'
-import { ContextPanel } from './components/ContextPanel'
+import { RemotePairingPopover } from './components/RemotePairingPopover'
+import { ApprovalBar } from './components/ApprovalBar'
+import { DiffPanel } from './components/DiffPanel'
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
 
@@ -45,6 +49,7 @@ export default function App() {
   const [isStartingRemote, setIsStartingRemote] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const selectionSeedRef = useRef<string | null>(null)
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
@@ -73,6 +78,14 @@ export default function App() {
       ? `${remoteWebUrl}?relay=${encodeURIComponent(remoteStatus.relay_url)}&code=${encodeURIComponent(remoteStatus.pairing.pairing_code)}`
       : null
 
+  const handleEvent = useCallback((event: EventEnvelope) => {
+    setSnapshot((c) => applySnapshotEvent(c, event))
+    setThreadDetail((c) => applyEventToThreadDetail(c, event))
+    if (event.event.type === 'turn-end') {
+      setGitRefreshTrigger((c) => c + 1)
+    }
+  }, [])
+
   // Bootstrap daemon connection
   useEffect(() => {
     let socket: WebSocket | null = null
@@ -91,14 +104,9 @@ export default function App() {
         if (cancelled) return
         setSnapshot(nextSnapshot)
         setRemoteStatus(nextRemoteStatus)
-        setSelectedWorkspaceId((c) => c ?? nextSnapshot.workspaces[0]?.id ?? null)
-        setSelectedThreadId((c) => c ?? nextSnapshot.threads[0]?.id ?? null)
         setConnectionState('ready')
         setActionError(null)
-        socket = nextApi.connectEvents((event) => {
-          setSnapshot((c) => applySnapshotEvent(c, event))
-          setThreadDetail((c) => applyEventToThreadDetail(c, event))
-        })
+        socket = nextApi.connectEvents(handleEvent)
       } catch (error) {
         setConnectionState('error')
         setConnectionError(error instanceof Error ? error.message : 'Failed to connect to daemon')
@@ -110,7 +118,17 @@ export default function App() {
       cancelled = true
       socket?.close()
     }
-  }, [])
+  }, [handleEvent])
+
+  useEffect(() => {
+    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId)
+    if (nextSelection.workspaceId !== selectedWorkspaceId) {
+      setSelectedWorkspaceId(nextSelection.workspaceId)
+    }
+    if (nextSelection.threadId !== selectedThreadId) {
+      setSelectedThreadId(nextSelection.threadId)
+    }
+  }, [snapshot, selectedThreadId, selectedWorkspaceId])
 
   // Fetch thread detail on selection change
   useEffect(() => {
@@ -167,6 +185,99 @@ export default function App() {
     }
   }, [selectedEffort, selectedModel, selectedThread, selectedWorkspace])
 
+  const persistThreadSettings = useCallback(
+    async ({
+      modelId,
+      effort,
+      collaborationModeId,
+    }: {
+      modelId: string | null
+      effort: string | null
+      collaborationModeId: string | null
+    }) => {
+      if (!api || !selectedWorkspace || !selectedThreadId) return
+      try {
+        const handle = await api.updateThread({
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          model_id: modelId,
+          reasoning_effort: effort,
+          collaboration_mode_id: collaborationModeId,
+        })
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                workspaces: current.workspaces.map((workspace) =>
+                  workspace.id === handle.workspace.id ? handle.workspace : workspace,
+                ),
+                threads: current.threads.map((thread) =>
+                  thread.id === handle.thread.id ? handle.thread : thread,
+                ),
+              }
+            : current,
+        )
+        setThreadDetail((current) =>
+          current && current.thread.id === handle.thread.id
+            ? { ...current, workspace: handle.workspace, thread: handle.thread }
+            : current,
+        )
+        setActionError(null)
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : 'Failed to update thread settings')
+      }
+    },
+    [api, selectedThreadId, selectedWorkspace],
+  )
+
+  const handleModelChange = useCallback(
+    (modelId: string) => {
+      setSelectedModel(modelId)
+      const nextOptions = reasoningOptions(selectedThread, selectedWorkspace, modelId)
+      const nextEffort =
+        selectedEffort && nextOptions.includes(selectedEffort)
+          ? selectedEffort
+          : (nextOptions[0] ?? 'medium')
+      setSelectedEffort(nextEffort)
+      void persistThreadSettings({
+        modelId,
+        effort: nextEffort,
+        collaborationModeId: selectedCollaborationMode,
+      })
+    },
+    [
+      persistThreadSettings,
+      selectedCollaborationMode,
+      selectedEffort,
+      selectedThread,
+      selectedWorkspace,
+    ],
+  )
+
+  const handleEffortChange = useCallback(
+    (effort: string) => {
+      setSelectedEffort(effort)
+      void persistThreadSettings({
+        modelId: selectedModel,
+        effort,
+        collaborationModeId: selectedCollaborationMode,
+      })
+    },
+    [persistThreadSettings, selectedCollaborationMode, selectedModel],
+  )
+
+  const handleCollaborationModeChange = useCallback(
+    (modeId: string) => {
+      setSelectedCollaborationMode(modeId)
+      void persistThreadSettings({
+        modelId: selectedModel,
+        effort: selectedEffort,
+        collaborationModeId: modeId,
+      })
+    },
+    [persistThreadSettings, selectedEffort, selectedModel],
+  )
+
   // Poll remote status
   useEffect(() => {
     if (!api || !remoteStatus || remoteStatus.status === 'inactive') return
@@ -175,6 +286,13 @@ export default function App() {
     }, 2000)
     return () => window.clearInterval(interval)
   }, [api, remoteStatus?.status])
+
+  // Refresh git on workspace change
+  useEffect(() => {
+    if (selectedWorkspaceId) {
+      setGitRefreshTrigger((c) => c + 1)
+    }
+  }, [selectedWorkspaceId])
 
   async function handleAddProject() {
     if (!api) return
@@ -270,7 +388,7 @@ export default function App() {
   const conversationItems: ConversationItem[] = threadDetail?.items ?? []
 
   return (
-    <AppShell
+    <DesktopShell
       sidebar={
         <DesktopSidebar
           connectionState={connectionState}
@@ -292,13 +410,25 @@ export default function App() {
         />
       }
       main={
-        <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
+        <section className="flex h-full min-h-0 flex-col bg-surface-1">
           <SessionHeader
             workspace={selectedWorkspace}
             thread={selectedThread}
             selectedModel={selectedModel}
             selectedEffort={selectedEffort}
-            remoteStatus={remoteStatus}
+          >
+            <RemotePairingPopover
+              remoteStatus={remoteStatus}
+              pairingLink={pairingLink}
+              relayUrl={relayUrl}
+              onRelayUrlChange={setRelayUrl}
+              onStartPairing={() => void handleStartRemotePairing()}
+              isStartingRemote={isStartingRemote}
+            />
+          </SessionHeader>
+          <ApprovalBar
+            approvals={approvals}
+            onApproval={(requestId, decision) => void handleApproval(requestId, decision)}
           />
           <Conversation items={conversationItems} />
           <PromptInput
@@ -309,29 +439,23 @@ export default function App() {
             attachments={attachments}
             models={selectedWorkspace?.models ?? []}
             selectedModelId={selectedModel}
-            onModelChange={setSelectedModel}
+            onModelChange={handleModelChange}
             reasoningOptions={reasoningOptions(selectedThread, selectedWorkspace, selectedModel)}
             selectedEffort={selectedEffort}
-            onEffortChange={setSelectedEffort}
+            onEffortChange={handleEffortChange}
             collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
             selectedCollaborationModeId={selectedCollaborationMode}
-            onCollaborationModeChange={setSelectedCollaborationMode}
+            onCollaborationModeChange={handleCollaborationModeChange}
             approvalPolicy="on-request"
             disabled={!selectedWorkspace || isSending}
           />
         </section>
       }
       rail={
-        <ContextPanel
-          remoteStatus={remoteStatus}
-          pairingLink={pairingLink}
-          relayUrl={relayUrl}
-          onRelayUrlChange={setRelayUrl}
-          onStartPairing={() => void handleStartRemotePairing()}
-          isStartingRemote={isStartingRemote}
-          approvals={approvals}
-          onApproval={(requestId, decision) => void handleApproval(requestId, decision)}
-          thread={selectedThread}
+        <DiffPanel
+          api={api}
+          workspaceId={selectedWorkspaceId}
+          refreshTrigger={gitRefreshTrigger}
         />
       }
     />

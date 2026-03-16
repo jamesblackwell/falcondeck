@@ -12,7 +12,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ApprovalResponseRequest, ConnectWorkspaceRequest, SendTurnRequest, StartRemotePairingRequest,
-    StartReviewRequest, StartThreadRequest, UnifiedEvent,
+    StartReviewRequest, StartThreadRequest, UnifiedEvent, UpdateThreadRequest,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -32,7 +32,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workspaces/{workspace_id}/threads", post(start_thread))
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}",
-            get(thread_detail),
+            get(thread_detail).patch(update_thread),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/turns",
@@ -49,6 +49,14 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/approvals/{request_id}/respond",
             post(respond_approval),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/git/status",
+            get(git_status),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/git/diff",
+            get(git_diff),
         )
         .layer(
             CorsLayer::new()
@@ -110,6 +118,16 @@ async fn thread_detail(
     Ok(Json(state.thread_detail(&workspace_id, &thread_id).await?))
 }
 
+async fn update_thread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(mut request): Json<UpdateThreadRequest>,
+) -> Result<Json<falcondeck_core::ThreadHandle>, DaemonError> {
+    request.workspace_id = workspace_id;
+    request.thread_id = thread_id;
+    Ok(Json(state.update_thread(request).await?))
+}
+
 async fn send_turn(
     State(state): State<AppState>,
     Path((workspace_id, thread_id)): Path<(String, String)>,
@@ -145,6 +163,30 @@ async fn respond_approval(
     Ok(Json(
         state
             .respond_to_approval(workspace_id, request_id, request.decision)
+            .await?,
+    ))
+}
+
+async fn git_status(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<falcondeck_core::GitStatusResponse>, DaemonError> {
+    Ok(Json(state.git_status(&workspace_id).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct GitDiffQuery {
+    path: Option<String>,
+}
+
+async fn git_diff(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GitDiffQuery>,
+) -> Result<Json<falcondeck_core::GitDiffResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .git_diff(&workspace_id, query.path.as_deref())
             .await?,
     ))
 }

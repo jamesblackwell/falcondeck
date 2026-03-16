@@ -42,6 +42,15 @@ pub struct StartThreadRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateThreadRequest {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub model_id: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub collaboration_mode_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageInput {
     pub id: String,
     pub name: Option<String>,
@@ -589,6 +598,36 @@ pub enum RelayServerMessage {
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GitFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+    Copied,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitStatusEntry {
+    pub path: String,
+    pub status: GitFileStatus,
+    pub insertions: Option<u32>,
+    pub deletions: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitStatusResponse {
+    pub branch: Option<String>,
+    pub entries: Vec<GitStatusEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitDiffResponse {
+    pub diff: String,
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
+import { LoaderCircle } from 'lucide-react'
+
 import type { ThreadSummary } from '@falcondeck/client-core'
-import { cn, StatusIndicator } from '@falcondeck/ui'
+import { cn } from '@falcondeck/ui'
 
 export type ThreadItemProps = {
   thread: ThreadSummary
@@ -8,47 +10,42 @@ export type ThreadItemProps = {
   compact?: boolean
 }
 
-function threadStatusMap(status: ThreadSummary['status']) {
-  switch (status) {
-    case 'running':
-      return 'active' as const
-    case 'waiting_for_approval':
-      return 'warning' as const
-    case 'error':
-      return 'error' as const
-    default:
-      return 'idle' as const
-  }
+function timeAgo(dateStr: string) {
+  const seconds = Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000)
+  if (seconds < 60) return 'now'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h`
+  const days = Math.floor(hours / 24)
+  return `${days}d`
 }
 
-export function ThreadItem({ thread, isSelected, onSelect, compact }: ThreadItemProps) {
+export function ThreadItem({ thread, isSelected, onSelect }: ThreadItemProps) {
+  const isRunning = thread.status === 'running'
+
   return (
     <button
       type="button"
       className={cn(
-        'flex w-full items-start gap-2.5 rounded-[var(--fd-radius-md)] px-3 py-2 text-left transition-colors duration-[var(--fd-duration-fast)]',
+        'flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors duration-[var(--fd-duration-fast)]',
         isSelected
           ? 'bg-accent-dim'
           : 'hover:bg-surface-3',
       )}
       onClick={onSelect}
     >
-      <StatusIndicator
-        status={threadStatusMap(thread.status)}
-        size="sm"
-        pulse={thread.status === 'running'}
-        className="mt-1.5"
-      />
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-          {thread.title}
-        </p>
-        {!compact && thread.last_message_preview ? (
-          <p className="mt-0.5 line-clamp-1 text-[length:var(--fd-text-xs)] text-fg-muted">
-            {thread.last_message_preview}
-          </p>
-        ) : null}
-      </div>
+      {isRunning ? (
+        <LoaderCircle className="h-4 w-4 shrink-0 animate-spin text-accent" />
+      ) : (
+        <span className="h-4 w-4 shrink-0" />
+      )}
+      <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-primary">
+        {thread.title}
+      </span>
+      <span className="shrink-0 text-[length:var(--fd-text-xs)] text-fg-faint">
+        {timeAgo(thread.updated_at)}
+      </span>
     </button>
   )
 }

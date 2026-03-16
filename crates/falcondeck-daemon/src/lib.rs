@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod codex;
 mod error;
+mod git;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;

@@ -1,18 +1,18 @@
-import { AlertTriangle, Check, Copy, LoaderCircle, Smartphone } from 'lucide-react'
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  Copy,
+  LoaderCircle,
+  RadioTower,
+  Smartphone,
+} from 'lucide-react'
 import { useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
+import * as Popover from '@radix-ui/react-popover'
 
-import type { ApprovalRequest, RemoteStatusResponse, ThreadSummary } from '@falcondeck/client-core'
-import { ApprovalCard, CodeBlock } from '@falcondeck/chat-ui'
-import {
-  Badge,
-  Button,
-  Input,
-  Panel,
-  PanelContent,
-  PanelHeader,
-  StatusIndicator,
-} from '@falcondeck/ui'
+import type { RemoteStatusResponse } from '@falcondeck/client-core'
+import { Badge, Button, Input, StatusIndicator } from '@falcondeck/ui'
 
 import { remoteDescription, remoteHeadline, remoteTone } from '../utils'
 
@@ -54,47 +54,69 @@ function PairingDetails({ link, code }: { link: string; code: string }) {
   )
 }
 
-export type ContextPanelProps = {
+export type RemotePairingPopoverProps = {
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
   relayUrl: string
   onRelayUrlChange: (url: string) => void
   onStartPairing: () => void
   isStartingRemote: boolean
-  approvals: ApprovalRequest[]
-  onApproval: (requestId: string, decision: 'allow' | 'deny' | 'always_allow') => void
-  thread: ThreadSummary | null
 }
 
-export function ContextPanel({
+export function RemotePairingPopover({
   remoteStatus,
   pairingLink,
   relayUrl,
   onRelayUrlChange,
   onStartPairing,
   isStartingRemote,
-  approvals,
-  onApproval,
-  thread,
-}: ContextPanelProps) {
-  const isRemoteConnected = remoteStatus?.status === 'connected'
+}: RemotePairingPopoverProps) {
+  const isConnected = remoteStatus?.status === 'connected'
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
-      {/* Remote Pairing */}
-      <Panel collapsible defaultOpen={!isRemoteConnected}>
-        <PanelHeader collapsible>
-          <Smartphone className="h-3.5 w-3.5" />
-          Remote
-          {remoteStatus ? (
-            <Badge variant={remoteTone(remoteStatus.status)} dot className="ml-auto">
-              {remoteStatus.status}
-            </Badge>
-          ) : null}
-        </PanelHeader>
-        <PanelContent collapsible>
+    <Popover.Root>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          className="flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-secondary"
+        >
+          {isConnected ? (
+            <StatusIndicator status="connected" size="sm" />
+          ) : (
+            <RadioTower className="h-3.5 w-3.5" />
+          )}
+          <span className={isConnected ? 'text-success' : undefined}>
+            {remoteHeadline(remoteStatus?.status)}
+          </span>
+          <ChevronDown className="h-3 w-3" />
+        </button>
+      </Popover.Trigger>
+
+      <Popover.Portal>
+        <Popover.Content
+          align="end"
+          sideOffset={8}
+          className="z-50 w-[340px] rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-4 shadow-xl animate-in fade-in slide-in-from-top-1"
+        >
           <div className="space-y-3">
-            <Input value={relayUrl} onChange={(event) => onRelayUrlChange(event.target.value)} />
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                <Smartphone className="h-4 w-4" />
+                Remote Pairing
+              </div>
+              {remoteStatus ? (
+                <Badge variant={remoteTone(remoteStatus.status)} dot>
+                  {remoteStatus.status}
+                </Badge>
+              ) : null}
+            </div>
+
+            <Input
+              value={relayUrl}
+              onChange={(event) => onRelayUrlChange(event.target.value)}
+              placeholder="Relay URL"
+            />
+
             <Button
               type="button"
               size="sm"
@@ -138,59 +160,8 @@ export function ContextPanel({
               </div>
             ) : null}
           </div>
-        </PanelContent>
-      </Panel>
-
-      {/* Approvals */}
-      {approvals.length > 0 ? (
-        <Panel>
-          <PanelHeader>
-            <StatusIndicator status="warning" size="sm" pulse />
-            Approvals
-            <Badge variant="warning" className="ml-auto">{approvals.length}</Badge>
-          </PanelHeader>
-          <PanelContent>
-            <div className="space-y-2">
-              {approvals.map((approval) => (
-                <ApprovalCard
-                  key={approval.request_id}
-                  approval={approval}
-                  onAllow={() => onApproval(approval.request_id, 'allow')}
-                  onDeny={() => onApproval(approval.request_id, 'deny')}
-                  onAlwaysAllow={() => onApproval(approval.request_id, 'always_allow')}
-                />
-              ))}
-            </div>
-          </PanelContent>
-        </Panel>
-      ) : null}
-
-      {/* Plan */}
-      {thread?.latest_plan?.steps.length ? (
-        <Panel collapsible defaultOpen>
-          <PanelHeader collapsible>Plan</PanelHeader>
-          <PanelContent collapsible>
-            <div className="space-y-1">
-              {thread.latest_plan.steps.map((step, index) => (
-                <div key={`${step.step}-${index}`} className="flex items-center justify-between gap-2 text-[length:var(--fd-text-sm)]">
-                  <span className="text-fg-primary">{step.step}</span>
-                  <span className="text-[length:var(--fd-text-xs)] text-fg-muted">{step.status}</span>
-                </div>
-              ))}
-            </div>
-          </PanelContent>
-        </Panel>
-      ) : null}
-
-      {/* Diff */}
-      {thread?.latest_diff ? (
-        <Panel collapsible defaultOpen={false}>
-          <PanelHeader collapsible>Latest diff</PanelHeader>
-          <PanelContent collapsible>
-            <CodeBlock code={thread.latest_diff} language="diff" />
-          </PanelContent>
-        </Panel>
-      ) : null}
-    </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }

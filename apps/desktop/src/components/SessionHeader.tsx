@@ -1,16 +1,14 @@
-import { RadioTower } from 'lucide-react'
+import * as React from 'react'
 
-import type { RemoteStatusResponse, ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
+import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
 import { Badge, StatusIndicator, Toolbar, ToolbarGroup } from '@falcondeck/ui'
-
-import { remoteHeadline } from '../utils'
 
 export type SessionHeaderProps = {
   workspace: WorkspaceSummary | null
   thread: ThreadSummary | null
   selectedModel: string | null
   selectedEffort: string | null
-  remoteStatus: RemoteStatusResponse | null
+  children?: React.ReactNode
 }
 
 function threadStatusDisplay(status: ThreadSummary['status']) {
@@ -31,12 +29,12 @@ export function SessionHeader({
   thread,
   selectedModel,
   selectedEffort,
-  remoteStatus,
+  children,
 }: SessionHeaderProps) {
   const pathLabel = workspace?.path.split('/').pop()
 
   return (
-    <Toolbar className="rounded-t-[var(--fd-radius-xl)] bg-surface-1">
+    <Toolbar className="bg-surface-1">
       <div className="flex items-center gap-3">
         {thread ? (
           <StatusIndicator
@@ -62,12 +60,7 @@ export function SessionHeader({
           </Badge>
         ) : null}
         {selectedEffort ? <Badge>{selectedEffort}</Badge> : null}
-        <div className="flex items-center gap-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
-          <RadioTower className="h-3.5 w-3.5" />
-          <span className={remoteStatus?.status === 'connected' ? 'text-success' : undefined}>
-            {remoteHeadline(remoteStatus?.status)}
-          </span>
-        </div>
+        {children}
       </ToolbarGroup>
     </Toolbar>
   )

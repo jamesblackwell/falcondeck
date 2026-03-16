@@ -2,10 +2,13 @@ import type {
   CollaborationModeSummary,
   DaemonSnapshot,
   EventEnvelope,
+  GitDiffResponse,
+  GitStatusResponse,
   RemoteStatusResponse,
   ThreadDetail,
   ThreadHandle,
   TurnInputItem,
+  UpdateThreadPayload,
   WorkspaceSummary,
 } from './types'
 
@@ -75,6 +78,15 @@ export function createDaemonApiClient(baseUrl: string) {
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}`),
       )
     },
+    async updateThread(payload: UpdateThreadPayload) {
+      return parseJson<ThreadHandle>(
+        await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}`, {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        }),
+      )
+    },
     async collaborationModes(workspaceId: string) {
       return parseJson<CollaborationModeSummary[]>(
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/collaboration-modes`),
@@ -100,6 +112,17 @@ export function createDaemonApiClient(baseUrl: string) {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ decision }),
         }),
+      )
+    },
+    async gitStatus(workspaceId: string) {
+      return parseJson<GitStatusResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/status`),
+      )
+    },
+    async gitDiff(workspaceId: string, path?: string) {
+      const params = path ? `?path=${encodeURIComponent(path)}` : ''
+      return parseJson<GitDiffResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/diff${params}`),
       )
     },
     connectEvents(onEvent: (event: EventEnvelope) => void) {

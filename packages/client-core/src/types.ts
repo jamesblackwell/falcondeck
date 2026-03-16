@@ -219,6 +219,32 @@ export type ThreadHandle = {
   thread: ThreadSummary
 }
 
+export type UpdateThreadPayload = {
+  workspace_id: string
+  thread_id: string
+  model_id?: string | null
+  reasoning_effort?: string | null
+  collaboration_mode_id?: string | null
+}
+
+export type GitFileStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' | 'copied'
+
+export type GitStatusEntry = {
+  path: string
+  status: GitFileStatus
+  insertions: number | null
+  deletions: number | null
+}
+
+export type GitStatusResponse = {
+  branch: string | null
+  entries: GitStatusEntry[]
+}
+
+export type GitDiffResponse = {
+  diff: string
+}
+
 export type RemoteConnectionStatus =
   | 'inactive'
   | 'waiting_for_claim'

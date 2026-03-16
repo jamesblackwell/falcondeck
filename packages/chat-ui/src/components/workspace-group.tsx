@@ -14,7 +14,7 @@ export function WorkspaceGroup({ workspace, isSelected, onSelect, children }: Wo
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
 
   return (
-    <section className="space-y-0.5">
+    <section>
       <button
         type="button"
         className={cn(
@@ -28,7 +28,7 @@ export function WorkspaceGroup({ workspace, isSelected, onSelect, children }: Wo
         <FolderOpen className="h-4 w-4 shrink-0 text-fg-muted" />
         <span className="truncate text-[length:var(--fd-text-sm)] font-medium">{pathLabel}</span>
       </button>
-      <div className="ml-6 space-y-0.5">
+      <div className="pl-2">
         {children}
       </div>
     </section>
