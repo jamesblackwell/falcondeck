@@ -10,12 +10,14 @@ use std::{
 use chrono::Utc;
 use falcondeck_core::{
     AccountSummary, ApprovalDecision, ApprovalRequest, CollaborationModeSummary, CommandResponse,
-    ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot, EventEnvelope,
-    HealthResponse, PairingStatusResponse, RelayClientMessage, RelayServerMessage,
-    RemoteConnectionStatus, RemotePairingSession, RemoteStatusResponse, SendTurnRequest,
-    ServiceLevel, StartPairingRequest, StartPairingResponse, StartRemotePairingRequest,
-    StartReviewRequest, StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle,
-    ThreadStatus, ThreadSummary, TurnInputItem, UnifiedEvent, WorkspaceStatus, WorkspaceSummary,
+    ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope,
+    EventEnvelope, HealthResponse, PairingPublicKeyBundle, PairingStatusResponse,
+    RelayClientMessage, RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus,
+    RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
+    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
+    StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
+    TurnInputItem, UnifiedEvent, WorkspaceStatus, WorkspaceSummary,
+    crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -87,6 +89,8 @@ struct RemotePairingState {
     pairing_code: String,
     session_id: Option<String>,
     expires_at: chrono::DateTime<Utc>,
+    local_key_pair: LocalBoxKeyPair,
+    data_key: [u8; 32],
 }
 
 impl AppState {
@@ -144,14 +148,17 @@ impl AppState {
     ) -> Result<RemoteStatusResponse, DaemonError> {
         let relay_url = normalize_relay_url(&request.relay_url)?;
         let client = reqwest::Client::new();
+        let local_key_pair = LocalBoxKeyPair::generate();
+        let data_key = generate_data_key();
         let pairing = client
             .post(format!("{relay_url}/v1/pairings"))
             .json(&StartPairingRequest {
                 label: Some(host_label()),
                 ttl_seconds: Some(600),
-                daemon_bundle: Some(json!({
-                    "daemonVersion": self.inner.daemon.version,
-                })),
+                daemon_bundle: Some(PairingPublicKeyBundle {
+                    encryption_variant: falcondeck_core::EncryptionVariant::DataKeyV1,
+                    public_key: local_key_pair.public_key_base64().to_string(),
+                }),
             })
             .send()
             .await
@@ -160,13 +167,17 @@ impl AppState {
             .map_err(|error| DaemonError::Rpc(format!("relay pairing request failed: {error}")))?
             .json::<StartPairingResponse>()
             .await
-            .map_err(|error| DaemonError::Rpc(format!("failed to parse relay pairing response: {error}")))?;
+            .map_err(|error| {
+                DaemonError::Rpc(format!("failed to parse relay pairing response: {error}"))
+            })?;
 
         let remote_pairing = RemotePairingState {
             pairing_id: pairing.pairing_id.clone(),
             pairing_code: pairing.pairing_code.clone(),
             session_id: None,
             expires_at: pairing.expires_at,
+            local_key_pair,
+            data_key,
         };
 
         let response = {
@@ -209,7 +220,12 @@ impl AppState {
 
         let mut threads = workspaces
             .values()
-            .flat_map(|workspace| workspace.threads.values().map(|thread| thread.summary.clone()))
+            .flat_map(|workspace| {
+                workspace
+                    .threads
+                    .values()
+                    .map(|thread| thread.summary.clone())
+            })
             .collect::<Vec<_>>();
         threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 
@@ -616,7 +632,7 @@ impl AppState {
         pairing: RemotePairingState,
     ) -> Result<(), String> {
         let client = reqwest::Client::new();
-        let session_id = loop {
+        let (session_id, client_bundle) = loop {
             let response = client
                 .get(format!("{relay_url}/v1/pairings/{}", pairing.pairing_id))
                 .bearer_auth(&daemon_token)
@@ -629,6 +645,10 @@ impl AppState {
                 .await
                 .map_err(|error| format!("failed to parse relay pairing status: {error}"))?;
 
+            if response.status == falcondeck_core::PairingStatus::Expired {
+                return Err("relay pairing expired before it was claimed".to_string());
+            }
+
             {
                 let mut remote = self.inner.remote.lock().await;
                 if let Some(current_pairing) = remote.pairing.as_mut() {
@@ -637,7 +657,10 @@ impl AppState {
             }
 
             if let Some(session_id) = response.session_id {
-                break session_id;
+                let client_bundle = response.client_bundle.ok_or_else(|| {
+                    "relay pairing completed without client key material".to_string()
+                })?;
+                break (session_id, client_bundle);
             }
 
             sleep(Duration::from_secs(2)).await;
@@ -652,7 +675,7 @@ impl AppState {
             remote.last_error = None;
         }
 
-        self.connect_remote_session(relay_url, daemon_token, session_id)
+        self.connect_remote_session(relay_url, daemon_token, session_id, pairing, client_bundle)
             .await
     }
 
@@ -661,12 +684,32 @@ impl AppState {
         relay_url: String,
         daemon_token: String,
         session_id: String,
+        pairing: RemotePairingState,
+        client_bundle: PairingPublicKeyBundle,
     ) -> Result<(), String> {
         let ws_url = relay_ws_url(&relay_url, &session_id, &daemon_token);
         let (socket, _) = connect_async(&ws_url)
             .await
             .map_err(|error| format!("failed to connect daemon relay websocket: {error}"))?;
         let (mut writer, mut reader) = socket.split();
+        let client_wrapped_data_key = pairing
+            .local_key_pair
+            .wrap_data_key(&client_bundle.public_key, &pairing.data_key)
+            .map_err(|error| format!("failed to wrap remote session key: {error}"))?;
+        let daemon_wrapped_data_key = pairing
+            .local_key_pair
+            .wrap_data_key(
+                pairing.local_key_pair.public_key_base64(),
+                &pairing.data_key,
+            )
+            .map_err(|error| format!("failed to wrap daemon session key: {error}"))?;
+        let session_material = SessionKeyMaterial {
+            encryption_variant: falcondeck_core::EncryptionVariant::DataKeyV1,
+            daemon_public_key: pairing.local_key_pair.public_key_base64().to_string(),
+            client_public_key: client_bundle.public_key,
+            client_wrapped_data_key,
+            daemon_wrapped_data_key: Some(daemon_wrapped_data_key),
+        };
 
         {
             let mut remote = self.inner.remote.lock().await;
@@ -678,6 +721,36 @@ impl AppState {
             &mut writer,
             &RelayClientMessage::RpcRegister {
                 method: "approval.respond".to_string(),
+            },
+        )
+        .await?;
+        send_relay_message(
+            &mut writer,
+            &RelayClientMessage::RpcRegister {
+                method: "thread.start".to_string(),
+            },
+        )
+        .await?;
+        send_relay_message(
+            &mut writer,
+            &RelayClientMessage::RpcRegister {
+                method: "turn.start".to_string(),
+            },
+        )
+        .await?;
+        send_relay_message(
+            &mut writer,
+            &RelayClientMessage::RpcRegister {
+                method: "turn.interrupt".to_string(),
+            },
+        )
+        .await?;
+        send_relay_message(
+            &mut writer,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::SessionBootstrap {
+                    material: session_material,
+                },
             },
         )
         .await?;
@@ -694,10 +767,9 @@ impl AppState {
         send_relay_message(
             &mut writer,
             &RelayClientMessage::Update {
-                body: json!({
-                    "kind": "daemon-event",
-                    "event": snapshot_event,
-                }),
+                body: RelayUpdateBody::Encrypted {
+                    envelope: encrypt_remote_daemon_event(&pairing.data_key, &snapshot_event)?,
+                },
             },
         )
         .await?;
@@ -710,10 +782,9 @@ impl AppState {
                     send_relay_message(
                         &mut writer,
                         &RelayClientMessage::Update {
-                            body: json!({
-                                "kind": "daemon-event",
-                                "event": event,
-                            }),
+                            body: RelayUpdateBody::Encrypted {
+                                envelope: encrypt_remote_daemon_event(&pairing.data_key, &event)?,
+                            },
                         },
                     ).await?;
                 }
@@ -723,7 +794,7 @@ impl AppState {
                             let parsed = serde_json::from_str::<RelayServerMessage>(&text)
                                 .map_err(|error| format!("invalid relay message: {error}"))?;
                             if let RelayServerMessage::RpcRequest { request_id, method, params } = parsed {
-                                self.handle_remote_rpc(&mut writer, request_id, method, params).await?;
+                                self.handle_remote_rpc(&mut writer, &pairing.data_key, request_id, method, params).await?;
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => {
@@ -742,13 +813,18 @@ impl AppState {
     async fn handle_remote_rpc(
         &self,
         writer: &mut futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
             Message,
         >,
+        data_key: &[u8; 32],
         request_id: String,
         method: String,
-        params: Value,
+        params: EncryptedEnvelope,
     ) -> Result<(), String> {
+        let params: Value = decrypt_json(data_key, &params)
+            .map_err(|error| format!("failed to decrypt remote rpc payload: {error}"))?;
         match method.as_str() {
             "thread.start" => {
                 let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
@@ -760,7 +836,10 @@ impl AppState {
                         &params,
                         &["collaborationModeId", "collaboration_mode_id"],
                     ),
-                    approval_policy: extract_string(&params, &["approvalPolicy", "approval_policy"]),
+                    approval_policy: extract_string(
+                        &params,
+                        &["approvalPolicy", "approval_policy"],
+                    ),
                 };
                 match self.start_thread(request).await {
                     Ok(handle) => {
@@ -769,7 +848,9 @@ impl AppState {
                             &RelayClientMessage::RpcResult {
                                 request_id,
                                 ok: true,
-                                result: Some(serde_json::to_value(handle).unwrap_or(Value::Null)),
+                                result: Some(encrypt_json(data_key, &handle).map_err(|error| {
+                                    format!("failed to encrypt rpc result: {error}")
+                                })?),
                                 error: None,
                             },
                         )
@@ -782,7 +863,17 @@ impl AppState {
                                 request_id,
                                 ok: false,
                                 result: None,
-                                error: Some(error.to_string()),
+                                error: Some(
+                                    encrypt_json(
+                                        data_key,
+                                        &json!({ "message": error.to_string() }),
+                                    )
+                                    .map_err(
+                                        |encrypt_error| {
+                                            format!("failed to encrypt rpc error: {encrypt_error}")
+                                        },
+                                    )?,
+                                ),
                             },
                         )
                         .await?;
@@ -812,7 +903,10 @@ impl AppState {
                         &params,
                         &["collaborationModeId", "collaboration_mode_id"],
                     ),
-                    approval_policy: extract_string(&params, &["approvalPolicy", "approval_policy"]),
+                    approval_policy: extract_string(
+                        &params,
+                        &["approvalPolicy", "approval_policy"],
+                    ),
                 };
                 match self.send_turn(request).await {
                     Ok(response) => {
@@ -821,7 +915,9 @@ impl AppState {
                             &RelayClientMessage::RpcResult {
                                 request_id,
                                 ok: true,
-                                result: Some(serde_json::to_value(response).unwrap_or(Value::Null)),
+                                result: Some(encrypt_json(data_key, &response).map_err(
+                                    |error| format!("failed to encrypt rpc result: {error}"),
+                                )?),
                                 error: None,
                             },
                         )
@@ -834,7 +930,17 @@ impl AppState {
                                 request_id,
                                 ok: false,
                                 result: None,
-                                error: Some(error.to_string()),
+                                error: Some(
+                                    encrypt_json(
+                                        data_key,
+                                        &json!({ "message": error.to_string() }),
+                                    )
+                                    .map_err(
+                                        |encrypt_error| {
+                                            format!("failed to encrypt rpc error: {encrypt_error}")
+                                        },
+                                    )?,
+                                ),
                             },
                         )
                         .await?;
@@ -853,7 +959,9 @@ impl AppState {
                             &RelayClientMessage::RpcResult {
                                 request_id,
                                 ok: true,
-                                result: Some(serde_json::to_value(response).unwrap_or(Value::Null)),
+                                result: Some(encrypt_json(data_key, &response).map_err(
+                                    |error| format!("failed to encrypt rpc result: {error}"),
+                                )?),
                                 error: None,
                             },
                         )
@@ -866,7 +974,17 @@ impl AppState {
                                 request_id,
                                 ok: false,
                                 result: None,
-                                error: Some(error.to_string()),
+                                error: Some(
+                                    encrypt_json(
+                                        data_key,
+                                        &json!({ "message": error.to_string() }),
+                                    )
+                                    .map_err(
+                                        |encrypt_error| {
+                                            format!("failed to encrypt rpc error: {encrypt_error}")
+                                        },
+                                    )?,
+                                ),
                             },
                         )
                         .await?;
@@ -889,7 +1007,17 @@ impl AppState {
                                 request_id,
                                 ok: false,
                                 result: None,
-                                error: Some("unsupported approval decision".to_string()),
+                                error: Some(
+                                    encrypt_json(
+                                        data_key,
+                                        &json!({ "message": "unsupported approval decision" }),
+                                    )
+                                    .map_err(
+                                        |encrypt_error| {
+                                            format!("failed to encrypt rpc error: {encrypt_error}")
+                                        },
+                                    )?,
+                                ),
                             },
                         )
                         .await?;
@@ -907,7 +1035,11 @@ impl AppState {
                             &RelayClientMessage::RpcResult {
                                 request_id,
                                 ok: true,
-                                result: Some(json!({ "ok": true })),
+                                result: Some(
+                                    encrypt_json(data_key, &json!({ "ok": true })).map_err(
+                                        |error| format!("failed to encrypt rpc result: {error}"),
+                                    )?,
+                                ),
                                 error: None,
                             },
                         )
@@ -920,7 +1052,17 @@ impl AppState {
                                 request_id,
                                 ok: false,
                                 result: None,
-                                error: Some(error.to_string()),
+                                error: Some(
+                                    encrypt_json(
+                                        data_key,
+                                        &json!({ "message": error.to_string() }),
+                                    )
+                                    .map_err(
+                                        |encrypt_error| {
+                                            format!("failed to encrypt rpc error: {encrypt_error}")
+                                        },
+                                    )?,
+                                ),
                             },
                         )
                         .await?;
@@ -934,7 +1076,10 @@ impl AppState {
                         request_id,
                         ok: false,
                         result: None,
-                        error: Some(format!("unsupported remote rpc method `{method}`")),
+                        error: Some(
+                            encrypt_json(data_key, &json!({ "message": format!("unsupported remote rpc method `{method}`") }))
+                                .map_err(|encrypt_error| format!("failed to encrypt rpc error: {encrypt_error}"))?,
+                        ),
                     },
                 )
                 .await?;
@@ -1182,7 +1327,11 @@ impl AppState {
                             if method.ends_with("summaryTextDelta") {
                                 ConversationItem::Reasoning {
                                     id,
-                                    summary: Some(format!("{}{}", summary.unwrap_or_default(), delta)),
+                                    summary: Some(format!(
+                                        "{}{}",
+                                        summary.unwrap_or_default(),
+                                        delta
+                                    )),
                                     content,
                                     created_at,
                                 }
@@ -1531,20 +1680,22 @@ impl AppState {
         let thread = workspace
             .threads
             .entry(thread_id.to_string())
-            .or_insert_with(|| ManagedThread::new(ThreadSummary {
-                id: thread_id.to_string(),
-                workspace_id: workspace_id.to_string(),
-                title: "Untitled thread".to_string(),
-                status: ThreadStatus::Idle,
-                updated_at: now,
-                last_message_preview: None,
-                latest_turn_id: None,
-                latest_plan: None,
-                latest_diff: None,
-                last_tool: None,
-                last_error: None,
-                codex: ThreadCodexParams::default(),
-            }));
+            .or_insert_with(|| {
+                ManagedThread::new(ThreadSummary {
+                    id: thread_id.to_string(),
+                    workspace_id: workspace_id.to_string(),
+                    title: "Untitled thread".to_string(),
+                    status: ThreadStatus::Idle,
+                    updated_at: now,
+                    last_message_preview: None,
+                    latest_turn_id: None,
+                    latest_plan: None,
+                    latest_diff: None,
+                    last_tool: None,
+                    last_error: None,
+                    codex: ThreadCodexParams::default(),
+                })
+            });
         updater(&mut thread.summary);
         thread.summary.updated_at = now;
         workspace.summary.current_thread_id = Some(thread.summary.id.clone());
@@ -1800,15 +1951,31 @@ fn host_label() -> String {
         .unwrap_or_else(|_| "FalconDeck desktop".to_string())
 }
 
+fn encrypt_remote_daemon_event(
+    data_key: &[u8; 32],
+    event: &EventEnvelope,
+) -> Result<EncryptedEnvelope, String> {
+    encrypt_json(
+        data_key,
+        &json!({
+            "kind": "daemon-event",
+            "event": event,
+        }),
+    )
+    .map_err(|error| format!("failed to encrypt relay update: {error}"))
+}
+
 async fn send_relay_message(
     writer: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
         Message,
     >,
     message: &RelayClientMessage,
 ) -> Result<(), String> {
-    let payload =
-        serde_json::to_string(message).map_err(|error| format!("failed to encode relay message: {error}"))?;
+    let payload = serde_json::to_string(message)
+        .map_err(|error| format!("failed to encode relay message: {error}"))?;
     writer
         .send(Message::Text(payload.into()))
         .await

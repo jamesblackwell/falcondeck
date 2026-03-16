@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+aes-gcm = "0.10.3"
+base64 = "0.22.1"
 chrono.workspace = true
+crypto_box = "0.9.1"
+rand = "0.8.5"
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 uuid.workspace = true

@@ -573,6 +573,9 @@ export default function App() {
             <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
               <p className="text-sm font-medium text-white">{remoteHeadline(remoteStatus?.status)}</p>
               <p className="mt-2 text-sm text-zinc-400">{remoteDescription(remoteStatus)}</p>
+              <p className="mt-3 text-xs uppercase tracking-[0.28em] text-emerald-300/80">
+                End-to-end encrypted relay
+              </p>
             </div>
             {pairingLink ? (
               <div className="space-y-3 rounded-3xl border border-white/10 bg-white/5 p-4">

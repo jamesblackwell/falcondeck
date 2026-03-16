@@ -6,12 +6,12 @@ use std::{
 
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
-    ClaimPairingRequest, ClaimPairingResponse, PairingStatus, PairingStatusResponse,
-    RelayClientMessage, RelayHealthResponse, RelayPeerRole, RelayServerMessage, RelayUpdate,
-    RelayUpdatesResponse, StartPairingRequest, StartPairingResponse,
+    ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, PairingPublicKeyBundle,
+    PairingStatus, PairingStatusResponse, RelayClientMessage, RelayHealthResponse, RelayPeerRole,
+    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
+    StartPairingResponse,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tokio::{
     fs,
     sync::{Mutex, mpsc},
@@ -53,8 +53,8 @@ struct PairingRecord {
     daemon_token: String,
     label: Option<String>,
     session_id: Option<String>,
-    daemon_bundle: Option<Value>,
-    client_bundle: Option<Value>,
+    daemon_bundle: Option<PairingPublicKeyBundle>,
+    client_bundle: Option<PairingPublicKeyBundle>,
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
 }
@@ -144,6 +144,11 @@ impl AppState {
                 "ttl_seconds must be between 1 and 86400".to_string(),
             ));
         }
+        if request.daemon_bundle.is_none() {
+            return Err(RelayError::BadRequest(
+                "daemon_bundle with a public key is required".to_string(),
+            ));
+        }
 
         let now = Utc::now();
         let expires_at = now + Duration::seconds(ttl_seconds as i64);
@@ -189,6 +194,11 @@ impl AppState {
         if pairing_code.is_empty() {
             return Err(RelayError::BadRequest(
                 "pairing_code is required".to_string(),
+            ));
+        }
+        if request.client_bundle.is_none() {
+            return Err(RelayError::BadRequest(
+                "client_bundle with a public key is required".to_string(),
             ));
         }
 
@@ -412,7 +422,7 @@ impl AppState {
                                         request_id,
                                         ok: false,
                                         result: None,
-                                        error: Some("rpc target disconnected".to_string()),
+                                        error: None,
                                     },
                                 ));
                             }
@@ -513,7 +523,11 @@ impl AppState {
         Ok(())
     }
 
-    async fn append_update(&self, session_id: &str, body: Value) -> Result<(), RelayError> {
+    async fn append_update(
+        &self,
+        session_id: &str,
+        body: RelayUpdateBody,
+    ) -> Result<(), RelayError> {
         let (update, recipients, snapshot) = {
             let mut store = self.inner.store.lock().await;
             let session = store
@@ -595,7 +609,7 @@ impl AppState {
         peer_id: &str,
         request_id: String,
         method: String,
-        params: Value,
+        params: EncryptedEnvelope,
     ) {
         let mut response = None;
         let mut target = None;
@@ -611,7 +625,7 @@ impl AppState {
                                 request_id: request_id.clone(),
                                 ok: false,
                                 result: None,
-                                error: Some("rpc request_id is already in flight".to_string()),
+                                error: None,
                             },
                         )
                     });
@@ -633,7 +647,7 @@ impl AppState {
                                     request_id: request_id.clone(),
                                     ok: false,
                                     result: None,
-                                    error: Some(format!("rpc method `{method}` is not available")),
+                                    error: None,
                                 },
                             )
                         });
@@ -646,7 +660,7 @@ impl AppState {
                                 request_id: request_id.clone(),
                                 ok: false,
                                 result: None,
-                                error: Some(format!("rpc method `{method}` is not registered")),
+                                error: None,
                             },
                         )
                     });
@@ -670,8 +684,8 @@ impl AppState {
         session_id: &str,
         request_id: String,
         ok: bool,
-        result: Option<Value>,
-        error: Option<String>,
+        result: Option<EncryptedEnvelope>,
+        error: Option<EncryptedEnvelope>,
     ) {
         let mut response = None;
         {

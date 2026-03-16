@@ -238,10 +238,39 @@ export type RemoteStatusResponse = {
   last_error: string | null
 }
 
+export type EncryptionVariant = 'data_key_v1'
+
+export type PairingPublicKeyBundle = {
+  encryption_variant: EncryptionVariant
+  public_key: string
+}
+
+export type WrappedDataKey = {
+  encryption_variant: EncryptionVariant
+  wrapped_key: string
+}
+
+export type SessionKeyMaterial = {
+  encryption_variant: EncryptionVariant
+  daemon_public_key: string
+  client_public_key: string
+  client_wrapped_data_key: WrappedDataKey
+  daemon_wrapped_data_key: WrappedDataKey | null
+}
+
+export type EncryptedEnvelope = {
+  encryption_variant: EncryptionVariant
+  ciphertext: string
+}
+
+export type RelayUpdateBody =
+  | { t: 'session-bootstrap'; material: SessionKeyMaterial }
+  | { t: 'encrypted'; envelope: EncryptedEnvelope }
+
 export type RelayUpdate = {
   id: string
   seq: number
-  body: unknown
+  body: RelayUpdateBody
   created_at: string
 }
 
@@ -251,25 +280,25 @@ export type RelayServerMessage =
   | { type: 'sync'; updates: RelayUpdate[]; next_seq: number }
   | { type: 'update'; update: RelayUpdate }
   | { type: 'ephemeral'; body: unknown }
-  | { type: 'rpc-request'; request_id: string; method: string; params: Record<string, unknown> }
+  | { type: 'rpc-request'; request_id: string; method: string; params: EncryptedEnvelope }
   | {
       type: 'rpc-result'
       request_id: string
       ok: boolean
-      result?: unknown
-      error?: string | null
+      result?: EncryptedEnvelope | null
+      error?: EncryptedEnvelope | null
     }
   | { type: 'error'; message: string }
 
 export type RelayClientMessage =
   | { type: 'sync'; after_seq?: number | null }
-  | { type: 'update'; body: unknown }
+  | { type: 'update'; body: RelayUpdateBody }
   | { type: 'rpc-register'; method: string }
-  | { type: 'rpc-call'; request_id: string; method: string; params: Record<string, unknown> }
+  | { type: 'rpc-call'; request_id: string; method: string; params: EncryptedEnvelope }
   | {
       type: 'rpc-result'
       request_id: string
       ok: boolean
-      result?: unknown
-      error?: string | null
+      result?: EncryptedEnvelope | null
+      error?: EncryptedEnvelope | null
     }

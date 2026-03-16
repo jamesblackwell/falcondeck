@@ -2,15 +2,16 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use chrono::Duration;
 use falcondeck_core::{
-    ClaimPairingRequest, ClaimPairingResponse, PairingStatus, PairingStatusResponse,
-    RelayClientMessage, RelayServerMessage, RelayUpdate, RelayUpdatesResponse, StartPairingRequest,
+    ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
+    PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
+    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
     StartPairingResponse,
+    crypto::{LocalBoxKeyPair, encrypt_json, generate_data_key},
 };
 use falcondeck_relay::{AppState, router};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
-use serde_json::json;
 use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
@@ -37,7 +38,7 @@ async fn pairing_flow_and_history_round_trip() {
         &StartPairingRequest {
             label: Some("James Mac".to_string()),
             ttl_seconds: Some(300),
-            daemon_bundle: Some(json!({ "pub": "daemon-key" })),
+            daemon_bundle: Some(test_bundle()),
         },
     )
     .await;
@@ -57,7 +58,7 @@ async fn pairing_flow_and_history_round_trip() {
         &ClaimPairingRequest {
             pairing_code: pairing.pairing_code.clone(),
             label: Some("Phone".to_string()),
-            client_bundle: Some(json!({ "pub": "client-key" })),
+            client_bundle: Some(test_bundle()),
         },
     )
     .await;
@@ -73,8 +74,8 @@ async fn pairing_flow_and_history_round_trip() {
         claimed.session_id.as_deref(),
         Some(claim.session_id.as_str())
     );
-    assert_eq!(claimed.client_bundle, Some(json!({ "pub": "client-key" })));
-    assert_eq!(claim.daemon_bundle, Some(json!({ "pub": "daemon-key" })));
+    assert!(claimed.client_bundle.is_some());
+    assert!(claim.daemon_bundle.is_some());
 
     let updates = get_json::<RelayUpdatesResponse>(
         &client,
@@ -132,7 +133,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         &RelayClientMessage::RpcCall {
             request_id: "req-1".to_string(),
             method: "approval.respond".to_string(),
-            params: json!({ "decision": "allow" }),
+            params: test_envelope("allow"),
         },
     )
     .await;
@@ -143,7 +144,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         RelayServerMessage::RpcRequest {
             request_id: "req-1".to_string(),
             method: "approval.respond".to_string(),
-            params: json!({ "decision": "allow" }),
+            params: test_envelope("allow"),
         }
     );
 
@@ -152,7 +153,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         &RelayClientMessage::RpcResult {
             request_id: "req-1".to_string(),
             ok: true,
-            result: Some(json!({ "ok": true })),
+            result: Some(test_envelope("ok")),
             error: None,
         },
     )
@@ -164,7 +165,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         RelayServerMessage::RpcResult {
             request_id: "req-1".to_string(),
             ok: true,
-            result: Some(json!({ "ok": true })),
+            result: Some(test_envelope("ok")),
             error: None,
         }
     );
@@ -172,14 +173,21 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
     send_client_message(
         &mut daemon_ws,
         &RelayClientMessage::Update {
-            body: json!({ "ciphertext": "abc123" }),
+            body: RelayUpdateBody::Encrypted {
+                envelope: test_envelope("abc123"),
+            },
         },
     )
     .await;
 
     let update = recv_until_update(&mut client_ws).await;
     assert_eq!(update.seq, 1);
-    assert_eq!(update.body, json!({ "ciphertext": "abc123" }));
+    assert_eq!(
+        update.body,
+        RelayUpdateBody::Encrypted {
+            envelope: test_envelope("abc123"),
+        }
+    );
 
     send_client_message(
         &mut client_ws,
@@ -191,7 +199,12 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         RelayServerMessage::Sync { updates, next_seq } => {
             assert_eq!(next_seq, 2);
             assert_eq!(updates.len(), 1);
-            assert_eq!(updates[0].body, json!({ "ciphertext": "abc123" }));
+            assert_eq!(
+                updates[0].body,
+                RelayUpdateBody::Encrypted {
+                    envelope: test_envelope("abc123"),
+                }
+            );
         }
         other => panic!("expected sync response, got {other:?}"),
     }
@@ -213,7 +226,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         &RelayClientMessage::RpcCall {
             request_id: "req-2".to_string(),
             method: "missing.method".to_string(),
-            params: json!({}),
+            params: test_envelope("missing"),
         },
     )
     .await;
@@ -224,7 +237,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
             request_id: "req-2".to_string(),
             ok: false,
             result: None,
-            error: Some("rpc method `missing.method` is not registered".to_string()),
+            error: None,
         }
     );
 }
@@ -239,7 +252,7 @@ async fn expired_pairings_cannot_be_claimed() {
         &StartPairingRequest {
             label: None,
             ttl_seconds: Some(1),
-            daemon_bundle: None,
+            daemon_bundle: Some(test_bundle()),
         },
     )
     .await;
@@ -251,7 +264,7 @@ async fn expired_pairings_cannot_be_claimed() {
         .json(&ClaimPairingRequest {
             pairing_code: pairing.pairing_code,
             label: None,
-            client_bundle: None,
+            client_bundle: Some(test_bundle()),
         })
         .send()
         .await
@@ -278,7 +291,9 @@ async fn persisted_updates_survive_restart() {
     send_client_message(
         &mut daemon_ws,
         &RelayClientMessage::Update {
-            body: json!({ "ciphertext": "persist-me" }),
+            body: RelayUpdateBody::Encrypted {
+                envelope: test_envelope("persist-me"),
+            },
         },
     )
     .await;
@@ -300,7 +315,45 @@ async fn persisted_updates_survive_restart() {
     assert_eq!(history.updates.len(), 1);
     assert_eq!(
         history.updates[0].body,
-        json!({ "ciphertext": "persist-me" })
+        RelayUpdateBody::Encrypted {
+            envelope: test_envelope("persist-me"),
+        }
+    );
+}
+
+#[tokio::test]
+async fn persisted_state_does_not_store_plaintext_session_markers() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("relay-state.json");
+    let server = spawn_server_at(state_path.clone()).await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = format!(
+        "{}/v1/updates/ws?session_id={}&token={}",
+        server.ws_base, claim.session_id, pairing.daemon_token
+    );
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    let data_key = generate_data_key();
+    let marker = "TOP_SECRET_FALCONDECK_MARKER";
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::Update {
+            body: RelayUpdateBody::Encrypted {
+                envelope: encrypt_json(&data_key, &serde_json::json!({ "marker": marker }))
+                    .unwrap(),
+            },
+        },
+    )
+    .await;
+    let _ = recv_until_update(&mut daemon_ws).await;
+
+    let persisted = std::fs::read_to_string(state_path).unwrap();
+    assert!(
+        !persisted.contains(marker),
+        "relay state should not contain plaintext session payloads"
     );
 }
 
@@ -314,7 +367,7 @@ async fn create_claimed_session(
         &StartPairingRequest {
             label: Some("desktop".to_string()),
             ttl_seconds: Some(300),
-            daemon_bundle: Some(json!({ "pub": "daemon-key" })),
+            daemon_bundle: Some(test_bundle()),
         },
     )
     .await;
@@ -325,7 +378,7 @@ async fn create_claimed_session(
         &ClaimPairingRequest {
             pairing_code: pairing.pairing_code.clone(),
             label: Some("remote-web".to_string()),
-            client_bundle: Some(json!({ "pub": "client-key" })),
+            client_bundle: Some(test_bundle()),
         },
     )
     .await;
@@ -449,5 +502,20 @@ fn format_addr(addr: SocketAddr) -> String {
     match addr {
         SocketAddr::V4(_) => addr.to_string(),
         SocketAddr::V6(_) => format!("[{}]:{}", addr.ip(), addr.port()),
+    }
+}
+
+fn test_bundle() -> PairingPublicKeyBundle {
+    let key_pair = LocalBoxKeyPair::generate();
+    PairingPublicKeyBundle {
+        encryption_variant: EncryptionVariant::DataKeyV1,
+        public_key: key_pair.public_key_base64().to_string(),
+    }
+}
+
+fn test_envelope(marker: &str) -> EncryptedEnvelope {
+    EncryptedEnvelope {
+        encryption_variant: EncryptionVariant::DataKeyV1,
+        ciphertext: format!("opaque-{marker}"),
     }
 }

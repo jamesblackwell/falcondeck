@@ -11,8 +11,8 @@ use futures_util::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ApprovalResponseRequest, ConnectWorkspaceRequest, SendTurnRequest, StartReviewRequest,
-    StartRemotePairingRequest, StartThreadRequest, UnifiedEvent,
+    ApprovalResponseRequest, ConnectWorkspaceRequest, SendTurnRequest, StartRemotePairingRequest,
+    StartReviewRequest, StartThreadRequest, UnifiedEvent,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -67,7 +67,9 @@ async fn snapshot(State(state): State<AppState>) -> Json<falcondeck_core::Daemon
     Json(state.snapshot().await)
 }
 
-async fn remote_status(State(state): State<AppState>) -> Json<falcondeck_core::RemoteStatusResponse> {
+async fn remote_status(
+    State(state): State<AppState>,
+) -> Json<falcondeck_core::RemoteStatusResponse> {
     Json(state.remote_status().await)
 }
 

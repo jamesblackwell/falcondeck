@@ -2,15 +2,22 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { LoaderCircle, Smartphone } from 'lucide-react'
 
 import {
+  bootstrapSessionCrypto,
   buildProjectGroups,
+  decryptJson,
+  encryptJson,
   type ConversationItem,
   type DaemonSnapshot,
+  type EncryptedEnvelope,
   type EventEnvelope,
   type ImageInput,
+  generateBoxKeyPair,
   projectLabel,
+  publicKeyToBase64,
   type RelayClientMessage,
   type RelayServerMessage,
   type RelayUpdate,
+  type SessionCryptoState,
   type ThreadHandle,
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput } from '@falcondeck/chat-ui'
@@ -26,17 +33,25 @@ import {
   ScrollArea,
 } from '@falcondeck/ui'
 
-function parseDaemonEvent(update: RelayUpdate): EventEnvelope | null {
+function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
-    typeof update.body === 'object' &&
-    update.body !== null &&
-    'kind' in update.body &&
-    'event' in update.body &&
-    (update.body as { kind?: string }).kind === 'daemon-event'
+    typeof payload === 'object' &&
+    payload !== null &&
+    'kind' in payload &&
+    'event' in payload &&
+    (payload as { kind?: string }).kind === 'daemon-event'
   ) {
-    return (update.body as { event: EventEnvelope }).event
+    return (payload as { event: EventEnvelope }).event
   }
   return null
+}
+
+function encryptedRpcErrorMessage(payload: unknown) {
+  if (typeof payload === 'object' && payload !== null && 'message' in payload) {
+    const message = (payload as { message?: unknown }).message
+    if (typeof message === 'string') return message
+  }
+  return 'Remote action failed'
 }
 
 function applySnapshotEvent(snapshot: DaemonSnapshot | null, event: EventEnvelope) {
@@ -128,6 +143,9 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const requestCounter = useRef(1)
   const socketRef = useRef<WebSocket | null>(null)
+  const sessionCryptoRef = useRef<SessionCryptoState | null>(null)
+  const clientKeyPairRef = useRef<ReturnType<typeof generateBoxKeyPair> | null>(null)
+  const pendingEncryptedUpdatesRef = useRef<RelayUpdate[]>([])
   const pendingRpc = useRef(
     new Map<
       string,
@@ -170,41 +188,38 @@ export default function App() {
     const socket = new WebSocket(
       `${relayWsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(clientToken)}`,
     )
+    let isCurrent = true
     socketRef.current = socket
+    sessionCryptoRef.current = null
+    pendingEncryptedUpdatesRef.current = []
     setConnectionStatus('connecting')
     setError(null)
 
     socket.onopen = () => {
+      if (!isCurrent) return
       setConnectionStatus('connected')
       sendRelayMessage(socket, { type: 'sync', after_seq: 0 })
     }
 
     socket.onmessage = (message) => {
+      if (!isCurrent) return
       const payload = JSON.parse(message.data) as RelayServerMessage
       switch (payload.type) {
         case 'ready':
           setConnectionStatus(`connected as ${payload.role}`)
           break
         case 'sync':
-          payload.updates.forEach(applyUpdate)
+          void processRelayUpdates(payload.updates)
           break
         case 'update':
-          applyUpdate(payload.update)
+          void processRelayUpdate(payload.update)
           break
         case 'rpc-result':
-          if (payload.request_id) {
-            const pending = pendingRpc.current.get(payload.request_id)
-            if (pending) {
-              pendingRpc.current.delete(payload.request_id)
-              window.clearTimeout(pending.timeout)
-              if (payload.ok) pending.resolve(payload.result)
-              else pending.reject(new Error(payload.error ?? 'Remote action failed'))
-              return
-            }
+          if (payload.request_id && pendingRpc.current.has(payload.request_id)) {
+            void resolvePendingRpc(payload.request_id, payload.ok, payload.result ?? null, payload.error ?? null)
+            return
           }
-          if (!payload.ok) {
-            setError(payload.error ?? 'Remote action failed')
-          }
+          if (!payload.ok) setError('Remote action failed')
           break
         case 'error':
           setError(payload.message)
@@ -213,20 +228,95 @@ export default function App() {
     }
 
     socket.onclose = () => {
+      if (!isCurrent) return
       setConnectionStatus('disconnected')
       for (const [requestId, pending] of pendingRpc.current.entries()) {
         window.clearTimeout(pending.timeout)
         pending.reject(new Error('Relay connection closed'))
         pendingRpc.current.delete(requestId)
       }
+      sessionCryptoRef.current = null
+      pendingEncryptedUpdatesRef.current = []
     }
     return () => {
+      isCurrent = false
       socket.close()
     }
   }, [clientToken, relayWsUrl, sessionId])
 
-  function applyUpdate(update: RelayUpdate) {
-    const event = parseDaemonEvent(update)
+  async function resolvePendingRpc(
+    requestId: string,
+    ok: boolean,
+    result: EncryptedEnvelope | null,
+    errorEnvelope: EncryptedEnvelope | null,
+  ) {
+    const pending = pendingRpc.current.get(requestId)
+    if (!pending) return
+    pendingRpc.current.delete(requestId)
+    window.clearTimeout(pending.timeout)
+
+    try {
+      const sessionCrypto = sessionCryptoRef.current
+      if (!sessionCrypto) throw new Error('Encrypted relay session is not ready')
+      if (ok) {
+        if (!result) {
+          pending.resolve(null)
+          return
+        }
+        pending.resolve(await decryptJson(sessionCrypto.dataKey, result))
+        return
+      }
+      if (!errorEnvelope) {
+        pending.reject(new Error('Remote action failed'))
+        return
+      }
+      const decryptedError = await decryptJson<unknown>(sessionCrypto.dataKey, errorEnvelope)
+      pending.reject(new Error(encryptedRpcErrorMessage(decryptedError)))
+    } catch (rpcError) {
+      pending.reject(rpcError instanceof Error ? rpcError : new Error('Remote action failed'))
+    }
+  }
+
+  async function processRelayUpdates(updates: RelayUpdate[]) {
+    for (const update of updates) {
+      await processRelayUpdate(update)
+    }
+  }
+
+  async function processRelayUpdate(update: RelayUpdate) {
+    if (update.body.t === 'session-bootstrap') {
+      const keyPair = clientKeyPairRef.current
+      if (!keyPair) {
+        setError('Missing local pairing key material')
+        return
+      }
+      try {
+        sessionCryptoRef.current = bootstrapSessionCrypto(keyPair, update.body.material)
+        setConnectionStatus('connected as client (encrypted)')
+        const pendingUpdates = pendingEncryptedUpdatesRef.current
+        pendingEncryptedUpdatesRef.current = []
+        await processRelayUpdates(pendingUpdates)
+      } catch (cryptoError) {
+        setError(cryptoError instanceof Error ? cryptoError.message : 'Failed to establish encrypted relay session')
+      }
+      return
+    }
+
+    const sessionCrypto = sessionCryptoRef.current
+    if (!sessionCrypto) {
+      pendingEncryptedUpdatesRef.current.push(update)
+      return
+    }
+
+    let decryptedPayload: unknown
+    try {
+      decryptedPayload = await decryptJson(sessionCrypto.dataKey, update.body.envelope)
+    } catch (cryptoError) {
+      setError(cryptoError instanceof Error ? cryptoError.message : 'Failed to decrypt relay update')
+      return
+    }
+
+    const event = parseDaemonEvent(decryptedPayload)
     if (!event) return
 
     setSnapshot((current) => {
@@ -261,16 +351,23 @@ export default function App() {
   }
 
   async function handleClaimPairing() {
+    const keyPair = generateBoxKeyPair()
+    clientKeyPairRef.current = keyPair
     const response = await fetch(`${relayUrl.replace(/\/$/, '')}/v1/pairings/claim`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         pairing_code: pairingCode.trim(),
         label: 'FalconDeck Remote Web',
+        client_bundle: {
+          encryption_variant: 'data_key_v1',
+          public_key: publicKeyToBase64(keyPair),
+        },
       }),
     })
 
     if (!response.ok) {
+      clientKeyPairRef.current = null
       const payload = (await response.json().catch(() => null)) as { error?: string } | null
       setError(payload?.error ?? `Failed with status ${response.status}`)
       return
@@ -279,7 +376,7 @@ export default function App() {
     const claim = (await response.json()) as { session_id: string; client_token: string }
     setSessionId(claim.session_id)
     setClientToken(claim.client_token)
-    setConnectionStatus('claimed')
+    setConnectionStatus('claimed, awaiting encrypted session')
     setError(null)
   }
 
@@ -288,13 +385,18 @@ export default function App() {
     setAttachments((current) => [...current, ...next])
   }
 
-  function callRpc<T = unknown>(method: string, rpcParams: Record<string, unknown>) {
+  async function callRpc<T = unknown>(method: string, rpcParams: Record<string, unknown>) {
     const socket = socketRef.current
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-      return Promise.reject(new Error('Remote connection is not ready'))
+      throw new Error('Remote connection is not ready')
+    }
+    const sessionCrypto = sessionCryptoRef.current
+    if (!sessionCrypto) {
+      throw new Error('Encrypted relay session is not ready')
     }
 
     const requestId = `remote-${requestCounter.current++}`
+    const encryptedParams = await encryptJson(sessionCrypto.dataKey, rpcParams)
     return new Promise<T>((resolve, reject) => {
       const timeout = window.setTimeout(() => {
         pendingRpc.current.delete(requestId)
@@ -309,7 +411,7 @@ export default function App() {
         type: 'rpc-call',
         request_id: requestId,
         method,
-        params: rpcParams,
+        params: encryptedParams,
       })
     })
   }
@@ -410,9 +512,13 @@ export default function App() {
                 <Smartphone className="h-4 w-4" />
                 Connect Remote
               </Button>
+              <CardDescription className="text-emerald-300/80">End-to-end encrypted relay session</CardDescription>
             </div>
           ) : (
-            <CardDescription>{connectionStatus}</CardDescription>
+            <div className="space-y-1">
+              <CardDescription>{connectionStatus}</CardDescription>
+              <CardDescription className="text-emerald-300/80">End-to-end encrypted relay session</CardDescription>
+            </div>
           )}
           {error ? <CardDescription className="text-rose-300">{error}</CardDescription> : null}
         </CardHeader>

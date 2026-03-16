@@ -10,8 +10,8 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    AccountStatus, AccountSummary, CollaborationModeSummary, ModelSummary,
-    ReasoningEffortSummary, ThreadCodexParams, ThreadPlan, ThreadStatus, ThreadSummary,
+    AccountStatus, AccountSummary, CollaborationModeSummary, ModelSummary, ReasoningEffortSummary,
+    ThreadCodexParams, ThreadPlan, ThreadStatus, ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -418,10 +418,7 @@ fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
                 id: id.clone(),
                 label: extract_string(entry, &["label", "name"]).unwrap_or(id),
                 model_id: extract_string(entry, &["model", "modelId", "model_id"]),
-                reasoning_effort: extract_string(
-                    entry,
-                    &["reasoningEffort", "reasoning_effort"],
-                ),
+                reasoning_effort: extract_string(entry, &["reasoningEffort", "reasoning_effort"]),
             })
         })
         .collect()

@@ -1,3 +1,5 @@
+pub mod crypto;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -50,10 +52,7 @@ pub struct ImageInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnInputItem {
-    Text {
-        id: Option<String>,
-        text: String,
-    },
+    Text { id: Option<String>, text: String },
     Image(ImageInput),
 }
 
@@ -370,11 +369,51 @@ pub struct RelayHealthResponse {
     pub active_sessions: usize,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EncryptionVariant {
+    DataKeyV1,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingPublicKeyBundle {
+    pub encryption_variant: EncryptionVariant,
+    pub public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WrappedDataKey {
+    pub encryption_variant: EncryptionVariant,
+    pub wrapped_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionKeyMaterial {
+    pub encryption_variant: EncryptionVariant,
+    pub daemon_public_key: String,
+    pub client_public_key: String,
+    pub client_wrapped_data_key: WrappedDataKey,
+    pub daemon_wrapped_data_key: Option<WrappedDataKey>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EncryptedEnvelope {
+    pub encryption_variant: EncryptionVariant,
+    pub ciphertext: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "t", rename_all = "kebab-case")]
+pub enum RelayUpdateBody {
+    SessionBootstrap { material: SessionKeyMaterial },
+    Encrypted { envelope: EncryptedEnvelope },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StartPairingRequest {
     pub label: Option<String>,
     pub ttl_seconds: Option<u64>,
-    pub daemon_bundle: Option<Value>,
+    pub daemon_bundle: Option<PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -389,14 +428,14 @@ pub struct StartPairingResponse {
 pub struct ClaimPairingRequest {
     pub pairing_code: String,
     pub label: Option<String>,
-    pub client_bundle: Option<Value>,
+    pub client_bundle: Option<PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimPairingResponse {
     pub session_id: String,
     pub client_token: String,
-    pub daemon_bundle: Option<Value>,
+    pub daemon_bundle: Option<PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -406,8 +445,8 @@ pub struct PairingStatusResponse {
     pub status: PairingStatus,
     pub session_id: Option<String>,
     pub expires_at: DateTime<Utc>,
-    pub daemon_bundle: Option<Value>,
-    pub client_bundle: Option<Value>,
+    pub daemon_bundle: Option<PairingPublicKeyBundle>,
+    pub client_bundle: Option<PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -427,7 +466,7 @@ pub struct RelayUpdatesQuery {
 pub struct RelayUpdate {
     pub id: String,
     pub seq: u64,
-    pub body: Value,
+    pub body: RelayUpdateBody,
     pub created_at: DateTime<Utc>,
 }
 
@@ -484,7 +523,7 @@ pub enum RelayClientMessage {
         after_seq: Option<u64>,
     },
     Update {
-        body: Value,
+        body: RelayUpdateBody,
     },
     Ephemeral {
         body: Value,
@@ -498,13 +537,13 @@ pub enum RelayClientMessage {
     RpcCall {
         request_id: String,
         method: String,
-        params: Value,
+        params: EncryptedEnvelope,
     },
     RpcResult {
         request_id: String,
         ok: bool,
-        result: Option<Value>,
-        error: Option<String>,
+        result: Option<EncryptedEnvelope>,
+        error: Option<EncryptedEnvelope>,
     },
 }
 
@@ -536,13 +575,13 @@ pub enum RelayServerMessage {
     RpcRequest {
         request_id: String,
         method: String,
-        params: Value,
+        params: EncryptedEnvelope,
     },
     RpcResult {
         request_id: String,
         ok: bool,
-        result: Option<Value>,
-        error: Option<String>,
+        result: Option<EncryptedEnvelope>,
+        error: Option<EncryptedEnvelope>,
     },
     Error {
         message: String,

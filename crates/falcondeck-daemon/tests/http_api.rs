@@ -2,8 +2,9 @@ use std::path::PathBuf;
 
 use chrono::Duration;
 use falcondeck_core::{
-    ClaimPairingRequest, ClaimPairingResponse, DaemonSnapshot, HealthResponse, RemoteStatusResponse,
-    StartRemotePairingRequest, WorkspaceStatus,
+    ClaimPairingRequest, ClaimPairingResponse, DaemonSnapshot, EncryptionVariant, HealthResponse,
+    PairingPublicKeyBundle, RemoteStatusResponse, StartRemotePairingRequest, WorkspaceStatus,
+    crypto::LocalBoxKeyPair,
 };
 use falcondeck_daemon::{DaemonConfig, spawn_embedded};
 use falcondeck_relay::{AppState as RelayState, router as relay_router};
@@ -146,7 +147,7 @@ async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
         .json(&ClaimPairingRequest {
             pairing_code: pairing.pairing_code.clone(),
             label: Some("remote-web-test".to_string()),
-            client_bundle: None,
+            client_bundle: Some(test_bundle()),
         })
         .send()
         .await
@@ -197,17 +198,27 @@ async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
         .unwrap();
 
     assert!(
-        updates.updates.iter().any(|update| {
-            update
-                .body
-                .get("event")
-                .and_then(|event| event.get("event"))
-                .and_then(|event| event.get("type"))
-                .and_then(serde_json::Value::as_str)
-                == Some("snapshot")
-        }),
-        "relay updates should include a forwarded daemon snapshot"
+        updates.updates.iter().any(|update| matches!(
+            update.body,
+            falcondeck_core::RelayUpdateBody::SessionBootstrap { .. }
+        )),
+        "relay updates should include encrypted session bootstrap material"
+    );
+    assert!(
+        updates.updates.iter().any(|update| matches!(
+            update.body,
+            falcondeck_core::RelayUpdateBody::Encrypted { .. }
+        )),
+        "relay updates should include encrypted daemon events"
     );
 
     daemon.shutdown().await.unwrap();
+}
+
+fn test_bundle() -> PairingPublicKeyBundle {
+    let key_pair = LocalBoxKeyPair::generate();
+    PairingPublicKeyBundle {
+        encryption_variant: EncryptionVariant::DataKeyV1,
+        public_key: key_pair.public_key_base64().to_string(),
+    }
 }

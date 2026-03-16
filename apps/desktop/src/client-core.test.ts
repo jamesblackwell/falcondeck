@@ -1,12 +1,19 @@
 import { describe, expect, it } from 'vitest'
+import nacl from 'tweetnacl'
 
 import {
   applyEventToThreadDetail,
+  bootstrapSessionCrypto,
   buildProjectGroups,
+  decryptJson,
+  encryptJson,
+  generateBoxKeyPair,
   projectLabel,
+  publicKeyToBase64,
   upsertConversationItem,
   type ConversationItem,
   type EventEnvelope,
+  type SessionKeyMaterial,
   type ThreadDetail,
   type ThreadSummary,
   type WorkspaceSummary,
@@ -141,5 +148,74 @@ describe('client-core conversation helpers', () => {
       thread_id: 'thread-2',
     }
     expect(applyEventToThreadDetail(detail, otherThreadEvent)).toBe(detail)
+  })
+})
+
+describe('client-core relay crypto helpers', () => {
+  it('encrypts and decrypts JSON payloads with the shared session key', async () => {
+    const dataKey = crypto.getRandomValues(new Uint8Array(32))
+    const envelope = await encryptJson(dataKey, { hello: 'world' })
+    await expect(decryptJson<{ hello: string }>(dataKey, envelope)).resolves.toEqual({ hello: 'world' })
+  })
+
+  it('unwraps bootstrap material into usable session crypto state', async () => {
+    const daemonKeyPair = generateBoxKeyPair()
+    const clientKeyPair = generateBoxKeyPair()
+    const dataKey = crypto.getRandomValues(new Uint8Array(32))
+    const nonce = crypto.getRandomValues(new Uint8Array(24))
+    const ciphertext = (await import('tweetnacl')).default.box(
+      dataKey,
+      nonce,
+      clientKeyPair.publicKey,
+      daemonKeyPair.secretKey,
+    )
+
+    const material: SessionKeyMaterial = {
+      encryption_variant: 'data_key_v1',
+      daemon_public_key: publicKeyToBase64(daemonKeyPair),
+      client_public_key: publicKeyToBase64(clientKeyPair),
+      client_wrapped_data_key: {
+        encryption_variant: 'data_key_v1',
+        wrapped_key: btoa(
+          String.fromCharCode(0, ...daemonKeyPair.publicKey, ...nonce, ...ciphertext),
+        ),
+      },
+      daemon_wrapped_data_key: null,
+    }
+
+    const sessionCrypto = bootstrapSessionCrypto(clientKeyPair, material)
+    const envelope = await encryptJson(sessionCrypto.dataKey, { secure: true })
+    await expect(decryptJson<{ secure: boolean }>(sessionCrypto.dataKey, envelope)).resolves.toEqual({ secure: true })
+  })
+
+  it('rejects bootstrap material for a different client key', () => {
+    const daemonKeyPair = generateBoxKeyPair()
+    const clientKeyPair = generateBoxKeyPair()
+    const otherClientKeyPair = generateBoxKeyPair()
+    const nonce = crypto.getRandomValues(new Uint8Array(24))
+    const dataKey = crypto.getRandomValues(new Uint8Array(32))
+    const ciphertext = nacl.box(
+      dataKey,
+      nonce,
+      clientKeyPair.publicKey,
+      daemonKeyPair.secretKey,
+    )
+
+    const material: SessionKeyMaterial = {
+      encryption_variant: 'data_key_v1',
+      daemon_public_key: publicKeyToBase64(daemonKeyPair),
+      client_public_key: publicKeyToBase64(otherClientKeyPair),
+      client_wrapped_data_key: {
+        encryption_variant: 'data_key_v1',
+        wrapped_key: btoa(
+          String.fromCharCode(0, ...daemonKeyPair.publicKey, ...nonce, ...ciphertext),
+        ),
+      },
+      daemon_wrapped_data_key: null,
+    }
+
+    expect(() => bootstrapSessionCrypto(clientKeyPair, material)).toThrow(
+      'Encrypted session bootstrap is not addressed to this client',
+    )
   })
 })
