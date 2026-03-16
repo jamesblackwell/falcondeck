@@ -1,0 +1,24 @@
+[package]
+name = "falcondeck-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+axum.workspace = true
+chrono.workspace = true
+falcondeck-core = { path = "../falcondeck-core" }
+futures-util.workspace = true
+reqwest = { version = "0.12.24", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+falcondeck-relay = { path = "../falcondeck-relay" }
+tempfile = "3.23.0"

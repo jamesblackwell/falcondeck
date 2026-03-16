@@ -1,0 +1,203 @@
+use axum::{
+    Json, Router,
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    response::IntoResponse,
+    routing::{get, post},
+};
+use futures_util::StreamExt;
+use tower_http::cors::{Any, CorsLayer};
+
+use falcondeck_core::{
+    ApprovalResponseRequest, ConnectWorkspaceRequest, SendTurnRequest, StartReviewRequest,
+    StartRemotePairingRequest, StartThreadRequest, UnifiedEvent,
+};
+
+use crate::{app::AppState, error::DaemonError};
+
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/api/snapshot", get(snapshot))
+        .route("/api/remote/status", get(remote_status))
+        .route("/api/remote/pairing", post(start_remote_pairing))
+        .route("/api/events", get(events))
+        .route("/api/workspaces/connect", post(connect_workspace))
+        .route(
+            "/api/workspaces/{workspace_id}/collaboration-modes",
+            get(collaboration_modes),
+        )
+        .route("/api/workspaces/{workspace_id}/threads", post(start_thread))
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}",
+            get(thread_detail),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/turns",
+            post(send_turn),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/interrupt",
+            post(interrupt_turn),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/review",
+            post(start_review),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/approvals/{request_id}/respond",
+            post(respond_approval),
+        )
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+        .with_state(state)
+}
+
+async fn health(State(state): State<AppState>) -> Json<falcondeck_core::HealthResponse> {
+    Json(state.health().await)
+}
+
+async fn snapshot(State(state): State<AppState>) -> Json<falcondeck_core::DaemonSnapshot> {
+    Json(state.snapshot().await)
+}
+
+async fn remote_status(State(state): State<AppState>) -> Json<falcondeck_core::RemoteStatusResponse> {
+    Json(state.remote_status().await)
+}
+
+async fn start_remote_pairing(
+    State(state): State<AppState>,
+    Json(request): Json<StartRemotePairingRequest>,
+) -> Result<Json<falcondeck_core::RemoteStatusResponse>, DaemonError> {
+    Ok(Json(state.start_remote_pairing(request).await?))
+}
+
+async fn connect_workspace(
+    State(state): State<AppState>,
+    Json(request): Json<ConnectWorkspaceRequest>,
+) -> Result<Json<falcondeck_core::WorkspaceSummary>, DaemonError> {
+    Ok(Json(state.connect_workspace(request).await?))
+}
+
+async fn collaboration_modes(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<Vec<falcondeck_core::CollaborationModeSummary>>, DaemonError> {
+    Ok(Json(state.collaboration_modes(&workspace_id).await?))
+}
+
+async fn start_thread(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(mut request): Json<StartThreadRequest>,
+) -> Result<Json<falcondeck_core::ThreadHandle>, DaemonError> {
+    request.workspace_id = workspace_id;
+    Ok(Json(state.start_thread(request).await?))
+}
+
+async fn thread_detail(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::ThreadDetail>, DaemonError> {
+    Ok(Json(state.thread_detail(&workspace_id, &thread_id).await?))
+}
+
+async fn send_turn(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(mut request): Json<SendTurnRequest>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    request.workspace_id = workspace_id;
+    request.thread_id = thread_id;
+    Ok(Json(state.send_turn(request).await?))
+}
+
+async fn interrupt_turn(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(state.interrupt_turn(workspace_id, thread_id).await?))
+}
+
+async fn start_review(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(mut request): Json<StartReviewRequest>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    request.workspace_id = workspace_id;
+    request.thread_id = thread_id;
+    Ok(Json(state.start_review(request).await?))
+}
+
+async fn respond_approval(
+    State(state): State<AppState>,
+    Path((workspace_id, request_id)): Path<(String, String)>,
+    Json(request): Json<ApprovalResponseRequest>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .respond_to_approval(workspace_id, request_id, request.decision)
+            .await?,
+    ))
+}
+
+async fn events(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| event_socket(socket, state))
+}
+
+async fn event_socket(mut socket: WebSocket, state: AppState) {
+    let snapshot = state.snapshot().await;
+    let initial_event = falcondeck_core::EventEnvelope {
+        seq: 0,
+        emitted_at: chrono::Utc::now(),
+        workspace_id: None,
+        thread_id: None,
+        event: UnifiedEvent::Snapshot { snapshot },
+    };
+    if socket
+        .send(Message::Text(
+            serde_json::to_string(&initial_event)
+                .unwrap_or_else(|_| "{}".to_string())
+                .into(),
+        ))
+        .await
+        .is_err()
+    {
+        return;
+    }
+
+    let mut receiver = state.subscribe();
+    loop {
+        tokio::select! {
+            received = receiver.recv() => {
+                match received {
+                    Ok(event) => {
+                        if socket
+                            .send(Message::Text(
+                                serde_json::to_string(&event)
+                                    .unwrap_or_else(|_| "{}".to_string())
+                                    .into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            message = socket.next() => {
+                if message.is_none() {
+                    break;
+                }
+            }
+        }
+    }
+}
