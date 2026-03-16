@@ -23,7 +23,7 @@ function bytesToBase64(bytes: Uint8Array) {
   return btoa(binary)
 }
 
-function base64ToBytes(value: string) {
+export function base64ToBytes(value: string) {
   const binary = atob(value)
   const bytes = new Uint8Array(binary.length)
   for (let index = 0; index < binary.length; index += 1) {
@@ -91,6 +91,18 @@ export function generateBoxKeyPair() {
 
 export function publicKeyToBase64(keyPair: BoxKeyPair) {
   return bytesToBase64(keyPair.publicKey)
+}
+
+export function secretKeyToBase64(keyPair: BoxKeyPair) {
+  return bytesToBase64(keyPair.secretKey)
+}
+
+export function restoreBoxKeyPair(secretKeyBase64: string): BoxKeyPair {
+  const secretKey = base64ToBytes(secretKeyBase64)
+  if (secretKey.length !== BOX_PUBLIC_KEY_BYTES) {
+    throw new Error('Stored secret key has invalid length')
+  }
+  return nacl.box.keyPair.fromSecretKey(secretKey)
 }
 
 export async function encryptJson(dataKey: Uint8Array, value: unknown): Promise<EncryptedEnvelope> {

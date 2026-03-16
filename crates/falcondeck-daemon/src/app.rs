@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    env,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -22,6 +23,7 @@ use falcondeck_core::{
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::{
+    fs,
     sync::{broadcast, Mutex},
     task::JoinHandle,
     time::{sleep, Duration},

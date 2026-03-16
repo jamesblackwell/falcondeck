@@ -44,25 +44,30 @@
 :root {
   color-scheme: dark;
 
-  /* === Background Scale (deep black to elevated) === */
-  --fd-bg-0: #030504;
-  --fd-bg-1: #080c0a;
-  --fd-bg-2: #0e1310;
-  --fd-bg-3: #151b17;
-  --fd-bg-4: #1c2420;
+  /* === Background Scale === */
+  /* bg-0: app canvas, deepest layer */
+  /* bg-1: panels, sidebar, rail — the primary "surface" tone */
+  /* bg-2: cards, inputs, composer — clearly lifted from bg-1 */
+  /* bg-3: hover states, interactive surfaces */
+  /* bg-4: active/pressed states */
+  --fd-bg-0: #09090b;
+  --fd-bg-1: #111113;
+  --fd-bg-2: #1a1a1f;
+  --fd-bg-3: #232329;
+  --fd-bg-4: #2c2c34;
 
   /* === Foreground Scale === */
-  --fd-fg-0: #f0f5f1;
-  --fd-fg-1: #c8d3cb;
-  --fd-fg-2: #7d8b82;
-  --fd-fg-3: #4a5550;
-  --fd-fg-4: #313a36;
+  --fd-fg-0: #f4f4f6;
+  --fd-fg-1: #c4c4cc;
+  --fd-fg-2: #8e8e99;
+  --fd-fg-3: #62626d;
+  --fd-fg-4: #42424a;
 
   /* === Border Scale === */
-  --fd-border-0: rgba(255, 255, 255, 0.04);
-  --fd-border-1: rgba(255, 255, 255, 0.08);
-  --fd-border-2: rgba(255, 255, 255, 0.14);
-  --fd-border-3: rgba(255, 255, 255, 0.22);
+  --fd-border-0: rgba(255, 255, 255, 0.06);
+  --fd-border-1: rgba(255, 255, 255, 0.10);
+  --fd-border-2: rgba(255, 255, 255, 0.16);
+  --fd-border-3: rgba(255, 255, 255, 0.24);
 
   /* === Accent (Emerald) === */
   --fd-accent: #34d399;
@@ -153,6 +158,15 @@ body {
   line-height: var(--fd-leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  /* Allow text selection everywhere — feels like a real app, not a locked-down webview */
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* Prevent selection on interactive chrome only */
+button, [role="button"], [data-radix-collection-item] {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* === Scrollbar === */

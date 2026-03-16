@@ -3,7 +3,7 @@ import { cva, type VariantProps } from 'class-variance-authority'
 
 import { cn } from '../lib/utils'
 
-const cardVariants = cva('border backdrop-blur-sm', {
+const cardVariants = cva('border', {
   variants: {
     variant: {
       elevated:

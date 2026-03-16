@@ -53,6 +53,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
       reasoning_effort: null,
       collaboration_mode_id: null,
       approval_policy: null,
+      service_tier: null,
     },
     ...overrides,
   }

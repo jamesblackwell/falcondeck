@@ -1,11 +1,11 @@
 use aes_gcm::{
-    Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
-use rand::{RngCore, rngs::OsRng};
-use serde::{Serialize, de::DeserializeOwned};
+use rand::{rngs::OsRng, RngCore};
+use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
 use crate::{EncryptedEnvelope, EncryptionVariant, WrappedDataKey};
@@ -123,6 +123,24 @@ impl LocalBoxKeyPair {
 
     pub fn secret_key_bytes(&self) -> [u8; DATA_KEY_LEN] {
         self.secret_key.to_bytes()
+    }
+
+    pub fn secret_key_base64(&self) -> String {
+        BASE64.encode(self.secret_key.to_bytes())
+    }
+
+    pub fn from_secret_key_base64(secret_key_base64: &str) -> Result<Self, CryptoError> {
+        let bytes = BASE64
+            .decode(secret_key_base64)
+            .map_err(|_| CryptoError::InvalidBase64)?;
+        let secret_key_bytes = <[u8; DATA_KEY_LEN]>::try_from(bytes.as_slice())
+            .map_err(|_| CryptoError::InvalidKeyMaterial)?;
+        let secret_key = SecretKey::from(secret_key_bytes);
+        let public_key_base64 = BASE64.encode(secret_key.public_key().as_bytes());
+        Ok(Self {
+            secret_key,
+            public_key_base64,
+        })
     }
 }
 
@@ -261,5 +279,14 @@ mod tests {
         };
         let unwrapped = client.unwrap_data_key(&wrapped).unwrap();
         assert_eq!(unwrapped, data_key);
+    }
+
+    #[test]
+    fn local_key_pair_restores_from_secret_key_base64() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let restored =
+            LocalBoxKeyPair::from_secret_key_base64(&key_pair.secret_key_base64()).unwrap();
+        assert_eq!(restored.public_key_base64(), key_pair.public_key_base64());
+        assert_eq!(restored.secret_key_bytes(), key_pair.secret_key_bytes());
     }
 }
