@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Default FalconDeck desktop capabilities",
+  "windows": ["main"],
+  "permissions": ["core:default", "dialog:allow-open"]
+}

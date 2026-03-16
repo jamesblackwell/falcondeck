@@ -1,0 +1,20 @@
+{
+  "name": "@falcondeck/chat-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@falcondeck/client-core": "file:../client-core",
+    "@falcondeck/ui": "file:../ui",
+    "lucide-react": "^0.547.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}

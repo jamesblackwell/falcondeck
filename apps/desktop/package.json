@@ -1,0 +1,61 @@
+{
+  "name": "falcondeck-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "predev": "npm run typecheck",
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@falcondeck/chat-ui": "file:../../packages/chat-ui",
+    "@falcondeck/client-core": "file:../../packages/client-core",
+    "@falcondeck/ui": "file:../../packages/ui",
+    "@tauri-apps/api": "^2.8.0",
+    "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@radix-ui/react-collapsible": "^1.1.12",
+    "@radix-ui/react-scroll-area": "^1.2.10",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.547.0",
+    "qrcode.react": "^4.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
+  },
+  "optionalDependencies": {
+    "@rolldown/binding-darwin-arm64": "1.0.0-rc.9",
+    "@rolldown/binding-darwin-x64": "1.0.0-rc.9",
+    "@rolldown/binding-linux-x64-gnu": "1.0.0-rc.9"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.13",
+    "@eslint/js": "^9.39.4",
+    "@tauri-apps/cli": "^2.8.0",
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^24.12.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.0.4",
+    "eslint": "^9.39.4",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.4.0",
+    "jsdom": "^27.2.0",
+    "tailwindcss": "^4.1.13",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.56.1",
+    "vite": "^7.0.4",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "FalconDeck",
+  "version": "0.1.0",
+  "identifier": "com.falcondeck.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "FalconDeck",
+        "width": 1520,
+        "height": 980,
+        "minWidth": 1120,
+        "minHeight": 760
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@falcondeck/client-core",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "clsx": "^2.1.1"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0"
+  }
+}
