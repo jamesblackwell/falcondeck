@@ -21,6 +21,7 @@ use falcondeck_core::{
     crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
     fs,
@@ -98,8 +99,23 @@ struct RemotePairingState {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct PersistedAppState {
-    workspaces: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_persisted_workspaces")]
+    workspaces: Vec<PersistedWorkspaceState>,
     remote: Option<PersistedRemoteState>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct PersistedWorkspaceState {
+    path: String,
+    current_thread_id: Option<String>,
+    updated_at: Option<chrono::DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+enum PersistedWorkspaceEntry {
+    LegacyPath(String),
+    State(PersistedWorkspaceState),
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -151,12 +167,17 @@ impl AppState {
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
         let persisted = load_persisted_app_state(&self.inner.state_path).await?;
-        for path in persisted.workspaces {
+        for workspace in persisted.workspaces {
             if let Err(error) = self
-                .connect_workspace(ConnectWorkspaceRequest { path: path.clone() })
+                .connect_workspace_internal(
+                    ConnectWorkspaceRequest {
+                        path: workspace.path.clone(),
+                    },
+                    Some(&workspace),
+                )
                 .await
             {
-                tracing::warn!("failed to restore workspace {path}: {error}");
+                tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
             }
         }
 
@@ -220,6 +241,24 @@ impl AppState {
         request: StartRemotePairingRequest,
     ) -> Result<RemoteStatusResponse, DaemonError> {
         let relay_url = normalize_relay_url(&request.relay_url)?;
+        {
+            let remote = self.inner.remote.lock().await;
+            let should_reuse = remote.relay_url.as_deref() == Some(relay_url.as_str())
+                && matches!(
+                    remote.status,
+                    RemoteConnectionStatus::WaitingForClaim
+                        | RemoteConnectionStatus::Connecting
+                        | RemoteConnectionStatus::Connected
+                );
+            if should_reuse {
+                return Ok(RemoteStatusResponse {
+                    status: remote.status.clone(),
+                    relay_url: remote.relay_url.clone(),
+                    pairing: remote.pairing.as_ref().map(|pairing| pairing.to_response()),
+                    last_error: remote.last_error.clone(),
+                });
+            }
+        }
         let client = reqwest::Client::new();
         let local_key_pair = LocalBoxKeyPair::generate();
         let data_key = generate_data_key();
@@ -322,6 +361,14 @@ impl AppState {
         &self,
         request: ConnectWorkspaceRequest,
     ) -> Result<WorkspaceSummary, DaemonError> {
+        self.connect_workspace_internal(request, None).await
+    }
+
+    async fn connect_workspace_internal(
+        &self,
+        request: ConnectWorkspaceRequest,
+        persisted_workspace: Option<&PersistedWorkspaceState>,
+    ) -> Result<WorkspaceSummary, DaemonError> {
         let requested_path = PathBuf::from(request.path.trim());
         if request.path.trim().is_empty() {
             return Err(DaemonError::BadRequest(
@@ -335,12 +382,35 @@ impl AppState {
         let path_string = path.to_string_lossy().to_string();
 
         {
-            let workspaces = self.inner.workspaces.lock().await;
+            let mut workspaces = self.inner.workspaces.lock().await;
             if let Some(existing) = workspaces
                 .values()
                 .find(|workspace| workspace.summary.path == path_string)
             {
-                return Ok(existing.summary.clone());
+                let existing_summary = existing.summary.clone();
+                let existing_id = existing_summary.id.clone();
+                let preferred_thread_id = persisted_workspace
+                    .and_then(|workspace| workspace.current_thread_id.as_deref())
+                    .and_then(|thread_id| {
+                        existing
+                            .threads
+                            .contains_key(thread_id)
+                            .then(|| thread_id.to_string())
+                    })
+                    .or(existing_summary.current_thread_id.clone());
+                if let Some(workspace) = workspaces.get_mut(&existing_id) {
+                    workspace.summary.current_thread_id = preferred_thread_id;
+                    if let Some(updated_at) =
+                        persisted_workspace.and_then(|workspace| workspace.updated_at)
+                    {
+                        workspace.summary.updated_at = updated_at;
+                    }
+                    let summary = workspace.summary.clone();
+                    drop(workspaces);
+                    self.persist_local_state().await?;
+                    return Ok(summary);
+                }
+                return Ok(existing_summary);
             }
         }
 
@@ -361,7 +431,15 @@ impl AppState {
 
         let now = Utc::now();
         threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
-        let current_thread_id = threads.first().map(|thread| thread.summary.id.clone());
+        let current_thread_id = persisted_workspace
+            .and_then(|workspace| workspace.current_thread_id.as_deref())
+            .and_then(|thread_id| {
+                threads
+                    .iter()
+                    .find(|thread| thread.summary.id == thread_id)
+                    .map(|thread| thread.summary.id.clone())
+            })
+            .or_else(|| threads.first().map(|thread| thread.summary.id.clone()));
         let summary = WorkspaceSummary {
             id: workspace_id.clone(),
             path: path_string,
@@ -375,7 +453,9 @@ impl AppState {
             account,
             current_thread_id,
             connected_at: now,
-            updated_at: now,
+            updated_at: persisted_workspace
+                .and_then(|workspace| workspace.updated_at)
+                .unwrap_or(now),
             last_error: None,
         };
 
@@ -849,6 +929,13 @@ impl AppState {
         send_relay_message(
             &mut writer,
             &RelayClientMessage::RpcRegister {
+                method: "thread.detail".to_string(),
+            },
+        )
+        .await?;
+        send_relay_message(
+            &mut writer,
+            &RelayClientMessage::RpcRegister {
                 method: "turn.start".to_string(),
             },
         )
@@ -964,6 +1051,50 @@ impl AppState {
                                 request_id,
                                 ok: true,
                                 result: Some(encrypt_json(data_key, &handle).map_err(|error| {
+                                    format!("failed to encrypt rpc result: {error}")
+                                })?),
+                                error: None,
+                            },
+                        )
+                        .await?;
+                    }
+                    Err(error) => {
+                        send_relay_message(
+                            writer,
+                            &RelayClientMessage::RpcResult {
+                                request_id,
+                                ok: false,
+                                result: None,
+                                error: Some(
+                                    encrypt_json(
+                                        data_key,
+                                        &json!({ "message": error.to_string() }),
+                                    )
+                                    .map_err(
+                                        |encrypt_error| {
+                                            format!("failed to encrypt rpc error: {encrypt_error}")
+                                        },
+                                    )?,
+                                ),
+                            },
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "thread.detail" => {
+                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
+                    .ok_or_else(|| "thread.detail missing workspaceId".to_string())?;
+                let thread_id = extract_string(&params, &["threadId", "thread_id"])
+                    .ok_or_else(|| "thread.detail missing threadId".to_string())?;
+                match self.thread_detail(&workspace_id, &thread_id).await {
+                    Ok(detail) => {
+                        send_relay_message(
+                            writer,
+                            &RelayClientMessage::RpcResult {
+                                request_id,
+                                ok: true,
+                                result: Some(encrypt_json(data_key, &detail).map_err(|error| {
                                     format!("failed to encrypt rpc result: {error}")
                                 })?),
                                 error: None,
@@ -1254,17 +1385,21 @@ impl AppState {
 
     async fn persist_local_state(&self) -> Result<(), DaemonError> {
         let workspaces = self.inner.workspaces.lock().await;
-        let mut workspace_paths = workspaces
+        let mut persisted_workspaces = workspaces
             .values()
-            .map(|workspace| workspace.summary.path.clone())
+            .map(|workspace| PersistedWorkspaceState {
+                path: workspace.summary.path.clone(),
+                current_thread_id: workspace.summary.current_thread_id.clone(),
+                updated_at: Some(workspace.summary.updated_at),
+            })
             .collect::<Vec<_>>();
-        workspace_paths.sort();
-        workspace_paths.dedup();
+        persisted_workspaces.sort_by(|left, right| left.path.cmp(&right.path));
+        persisted_workspaces.dedup_by(|left, right| left.path == right.path);
         drop(workspaces);
 
         let remote = self.inner.remote.lock().await;
         let persisted = PersistedAppState {
-            workspaces: workspace_paths,
+            workspaces: persisted_workspaces,
             remote: persisted_remote_state(&remote),
         };
         drop(remote);
@@ -1915,6 +2050,23 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound(format!("workspace {workspace_id} not found")))
     }
 
+    pub async fn git_status(
+        &self,
+        workspace_id: &str,
+    ) -> Result<falcondeck_core::GitStatusResponse, DaemonError> {
+        let session = self.session_for(workspace_id).await?;
+        crate::git::git_status(session.workspace_path()).await
+    }
+
+    pub async fn git_diff(
+        &self,
+        workspace_id: &str,
+        path: Option<&str>,
+    ) -> Result<falcondeck_core::GitDiffResponse, DaemonError> {
+        let session = self.session_for(workspace_id).await?;
+        crate::git::git_diff(session.workspace_path(), path).await
+    }
+
     async fn upsert_thread<F>(
         &self,
         workspace_id: &str,
@@ -2271,6 +2423,26 @@ async fn load_persisted_app_state(path: &PathBuf) -> Result<PersistedAppState, D
     }
 }
 
+fn deserialize_persisted_workspaces<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PersistedWorkspaceState>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let entries = Vec::<PersistedWorkspaceEntry>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| match entry {
+            PersistedWorkspaceEntry::LegacyPath(path) => PersistedWorkspaceState {
+                path,
+                current_thread_id: None,
+                updated_at: None,
+            },
+            PersistedWorkspaceEntry::State(workspace) => workspace,
+        })
+        .collect())
+}
+
 async fn persist_app_state(path: &PathBuf, state: &PersistedAppState) -> Result<(), DaemonError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
@@ -2465,6 +2637,52 @@ mod tests {
                 &falcondeck_core::AccountStatus::NeedsAuth,
             ),
             WorkspaceStatus::NeedsAuth
+        );
+    }
+
+    #[test]
+    fn persisted_state_reads_legacy_workspace_paths() {
+        let payload = json!({
+            "workspaces": ["/tmp/project-a", "/tmp/project-b"],
+            "remote": null
+        });
+        let persisted: PersistedAppState = serde_json::from_value(payload).unwrap();
+        assert_eq!(
+            persisted.workspaces,
+            vec![
+                super::PersistedWorkspaceState {
+                    path: "/tmp/project-a".to_string(),
+                    current_thread_id: None,
+                    updated_at: None,
+                },
+                super::PersistedWorkspaceState {
+                    path: "/tmp/project-b".to_string(),
+                    current_thread_id: None,
+                    updated_at: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn persisted_state_reads_workspace_thread_selection() {
+        let payload = json!({
+            "workspaces": [
+                {
+                    "path": "/tmp/project-a",
+                    "current_thread_id": "thread-123"
+                }
+            ],
+            "remote": null
+        });
+        let persisted: PersistedAppState = serde_json::from_value(payload).unwrap();
+        assert_eq!(
+            persisted.workspaces,
+            vec![super::PersistedWorkspaceState {
+                path: "/tmp/project-a".to_string(),
+                current_thread_id: Some("thread-123".to_string()),
+                updated_at: None,
+            }]
         );
     }
 

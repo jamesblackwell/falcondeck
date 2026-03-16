@@ -9,9 +9,11 @@ import {
   filesToImageInputs,
   generateBoxKeyPair,
   publicKeyToBase64,
+  reconcileSnapshotSelection,
   restoreBoxKeyPair,
   secretKeyToBase64,
   shouldReusePersistedRemoteSession,
+  upsertConversationItem,
   type ConversationItem,
   type DaemonSnapshot,
   type EncryptedEnvelope,
@@ -22,6 +24,7 @@ import {
   type RelayServerMessage,
   type RelayUpdate,
   type SessionCryptoState,
+  type ThreadDetail,
   type ThreadHandle,
 } from '@falcondeck/client-core'
 import { ApprovalCard, Conversation, PromptInput, ThreadItem, WorkspaceGroup } from '@falcondeck/chat-ui'
@@ -116,6 +119,7 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState('not connected')
   const [snapshot, setSnapshot] = useState<DaemonSnapshot | null>(null)
   const [threadItems, setThreadItems] = useState<Record<string, ConversationItem[]>>({})
+  const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null)
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -127,6 +131,9 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
+  const reconnectTimerRef = useRef<number | null>(null)
+  const reconnectAttemptRef = useRef(0)
+  const [connectionGeneration, setConnectionGeneration] = useState(0)
 
   const requestCounter = useRef(1)
   const socketRef = useRef<WebSocket | null>(null)
@@ -149,6 +156,24 @@ export default function App() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    return () => {
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId)
+    if (nextSelection.workspaceId !== selectedWorkspaceId) {
+      setSelectedWorkspaceId(nextSelection.workspaceId)
+    }
+    if (nextSelection.threadId !== selectedThreadId) {
+      setSelectedThreadId(nextSelection.threadId)
+    }
+  }, [snapshot, selectedThreadId, selectedWorkspaceId])
 
   const relayWsUrl = useMemo(() => {
     const trimmed = relayUrl.trim().replace(/\/$/, '')
@@ -174,14 +199,18 @@ export default function App() {
     [selectedThreadId, snapshot?.approvals],
   )
   const items = useMemo(
-    () => (selectedThreadId ? threadItems[selectedThreadId] ?? [] : []),
-    [selectedThreadId, threadItems],
+    () => threadDetail?.items ?? (selectedThreadId ? threadItems[selectedThreadId] ?? [] : []),
+    [selectedThreadId, threadDetail, threadItems],
   )
 
   // ── WebSocket relay connection ─────────────────────────────────────
 
   useEffect(() => {
     if (!sessionId || !clientToken) return
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
     const socket = new WebSocket(
       `${relayWsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(clientToken)}`,
     )
@@ -194,6 +223,7 @@ export default function App() {
 
     socket.onopen = () => {
       if (!isCurrent) return
+      reconnectAttemptRef.current = 0
       setConnectionStatus('connected')
       sendRelayMessage(socket, { type: 'sync', after_seq: 0 })
     }
@@ -234,10 +264,21 @@ export default function App() {
       }
       sessionCryptoRef.current = null
       pendingEncryptedUpdatesRef.current = []
+      if (sessionId && clientToken) {
+        const delay = Math.min(1000 * 2 ** reconnectAttemptRef.current, 10_000)
+        reconnectAttemptRef.current += 1
+        reconnectTimerRef.current = window.setTimeout(() => {
+          reconnectTimerRef.current = null
+          setConnectionGeneration((value) => value + 1)
+        }, delay)
+      }
     }
 
-    return () => { isCurrent = false; socket.close() }
-  }, [clientToken, relayWsUrl, sessionId])
+    return () => {
+      isCurrent = false
+      socket.close()
+    }
+  }, [clientToken, connectionGeneration, relayWsUrl, sessionId])
 
   async function resolvePendingRpc(
     requestId: string,
@@ -283,6 +324,7 @@ export default function App() {
         clientKeyPairRef.current = null
         setSessionId(null)
         setClientToken(null)
+        setConnectionGeneration((value) => value + 1)
         setError(e instanceof Error ? e.message : 'Failed to establish encrypted relay session')
       }
       return
@@ -303,12 +345,10 @@ export default function App() {
     if (!event) return
 
     setSnapshot((current) => {
-      const next = applySnapshotEvent(current, event) ?? (event.event.type === 'snapshot' ? event.event.snapshot : current)
-      if (next) {
-        setSelectedWorkspaceId((x) => x ?? next.workspaces[0]?.id ?? null)
-        setSelectedThreadId((x) => x ?? next.threads[0]?.id ?? null)
-      }
-      return next
+      return (
+        applySnapshotEvent(current, event) ??
+        (event.event.type === 'snapshot' ? event.event.snapshot : current)
+      )
     })
 
     if (!event.thread_id) return
@@ -316,15 +356,45 @@ export default function App() {
     if (de.type === 'conversation-item-added' || de.type === 'conversation-item-updated') {
       setThreadItems((current) => {
         const bucket = current[event.thread_id!] ?? []
-        const idx = bucket.findIndex((i) => i.id === de.item.id && i.kind === de.item.kind)
-        const next = bucket.slice()
-        if (idx === -1) next.push(de.item)
-        else next[idx] = de.item
-        next.sort((a, b) => a.created_at.localeCompare(b.created_at))
-        return { ...current, [event.thread_id!]: next }
+        return { ...current, [event.thread_id!]: upsertConversationItem(bucket, de.item) }
+      })
+      setThreadDetail((current) => {
+        if (!current || current.thread.id !== event.thread_id) return current
+        return { ...current, items: upsertConversationItem(current.items, de.item) }
       })
     }
   }
+
+  useEffect(() => {
+    if (!selectedWorkspaceId || !selectedThreadId || !isEncrypted) {
+      setThreadDetail(null)
+      return
+    }
+
+    let cancelled = false
+    void callRpc<ThreadDetail>('thread.detail', {
+      workspace_id: selectedWorkspaceId,
+      thread_id: selectedThreadId,
+    })
+      .then((detail) => {
+        if (cancelled) return
+        setThreadDetail(detail)
+        setThreadItems((current) => {
+          const bucket = current[selectedThreadId] ?? []
+          const merged = detail.items.reduce((items, item) => upsertConversationItem(items, item), bucket)
+          return { ...current, [selectedThreadId]: merged }
+        })
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setThreadDetail(null)
+        setError(e instanceof Error ? e.message : 'Failed to load thread detail')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [isEncrypted, selectedThreadId, selectedWorkspaceId])
 
   // ── Actions ────────────────────────────────────────────────────────
 
