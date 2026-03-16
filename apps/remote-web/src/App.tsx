@@ -9,11 +9,15 @@ import {
   filesToImageInputs,
   generateBoxKeyPair,
   publicKeyToBase64,
+  restoreBoxKeyPair,
+  secretKeyToBase64,
+  shouldReusePersistedRemoteSession,
   type ConversationItem,
   type DaemonSnapshot,
   type EncryptedEnvelope,
   type EventEnvelope,
   type ImageInput,
+  type PersistedRemoteSession,
   type RelayClientMessage,
   type RelayServerMessage,
   type RelayUpdate,
@@ -64,14 +68,38 @@ function sendRelayMessage(socket: WebSocket, message: RelayClientMessage) {
   socket.send(JSON.stringify(message))
 }
 
+const STORAGE_KEY = 'falcondeck.remote.session.v1'
+
+function loadPersistedRemoteSession(): PersistedRemoteSession | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as PersistedRemoteSession
+  } catch {
+    return null
+  }
+}
+
+function persistRemoteSession(value: PersistedRemoteSession | null) {
+  if (value) {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
+  } else {
+    window.localStorage.removeItem(STORAGE_KEY)
+  }
+}
+
 export default function App() {
   const params = new URLSearchParams(window.location.search)
+  const persistedSession = shouldReusePersistedRemoteSession(params, loadPersistedRemoteSession())
   const [relayUrl, setRelayUrl] = useState(
-    params.get('relay') ?? import.meta.env.VITE_FALCONDECK_RELAY_URL ?? 'https://connect.falcondeck.com',
+    params.get('relay') ??
+      persistedSession?.relayUrl ??
+      import.meta.env.VITE_FALCONDECK_RELAY_URL ??
+      'https://connect.falcondeck.com',
   )
-  const [pairingCode, setPairingCode] = useState(params.get('code') ?? '')
-  const [sessionId, setSessionId] = useState<string | null>(null)
-  const [clientToken, setClientToken] = useState<string | null>(null)
+  const [pairingCode, setPairingCode] = useState(params.get('code') ?? persistedSession?.pairingCode ?? '')
+  const [sessionId, setSessionId] = useState<string | null>(persistedSession?.sessionId ?? null)
+  const [clientToken, setClientToken] = useState<string | null>(persistedSession?.clientToken ?? null)
   const [connectionStatus, setConnectionStatus] = useState('not connected')
   const [snapshot, setSnapshot] = useState<DaemonSnapshot | null>(null)
   const [threadItems, setThreadItems] = useState<Record<string, ConversationItem[]>>({})
@@ -94,6 +122,16 @@ export default function App() {
   const pendingRpc = useRef(
     new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: number }>(),
   )
+
+  useEffect(() => {
+    if (persistedSession?.clientSecretKey) {
+      try {
+        clientKeyPairRef.current = restoreBoxKeyPair(persistedSession.clientSecretKey)
+      } catch {
+        persistRemoteSession(null)
+      }
+    }
+  }, [])
 
   const relayWsUrl = useMemo(() => {
     const trimmed = relayUrl.trim().replace(/\/$/, '')
@@ -223,6 +261,10 @@ export default function App() {
         pendingEncryptedUpdatesRef.current = []
         await processRelayUpdates(pending)
       } catch (e) {
+        persistRemoteSession(null)
+        clientKeyPairRef.current = null
+        setSessionId(null)
+        setClientToken(null)
         setError(e instanceof Error ? e.message : 'Failed to establish encrypted relay session')
       }
       return
@@ -289,6 +331,13 @@ export default function App() {
     setClientToken(claim.client_token)
     setConnectionStatus('claimed, awaiting encrypted session')
     setError(null)
+    persistRemoteSession({
+      relayUrl: relayUrl.trim(),
+      pairingCode: pairingCode.trim(),
+      sessionId: claim.session_id,
+      clientToken: claim.client_token,
+      clientSecretKey: secretKeyToBase64(keyPair),
+    })
   }
 
   async function callRpc<T = unknown>(method: string, rpcParams: Record<string, unknown>) {

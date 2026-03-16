@@ -4,6 +4,7 @@ mod codex;
 mod error;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::PathBuf;
 
 pub use app::AppState;
 pub use error::DaemonError;
@@ -13,6 +14,7 @@ use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 pub struct DaemonConfig {
     pub bind_addr: SocketAddr,
     pub codex_bin: String,
+    pub state_path: Option<PathBuf>,
 }
 
 impl Default for DaemonConfig {
@@ -23,6 +25,7 @@ impl Default for DaemonConfig {
                 falcondeck_core::DEFAULT_DAEMON_PORT,
             ),
             codex_bin: "codex".to_string(),
+            state_path: None,
         }
     }
 }
@@ -47,7 +50,24 @@ impl EmbeddedDaemonHandle {
 }
 
 pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle, DaemonError> {
-    let state = AppState::new("0.1.0".to_string(), config.codex_bin);
+    let state = AppState::new_with_state_path(
+        "0.1.0".to_string(),
+        config.codex_bin,
+        config.state_path.unwrap_or_else(|| {
+            std::env::var("FALCONDECK_STATE_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    PathBuf::from(
+                        std::env::var("HOME")
+                            .map(|home| format!("{home}/.falcondeck/daemon-state.json"))
+                            .unwrap_or_else(|_| ".falcondeck/daemon-state.json".to_string()),
+                    )
+                })
+        }),
+    );
+    if let Err(error) = state.restore_local_state().await {
+        tracing::warn!("failed to restore daemon local state: {error}");
+    }
     let router = api::router(state);
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;

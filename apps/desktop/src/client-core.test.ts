@@ -10,6 +10,7 @@ import {
   generateBoxKeyPair,
   projectLabel,
   publicKeyToBase64,
+  shouldReusePersistedRemoteSession,
   upsertConversationItem,
   type ConversationItem,
   type EventEnvelope,
@@ -218,5 +219,36 @@ describe('client-core relay crypto helpers', () => {
     expect(() => bootstrapSessionCrypto(clientKeyPair, material)).toThrow(
       'Encrypted session bootstrap is not addressed to this client',
     )
+  })
+})
+
+describe('client-core remote session persistence', () => {
+  it('ignores a saved session when a fresh QR pairing code is opened', () => {
+    const persisted = {
+      relayUrl: 'https://connect.falcondeck.com',
+      pairingCode: 'OLDPAIR123456',
+      sessionId: 'session-old',
+      clientToken: 'client-old',
+      clientSecretKey: 'secret',
+    }
+
+    const params = new URLSearchParams({
+      relay: 'https://connect.falcondeck.com',
+      code: 'NEWPAIR654321',
+    })
+
+    expect(shouldReusePersistedRemoteSession(params, persisted)).toBeNull()
+  })
+
+  it('reuses a saved session when the URL does not override it', () => {
+    const persisted = {
+      relayUrl: 'https://connect.falcondeck.com',
+      pairingCode: 'PAIRCODE1234',
+      sessionId: 'session-1',
+      clientToken: 'client-1',
+      clientSecretKey: 'secret',
+    }
+
+    expect(shouldReusePersistedRemoteSession(new URLSearchParams(), persisted)).toEqual(persisted)
   })
 })

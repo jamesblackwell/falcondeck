@@ -11,8 +11,12 @@ use falcondeck_relay::{AppState as RelayState, router as relay_router};
 use tempfile::TempDir;
 
 fn test_config() -> DaemonConfig {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let _ = temp_dir.keep();
     DaemonConfig {
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        state_path: Some(state_path),
         ..DaemonConfig::default()
     }
 }

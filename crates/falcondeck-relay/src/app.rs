@@ -800,7 +800,9 @@ async fn load_state(path: &Path) -> Result<PersistedState, RelayError> {
         Ok(contents) => match serde_json::from_str(&contents) {
             Ok(state) => Ok(state),
             Err(error) => {
-                warn!("failed to parse persisted relay state directly: {error}; attempting legacy migration");
+                warn!(
+                    "failed to parse persisted relay state directly: {error}; attempting legacy migration"
+                );
                 load_compatible_state(&contents)
             }
         },
@@ -864,14 +866,14 @@ async fn persist_state(path: &Path, state: &PersistedState) -> Result<(), RelayE
 }
 
 fn generate_pairing_code(state: &PersistedState) -> String {
+    const ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     for _ in 0..16 {
-        let candidate = Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(8)
-            .collect::<String>()
-            .to_uppercase();
+        let bytes = *Uuid::new_v4().as_bytes();
+        let candidate = bytes
+            .iter()
+            .take(12)
+            .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
+            .collect::<String>();
         if state
             .pairings
             .values()
@@ -882,11 +884,10 @@ fn generate_pairing_code(state: &PersistedState) -> String {
     }
 
     warn!("pairing code generation retried more than expected");
-    Uuid::new_v4()
-        .simple()
-        .to_string()
-        .chars()
-        .take(12)
+    let bytes = *Uuid::new_v4().as_bytes();
+    bytes
+        .iter()
+        .map(|byte| ALPHABET[usize::from(*byte) % ALPHABET.len()] as char)
+        .take(16)
         .collect::<String>()
-        .to_uppercase()
 }

@@ -3,14 +3,13 @@ use std::{
     env,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use chrono::Utc;
 use falcondeck_core::{
-    crypto::{decrypt_json, encrypt_json, generate_data_key, LocalBoxKeyPair},
     ApprovalDecision, ApprovalRequest, CollaborationModeSummary, CommandResponse,
     ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope,
     EventEnvelope, HealthResponse, PairingPublicKeyBundle, PairingStatusResponse,
@@ -19,14 +18,15 @@ use falcondeck_core::{
     StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
     StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
     TurnInputItem, UnifiedEvent, WorkspaceStatus, WorkspaceSummary,
+    crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{
     fs,
-    sync::{broadcast, Mutex},
+    sync::{Mutex, broadcast},
     task::JoinHandle,
-    time::{sleep, Duration},
+    time::{Duration, sleep},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::debug;
@@ -34,8 +34,8 @@ use uuid::Uuid;
 
 use crate::{
     codex::{
-        extract_string, extract_thread_id, extract_thread_title, parse_account, parse_thread_plan,
-        CodexBootstrap, CodexSession,
+        CodexBootstrap, CodexSession, extract_string, extract_thread_id, extract_thread_title,
+        parse_account, parse_thread_plan,
     },
     error::DaemonError,
 };
@@ -48,6 +48,7 @@ pub struct AppState {
 struct InnerState {
     daemon: DaemonInfo,
     codex_bin: String,
+    state_path: PathBuf,
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
@@ -95,8 +96,30 @@ struct RemotePairingState {
     data_key: [u8; 32],
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+struct PersistedAppState {
+    workspaces: Vec<String>,
+    remote: Option<PersistedRemoteState>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedRemoteState {
+    relay_url: String,
+    daemon_token: String,
+    pairing_id: String,
+    pairing_code: String,
+    session_id: Option<String>,
+    expires_at: chrono::DateTime<Utc>,
+    local_secret_key_base64: String,
+    data_key_base64: String,
+}
+
 impl AppState {
     pub fn new(version: String, codex_bin: String) -> Self {
+        Self::new_with_state_path(version, codex_bin, default_state_path())
+    }
+
+    pub fn new_with_state_path(version: String, codex_bin: String, state_path: PathBuf) -> Self {
         let (broadcaster, _) = broadcast::channel(512);
         Self {
             inner: Arc::new(InnerState {
@@ -105,6 +128,7 @@ impl AppState {
                     started_at: Utc::now(),
                 },
                 codex_bin,
+                state_path,
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
@@ -123,6 +147,29 @@ impl AppState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
         self.inner.broadcaster.subscribe()
+    }
+
+    pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
+        let persisted = load_persisted_app_state(&self.inner.state_path).await?;
+        for path in persisted.workspaces {
+            if let Err(error) = self
+                .connect_workspace(ConnectWorkspaceRequest { path: path.clone() })
+                .await
+            {
+                tracing::warn!("failed to restore workspace {path}: {error}");
+            }
+        }
+
+        if let Some(remote) = persisted.remote {
+            if remote.session_id.is_none() && remote.expires_at <= Utc::now() {
+                tracing::info!("skipping expired persisted remote pairing {}", remote.pairing_id);
+                self.persist_local_state().await?;
+            } else if let Err(error) = self.resume_remote_bridge(remote).await {
+                tracing::warn!("failed to restore remote bridge: {error}");
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn health(&self) -> HealthResponse {
@@ -206,6 +253,8 @@ impl AppState {
                 last_error: remote.last_error.clone(),
             }
         };
+
+        self.persist_local_state().await?;
 
         Ok(response)
     }
@@ -325,6 +374,8 @@ impl AppState {
                 snapshot: self.snapshot().await,
             },
         );
+
+        self.persist_local_state().await?;
 
         Ok(summary)
     }
@@ -632,8 +683,23 @@ impl AppState {
 
         if let Err(error) = result {
             let mut remote = self.inner.remote.lock().await;
-            remote.status = RemoteConnectionStatus::Error;
+            let should_clear_pairing = remote
+                .pairing
+                .as_ref()
+                .is_some_and(|pairing| pairing.session_id.is_none() && pairing.expires_at <= Utc::now());
+            remote.status = if should_clear_pairing {
+                RemoteConnectionStatus::Inactive
+            } else {
+                RemoteConnectionStatus::Error
+            };
             remote.last_error = Some(error);
+            if should_clear_pairing {
+                remote.relay_url = None;
+                remote.daemon_token = None;
+                remote.pairing = None;
+            }
+            drop(remote);
+            let _ = self.persist_local_state().await;
         }
     }
 
@@ -687,6 +753,10 @@ impl AppState {
             remote.last_error = None;
         }
 
+        self.persist_local_state()
+            .await
+            .map_err(|error| format!("failed to persist remote pairing state: {error}"))?;
+
         self.connect_remote_session(relay_url, daemon_token, session_id, pairing, client_bundle)
             .await
     }
@@ -728,6 +798,10 @@ impl AppState {
             remote.status = RemoteConnectionStatus::Connected;
             remote.last_error = None;
         }
+
+        self.persist_local_state()
+            .await
+            .map_err(|error| format!("failed to persist connected remote state: {error}"))?;
 
         send_relay_message(
             &mut writer,
@@ -1100,6 +1174,73 @@ impl AppState {
         }
 
         Ok(())
+    }
+
+    async fn resume_remote_bridge(&self, remote: PersistedRemoteState) -> Result<(), DaemonError> {
+        let local_key_pair = LocalBoxKeyPair::from_secret_key_base64(
+            &remote.local_secret_key_base64,
+        )
+        .map_err(|error| {
+            DaemonError::BadRequest(format!("invalid persisted local key pair: {error}"))
+        })?;
+        let data_key = decode_fixed_base64::<32>(&remote.data_key_base64).map_err(|error| {
+            DaemonError::BadRequest(format!("invalid persisted relay data key: {error}"))
+        })?;
+        let pairing = RemotePairingState {
+            pairing_id: remote.pairing_id,
+            pairing_code: remote.pairing_code,
+            session_id: remote.session_id,
+            expires_at: remote.expires_at,
+            local_key_pair,
+            data_key,
+        };
+        let relay_url = remote.relay_url;
+        let daemon_token = remote.daemon_token;
+
+        {
+            let mut current = self.inner.remote.lock().await;
+            if let Some(task) = current.task.take() {
+                task.abort();
+            }
+            current.status = if pairing.session_id.is_some() {
+                RemoteConnectionStatus::Connecting
+            } else {
+                RemoteConnectionStatus::WaitingForClaim
+            };
+            current.relay_url = Some(relay_url.clone());
+            current.daemon_token = Some(daemon_token.clone());
+            current.pairing = Some(pairing.clone());
+            current.last_error = None;
+
+            let app = self.clone();
+            let task = tokio::spawn(async move {
+                app.run_remote_bridge(relay_url, daemon_token, pairing)
+                    .await;
+            });
+            current.task = Some(task);
+        }
+
+        Ok(())
+    }
+
+    async fn persist_local_state(&self) -> Result<(), DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let mut workspace_paths = workspaces
+            .values()
+            .map(|workspace| workspace.summary.path.clone())
+            .collect::<Vec<_>>();
+        workspace_paths.sort();
+        workspace_paths.dedup();
+        drop(workspaces);
+
+        let remote = self.inner.remote.lock().await;
+        let persisted = PersistedAppState {
+            workspaces: workspace_paths,
+            remote: persisted_remote_state(&remote),
+        };
+        drop(remote);
+
+        persist_app_state(&self.inner.state_path, &persisted).await
     }
 
     pub async fn ingest_notification(
@@ -2063,6 +2204,128 @@ fn should_surface_tool_item(kind: &str) -> bool {
     )
 }
 
+fn default_state_path() -> PathBuf {
+    let home = env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    home.join(".falcondeck").join("daemon-state.json")
+}
+
+async fn load_persisted_app_state(path: &PathBuf) -> Result<PersistedAppState, DaemonError> {
+    match fs::read_to_string(path).await {
+        Ok(contents) => serde_json::from_str(&contents).map_err(DaemonError::from),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(PersistedAppState::default())
+        }
+        Err(error) => Err(DaemonError::Io(error)),
+    }
+}
+
+async fn persist_app_state(path: &PathBuf, state: &PersistedAppState) -> Result<(), DaemonError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let payload = serde_json::to_vec_pretty(state)?;
+    fs::write(&tmp_path, payload).await?;
+    fs::rename(&tmp_path, path).await?;
+    Ok(())
+}
+
+fn persisted_remote_state(remote: &RemoteBridgeState) -> Option<PersistedRemoteState> {
+    let relay_url = remote.relay_url.clone()?;
+    let daemon_token = remote.daemon_token.clone()?;
+    let pairing = remote.pairing.as_ref()?;
+    Some(PersistedRemoteState {
+        relay_url,
+        daemon_token,
+        pairing_id: pairing.pairing_id.clone(),
+        pairing_code: pairing.pairing_code.clone(),
+        session_id: pairing.session_id.clone(),
+        expires_at: pairing.expires_at,
+        local_secret_key_base64: pairing.local_key_pair.secret_key_base64(),
+        data_key_base64: encode_base64(&pairing.data_key),
+    })
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        let b0 = bytes[index];
+        let b1 = if index + 1 < bytes.len() {
+            bytes[index + 1]
+        } else {
+            0
+        };
+        let b2 = if index + 2 < bytes.len() {
+            bytes[index + 2]
+        } else {
+            0
+        };
+
+        output.push(TABLE[(b0 >> 2) as usize] as char);
+        output.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if index + 1 < bytes.len() {
+            output.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if index + 2 < bytes.len() {
+            output.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        index += 3;
+    }
+    output
+}
+
+fn decode_fixed_base64<const N: usize>(value: &str) -> Result<[u8; N], String> {
+    fn sextet(byte: u8) -> Option<u8> {
+        match byte {
+            b'A'..=b'Z' => Some(byte - b'A'),
+            b'a'..=b'z' => Some(byte - b'a' + 26),
+            b'0'..=b'9' => Some(byte - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+
+    let bytes = value.as_bytes();
+    if bytes.len() % 4 != 0 {
+        return Err("invalid base64 length".to_string());
+    }
+
+    let mut decoded = Vec::with_capacity((bytes.len() / 4) * 3);
+    for chunk in bytes.chunks(4) {
+        let c0 = sextet(chunk[0]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let c1 = sextet(chunk[1]).ok_or_else(|| "invalid base64 character".to_string())?;
+        let c2 = if chunk[2] == b'=' {
+            None
+        } else {
+            Some(sextet(chunk[2]).ok_or_else(|| "invalid base64 character".to_string())?)
+        };
+        let c3 = if chunk[3] == b'=' {
+            None
+        } else {
+            Some(sextet(chunk[3]).ok_or_else(|| "invalid base64 character".to_string())?)
+        };
+
+        decoded.push((c0 << 2) | (c1 >> 4));
+        if let Some(c2) = c2 {
+            decoded.push(((c1 & 0x0f) << 4) | (c2 >> 2));
+            if let Some(c3) = c3 {
+                decoded.push(((c2 & 0x03) << 6) | c3);
+            }
+        }
+    }
+
+    <[u8; N]>::try_from(decoded.as_slice()).map_err(|_| "invalid decoded length".to_string())
+}
+
 fn workspace_status_after_account_update(
     current_status: &WorkspaceStatus,
     account_status: &falcondeck_core::AccountStatus,
@@ -2076,12 +2339,16 @@ fn workspace_status_after_account_update(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use chrono::{Duration, Utc};
     use falcondeck_core::{ImageInput, TurnInputItem, WorkspaceStatus};
     use serde_json::json;
+    use tempfile::tempdir;
 
     use super::{
         codex_inputs, collaboration_mode_payload, should_surface_tool_item,
-        workspace_status_after_account_update,
+        workspace_status_after_account_update, AppState, PersistedAppState, PersistedRemoteState,
     };
 
     #[test]
@@ -2148,6 +2415,52 @@ mod tests {
             ),
             WorkspaceStatus::NeedsAuth
         );
+    }
+
+    #[tokio::test]
+    async fn restore_skips_expired_unclaimed_remote_pairing() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let persisted = PersistedAppState {
+            workspaces: vec![],
+            remote: Some(PersistedRemoteState {
+                relay_url: "https://connect.falcondeck.com".to_string(),
+                daemon_token: "daemon-token".to_string(),
+                pairing_id: "pairing-1".to_string(),
+                pairing_code: "ABCDEFGHJKLM".to_string(),
+                session_id: None,
+                expires_at: Utc::now() - Duration::seconds(5),
+                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            }),
+        };
+
+        tokio::fs::write(
+            &state_path,
+            serde_json::to_vec_pretty(&persisted).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            PathBuf::from(&state_path),
+        );
+        app.restore_local_state().await.unwrap();
+
+        let remote = app.inner.remote.lock().await;
+        assert_eq!(remote.status, falcondeck_core::RemoteConnectionStatus::Inactive);
+        assert!(remote.relay_url.is_none());
+        assert!(remote.daemon_token.is_none());
+        assert!(remote.pairing.is_none());
+        drop(remote);
+
+        let persisted_after: PersistedAppState = serde_json::from_slice(
+            &tokio::fs::read(&state_path).await.unwrap(),
+        )
+        .unwrap();
+        assert!(persisted_after.remote.is_none());
     }
 }
 
