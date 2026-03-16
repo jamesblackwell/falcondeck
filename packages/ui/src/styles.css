@@ -1,18 +1,199 @@
+/* ================================================================
+   FalconDeck Design Tokens
+   Direction: "Precision Instrument" — deep black, emerald accent,
+   disciplined scales, clear elevation hierarchy.
+   ================================================================ */
+
 @theme {
   --font-sans: "Inter", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
   --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+
+  /* Tailwind v4 color aliases — enables bg-surface-0, text-fg-primary, etc. */
+  --color-surface-0: var(--fd-bg-0);
+  --color-surface-1: var(--fd-bg-1);
+  --color-surface-2: var(--fd-bg-2);
+  --color-surface-3: var(--fd-bg-3);
+  --color-surface-4: var(--fd-bg-4);
+
+  --color-fg-primary: var(--fd-fg-0);
+  --color-fg-secondary: var(--fd-fg-1);
+  --color-fg-tertiary: var(--fd-fg-2);
+  --color-fg-muted: var(--fd-fg-3);
+  --color-fg-faint: var(--fd-fg-4);
+
+  --color-border-subtle: var(--fd-border-0);
+  --color-border-default: var(--fd-border-1);
+  --color-border-emphasis: var(--fd-border-2);
+  --color-border-strong: var(--fd-border-3);
+
+  --color-accent: var(--fd-accent);
+  --color-accent-muted: var(--fd-accent-muted);
+  --color-accent-strong: var(--fd-accent-strong);
+  --color-accent-dim: var(--fd-accent-dim);
+
+  --color-success: var(--fd-success);
+  --color-success-muted: var(--fd-success-muted);
+  --color-warning: var(--fd-warning);
+  --color-warning-muted: var(--fd-warning-muted);
+  --color-danger: var(--fd-danger);
+  --color-danger-muted: var(--fd-danger-muted);
+  --color-info: var(--fd-info);
+  --color-info-muted: var(--fd-info-muted);
 }
 
 :root {
   color-scheme: dark;
-  --fd-background:
-    radial-gradient(circle at top left, rgba(16, 185, 129, 0.18), transparent 25%),
-    radial-gradient(circle at top right, rgba(148, 163, 184, 0.08), transparent 20%),
-    linear-gradient(180deg, #070b09 0%, #040605 100%);
+
+  /* === Background Scale (deep black to elevated) === */
+  --fd-bg-0: #030504;
+  --fd-bg-1: #080c0a;
+  --fd-bg-2: #0e1310;
+  --fd-bg-3: #151b17;
+  --fd-bg-4: #1c2420;
+
+  /* === Foreground Scale === */
+  --fd-fg-0: #f0f5f1;
+  --fd-fg-1: #c8d3cb;
+  --fd-fg-2: #7d8b82;
+  --fd-fg-3: #4a5550;
+  --fd-fg-4: #313a36;
+
+  /* === Border Scale === */
+  --fd-border-0: rgba(255, 255, 255, 0.04);
+  --fd-border-1: rgba(255, 255, 255, 0.08);
+  --fd-border-2: rgba(255, 255, 255, 0.14);
+  --fd-border-3: rgba(255, 255, 255, 0.22);
+
+  /* === Accent (Emerald) === */
+  --fd-accent: #34d399;
+  --fd-accent-muted: rgba(52, 211, 153, 0.14);
+  --fd-accent-strong: #6ee7b7;
+  --fd-accent-dim: rgba(52, 211, 153, 0.07);
+
+  /* === Semantic Colors === */
+  --fd-success: #34d399;
+  --fd-success-muted: rgba(52, 211, 153, 0.12);
+  --fd-warning: #fbbf24;
+  --fd-warning-muted: rgba(251, 191, 36, 0.12);
+  --fd-danger: #f87171;
+  --fd-danger-muted: rgba(248, 113, 113, 0.12);
+  --fd-info: #60a5fa;
+  --fd-info-muted: rgba(96, 165, 250, 0.12);
+
+  /* === Border Radius Scale === */
+  --fd-radius-sm: 6px;
+  --fd-radius-md: 8px;
+  --fd-radius-lg: 12px;
+  --fd-radius-xl: 16px;
+  --fd-radius-2xl: 20px;
+  --fd-radius-full: 999px;
+
+  /* === Shadows === */
+  --fd-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --fd-shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --fd-shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.4);
+  --fd-shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.45);
+  --fd-shadow-glow: 0 0 24px rgba(52, 211, 153, 0.06);
+
+  /* === Spacing (4px base) === */
+  --fd-space-0: 0px;
+  --fd-space-px: 1px;
+  --fd-space-0_5: 2px;
+  --fd-space-1: 4px;
+  --fd-space-1_5: 6px;
+  --fd-space-2: 8px;
+  --fd-space-3: 12px;
+  --fd-space-4: 16px;
+  --fd-space-5: 20px;
+  --fd-space-6: 24px;
+  --fd-space-8: 32px;
+  --fd-space-10: 40px;
+  --fd-space-12: 48px;
+  --fd-space-16: 64px;
+
+  /* === Typography Scale === */
+  --fd-text-2xs: 10px;
+  --fd-text-xs: 11px;
+  --fd-text-sm: 13px;
+  --fd-text-base: 14px;
+  --fd-text-md: 15px;
+  --fd-text-lg: 17px;
+  --fd-text-xl: 20px;
+  --fd-text-2xl: 24px;
+  --fd-text-3xl: 30px;
+
+  --fd-leading-tight: 1.25;
+  --fd-leading-normal: 1.5;
+  --fd-leading-relaxed: 1.65;
+
+  --fd-tracking-tight: -0.01em;
+  --fd-tracking-normal: 0;
+  --fd-tracking-wide: 0.04em;
+  --fd-tracking-widest: 0.12em;
+
+  /* === Transitions === */
+  --fd-duration-fast: 100ms;
+  --fd-duration-normal: 150ms;
+  --fd-duration-slow: 250ms;
+  --fd-ease-default: cubic-bezier(0.4, 0, 0.2, 1);
+  --fd-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* === Layout === */
+  --fd-sidebar-width: 280px;
+  --fd-rail-width: 320px;
+  --fd-gap: 12px;
+  --fd-shell-padding: 12px;
 }
 
 body {
-  background: var(--fd-background);
-  color: white;
+  background: var(--fd-bg-0);
+  color: var(--fd-fg-0);
   font-family: var(--font-sans);
+  font-size: var(--fd-text-base);
+  line-height: var(--fd-leading-normal);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* === Scrollbar === */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--fd-border-1);
+  border-radius: var(--fd-radius-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fd-border-2);
+}
+
+/* === Collapsible Animations === */
+@keyframes fd-expand {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+@keyframes fd-collapse {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+@theme {
+  --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-default);
+  --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-default);
 }

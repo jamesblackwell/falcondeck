@@ -13,8 +13,8 @@ export function ModelSelector({
 }) {
   return (
     <Select value={value ?? undefined} onValueChange={onValueChange}>
-      <SelectTrigger className="h-10 min-w-[180px]">
-        <SelectValue placeholder="Select model" />
+      <SelectTrigger className="min-w-[140px]">
+        <SelectValue placeholder="Model" />
       </SelectTrigger>
       <SelectContent>
         {models.map((model) => (
@@ -38,7 +38,7 @@ export function ReasoningSelector({
 }) {
   return (
     <Select value={value ?? undefined} onValueChange={onValueChange}>
-      <SelectTrigger className="h-10 min-w-[140px]">
+      <SelectTrigger className="min-w-[100px]">
         <SelectValue placeholder="Effort" />
       </SelectTrigger>
       <SelectContent>
@@ -63,7 +63,7 @@ export function CollaborationModeSelector({
 }) {
   return (
     <Select value={value ?? undefined} onValueChange={onValueChange}>
-      <SelectTrigger className="h-10 min-w-[160px]">
+      <SelectTrigger className="min-w-[120px]">
         <SelectValue placeholder="Mode" />
       </SelectTrigger>
       <SelectContent>

@@ -1,6 +1,9 @@
 @import "tailwindcss";
 @import "@falcondeck/ui/styles.css";
 
+@source "../../../packages/ui/src";
+@source "../../../packages/chat-ui/src";
+
 body {
   margin: 0;
 }

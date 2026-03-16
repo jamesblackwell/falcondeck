@@ -14,14 +14,14 @@ export const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      'flex h-10 w-full items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 text-sm text-white outline-none ring-offset-transparent focus:ring-2 focus:ring-emerald-400',
+      'flex h-8 w-full items-center justify-between rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2 px-3 text-[length:var(--fd-text-sm)] text-fg-primary outline-none transition-colors duration-[var(--fd-duration-fast)] focus:ring-2 focus:ring-accent focus:ring-offset-2 focus:ring-offset-surface-0',
       className,
     )}
     {...props}
   >
     {children}
     <SelectPrimitive.Icon asChild>
-      <ChevronDown className="h-4 w-4 text-zinc-400" />
+      <ChevronDown className="h-3.5 w-3.5 text-fg-muted" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
 ))
@@ -35,12 +35,12 @@ export const SelectContent = React.forwardRef<
     <SelectPrimitive.Content
       ref={ref}
       className={cn(
-        'z-50 overflow-hidden rounded-2xl border border-white/10 bg-zinc-950 text-white shadow-2xl',
+        'z-50 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-emphasis bg-surface-2 text-fg-primary shadow-[var(--fd-shadow-lg)]',
         className,
       )}
       {...props}
     >
-      <SelectPrimitive.Viewport className="p-2">{children}</SelectPrimitive.Viewport>
+      <SelectPrimitive.Viewport className="p-1.5">{children}</SelectPrimitive.Viewport>
     </SelectPrimitive.Content>
   </SelectPrimitive.Portal>
 ))
@@ -53,14 +53,14 @@ export const SelectItem = React.forwardRef<
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      'relative flex cursor-default select-none items-center rounded-lg py-2 pl-3 pr-8 text-sm text-zinc-200 outline-none focus:bg-white/8 focus:text-white',
+      'relative flex cursor-default select-none items-center rounded-[var(--fd-radius-md)] py-1.5 pl-3 pr-8 text-[length:var(--fd-text-sm)] text-fg-secondary outline-none transition-colors focus:bg-surface-3 focus:text-fg-primary',
       className,
     )}
     {...props}
   >
     <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
     <SelectPrimitive.ItemIndicator className="absolute right-3 inline-flex items-center">
-      <Check className="h-4 w-4" />
+      <Check className="h-3.5 w-3.5 text-accent" />
     </SelectPrimitive.ItemIndicator>
   </SelectPrimitive.Item>
 ))

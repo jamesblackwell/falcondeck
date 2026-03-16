@@ -1,6 +1,8 @@
 @import "tailwindcss";
 @import "@falcondeck/ui/styles.css";
 
+@source "../../../packages/ui/src";
+
 body {
   margin: 0;
 }

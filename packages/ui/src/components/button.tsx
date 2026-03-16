@@ -5,22 +5,22 @@ import { Slot } from '@radix-ui/react-slot'
 import { cn } from '../lib/utils'
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-xl text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400 disabled:pointer-events-none disabled:opacity-50',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap text-[length:var(--fd-text-sm)] font-medium transition-all duration-[var(--fd-duration-fast)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-0 disabled:pointer-events-none disabled:opacity-40 active:scale-[0.98]',
   {
     variants: {
       variant: {
         default:
-          'bg-emerald-300 text-emerald-950 shadow-[0_0_0_1px_rgba(255,255,255,0.08)] hover:bg-emerald-200',
-        secondary: 'bg-white/8 text-white hover:bg-white/12',
-        outline: 'border border-white/12 bg-transparent text-white hover:bg-white/6',
-        ghost: 'bg-transparent text-zinc-300 hover:bg-white/6 hover:text-white',
-        danger: 'bg-rose-400 text-rose-950 hover:bg-rose-300',
+          'bg-accent text-surface-0 shadow-[var(--fd-shadow-sm)] hover:bg-accent-strong',
+        secondary: 'bg-surface-3 text-fg-primary hover:bg-surface-4',
+        outline: 'border border-border-emphasis bg-transparent text-fg-primary hover:bg-surface-3',
+        ghost: 'bg-transparent text-fg-secondary hover:bg-surface-3 hover:text-fg-primary',
+        danger: 'bg-danger text-surface-0 hover:brightness-110',
       },
       size: {
-        default: 'h-11 px-4 py-2',
-        sm: 'h-9 rounded-lg px-3',
-        lg: 'h-12 rounded-2xl px-5 text-base',
-        icon: 'h-10 w-10',
+        default: 'h-9 rounded-[var(--fd-radius-lg)] px-3.5',
+        sm: 'h-7 rounded-[var(--fd-radius-md)] px-2.5 text-[length:var(--fd-text-xs)]',
+        lg: 'h-11 rounded-[var(--fd-radius-xl)] px-5 text-[length:var(--fd-text-base)]',
+        icon: 'h-8 w-8 rounded-[var(--fd-radius-md)]',
       },
     },
     defaultVariants: {
