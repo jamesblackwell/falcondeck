@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   applySnapshotEvent,
@@ -131,6 +131,7 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
+  const threadSettingsRequestRef = useRef(0)
   const reconnectTimerRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
   const [connectionGeneration, setConnectionGeneration] = useState(0)
@@ -532,6 +533,106 @@ export default function App() {
     }
   }, [selectedEffort, selectedModel, selectedWorkspace, snapshot])
 
+  const applyThreadHandle = useCallback((handle: ThreadHandle) => {
+    setSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            workspaces: current.workspaces.map((workspace) =>
+              workspace.id === handle.workspace.id ? handle.workspace : workspace,
+            ),
+            threads: current.threads.map((thread) =>
+              thread.id === handle.thread.id ? handle.thread : thread,
+            ),
+          }
+        : current,
+    )
+    setThreadDetail((current) =>
+      current && current.thread.id === handle.thread.id
+        ? { ...current, workspace: handle.workspace, thread: handle.thread }
+        : current,
+    )
+  }, [])
+
+  const persistThreadSettings = useCallback(
+    async ({
+      modelId,
+      effort,
+      collaborationModeId,
+    }: {
+      modelId: string | null
+      effort: string | null
+      collaborationModeId: string | null
+    }) => {
+      if (!selectedWorkspace || !selectedThreadId) return
+      const requestId = ++threadSettingsRequestRef.current
+      try {
+        const handle = await callRpc<ThreadHandle>('thread.update', {
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          model_id: modelId,
+          reasoning_effort: effort,
+          collaboration_mode_id: collaborationModeId,
+        })
+        if (requestId !== threadSettingsRequestRef.current) return
+        applyThreadHandle(handle)
+        setError(null)
+      } catch (e) {
+        if (requestId !== threadSettingsRequestRef.current) return
+        setError(e instanceof Error ? e.message : 'Remote action failed')
+      }
+    },
+    [applyThreadHandle, selectedThreadId, selectedWorkspace],
+  )
+
+  const handleModelChange = useCallback(
+    (modelId: string) => {
+      setSelectedModel(modelId)
+      const nextOptions = reasoningOptions(snapshot, selectedWorkspace?.id ?? null, modelId)
+      const nextEffort =
+        selectedEffort && nextOptions.includes(selectedEffort)
+          ? selectedEffort
+          : (nextOptions[0] ?? 'medium')
+      setSelectedEffort(nextEffort)
+      void persistThreadSettings({
+        modelId,
+        effort: nextEffort,
+        collaborationModeId: selectedCollaborationMode,
+      })
+    },
+    [
+      persistThreadSettings,
+      selectedCollaborationMode,
+      selectedEffort,
+      selectedWorkspace?.id,
+      snapshot,
+    ],
+  )
+
+  const handleEffortChange = useCallback(
+    (effort: string) => {
+      setSelectedEffort(effort)
+      void persistThreadSettings({
+        modelId: selectedModel,
+        effort,
+        collaborationModeId: selectedCollaborationMode,
+      })
+    },
+    [persistThreadSettings, selectedCollaborationMode, selectedModel],
+  )
+
+  const handleCollaborationModeChange = useCallback(
+    (modeId: string) => {
+      setSelectedCollaborationMode(modeId)
+      void persistThreadSettings({
+        modelId: selectedModel,
+        effort: selectedEffort,
+        collaborationModeId: modeId,
+      })
+    },
+    [persistThreadSettings, selectedEffort, selectedModel],
+  )
+
   useEffect(() => {
     if (!snapshot) return
     const valid = new Set(snapshot.threads.map((t) => t.id))
@@ -693,13 +794,13 @@ export default function App() {
           attachments={attachments}
           models={selectedWorkspace?.models ?? []}
           selectedModelId={selectedModel}
-          onModelChange={setSelectedModel}
+          onModelChange={handleModelChange}
           reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedModel)}
           selectedEffort={selectedEffort}
-          onEffortChange={setSelectedEffort}
+          onEffortChange={handleEffortChange}
           collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
           selectedCollaborationModeId={selectedCollaborationMode}
-          onCollaborationModeChange={setSelectedCollaborationMode}
+          onCollaborationModeChange={handleCollaborationModeChange}
           approvalPolicy="on-request"
           disabled={!selectedWorkspace || isSubmitting || !isEncrypted}
           compact

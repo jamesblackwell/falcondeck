@@ -416,8 +416,12 @@ pub fn parse_account(value: &Value) -> AccountSummary {
 
 fn parse_models(value: &Value) -> Vec<ModelSummary> {
     let models = value
-        .get("models")
+        .get("result")
+        .and_then(Value::as_object)
+        .and_then(|result| result.get("data"))
         .and_then(Value::as_array)
+        .or_else(|| value.get("data").and_then(Value::as_array))
+        .or_else(|| value.get("models").and_then(Value::as_array))
         .or_else(|| value.as_array());
 
     models
@@ -426,10 +430,13 @@ fn parse_models(value: &Value) -> Vec<ModelSummary> {
         .filter_map(|entry| {
             let id = entry
                 .get("id")
+                .or_else(|| entry.get("model"))
                 .or_else(|| entry.get("slug"))
                 .and_then(Value::as_str)?;
             let label = entry
-                .get("title")
+                .get("displayName")
+                .or_else(|| entry.get("display_name"))
+                .or_else(|| entry.get("title"))
                 .or_else(|| entry.get("label"))
                 .or_else(|| entry.get("name"))
                 .and_then(Value::as_str)
@@ -471,18 +478,30 @@ fn parse_reasoning_efforts(value: &Value) -> Vec<ReasoningEffortSummary> {
 
 fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
     value
-        .get("modes")
+        .get("result")
+        .and_then(Value::as_object)
+        .and_then(|result| result.get("data"))
         .and_then(Value::as_array)
+        .or_else(|| value.get("data").and_then(Value::as_array))
+        .or_else(|| value.get("modes").and_then(Value::as_array))
         .or_else(|| value.as_array())
         .into_iter()
         .flatten()
         .filter_map(|entry| {
-            let id = extract_string(entry, &["id"])?;
+            let settings = entry.get("settings");
+            let id = extract_string(entry, &["id", "mode", "name"])?;
             Some(CollaborationModeSummary {
                 id: id.clone(),
                 label: extract_string(entry, &["label", "name"]).unwrap_or(id),
-                model_id: extract_string(entry, &["model", "modelId", "model_id"]),
-                reasoning_effort: extract_string(entry, &["reasoningEffort", "reasoning_effort"]),
+                model_id: extract_string(entry, &["model", "modelId", "model_id"]).or_else(|| {
+                    settings.and_then(|settings| extract_string(settings, &["model", "modelId", "model_id"]))
+                }),
+                reasoning_effort: extract_string(entry, &["reasoningEffort", "reasoning_effort"])
+                    .or_else(|| {
+                        settings.and_then(|settings| {
+                            extract_string(settings, &["reasoningEffort", "reasoning_effort"])
+                        })
+                    }),
             })
         })
         .collect()
@@ -1172,6 +1191,50 @@ mod tests {
         ]));
         assert_eq!(models.len(), 1);
         assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn parses_models_from_result_data_shape() {
+        let models = parse_models(&json!({
+            "result": {
+                "data": [{
+                    "id": "gpt-5.4",
+                    "model": "gpt-5.4",
+                    "displayName": "GPT-5.4",
+                    "defaultReasoningEffort": "medium",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "low", "description": "Low"},
+                        {"reasoningEffort": "medium", "description": "Medium"}
+                    ]
+                }]
+            }
+        }));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.4");
+        assert_eq!(models[0].label, "GPT-5.4");
+        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(models[0].supported_reasoning_efforts.len(), 2);
+    }
+
+    #[test]
+    fn parses_collaboration_modes_from_result_data_shape() {
+        let modes = parse_collaboration_modes(&json!({
+            "result": {
+                "data": [{
+                    "mode": "plan",
+                    "name": "Plan",
+                    "settings": {
+                        "model": "gpt-5.4",
+                        "reasoning_effort": "high"
+                    }
+                }]
+            }
+        }));
+        assert_eq!(modes.len(), 1);
+        assert_eq!(modes[0].id, "plan");
+        assert_eq!(modes[0].label, "Plan");
+        assert_eq!(modes[0].model_id.as_deref(), Some("gpt-5.4"));
+        assert_eq!(modes[0].reasoning_effort.as_deref(), Some("high"));
     }
 
     #[test]

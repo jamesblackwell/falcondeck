@@ -13,6 +13,7 @@ import {
   type ImageInput,
   type RemoteStatusResponse,
   type ThreadDetail,
+  type ThreadHandle,
   type TurnInputItem,
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput } from '@falcondeck/chat-ui'
@@ -51,6 +52,7 @@ export default function App() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const selectionSeedRef = useRef<string | null>(null)
+  const threadSettingsRequestRef = useRef(0)
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
   const selectedWorkspace = useMemo(
@@ -185,6 +187,27 @@ export default function App() {
     }
   }, [selectedEffort, selectedModel, selectedThread, selectedWorkspace])
 
+  const applyThreadHandle = useCallback((handle: ThreadHandle) => {
+    setSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            workspaces: current.workspaces.map((workspace) =>
+              workspace.id === handle.workspace.id ? handle.workspace : workspace,
+            ),
+            threads: current.threads.map((thread) =>
+              thread.id === handle.thread.id ? handle.thread : thread,
+            ),
+          }
+        : current,
+    )
+    setThreadDetail((current) =>
+      current && current.thread.id === handle.thread.id
+        ? { ...current, workspace: handle.workspace, thread: handle.thread }
+        : current,
+    )
+  }, [])
+
   const persistThreadSettings = useCallback(
     async ({
       modelId,
@@ -196,6 +219,7 @@ export default function App() {
       collaborationModeId: string | null
     }) => {
       if (!api || !selectedWorkspace || !selectedThreadId) return
+      const requestId = ++threadSettingsRequestRef.current
       try {
         const handle = await api.updateThread({
           workspace_id: selectedWorkspace.id,
@@ -204,30 +228,15 @@ export default function App() {
           reasoning_effort: effort,
           collaboration_mode_id: collaborationModeId,
         })
-        setSnapshot((current) =>
-          current
-            ? {
-                ...current,
-                workspaces: current.workspaces.map((workspace) =>
-                  workspace.id === handle.workspace.id ? handle.workspace : workspace,
-                ),
-                threads: current.threads.map((thread) =>
-                  thread.id === handle.thread.id ? handle.thread : thread,
-                ),
-              }
-            : current,
-        )
-        setThreadDetail((current) =>
-          current && current.thread.id === handle.thread.id
-            ? { ...current, workspace: handle.workspace, thread: handle.thread }
-            : current,
-        )
+        if (requestId !== threadSettingsRequestRef.current) return
+        applyThreadHandle(handle)
         setActionError(null)
       } catch (error) {
+        if (requestId !== threadSettingsRequestRef.current) return
         setActionError(error instanceof Error ? error.message : 'Failed to update thread settings')
       }
     },
-    [api, selectedThreadId, selectedWorkspace],
+    [api, applyThreadHandle, selectedThreadId, selectedWorkspace],
   )
 
   const handleModelChange = useCallback(
