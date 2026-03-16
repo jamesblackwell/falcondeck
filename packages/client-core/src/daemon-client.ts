@@ -25,6 +25,7 @@ export type SendTurnPayload = {
   reasoning_effort?: string | null
   collaboration_mode_id?: string | null
   approval_policy?: string | null
+  service_tier?: string | null
 }
 
 export type StartThreadPayload = {

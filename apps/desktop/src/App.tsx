@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   applyEventToThreadDetail,
@@ -17,7 +17,7 @@ import { Conversation, PromptInput } from '@falcondeck/chat-ui'
 import { AppShell } from '@falcondeck/ui'
 
 import { detectApiBaseUrl } from './api'
-import { reasoningOptions } from './utils'
+import { defaultModelId, reasoningOptions } from './utils'
 import { DesktopSidebar } from './components/Sidebar'
 import { SessionHeader } from './components/SessionHeader'
 import { ContextPanel } from './components/ContextPanel'
@@ -45,6 +45,7 @@ export default function App() {
   const [isStartingRemote, setIsStartingRemote] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
+  const selectionSeedRef = useRef<string | null>(null)
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
   const selectedWorkspace = useMemo(
@@ -131,18 +132,40 @@ export default function App() {
       setSelectedModel(null)
       setSelectedEffort('medium')
       setSelectedCollaborationMode(null)
+      selectionSeedRef.current = null
       return
     }
+    const seedKey = `${selectedWorkspace.id}:${selectedThread?.id ?? 'workspace'}`
+    if (selectionSeedRef.current === seedKey) {
+      return
+    }
+    selectionSeedRef.current = seedKey
+
+    const fallbackModelId = defaultModelId(selectedWorkspace)
     if (selectedThread) {
-      setSelectedModel(selectedThread.codex.model_id ?? selectedWorkspace.models.find((m) => m.is_default)?.id ?? null)
-      setSelectedEffort(selectedThread.codex.reasoning_effort ?? reasoningOptions(selectedThread, selectedWorkspace)[0] ?? 'medium')
+      const nextModelId = selectedThread.codex.model_id ?? fallbackModelId
+      setSelectedModel(nextModelId)
+      setSelectedEffort(
+        selectedThread.codex.reasoning_effort ??
+          reasoningOptions(selectedThread, selectedWorkspace, nextModelId)[0] ??
+          'medium',
+      )
       setSelectedCollaborationMode(selectedThread.codex.collaboration_mode_id ?? selectedWorkspace.collaboration_modes[0]?.id ?? null)
       return
     }
-    setSelectedModel(selectedWorkspace.models.find((m) => m.is_default)?.id ?? null)
-    setSelectedEffort(selectedWorkspace.models.find((m) => m.is_default)?.default_reasoning_effort ?? 'medium')
+    setSelectedModel(fallbackModelId)
+    setSelectedEffort(reasoningOptions(null, selectedWorkspace, fallbackModelId)[0] ?? 'medium')
     setSelectedCollaborationMode(selectedWorkspace.collaboration_modes[0]?.id ?? null)
   }, [selectedThread, selectedWorkspace])
+
+  useEffect(() => {
+    if (!selectedWorkspace) return
+    const options = reasoningOptions(selectedThread, selectedWorkspace, selectedModel)
+    if (options.length === 0) return
+    if (!selectedEffort || !options.includes(selectedEffort)) {
+      setSelectedEffort(options[0] ?? 'medium')
+    }
+  }, [selectedEffort, selectedModel, selectedThread, selectedWorkspace])
 
   // Poll remote status
   useEffect(() => {
@@ -277,7 +300,7 @@ export default function App() {
             models={selectedWorkspace?.models ?? []}
             selectedModelId={selectedModel}
             onModelChange={setSelectedModel}
-            reasoningOptions={reasoningOptions(selectedThread, selectedWorkspace)}
+            reasoningOptions={reasoningOptions(selectedThread, selectedWorkspace, selectedModel)}
             selectedEffort={selectedEffort}
             onEffortChange={setSelectedEffort}
             collaborationModes={selectedWorkspace?.collaboration_modes ?? []}

@@ -47,6 +47,7 @@ pub struct ImageInput {
     pub name: Option<String>,
     pub mime_type: Option<String>,
     pub url: String,
+    pub local_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +63,7 @@ pub struct ThreadCodexParams {
     pub reasoning_effort: Option<String>,
     pub collaboration_mode_id: Option<String>,
     pub approval_policy: Option<String>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,6 +75,7 @@ pub struct SendTurnRequest {
     pub reasoning_effort: Option<String>,
     pub collaboration_mode_id: Option<String>,
     pub approval_policy: Option<String>,
+    pub service_tier: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

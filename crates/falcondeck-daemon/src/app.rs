@@ -2,14 +2,15 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
 use chrono::Utc;
 use falcondeck_core::{
-    AccountSummary, ApprovalDecision, ApprovalRequest, CollaborationModeSummary, CommandResponse,
+    crypto::{decrypt_json, encrypt_json, generate_data_key, LocalBoxKeyPair},
+    ApprovalDecision, ApprovalRequest, CollaborationModeSummary, CommandResponse,
     ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope,
     EventEnvelope, HealthResponse, PairingPublicKeyBundle, PairingStatusResponse,
     RelayClientMessage, RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus,
@@ -17,14 +18,13 @@ use falcondeck_core::{
     StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
     StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
     TurnInputItem, UnifiedEvent, WorkspaceStatus, WorkspaceSummary,
-    crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::{
-    sync::{Mutex, broadcast},
+    sync::{broadcast, Mutex},
     task::JoinHandle,
-    time::{Duration, sleep},
+    time::{sleep, Duration},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::debug;
@@ -32,8 +32,8 @@ use uuid::Uuid;
 
 use crate::{
     codex::{
-        CodexBootstrap, CodexSession, extract_string, extract_thread_id, extract_thread_title,
-        parse_thread_plan,
+        extract_string, extract_thread_id, extract_thread_title, parse_account, parse_thread_plan,
+        CodexBootstrap, CodexSession,
     },
     error::DaemonError,
 };
@@ -375,6 +375,7 @@ impl AppState {
                 reasoning_effort: None,
                 collaboration_mode_id: request.collaboration_mode_id,
                 approval_policy: Some(approval_policy),
+                service_tier: None,
             },
         };
         workspace.summary.current_thread_id = Some(thread_id.clone());
@@ -431,6 +432,10 @@ impl AppState {
                     .clone()
                     .or(thread.codex.collaboration_mode_id.clone());
                 thread.codex.approval_policy = Some(approval_policy.clone());
+                thread.codex.service_tier = request
+                    .service_tier
+                    .clone()
+                    .or(thread.codex.service_tier.clone());
             })
             .await?;
         self.push_conversation_item(
@@ -455,8 +460,13 @@ impl AppState {
                     "cwd": workspace_path,
                     "model": request.model_id,
                     "effort": request.reasoning_effort,
-                    "collaborationMode": request.collaboration_mode_id,
-                    "approvalPolicy": approval_policy
+                    "collaborationMode": collaboration_mode_payload(
+                        request.collaboration_mode_id.as_deref(),
+                        request.model_id.as_deref(),
+                        request.reasoning_effort.as_deref(),
+                    ),
+                    "approvalPolicy": approval_policy,
+                    "serviceTier": request.service_tier
                 }),
             )
             .await?;
@@ -907,6 +917,7 @@ impl AppState {
                         &params,
                         &["approvalPolicy", "approval_policy"],
                     ),
+                    service_tier: extract_string(&params, &["serviceTier", "service_tier"]),
                 };
                 match self.send_turn(request).await {
                     Ok(response) => {
@@ -1104,6 +1115,22 @@ impl AppState {
                         .upsert_thread(workspace_id, &thread_id, |thread| {
                             thread.title = title.clone();
                             thread.status = ThreadStatus::Idle;
+                            if let Some(model_id) =
+                                extract_string(&params, &["model", "modelId", "model_id"])
+                            {
+                                thread.codex.model_id = Some(model_id);
+                            }
+                            if let Some(reasoning_effort) = extract_string(
+                                &params,
+                                &["effort", "reasoningEffort", "reasoning_effort"],
+                            ) {
+                                thread.codex.reasoning_effort = Some(reasoning_effort);
+                            }
+                            if let Some(approval_policy) =
+                                extract_string(&params, &["approvalPolicy", "approval_policy"])
+                            {
+                                thread.codex.approval_policy = Some(approval_policy);
+                            }
                         })
                         .await?;
                     self.emit(
@@ -1138,6 +1165,27 @@ impl AppState {
                             thread.status = ThreadStatus::Running;
                             thread.latest_turn_id = Some(turn_id.clone());
                             thread.last_error = None;
+                            if let Some(model_id) =
+                                extract_string(&params, &["model", "modelId", "model_id"])
+                            {
+                                thread.codex.model_id = Some(model_id);
+                            }
+                            if let Some(reasoning_effort) = extract_string(
+                                &params,
+                                &["effort", "reasoningEffort", "reasoning_effort"],
+                            ) {
+                                thread.codex.reasoning_effort = Some(reasoning_effort);
+                            }
+                            if let Some(approval_policy) =
+                                extract_string(&params, &["approvalPolicy", "approval_policy"])
+                            {
+                                thread.codex.approval_policy = Some(approval_policy);
+                            }
+                            if let Some(service_tier) =
+                                extract_string(&params, &["serviceTier", "service_tier"])
+                            {
+                                thread.codex.service_tier = Some(service_tier);
+                            }
                         })
                         .await?;
                     self.emit(
@@ -1370,6 +1418,9 @@ impl AppState {
                         extract_string(item, &["id"]).unwrap_or_else(|| "item".to_string());
                     let kind = extract_string(item, &["kind", "type"])
                         .unwrap_or_else(|| "tool".to_string());
+                    if !should_surface_tool_item(&kind) {
+                        return Ok(());
+                    }
                     let title = extract_string(item, &["title", "label", "command"])
                         .or_else(|| {
                             extract_string(
@@ -1423,6 +1474,9 @@ impl AppState {
                         extract_string(item, &["id"]).unwrap_or_else(|| "item".to_string());
                     let kind = extract_string(item, &["kind", "type"])
                         .unwrap_or_else(|| "tool".to_string());
+                    if !should_surface_tool_item(&kind) {
+                        return Ok(());
+                    }
                     let title = extract_string(item, &["title", "label", "command"])
                         .or_else(|| {
                             extract_string(
@@ -1510,14 +1564,40 @@ impl AppState {
             "account/updated" => {
                 let mut workspaces = self.inner.workspaces.lock().await;
                 if let Some(workspace) = workspaces.get_mut(workspace_id) {
-                    let label = extract_string(&params, &["email", "authMode", "auth_mode"])
-                        .unwrap_or_else(|| workspace.summary.account.label.clone());
-                    workspace.summary.account = AccountSummary {
-                        status: falcondeck_core::AccountStatus::Ready,
-                        label,
-                    };
-                    workspace.summary.status = WorkspaceStatus::Ready;
+                    workspace.summary.account = parse_account(&params);
+                    workspace.summary.status = workspace_status_after_account_update(
+                        &workspace.summary.status,
+                        &workspace.summary.account.status,
+                    );
                     workspace.summary.updated_at = Utc::now();
+                }
+            }
+            "model/rerouted" => {
+                if let Some(thread_id) = extract_thread_id(&params) {
+                    let rerouted_model = extract_string(
+                        &params,
+                        &[
+                            "toModel",
+                            "to_model",
+                            "model",
+                            "modelId",
+                            "model_id",
+                            "reroutedModel",
+                            "rerouted_model",
+                        ],
+                    );
+                    if let Some(model_id) = rerouted_model {
+                        let thread = self
+                            .upsert_thread(workspace_id, &thread_id, |thread| {
+                                thread.codex.model_id = Some(model_id.clone());
+                            })
+                            .await?;
+                        self.emit(
+                            Some(workspace_id.to_string()),
+                            Some(thread_id),
+                            UnifiedEvent::ThreadUpdated { thread },
+                        );
+                    }
                 }
             }
             _ => {
@@ -1867,12 +1947,59 @@ fn codex_inputs(inputs: &[TurnInputItem]) -> Vec<Value> {
                 "type": "text",
                 "text": text,
             }),
-            TurnInputItem::Image(image) => json!({
-                "type": "image",
-                "url": image.url,
-            }),
+            TurnInputItem::Image(image) => {
+                if let Some(local_path) = image
+                    .local_path
+                    .as_deref()
+                    .filter(|path| !path.trim().is_empty())
+                {
+                    json!({
+                        "type": "localImage",
+                        "path": local_path,
+                    })
+                } else if image.url.starts_with("http://")
+                    || image.url.starts_with("https://")
+                    || image.url.starts_with("data:")
+                {
+                    json!({
+                        "type": "image",
+                        "url": image.url,
+                    })
+                } else {
+                    json!({
+                        "type": "localImage",
+                        "path": image.url,
+                    })
+                }
+            }
         })
         .collect()
+}
+
+fn collaboration_mode_payload(
+    mode_id: Option<&str>,
+    model_id: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> Value {
+    let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Value::Null;
+    };
+
+    let mut settings = serde_json::Map::new();
+    if let Some(model_id) = model_id.map(str::trim).filter(|value| !value.is_empty()) {
+        settings.insert("model".to_string(), json!(model_id));
+    }
+    if let Some(reasoning_effort) = reasoning_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        settings.insert("reasoning_effort".to_string(), json!(reasoning_effort));
+    }
+
+    json!({
+        "mode": mode_id,
+        "settings": settings,
+    })
 }
 
 fn build_user_message_item(inputs: &[TurnInputItem]) -> ConversationItem {
@@ -1919,6 +2046,107 @@ fn truncate_preview(input: &str, limit: usize) -> String {
         .collect::<String>();
     result.push('…');
     result
+}
+
+fn should_surface_tool_item(kind: &str) -> bool {
+    !matches!(
+        kind,
+        "userMessage"
+            | "user_message"
+            | "agentMessage"
+            | "agent_message"
+            | "reasoning"
+            | "reasoningSummary"
+            | "reasoning_summary"
+    )
+}
+
+fn workspace_status_after_account_update(
+    current_status: &WorkspaceStatus,
+    account_status: &falcondeck_core::AccountStatus,
+) -> WorkspaceStatus {
+    match account_status {
+        falcondeck_core::AccountStatus::NeedsAuth => WorkspaceStatus::NeedsAuth,
+        _ if matches!(current_status, WorkspaceStatus::NeedsAuth) => WorkspaceStatus::Ready,
+        _ => current_status.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use falcondeck_core::{ImageInput, TurnInputItem, WorkspaceStatus};
+    use serde_json::json;
+
+    use super::{
+        codex_inputs, collaboration_mode_payload, should_surface_tool_item,
+        workspace_status_after_account_update,
+    };
+
+    #[test]
+    fn filters_internal_codex_item_kinds_from_tool_timeline() {
+        assert!(!should_surface_tool_item("userMessage"));
+        assert!(!should_surface_tool_item("agentMessage"));
+        assert!(!should_surface_tool_item("reasoning"));
+        assert!(should_surface_tool_item("commandExecution"));
+    }
+
+    #[test]
+    fn builds_structured_collaboration_mode_payload() {
+        let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"));
+        assert_eq!(
+            payload,
+            json!({
+                "mode": "plan",
+                "settings": {
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn encodes_local_images_for_codex() {
+        let payload = codex_inputs(&[TurnInputItem::Image(ImageInput {
+            id: "img-1".to_string(),
+            name: Some("diagram.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: "ignored".to_string(),
+            local_path: Some("/tmp/diagram.png".to_string()),
+        })]);
+        assert_eq!(
+            payload,
+            vec![json!({
+                "type": "localImage",
+                "path": "/tmp/diagram.png"
+            })]
+        );
+    }
+
+    #[test]
+    fn account_updates_do_not_clobber_runtime_status() {
+        assert_eq!(
+            workspace_status_after_account_update(
+                &WorkspaceStatus::Busy,
+                &falcondeck_core::AccountStatus::Ready,
+            ),
+            WorkspaceStatus::Busy
+        );
+        assert_eq!(
+            workspace_status_after_account_update(
+                &WorkspaceStatus::NeedsAuth,
+                &falcondeck_core::AccountStatus::Ready,
+            ),
+            WorkspaceStatus::Ready
+        );
+        assert_eq!(
+            workspace_status_after_account_update(
+                &WorkspaceStatus::Error,
+                &falcondeck_core::AccountStatus::NeedsAuth,
+            ),
+            WorkspaceStatus::NeedsAuth
+        );
+    }
 }
 
 fn normalize_relay_url(input: &str) -> Result<String, DaemonError> {

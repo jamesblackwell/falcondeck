@@ -39,6 +39,7 @@ export type ThreadCodexParams = {
   reasoning_effort: string | null
   collaboration_mode_id: string | null
   approval_policy: string | null
+  service_tier: string | null
 }
 
 export type WorkspaceSummary = {
@@ -97,6 +98,7 @@ export type ImageInput = {
   name: string | null
   mime_type: string | null
   url: string
+  local_path?: string | null
 }
 
 export type TextInput = {

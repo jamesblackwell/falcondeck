@@ -68,6 +68,7 @@ export async function filesToImageInputs(files: FileList | null): Promise<ImageI
               name: file.name,
               mime_type: file.type,
               url: String(reader.result),
+              local_path: null,
             })
           reader.readAsDataURL(file)
         }),

@@ -84,6 +84,7 @@ export default function App() {
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const selectionSeedRef = useRef<string | null>(null)
 
   const requestCounter = useRef(1)
   const socketRef = useRef<WebSocket | null>(null)
@@ -353,17 +354,45 @@ export default function App() {
 
   // Sync model/effort/mode from thread/workspace
   useEffect(() => {
-    if (!selectedWorkspace) { setSelectedModel(null); setSelectedEffort('medium'); setSelectedCollaborationMode(null); return }
+    if (!selectedWorkspace) {
+      setSelectedModel(null)
+      setSelectedEffort('medium')
+      setSelectedCollaborationMode(null)
+      selectionSeedRef.current = null
+      return
+    }
+    const seedKey = `${selectedWorkspace.id}:${selectedThread?.id ?? 'workspace'}`
+    if (selectionSeedRef.current === seedKey) {
+      return
+    }
+    selectionSeedRef.current = seedKey
+
+    const fallbackModelId =
+      selectedWorkspace.models.find((m) => m.is_default)?.id ?? selectedWorkspace.models[0]?.id ?? null
     if (selectedThread) {
-      setSelectedModel(selectedThread.codex.model_id ?? selectedWorkspace.models.find((m) => m.is_default)?.id ?? null)
-      setSelectedEffort(selectedThread.codex.reasoning_effort ?? reasoningOptions(snapshot, selectedWorkspace.id, selectedThread.codex.model_id ?? selectedModel)[0] ?? 'medium')
+      const nextModelId = selectedThread.codex.model_id ?? fallbackModelId
+      setSelectedModel(nextModelId)
+      setSelectedEffort(
+        selectedThread.codex.reasoning_effort ??
+          reasoningOptions(snapshot, selectedWorkspace.id, nextModelId)[0] ??
+          'medium',
+      )
       setSelectedCollaborationMode(selectedThread.codex.collaboration_mode_id ?? selectedWorkspace.collaboration_modes[0]?.id ?? null)
       return
     }
-    setSelectedModel(selectedWorkspace.models.find((m) => m.is_default)?.id ?? null)
-    setSelectedEffort(reasoningOptions(snapshot, selectedWorkspace.id, selectedWorkspace.models.find((m) => m.is_default)?.id ?? null)[0] ?? 'medium')
+    setSelectedModel(fallbackModelId)
+    setSelectedEffort(reasoningOptions(snapshot, selectedWorkspace.id, fallbackModelId)[0] ?? 'medium')
     setSelectedCollaborationMode(selectedWorkspace.collaboration_modes[0]?.id ?? null)
-  }, [selectedThread, selectedWorkspace, snapshot, selectedModel])
+  }, [selectedThread, selectedWorkspace, snapshot])
+
+  useEffect(() => {
+    if (!selectedWorkspace) return
+    const options = reasoningOptions(snapshot, selectedWorkspace.id, selectedModel)
+    if (options.length === 0) return
+    if (!selectedEffort || !options.includes(selectedEffort)) {
+      setSelectedEffort(options[0] ?? 'medium')
+    }
+  }, [selectedEffort, selectedModel, selectedWorkspace, snapshot])
 
   // Clean stale thread items
   useEffect(() => {

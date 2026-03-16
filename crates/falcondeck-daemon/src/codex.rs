@@ -3,8 +3,8 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
@@ -13,11 +13,11 @@ use falcondeck_core::{
     AccountStatus, AccountSummary, CollaborationModeSummary, ModelSummary, ReasoningEffortSummary,
     ThreadCodexParams, ThreadPlan, ThreadStatus, ThreadSummary,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, oneshot},
+    sync::{oneshot, Mutex},
 };
 use tracing::warn;
 
@@ -320,12 +320,38 @@ impl CodexSession {
     }
 }
 
-fn parse_account(value: &Value) -> AccountSummary {
+pub fn parse_account(value: &Value) -> AccountSummary {
+    let account = value.get("account").and_then(Value::as_object);
     let requires_auth = value
         .get("requiresOpenaiAuth")
         .or_else(|| value.get("requires_openai_auth"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+
+    let email = value
+        .get("email")
+        .or_else(|| account.and_then(|account| account.get("email")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    if let Some(email) = email {
+        return AccountSummary {
+            status: AccountStatus::Ready,
+            label: email,
+        };
+    }
+
+    let auth_type = account
+        .and_then(|account| account.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    if let Some(auth_type) = auth_type {
+        return AccountSummary {
+            status: AccountStatus::Ready,
+            label: format!("Signed in ({auth_type})"),
+        };
+    }
 
     if requires_auth {
         return AccountSummary {
@@ -334,19 +360,9 @@ fn parse_account(value: &Value) -> AccountSummary {
         };
     }
 
-    let email = value
-        .get("email")
-        .or_else(|| {
-            value
-                .get("account")
-                .and_then(|account| account.get("email"))
-        })
-        .and_then(Value::as_str)
-        .map(str::to_string);
-
     AccountSummary {
-        status: AccountStatus::Ready,
-        label: email.unwrap_or_else(|| "Signed in".to_string()),
+        status: AccountStatus::Unknown,
+        label: "Account status unknown".to_string(),
     }
 }
 
@@ -448,7 +464,19 @@ fn parse_threads(workspace_id: &str, value: &Value) -> Vec<ThreadSummary> {
                 latest_diff: None,
                 last_tool: None,
                 last_error: None,
-                codex: ThreadCodexParams::default(),
+                codex: ThreadCodexParams {
+                    model_id: extract_string(entry, &["model", "modelId", "model_id"]),
+                    reasoning_effort: extract_string(
+                        entry,
+                        &["effort", "reasoningEffort", "reasoning_effort"],
+                    ),
+                    collaboration_mode_id: extract_string(
+                        entry,
+                        &["collaborationModeId", "collaboration_mode_id"],
+                    ),
+                    approval_policy: extract_string(entry, &["approvalPolicy", "approval_policy"]),
+                    service_tier: extract_string(entry, &["serviceTier", "service_tier"]),
+                },
             })
         })
         .collect()
@@ -506,6 +534,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn prefers_account_identity_over_requires_auth_flag() {
+        let account = parse_account(&json!({
+            "account": {
+                "type": "chatgpt",
+                "email": "ai@blackwell.page"
+            },
+            "requiresOpenaiAuth": true
+        }));
+        assert_eq!(account.status, AccountStatus::Ready);
+        assert_eq!(account.label, "ai@blackwell.page");
+    }
+
+    #[test]
     fn parses_models_from_array() {
         let models = parse_models(&json!([
             {"id": "o3", "title": "o3", "isDefault": true}
@@ -522,5 +563,41 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(plan.steps[0].step, "Build daemon");
+    }
+
+    #[test]
+    fn parses_thread_codex_params_from_thread_list_entries() {
+        let threads = parse_threads(
+            "workspace-1",
+            &json!([{
+                "id": "thread-1",
+                "title": "Hello",
+                "model": "gpt-5.4",
+                "effort": "high",
+                "collaborationModeId": "plan",
+                "approvalPolicy": "on-request",
+                "serviceTier": "fast"
+            }]),
+        );
+
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].codex.model_id.as_deref(), Some("gpt-5.4"));
+        assert_eq!(threads[0].codex.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            threads[0].codex.collaboration_mode_id.as_deref(),
+            Some("plan")
+        );
+        assert_eq!(
+            threads[0].codex.approval_policy.as_deref(),
+            Some("on-request")
+        );
+        assert_eq!(threads[0].codex.service_tier.as_deref(), Some("fast"));
+    }
+
+    #[test]
+    fn marks_account_unknown_when_identity_is_missing() {
+        let account = parse_account(&json!({}));
+        assert_eq!(account.status, AccountStatus::Unknown);
+        assert_eq!(account.label, "Account status unknown");
     }
 }
