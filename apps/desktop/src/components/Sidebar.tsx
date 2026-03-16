@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import { FolderPlus, LoaderCircle } from 'lucide-react'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
@@ -6,7 +5,6 @@ import { WorkspaceGroup, ThreadItem } from '@falcondeck/chat-ui'
 import {
   Button,
   EmptyState,
-  Input,
   Sidebar as SidebarShell,
   SidebarContent,
   SidebarHeader,
@@ -24,7 +22,7 @@ export type DesktopSidebarProps = {
   selectedThreadId: string | null
   onSelectWorkspace: (workspaceId: string, threadId: string | null) => void
   onSelectThread: (workspaceId: string, threadId: string) => void
-  onAddProject: (path: string) => Promise<void>
+  onAddProject: () => void
   isAddingProject: boolean
 }
 
@@ -51,26 +49,6 @@ export function DesktopSidebar({
   onAddProject,
   isAddingProject,
 }: DesktopSidebarProps) {
-  const [workspacePath, setWorkspacePath] = useState('')
-  const [showAddProject, setShowAddProject] = useState(false)
-
-  async function handleAdd() {
-    if (workspacePath.trim()) {
-      await onAddProject(workspacePath.trim())
-      setWorkspacePath('')
-      setShowAddProject(false)
-      return
-    }
-
-    if (!window.__TAURI_INTERNALS__) return
-    const { open } = await import('@tauri-apps/plugin-dialog')
-    const selected = await open({ directory: true, multiple: false, title: 'Add Project' })
-    if (typeof selected === 'string' && selected.trim()) {
-      await onAddProject(selected.trim())
-      setShowAddProject(false)
-    }
-  }
-
   return (
     <SidebarShell>
       <SidebarHeader>
@@ -81,8 +59,8 @@ export function DesktopSidebar({
               size="md"
               pulse={connectionState === 'connecting'}
             />
-            <span className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.12em] text-fg-muted">
-              FalconDeck
+            <span className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
+              Threads
             </span>
           </div>
           <Button
@@ -90,27 +68,16 @@ export function DesktopSidebar({
             variant="ghost"
             size="icon"
             className="h-7 w-7"
-            onClick={() => setShowAddProject((prev) => !prev)}
+            onClick={onAddProject}
+            disabled={isAddingProject}
           >
-            <FolderPlus className="h-4 w-4" />
+            {isAddingProject ? (
+              <LoaderCircle className="h-4 w-4 animate-spin" />
+            ) : (
+              <FolderPlus className="h-4 w-4" />
+            )}
           </Button>
         </div>
-
-        {showAddProject ? (
-          <div className="flex gap-2">
-            <Input
-              value={workspacePath}
-              onChange={(event) => setWorkspacePath(event.target.value)}
-              placeholder="/path/to/project"
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') void handleAdd()
-              }}
-            />
-            <Button type="button" size="sm" onClick={() => void handleAdd()} disabled={isAddingProject}>
-              {isAddingProject ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : 'Add'}
-            </Button>
-          </div>
-        ) : null}
 
         {connectionError ? (
           <p className="text-[length:var(--fd-text-xs)] text-danger">{connectionError}</p>
@@ -121,7 +88,7 @@ export function DesktopSidebar({
       </SidebarHeader>
 
       <SidebarContent>
-        <div className="space-y-3">
+        <div className="space-y-4">
           {groups.map((group) => (
             <WorkspaceGroup
               key={group.workspace.id}
@@ -135,7 +102,7 @@ export function DesktopSidebar({
               }
             >
               {group.threads.length === 0 ? (
-                <EmptyState title="No threads yet" className="py-4" />
+                <p className="py-2 pl-2 text-[length:var(--fd-text-xs)] text-fg-muted">No threads yet</p>
               ) : null}
               {group.threads.map((thread) => (
                 <ThreadItem

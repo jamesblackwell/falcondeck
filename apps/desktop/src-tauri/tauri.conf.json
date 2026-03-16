@@ -14,7 +14,7 @@
       {
         "label": "main",
         "title": "FalconDeck",
-        "titleBarStyle": "overlay",
+        "titleBarStyle": "Overlay",
         "hiddenTitle": true,
         "width": 1520,
         "height": 980,

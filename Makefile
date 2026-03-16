@@ -15,7 +15,8 @@ UI_PORT ?= 1420
 REMOTE_WEB_PORT ?= 4174
 RELAY_BIND_HOST ?= 0.0.0.0
 CODEX_BIN ?= codex
-TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(node -p "process.platform + '-' + process.arch")
+TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
+TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
 
 .DEFAULT_GOAL := help
 
@@ -59,11 +60,11 @@ desktop-prepare:
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
 		fi; \
-		if ! cd "$(DESKTOP_DIR)" && node -e "require('@tauri-apps/cli')"; then \
+		if ! (cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')"); then \
 			echo "Retrying workspace install after native binding check failed"; \
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
-			cd "$(DESKTOP_DIR)" && node -e "require('@tauri-apps/cli')"; \
+			(cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')"); \
 		fi
 
 remote-web-prepare:
@@ -105,10 +106,10 @@ dev: desktop-prepare remote-web-prepare
 			fi; \
 		fi; \
 		trap 'if [ -n "$$remote_web_pid" ]; then kill $$remote_web_pid 2>/dev/null || true; fi; if [ -n "$$relay_pid" ]; then kill $$relay_pid 2>/dev/null || true; fi' EXIT INT TERM; \
-		$(NPM) run tauri:dev
+		$(TAURI_DEV)
 
 desktop-dev: desktop-prepare
-	$(NPM) run tauri:dev
+	@$(TAURI_DEV)
 
 frontend-dev: desktop-prepare
 	$(NPM) run dev

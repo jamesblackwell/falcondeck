@@ -176,10 +176,20 @@ export default function App() {
     return () => window.clearInterval(interval)
   }, [api, remoteStatus?.status])
 
-  async function handleAddProject(path: string) {
+  async function handleAddProject() {
     if (!api) return
     setIsAddingProject(true)
     try {
+      let path: string | null = null
+      if (window.__TAURI_INTERNALS__) {
+        const { open } = await import('@tauri-apps/plugin-dialog')
+        const selected = await open({ directory: true, multiple: false, title: 'Add Project' })
+        if (typeof selected === 'string') path = selected.trim()
+      }
+      if (!path) {
+        setIsAddingProject(false)
+        return
+      }
       const workspace = await api.connectWorkspace(path)
       const nextSnapshot = await api.snapshot()
       setSnapshot(nextSnapshot)
