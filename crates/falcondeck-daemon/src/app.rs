@@ -350,7 +350,7 @@ impl AppState {
             account,
             models,
             collaboration_modes,
-            threads,
+            mut threads,
         } = CodexSession::connect(
             workspace_id.clone(),
             path_string.clone(),
@@ -360,7 +360,8 @@ impl AppState {
         .await?;
 
         let now = Utc::now();
-        let current_thread_id = threads.first().map(|thread| thread.id.clone());
+        threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
+        let current_thread_id = threads.first().map(|thread| thread.summary.id.clone());
         let summary = WorkspaceSummary {
             id: workspace_id.clone(),
             path: path_string,
@@ -386,7 +387,12 @@ impl AppState {
                 collaboration_modes,
                 threads: threads
                     .into_iter()
-                    .map(|thread| (thread.id.clone(), ManagedThread::new(thread)))
+                    .map(|thread| {
+                        (
+                            thread.summary.id.clone(),
+                            ManagedThread::with_items(thread.summary, thread.items),
+                        )
+                    })
                     .collect(),
             },
         );
@@ -707,10 +713,9 @@ impl AppState {
 
         if let Err(error) = result {
             let mut remote = self.inner.remote.lock().await;
-            let should_clear_pairing = remote
-                .pairing
-                .as_ref()
-                .is_some_and(|pairing| pairing.session_id.is_none() && pairing.expires_at <= Utc::now());
+            let should_clear_pairing = remote.pairing.as_ref().is_some_and(|pairing| {
+                pairing.session_id.is_none() && pairing.expires_at <= Utc::now()
+            });
             remote.status = if should_clear_pairing {
                 RemoteConnectionStatus::Inactive
             } else {
@@ -1974,6 +1979,27 @@ impl ManagedThread {
             tool_items: HashMap::new(),
         }
     }
+
+    fn with_items(summary: ThreadSummary, items: Vec<ConversationItem>) -> Self {
+        let mut thread = Self::new(summary);
+        for (index, item) in items.into_iter().enumerate() {
+            let id = conversation_item_identity(&item).to_string();
+            match &item {
+                ConversationItem::AssistantMessage { .. } => {
+                    thread.assistant_items.insert(id, index);
+                }
+                ConversationItem::Reasoning { .. } => {
+                    thread.reasoning_items.insert(id, index);
+                }
+                ConversationItem::ToolCall { .. } => {
+                    thread.tool_items.insert(id, index);
+                }
+                _ => {}
+            }
+            thread.items.push(item);
+        }
+        thread
+    }
 }
 
 impl AppState {
@@ -2371,8 +2397,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        codex_inputs, collaboration_mode_payload, should_surface_tool_item,
-        workspace_status_after_account_update, AppState, PersistedAppState, PersistedRemoteState,
+        AppState, PersistedAppState, PersistedRemoteState, codex_inputs,
+        collaboration_mode_payload, should_surface_tool_item,
+        workspace_status_after_account_update,
     };
 
     #[test]
@@ -2459,12 +2486,9 @@ mod tests {
             }),
         };
 
-        tokio::fs::write(
-            &state_path,
-            serde_json::to_vec_pretty(&persisted).unwrap(),
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+            .await
+            .unwrap();
 
         let app = AppState::new_with_state_path(
             "test".to_string(),
@@ -2474,7 +2498,10 @@ mod tests {
         app.restore_local_state().await.unwrap();
 
         let remote = app.inner.remote.lock().await;
-        assert_eq!(remote.status, falcondeck_core::RemoteConnectionStatus::Inactive);
+        assert_eq!(
+            remote.status,
+            falcondeck_core::RemoteConnectionStatus::Inactive
+        );
         assert!(remote.relay_url.is_none());
         assert!(remote.daemon_token.is_none());
         assert!(remote.pairing.is_none());

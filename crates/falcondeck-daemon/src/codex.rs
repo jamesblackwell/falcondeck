@@ -10,8 +10,9 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    AccountStatus, AccountSummary, CollaborationModeSummary, ModelSummary, ReasoningEffortSummary,
-    ThreadCodexParams, ThreadPlan, ThreadStatus, ThreadSummary,
+    AccountStatus, AccountSummary, CollaborationModeSummary, ConversationItem, ImageInput,
+    ModelSummary, ReasoningEffortSummary, ThreadCodexParams, ThreadPlan, ThreadStatus,
+    ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -28,7 +29,12 @@ pub struct CodexBootstrap {
     pub account: AccountSummary,
     pub models: Vec<ModelSummary>,
     pub collaboration_modes: Vec<CollaborationModeSummary>,
-    pub threads: Vec<ThreadSummary>,
+    pub threads: Vec<HydratedThread>,
+}
+
+pub struct HydratedThread {
+    pub summary: ThreadSummary,
+    pub items: Vec<ConversationItem>,
 }
 
 pub struct CodexSession {
@@ -153,7 +159,21 @@ impl CodexSession {
                 }),
             )
             .await?;
-        let threads = parse_threads(&workspace_id, &threads_value);
+        let thread_summaries = parse_threads(&workspace_id, &threads_value);
+        let mut threads = Vec::with_capacity(thread_summaries.len());
+        for summary in thread_summaries {
+            let (summary, items) = match session.read_thread(&summary.id).await {
+                Ok(value) => {
+                    let items = hydrate_thread_items(&value);
+                    (hydrate_thread_summary(summary, &value, &items), items)
+                }
+                Err(error) => {
+                    warn!("failed to read codex thread {}: {error}", summary.id);
+                    (summary, Vec::new())
+                }
+            };
+            threads.push(HydratedThread { summary, items });
+        }
 
         Ok(CodexBootstrap {
             session,
@@ -204,6 +224,11 @@ impl CodexSession {
         stdin.write_all(b"\n").await?;
         stdin.flush().await?;
         Ok(())
+    }
+
+    pub async fn read_thread(&self, thread_id: &str) -> Result<Value, DaemonError> {
+        self.send_request("thread/read", json!({ "threadId": thread_id }))
+            .await
     }
 
     pub async fn respond_to_request(
@@ -457,7 +482,20 @@ fn parse_threads(workspace_id: &str, value: &Value) -> Vec<ThreadSummary> {
                 workspace_id: workspace_id.to_string(),
                 title: extract_thread_title(entry).unwrap_or_else(|| "Untitled thread".to_string()),
                 status: ThreadStatus::Idle,
-                updated_at: now,
+                updated_at: extract_datetime(
+                    entry,
+                    &[
+                        "updatedAt",
+                        "updated_at",
+                        "lastUpdatedAt",
+                        "last_updated_at",
+                        "completedAt",
+                        "completed_at",
+                        "startedAt",
+                        "started_at",
+                    ],
+                )
+                .unwrap_or(now),
                 last_message_preview: None,
                 latest_turn_id: None,
                 latest_plan: None,
@@ -480,6 +518,310 @@ fn parse_threads(workspace_id: &str, value: &Value) -> Vec<ThreadSummary> {
             })
         })
         .collect()
+}
+
+fn extract_thread_record(value: &Value) -> Option<&Value> {
+    fn walk<'a>(value: &'a Value) -> Option<&'a Value> {
+        if value
+            .as_object()
+            .is_some_and(|record| record.contains_key("turns"))
+        {
+            return Some(value);
+        }
+
+        if let Some(thread) = value.get("thread") {
+            if let Some(found) = walk(thread) {
+                return Some(found);
+            }
+        }
+
+        if let Some(object) = value.as_object() {
+            for key in ["result", "data", "items", "results"] {
+                if let Some(nested) = object.get(key) {
+                    if let Some(array) = nested.as_array() {
+                        for entry in array {
+                            if let Some(found) = walk(entry) {
+                                return Some(found);
+                            }
+                        }
+                    } else if let Some(found) = walk(nested) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    walk(value)
+}
+
+fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
+    let Some(thread) = extract_thread_record(value) else {
+        return Vec::new();
+    };
+    let turns = thread
+        .get("turns")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut items = Vec::new();
+    for turn in turns {
+        let turn_items = turn
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for item in turn_items {
+            if let Some(converted) = build_conversation_item_from_thread_item(&item) {
+                items.push(converted);
+            }
+        }
+    }
+
+    items
+}
+
+fn hydrate_thread_summary(
+    mut summary: ThreadSummary,
+    value: &Value,
+    items: &[ConversationItem],
+) -> ThreadSummary {
+    if let Some(last_message) = items.iter().rev().find_map(|item| match item {
+        ConversationItem::AssistantMessage { text, .. }
+        | ConversationItem::UserMessage { text, .. } => Some(text.clone()),
+        _ => None,
+    }) {
+        summary.last_message_preview = Some(truncate_preview(&last_message));
+    }
+
+    if let Some(last_tool) = items.iter().rev().find_map(|item| match item {
+        ConversationItem::ToolCall { title, .. } => Some(title.clone()),
+        _ => None,
+    }) {
+        summary.last_tool = Some(last_tool);
+    }
+
+    if let Some(last_error) = items.iter().rev().find_map(|item| match item {
+        ConversationItem::ToolCall { status, output, .. }
+            if status.eq_ignore_ascii_case("error") =>
+        {
+            Some(output.clone().unwrap_or_else(|| "Tool failed".to_string()))
+        }
+        ConversationItem::Service { level, message, .. }
+            if matches!(level, falcondeck_core::ServiceLevel::Error) =>
+        {
+            Some(message.clone())
+        }
+        _ => None,
+    }) {
+        summary.last_error = Some(last_error);
+    }
+
+    if let Some(thread) = extract_thread_record(value) {
+        let turns = thread
+            .get("turns")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(last_turn) = turns.last() {
+            summary.latest_turn_id = extract_string(last_turn, &["id"]);
+            if let Some(status) = extract_string(last_turn, &["status"]) {
+                summary.status = thread_status_from_turn_status(&status);
+            }
+            if let Some(updated_at) = extract_datetime(
+                last_turn,
+                &["completedAt", "completed_at", "startedAt", "started_at"],
+            ) {
+                summary.updated_at = updated_at;
+            } else if let Some(updated_at) =
+                items.iter().filter_map(conversation_item_created_at).max()
+            {
+                summary.updated_at = updated_at;
+            }
+        } else if let Some(updated_at) = items.iter().filter_map(conversation_item_created_at).max()
+        {
+            summary.updated_at = updated_at;
+        }
+    }
+
+    summary
+}
+
+fn thread_status_from_turn_status(status: &str) -> ThreadStatus {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "inprogress" | "in_progress" | "running" => ThreadStatus::Running,
+        "error" | "failed" => ThreadStatus::Error,
+        _ => ThreadStatus::Idle,
+    }
+}
+
+fn build_conversation_item_from_thread_item(item: &Value) -> Option<ConversationItem> {
+    let id = extract_string(item, &["id"])?;
+    let item_type = extract_string(item, &["type"])?;
+    let created_at =
+        extract_datetime(item, &["createdAt", "created_at", "timestamp"]).unwrap_or_else(Utc::now);
+
+    match item_type.as_str() {
+        "userMessage" => {
+            let content = item
+                .get("content")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let (text, attachments) = parse_user_message_content(&id, &content);
+            Some(ConversationItem::UserMessage {
+                id,
+                text,
+                attachments,
+                created_at,
+            })
+        }
+        "agentMessage" => Some(ConversationItem::AssistantMessage {
+            id,
+            text: extract_string(item, &["text"]).unwrap_or_default(),
+            created_at,
+        }),
+        "reasoning" => Some(ConversationItem::Reasoning {
+            id,
+            summary: thread_item_text(item.get("summary")),
+            content: thread_item_text(item.get("content")).unwrap_or_default(),
+            created_at,
+        }),
+        "commandExecution" | "fileChange" | "webSearch" | "imageView" | "contextCompaction" => {
+            let output = extract_string(item, &["output", "stdout", "result", "detail", "query"]);
+            Some(ConversationItem::ToolCall {
+                id,
+                title: thread_tool_title(&item_type),
+                tool_kind: item_type.clone(),
+                status: extract_string(item, &["status"])
+                    .unwrap_or_else(|| "completed".to_string()),
+                output,
+                exit_code: item
+                    .get("exitCode")
+                    .or_else(|| item.get("exit_code"))
+                    .and_then(Value::as_i64)
+                    .map(|value| value as i32),
+                created_at,
+                completed_at: extract_datetime(item, &["completedAt", "completed_at"]),
+            })
+        }
+        "enteredReviewMode" | "exitedReviewMode" => Some(ConversationItem::Service {
+            id,
+            level: falcondeck_core::ServiceLevel::Info,
+            message: if item_type == "enteredReviewMode" {
+                "Review mode enabled".to_string()
+            } else {
+                "Review mode completed".to_string()
+            },
+            created_at,
+        }),
+        _ => None,
+    }
+}
+
+fn parse_user_message_content(item_id: &str, content: &[Value]) -> (String, Vec<ImageInput>) {
+    let mut text_parts = Vec::new();
+    let mut attachments = Vec::new();
+
+    for (index, entry) in content.iter().enumerate() {
+        let Some(item_type) = extract_string(entry, &["type"]) else {
+            continue;
+        };
+        match item_type.as_str() {
+            "text" => {
+                if let Some(text) = extract_string(entry, &["text"]) {
+                    text_parts.push(text);
+                }
+            }
+            "image" | "localImage" => {
+                let local_path = extract_string(entry, &["path"]).filter(|value| !value.is_empty());
+                let url = extract_string(entry, &["url", "value", "data", "source"])
+                    .or_else(|| local_path.clone())
+                    .unwrap_or_default();
+                if !url.is_empty() {
+                    attachments.push(ImageInput {
+                        id: format!("{item_id}-image-{index}"),
+                        name: extract_string(entry, &["name"]),
+                        mime_type: extract_string(entry, &["mimeType", "mime_type"]),
+                        url,
+                        local_path,
+                    });
+                }
+            }
+            "skill" => {
+                if let Some(name) = extract_string(entry, &["name"]) {
+                    text_parts.push(format!("${name}"));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (text_parts.join(" ").trim().to_string(), attachments)
+}
+
+fn extract_datetime(value: &Value, keys: &[&str]) -> Option<chrono::DateTime<Utc>> {
+    let raw = extract_string(value, keys)?;
+    chrono::DateTime::parse_from_rfc3339(&raw)
+        .map(|dt| dt.with_timezone(&Utc))
+        .ok()
+}
+
+fn thread_item_text(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+    }
+    if let Some(parts) = value.as_array() {
+        let joined = parts
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return (!joined.is_empty()).then_some(joined);
+    }
+    None
+}
+
+fn thread_tool_title(item_type: &str) -> String {
+    match item_type {
+        "commandExecution" => "Command execution",
+        "fileChange" => "File change",
+        "webSearch" => "Web search",
+        "imageView" => "Image view",
+        "contextCompaction" => "Context compaction",
+        _ => "Tool",
+    }
+    .to_string()
+}
+
+fn truncate_preview(text: &str) -> String {
+    const MAX_PREVIEW_CHARS: usize = 96;
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= MAX_PREVIEW_CHARS {
+        return trimmed.to_string();
+    }
+    let preview = trimmed.chars().take(MAX_PREVIEW_CHARS).collect::<String>();
+    format!("{preview}...")
+}
+
+fn conversation_item_created_at(item: &ConversationItem) -> Option<chrono::DateTime<Utc>> {
+    Some(match item {
+        ConversationItem::UserMessage { created_at, .. }
+        | ConversationItem::AssistantMessage { created_at, .. }
+        | ConversationItem::Reasoning { created_at, .. }
+        | ConversationItem::ToolCall { created_at, .. }
+        | ConversationItem::Plan { created_at, .. }
+        | ConversationItem::Diff { created_at, .. }
+        | ConversationItem::Service { created_at, .. }
+        | ConversationItem::Approval { created_at, .. } => *created_at,
+    })
 }
 
 pub fn extract_thread_id(value: &Value) -> Option<String> {
@@ -572,6 +914,7 @@ mod tests {
             &json!([{
                 "id": "thread-1",
                 "title": "Hello",
+                "updatedAt": "2026-03-16T11:00:00Z",
                 "model": "gpt-5.4",
                 "effort": "high",
                 "collaborationModeId": "plan",
@@ -592,6 +935,10 @@ mod tests {
             Some("on-request")
         );
         assert_eq!(threads[0].codex.service_tier.as_deref(), Some("fast"));
+        assert_eq!(
+            threads[0].updated_at.to_rfc3339(),
+            "2026-03-16T11:00:00+00:00"
+        );
     }
 
     #[test]
@@ -599,5 +946,215 @@ mod tests {
         let account = parse_account(&json!({}));
         assert_eq!(account.status, AccountStatus::Unknown);
         assert_eq!(account.label, "Account status unknown");
+    }
+
+    #[test]
+    fn hydrates_thread_items_from_thread_read() {
+        let items = hydrate_thread_items(&json!({
+            "result": {
+                "data": [{
+                    "thread": {
+                        "turns": [{
+                            "items": [
+                                {
+                                    "id": "user-1",
+                                    "type": "userMessage",
+                                    "createdAt": "2026-03-16T10:00:00Z",
+                                    "content": [
+                                        {"type": "text", "text": "Summarise recent commits"},
+                                        {"type": "localImage", "path": "/tmp/screenshot.png"}
+                                    ]
+                                },
+                                {
+                                    "id": "reasoning-1",
+                                    "type": "reasoning",
+                                    "summary": ["Looking at git state"],
+                                    "content": ["Collecting commit history"],
+                                    "createdAt": "2026-03-16T10:00:01Z"
+                                },
+                                {
+                                    "id": "tool-1",
+                                    "type": "commandExecution",
+                                    "status": "completed",
+                                    "output": "ok",
+                                    "createdAt": "2026-03-16T10:00:02Z",
+                                    "completedAt": "2026-03-16T10:00:03Z"
+                                },
+                                {
+                                    "id": "assistant-1",
+                                    "type": "agentMessage",
+                                    "text": "Here are the recent commits.",
+                                    "createdAt": "2026-03-16T10:00:04Z"
+                                }
+                            ]
+                        }]
+                    }
+                }]
+            }
+        }));
+
+        assert_eq!(items.len(), 4);
+        match &items[0] {
+            ConversationItem::UserMessage {
+                text, attachments, ..
+            } => {
+                assert_eq!(text, "Summarise recent commits");
+                assert_eq!(
+                    attachments[0].local_path.as_deref(),
+                    Some("/tmp/screenshot.png")
+                );
+            }
+            other => panic!("expected user message, got {other:?}"),
+        }
+        match &items[1] {
+            ConversationItem::Reasoning {
+                summary, content, ..
+            } => {
+                assert_eq!(summary.as_deref(), Some("Looking at git state"));
+                assert_eq!(content, "Collecting commit history");
+            }
+            other => panic!("expected reasoning item, got {other:?}"),
+        }
+        match &items[2] {
+            ConversationItem::ToolCall { title, output, .. } => {
+                assert_eq!(title, "Command execution");
+                assert_eq!(output.as_deref(), Some("ok"));
+            }
+            other => panic!("expected tool item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hydrates_thread_summary_from_restored_items() {
+        let thread_read = json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-1",
+                    "status": "completed",
+                    "completedAt": "2026-03-16T10:00:05Z"
+                }]
+            }
+        });
+        let summary = hydrate_thread_summary(
+            ThreadSummary {
+                id: "thread-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                title: "Restored".to_string(),
+                status: ThreadStatus::Idle,
+                updated_at: Utc::now(),
+                last_message_preview: None,
+                latest_turn_id: None,
+                latest_plan: None,
+                latest_diff: None,
+                last_tool: None,
+                last_error: None,
+                codex: ThreadCodexParams::default(),
+            },
+            &thread_read,
+            &[
+                ConversationItem::Reasoning {
+                    id: "reasoning-1".to_string(),
+                    summary: Some("Thinking".to_string()),
+                    content: "Working".to_string(),
+                    created_at: Utc::now(),
+                },
+                ConversationItem::ToolCall {
+                    id: "tool-1".to_string(),
+                    title: "Command execution".to_string(),
+                    tool_kind: "commandExecution".to_string(),
+                    status: "completed".to_string(),
+                    output: Some("done".to_string()),
+                    exit_code: Some(0),
+                    created_at: Utc::now(),
+                    completed_at: Some(Utc::now()),
+                },
+                ConversationItem::AssistantMessage {
+                    id: "assistant-1".to_string(),
+                    text: "Here are the recent changes in this project.".to_string(),
+                    created_at: Utc::now(),
+                },
+            ],
+        );
+
+        assert_eq!(summary.status, ThreadStatus::Idle);
+        assert_eq!(summary.latest_turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(summary.last_tool.as_deref(), Some("Command execution"));
+        assert_eq!(
+            summary.last_message_preview.as_deref(),
+            Some("Here are the recent changes in this project.")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_latest_item_timestamp_when_turn_timestamp_is_missing() {
+        let summary = hydrate_thread_summary(
+            ThreadSummary {
+                id: "thread-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                title: "Restored".to_string(),
+                status: ThreadStatus::Idle,
+                updated_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T09:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                last_message_preview: None,
+                latest_turn_id: None,
+                latest_plan: None,
+                latest_diff: None,
+                last_tool: None,
+                last_error: None,
+                codex: ThreadCodexParams::default(),
+            },
+            &json!({ "thread": { "turns": [{ "id": "turn-1", "status": "completed" }] } }),
+            &[ConversationItem::AssistantMessage {
+                id: "assistant-1".to_string(),
+                text: "Fresh message".to_string(),
+                created_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            }],
+        );
+
+        assert_eq!(summary.updated_at.to_rfc3339(), "2026-03-16T10:00:00+00:00");
+    }
+
+    #[test]
+    fn ignores_non_error_service_items_when_deriving_last_error() {
+        let summary = hydrate_thread_summary(
+            ThreadSummary {
+                id: "thread-1".to_string(),
+                workspace_id: "workspace-1".to_string(),
+                title: "Restored".to_string(),
+                status: ThreadStatus::Idle,
+                updated_at: Utc::now(),
+                last_message_preview: None,
+                latest_turn_id: None,
+                latest_plan: None,
+                latest_diff: None,
+                last_tool: None,
+                last_error: None,
+                codex: ThreadCodexParams::default(),
+            },
+            &json!({ "thread": { "turns": [] } }),
+            &[ConversationItem::Service {
+                id: "svc-1".to_string(),
+                level: falcondeck_core::ServiceLevel::Info,
+                message: "Review mode completed".to_string(),
+                created_at: Utc::now(),
+            }],
+        );
+
+        assert!(summary.last_error.is_none());
+    }
+
+    #[test]
+    fn maps_canceled_turn_statuses_back_to_idle() {
+        assert_eq!(
+            thread_status_from_turn_status("canceled"),
+            ThreadStatus::Idle
+        );
+        assert_eq!(
+            thread_status_from_turn_status("cancelled"),
+            ThreadStatus::Idle
+        );
     }
 }
