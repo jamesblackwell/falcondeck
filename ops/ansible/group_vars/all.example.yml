@@ -23,5 +23,17 @@ falcondeck_repo_src: ~/src/falcondeck
 # Remote checkout/build path used by Ansible
 falcondeck_repo_dest: /usr/local/src/falcondeck
 
+# Optional PostgreSQL-backed relay storage (recommended for production)
+falcondeck_relay_postgres_enabled: false
+falcondeck_relay_postgres_managed: false
+falcondeck_relay_postgres_host: 127.0.0.1
+falcondeck_relay_postgres_port: 5432
+falcondeck_relay_postgres_db: falcondeck_relay
+falcondeck_relay_postgres_user: falcondeck_relay
+falcondeck_relay_postgres_password: change-me
+
+# Optional explicit database URL; when set, this takes precedence over the structured vars above
+falcondeck_relay_database_url: ""
+
 # Optional extra env vars for the relay service
 falcondeck_relay_env: {}

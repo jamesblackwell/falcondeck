@@ -247,10 +247,39 @@ export type GitDiffResponse = {
 
 export type RemoteConnectionStatus =
   | 'inactive'
-  | 'waiting_for_claim'
+  | 'pairing_pending'
+  | 'device_trusted'
   | 'connecting'
   | 'connected'
+  | 'degraded'
+  | 'offline'
+  | 'revoked'
   | 'error'
+
+export type TrustedDeviceStatus = 'active' | 'revoked'
+
+export type TrustedDevice = {
+  device_id: string
+  session_id: string
+  label: string | null
+  status: TrustedDeviceStatus
+  created_at: string
+  last_seen_at: string | null
+  revoked_at: string | null
+}
+
+export type MachinePresence = {
+  session_id: string
+  daemon_connected: boolean
+  last_seen_at: string | null
+}
+
+export type SyncCursor = {
+  session_id: string
+  next_seq: number
+  last_acknowledged_seq: number
+  requires_bootstrap: boolean
+}
 
 export type RemotePairingSession = {
   pairing_id: string
@@ -263,7 +292,16 @@ export type RemoteStatusResponse = {
   status: RemoteConnectionStatus
   relay_url: string | null
   pairing: RemotePairingSession | null
+  trusted_devices: TrustedDevice[]
+  presence: MachinePresence | null
   last_error: string | null
+}
+
+export type ClaimPairingResponse = {
+  session_id: string
+  device_id: string
+  client_token: string
+  trusted_device: TrustedDevice
 }
 
 export type EncryptionVariant = 'data_key_v1'
@@ -294,6 +332,8 @@ export type EncryptedEnvelope = {
 export type RelayUpdateBody =
   | { t: 'session-bootstrap'; material: SessionKeyMaterial }
   | { t: 'encrypted'; envelope: EncryptedEnvelope }
+  | { t: 'action-status'; action: QueuedRemoteAction }
+  | { t: 'presence'; presence: MachinePresence }
 
 export type RelayUpdate = {
   id: string
@@ -302,11 +342,48 @@ export type RelayUpdate = {
   created_at: string
 }
 
+export type RelayUpdatesResponse = {
+  session_id: string
+  updates: RelayUpdate[]
+  next_seq: number
+  cursor: SyncCursor
+  presence: MachinePresence
+}
+
+export type QueuedRemoteActionStatus =
+  | 'queued'
+  | 'dispatched'
+  | 'executing'
+  | 'completed'
+  | 'failed'
+
+export type QueuedRemoteAction = {
+  action_id: string
+  session_id: string
+  device_id: string
+  action_type: string
+  idempotency_key: string
+  status: QueuedRemoteActionStatus
+  created_at: string
+  updated_at: string
+  error: string | null
+  result: EncryptedEnvelope | null
+}
+
+export type SubmitQueuedActionRequest = {
+  idempotency_key: string
+  action_type: string
+  payload: EncryptedEnvelope
+}
+
 export type RelayServerMessage =
   | { type: 'ready'; session_id: string; role: 'daemon' | 'client'; next_seq: number }
   | { type: 'pong' }
   | { type: 'sync'; updates: RelayUpdate[]; next_seq: number }
   | { type: 'update'; update: RelayUpdate }
+  | { type: 'action-requested'; action: QueuedRemoteAction; payload: EncryptedEnvelope }
+  | { type: 'action-updated'; action: QueuedRemoteAction }
+  | { type: 'presence'; presence: MachinePresence }
   | { type: 'ephemeral'; body: unknown }
   | { type: 'rpc-request'; request_id: string; method: string; params: EncryptedEnvelope }
   | {
@@ -319,9 +396,12 @@ export type RelayServerMessage =
   | { type: 'error'; message: string }
 
 export type RelayClientMessage =
+  | { type: 'ping' }
   | { type: 'sync'; after_seq?: number | null }
   | { type: 'update'; body: RelayUpdateBody }
+  | { type: 'ephemeral'; body: unknown }
   | { type: 'rpc-register'; method: string }
+  | { type: 'rpc-unregister'; method: string }
   | { type: 'rpc-call'; request_id: string; method: string; params: EncryptedEnvelope }
   | {
       type: 'rpc-result'
@@ -329,4 +409,11 @@ export type RelayClientMessage =
       ok: boolean
       result?: EncryptedEnvelope | null
       error?: EncryptedEnvelope | null
+    }
+  | {
+      type: 'action-update'
+      action_id: string
+      status: QueuedRemoteActionStatus
+      error?: string | null
+      result?: EncryptedEnvelope | null
     }

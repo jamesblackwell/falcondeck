@@ -8,4 +8,12 @@ falcondeck_relay_data_dir: /var/lib/falcondeck/relay
 falcondeck_repo_dest: /usr/local/src/falcondeck
 falcondeck_relay_bind_host: 127.0.0.1
 falcondeck_relay_port: 8787
+falcondeck_relay_postgres_enabled: false
+falcondeck_relay_postgres_managed: false
+falcondeck_relay_postgres_host: 127.0.0.1
+falcondeck_relay_postgres_port: 5432
+falcondeck_relay_postgres_db: falcondeck_relay
+falcondeck_relay_postgres_user: falcondeck_relay
+falcondeck_relay_postgres_password: ""
+falcondeck_relay_database_url: ""
 falcondeck_relay_env: {}

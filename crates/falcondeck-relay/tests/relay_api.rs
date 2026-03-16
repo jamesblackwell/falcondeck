@@ -5,7 +5,7 @@ use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
     PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
     RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
-    StartPairingResponse,
+    StartPairingResponse, SubmitQueuedActionRequest, TrustedDevicesResponse,
     crypto::{LocalBoxKeyPair, encrypt_json, generate_data_key},
 };
 use falcondeck_relay::{AppState, router};
@@ -38,8 +38,11 @@ async fn pairing_flow_and_history_round_trip() {
         &StartPairingRequest {
             label: Some("James Mac".to_string()),
             ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
             daemon_bundle: Some(test_bundle()),
         },
+        None,
     )
     .await;
 
@@ -60,6 +63,7 @@ async fn pairing_flow_and_history_round_trip() {
             label: Some("Phone".to_string()),
             client_bundle: Some(test_bundle()),
         },
+        None,
     )
     .await;
 
@@ -88,6 +92,64 @@ async fn pairing_flow_and_history_round_trip() {
     .await;
     assert!(updates.updates.is_empty());
     assert_eq!(updates.next_seq, 1);
+}
+
+#[tokio::test]
+async fn additional_pairings_attach_new_devices_to_the_same_session() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, first_claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let second_pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: Some(pairing.session_id.clone()),
+            daemon_token: Some(pairing.daemon_token.clone()),
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    assert_eq!(second_pairing.session_id, pairing.session_id);
+    assert_eq!(second_pairing.daemon_token, pairing.daemon_token);
+
+    let second_claim = post_json::<_, ClaimPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings/claim", server.http_base),
+        &ClaimPairingRequest {
+            pairing_code: second_pairing.pairing_code,
+            label: Some("tablet".to_string()),
+            client_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    assert_eq!(second_claim.session_id, first_claim.session_id);
+    assert_ne!(second_claim.device_id, first_claim.device_id);
+
+    let devices = get_json::<TrustedDevicesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/devices",
+            server.http_base, first_claim.session_id
+        ),
+        Some(&pairing.daemon_token),
+    )
+    .await;
+    assert_eq!(devices.devices.len(), 2);
+    assert_eq!(
+        devices
+            .devices
+            .iter()
+            .filter(|device| device.status == falcondeck_core::TrustedDeviceStatus::Active)
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]
@@ -181,7 +243,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
     .await;
 
     let update = recv_until_update(&mut client_ws).await;
-    assert_eq!(update.seq, 1);
+    assert!(update.seq >= 1);
     assert_eq!(
         update.body,
         RelayUpdateBody::Encrypted {
@@ -197,10 +259,14 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
     let sync = recv_server_message(&mut client_ws).await;
     match sync {
         RelayServerMessage::Sync { updates, next_seq } => {
-            assert_eq!(next_seq, 2);
-            assert_eq!(updates.len(), 1);
+            assert!(next_seq >= 2);
+            let encrypted_updates = updates
+                .iter()
+                .filter(|update| matches!(update.body, RelayUpdateBody::Encrypted { .. }))
+                .collect::<Vec<_>>();
+            assert_eq!(encrypted_updates.len(), 1);
             assert_eq!(
-                updates[0].body,
+                encrypted_updates[0].body,
                 RelayUpdateBody::Encrypted {
                     envelope: test_envelope("abc123"),
                 }
@@ -218,8 +284,13 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
         Some(&claim.client_token),
     )
     .await;
-    assert_eq!(history.updates.len(), 1);
-    assert_eq!(history.next_seq, 2);
+    let encrypted_history = history
+        .updates
+        .iter()
+        .filter(|update| matches!(update.body, RelayUpdateBody::Encrypted { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(encrypted_history.len(), 1);
+    assert!(history.next_seq >= 2);
 
     send_client_message(
         &mut client_ws,
@@ -252,8 +323,11 @@ async fn expired_pairings_cannot_be_claimed() {
         &StartPairingRequest {
             label: None,
             ttl_seconds: Some(1),
+            existing_session_id: None,
+            daemon_token: None,
             daemon_bundle: Some(test_bundle()),
         },
+        None,
     )
     .await;
 
@@ -271,6 +345,126 @@ async fn expired_pairings_cannot_be_claimed() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn queued_actions_are_not_redispatched_while_the_daemon_is_still_connected() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = format!(
+        "{}/v1/updates/ws?session_id={}&token={}",
+        server.ws_base, claim.session_id, pairing.daemon_token
+    );
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    let first_action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "idempotency-1".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("payload-1"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let RelayServerMessage::ActionRequested {
+        action: first_request,
+        ..
+    } = recv_until_action_requested(&mut daemon_ws).await
+    else {
+        unreachable!();
+    };
+    assert_eq!(first_request.action_id, first_action.action_id);
+
+    let second_action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "idempotency-2".to_string(),
+            action_type: "thread.update".to_string(),
+            payload: test_envelope("payload-2"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let RelayServerMessage::ActionRequested {
+        action: second_request,
+        ..
+    } = recv_until_action_requested(&mut daemon_ws).await
+    else {
+        unreachable!();
+    };
+    assert_eq!(second_request.action_id, second_action.action_id);
+
+    let unexpected = timeout(
+        TokioDuration::from_millis(250),
+        recv_until_action_requested(&mut daemon_ws),
+    )
+    .await;
+    assert!(
+        unexpected.is_err(),
+        "first queued action was redispatched unexpectedly"
+    );
+}
+
+#[tokio::test]
+async fn dispatched_actions_are_requeued_after_daemon_disconnect() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = format!(
+        "{}/v1/updates/ws?session_id={}&token={}",
+        server.ws_base, claim.session_id, pairing.daemon_token
+    );
+    let (mut daemon_ws, _) = connect_async(&daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    let action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "idempotency-requeue".to_string(),
+            action_type: "turn.start".to_string(),
+            payload: test_envelope("payload-requeue"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let RelayServerMessage::ActionRequested {
+        action: initial_request,
+        ..
+    } = recv_until_action_requested(&mut daemon_ws).await
+    else {
+        unreachable!();
+    };
+    assert_eq!(initial_request.action_id, action.action_id);
+
+    daemon_ws.close(None).await.unwrap();
+
+    let (mut reconnected_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut reconnected_ws).await;
+    let RelayServerMessage::ActionRequested {
+        action: retried_request,
+        ..
+    } = recv_until_action_requested(&mut reconnected_ws).await
+    else {
+        unreachable!();
+    };
+    assert_eq!(retried_request.action_id, action.action_id);
 }
 
 #[tokio::test]
@@ -312,9 +506,14 @@ async fn persisted_updates_survive_restart() {
         Some(&claim.client_token),
     )
     .await;
-    assert_eq!(history.updates.len(), 1);
+    let encrypted_updates = history
+        .updates
+        .iter()
+        .filter(|update| matches!(update.body, RelayUpdateBody::Encrypted { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(encrypted_updates.len(), 1);
     assert_eq!(
-        history.updates[0].body,
+        encrypted_updates[0].body,
         RelayUpdateBody::Encrypted {
             envelope: test_envelope("persist-me"),
         }
@@ -415,8 +614,11 @@ async fn create_claimed_session(
         &StartPairingRequest {
             label: Some("desktop".to_string()),
             ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
             daemon_bundle: Some(test_bundle()),
         },
+        None,
     )
     .await;
 
@@ -428,20 +630,26 @@ async fn create_claimed_session(
             label: Some("remote-web".to_string()),
             client_bundle: Some(test_bundle()),
         },
+        None,
     )
     .await;
 
     (pairing, claim)
 }
 
-async fn post_json<T, R>(client: &reqwest::Client, url: &str, body: &T) -> R
+async fn post_json<T, R>(client: &reqwest::Client, url: &str, body: &T, bearer: Option<&str>) -> R
 where
     T: serde::Serialize + ?Sized,
     R: DeserializeOwned,
 {
-    client
-        .post(url)
-        .json(body)
+    let request = client.post(url).json(body);
+    let request = if let Some(token) = bearer {
+        request.bearer_auth(token)
+    } else {
+        request
+    };
+
+    request
         .send()
         .await
         .unwrap()
@@ -489,15 +697,44 @@ async fn recv_server_message(
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
 ) -> RelayServerMessage {
-    let message = timeout(TokioDuration::from_secs(5), socket.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let Message::Text(text) = message else {
-        panic!("expected text websocket frame");
-    };
-    serde_json::from_str::<RelayServerMessage>(&text).unwrap()
+    loop {
+        let message = timeout(TokioDuration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let Message::Text(text) = message else {
+            panic!("expected text websocket frame");
+        };
+        let parsed = serde_json::from_str::<RelayServerMessage>(&text).unwrap();
+        match parsed {
+            RelayServerMessage::Presence { .. } | RelayServerMessage::ActionUpdated { .. } => {}
+            RelayServerMessage::Update { ref update }
+                if matches!(
+                    update.body,
+                    RelayUpdateBody::Presence { .. } | RelayUpdateBody::ActionStatus { .. }
+                ) => {}
+            other => return other,
+        }
+    }
+}
+
+async fn recv_until_action_requested(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> falcondeck_core::RelayServerMessage {
+    loop {
+        match recv_server_message(socket).await {
+            message @ RelayServerMessage::ActionRequested { .. } => return message,
+            RelayServerMessage::Pong
+            | RelayServerMessage::RpcRegistered { .. }
+            | RelayServerMessage::RpcUnregistered { .. }
+            | RelayServerMessage::RpcResult { .. }
+            | RelayServerMessage::Update { .. } => {}
+            other => panic!("expected action request, got {other:?}"),
+        }
+    }
 }
 
 async fn recv_until_update(
@@ -510,6 +747,7 @@ async fn recv_until_update(
             RelayServerMessage::Update { update } => return update,
             RelayServerMessage::Pong => {}
             RelayServerMessage::RpcResult { .. } => {}
+            RelayServerMessage::Presence { .. } => {}
             other => panic!("expected update message, got {other:?}"),
         }
     }

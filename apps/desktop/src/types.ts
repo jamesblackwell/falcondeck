@@ -122,9 +122,13 @@ export type TimelineEntry = {
 
 export type RemoteConnectionStatus =
   | 'inactive'
-  | 'waiting_for_claim'
+  | 'pairing_pending'
+  | 'device_trusted'
   | 'connecting'
   | 'connected'
+  | 'degraded'
+  | 'offline'
+  | 'revoked'
   | 'error'
 
 export type RemotePairingSession = {

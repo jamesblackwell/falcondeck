@@ -2,6 +2,10 @@
 Description=FalconDeck Relay
 After=network-online.target
 Wants=network-online.target
+{% if falcondeck_relay_postgres_enabled %}
+After=postgresql.service
+Wants=postgresql.service
+{% endif %}
 
 [Service]
 Type=simple

@@ -15,7 +15,7 @@ const DATA_KEY_BYTES = 32
 const CONTENT_VERSION = 0
 const WRAPPED_KEY_VERSION = 0
 
-function bytesToBase64(bytes: Uint8Array) {
+export function bytesToBase64(bytes: Uint8Array) {
   let binary = ''
   bytes.forEach((byte) => {
     binary += String.fromCharCode(byte)
@@ -82,7 +82,7 @@ export type BoxKeyPair = ReturnType<typeof nacl.box.keyPair>
 
 export type SessionCryptoState = {
   dataKey: Uint8Array
-  material: SessionKeyMaterial
+  material: SessionKeyMaterial | null
 }
 
 export function generateBoxKeyPair() {

@@ -419,18 +419,23 @@ pub struct EncryptedEnvelope {
 pub enum RelayUpdateBody {
     SessionBootstrap { material: SessionKeyMaterial },
     Encrypted { envelope: EncryptedEnvelope },
+    ActionStatus { action: QueuedRemoteAction },
+    Presence { presence: MachinePresence },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StartPairingRequest {
     pub label: Option<String>,
     pub ttl_seconds: Option<u64>,
+    pub existing_session_id: Option<String>,
+    pub daemon_token: Option<String>,
     pub daemon_bundle: Option<PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartPairingResponse {
     pub pairing_id: String,
+    pub session_id: String,
     pub pairing_code: String,
     pub daemon_token: String,
     pub expires_at: DateTime<Utc>,
@@ -446,7 +451,9 @@ pub struct ClaimPairingRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimPairingResponse {
     pub session_id: String,
+    pub device_id: String,
     pub client_token: String,
+    pub trusted_device: TrustedDevice,
     pub daemon_bundle: Option<PairingPublicKeyBundle>,
 }
 
@@ -456,6 +463,7 @@ pub struct PairingStatusResponse {
     pub label: Option<String>,
     pub status: PairingStatus,
     pub session_id: Option<String>,
+    pub device_id: Option<String>,
     pub expires_at: DateTime<Utc>,
     pub daemon_bundle: Option<PairingPublicKeyBundle>,
     pub client_bundle: Option<PairingPublicKeyBundle>,
@@ -474,6 +482,39 @@ pub struct RelayUpdatesQuery {
     pub after_seq: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustedDeviceStatus {
+    Active,
+    Revoked,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrustedDevice {
+    pub device_id: String,
+    pub session_id: String,
+    pub label: Option<String>,
+    pub status: TrustedDeviceStatus,
+    pub created_at: DateTime<Utc>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MachinePresence {
+    pub session_id: String,
+    pub daemon_connected: bool,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SyncCursor {
+    pub session_id: String,
+    pub next_seq: u64,
+    pub last_acknowledged_seq: u64,
+    pub requires_bootstrap: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RelayUpdate {
     pub id: String,
@@ -487,6 +528,46 @@ pub struct RelayUpdatesResponse {
     pub session_id: String,
     pub updates: Vec<RelayUpdate>,
     pub next_seq: u64,
+    pub cursor: SyncCursor,
+    pub presence: MachinePresence,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SubmitQueuedActionRequest {
+    pub idempotency_key: String,
+    pub action_type: String,
+    pub payload: EncryptedEnvelope,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedRemoteActionStatus {
+    Queued,
+    Dispatched,
+    Executing,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QueuedRemoteAction {
+    pub action_id: String,
+    pub session_id: String,
+    pub device_id: String,
+    pub action_type: String,
+    pub idempotency_key: String,
+    pub status: QueuedRemoteActionStatus,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub error: Option<String>,
+    pub result: Option<EncryptedEnvelope>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TrustedDevicesResponse {
+    pub session_id: String,
+    pub devices: Vec<TrustedDevice>,
+    pub presence: MachinePresence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -506,9 +587,13 @@ pub struct RemotePairingSession {
 #[serde(rename_all = "snake_case")]
 pub enum RemoteConnectionStatus {
     Inactive,
-    WaitingForClaim,
+    PairingPending,
+    DeviceTrusted,
     Connecting,
     Connected,
+    Degraded,
+    Offline,
+    Revoked,
     Error,
 }
 
@@ -517,6 +602,8 @@ pub struct RemoteStatusResponse {
     pub status: RemoteConnectionStatus,
     pub relay_url: Option<String>,
     pub pairing: Option<RemotePairingSession>,
+    pub trusted_devices: Vec<TrustedDevice>,
+    pub presence: Option<MachinePresence>,
     pub last_error: Option<String>,
 }
 
@@ -557,6 +644,12 @@ pub enum RelayClientMessage {
         result: Option<EncryptedEnvelope>,
         error: Option<EncryptedEnvelope>,
     },
+    ActionUpdate {
+        action_id: String,
+        status: QueuedRemoteActionStatus,
+        error: Option<String>,
+        result: Option<EncryptedEnvelope>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -594,6 +687,16 @@ pub enum RelayServerMessage {
         ok: bool,
         result: Option<EncryptedEnvelope>,
         error: Option<EncryptedEnvelope>,
+    },
+    ActionRequested {
+        action: QueuedRemoteAction,
+        payload: EncryptedEnvelope,
+    },
+    ActionUpdated {
+        action: QueuedRemoteAction,
+    },
+    Presence {
+        presence: MachinePresence,
     },
     Error {
         message: String,

@@ -12,6 +12,13 @@
   become: false
   register: falcondeck_repo_src_stat
 
+- name: Validate PostgreSQL configuration when enabled
+  ansible.builtin.assert:
+    that:
+      - not falcondeck_relay_postgres_enabled or (falcondeck_relay_database_url | trim | length > 0) or (falcondeck_relay_postgres_password | trim | length > 0)
+    fail_msg: >-
+      Set falcondeck_relay_database_url or falcondeck_relay_postgres_password when enabling PostgreSQL-backed relay storage.
+
 - name: Fail if local repo source is missing
   ansible.builtin.assert:
     that:
@@ -35,6 +42,58 @@
       - --exclude=.DS_Store
   delegate_to: localhost
   become: false
+
+- name: Install PostgreSQL packages
+  ansible.builtin.apt:
+    name:
+      - postgresql
+      - postgresql-client
+    update_cache: true
+    state: present
+  when:
+    - falcondeck_relay_postgres_enabled
+    - falcondeck_relay_postgres_managed
+
+- name: Ensure PostgreSQL service is running
+  ansible.builtin.systemd:
+    name: postgresql
+    enabled: true
+    state: started
+  when:
+    - falcondeck_relay_postgres_enabled
+    - falcondeck_relay_postgres_managed
+
+- name: Ensure relay PostgreSQL role exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    runuser -u postgres -- psql -v ON_ERROR_STOP=1 <<'SQL'
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{{ falcondeck_relay_postgres_user }}') THEN
+        CREATE ROLE "{{ falcondeck_relay_postgres_user }}" LOGIN PASSWORD '{{ falcondeck_relay_postgres_password | replace("'", "''") }}';
+      ELSE
+        ALTER ROLE "{{ falcondeck_relay_postgres_user }}" WITH LOGIN PASSWORD '{{ falcondeck_relay_postgres_password | replace("'", "''") }}';
+      END IF;
+    END
+    $$;
+    SQL
+  args:
+    executable: /bin/bash
+  when:
+    - falcondeck_relay_postgres_enabled
+    - falcondeck_relay_postgres_managed
+
+- name: Ensure relay PostgreSQL database exists
+  ansible.builtin.shell: |
+    set -euo pipefail
+    if ! runuser -u postgres -- psql -Atqc "SELECT 1 FROM pg_database WHERE datname='{{ falcondeck_relay_postgres_db }}'" | grep -q 1; then
+      runuser -u postgres -- createdb --owner="{{ falcondeck_relay_postgres_user }}" "{{ falcondeck_relay_postgres_db }}"
+    fi
+  args:
+    executable: /bin/bash
+  when:
+    - falcondeck_relay_postgres_enabled
+    - falcondeck_relay_postgres_managed
 
 - name: Install Rust toolchain for relay builds
   ansible.builtin.shell: |

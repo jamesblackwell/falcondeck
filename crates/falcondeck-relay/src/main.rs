@@ -26,16 +26,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "FALCONDECK_RELAY_STATE_PATH",
         "./var/falcondeck-relay/state.json",
     );
+    let database_url = std::env::var("FALCONDECK_RELAY_DATABASE_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     let pairing_ttl_seconds = env_or_default("FALCONDECK_RELAY_PAIRING_TTL_SECONDS", "600")
         .parse::<i64>()
         .unwrap_or(600);
 
-    let state = AppState::load(
-        env!("CARGO_PKG_VERSION").to_string(),
-        PathBuf::from(state_path),
-        Duration::seconds(pairing_ttl_seconds.max(1)),
-    )
-    .await?;
+    let state = if let Some(database_url) = database_url {
+        AppState::load_postgres(
+            env!("CARGO_PKG_VERSION").to_string(),
+            database_url,
+            Duration::seconds(pairing_ttl_seconds.max(1)),
+        )
+        .await?
+    } else {
+        AppState::load(
+            env!("CARGO_PKG_VERSION").to_string(),
+            PathBuf::from(state_path),
+            Duration::seconds(pairing_ttl_seconds.max(1)),
+        )
+        .await?
+    };
 
     let listener = tokio::net::TcpListener::bind(bind_addr.parse::<SocketAddr>()?).await?;
     let local_addr = listener.local_addr()?;

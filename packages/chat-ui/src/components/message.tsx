@@ -1,7 +1,7 @@
 import { memo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { AlertTriangle, ChevronRight, CheckCircle2, Circle, Loader2, Brain } from 'lucide-react'
+import { AlertTriangle, ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 
 import type { ConversationItem } from '@falcondeck/client-core'
@@ -148,39 +148,6 @@ function ToolCallMessage({ item }: { item: Extract<ConversationItem, { kind: 'to
   )
 }
 
-function ReasoningMessage({ item }: { item: Extract<ConversationItem, { kind: 'reasoning' }> }) {
-  const [open, setOpen] = useState(false)
-
-  return (
-    <Collapsible.Root open={open} onOpenChange={setOpen}>
-      <Collapsible.Trigger asChild>
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-label="Toggle reasoning"
-          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2"
-        >
-          <Brain className="h-3.5 w-3.5 shrink-0" />
-          <span className="flex-1 truncate text-[length:var(--fd-text-xs)] italic">
-            {item.summary ?? 'Reasoning...'}
-          </span>
-          <ChevronRight
-            className={cn(
-              'h-3 w-3 shrink-0 transition-transform duration-[var(--fd-duration-fast)]',
-              open && 'rotate-90',
-            )}
-          />
-        </button>
-      </Collapsible.Trigger>
-      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
-        <div className="mt-1 max-w-none px-3 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-          {renderMarkdown(item.content)}
-        </div>
-      </Collapsible.Content>
-    </Collapsible.Root>
-  )
-}
-
 function PlanStepIcon({ status }: { status: string }) {
   switch (status) {
     case 'completed':
@@ -261,7 +228,7 @@ export const MessageCard = memo(function MessageCard({ item }: { item: Conversat
     case 'tool_call':
       return <ToolCallMessage item={item} />
     case 'reasoning':
-      return <ReasoningMessage item={item} />
+      return null
     case 'plan':
       return <PlanMessage item={item} />
     case 'diff':

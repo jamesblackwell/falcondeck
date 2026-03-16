@@ -2,8 +2,11 @@ export type PersistedRemoteSession = {
   relayUrl: string
   pairingCode: string
   sessionId: string
+  deviceId?: string | null
   clientToken: string
   clientSecretKey: string
+  dataKey?: string | null
+  lastReceivedSeq?: number
 }
 
 export function shouldReusePersistedRemoteSession(

@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use chrono::Duration;
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, DaemonSnapshot, EncryptionVariant, HealthResponse,
-    PairingPublicKeyBundle, RemoteStatusResponse, StartRemotePairingRequest, WorkspaceStatus,
-    crypto::LocalBoxKeyPair,
+    PairingPublicKeyBundle, RelayUpdateBody, RelayUpdatesResponse, RemoteStatusResponse,
+    StartRemotePairingRequest, WorkspaceStatus, crypto::LocalBoxKeyPair,
 };
 use falcondeck_daemon::{DaemonConfig, spawn_embedded};
 use falcondeck_relay::{AppState as RelayState, router as relay_router};
@@ -219,10 +219,183 @@ async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
     daemon.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstrap() {
+    let relay_dir = tempfile::tempdir().unwrap();
+    let relay_base = spawn_relay(&relay_dir).await;
+    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let first_remote = client
+        .post(format!("{}/api/remote/pairing", daemon.base_url()))
+        .json(&StartRemotePairingRequest {
+            relay_url: relay_base.clone(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<RemoteStatusResponse>()
+        .await
+        .unwrap();
+    let first_pairing = first_remote.pairing.unwrap();
+    let first_claim = client
+        .post(format!("{relay_base}/v1/pairings/claim"))
+        .json(&ClaimPairingRequest {
+            pairing_code: first_pairing.pairing_code.clone(),
+            label: Some("phone".to_string()),
+            client_bundle: Some(test_bundle()),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<ClaimPairingResponse>()
+        .await
+        .unwrap();
+
+    wait_for_connected(&client, &daemon.base_url()).await;
+
+    let second_remote = client
+        .post(format!("{}/api/remote/pairing", daemon.base_url()))
+        .json(&StartRemotePairingRequest {
+            relay_url: relay_base.clone(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<RemoteStatusResponse>()
+        .await
+        .unwrap();
+    let second_pairing = second_remote.pairing.unwrap();
+    assert_eq!(
+        second_pairing.session_id.as_deref(),
+        Some(first_claim.session_id.as_str())
+    );
+
+    let second_bundle = test_bundle();
+    let second_client_public_key = second_bundle.public_key.clone();
+    let second_claim = client
+        .post(format!("{relay_base}/v1/pairings/claim"))
+        .json(&ClaimPairingRequest {
+            pairing_code: second_pairing.pairing_code.clone(),
+            label: Some("tablet".to_string()),
+            client_bundle: Some(second_bundle),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<ClaimPairingResponse>()
+        .await
+        .unwrap();
+
+    assert_eq!(second_claim.session_id, first_claim.session_id);
+    assert_ne!(second_claim.device_id, first_claim.device_id);
+
+    let final_status = wait_for_trusted_device_count(&client, &daemon.base_url(), 2).await;
+    assert_eq!(final_status.trusted_devices.len(), 2);
+
+    let second_updates = wait_for_device_bootstrap(
+        &client,
+        &relay_base,
+        &second_claim.session_id,
+        &second_claim.client_token,
+        &second_client_public_key,
+    )
+    .await;
+
+    assert!(
+        second_updates.updates.iter().any(|update| {
+            matches!(
+                &update.body,
+                RelayUpdateBody::SessionBootstrap { material }
+                    if material.client_public_key == second_client_public_key
+            )
+        }),
+        "second trusted device should receive its own bootstrap material"
+    );
+
+    daemon.shutdown().await.unwrap();
+}
+
 fn test_bundle() -> PairingPublicKeyBundle {
     let key_pair = LocalBoxKeyPair::generate();
     PairingPublicKeyBundle {
         encryption_variant: EncryptionVariant::DataKeyV1,
         public_key: key_pair.public_key_base64().to_string(),
     }
+}
+
+async fn wait_for_connected(
+    client: &reqwest::Client,
+    daemon_base_url: &str,
+) -> RemoteStatusResponse {
+    for _ in 0..40 {
+        let status = client
+            .get(format!("{daemon_base_url}/api/remote/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<RemoteStatusResponse>()
+            .await
+            .unwrap();
+        if status.status == falcondeck_core::RemoteConnectionStatus::Connected {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    panic!("daemon never connected to relay");
+}
+
+async fn wait_for_trusted_device_count(
+    client: &reqwest::Client,
+    daemon_base_url: &str,
+    expected_devices: usize,
+) -> RemoteStatusResponse {
+    for _ in 0..40 {
+        let status = client
+            .get(format!("{daemon_base_url}/api/remote/status"))
+            .send()
+            .await
+            .unwrap()
+            .json::<RemoteStatusResponse>()
+            .await
+            .unwrap();
+        if status.trusted_devices.len() >= expected_devices {
+            return status;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    panic!("daemon never reported {expected_devices} trusted devices");
+}
+
+async fn wait_for_device_bootstrap(
+    client: &reqwest::Client,
+    relay_base: &str,
+    session_id: &str,
+    client_token: &str,
+    expected_client_public_key: &str,
+) -> RelayUpdatesResponse {
+    for _ in 0..40 {
+        let updates = client
+            .get(format!(
+                "{relay_base}/v1/sessions/{session_id}/updates?after_seq=0"
+            ))
+            .bearer_auth(client_token)
+            .send()
+            .await
+            .unwrap()
+            .json::<RelayUpdatesResponse>()
+            .await
+            .unwrap();
+        if updates.updates.iter().any(|update| {
+            matches!(
+                &update.body,
+                RelayUpdateBody::SessionBootstrap { material }
+                    if material.client_public_key == expected_client_public_key
+            )
+        }) {
+            return updates;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    panic!("relay never published bootstrap material for the new trusted device");
 }

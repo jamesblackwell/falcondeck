@@ -14,7 +14,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ClaimPairingRequest, RelayClientMessage, RelayServerMessage, RelayUpdatesQuery,
-    StartPairingRequest,
+    StartPairingRequest, SubmitQueuedActionRequest,
 };
 
 use crate::{
@@ -30,6 +30,16 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pairings/claim", post(claim_pairing))
         .route("/v1/pairings/{pairing_id}", get(pairing_status))
         .route("/v1/sessions/{session_id}/updates", get(session_updates))
+        .route("/v1/sessions/{session_id}/actions", post(submit_action))
+        .route(
+            "/v1/sessions/{session_id}/actions/{action_id}",
+            get(action_status),
+        )
+        .route("/v1/sessions/{session_id}/devices", get(trusted_devices))
+        .route(
+            "/v1/sessions/{session_id}/devices/{device_id}",
+            axum::routing::delete(revoke_trusted_device),
+        )
         .route("/v1/updates/ws", get(updates_ws))
         .layer(
             CorsLayer::new()
@@ -115,7 +125,7 @@ async fn updates_ws(
 
 async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
     let (peer_id, mut rx, ready) = match state
-        .register_peer(&auth.session_id, auth.role.clone())
+        .register_peer(&auth.session_id, auth.role.clone(), auth.device_id.clone())
         .await
     {
         Ok(values) => values,
@@ -130,6 +140,9 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
         state.unregister_peer(&auth.session_id, &peer_id).await;
         return;
     }
+    state
+        .after_peer_ready(&auth.session_id, auth.role.clone())
+        .await;
 
     loop {
         tokio::select! {
@@ -188,6 +201,51 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
     }
 
     state.unregister_peer(&auth.session_id, &peer_id).await;
+}
+
+async fn submit_action(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<SubmitQueuedActionRequest>,
+) -> Result<Json<falcondeck_core::QueuedRemoteAction>, RelayError> {
+    let token = auth_token(&headers, None)?;
+    Ok(Json(
+        state.submit_action(&session_id, &token, request).await?,
+    ))
+}
+
+async fn action_status(
+    State(state): State<AppState>,
+    Path((session_id, action_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<falcondeck_core::QueuedRemoteAction>, RelayError> {
+    let token = auth_token(&headers, None)?;
+    Ok(Json(
+        state.action_status(&session_id, &token, &action_id).await?,
+    ))
+}
+
+async fn trusted_devices(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<falcondeck_core::TrustedDevicesResponse>, RelayError> {
+    let token = auth_token(&headers, None)?;
+    Ok(Json(state.trusted_devices(&session_id, &token).await?))
+}
+
+async fn revoke_trusted_device(
+    State(state): State<AppState>,
+    Path((session_id, device_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<falcondeck_core::TrustedDevicesResponse>, RelayError> {
+    let token = auth_token(&headers, None)?;
+    Ok(Json(
+        state
+            .revoke_trusted_device(&session_id, &token, &device_id)
+            .await?,
+    ))
 }
 
 async fn send_message(
