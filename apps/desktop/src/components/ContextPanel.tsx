@@ -1,4 +1,5 @@
-import { AlertTriangle, LoaderCircle, Smartphone } from 'lucide-react'
+import { AlertTriangle, Check, Copy, LoaderCircle, Smartphone } from 'lucide-react'
+import { useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 
 import type { ApprovalRequest, RemoteStatusResponse, ThreadSummary } from '@falcondeck/client-core'
@@ -14,6 +15,44 @@ import {
 } from '@falcondeck/ui'
 
 import { remoteDescription, remoteHeadline, remoteTone } from '../utils'
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false)
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void navigator.clipboard.writeText(text)
+        setCopied(true)
+        setTimeout(() => setCopied(false), 1500)
+      }}
+      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
+    >
+      {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
+    </button>
+  )
+}
+
+function PairingDetails({ link, code }: { link: string; code: string }) {
+  return (
+    <div className="space-y-2 rounded-[var(--fd-radius-lg)] bg-surface-2 p-3">
+      <div className="flex justify-center rounded-[var(--fd-radius-lg)] bg-surface-0 p-4">
+        <QRCodeSVG value={link} size={140} bgColor="transparent" fgColor="#f0f5f1" />
+      </div>
+      <div className="flex items-start gap-1.5">
+        <p className="min-w-0 flex-1 break-all text-[length:var(--fd-text-2xs)] text-fg-muted">{link}</p>
+        <CopyButton text={link} />
+      </div>
+      <div className="flex items-center justify-between text-[length:var(--fd-text-xs)]">
+        <span className="text-fg-muted">Code</span>
+        <div className="flex items-center gap-1.5">
+          <span className="font-mono font-semibold text-fg-primary">{code}</span>
+          <CopyButton text={code} />
+        </div>
+      </div>
+    </div>
+  )
+}
 
 export type ContextPanelProps = {
   remoteStatus: RemoteStatusResponse | null
@@ -84,18 +123,7 @@ export function ContextPanel({
             </div>
 
             {pairingLink ? (
-              <div className="space-y-2 rounded-[var(--fd-radius-lg)] bg-surface-2 p-3">
-                <div className="flex justify-center rounded-[var(--fd-radius-lg)] bg-surface-0 p-4">
-                  <QRCodeSVG value={pairingLink} size={140} bgColor="transparent" fgColor="#f0f5f1" />
-                </div>
-                <p className="break-all text-[length:var(--fd-text-2xs)] text-fg-muted">{pairingLink}</p>
-                <div className="flex items-center justify-between text-[length:var(--fd-text-xs)]">
-                  <span className="text-fg-muted">Code</span>
-                  <span className="font-mono font-semibold text-fg-primary">
-                    {remoteStatus?.pairing?.pairing_code}
-                  </span>
-                </div>
-              </div>
+              <PairingDetails link={pairingLink} code={remoteStatus?.pairing?.pairing_code ?? ''} />
             ) : null}
 
             {remoteStatus?.last_error ? (

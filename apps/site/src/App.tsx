@@ -1,44 +1,117 @@
-import { Button, Card, CardContent, CardDescription, CardHeader, CardTitle } from '@falcondeck/ui'
+import { ArrowRight, Github, Monitor, Smartphone, Shield, Terminal, Zap, Radio } from 'lucide-react'
+import { Button } from '@falcondeck/ui'
+
+function FeatureCard({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) {
+  return (
+    <div className="rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-6">
+      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-[var(--fd-radius-lg)] bg-surface-3 text-fg-tertiary">
+        {icon}
+      </div>
+      <h3 className="text-[length:var(--fd-text-md)] font-semibold text-fg-primary">{title}</h3>
+      <p className="mt-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-tertiary">{description}</p>
+    </div>
+  )
+}
 
 export default function App() {
   return (
-    <main className="min-h-screen px-6 py-10 text-white md:px-10">
-      <section className="mx-auto flex max-w-6xl flex-col gap-8">
-        <div className="space-y-4">
-          <p className="text-sm uppercase tracking-[0.4em] text-zinc-400">FalconDeck</p>
-          <h1 className="max-w-4xl text-5xl font-semibold tracking-tight md:text-7xl">
-            Control Codex sessions locally, remotely, and eventually from mobile.
+    <div className="min-h-screen bg-surface-0">
+      {/* Nav */}
+      <nav className="mx-auto flex max-w-5xl items-center justify-between px-6 py-6">
+        <div className="flex items-center gap-2">
+          <Terminal className="h-5 w-5 text-accent" />
+          <span className="text-[length:var(--fd-text-md)] font-semibold text-fg-primary">FalconDeck</span>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="sm" asChild>
+            <a href="https://github.com/jamesblackwell/falcondeck">
+              <Github className="h-4 w-4" />
+              GitHub
+            </a>
+          </Button>
+          <Button size="sm" asChild>
+            <a href="https://app.falcondeck.com">
+              Open App
+              <ArrowRight className="h-3.5 w-3.5" />
+            </a>
+          </Button>
+        </div>
+      </nav>
+
+      {/* Hero */}
+      <section className="mx-auto max-w-5xl px-6 pt-16 pb-20">
+        <div className="max-w-3xl">
+          <h1 className="text-[length:var(--fd-text-3xl)] font-semibold leading-tight tracking-tight text-fg-primary md:text-5xl md:leading-tight">
+            The open-source control plane for AI coding agents
           </h1>
-          <p className="max-w-2xl text-lg text-zinc-400">
-            FalconDeck is the open-source agent control plane for managing Codex workspaces,
-            approvals, diffs, and remote access from one interface.
+          <p className="mt-4 max-w-2xl text-[length:var(--fd-text-lg)] leading-relaxed text-fg-tertiary">
+            Manage Codex workspaces, review diffs, approve actions, and monitor sessions — from your desktop or remotely from any device.
           </p>
-          <div className="flex flex-wrap gap-3">
-            <Button asChild>
-              <a href="https://app.falcondeck.com">Open remote app</a>
+          <div className="mt-8 flex flex-wrap gap-3">
+            <Button size="lg" asChild>
+              <a href="https://github.com/jamesblackwell/falcondeck">
+                <Github className="h-4 w-4" />
+                View on GitHub
+              </a>
             </Button>
-            <Button variant="secondary" asChild>
-              <a href="https://github.com/Dimillian/CodexMonitor">Design reference</a>
+            <Button variant="outline" size="lg" asChild>
+              <a href="https://app.falcondeck.com">
+                Open Remote Client
+                <ArrowRight className="h-4 w-4" />
+              </a>
             </Button>
           </div>
         </div>
+      </section>
 
-        <div className="grid gap-4 md:grid-cols-3">
-          {[
-            ['Desktop control plane', 'Grouped projects, rich chat UX, approvals, plan, and diff views.'],
-            ['Public relay', 'Pair a desktop with a phone or browser through a hosted relay.'],
-            ['React Native-ready core', 'Shared headless state and protocol layers prepared for future native clients.'],
-          ].map(([title, description]) => (
-            <Card key={title}>
-              <CardHeader>
-                <CardTitle>{title}</CardTitle>
-                <CardDescription>{description}</CardDescription>
-              </CardHeader>
-              <CardContent />
-            </Card>
-          ))}
+      {/* Features */}
+      <section className="mx-auto max-w-5xl px-6 pb-20">
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          <FeatureCard
+            icon={<Monitor className="h-5 w-5" />}
+            title="Desktop control plane"
+            description="A native Tauri app with grouped project navigation, rich conversation rendering, and real-time streaming."
+          />
+          <FeatureCard
+            icon={<Smartphone className="h-5 w-5" />}
+            title="Remote access"
+            description="Pair your desktop with a phone or browser. Follow live sessions, send prompts, and approve actions from anywhere."
+          />
+          <FeatureCard
+            icon={<Shield className="h-5 w-5" />}
+            title="End-to-end encrypted"
+            description="All remote session content is encrypted client-to-client. The relay server never sees plaintext."
+          />
+          <FeatureCard
+            icon={<Zap className="h-5 w-5" />}
+            title="Approvals & diffs"
+            description="Review Codex permission requests and code changes inline. Approve or deny with a single click."
+          />
+          <FeatureCard
+            icon={<Radio className="h-5 w-5" />}
+            title="Public relay"
+            description="A lightweight relay server handles session bridging, QR pairing, and reconnection by sequence number."
+          />
+          <FeatureCard
+            icon={<Terminal className="h-5 w-5" />}
+            title="Open source"
+            description="MIT licensed. The full stack — daemon, relay, desktop app, remote client — is in a single monorepo."
+          />
         </div>
       </section>
-    </main>
+
+      {/* Footer */}
+      <footer className="border-t border-border-subtle">
+        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-6">
+          <p className="text-[length:var(--fd-text-xs)] text-fg-muted">FalconDeck</p>
+          <a
+            href="https://github.com/jamesblackwell/falcondeck"
+            className="text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-secondary"
+          >
+            GitHub
+          </a>
+        </div>
+      </footer>
+    </div>
   )
 }
