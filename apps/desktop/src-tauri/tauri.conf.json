@@ -14,6 +14,7 @@
       {
         "label": "main",
         "title": "FalconDeck",
+        "decorations": false,
         "width": 1520,
         "height": 980,
         "minWidth": 1120,
