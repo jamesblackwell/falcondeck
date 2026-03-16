@@ -161,8 +161,20 @@ impl AppState {
         }
 
         if let Some(remote) = persisted.remote {
-            if remote.session_id.is_none() && remote.expires_at <= Utc::now() {
-                tracing::info!("skipping expired persisted remote pairing {}", remote.pairing_id);
+            if remote.session_id.is_none() && relay_url_looks_legacy_loopback(&remote.relay_url) {
+                tracing::info!(
+                    "skipping legacy loopback remote pairing {} for relay {}",
+                    remote.pairing_id,
+                    remote.relay_url
+                );
+                self.clear_remote_bridge_state().await;
+                self.persist_local_state().await?;
+            } else if remote.session_id.is_none() && remote.expires_at <= Utc::now() {
+                tracing::info!(
+                    "skipping expired persisted remote pairing {}",
+                    remote.pairing_id
+                );
+                self.clear_remote_bridge_state().await;
                 self.persist_local_state().await?;
             } else if let Err(error) = self.resume_remote_bridge(remote).await {
                 tracing::warn!("failed to restore remote bridge: {error}");
@@ -179,6 +191,18 @@ impl AppState {
             version: self.inner.daemon.version.clone(),
             workspaces,
         }
+    }
+
+    async fn clear_remote_bridge_state(&self) {
+        let mut remote = self.inner.remote.lock().await;
+        if let Some(task) = remote.task.take() {
+            task.abort();
+        }
+        remote.status = RemoteConnectionStatus::Inactive;
+        remote.relay_url = None;
+        remote.pairing = None;
+        remote.daemon_token = None;
+        remote.last_error = None;
     }
 
     pub async fn remote_status(&self) -> RemoteStatusResponse {
@@ -2456,10 +2480,52 @@ mod tests {
         assert!(remote.pairing.is_none());
         drop(remote);
 
-        let persisted_after: PersistedAppState = serde_json::from_slice(
-            &tokio::fs::read(&state_path).await.unwrap(),
-        )
-        .unwrap();
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        assert!(persisted_after.remote.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_skips_legacy_loopback_remote_pairing() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let persisted = PersistedAppState {
+            workspaces: vec![],
+            remote: Some(PersistedRemoteState {
+                relay_url: "http://127.0.0.1:54871".to_string(),
+                daemon_token: "daemon-token".to_string(),
+                pairing_id: "pairing-legacy".to_string(),
+                pairing_code: "ABCDEFGHJKLM".to_string(),
+                session_id: None,
+                expires_at: Utc::now() + Duration::minutes(10),
+                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            }),
+        };
+
+        tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+            .await
+            .unwrap();
+
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            PathBuf::from(&state_path),
+        );
+        app.restore_local_state().await.unwrap();
+
+        let remote = app.inner.remote.lock().await;
+        assert_eq!(
+            remote.status,
+            falcondeck_core::RemoteConnectionStatus::Inactive
+        );
+        assert!(remote.relay_url.is_none());
+        assert!(remote.daemon_token.is_none());
+        assert!(remote.pairing.is_none());
+        drop(remote);
+
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
         assert!(persisted_after.remote.is_none());
     }
 }
@@ -2486,6 +2552,17 @@ fn relay_ws_url(relay_url: &str, session_id: &str, token: &str) -> String {
         relay_url.to_string()
     };
     format!("{base}/v1/updates/ws?session_id={session_id}&token={token}")
+}
+
+fn relay_url_looks_legacy_loopback(relay_url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(relay_url) else {
+        return false;
+    };
+
+    matches!(
+        parsed.host_str(),
+        Some("127.0.0.1") | Some("localhost") | Some("::1")
+    )
 }
 
 fn host_label() -> String {
