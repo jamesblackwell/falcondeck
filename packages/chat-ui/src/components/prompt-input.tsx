@@ -1,5 +1,5 @@
 import { ImagePlus, Send } from 'lucide-react'
-import { useCallback, useRef, type ChangeEvent } from 'react'
+import { memo, useCallback, useRef, type ChangeEvent } from 'react'
 
 import type { CollaborationModeSummary, ImageInput, ModelSummary } from '@falcondeck/client-core'
 import { Button } from '@falcondeck/ui'
@@ -22,11 +22,10 @@ export type PromptInputProps = {
   selectedCollaborationModeId: string | null
   onCollaborationModeChange: (value: string) => void
   disabled?: boolean
-  approvalPolicy?: string | null
   compact?: boolean
 }
 
-export function PromptInput({
+export const PromptInput = memo(function PromptInput({
   value,
   onValueChange,
   onSubmit,
@@ -126,11 +125,6 @@ export function PromptInput({
 
         {/* Send */}
         <div className="ml-auto flex items-center gap-2">
-          {!compact ? (
-            <span className="select-none rounded-[var(--fd-radius-md)] border border-border-default bg-surface-3 px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
-              ↵
-            </span>
-          ) : null}
           <Button
             type="button"
             onClick={onSubmit}
@@ -143,4 +137,4 @@ export function PromptInput({
       </div>
     </div>
   )
-}
+})

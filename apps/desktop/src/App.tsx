@@ -1,24 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
-  applyEventToThreadDetail,
-  applySnapshotEvent,
   buildProjectGroups,
-  createDaemonApiClient,
   filesToImageInputs,
-  reconcileSnapshotSelection,
   type ConversationItem,
-  type DaemonSnapshot,
-  type EventEnvelope,
   type ImageInput,
-  type RemoteStatusResponse,
-  type ThreadDetail,
   type ThreadHandle,
   type TurnInputItem,
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput } from '@falcondeck/chat-ui'
 
-import { detectApiBaseUrl } from './api'
 import { defaultModelId, reasoningOptions } from './utils'
 import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
@@ -26,18 +17,27 @@ import { SessionHeader } from './components/SessionHeader'
 import { RemotePairingPopover } from './components/RemotePairingPopover'
 import { ApprovalBar } from './components/ApprovalBar'
 import { DiffPanel } from './components/DiffPanel'
-
-type ConnectionState = 'connecting' | 'ready' | 'error'
+import { NewThreadState } from './components/NewThreadState'
+import { useDaemonConnection } from './hooks/useDaemonConnection'
 
 export default function App() {
-  const [baseUrl, setBaseUrl] = useState<string | null>(null)
-  const [connectionState, setConnectionState] = useState<ConnectionState>('connecting')
-  const [connectionError, setConnectionError] = useState<string | null>(null)
-  const [snapshot, setSnapshot] = useState<DaemonSnapshot | null>(null)
-  const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null)
-  const [remoteStatus, setRemoteStatus] = useState<RemoteStatusResponse | null>(null)
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
-  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
+  const {
+    api,
+    connectionState,
+    connectionError,
+    snapshot,
+    setSnapshot,
+    threadDetail,
+    setThreadDetail,
+    remoteStatus,
+    setRemoteStatus,
+    selectedWorkspaceId,
+    setSelectedWorkspaceId,
+    selectedThreadId,
+    setSelectedThreadId,
+    gitRefreshTrigger,
+  } = useDaemonConnection()
+
   const [draft, setDraft] = useState('')
   const [relayUrl, setRelayUrl] = useState(
     import.meta.env.VITE_FALCONDECK_RELAY_URL ?? 'https://connect.falcondeck.com',
@@ -50,11 +50,9 @@ export default function App() {
   const [isStartingRemote, setIsStartingRemote] = useState(false)
   const [isSending, setIsSending] = useState(false)
   const [actionError, setActionError] = useState<string | null>(null)
-  const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
 
-  const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
   const selectedWorkspace = useMemo(
     () => snapshot?.workspaces.find((w) => w.id === selectedWorkspaceId) ?? null,
     [selectedWorkspaceId, snapshot?.workspaces],
@@ -80,72 +78,6 @@ export default function App() {
       ? `${remoteWebUrl}?relay=${encodeURIComponent(remoteStatus.relay_url)}&code=${encodeURIComponent(remoteStatus.pairing.pairing_code)}`
       : null
 
-  const handleEvent = useCallback((event: EventEnvelope) => {
-    setSnapshot((c) => applySnapshotEvent(c, event))
-    setThreadDetail((c) => applyEventToThreadDetail(c, event))
-    if (event.event.type === 'turn-end') {
-      setGitRefreshTrigger((c) => c + 1)
-    }
-  }, [])
-
-  // Bootstrap daemon connection
-  useEffect(() => {
-    let socket: WebSocket | null = null
-    let cancelled = false
-
-    async function bootstrap() {
-      try {
-        const nextBaseUrl = await detectApiBaseUrl()
-        if (cancelled) return
-        setBaseUrl(nextBaseUrl)
-        const nextApi = createDaemonApiClient(nextBaseUrl)
-        const [nextSnapshot, nextRemoteStatus] = await Promise.all([
-          nextApi.snapshot(),
-          nextApi.remoteStatus(),
-        ])
-        if (cancelled) return
-        setSnapshot(nextSnapshot)
-        setRemoteStatus(nextRemoteStatus)
-        setConnectionState('ready')
-        setActionError(null)
-        socket = nextApi.connectEvents(handleEvent)
-      } catch (error) {
-        setConnectionState('error')
-        setConnectionError(error instanceof Error ? error.message : 'Failed to connect to daemon')
-      }
-    }
-
-    void bootstrap()
-    return () => {
-      cancelled = true
-      socket?.close()
-    }
-  }, [handleEvent])
-
-  useEffect(() => {
-    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId)
-    if (nextSelection.workspaceId !== selectedWorkspaceId) {
-      setSelectedWorkspaceId(nextSelection.workspaceId)
-    }
-    if (nextSelection.threadId !== selectedThreadId) {
-      setSelectedThreadId(nextSelection.threadId)
-    }
-  }, [snapshot, selectedThreadId, selectedWorkspaceId])
-
-  // Fetch thread detail on selection change
-  useEffect(() => {
-    if (!api || !selectedWorkspaceId || !selectedThreadId) {
-      setThreadDetail(null)
-      return
-    }
-    let cancelled = false
-    void api
-      .threadDetail(selectedWorkspaceId, selectedThreadId)
-      .then((detail) => { if (!cancelled) setThreadDetail(detail) })
-      .catch(() => { if (!cancelled) setThreadDetail(null) })
-    return () => { cancelled = true }
-  }, [api, selectedThreadId, selectedWorkspaceId])
-
   // Sync model/effort/mode selections from thread/workspace
   useEffect(() => {
     if (!selectedWorkspace) {
@@ -156,9 +88,7 @@ export default function App() {
       return
     }
     const seedKey = `${selectedWorkspace.id}:${selectedThread?.id ?? 'workspace'}`
-    if (selectionSeedRef.current === seedKey) {
-      return
-    }
+    if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
 
     const fallbackModelId = defaultModelId(selectedWorkspace)
@@ -192,11 +122,11 @@ export default function App() {
       current
         ? {
             ...current,
-            workspaces: current.workspaces.map((workspace) =>
-              workspace.id === handle.workspace.id ? handle.workspace : workspace,
+            workspaces: current.workspaces.map((w) =>
+              w.id === handle.workspace.id ? handle.workspace : w,
             ),
-            threads: current.threads.map((thread) =>
-              thread.id === handle.thread.id ? handle.thread : thread,
+            threads: current.threads.map((t) =>
+              t.id === handle.thread.id ? handle.thread : t,
             ),
           }
         : current,
@@ -206,7 +136,7 @@ export default function App() {
         ? { ...current, workspace: handle.workspace, thread: handle.thread }
         : current,
     )
-  }, [])
+  }, [setSnapshot, setThreadDetail])
 
   const persistThreadSettings = useCallback(
     async ({
@@ -248,29 +178,15 @@ export default function App() {
           ? selectedEffort
           : (nextOptions[0] ?? 'medium')
       setSelectedEffort(nextEffort)
-      void persistThreadSettings({
-        modelId,
-        effort: nextEffort,
-        collaborationModeId: selectedCollaborationMode,
-      })
+      void persistThreadSettings({ modelId, effort: nextEffort, collaborationModeId: selectedCollaborationMode })
     },
-    [
-      persistThreadSettings,
-      selectedCollaborationMode,
-      selectedEffort,
-      selectedThread,
-      selectedWorkspace,
-    ],
+    [persistThreadSettings, selectedCollaborationMode, selectedEffort, selectedThread, selectedWorkspace],
   )
 
   const handleEffortChange = useCallback(
     (effort: string) => {
       setSelectedEffort(effort)
-      void persistThreadSettings({
-        modelId: selectedModel,
-        effort,
-        collaborationModeId: selectedCollaborationMode,
-      })
+      void persistThreadSettings({ modelId: selectedModel, effort, collaborationModeId: selectedCollaborationMode })
     },
     [persistThreadSettings, selectedCollaborationMode, selectedModel],
   )
@@ -278,30 +194,10 @@ export default function App() {
   const handleCollaborationModeChange = useCallback(
     (modeId: string) => {
       setSelectedCollaborationMode(modeId)
-      void persistThreadSettings({
-        modelId: selectedModel,
-        effort: selectedEffort,
-        collaborationModeId: modeId,
-      })
+      void persistThreadSettings({ modelId: selectedModel, effort: selectedEffort, collaborationModeId: modeId })
     },
     [persistThreadSettings, selectedEffort, selectedModel],
   )
-
-  // Poll remote status
-  useEffect(() => {
-    if (!api || !remoteStatus || remoteStatus.status === 'inactive') return
-    const interval = window.setInterval(() => {
-      void api.remoteStatus().then(setRemoteStatus).catch(() => {})
-    }, 2000)
-    return () => window.clearInterval(interval)
-  }, [api, remoteStatus?.status])
-
-  // Refresh git on workspace change
-  useEffect(() => {
-    if (selectedWorkspaceId) {
-      setGitRefreshTrigger((c) => c + 1)
-    }
-  }, [selectedWorkspaceId])
 
   async function handleAddProject() {
     if (!api) return
@@ -394,17 +290,21 @@ export default function App() {
     }
   }
 
-  const conversationItems: ConversationItem[] = threadDetail?.items ?? []
-
+  // Stable callbacks for child components
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(threadId)
-  }, [])
+  }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleSelectThread = useCallback((workspaceId: string, threadId: string) => {
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(threadId)
-  }, [])
+  }, [setSelectedWorkspaceId, setSelectedThreadId])
+
+  const handleNewThread = useCallback((workspaceId: string) => {
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(null)
+  }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleApprovalCallback = useCallback(
     (requestId: string, decision: 'allow' | 'deny' | 'always_allow') => {
@@ -431,14 +331,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, relayUrl])
 
+  // Memoized derived values
+  const conversationItems: ConversationItem[] = threadDetail?.items ?? []
   const currentReasoningOptions = useMemo(
     () => reasoningOptions(selectedThread, selectedWorkspace, selectedModel),
     [selectedThread, selectedWorkspace, selectedModel],
   )
-
   const models = useMemo(() => selectedWorkspace?.models ?? [], [selectedWorkspace?.models])
   const collaborationModes = useMemo(() => selectedWorkspace?.collaboration_modes ?? [], [selectedWorkspace?.collaboration_modes])
   const isDisabled = !selectedWorkspace || isSending
+  const workspaces = useMemo(() => snapshot?.workspaces ?? [], [snapshot?.workspaces])
+
+  const newThreadEmptyState = useMemo(
+    () => (
+      <NewThreadState
+        workspaces={workspaces}
+        selectedWorkspace={selectedWorkspace}
+        onSelectWorkspace={handleNewThread}
+      />
+    ),
+    [workspaces, selectedWorkspace, handleNewThread],
+  )
 
   return (
     <DesktopShell
@@ -452,18 +365,14 @@ export default function App() {
           selectedThreadId={selectedThreadId}
           onSelectWorkspace={handleSelectWorkspace}
           onSelectThread={handleSelectThread}
+          onNewThread={handleNewThread}
           onAddProject={handleAddProject}
           isAddingProject={isAddingProject}
         />
       }
       main={
         <section className="flex h-full min-h-0 flex-col bg-surface-1">
-          <SessionHeader
-            workspace={selectedWorkspace}
-            thread={selectedThread}
-            selectedModel={selectedModel}
-            selectedEffort={selectedEffort}
-          >
+          <SessionHeader workspace={selectedWorkspace} thread={selectedThread}>
             <RemotePairingPopover
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}
@@ -473,11 +382,8 @@ export default function App() {
               isStartingRemote={isStartingRemote}
             />
           </SessionHeader>
-          <ApprovalBar
-            approvals={approvals}
-            onApproval={handleApprovalCallback}
-          />
-          <Conversation items={conversationItems} />
+          <ApprovalBar approvals={approvals} onApproval={handleApprovalCallback} />
+          <Conversation items={conversationItems} emptyState={newThreadEmptyState} />
           <PromptInput
             value={draft}
             onValueChange={setDraft}
@@ -493,17 +399,12 @@ export default function App() {
             collaborationModes={collaborationModes}
             selectedCollaborationModeId={selectedCollaborationMode}
             onCollaborationModeChange={handleCollaborationModeChange}
-            approvalPolicy="on-request"
             disabled={isDisabled}
           />
         </section>
       }
       rail={
-        <DiffPanel
-          api={api}
-          workspaceId={selectedWorkspaceId}
-          refreshTrigger={gitRefreshTrigger}
-        />
+        <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
       }
     />
   )

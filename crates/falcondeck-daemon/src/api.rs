@@ -50,14 +50,8 @@ pub fn router(state: AppState) -> Router {
             "/api/workspaces/{workspace_id}/approvals/{request_id}/respond",
             post(respond_approval),
         )
-        .route(
-            "/api/workspaces/{workspace_id}/git/status",
-            get(git_status),
-        )
-        .route(
-            "/api/workspaces/{workspace_id}/git/diff",
-            get(git_diff),
-        )
+        .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
+        .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -185,9 +179,7 @@ async fn git_diff(
     axum::extract::Query(query): axum::extract::Query<GitDiffQuery>,
 ) -> Result<Json<falcondeck_core::GitDiffResponse>, DaemonError> {
     Ok(Json(
-        state
-            .git_diff(&workspace_id, query.path.as_deref())
-            .await?,
+        state.git_diff(&workspace_id, query.path.as_deref()).await?,
     ))
 }
 

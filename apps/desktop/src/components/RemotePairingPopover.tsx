@@ -1,37 +1,17 @@
 import {
   AlertTriangle,
-  Check,
   ChevronDown,
-  Copy,
   LoaderCircle,
   RadioTower,
   Smartphone,
 } from 'lucide-react'
-import { useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import * as Popover from '@radix-ui/react-popover'
 
 import type { RemoteStatusResponse } from '@falcondeck/client-core'
-import { Badge, Button, Input, StatusIndicator } from '@falcondeck/ui'
+import { Badge, Button, CopyButton, Input, StatusIndicator } from '@falcondeck/ui'
 
 import { remoteDescription, remoteHeadline, remoteTone } from '../utils'
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <button
-      type="button"
-      onClick={() => {
-        void navigator.clipboard.writeText(text)
-        setCopied(true)
-        setTimeout(() => setCopied(false), 1500)
-      }}
-      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
-    >
-      {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
-    </button>
-  )
-}
 
 function PairingDetails({ link, code }: { link: string; code: string }) {
   return (

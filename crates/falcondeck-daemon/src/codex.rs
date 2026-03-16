@@ -494,7 +494,9 @@ fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
                 id: id.clone(),
                 label: extract_string(entry, &["label", "name"]).unwrap_or(id),
                 model_id: extract_string(entry, &["model", "modelId", "model_id"]).or_else(|| {
-                    settings.and_then(|settings| extract_string(settings, &["model", "modelId", "model_id"]))
+                    settings.and_then(|settings| {
+                        extract_string(settings, &["model", "modelId", "model_id"])
+                    })
                 }),
                 reasoning_effort: extract_string(entry, &["reasoningEffort", "reasoning_effort"])
                     .or_else(|| {
@@ -1212,7 +1214,10 @@ mod tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "gpt-5.4");
         assert_eq!(models[0].label, "GPT-5.4");
-        assert_eq!(models[0].default_reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(
+            models[0].default_reasoning_effort.as_deref(),
+            Some("medium")
+        );
         assert_eq!(models[0].supported_reasoning_efforts.len(), 2);
     }
 

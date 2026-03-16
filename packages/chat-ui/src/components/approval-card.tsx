@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { AlertTriangle } from 'lucide-react'
 
 import type { ApprovalRequest } from '@falcondeck/client-core'
@@ -10,7 +11,7 @@ export type ApprovalCardProps = {
   onAlwaysAllow?: () => void
 }
 
-export function ApprovalCard({ approval, onAllow, onDeny, onAlwaysAllow }: ApprovalCardProps) {
+export const ApprovalCard = memo(function ApprovalCard({ approval, onAllow, onDeny, onAlwaysAllow }: ApprovalCardProps) {
   return (
     <div className="rounded-[var(--fd-radius-lg)] border border-warning/20 bg-warning-muted px-4 py-3">
       <div className="flex items-start gap-2.5">
@@ -42,4 +43,4 @@ export function ApprovalCard({ approval, onAllow, onDeny, onAlwaysAllow }: Appro
       </div>
     </div>
   )
-}
+})

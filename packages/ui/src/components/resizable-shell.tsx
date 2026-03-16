@@ -12,8 +12,8 @@ export function ResizableShell({
 }) {
   return (
     <div className={cn('relative h-screen overflow-hidden bg-surface-0', className)}>
-      <div data-tauri-drag-region className="absolute inset-x-0 top-0 z-50 h-[40px]" />
-      <div className="h-full pt-[40px]">
+      <div data-tauri-drag-region className="absolute inset-x-0 top-0 h-[38px]" />
+      <div className="h-full">
         <Group orientation="horizontal">
           {children}
         </Group>

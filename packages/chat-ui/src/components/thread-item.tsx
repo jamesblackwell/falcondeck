@@ -8,7 +8,6 @@ export type ThreadItemProps = {
   thread: ThreadSummary
   isSelected: boolean
   onSelect: () => void
-  compact?: boolean
 }
 
 function timeAgo(dateStr: string) {
@@ -30,7 +29,7 @@ export const ThreadItem = memo(function ThreadItem({ thread, isSelected, onSelec
     <button
       type="button"
       className={cn(
-        'flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors duration-[var(--fd-duration-fast)]',
+        'flex w-full items-center gap-1.5 overflow-hidden rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors duration-[var(--fd-duration-fast)]',
         isSelected
           ? 'bg-accent-dim'
           : 'hover:bg-surface-3',
@@ -38,10 +37,8 @@ export const ThreadItem = memo(function ThreadItem({ thread, isSelected, onSelec
       onClick={onSelect}
     >
       {isRunning ? (
-        <LoaderCircle className="h-4 w-4 shrink-0 animate-spin text-accent" />
-      ) : (
-        <span className="h-4 w-4 shrink-0" />
-      )}
+        <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+      ) : null}
       <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-primary">
         {thread.title}
       </span>

@@ -1,7 +1,6 @@
-import { Copy } from 'lucide-react'
-import { useState } from 'react'
+import { memo } from 'react'
 
-import { Button } from '@falcondeck/ui'
+import { CopyButton } from '@falcondeck/ui'
 
 function DiffLine({ line }: { line: string }) {
   if (line.startsWith('+++') || line.startsWith('---')) {
@@ -19,24 +18,14 @@ function DiffLine({ line }: { line: string }) {
   return <span>{line}</span>
 }
 
-export function CodeBlock({ code, language }: { code: string; language?: string | null }) {
-  const [copied, setCopied] = useState(false)
+export const CodeBlock = memo(function CodeBlock({ code, language }: { code: string; language?: string | null }) {
   const isDiff = language === 'diff'
-
-  async function handleCopy() {
-    await navigator.clipboard.writeText(code)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1200)
-  }
 
   return (
     <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
       <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
         <span>{language ?? 'code'}</span>
-        <Button type="button" variant="ghost" size="sm" onClick={() => void handleCopy()}>
-          <Copy className="h-3 w-3" />
-          {copied ? 'Copied' : 'Copy'}
-        </Button>
+        <CopyButton text={code} variant="labeled" />
       </div>
       <pre className="overflow-x-auto p-3 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
         <code>
@@ -52,4 +41,4 @@ export function CodeBlock({ code, language }: { code: string; language?: string 
       </pre>
     </div>
   )
-}
+})

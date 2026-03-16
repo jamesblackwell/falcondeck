@@ -1,4 +1,4 @@
-import { FolderPlus, LoaderCircle } from 'lucide-react'
+import { FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
 import { WorkspaceGroup, ThreadItem } from '@falcondeck/chat-ui'
@@ -8,7 +8,6 @@ import {
   Sidebar as SidebarShell,
   SidebarContent,
   SidebarHeader,
-  StatusIndicator,
 } from '@falcondeck/ui'
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
@@ -22,23 +21,12 @@ export type DesktopSidebarProps = {
   selectedThreadId: string | null
   onSelectWorkspace: (workspaceId: string, threadId: string | null) => void
   onSelectThread: (workspaceId: string, threadId: string) => void
+  onNewThread: (workspaceId: string) => void
   onAddProject: () => void
   isAddingProject: boolean
 }
 
-function connectionStatusMap(state: ConnectionState) {
-  switch (state) {
-    case 'ready':
-      return 'connected' as const
-    case 'error':
-      return 'error' as const
-    default:
-      return 'active' as const
-  }
-}
-
 export function DesktopSidebar({
-  connectionState,
   connectionError,
   actionError,
   groups,
@@ -46,6 +34,7 @@ export function DesktopSidebar({
   selectedThreadId,
   onSelectWorkspace,
   onSelectThread,
+  onNewThread,
   onAddProject,
   isAddingProject,
 }: DesktopSidebarProps) {
@@ -53,16 +42,18 @@ export function DesktopSidebar({
     <SidebarShell>
       <SidebarHeader>
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <StatusIndicator
-              status={connectionStatusMap(connectionState)}
-              size="md"
-              pulse={connectionState === 'connecting'}
-            />
-            <span className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
-              Threads
-            </span>
-          </div>
+          {selectedWorkspaceId ? (
+            <button
+              type="button"
+              onClick={() => onNewThread(selectedWorkspaceId)}
+              className="flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+            >
+              <SquarePen className="h-3.5 w-3.5" />
+              New thread
+            </button>
+          ) : (
+            <span className="text-[length:var(--fd-text-sm)] text-fg-muted">Threads</span>
+          )}
           <Button
             type="button"
             variant="ghost"
@@ -100,6 +91,7 @@ export function DesktopSidebar({
                   group.workspace.current_thread_id ?? group.threads[0]?.id ?? null,
                 )
               }
+              onNewThread={() => onNewThread(group.workspace.id)}
             >
               {group.threads.length === 0 ? (
                 <p className="py-2 pl-2 text-[length:var(--fd-text-xs)] text-fg-muted">No threads yet</p>

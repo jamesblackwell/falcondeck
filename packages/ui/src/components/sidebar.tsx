@@ -20,7 +20,7 @@ export function Sidebar({ className, children, ...props }: React.HTMLAttributes<
 export function SidebarHeader({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn('flex flex-col gap-3 border-b border-border-subtle px-4 py-4', className)}
+      className={cn('flex flex-col gap-3 border-b border-border-subtle px-4 pb-3 pt-11', className)}
       {...props}
     >
       {children}
@@ -30,9 +30,9 @@ export function SidebarHeader({ className, children, ...props }: React.HTMLAttri
 
 export function SidebarContent({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={cn('min-h-0 flex-1', className)} {...props}>
+    <div className={cn('min-h-0 min-w-0 flex-1 overflow-hidden', className)} {...props}>
       <ScrollArea className="h-full">
-        <div className="px-3 py-3">{children}</div>
+        <div className="px-3 py-3 overflow-hidden">{children}</div>
       </ScrollArea>
     </div>
   )

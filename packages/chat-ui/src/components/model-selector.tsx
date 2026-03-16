@@ -44,7 +44,7 @@ export function ReasoningSelector({
       <SelectContent>
         {options.map((option) => (
           <SelectItem key={option} value={option}>
-            {option}
+            {option.charAt(0).toUpperCase() + option.slice(1)}
           </SelectItem>
         ))}
       </SelectContent>
