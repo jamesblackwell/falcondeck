@@ -28,8 +28,8 @@ export function ThreadItem({ thread, isSelected, onSelect, compact }: ThreadItem
       className={cn(
         'flex w-full items-start gap-2.5 rounded-[var(--fd-radius-md)] px-3 py-2 text-left transition-colors duration-[var(--fd-duration-fast)]',
         isSelected
-          ? 'border-l-2 border-l-accent bg-accent-dim'
-          : 'border-l-2 border-l-transparent hover:bg-surface-3',
+          ? 'bg-accent-dim'
+          : 'hover:bg-surface-3',
       )}
       onClick={onSelect}
     >

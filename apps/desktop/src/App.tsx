@@ -282,7 +282,7 @@ export default function App() {
         />
       }
       main={
-        <section className="flex min-h-[calc(100vh-24px)] flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
+        <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
           <SessionHeader
             workspace={selectedWorkspace}
             thread={selectedThread}

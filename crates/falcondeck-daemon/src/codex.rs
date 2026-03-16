@@ -3,8 +3,8 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -13,11 +13,11 @@ use falcondeck_core::{
     AccountStatus, AccountSummary, CollaborationModeSummary, ModelSummary, ReasoningEffortSummary,
     ThreadCodexParams, ThreadPlan, ThreadStatus, ThreadSummary,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{oneshot, Mutex},
+    sync::{Mutex, oneshot},
 };
 use tracing::warn;
 

@@ -36,7 +36,7 @@ export function SessionHeader({
   const pathLabel = workspace?.path.split('/').pop()
 
   return (
-    <Toolbar data-tauri-drag-region className="rounded-t-[var(--fd-radius-xl)] bg-surface-1">
+    <Toolbar className="rounded-t-[var(--fd-radius-xl)] bg-surface-1">
       <div className="flex items-center gap-3">
         {thread ? (
           <StatusIndicator

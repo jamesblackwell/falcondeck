@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { AlertTriangle, ChevronRight, CheckCircle2, Circle, Loader2, Wrench, Brain } from 'lucide-react'
+import { AlertTriangle, ChevronRight, CheckCircle2, Circle, Loader2, Brain } from 'lucide-react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 
 import type { ConversationItem } from '@falcondeck/client-core'
@@ -23,10 +23,43 @@ function renderMarkdown(text: string) {
             return <CodeBlock code={code} language={match?.[1] ?? null} />
           }
           return (
-            <code className="rounded-[var(--fd-radius-sm)] bg-surface-3 px-1.5 py-0.5 text-[length:var(--fd-text-sm)] text-fg-secondary">
+            <code className="rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-0.5 font-mono text-[0.9em]">
               {children}
             </code>
           )
+        },
+        p({ children }) {
+          return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>
+        },
+        ul({ children }) {
+          return <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
+        },
+        ol({ children }) {
+          return <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
+        },
+        li({ children }) {
+          return <li className="leading-relaxed">{children}</li>
+        },
+        h1({ children }) {
+          return <h1 className="mb-3 mt-5 first:mt-0 text-[1.4em] font-semibold text-fg-primary">{children}</h1>
+        },
+        h2({ children }) {
+          return <h2 className="mb-2 mt-4 first:mt-0 text-[1.2em] font-semibold text-fg-primary">{children}</h2>
+        },
+        h3({ children }) {
+          return <h3 className="mb-2 mt-3 first:mt-0 text-[1.1em] font-semibold text-fg-primary">{children}</h3>
+        },
+        blockquote({ children }) {
+          return <blockquote className="mb-3 border-l-2 border-border-emphasis pl-4 text-fg-secondary italic last:mb-0">{children}</blockquote>
+        },
+        strong({ children }) {
+          return <strong className="font-semibold text-fg-primary">{children}</strong>
+        },
+        a({ href, children }) {
+          return <a href={href} className="text-accent underline decoration-accent/40 underline-offset-2" target="_blank" rel="noopener noreferrer">{children}</a>
+        },
+        hr() {
+          return <hr className="my-4 border-border-subtle" />
         },
       }}
     >
@@ -37,14 +70,8 @@ function renderMarkdown(text: string) {
 
 function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_message' }> }) {
   return (
-    <div className="ml-10 rounded-[var(--fd-radius-lg)] border-l-2 border-l-accent bg-surface-2 px-4 py-3">
-      <div className="flex items-center gap-2">
-        <span className="text-[length:var(--fd-text-xs)] font-medium text-accent">You</span>
-        <span className="text-[length:var(--fd-text-2xs)] text-fg-muted">
-          {new Date(item.created_at).toLocaleTimeString()}
-        </span>
-      </div>
-      <div className="prose prose-invert mt-2 max-w-none text-[length:var(--fd-text-sm)] text-fg-primary">
+    <div className="ml-auto max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
+      <div className="max-w-none text-[length:var(--fd-text-md)] text-fg-primary">
         {renderMarkdown(item.text)}
       </div>
       {item.attachments.length > 0 ? (
@@ -66,21 +93,23 @@ function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_m
 function AssistantMessage({ item }: { item: Extract<ConversationItem, { kind: 'assistant_message' }> }) {
   return (
     <div className="px-1">
-      <div className="flex items-center gap-2">
-        <span className="text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary">Codex</span>
-        <span className="text-[length:var(--fd-text-2xs)] text-fg-muted">
-          {new Date(item.created_at).toLocaleTimeString()}
-        </span>
-      </div>
-      <div className="prose prose-invert mt-2 max-w-none text-[length:var(--fd-text-sm)] text-fg-primary">
+      <div className="max-w-none text-[length:var(--fd-text-md)] text-fg-primary">
         {renderMarkdown(item.text)}
       </div>
     </div>
   )
 }
 
+function toolCallLabel(title: string) {
+  // Simplify verbose shell commands: "/bin/zsh -lc 'git diff --stat'" → "git diff --stat"
+  const shellMatch = /['"](.+?)['"]/.exec(title)
+  if (shellMatch) return shellMatch[1]
+  return title
+}
+
 function ToolCallMessage({ item }: { item: Extract<ConversationItem, { kind: 'tool_call' }> }) {
   const [open, setOpen] = useState(false)
+  const isCompleted = item.status === 'completed'
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
@@ -88,19 +117,20 @@ function ToolCallMessage({ item }: { item: Extract<ConversationItem, { kind: 'to
         <button
           type="button"
           aria-expanded={open}
-          aria-label={`Toggle ${item.tool_kind}: ${item.title}`}
-          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] border-l-2 border-l-info bg-surface-1 px-3 py-2 text-left transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2"
+          aria-label={`Toggle ${item.title}`}
+          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2"
         >
-          <Wrench className="h-3.5 w-3.5 shrink-0 text-info" />
-          <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-secondary">
-            {item.tool_kind}: {item.title}
-          </span>
-          <span className="text-[length:var(--fd-text-2xs)] uppercase tracking-widest text-fg-muted">
-            {item.status}
+          {isCompleted ? (
+            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+          ) : (
+            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+          )}
+          <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
+            {toolCallLabel(item.title)}
           </span>
           <ChevronRight
             className={cn(
-              'h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)]',
+              'h-3 w-3 shrink-0 transition-transform duration-[var(--fd-duration-fast)]',
               open && 'rotate-90',
             )}
           />
@@ -108,7 +138,7 @@ function ToolCallMessage({ item }: { item: Extract<ConversationItem, { kind: 'to
       </Collapsible.Trigger>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
         {item.output ? (
-          <div className="mt-1 ml-5">
+          <div className="mt-1 ml-6">
             <CodeBlock code={item.output} language={null} />
           </div>
         ) : null}
@@ -142,7 +172,7 @@ function ReasoningMessage({ item }: { item: Extract<ConversationItem, { kind: 'r
         </button>
       </Collapsible.Trigger>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
-        <div className="prose prose-invert mt-1 max-w-none px-3 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+        <div className="mt-1 max-w-none px-3 text-[length:var(--fd-text-sm)] text-fg-tertiary">
           {renderMarkdown(item.content)}
         </div>
       </Collapsible.Content>

@@ -7,7 +7,7 @@ export function Sidebar({ className, children, ...props }: React.HTMLAttributes<
   return (
     <aside
       className={cn(
-        'flex min-h-[calc(100vh-24px)] flex-col rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1',
+        'flex h-full min-h-0 flex-col rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1',
         className,
       )}
       {...props}

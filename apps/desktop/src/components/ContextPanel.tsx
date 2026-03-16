@@ -41,7 +41,7 @@ export function ContextPanel({
   const isRemoteConnected = remoteStatus?.status === 'connected'
 
   return (
-    <div className="flex min-h-[calc(100vh-24px)] flex-col overflow-y-auto rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
       {/* Remote Pairing */}
       <Panel collapsible defaultOpen={!isRemoteConnected}>
         <PanelHeader collapsible>

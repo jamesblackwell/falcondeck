@@ -158,15 +158,14 @@ body {
   line-height: var(--fd-leading-normal);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  /* Allow text selection everywhere — feels like a real app, not a locked-down webview */
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-/* Prevent selection on interactive chrome only */
-button, [role="button"], [data-radix-collection-item] {
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* Allow selection in content areas only */
+[data-selectable], [data-selectable] * {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 /* === Scrollbar === */

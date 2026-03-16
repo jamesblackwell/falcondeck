@@ -16,7 +16,7 @@ export function Conversation({ items }: { items: ConversationItem[] }) {
   }, [items.length, lastItemId])
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div data-selectable className="min-h-0 flex-1 overflow-y-auto">
       <div className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">
         {items.length === 0 ? (
           <EmptyState

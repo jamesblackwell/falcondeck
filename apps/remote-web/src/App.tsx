@@ -480,7 +480,7 @@ export default function App() {
         />
       }
       main={
-        <section className="flex min-h-[calc(100vh-24px)] flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
+        <section className="flex h-[calc(100vh-24px)] flex-col overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1">
           <Toolbar className="rounded-t-[var(--fd-radius-xl)]">
             <div className="flex items-center gap-2">
               <StatusIndicator
