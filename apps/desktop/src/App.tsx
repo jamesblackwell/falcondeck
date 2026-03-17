@@ -373,7 +373,7 @@ function AppInner() {
   const handleRefreshRemoteStatus = useCallback(() => {
     if (!api) return
     void api.remoteStatus().then(setRemoteStatus).catch(() => {})
-  }, [api])
+  }, [api, setRemoteStatus])
 
   const handleArchiveThread = useCallback(
     (workspaceId: string, threadId: string) => {
@@ -388,7 +388,7 @@ function AppInner() {
         toast({ variant: 'danger', title: 'Failed to archive thread', description: msg })
       })
     },
-    [api, selectedThreadId, toast],
+    [api, selectedThreadId, setSelectedThreadId, setSnapshot, toast],
   )
 
   // Memoized derived values
@@ -481,7 +481,7 @@ function AppInner() {
             }
             items={conversationItems}
             emptyState={conversationEmptyState}
-            isThinking={isSending}
+            isThinking={isSending || selectedThread?.status === 'running'}
             isLoading={isThreadDetailPending}
           />
           <PromptInput

@@ -121,27 +121,19 @@ function applyDaemonEventsToSnapshot(
 
 function applyDaemonEventsToThreadItems(
   current: Record<string, ConversationItem[]>,
-  events: EventEnvelope[],
+  updatesByThread: Map<string, ConversationItem[]>,
 ) {
   let next = current
-  const drafts = new Map<string, ConversationItem[]>()
 
-  for (const event of events) {
-    if (!event.thread_id) continue
-    if (
-      event.event.type !== 'conversation-item-added' &&
-      event.event.type !== 'conversation-item-updated'
-    ) {
-      continue
+  for (const [threadId, updates] of updatesByThread) {
+    let updated = current[threadId] ?? []
+    for (const item of updates) {
+      updated = upsertConversationItem(updated, item)
     }
-
-    const existing = drafts.get(event.thread_id) ?? current[event.thread_id] ?? []
-    const updated = upsertConversationItem(existing, event.event.item)
     if (next === current) {
       next = { ...current }
     }
-    next[event.thread_id] = updated
-    drafts.set(event.thread_id, updated)
+    next[threadId] = updated
   }
 
   return next
@@ -150,12 +142,61 @@ function applyDaemonEventsToThreadItems(
 function applyDaemonEventsToThreadDetail(
   current: ThreadDetail | null,
   events: EventEnvelope[],
+  updatesByThread: Map<string, ConversationItem[]>,
 ) {
   let next = current
   for (const event of events) {
     next = applyEventToThreadDetail(next, event)
   }
-  return next
+  if (!next) return next
+
+  const threadUpdates = updatesByThread.get(next.thread.id)
+  if (!threadUpdates || threadUpdates.length === 0) {
+    return next
+  }
+
+  let items = next.items
+  for (const item of threadUpdates) {
+    items = upsertConversationItem(items, item)
+  }
+
+  return items === next.items ? next : { ...next, items }
+}
+
+function collectConversationItemUpdates(events: EventEnvelope[]) {
+  const passthroughEvents: EventEnvelope[] = []
+  const updatesByThread = new Map<string, Map<string, ConversationItem>>()
+
+  for (const event of events) {
+    if (
+      event.thread_id &&
+      (event.event.type === 'conversation-item-added' ||
+        event.event.type === 'conversation-item-updated')
+    ) {
+      let threadUpdates = updatesByThread.get(event.thread_id)
+      if (!threadUpdates) {
+        threadUpdates = new Map<string, ConversationItem>()
+        updatesByThread.set(event.thread_id, threadUpdates)
+      }
+      threadUpdates.set(
+        `${event.event.item.kind}:${event.event.item.id}`,
+        event.event.item,
+      )
+      continue
+    }
+
+    passthroughEvents.push(event)
+  }
+
+  return {
+    passthroughEvents,
+    updatesByThread: new Map(
+      [...updatesByThread.entries()].map(([threadId, items]) => [
+        threadId,
+        [...items.values()],
+      ]),
+    ),
+  }
 }
 
 // ── Session persistence ──────────────────────────────────────────────
@@ -447,6 +488,7 @@ export default function App() {
     pendingEncryptedUpdatesRef.current = []
     pendingRelayUpdatesRef.current = []
     setConnectionStatus('connecting')
+    setMachinePresence(null)
     setError(null)
 
     socket.onopen = () => {
@@ -492,6 +534,7 @@ export default function App() {
     socket.onclose = () => {
       if (!isCurrent) return
       setConnectionStatus('disconnected')
+      setMachinePresence(null)
       for (const [reqId, pending] of pendingRpc.current.entries()) {
         window.clearTimeout(pending.timeout)
         pending.reject(new Error('Relay connection closed'))
@@ -667,9 +710,23 @@ export default function App() {
         }
 
         if (daemonEvents.length > 0) {
-          setSnapshot((current) => applyDaemonEventsToSnapshot(current, daemonEvents))
-          setThreadItems((current) => applyDaemonEventsToThreadItems(current, daemonEvents))
-          setThreadDetail((current) => applyDaemonEventsToThreadDetail(current, daemonEvents))
+          const { passthroughEvents, updatesByThread } =
+            collectConversationItemUpdates(daemonEvents)
+          setSnapshot((current) =>
+            applyDaemonEventsToSnapshot(current, passthroughEvents),
+          )
+          if (updatesByThread.size > 0) {
+            setThreadItems((current) =>
+              applyDaemonEventsToThreadItems(current, updatesByThread),
+            )
+          }
+          setThreadDetail((current) =>
+            applyDaemonEventsToThreadDetail(
+              current,
+              passthroughEvents,
+              updatesByThread,
+            ),
+          )
         }
       }
     } finally {
@@ -716,6 +773,7 @@ export default function App() {
           const merged = detail.items.reduce((items, item) => upsertConversationItem(items, item), bucket)
           return { ...current, [selectedThreadId]: merged }
         })
+        setError(null)
       })
       .catch((e) => {
         if (cancelled) return
@@ -736,6 +794,7 @@ export default function App() {
       .then((nextSnapshot) => {
         if (cancelled) return
         setSnapshot((current) => current ?? nextSnapshot)
+        setError(null)
       })
       .catch((e) => {
         if (cancelled) return
@@ -1242,7 +1301,7 @@ export default function App() {
             : selectedWorkspaceId
         }
         items={items}
-        isThinking={isSubmitting}
+        isThinking={isSubmitting || selectedThread?.status === 'running'}
       />
 
       {/* Prompt input */}

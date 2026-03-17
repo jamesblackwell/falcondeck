@@ -44,6 +44,8 @@ export const Conversation = memo(function Conversation({
     () => items.filter((item) => item.kind !== 'reasoning'),
     [items],
   )
+  const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
+  const showEmptyState = renderableItems.length === 0 && !hasHiddenOnlyItems
 
   useEffect(() => {
     if (!threadKey) return
@@ -198,15 +200,17 @@ export const Conversation = memo(function Conversation({
         onScroll={handleScroll}
       >
         <div ref={contentRef} className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">
-          {renderableItems.length === 0 ? (
+          {showEmptyState || (renderableItems.length === 0 && isThinking) ? (
             <div className="flex flex-col gap-3">
-              {emptyState ?? (
-                <EmptyState
-                  icon={<MessageSquare className="h-6 w-6" />}
-                  title="Ready for instructions"
-                  description="Send a prompt to start a conversation with Codex."
-                />
-              )}
+              {showEmptyState
+                ? emptyState ?? (
+                    <EmptyState
+                      icon={<MessageSquare className="h-6 w-6" />}
+                      title="Ready for instructions"
+                      description="Send a prompt to start a conversation with Codex."
+                    />
+                  )
+                : null}
               {isThinking ? (
                 <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
                   <LoaderCircle className="h-4 w-4 animate-spin text-accent" />

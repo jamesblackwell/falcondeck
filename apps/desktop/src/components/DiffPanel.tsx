@@ -14,7 +14,12 @@ export type DiffPanelProps = {
 }
 
 export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrigger }: DiffPanelProps) {
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
+  const [selection, setSelection] = useState<{
+    workspaceId: string
+    filePath: string
+  } | null>(null)
+  const selectedFile =
+    selection && selection.workspaceId === workspaceId ? selection.filePath : null
   const { status, isLoading, error, refresh } = useGitStatus(api, workspaceId, refreshTrigger)
   const { diff, isLoading: isDiffLoading, error: diffError } = useGitDiff(api, workspaceId, selectedFile)
 
@@ -26,7 +31,7 @@ export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrig
           diff={diff}
           isLoading={isDiffLoading}
           error={diffError}
-          onBack={() => setSelectedFile(null)}
+          onBack={() => setSelection(null)}
         />
       </div>
     )
@@ -40,7 +45,9 @@ export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrig
         isLoading={isLoading}
         error={error}
         onRefresh={() => void refresh()}
-        onSelectFile={setSelectedFile}
+        onSelectFile={(filePath) =>
+          setSelection(workspaceId ? { workspaceId, filePath } : null)
+        }
       />
     </div>
   )

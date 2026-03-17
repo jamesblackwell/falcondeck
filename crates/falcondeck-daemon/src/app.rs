@@ -403,7 +403,7 @@ impl AppState {
             } else {
                 let app = self.clone();
                 let task = tokio::spawn(async move {
-                    app.run_remote_bridge(relay_url, pairing.daemon_token, remote_pairing)
+                    app.run_remote_bridge(relay_url, pairing.daemon_token)
                         .await;
                 });
                 remote.task = Some(task);
@@ -1037,10 +1037,16 @@ impl AppState {
         &self,
         relay_url: String,
         daemon_token: String,
-        pairing: RemotePairingState,
     ) {
         let mut backoff_seconds = 1u64;
         loop {
+            let Some(pairing) = ({
+                let remote = self.inner.remote.lock().await;
+                current_pairing_for_remote_attempt(&remote, &relay_url, &daemon_token)
+            }) else {
+                break;
+            };
+
             let result = self
                 .wait_for_claim_and_connect(
                     relay_url.clone(),
@@ -1320,49 +1326,43 @@ impl AppState {
                         return;
                     };
 
-                    let restart =
+                    let should_restart = {
+                        let mut remote = self.inner.remote.lock().await;
+                        if remote.relay_url.as_deref() != Some(relay_url.as_str())
+                            || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
                         {
-                            let mut remote = self.inner.remote.lock().await;
-                            if remote.relay_url.as_deref() != Some(relay_url.as_str())
-                                || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
+                            false
+                        } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
+                            current_pairing.pairing_id != pairing_id
+                        }) {
+                            false
+                        } else {
                             {
-                                None
-                            } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
-                                current_pairing.pairing_id != pairing_id
-                            }) {
-                                None
-                            } else {
-                                {
-                                    let current_pairing =
-                                        remote.pairing.as_mut().expect("pairing checked above");
-                                    current_pairing.session_id = Some(session_id);
-                                    current_pairing.device_id = Some(device_id);
-                                    current_pairing.client_bundle = Some(client_bundle);
-                                    if current_pairing.trusted_at.is_none() {
-                                        current_pairing.trusted_at = Some(Utc::now());
-                                    }
+                                let current_pairing =
+                                    remote.pairing.as_mut().expect("pairing checked above");
+                                current_pairing.session_id = Some(session_id);
+                                current_pairing.device_id = Some(device_id);
+                                current_pairing.client_bundle = Some(client_bundle);
+                                if current_pairing.trusted_at.is_none() {
+                                    current_pairing.trusted_at = Some(Utc::now());
                                 }
-                                let next_pairing = remote
-                                    .pairing
-                                    .as_ref()
-                                    .expect("pairing updated above")
-                                    .clone();
-                                remote.status = RemoteConnectionStatus::Connecting;
-                                remote.last_error = None;
-                                if let Some(task) = remote.task.take() {
-                                    task.abort();
-                                }
-                                remote.pairing_watch_task = None;
-                                Some(next_pairing)
                             }
-                        };
+                            remote.status = RemoteConnectionStatus::Connecting;
+                            remote.last_error = None;
+                            if let Some(task) = remote.task.take() {
+                                task.abort();
+                            }
+                            remote.pairing_watch_task = None;
+                            true
+                        }
+                    };
 
-                    if let Some(pairing) = restart {
+                    if should_restart {
                         let app = self.clone();
                         let restart_relay_url = relay_url.clone();
                         let restart_daemon_token = daemon_token.clone();
                         let task = tokio::spawn(async move {
-                            app.run_remote_bridge(restart_relay_url, restart_daemon_token, pairing)
+                            app.run_remote_bridge(restart_relay_url, restart_daemon_token)
                                 .await;
                         });
                         {
@@ -2233,7 +2233,7 @@ impl AppState {
 
             let app = self.clone();
             let task = tokio::spawn(async move {
-                app.run_remote_bridge(relay_url, daemon_token, pairing)
+                app.run_remote_bridge(relay_url, daemon_token)
                     .await;
             });
             current.task = Some(task);
@@ -3208,6 +3208,20 @@ fn build_remote_status_response(remote: &RemoteBridgeState) -> RemoteStatusRespo
     }
 }
 
+fn current_pairing_for_remote_attempt(
+    remote: &RemoteBridgeState,
+    relay_url: &str,
+    daemon_token: &str,
+) -> Option<RemotePairingState> {
+    if remote.relay_url.as_deref() != Some(relay_url)
+        || remote.daemon_token.as_deref() != Some(daemon_token)
+    {
+        return None;
+    }
+
+    remote.pairing.clone()
+}
+
 fn normalize_request_id(value: &Value) -> String {
     match value {
         Value::String(string) => string.clone(),
@@ -3625,8 +3639,9 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        ConversationItem, ImageInput, ThreadCodexParams, ThreadStatus, ThreadSummary,
-        TurnInputItem, WorkspaceStatus,
+        ConversationItem, EncryptionVariant, ImageInput, PairingPublicKeyBundle,
+        ThreadCodexParams, ThreadStatus, ThreadSummary, TurnInputItem, WorkspaceStatus,
+        crypto::{LocalBoxKeyPair, generate_data_key},
     };
     use serde_json::json;
     use tempfile::tempdir;
@@ -3782,6 +3797,56 @@ mod tests {
             }],
         );
         assert!(restored_thread.requires_resume);
+    }
+
+    #[test]
+    fn reconnect_attempt_uses_current_trusted_pairing_state() {
+        let initial_pairing = super::RemotePairingState {
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "ABCDEFGHJKLM".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: None,
+            trusted_at: None,
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: None,
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let updated_pairing = super::RemotePairingState {
+            device_id: Some("device-1".to_string()),
+            trusted_at: Some(Utc::now()),
+            client_bundle: Some(PairingPublicKeyBundle {
+                encryption_variant: EncryptionVariant::DataKeyV1,
+                public_key: "client-public-key".to_string(),
+            }),
+            ..initial_pairing.clone()
+        };
+        let remote = super::RemoteBridgeState {
+            status: falcondeck_core::RemoteConnectionStatus::Connected,
+            relay_url: Some("https://connect.falcondeck.com".to_string()),
+            pairing: Some(updated_pairing.clone()),
+            daemon_token: Some("daemon-token".to_string()),
+            last_error: None,
+            task: None,
+            pairing_watch_task: None,
+        };
+
+        let pairing = super::current_pairing_for_remote_attempt(
+            &remote,
+            "https://connect.falcondeck.com",
+            "daemon-token",
+        )
+        .expect("current pairing for reconnect");
+
+        assert_eq!(pairing.session_id, updated_pairing.session_id);
+        assert_eq!(pairing.device_id, updated_pairing.device_id);
+        assert_eq!(
+            pairing
+                .client_bundle
+                .as_ref()
+                .map(|bundle| bundle.public_key.as_str()),
+            Some("client-public-key")
+        );
     }
 
     #[tokio::test]

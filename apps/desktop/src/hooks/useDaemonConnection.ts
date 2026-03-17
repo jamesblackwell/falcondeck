@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import {
   applyEventToThreadDetail,
@@ -33,25 +33,6 @@ export function useDaemonConnection() {
   const threadDetailPrefetchRef = useRef(new Set<string>())
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
-  const selectedThreadCacheKey =
-    selectedWorkspaceId && selectedThreadId
-      ? threadCacheKey(selectedWorkspaceId, selectedThreadId)
-      : null
-  const selectedThreadDetail = useMemo(() => {
-    if (!selectedThreadCacheKey) {
-      return null
-    }
-
-    if (
-      threadDetail &&
-      threadDetail.workspace.id === selectedWorkspaceId &&
-      threadDetail.thread.id === selectedThreadId
-    ) {
-      return threadDetail
-    }
-
-    return threadDetailCacheRef.current.get(selectedThreadCacheKey) ?? null
-  }, [selectedThreadCacheKey, selectedThreadId, selectedWorkspaceId, threadDetail])
 
   const handleEvent = useCallback((event: EventEnvelope) => {
     setSnapshot((c) => applySnapshotEvent(c, event))
@@ -116,6 +97,7 @@ export function useDaemonConnection() {
   }, [handleEvent])
 
   // Reconcile selection when snapshot changes
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId, {
       preserveEmptyThreadSelection: true,
@@ -127,8 +109,38 @@ export function useDaemonConnection() {
       setSelectedThreadId(nextSelection.threadId)
     }
   }, [snapshot, selectedThreadId, selectedWorkspaceId])
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useLayoutEffect(() => {
+    if (!selectedWorkspaceId || !selectedThreadId) {
+      if (threadDetail !== null) {
+        setThreadDetail(null)
+      }
+      return
+    }
+
+    if (
+      threadDetail &&
+      threadDetail.workspace.id === selectedWorkspaceId &&
+      threadDetail.thread.id === selectedThreadId
+    ) {
+      return
+    }
+
+    const cachedDetail =
+      threadDetailCacheRef.current.get(threadCacheKey(selectedWorkspaceId, selectedThreadId)) ??
+      null
+    if (cachedDetail) {
+      setThreadDetail(cachedDetail)
+    } else if (threadDetail !== null) {
+      setThreadDetail(null)
+    }
+  }, [selectedThreadId, selectedWorkspaceId, threadDetail])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Fetch thread detail on selection change
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!api || !selectedWorkspaceId || !selectedThreadId) {
       setThreadDetail(null)
@@ -157,9 +169,10 @@ export function useDaemonConnection() {
       })
       .catch(() => {
         if (!cancelled && !cachedDetail) setThreadDetail(null)
-      })
+    })
     return () => { cancelled = true }
   }, [api, selectedThreadId, selectedWorkspaceId, snapshot?.threads])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Prefetch likely-next threads so switching can render from memory immediately.
   useEffect(() => {
@@ -235,14 +248,16 @@ export function useDaemonConnection() {
       void api.remoteStatus().then(setRemoteStatus).catch(() => {})
     }, 2000)
     return () => window.clearInterval(interval)
-  }, [api, remoteStatus?.status])
+  }, [api, remoteStatus])
 
   // Refresh git on workspace change
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (selectedWorkspaceId) {
       setGitRefreshTrigger((c) => c + 1)
     }
   }, [selectedWorkspaceId])
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return {
     api,
@@ -250,7 +265,7 @@ export function useDaemonConnection() {
     connectionError,
     snapshot,
     setSnapshot,
-    threadDetail: selectedThreadDetail,
+    threadDetail,
     setThreadDetail,
     remoteStatus,
     setRemoteStatus,

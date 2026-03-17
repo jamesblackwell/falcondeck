@@ -98,6 +98,8 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
         return uiReducer(state, { type: 'snapshot-loaded', snapshot: action.event.event.snapshot })
       }
 
+      const daemonEvent = action.event.event
+
       const nextEventsByThread =
         action.event.thread_id == null
           ? state.eventsByThread
@@ -114,25 +116,25 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
       }
 
       let snapshot = state.snapshot
-      if (action.event.event.type === 'thread-started') {
+      if (daemonEvent.type === 'thread-started') {
         snapshot = {
           ...snapshot,
-          threads: upsertThread(snapshot.threads, action.event.event.thread),
+          threads: upsertThread(snapshot.threads, daemonEvent.thread),
         }
       }
-      if (action.event.event.type === 'thread-updated') {
+      if (daemonEvent.type === 'thread-updated') {
         snapshot = {
           ...snapshot,
-          threads: upsertThread(snapshot.threads, action.event.event.thread),
+          threads: upsertThread(snapshot.threads, daemonEvent.thread),
         }
       }
-      if (action.event.event.type === 'interactive-request') {
+      if (daemonEvent.type === 'interactive-request') {
         snapshot = {
           ...snapshot,
           interactive_requests: [
-            action.event.event.request,
+            daemonEvent.request,
             ...snapshot.interactive_requests.filter(
-              (request) => request.request_id !== action.event.event.request.request_id,
+              (request) => request.request_id !== daemonEvent.request.request_id,
             ),
           ],
         }

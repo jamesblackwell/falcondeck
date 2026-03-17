@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useState } from 'react'
+import { memo, useCallback, useState } from 'react'
 import { ChevronDown, FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
@@ -100,13 +100,15 @@ export const DesktopSidebar = memo(function DesktopSidebar({
     workspaceId: string | null
     threadId: string | null
   } | null>(null)
+  const pendingSelection =
+    optimisticSelection &&
+    (optimisticSelection.workspaceId !== selectedWorkspaceId ||
+      optimisticSelection.threadId !== selectedThreadId)
+      ? optimisticSelection
+      : null
 
-  useEffect(() => {
-    setOptimisticSelection(null)
-  }, [selectedWorkspaceId, selectedThreadId])
-
-  const visualSelectedWorkspaceId = optimisticSelection?.workspaceId ?? selectedWorkspaceId
-  const visualSelectedThreadId = optimisticSelection?.threadId ?? selectedThreadId
+  const visualSelectedWorkspaceId = pendingSelection?.workspaceId ?? selectedWorkspaceId
+  const visualSelectedThreadId = pendingSelection?.threadId ?? selectedThreadId
 
   const handleSelectWorkspace = useCallback(
     (workspaceId: string, threadId: string | null) => {
