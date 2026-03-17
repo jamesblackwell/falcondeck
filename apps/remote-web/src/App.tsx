@@ -497,6 +497,25 @@ export default function App() {
     }
   }, [hasSessionKey, relayConnected, selectedThreadId, selectedWorkspaceId])
 
+  useEffect(() => {
+    if (!relayConnected || !hasSessionKey || snapshot) return
+
+    let cancelled = false
+    void callRpc<DaemonSnapshot>('snapshot.current', {})
+      .then((nextSnapshot) => {
+        if (cancelled) return
+        setSnapshot((current) => current ?? nextSnapshot)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setError(e instanceof Error ? e.message : 'Failed to load remote snapshot')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [hasSessionKey, relayConnected, snapshot])
+
   // ── Actions ────────────────────────────────────────────────────────
 
   async function handleClaimPairing() {
