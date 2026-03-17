@@ -1,0 +1,189 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+
+import { useRelayStore } from './relay-store'
+import { __reset as resetSecureStore } from 'expo-secure-store'
+import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
+
+function resetStore() {
+  // Reset internal refs by disconnecting
+  const state = useRelayStore.getState()
+  // Force reset internal state
+  useRelayStore.setState({
+    relayUrl: 'https://connect.falcondeck.com',
+    pairingCode: '',
+    sessionId: null,
+    deviceId: null,
+    connectionStatus: 'not_connected',
+    machinePresence: null,
+    error: null,
+    isConnected: false,
+    isEncrypted: false,
+  })
+  resetSecureStore()
+  resetMMKV()
+}
+
+describe('relay-store', () => {
+  beforeEach(resetStore)
+
+  describe('initial state', () => {
+    it('starts not connected with no session', () => {
+      const state = useRelayStore.getState()
+      expect(state.connectionStatus).toBe('not_connected')
+      expect(state.sessionId).toBeNull()
+      expect(state.deviceId).toBeNull()
+      expect(state.isConnected).toBe(false)
+      expect(state.isEncrypted).toBe(false)
+      expect(state.error).toBeNull()
+    })
+  })
+
+  describe('setRelayUrl / setPairingCode', () => {
+    it('stores the relay URL', () => {
+      useRelayStore.getState().setRelayUrl('https://custom.relay.com')
+      expect(useRelayStore.getState().relayUrl).toBe('https://custom.relay.com')
+    })
+
+    it('uppercases the pairing code', () => {
+      useRelayStore.getState().setPairingCode('abcd-1234')
+      expect(useRelayStore.getState().pairingCode).toBe('ABCD-1234')
+    })
+  })
+
+  describe('claimPairing', () => {
+    it('does nothing when relay URL or pairing code is empty', async () => {
+      const { claimPairing } = useRelayStore.getState()
+
+      // Both empty
+      await claimPairing()
+      expect(useRelayStore.getState().connectionStatus).toBe('not_connected')
+
+      // URL set, code empty
+      useRelayStore.getState().setRelayUrl('https://relay.test')
+      await claimPairing()
+      expect(useRelayStore.getState().connectionStatus).toBe('not_connected')
+    })
+
+    it('sets error on network failure', async () => {
+      const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
+      setRelayUrl('https://relay.test')
+      setPairingCode('TEST-CODE')
+
+      // Mock fetch to fail
+      globalThis.fetch = vi.fn().mockRejectedValue(new Error('Network error'))
+
+      await claimPairing()
+
+      const state = useRelayStore.getState()
+      expect(state.connectionStatus).toBe('not_connected')
+      expect(state.error).toBe('Network error')
+    })
+
+    it('sets error on non-OK response', async () => {
+      const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
+      setRelayUrl('https://relay.test')
+      setPairingCode('BAD-CODE')
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: async () => ({ error: 'Pairing not found' }),
+      })
+
+      await claimPairing()
+
+      const state = useRelayStore.getState()
+      expect(state.connectionStatus).toBe('not_connected')
+      expect(state.error).toBe('Pairing not found')
+    })
+
+    it('transitions to connecting on successful claim', async () => {
+      const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
+      setRelayUrl('https://relay.test')
+      setPairingCode('GOOD-CODE')
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          session_id: 'session-abc',
+          device_id: 'device-xyz',
+          client_token: 'token-123',
+        }),
+      })
+
+      await claimPairing()
+
+      const state = useRelayStore.getState()
+      expect(state.connectionStatus).toBe('connecting')
+      expect(state.sessionId).toBe('session-abc')
+      expect(state.deviceId).toBe('device-xyz')
+      expect(state.isConnected).toBe(true)
+    })
+  })
+
+  describe('disconnect', () => {
+    it('resets all state and clears storage', async () => {
+      // Simulate a connected state
+      useRelayStore.setState({
+        sessionId: 'session-1',
+        deviceId: 'device-1',
+        connectionStatus: 'encrypted',
+        isConnected: true,
+        isEncrypted: true,
+      })
+
+      await useRelayStore.getState().disconnect()
+
+      const state = useRelayStore.getState()
+      expect(state.sessionId).toBeNull()
+      expect(state.deviceId).toBeNull()
+      expect(state.connectionStatus).toBe('not_connected')
+      expect(state.isConnected).toBe(false)
+      expect(state.isEncrypted).toBe(false)
+    })
+  })
+
+  describe('internal helpers', () => {
+    it('_setConnectionStatus updates both status and isEncrypted', () => {
+      const { _setConnectionStatus } = useRelayStore.getState()
+
+      _setConnectionStatus('encrypted')
+      expect(useRelayStore.getState().isEncrypted).toBe(true)
+      expect(useRelayStore.getState().connectionStatus).toBe('encrypted')
+
+      _setConnectionStatus('connected')
+      expect(useRelayStore.getState().isEncrypted).toBe(false)
+    })
+
+    it('_setMachinePresence updates presence', () => {
+      useRelayStore.getState()._setMachinePresence({
+        session_id: 's1',
+        daemon_connected: true,
+        last_seen_at: '2026-03-16T10:00:00Z',
+      })
+
+      expect(useRelayStore.getState().machinePresence?.daemon_connected).toBe(true)
+    })
+
+    it('_setLastReceivedSeq tracks the high-water mark', () => {
+      const store = useRelayStore.getState()
+      store._setLastReceivedSeq(5)
+      expect(store._getLastReceivedSeq()).toBe(5)
+
+      store._setLastReceivedSeq(3) // lower seq should be ignored
+      expect(store._getLastReceivedSeq()).toBe(5)
+
+      store._setLastReceivedSeq(10)
+      expect(store._getLastReceivedSeq()).toBe(10)
+    })
+
+    it('_setError sets and clears error', () => {
+      const store = useRelayStore.getState()
+      store._setError('Something broke')
+      expect(useRelayStore.getState().error).toBe('Something broke')
+
+      store._setError(null)
+      expect(useRelayStore.getState().error).toBeNull()
+    })
+  })
+})

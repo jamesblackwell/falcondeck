@@ -113,6 +113,8 @@ export type InteractiveRequest = {
   created_at: string
 }
 
+export type ApprovalRequest = InteractiveRequest
+
 export type InteractiveResponsePayload =
   | {
       kind: 'approval'
