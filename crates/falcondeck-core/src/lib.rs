@@ -7,6 +7,10 @@ use serde_json::Value;
 pub const DEFAULT_DAEMON_PORT: u16 = 4123;
 pub const DEFAULT_RELAY_PORT: u16 = 8787;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonInfo {
     pub version: String,
@@ -136,6 +140,10 @@ pub struct WorkspaceSummary {
     pub status: WorkspaceStatus,
     pub models: Vec<ModelSummary>,
     pub collaboration_modes: Vec<CollaborationModeSummary>,
+    #[serde(default = "default_true")]
+    pub supports_plan_mode: bool,
+    #[serde(default = "default_true")]
+    pub supports_native_plan_mode: bool,
     pub account: AccountSummary,
     pub current_thread_id: Option<String>,
     pub connected_at: DateTime<Utc>,
@@ -173,8 +181,12 @@ pub struct ModelSummary {
 pub struct CollaborationModeSummary {
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub mode: Option<String>,
     pub model_id: Option<String>,
     pub reasoning_effort: Option<String>,
+    #[serde(default = "default_true")]
+    pub is_native: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

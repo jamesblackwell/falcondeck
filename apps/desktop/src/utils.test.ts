@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
+import {
+  defaultCollaborationModeId,
+  isPlanModeEnabled,
+  supportsPlanMode,
+  togglePlanMode,
+  type ThreadSummary,
+  type WorkspaceSummary,
+} from '@falcondeck/client-core'
 
 import { defaultModelId, defaultReasoningEffort, reasoningOptions, resolveThreadModelId } from './utils'
 
@@ -16,6 +23,8 @@ function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
     connected_at: '2026-03-17T08:00:00Z',
     updated_at: '2026-03-17T08:00:00Z',
     last_error: null,
+    supports_plan_mode: true,
+    supports_native_plan_mode: true,
     ...overrides,
   }
 }
@@ -171,5 +180,43 @@ describe('desktop selection utils', () => {
 
     expect(resolveThreadModelId(selectedThread, selectedWorkspace)).toBe('gpt-5.3-codex-spark')
     expect(defaultReasoningEffort(selectedThread, selectedWorkspace)).toBe('high')
+  })
+
+  it('does not auto-enable plan mode for a new thread', () => {
+    const selectedWorkspace = workspace({
+      collaboration_modes: [
+        {
+          id: 'plan',
+          label: 'Plan',
+          mode: 'plan',
+          model_id: null,
+          reasoning_effort: 'medium',
+          is_native: true,
+        },
+      ],
+    })
+
+    expect(defaultCollaborationModeId(null)).toBeNull()
+    expect(supportsPlanMode(selectedWorkspace)).toBe(true)
+    expect(isPlanModeEnabled(null, selectedWorkspace)).toBe(false)
+  })
+
+  it('enables and disables plan mode using the canonical plan id', () => {
+    const selectedWorkspace = workspace({
+      collaboration_modes: [
+        {
+          id: 'plan',
+          label: 'Plan',
+          mode: 'plan',
+          model_id: null,
+          reasoning_effort: 'medium',
+          is_native: true,
+        },
+      ],
+    })
+
+    expect(togglePlanMode(true, selectedWorkspace, null)).toBe('plan')
+    expect(isPlanModeEnabled('plan', selectedWorkspace)).toBe(true)
+    expect(togglePlanMode(false, selectedWorkspace, 'plan')).toBeNull()
   })
 })

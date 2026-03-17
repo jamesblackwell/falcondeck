@@ -10,15 +10,15 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    ApprovalDecision, CollaborationModeSummary, CommandResponse,
-    ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope,
-    EventEnvelope, HealthResponse, PairingPublicKeyBundle, PairingStatusResponse,
-    RelayClientMessage, RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus,
-    RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
-    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
+    ApprovalDecision, CollaborationModeSummary, CommandResponse, ConnectWorkspaceRequest,
+    ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope, EventEnvelope, HealthResponse,
+    InteractiveQuestion, InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind,
+    InteractiveResponsePayload, PairingPublicKeyBundle, PairingStatusResponse, RelayClientMessage,
+    RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus, RemotePairingSession,
+    RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial, StartPairingRequest,
+    StartPairingResponse, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
     ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary, TurnInputItem,
-    UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary, InteractiveQuestion,
-    InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload,
+    UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -403,8 +403,7 @@ impl AppState {
             } else {
                 let app = self.clone();
                 let task = tokio::spawn(async move {
-                    app.run_remote_bridge(relay_url, pairing.daemon_token)
-                        .await;
+                    app.run_remote_bridge(relay_url, pairing.daemon_token).await;
                 });
                 remote.task = Some(task);
             }
@@ -544,6 +543,8 @@ impl AppState {
             },
             models,
             collaboration_modes: collaboration_modes.clone(),
+            supports_plan_mode: true,
+            supports_native_plan_mode: true,
             account,
             current_thread_id,
             connected_at: now,
@@ -594,6 +595,13 @@ impl AppState {
         &self,
         request: StartThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
+        let supports_native_plan_mode = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(&request.workspace_id)
+                .map(|workspace| workspace.summary.supports_native_plan_mode)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?
+        };
         let session = self.session_for(&request.workspace_id).await?;
         let workspace_path = session.workspace_path().to_string();
         let approval_policy = request
@@ -606,7 +614,12 @@ impl AppState {
                 json!({
                     "cwd": workspace_path,
                     "model": request.model_id,
-                    "collaborationMode": request.collaboration_mode_id,
+                    "collaborationMode": collaboration_mode_payload(
+                        request.collaboration_mode_id.as_deref(),
+                        request.model_id.as_deref(),
+                        None,
+                        supports_native_plan_mode,
+                    ),
                     "approvalPolicy": approval_policy
                 }),
             )
@@ -737,7 +750,7 @@ impl AppState {
         };
 
         let user_message = build_user_message_item(&inputs);
-        let (thread, requires_resume) = {
+        let (thread, requires_resume, use_plan_mode_shim) = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get_mut(&request.workspace_id)
@@ -764,25 +777,38 @@ impl AppState {
                     })
                 });
             managed.summary.status = ThreadStatus::Running;
-            managed.summary.codex.model_id =
-                request.model_id.clone().or(managed.summary.codex.model_id.clone());
-            managed.summary.codex.reasoning_effort = request
+            managed.summary.codex.model_id = request.model_id.clone().or(managed
+                .summary
+                .codex
+                .model_id
+                .clone());
+            managed.summary.codex.reasoning_effort = request.reasoning_effort.clone().or(managed
+                .summary
+                .codex
                 .reasoning_effort
-                .clone()
-                .or(managed.summary.codex.reasoning_effort.clone());
+                .clone());
             managed.summary.codex.collaboration_mode_id = request
                 .collaboration_mode_id
                 .clone()
                 .or(managed.summary.codex.collaboration_mode_id.clone());
             managed.summary.codex.approval_policy = Some(approval_policy.clone());
-            managed.summary.codex.service_tier = request
+            managed.summary.codex.service_tier = request.service_tier.clone().or(managed
+                .summary
+                .codex
                 .service_tier
-                .clone()
-                .or(managed.summary.codex.service_tier.clone());
+                .clone());
+            let use_plan_mode_shim = should_use_plan_mode_shim(
+                &workspace.summary,
+                request.collaboration_mode_id.as_deref(),
+            );
             managed.summary.updated_at = now;
             workspace.summary.current_thread_id = Some(managed.summary.id.clone());
             workspace.summary.updated_at = now;
-            (managed.summary.clone(), managed.requires_resume)
+            (
+                managed.summary.clone(),
+                managed.requires_resume,
+                use_plan_mode_shim,
+            )
         };
         self.push_conversation_item(
             &request.workspace_id,
@@ -812,7 +838,7 @@ impl AppState {
                 "turn/start",
                 json!({
                     "threadId": request.thread_id,
-                    "input": codex_inputs(&inputs),
+                    "input": codex_inputs_with_plan_mode_shim(&inputs, use_plan_mode_shim),
                     "cwd": workspace_path,
                     "model": request.model_id,
                     "effort": request.reasoning_effort,
@@ -820,6 +846,7 @@ impl AppState {
                         request.collaboration_mode_id.as_deref(),
                         request.model_id.as_deref(),
                         request.reasoning_effort.as_deref(),
+                        !use_plan_mode_shim,
                     ),
                     "approvalPolicy": approval_policy,
                     "serviceTier": request.service_tier
@@ -943,7 +970,10 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?;
 
         let result = match (&pending.request.kind, response) {
-            (InteractiveRequestKind::Approval, InteractiveResponsePayload::Approval { decision }) => {
+            (
+                InteractiveRequestKind::Approval,
+                InteractiveResponsePayload::Approval { decision },
+            ) => {
                 let decision = match decision {
                     ApprovalDecision::Allow => "allow",
                     ApprovalDecision::Deny => "deny",
@@ -954,7 +984,10 @@ impl AppState {
                     "acceptSettings": {"forSession": true}
                 })
             }
-            (InteractiveRequestKind::Question, InteractiveResponsePayload::Question { answers }) => json!({
+            (
+                InteractiveRequestKind::Question,
+                InteractiveResponsePayload::Question { answers },
+            ) => json!({
                 "answers": answers
                     .into_iter()
                     .map(|(question_id, question_answers)| {
@@ -974,9 +1007,7 @@ impl AppState {
             }
         };
 
-        session
-            .respond_to_request(pending.raw_id, result)
-            .await?;
+        session.respond_to_request(pending.raw_id, result).await?;
 
         if let Some(thread_id) = pending.request.thread_id {
             self.with_thread_mut(&workspace_id, &thread_id, |thread| {
@@ -1033,11 +1064,7 @@ impl AppState {
         })
     }
 
-    async fn run_remote_bridge(
-        &self,
-        relay_url: String,
-        daemon_token: String,
-    ) {
+    async fn run_remote_bridge(&self, relay_url: String, daemon_token: String) {
         let mut backoff_seconds = 1u64;
         loop {
             let Some(pairing) = ({
@@ -1326,36 +1353,37 @@ impl AppState {
                         return;
                     };
 
-                    let should_restart = {
-                        let mut remote = self.inner.remote.lock().await;
-                        if remote.relay_url.as_deref() != Some(relay_url.as_str())
-                            || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
+                    let should_restart =
                         {
-                            false
-                        } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
-                            current_pairing.pairing_id != pairing_id
-                        }) {
-                            false
-                        } else {
+                            let mut remote = self.inner.remote.lock().await;
+                            if remote.relay_url.as_deref() != Some(relay_url.as_str())
+                                || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
                             {
-                                let current_pairing =
-                                    remote.pairing.as_mut().expect("pairing checked above");
-                                current_pairing.session_id = Some(session_id);
-                                current_pairing.device_id = Some(device_id);
-                                current_pairing.client_bundle = Some(client_bundle);
-                                if current_pairing.trusted_at.is_none() {
-                                    current_pairing.trusted_at = Some(Utc::now());
+                                false
+                            } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
+                                current_pairing.pairing_id != pairing_id
+                            }) {
+                                false
+                            } else {
+                                {
+                                    let current_pairing =
+                                        remote.pairing.as_mut().expect("pairing checked above");
+                                    current_pairing.session_id = Some(session_id);
+                                    current_pairing.device_id = Some(device_id);
+                                    current_pairing.client_bundle = Some(client_bundle);
+                                    if current_pairing.trusted_at.is_none() {
+                                        current_pairing.trusted_at = Some(Utc::now());
+                                    }
                                 }
+                                remote.status = RemoteConnectionStatus::Connecting;
+                                remote.last_error = None;
+                                if let Some(task) = remote.task.take() {
+                                    task.abort();
+                                }
+                                remote.pairing_watch_task = None;
+                                true
                             }
-                            remote.status = RemoteConnectionStatus::Connecting;
-                            remote.last_error = None;
-                            if let Some(task) = remote.task.take() {
-                                task.abort();
-                            }
-                            remote.pairing_watch_task = None;
-                            true
-                        }
-                    };
+                        };
 
                     if should_restart {
                         let app = self.clone();
@@ -1638,8 +1666,9 @@ impl AppState {
                         request_id,
                         ok: true,
                         result: Some(
-                            encrypt_json(data_key, &snapshot)
-                                .map_err(|error| format!("failed to encrypt rpc result: {error}"))?,
+                            encrypt_json(data_key, &snapshot).map_err(|error| {
+                                format!("failed to encrypt rpc result: {error}")
+                            })?,
                         ),
                         error: None,
                     },
@@ -1928,15 +1957,10 @@ impl AppState {
                                 ok: false,
                                 result: None,
                                 error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": message }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
+                                    encrypt_json(data_key, &json!({ "message": message }))
+                                        .map_err(|encrypt_error| {
                                             format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
+                                        })?,
                                 ),
                             },
                         )
@@ -2233,8 +2257,7 @@ impl AppState {
 
             let app = self.clone();
             let task = tokio::spawn(async move {
-                app.run_remote_bridge(relay_url, daemon_token)
-                    .await;
+                app.run_remote_bridge(relay_url, daemon_token).await;
             });
             current.task = Some(task);
         }
@@ -3280,11 +3303,60 @@ fn codex_inputs(inputs: &[TurnInputItem]) -> Vec<Value> {
         .collect()
 }
 
+fn codex_inputs_with_plan_mode_shim(
+    inputs: &[TurnInputItem],
+    use_plan_mode_shim: bool,
+) -> Vec<Value> {
+    if !use_plan_mode_shim {
+        return codex_inputs(inputs);
+    }
+
+    let mut shimmed_inputs = vec![json!({
+        "type": "text",
+        "text": plan_mode_prompt_shim(),
+    })];
+    shimmed_inputs.extend(codex_inputs(inputs));
+    shimmed_inputs
+}
+
+fn plan_mode_prompt_shim() -> &'static str {
+    "Enter plan mode for this turn. Explore first, ask clarifying questions if needed, and produce a decision-complete implementation plan before making repo-tracked changes. Do not perform mutating work until the user explicitly exits plan mode."
+}
+
+fn mode_matches_plan(mode: &CollaborationModeSummary) -> bool {
+    mode.mode
+        .as_deref()
+        .unwrap_or(mode.id.as_str())
+        .eq_ignore_ascii_case("plan")
+}
+
+fn should_use_plan_mode_shim(summary: &WorkspaceSummary, mode_id: Option<&str>) -> bool {
+    if !summary.supports_plan_mode || summary.supports_native_plan_mode {
+        return false;
+    }
+
+    let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+
+    summary
+        .collaboration_modes
+        .iter()
+        .find(|mode| mode.id == mode_id)
+        .map(mode_matches_plan)
+        .unwrap_or_else(|| mode_id.eq_ignore_ascii_case("plan"))
+}
+
 fn collaboration_mode_payload(
     mode_id: Option<&str>,
     model_id: Option<&str>,
     reasoning_effort: Option<&str>,
+    supports_native_plan_mode: bool,
 ) -> Value {
+    if !supports_native_plan_mode {
+        return Value::Null;
+    }
+
     let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Value::Null;
     };
@@ -3347,7 +3419,8 @@ fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQuestion> {
             questions
                 .iter()
                 .map(|question| InteractiveQuestion {
-                    id: extract_string(question, &["id"]).unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    id: extract_string(question, &["id"])
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
                     header: extract_string(question, &["header"])
                         .unwrap_or_else(|| "Question".to_string()),
                     question: extract_string(question, &["question"])
@@ -3362,26 +3435,27 @@ fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQuestion> {
                         .or_else(|| question.get("is_secret"))
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                    options: question.get("options").and_then(Value::as_array).map(|options| {
-                        options
-                            .iter()
-                            .map(|option| InteractiveQuestionOption {
-                                label: extract_string(option, &["label"])
-                                    .unwrap_or_else(|| "Option".to_string()),
-                                description: extract_string(option, &["description"])
-                                    .unwrap_or_default(),
-                            })
-                            .collect()
-                    }),
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .map(|option| InteractiveQuestionOption {
+                                    label: extract_string(option, &["label"])
+                                        .unwrap_or_else(|| "Option".to_string()),
+                                    description: extract_string(option, &["description"])
+                                        .unwrap_or_default(),
+                                })
+                                .collect()
+                        }),
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn parse_interactive_response_params(
-    params: &Value,
-) -> Result<InteractiveResponsePayload, String> {
+fn parse_interactive_response_params(params: &Value) -> Result<InteractiveResponsePayload, String> {
     if let Some(response) = params.get("response") {
         if let Some(kind) = extract_string(response, &["kind"]) {
             return match kind.as_str() {
@@ -3408,18 +3482,22 @@ fn parse_interactive_response_params(
                                     let answer_values = value
                                         .as_array()
                                         .map(|items| {
-                                            items.iter()
+                                            items
+                                                .iter()
                                                 .filter_map(Value::as_str)
                                                 .map(str::to_string)
                                                 .collect::<Vec<_>>()
                                         })
                                         .or_else(|| {
-                                            value.get("answers").and_then(Value::as_array).map(|items| {
-                                                items.iter()
-                                                    .filter_map(Value::as_str)
-                                                    .map(str::to_string)
-                                                    .collect::<Vec<_>>()
-                                            })
+                                            value.get("answers").and_then(Value::as_array).map(
+                                                |items| {
+                                                    items
+                                                        .iter()
+                                                        .filter_map(Value::as_str)
+                                                        .map(str::to_string)
+                                                        .collect::<Vec<_>>()
+                                                },
+                                            )
                                         })
                                         .unwrap_or_default();
                                     (question_id.clone(), answer_values)
@@ -3639,8 +3717,9 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        ConversationItem, EncryptionVariant, ImageInput, PairingPublicKeyBundle,
-        ThreadCodexParams, ThreadStatus, ThreadSummary, TurnInputItem, WorkspaceStatus,
+        CollaborationModeSummary, ConversationItem, EncryptionVariant, ImageInput,
+        PairingPublicKeyBundle, ThreadCodexParams, ThreadStatus, ThreadSummary, TurnInputItem,
+        WorkspaceStatus, WorkspaceSummary,
         crypto::{LocalBoxKeyPair, generate_data_key},
     };
     use serde_json::json;
@@ -3648,8 +3727,8 @@ mod tests {
 
     use super::{
         AppState, PersistedAppState, PersistedRemoteState, codex_inputs,
-        collaboration_mode_payload, should_surface_tool_item,
-        workspace_status_after_account_update,
+        codex_inputs_with_plan_mode_shim, collaboration_mode_payload, should_surface_tool_item,
+        should_use_plan_mode_shim, workspace_status_after_account_update,
     };
 
     #[test]
@@ -3662,7 +3741,7 @@ mod tests {
 
     #[test]
     fn builds_structured_collaboration_mode_payload() {
-        let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"));
+        let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), true);
         assert_eq!(
             payload,
             json!({
@@ -3673,6 +3752,64 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn skips_structured_collaboration_mode_payload_for_non_native_plan_mode() {
+        let payload =
+            collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), false);
+        assert_eq!(payload, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn injects_plan_mode_prompt_shim_before_user_inputs() {
+        let payload = codex_inputs_with_plan_mode_shim(
+            &[TurnInputItem::Text {
+                id: None,
+                text: "Inspect the repo".to_string(),
+            }],
+            true,
+        );
+        assert_eq!(payload.len(), 2);
+        assert_eq!(payload[0]["type"], "text");
+        assert!(
+            payload[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Enter plan mode for this turn")
+        );
+        assert_eq!(payload[1]["text"], "Inspect the repo");
+    }
+
+    #[test]
+    fn only_uses_plan_mode_shim_for_non_native_plan_mode_workspaces() {
+        let workspace = WorkspaceSummary {
+            id: "workspace-1".to_string(),
+            path: "/tmp/falcondeck".to_string(),
+            status: WorkspaceStatus::Ready,
+            models: Vec::new(),
+            collaboration_modes: vec![CollaborationModeSummary {
+                id: "plan".to_string(),
+                label: "Plan".to_string(),
+                mode: Some("plan".to_string()),
+                model_id: None,
+                reasoning_effort: Some("medium".to_string()),
+                is_native: false,
+            }],
+            supports_plan_mode: true,
+            supports_native_plan_mode: false,
+            account: falcondeck_core::AccountSummary {
+                status: falcondeck_core::AccountStatus::Ready,
+                label: "ready".to_string(),
+            },
+            current_thread_id: None,
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+        };
+
+        assert!(should_use_plan_mode_shim(&workspace, Some("plan")));
+        assert!(!should_use_plan_mode_shim(&workspace, None));
     }
 
     #[test]

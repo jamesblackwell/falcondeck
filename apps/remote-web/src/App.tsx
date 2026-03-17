@@ -8,15 +8,19 @@ import {
   buildProjectGroups,
   bytesToBase64,
   conversationItemsForSelection,
+  defaultCollaborationModeId,
   decryptJson,
   encryptJson,
   filesToImageInputs,
   generateBoxKeyPair,
+  isPlanModeEnabled,
   publicKeyToBase64,
   reconcileSnapshotSelection,
   restoreBoxKeyPair,
   secretKeyToBase64,
   shouldReusePersistedRemoteSession,
+  supportsPlanMode,
+  togglePlanMode,
   upsertConversationItem,
   type ConversationItem,
   type DaemonSnapshot,
@@ -1024,12 +1028,12 @@ export default function App() {
           reasoningOptions(snapshot, selectedWorkspace.id, nextModelId)[0] ??
           'medium',
       )
-      setSelectedCollaborationMode(selectedThread.codex.collaboration_mode_id ?? selectedWorkspace.collaboration_modes[0]?.id ?? null)
+      setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
       return
     }
     setSelectedModel(fallbackModelId)
     setSelectedEffort(reasoningOptions(snapshot, selectedWorkspace.id, fallbackModelId)[0] ?? 'medium')
-    setSelectedCollaborationMode(selectedWorkspace.collaboration_modes[0]?.id ?? null)
+    setSelectedCollaborationMode(null)
   }, [selectedThread, selectedWorkspace, snapshot])
 
   useEffect(() => {
@@ -1130,7 +1134,7 @@ export default function App() {
   )
 
   const handleCollaborationModeChange = useCallback(
-    (modeId: string) => {
+    (modeId: string | null) => {
       setSelectedCollaborationMode(modeId)
       void persistThreadSettings({
         modelId: selectedModel,
@@ -1139,6 +1143,12 @@ export default function App() {
       })
     },
     [persistThreadSettings, selectedEffort, selectedModel],
+  )
+
+  const showPlanModeToggle = useMemo(() => supportsPlanMode(selectedWorkspace), [selectedWorkspace])
+  const planModeEnabled = useMemo(
+    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace),
+    [selectedCollaborationMode, selectedWorkspace],
   )
 
   useEffect(() => {
@@ -1320,7 +1330,14 @@ export default function App() {
           onEffortChange={handleEffortChange}
           collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
           selectedCollaborationModeId={selectedCollaborationMode}
-          onCollaborationModeChange={handleCollaborationModeChange}
+          onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
+          showPlanModeToggle={showPlanModeToggle}
+          planModeEnabled={planModeEnabled}
+          onPlanModeChange={(enabled) =>
+            handleCollaborationModeChange(
+              togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
+            )
+          }
           disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
           compact
         />
