@@ -6,7 +6,7 @@ export type WorkspaceStatus =
   | 'disconnected'
   | 'error'
 
-export type ThreadStatus = 'idle' | 'running' | 'waiting_for_approval' | 'error'
+export type ThreadStatus = 'idle' | 'running' | 'waiting_for_input' | 'error'
 export type ServiceLevel = 'info' | 'warning' | 'error'
 
 export type ModelSummary = {
@@ -56,15 +56,35 @@ export type ThreadSummary = {
   last_error: string | null
 }
 
-export type ApprovalRequest = {
+export type InteractiveRequestKind = 'approval' | 'question'
+
+export type InteractiveQuestionOption = {
+  label: string
+  description: string
+}
+
+export type InteractiveQuestion = {
+  id: string
+  header: string
+  question: string
+  is_other: boolean
+  is_secret: boolean
+  options: InteractiveQuestionOption[] | null
+}
+
+export type InteractiveRequest = {
   request_id: string
   workspace_id: string
   thread_id: string | null
   method: string
+  kind: InteractiveRequestKind
   title: string
   detail: string | null
   command: string | null
   path: string | null
+  turn_id: string | null
+  item_id: string | null
+  questions: InteractiveQuestion[]
   created_at: string
 }
 
@@ -75,7 +95,7 @@ export type DaemonSnapshot = {
   }
   workspaces: WorkspaceSummary[]
   threads: ThreadSummary[]
-  approvals: ApprovalRequest[]
+  interactive_requests: InteractiveRequest[]
 }
 
 export type EventEnvelope = {
@@ -101,7 +121,7 @@ export type EventEnvelope = {
         exit_code?: number | null
       }
     | { type: 'file'; item_id?: string | null; path?: string | null; summary: string }
-    | { type: 'approval-request'; request: ApprovalRequest }
+    | { type: 'interactive-request'; request: InteractiveRequest }
     | { type: 'thread-started'; thread: ThreadSummary }
     | { type: 'thread-updated'; thread: ThreadSummary }
 }

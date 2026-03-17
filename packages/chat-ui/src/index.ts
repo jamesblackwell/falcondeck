@@ -1,4 +1,4 @@
-export * from './components/approval-card'
+export * from './components/interactive-request-card'
 export * from './components/code-block'
 export * from './components/conversation'
 export * from './components/message'

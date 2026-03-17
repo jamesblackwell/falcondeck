@@ -16,7 +16,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelect
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
 
   return (
-    <section className="overflow-hidden">
+    <section className="min-w-0 overflow-hidden">
       <div
         className={cn(
           'group flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 transition-colors duration-[var(--fd-duration-fast)]',

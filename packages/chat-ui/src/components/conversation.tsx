@@ -1,12 +1,12 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
-import { ChevronDown, MessageSquare } from 'lucide-react'
+import { ChevronDown, LoaderCircle, MessageSquare } from 'lucide-react'
 
 import type { ConversationItem } from '@falcondeck/client-core'
 import { EmptyState } from '@falcondeck/ui'
 
 import { MessageCard } from './message'
 
-export const Conversation = memo(function Conversation({ items, emptyState }: { items: ConversationItem[]; emptyState?: React.ReactNode }) {
+export const Conversation = memo(function Conversation({ items, emptyState, isThinking = false }: { items: ConversationItem[]; emptyState?: React.ReactNode; isThinking?: boolean }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const [showJump, setShowJump] = useState(false)
@@ -49,6 +49,12 @@ export const Conversation = memo(function Conversation({ items, emptyState }: { 
           {items.map((item) => (
             <MessageCard key={`${item.kind}-${item.id}`} item={item} />
           ))}
+          {isThinking ? (
+            <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
+              <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
+              Thinking…
+            </div>
+          ) : null}
           <div ref={endRef} />
         </div>
       </div>

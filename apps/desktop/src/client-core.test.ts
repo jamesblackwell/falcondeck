@@ -271,7 +271,7 @@ describe('client-core selection reconciliation', () => {
       daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
       workspaces: [workspace(), currentWorkspace],
       threads: [currentThread, thread()],
-      approvals: [],
+      interactive_requests: [],
     }
 
     expect(
@@ -287,7 +287,7 @@ describe('client-core selection reconciliation', () => {
       daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
       workspaces: [workspace({ current_thread_id: 'thread-1' })],
       threads: [thread()],
-      approvals: [],
+      interactive_requests: [],
     }
 
     expect(

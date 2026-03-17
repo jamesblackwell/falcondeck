@@ -2,6 +2,10 @@ import type { CollaborationModeSummary, ModelSummary } from '@falcondeck/client-
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@falcondeck/ui'
 
+function formatModelLabel(label: string): string {
+  return label.replace(/\b(gpt|codex|spark)\b/gi, (match) => match.toUpperCase())
+}
+
 export function ModelSelector({
   value,
   models,
@@ -19,7 +23,7 @@ export function ModelSelector({
       <SelectContent>
         {models.map((model) => (
           <SelectItem key={model.id} value={model.id}>
-            {model.label}
+            {formatModelLabel(model.label)}
           </SelectItem>
         ))}
       </SelectContent>

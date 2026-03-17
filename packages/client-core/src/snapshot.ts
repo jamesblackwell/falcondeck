@@ -47,10 +47,15 @@ export function applySnapshotEvent(
           thread.id === daemonEvent.thread.id ? daemonEvent.thread : thread,
         ),
       }
-    case 'approval-request':
+    case 'interactive-request':
       return {
         ...snapshot,
-        approvals: [daemonEvent.request, ...snapshot.approvals],
+        interactive_requests: [
+          daemonEvent.request,
+          ...snapshot.interactive_requests.filter(
+            (request) => request.request_id !== daemonEvent.request.request_id,
+          ),
+        ],
       }
     default:
       return snapshot

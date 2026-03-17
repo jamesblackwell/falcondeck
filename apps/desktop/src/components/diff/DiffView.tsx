@@ -118,7 +118,7 @@ export const DiffView = memo(function DiffView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-border-subtle px-3 py-2">
+      <div className="flex items-center gap-2 border-b border-border-subtle px-3 pb-2 pt-10">
         <Button variant="ghost" size="icon" onClick={onBack} className="h-6 w-6">
           <ArrowLeft className="h-3.5 w-3.5" />
         </Button>

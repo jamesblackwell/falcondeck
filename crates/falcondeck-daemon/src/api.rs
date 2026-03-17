@@ -11,8 +11,8 @@ use futures_util::StreamExt;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ApprovalResponseRequest, ConnectWorkspaceRequest, SendTurnRequest, StartRemotePairingRequest,
-    StartReviewRequest, StartThreadRequest, UnifiedEvent, UpdateThreadRequest,
+    ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest, SendTurnRequest,
+    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, UnifiedEvent, UpdateThreadRequest,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -35,6 +35,14 @@ pub fn router(state: AppState) -> Router {
             get(thread_detail).patch(update_thread),
         )
         .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/archive",
+            post(archive_thread),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/unarchive",
+            post(unarchive_thread),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/turns",
             post(send_turn),
         )
@@ -47,9 +55,10 @@ pub fn router(state: AppState) -> Router {
             post(start_review),
         )
         .route(
-            "/api/workspaces/{workspace_id}/approvals/{request_id}/respond",
-            post(respond_approval),
+            "/api/workspaces/{workspace_id}/interactive-requests/{request_id}/respond",
+            post(respond_interactive_request),
         )
+        .route("/api/workspaces/{workspace_id}/approvals/{request_id}/respond", post(respond_approval))
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
         .layer(
@@ -122,6 +131,20 @@ async fn update_thread(
     Ok(Json(state.update_thread(request).await?))
 }
 
+async fn archive_thread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
+    Ok(Json(state.archive_thread(&workspace_id, &thread_id).await?))
+}
+
+async fn unarchive_thread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
+    Ok(Json(state.unarchive_thread(&workspace_id, &thread_id).await?))
+}
+
 async fn send_turn(
     State(state): State<AppState>,
     Path((workspace_id, thread_id)): Path<(String, String)>,
@@ -149,6 +172,18 @@ async fn start_review(
     Ok(Json(state.start_review(request).await?))
 }
 
+async fn respond_interactive_request(
+    State(state): State<AppState>,
+    Path((workspace_id, request_id)): Path<(String, String)>,
+    Json(request): Json<InteractiveResponseRequest>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .respond_to_interactive_request(workspace_id, request_id, request.response)
+            .await?,
+    ))
+}
+
 async fn respond_approval(
     State(state): State<AppState>,
     Path((workspace_id, request_id)): Path<(String, String)>,
@@ -156,7 +191,13 @@ async fn respond_approval(
 ) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
     Ok(Json(
         state
-            .respond_to_approval(workspace_id, request_id, request.decision)
+            .respond_to_interactive_request(
+                workspace_id,
+                request_id,
+                falcondeck_core::InteractiveResponsePayload::Approval {
+                    decision: request.decision,
+                },
+            )
             .await?,
     ))
 }

@@ -126,10 +126,15 @@ export function uiReducer(state: UiState, action: UiAction): UiState {
           threads: upsertThread(snapshot.threads, action.event.event.thread),
         }
       }
-      if (action.event.event.type === 'approval-request') {
+      if (action.event.event.type === 'interactive-request') {
         snapshot = {
           ...snapshot,
-          approvals: [action.event.event.request, ...snapshot.approvals],
+          interactive_requests: [
+            action.event.event.request,
+            ...snapshot.interactive_requests.filter(
+              (request) => request.request_id !== action.event.event.request.request_id,
+            ),
+          ],
         }
       }
 
@@ -193,12 +198,12 @@ export function buildTimeline(events: EventEnvelope[]): TimelineEntry[] {
           text: event.event.title,
         })
         break
-      case 'approval-request':
+      case 'interactive-request':
         entries.push({
-          id: `approval-${event.event.request.request_id}`,
+          id: `interactive-request-${event.event.request.request_id}`,
           at: event.emitted_at,
           kind: 'service',
-          label: 'Approval needed',
+          label: 'Input needed',
           text: event.event.request.title,
         })
         break

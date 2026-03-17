@@ -11,6 +11,7 @@ export function buildProjectGroups(
 ): ProjectGroup[] {
   const threadsByWorkspace = new Map<string, ThreadSummary[]>()
   for (const thread of threads) {
+    if (thread.is_archived) continue
     const bucket = threadsByWorkspace.get(thread.workspace_id) ?? []
     bucket.push(thread)
     threadsByWorkspace.set(thread.workspace_id, bucket)

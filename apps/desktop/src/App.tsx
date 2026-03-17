@@ -5,6 +5,8 @@ import {
   filesToImageInputs,
   type ConversationItem,
   type ImageInput,
+  type InteractiveRequest,
+  type InteractiveResponsePayload,
   type ThreadHandle,
   type TurnInputItem,
 } from '@falcondeck/client-core'
@@ -15,7 +17,7 @@ import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
 import { SessionHeader } from './components/SessionHeader'
 import { RemotePairingPopover } from './components/RemotePairingPopover'
-import { ApprovalBar } from './components/ApprovalBar'
+import { InteractiveRequestBar } from './components/InteractiveRequestBar'
 import { DiffPanel } from './components/DiffPanel'
 import { NewThreadState } from './components/NewThreadState'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
@@ -65,12 +67,12 @@ export default function App() {
     () => buildProjectGroups(snapshot?.workspaces ?? [], snapshot?.threads ?? []),
     [snapshot?.threads, snapshot?.workspaces],
   )
-  const approvals = useMemo(
+  const interactiveRequests = useMemo(
     () =>
-      (snapshot?.approvals ?? []).filter(
-        (a) => !selectedThreadId || a.thread_id === selectedThreadId,
+      (snapshot?.interactive_requests ?? []).filter(
+        (request) => !selectedThreadId || request.thread_id === selectedThreadId,
       ),
-    [selectedThreadId, snapshot?.approvals],
+    [selectedThreadId, snapshot?.interactive_requests],
   )
   const remoteWebUrl = import.meta.env.VITE_FALCONDECK_REMOTE_WEB_URL ?? 'https://app.falcondeck.com'
   const pairingLink =
@@ -228,6 +230,10 @@ export default function App() {
 
   async function handleSubmit() {
     if (!api || !selectedWorkspace || !draft.trim()) return
+    const submittedDraft = draft
+    const submittedAttachments = attachments
+    setDraft('')
+    setAttachments([])
     setIsSending(true)
     try {
       let activeThreadId = selectedThreadId
@@ -244,7 +250,7 @@ export default function App() {
           c ? { ...c, threads: [handle.thread, ...c.threads.filter((t) => t.id !== handle.thread.id)] } : c,
         )
       }
-      const inputs: TurnInputItem[] = [{ type: 'text', text: draft }, ...attachments]
+      const inputs: TurnInputItem[] = [{ type: 'text', text: submittedDraft }, ...submittedAttachments]
       await api.sendTurn({
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
@@ -254,10 +260,10 @@ export default function App() {
         collaboration_mode_id: selectedCollaborationMode,
         approval_policy: 'on-request',
       })
-      setDraft('')
-      setAttachments([])
       setActionError(null)
     } catch (error) {
+      setDraft(submittedDraft)
+      setAttachments(submittedAttachments)
       setActionError(error instanceof Error ? error.message : 'Failed to send turn')
     } finally {
       setIsSending(false)
@@ -278,15 +284,19 @@ export default function App() {
     }
   }
 
-  async function handleApproval(requestId: string, decision: 'allow' | 'deny' | 'always_allow') {
-    if (!api || !selectedWorkspaceId) return
+  async function handleInteractiveResponse(
+    workspaceId: string,
+    requestId: string,
+    response: InteractiveResponsePayload,
+  ) {
+    if (!api) return
     try {
-      await api.respondApproval(selectedWorkspaceId, requestId, decision)
+      await api.respondInteractive(workspaceId, requestId, response)
       const nextSnapshot = await api.snapshot()
       setSnapshot(nextSnapshot)
       setActionError(null)
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Failed to respond to approval')
+      setActionError(error instanceof Error ? error.message : 'Failed to respond to request')
     }
   }
 
@@ -306,12 +316,12 @@ export default function App() {
     setSelectedThreadId(null)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
-  const handleApprovalCallback = useCallback(
-    (requestId: string, decision: 'allow' | 'deny' | 'always_allow') => {
-      void handleApproval(requestId, decision)
+  const handleInteractiveResponseCallback = useCallback(
+    (request: InteractiveRequest, response: InteractiveResponsePayload) => {
+      void handleInteractiveResponse(request.workspace_id, request.request_id, response)
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [api, selectedWorkspaceId],
+    [api],
   )
 
   const handleSubmitCallback = useCallback(() => {
@@ -330,6 +340,19 @@ export default function App() {
     void handleStartRemotePairing()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, relayUrl])
+
+  const handleArchiveThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      if (!api) return
+      void api.archiveThread(workspaceId, threadId).then(() => {
+        if (selectedThreadId === threadId) {
+          setSelectedThreadId(null)
+        }
+        return api.snapshot().then(setSnapshot)
+      })
+    },
+    [api, selectedThreadId],
+  )
 
   // Memoized derived values
   const conversationItems: ConversationItem[] = threadDetail?.items ?? []
@@ -366,6 +389,7 @@ export default function App() {
           onSelectWorkspace={handleSelectWorkspace}
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
+          onArchiveThread={handleArchiveThread}
           onAddProject={handleAddProject}
           isAddingProject={isAddingProject}
         />
@@ -376,14 +400,15 @@ export default function App() {
             <RemotePairingPopover
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}
-              relayUrl={relayUrl}
-              onRelayUrlChange={setRelayUrl}
               onStartPairing={handleStartPairingCallback}
               isStartingRemote={isStartingRemote}
             />
           </SessionHeader>
-          <ApprovalBar approvals={approvals} onApproval={handleApprovalCallback} />
-          <Conversation items={conversationItems} emptyState={newThreadEmptyState} />
+          <InteractiveRequestBar
+            requests={interactiveRequests}
+            onRespond={handleInteractiveResponseCallback}
+          />
+          <Conversation items={conversationItems} emptyState={newThreadEmptyState} isThinking={isSending} />
           <PromptInput
             value={draft}
             onValueChange={setDraft}

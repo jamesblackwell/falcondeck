@@ -14,7 +14,7 @@ function threadStatusDisplay(status: ThreadSummary['status']) {
   switch (status) {
     case 'running':
       return 'active' as const
-    case 'waiting_for_approval':
+    case 'waiting_for_input':
       return 'warning' as const
     case 'error':
       return 'error' as const

@@ -18,7 +18,7 @@ pub struct DaemonSnapshot {
     pub daemon: DaemonInfo,
     pub workspaces: Vec<WorkspaceSummary>,
     pub threads: Vec<ThreadSummary>,
-    pub approvals: Vec<ApprovalRequest>,
+    pub interactive_requests: Vec<InteractiveRequest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,11 +100,27 @@ pub struct ApprovalResponseRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractiveResponseRequest {
+    pub response: InteractiveResponsePayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalDecision {
     Allow,
     Deny,
     AlwaysAllow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InteractiveResponsePayload {
+    Approval {
+        decision: ApprovalDecision,
+    },
+    Question {
+        answers: std::collections::HashMap<String, Vec<String>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +205,8 @@ pub struct ThreadSummary {
     pub last_tool: Option<String>,
     pub last_error: Option<String>,
     pub codex: ThreadCodexParams,
+    #[serde(default)]
+    pub is_archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,7 +214,7 @@ pub struct ThreadSummary {
 pub enum ThreadStatus {
     Idle,
     Running,
-    WaitingForApproval,
+    WaitingForInput,
     Error,
 }
 
@@ -213,16 +231,43 @@ pub struct PlanStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ApprovalRequest {
+pub struct InteractiveRequest {
     pub request_id: String,
     pub workspace_id: String,
     pub thread_id: Option<String>,
     pub method: String,
+    pub kind: InteractiveRequestKind,
     pub title: String,
     pub detail: Option<String>,
     pub command: Option<String>,
     pub path: Option<String>,
+    pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+    pub questions: Vec<InteractiveQuestion>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractiveRequestKind {
+    Approval,
+    Question,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractiveQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub is_other: bool,
+    pub is_secret: bool,
+    pub options: Option<Vec<InteractiveQuestionOption>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractiveQuestionOption {
+    pub label: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -271,9 +316,9 @@ pub enum ConversationItem {
         message: String,
         created_at: DateTime<Utc>,
     },
-    Approval {
+    InteractiveRequest {
         id: String,
-        request: ApprovalRequest,
+        request: InteractiveRequest,
         created_at: DateTime<Utc>,
         resolved: bool,
     },
@@ -341,8 +386,8 @@ pub enum UnifiedEvent {
         path: Option<String>,
         summary: String,
     },
-    ApprovalRequest {
-        request: ApprovalRequest,
+    InteractiveRequest {
+        request: InteractiveRequest,
     },
     ThreadStarted {
         thread: ThreadSummary,
@@ -746,7 +791,7 @@ mod tests {
             },
             workspaces: Vec::new(),
             threads: Vec::new(),
-            approvals: Vec::new(),
+            interactive_requests: Vec::new(),
         };
 
         let json = serde_json::to_value(UnifiedEvent::Snapshot { snapshot }).unwrap();

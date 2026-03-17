@@ -34,7 +34,7 @@ function createSnapshot() {
         last_error: null,
       },
     ],
-    approvals: [],
+    interactive_requests: [],
   }
 }
 
@@ -49,7 +49,7 @@ describe('uiReducer', () => {
     expect(next.selectedThreadId).toBe('t1')
   })
 
-  it('adds approval requests from events', () => {
+  it('adds interactive requests from events', () => {
     const hydrated = uiReducer(DEFAULT_UI_STATE, {
       type: 'snapshot-loaded',
       snapshot: createSnapshot(),
@@ -63,41 +63,49 @@ describe('uiReducer', () => {
         workspace_id: 'w1',
         thread_id: 't1',
         event: {
-          type: 'approval-request',
+          type: 'interactive-request',
           request: {
             request_id: 'approval-1',
             workspace_id: 'w1',
             thread_id: 't1',
             method: 'item/commandExecution/requestApproval',
+            kind: 'approval',
             title: 'Approve command',
             detail: null,
             command: 'rm -rf /tmp/demo',
             path: null,
+            turn_id: null,
+            item_id: null,
+            questions: [],
             created_at: new Date().toISOString(),
           },
         },
       },
     })
 
-    expect(next.snapshot?.approvals).toHaveLength(1)
-    expect(next.snapshot?.approvals[0].request_id).toBe('approval-1')
+    expect(next.snapshot?.interactive_requests).toHaveLength(1)
+    expect(next.snapshot?.interactive_requests[0].request_id).toBe('approval-1')
   })
 
-  it('replaces stale approvals when a snapshot event arrives', () => {
+  it('replaces stale interactive requests when a snapshot event arrives', () => {
     const base = uiReducer(DEFAULT_UI_STATE, {
       type: 'snapshot-loaded',
       snapshot: {
         ...createSnapshot(),
-        approvals: [
+        interactive_requests: [
           {
             request_id: 'approval-1',
             workspace_id: 'w1',
             thread_id: 't1',
             method: 'item/commandExecution/requestApproval',
+            kind: 'approval',
             title: 'Approve command',
             detail: null,
             command: 'echo hi',
             path: null,
+            turn_id: null,
+            item_id: null,
+            questions: [],
             created_at: new Date().toISOString(),
           },
         ],
@@ -118,7 +126,7 @@ describe('uiReducer', () => {
       },
     })
 
-    expect(next.snapshot?.approvals).toHaveLength(0)
+    expect(next.snapshot?.interactive_requests).toHaveLength(0)
   })
 })
 

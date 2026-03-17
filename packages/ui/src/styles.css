@@ -5,8 +5,8 @@
    ================================================================ */
 
 @theme {
-  --font-sans: "Inter", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+  --font-sans: "Geist", "Inter", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
 
   /* Tailwind v4 color aliases — enables bg-surface-0, text-fg-primary, etc. */
   --color-surface-0: var(--fd-bg-0);
@@ -117,15 +117,15 @@
   --fd-space-16: 64px;
 
   /* === Typography Scale === */
-  --fd-text-2xs: 10px;
-  --fd-text-xs: 11px;
-  --fd-text-sm: 13px;
-  --fd-text-base: 14px;
-  --fd-text-md: 15px;
-  --fd-text-lg: 17px;
-  --fd-text-xl: 20px;
-  --fd-text-2xl: 24px;
-  --fd-text-3xl: 30px;
+  --fd-text-2xs: 11px;
+  --fd-text-xs: 12px;
+  --fd-text-sm: 14px;
+  --fd-text-base: 15px;
+  --fd-text-md: 16px;
+  --fd-text-lg: 18px;
+  --fd-text-xl: 22px;
+  --fd-text-2xl: 26px;
+  --fd-text-3xl: 32px;
 
   --fd-leading-tight: 1.25;
   --fd-leading-normal: 1.5;
@@ -166,6 +166,13 @@ body {
 [data-selectable], [data-selectable] * {
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* Prevent Radix ScrollArea table-display wrapper from expanding beyond
+   the sidebar panel width — ensures text truncation and shrink-0 icons work. */
+[data-sidebar-scroll] [data-radix-scroll-area-viewport] > div {
+  display: block !important;
+  min-width: 0 !important;
 }
 
 /* === Scrollbar === */

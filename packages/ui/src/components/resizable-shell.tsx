@@ -51,7 +51,7 @@ export function ResizeHandle({ className }: { className?: string }) {
   return (
     <Separator
       className={cn(
-        'group relative mx-0.5 flex w-[1px] items-stretch justify-center',
+        'group relative mx-0.5 flex w-[1px] items-stretch justify-center outline-none',
         className,
       )}
     >

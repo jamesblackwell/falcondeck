@@ -1,4 +1,5 @@
-import { FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
+import { useState } from 'react'
+import { ChevronDown, FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
 import { WorkspaceGroup, ThreadItem } from '@falcondeck/chat-ui'
@@ -9,6 +10,8 @@ import {
   SidebarContent,
   SidebarHeader,
 } from '@falcondeck/ui'
+
+const VISIBLE_THREAD_LIMIT = 5
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
 
@@ -22,8 +25,62 @@ export type DesktopSidebarProps = {
   onSelectWorkspace: (workspaceId: string, threadId: string | null) => void
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread: (workspaceId: string) => void
+  onArchiveThread: (workspaceId: string, threadId: string) => void
   onAddProject: () => void
   isAddingProject: boolean
+}
+
+function ThreadList({
+  group,
+  selectedThreadId,
+  onSelectThread,
+  onArchiveThread,
+}: {
+  group: ProjectGroup
+  selectedThreadId: string | null
+  onSelectThread: (workspaceId: string, threadId: string) => void
+  onArchiveThread: (workspaceId: string, threadId: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const hasOverflow = group.threads.length > VISIBLE_THREAD_LIMIT
+  const selectedIsHidden =
+    hasOverflow &&
+    !expanded &&
+    selectedThreadId != null &&
+    group.threads.findIndex((t) => t.id === selectedThreadId) >= VISIBLE_THREAD_LIMIT
+
+  const showAll = expanded || selectedIsHidden
+  const visible = showAll ? group.threads : group.threads.slice(0, VISIBLE_THREAD_LIMIT)
+  const hiddenCount = group.threads.length - VISIBLE_THREAD_LIMIT
+
+  return (
+    <>
+      {group.threads.length === 0 ? (
+        <p className="py-2 pl-2 text-[length:var(--fd-text-xs)] text-fg-muted">No threads yet</p>
+      ) : null}
+      {visible.map((thread) => (
+        <ThreadItem
+          key={thread.id}
+          thread={thread}
+          isSelected={selectedThreadId === thread.id}
+          onSelect={() => onSelectThread(group.workspace.id, thread.id)}
+          onArchive={() => onArchiveThread(group.workspace.id, thread.id)}
+        />
+      ))}
+      {hasOverflow ? (
+        <button
+          type="button"
+          onClick={() => setExpanded(!showAll)}
+          className="flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
+        >
+          <ChevronDown
+            className={`h-3 w-3 transition-transform ${showAll ? 'rotate-180' : ''}`}
+          />
+          {showAll ? 'Show less' : `${hiddenCount} older threads`}
+        </button>
+      ) : null}
+    </>
+  )
 }
 
 export function DesktopSidebar({
@@ -35,6 +92,7 @@ export function DesktopSidebar({
   onSelectWorkspace,
   onSelectThread,
   onNewThread,
+  onArchiveThread,
   onAddProject,
   isAddingProject,
 }: DesktopSidebarProps) {
@@ -93,17 +151,12 @@ export function DesktopSidebar({
               }
               onNewThread={() => onNewThread(group.workspace.id)}
             >
-              {group.threads.length === 0 ? (
-                <p className="py-2 pl-2 text-[length:var(--fd-text-xs)] text-fg-muted">No threads yet</p>
-              ) : null}
-              {group.threads.map((thread) => (
-                <ThreadItem
-                  key={thread.id}
-                  thread={thread}
-                  isSelected={selectedThreadId === thread.id}
-                  onSelect={() => onSelectThread(group.workspace.id, thread.id)}
-                />
-              ))}
+              <ThreadList
+                group={group}
+                selectedThreadId={selectedThreadId}
+                onSelectThread={onSelectThread}
+                onArchiveThread={onArchiveThread}
+              />
             </WorkspaceGroup>
           ))}
           {groups.length === 0 ? (

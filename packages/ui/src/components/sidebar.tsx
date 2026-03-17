@@ -7,7 +7,7 @@ export function Sidebar({ className, children, ...props }: React.HTMLAttributes<
   return (
     <aside
       className={cn(
-        'flex h-full min-h-0 flex-col bg-surface-1',
+        'flex h-full min-h-0 flex-col bg-[color-mix(in_oklab,var(--color-surface-1)_92%,white)]',
         className,
       )}
       {...props}
@@ -31,8 +31,8 @@ export function SidebarHeader({ className, children, ...props }: React.HTMLAttri
 export function SidebarContent({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div className={cn('min-h-0 min-w-0 flex-1 overflow-hidden', className)} {...props}>
-      <ScrollArea className="h-full">
-        <div className="px-3 py-3 overflow-hidden">{children}</div>
+      <ScrollArea className="h-full" data-sidebar-scroll>
+        <div className="px-3 py-3">{children}</div>
       </ScrollArea>
     </div>
   )

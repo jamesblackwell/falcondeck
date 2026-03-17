@@ -1,13 +1,14 @@
 import { memo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { AlertTriangle, ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
+import { ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 
 import type { ConversationItem } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
 import { CodeBlock } from './code-block'
+import { InteractiveRequestCard } from './interactive-request-card'
 
 const remarkPlugins = [remarkGfm]
 
@@ -190,25 +191,12 @@ function DiffMessage({ item }: { item: Extract<ConversationItem, { kind: 'diff' 
   )
 }
 
-function ApprovalMessage({ item }: { item: Extract<ConversationItem, { kind: 'approval' }> }) {
-  return (
-    <div className="rounded-[var(--fd-radius-lg)] border border-warning/20 bg-warning-muted px-4 py-3">
-      <div className="flex items-start gap-2.5">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-        <div className="min-w-0 flex-1">
-          <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">{item.request.title}</p>
-          {item.request.detail ? (
-            <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-secondary">{item.request.detail}</p>
-          ) : null}
-          {item.request.command ? (
-            <pre className="mt-2 overflow-x-auto rounded-[var(--fd-radius-md)] bg-surface-1 px-2.5 py-1.5 font-mono text-[length:var(--fd-text-xs)] text-fg-secondary">
-              {item.request.command}
-            </pre>
-          ) : null}
-        </div>
-      </div>
-    </div>
-  )
+function InteractiveRequestMessage({
+  item,
+}: {
+  item: Extract<ConversationItem, { kind: 'interactive_request' }>
+}) {
+  return <InteractiveRequestCard request={item.request} resolved={item.resolved} />
 }
 
 function ServiceMessage({ item }: { item: Extract<ConversationItem, { kind: 'service' }> }) {
@@ -233,8 +221,8 @@ export const MessageCard = memo(function MessageCard({ item }: { item: Conversat
       return <PlanMessage item={item} />
     case 'diff':
       return <DiffMessage item={item} />
-    case 'approval':
-      return <ApprovalMessage item={item} />
+    case 'interactive_request':
+      return <InteractiveRequestMessage item={item} />
     case 'service':
       return <ServiceMessage item={item} />
   }

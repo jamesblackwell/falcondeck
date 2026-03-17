@@ -577,6 +577,7 @@ fn parse_threads(
                         ),
                         service_tier: extract_string(entry, &["serviceTier", "service_tier"]),
                     },
+                    is_archived: false,
                 },
                 session_path: extract_string(entry, &["path"]),
             })
@@ -1121,7 +1122,7 @@ fn conversation_item_created_at(item: &ConversationItem) -> Option<chrono::DateT
         | ConversationItem::Plan { created_at, .. }
         | ConversationItem::Diff { created_at, .. }
         | ConversationItem::Service { created_at, .. }
-        | ConversationItem::Approval { created_at, .. } => *created_at,
+        | ConversationItem::InteractiveRequest { created_at, .. } => *created_at,
     })
 }
 
@@ -1514,6 +1515,7 @@ mod tests {
                 last_tool: None,
                 last_error: None,
                 codex: ThreadCodexParams::default(),
+                is_archived: false,
             },
             &thread_read,
             &[
@@ -1568,6 +1570,7 @@ mod tests {
                 last_tool: None,
                 last_error: None,
                 codex: ThreadCodexParams::default(),
+                is_archived: false,
             },
             &json!({ "thread": { "turns": [{ "id": "turn-1", "status": "completed" }] } }),
             &[ConversationItem::AssistantMessage {
@@ -1598,6 +1601,7 @@ mod tests {
                 last_tool: None,
                 last_error: None,
                 codex: ThreadCodexParams::default(),
+                is_archived: false,
             },
             &json!({ "thread": { "turns": [] } }),
             &[ConversationItem::Service {

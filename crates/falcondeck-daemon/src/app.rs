@@ -10,14 +10,15 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    ApprovalDecision, ApprovalRequest, CollaborationModeSummary, CommandResponse,
+    ApprovalDecision, CollaborationModeSummary, CommandResponse,
     ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope,
     EventEnvelope, HealthResponse, PairingPublicKeyBundle, PairingStatusResponse,
     RelayClientMessage, RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus,
     RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
-    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
-    StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
-    TurnInputItem, UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
+    ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary, TurnInputItem,
+    UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary, InteractiveQuestion,
+    InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload,
     crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -53,7 +54,7 @@ struct InnerState {
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
-    approvals: Mutex<HashMap<(String, String), PendingServerRequest>>,
+    interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
     remote: Mutex<RemoteBridgeState>,
 }
 
@@ -76,7 +77,7 @@ struct ManagedThread {
 #[derive(Clone)]
 struct PendingServerRequest {
     raw_id: Value,
-    request: ApprovalRequest,
+    request: InteractiveRequest,
 }
 
 struct RemoteBridgeState {
@@ -114,6 +115,8 @@ struct PersistedWorkspaceState {
     path: String,
     current_thread_id: Option<String>,
     updated_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
+    archived_thread_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -156,7 +159,7 @@ impl AppState {
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
-                approvals: Mutex::new(HashMap::new()),
+                interactive_requests: Mutex::new(HashMap::new()),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,
@@ -415,7 +418,7 @@ impl AppState {
 
     pub async fn snapshot(&self) -> DaemonSnapshot {
         let workspaces = self.inner.workspaces.lock().await;
-        let approvals = self.inner.approvals.lock().await;
+        let interactive_requests = self.inner.interactive_requests.lock().await;
 
         let mut workspace_list = workspaces
             .values()
@@ -434,17 +437,17 @@ impl AppState {
             .collect::<Vec<_>>();
         threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
 
-        let mut approval_list = approvals
+        let mut interactive_request_list = interactive_requests
             .values()
             .map(|request| request.request.clone())
             .collect::<Vec<_>>();
-        approval_list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        interactive_request_list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
 
         DaemonSnapshot {
             daemon: self.inner.daemon.clone(),
             workspaces: workspace_list,
             threads,
-            approvals: approval_list,
+            interactive_requests: interactive_request_list,
         }
     }
 
@@ -558,7 +561,13 @@ impl AppState {
                 collaboration_modes,
                 threads: threads
                     .into_iter()
-                    .map(|thread| {
+                    .map(|mut thread| {
+                        if persisted_workspace
+                            .map(|pw| pw.archived_thread_ids.contains(&thread.summary.id))
+                            .unwrap_or(false)
+                        {
+                            thread.summary.is_archived = true;
+                        }
                         (
                             thread.summary.id.clone(),
                             ManagedThread::with_items(thread.summary, thread.items),
@@ -631,6 +640,7 @@ impl AppState {
                 approval_policy: Some(approval_policy),
                 service_tier: None,
             },
+            is_archived: false,
         };
         workspace.summary.current_thread_id = Some(thread_id.clone());
         workspace.summary.updated_at = now;
@@ -652,6 +662,60 @@ impl AppState {
             workspace: workspace_summary,
             thread,
         })
+    }
+
+    pub async fn archive_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<ThreadSummary, DaemonError> {
+        let mut workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        thread.summary.is_archived = true;
+        let summary = thread.summary.clone();
+        drop(workspaces);
+        self.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
+        let _ = self.persist_local_state().await;
+        Ok(summary)
+    }
+
+    pub async fn unarchive_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<ThreadSummary, DaemonError> {
+        let mut workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        thread.summary.is_archived = false;
+        let summary = thread.summary.clone();
+        drop(workspaces);
+        self.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
+        let _ = self.persist_local_state().await;
+        Ok(summary)
     }
 
     pub async fn send_turn(
@@ -696,6 +760,7 @@ impl AppState {
                         last_tool: None,
                         last_error: None,
                         codex: ThreadCodexParams::default(),
+                        is_archived: false,
                     })
                 });
             managed.summary.status = ThreadStatus::Running;
@@ -862,35 +927,55 @@ impl AppState {
         })
     }
 
-    pub async fn respond_to_approval(
+    pub async fn respond_to_interactive_request(
         &self,
         workspace_id: String,
         request_id: String,
-        decision: ApprovalDecision,
+        response: InteractiveResponsePayload,
     ) -> Result<CommandResponse, DaemonError> {
         let session = self.session_for(&workspace_id).await?;
         let pending = self
             .inner
-            .approvals
+            .interactive_requests
             .lock()
             .await
             .remove(&(workspace_id.clone(), request_id.clone()))
-            .ok_or_else(|| DaemonError::NotFound("approval request not found".to_string()))?;
+            .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?;
 
-        let decision = match decision {
-            ApprovalDecision::Allow => "allow",
-            ApprovalDecision::Deny => "deny",
-            ApprovalDecision::AlwaysAllow => "always_allow",
-        };
-
-        session
-            .respond_to_request(
-                pending.raw_id,
+        let result = match (&pending.request.kind, response) {
+            (InteractiveRequestKind::Approval, InteractiveResponsePayload::Approval { decision }) => {
+                let decision = match decision {
+                    ApprovalDecision::Allow => "allow",
+                    ApprovalDecision::Deny => "deny",
+                    ApprovalDecision::AlwaysAllow => "always_allow",
+                };
                 json!({
                     "decision": decision,
                     "acceptSettings": {"forSession": true}
-                }),
-            )
+                })
+            }
+            (InteractiveRequestKind::Question, InteractiveResponsePayload::Question { answers }) => json!({
+                "answers": answers
+                    .into_iter()
+                    .map(|(question_id, question_answers)| {
+                        (question_id, json!({ "answers": question_answers }))
+                    })
+                    .collect::<serde_json::Map<String, Value>>()
+            }),
+            (InteractiveRequestKind::Approval, _) => {
+                return Err(DaemonError::BadRequest(
+                    "interactive approval requires an approval response".to_string(),
+                ));
+            }
+            (InteractiveRequestKind::Question, _) => {
+                return Err(DaemonError::BadRequest(
+                    "interactive question requires question answers".to_string(),
+                ));
+            }
+        };
+
+        session
+            .respond_to_request(pending.raw_id, result)
             .await?;
 
         if let Some(thread_id) = pending.request.thread_id {
@@ -898,7 +983,7 @@ impl AppState {
                 thread.status = ThreadStatus::Running;
             })
             .await?;
-            self.resolve_approval_item(&workspace_id, &thread_id, &request_id)
+            self.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
                 .await?;
         }
 
@@ -912,7 +997,7 @@ impl AppState {
 
         Ok(CommandResponse {
             ok: true,
-            message: Some("approval sent".to_string()),
+            message: Some("response sent".to_string()),
         })
     }
 
@@ -1314,7 +1399,7 @@ impl AppState {
         send_relay_message(
             &mut writer,
             &RelayClientMessage::RpcRegister {
-                method: "approval.respond".to_string(),
+                method: "interactive.respond".to_string(),
             },
         )
         .await?;
@@ -1800,16 +1885,14 @@ impl AppState {
                     }
                 }
             }
-            "approval.respond" => {
+            "interactive.respond" | "approval.respond" => {
                 let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "approval.respond missing workspaceId".to_string())?;
+                    .ok_or_else(|| "interactive.respond missing workspaceId".to_string())?;
                 let request_id_param = extract_string(&params, &["requestId", "request_id"])
-                    .ok_or_else(|| "approval.respond missing requestId".to_string())?;
-                let decision = match extract_string(&params, &["decision"]).as_deref() {
-                    Some("allow") => ApprovalDecision::Allow,
-                    Some("deny") => ApprovalDecision::Deny,
-                    Some("always_allow") => ApprovalDecision::AlwaysAllow,
-                    _ => {
+                    .ok_or_else(|| "interactive.respond missing requestId".to_string())?;
+                let response = match parse_interactive_response_params(&params) {
+                    Ok(response) => response,
+                    Err(message) => {
                         send_relay_message(
                             writer,
                             &RelayClientMessage::RpcResult {
@@ -1819,7 +1902,7 @@ impl AppState {
                                 error: Some(
                                     encrypt_json(
                                         data_key,
-                                        &json!({ "message": "unsupported approval decision" }),
+                                        &json!({ "message": message }),
                                     )
                                     .map_err(
                                         |encrypt_error| {
@@ -1835,7 +1918,7 @@ impl AppState {
                 };
 
                 match self
-                    .respond_to_approval(workspace_id, request_id_param, decision)
+                    .respond_to_interactive_request(workspace_id, request_id_param, response)
                     .await
                 {
                     Ok(_) => {
@@ -2009,18 +2092,31 @@ impl AppState {
                     .await
                     .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
             }
-            "approval.respond" => {
+            "thread.archive" => {
                 let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "approval.respond missing workspaceId".to_string())?;
+                    .ok_or_else(|| "thread.archive missing workspaceId".to_string())?;
+                let thread_id = extract_string(&params, &["threadId", "thread_id"])
+                    .ok_or_else(|| "thread.archive missing threadId".to_string())?;
+                self.archive_thread(&workspace_id, &thread_id)
+                    .await
+                    .and_then(|summary| serde_json::to_value(summary).map_err(DaemonError::from))
+            }
+            "thread.unarchive" => {
+                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
+                    .ok_or_else(|| "thread.unarchive missing workspaceId".to_string())?;
+                let thread_id = extract_string(&params, &["threadId", "thread_id"])
+                    .ok_or_else(|| "thread.unarchive missing threadId".to_string())?;
+                self.unarchive_thread(&workspace_id, &thread_id)
+                    .await
+                    .and_then(|summary| serde_json::to_value(summary).map_err(DaemonError::from))
+            }
+            "interactive.respond" | "approval.respond" => {
+                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
+                    .ok_or_else(|| "interactive.respond missing workspaceId".to_string())?;
                 let request_id_param = extract_string(&params, &["requestId", "request_id"])
-                    .ok_or_else(|| "approval.respond missing requestId".to_string())?;
-                let decision = match extract_string(&params, &["decision"]).as_deref() {
-                    Some("allow") => ApprovalDecision::Allow,
-                    Some("deny") => ApprovalDecision::Deny,
-                    Some("always_allow") => ApprovalDecision::AlwaysAllow,
-                    _ => return Err("unsupported approval decision".to_string()),
-                };
-                self.respond_to_approval(workspace_id, request_id_param, decision)
+                    .ok_or_else(|| "interactive.respond missing requestId".to_string())?;
+                let response = parse_interactive_response_params(&params)?;
+                self.respond_to_interactive_request(workspace_id, request_id_param, response)
                     .await
                     .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
             }
@@ -2122,10 +2218,19 @@ impl AppState {
         let workspaces = self.inner.workspaces.lock().await;
         let mut persisted_workspaces = workspaces
             .values()
-            .map(|workspace| PersistedWorkspaceState {
-                path: workspace.summary.path.clone(),
-                current_thread_id: workspace.summary.current_thread_id.clone(),
-                updated_at: Some(workspace.summary.updated_at),
+            .map(|workspace| {
+                let archived_thread_ids = workspace
+                    .threads
+                    .values()
+                    .filter(|thread| thread.summary.is_archived)
+                    .map(|thread| thread.summary.id.clone())
+                    .collect();
+                PersistedWorkspaceState {
+                    path: workspace.summary.path.clone(),
+                    current_thread_id: workspace.summary.current_thread_id.clone(),
+                    updated_at: Some(workspace.summary.updated_at),
+                    archived_thread_ids,
+                }
             })
             .collect::<Vec<_>>();
         persisted_workspaces.sort_by(|left, right| left.path.cmp(&right.path));
@@ -2657,22 +2762,52 @@ impl AppState {
         method: &str,
         params: Value,
     ) -> Result<(), DaemonError> {
-        if method.ends_with("requestApproval") {
+        if method.ends_with("requestApproval") || method == "item/tool/requestUserInput" {
             let request_id = normalize_request_id(&raw_id);
-            let request = ApprovalRequest {
-                request_id: request_id.clone(),
-                workspace_id: workspace_id.to_string(),
-                thread_id: extract_thread_id(&params),
-                method: method.to_string(),
-                title: extract_string(&params, &["reason", "title"])
-                    .unwrap_or_else(|| approval_title(method)),
-                detail: extract_string(&params, &["message", "description"]),
-                command: extract_string(&params, &["command"]),
-                path: extract_string(&params, &["path"]),
-                created_at: Utc::now(),
+            let request = if method.ends_with("requestApproval") {
+                InteractiveRequest {
+                    request_id: request_id.clone(),
+                    workspace_id: workspace_id.to_string(),
+                    thread_id: extract_thread_id(&params),
+                    method: method.to_string(),
+                    kind: InteractiveRequestKind::Approval,
+                    title: extract_string(&params, &["reason", "title"])
+                        .unwrap_or_else(|| approval_title(method)),
+                    detail: extract_string(&params, &["message", "description"]),
+                    command: extract_string(&params, &["command"]),
+                    path: extract_string(&params, &["path"]),
+                    turn_id: extract_string(&params, &["turnId", "turn_id"]),
+                    item_id: extract_string(&params, &["itemId", "item_id"]),
+                    questions: Vec::new(),
+                    created_at: Utc::now(),
+                }
+            } else {
+                let questions = parse_interactive_questions(&params);
+                InteractiveRequest {
+                    request_id: request_id.clone(),
+                    workspace_id: workspace_id.to_string(),
+                    thread_id: extract_thread_id(&params),
+                    method: method.to_string(),
+                    kind: InteractiveRequestKind::Question,
+                    title: extract_string(&params, &["title"])
+                        .unwrap_or_else(|| "Answer question".to_string()),
+                    detail: extract_string(&params, &["message", "description"]).or_else(|| {
+                        Some(format!(
+                            "{} question{} from the agent.",
+                            questions.len(),
+                            if questions.len() == 1 { "" } else { "s" }
+                        ))
+                    }),
+                    command: None,
+                    path: None,
+                    turn_id: extract_string(&params, &["turnId", "turn_id"]),
+                    item_id: extract_string(&params, &["itemId", "item_id"]),
+                    questions,
+                    created_at: Utc::now(),
+                }
             };
 
-            self.inner.approvals.lock().await.insert(
+            self.inner.interactive_requests.lock().await.insert(
                 (workspace_id.to_string(), request_id.clone()),
                 PendingServerRequest {
                     raw_id,
@@ -2682,7 +2817,7 @@ impl AppState {
 
             if let Some(thread_id) = request.thread_id.clone() {
                 self.with_thread_mut(workspace_id, &thread_id, |thread| {
-                    thread.status = ThreadStatus::WaitingForApproval;
+                    thread.status = ThreadStatus::WaitingForInput;
                 })
                 .await?;
             }
@@ -2690,19 +2825,15 @@ impl AppState {
             self.emit(
                 Some(workspace_id.to_string()),
                 request.thread_id.clone(),
-                UnifiedEvent::ApprovalRequest {
+                UnifiedEvent::InteractiveRequest {
                     request: request.clone(),
                 },
             );
-            if let Some(thread_id) = params
-                .get("threadId")
-                .or_else(|| params.get("thread_id"))
-                .and_then(Value::as_str)
-            {
+            if let Some(thread_id) = request.thread_id.clone() {
                 self.push_conversation_item(
                     workspace_id,
-                    thread_id,
-                    ConversationItem::Approval {
+                    &thread_id,
+                    ConversationItem::InteractiveRequest {
                         id: request_id,
                         request,
                         created_at: Utc::now(),
@@ -2833,6 +2964,7 @@ impl AppState {
                     last_tool: None,
                     last_error: None,
                     codex: ThreadCodexParams::default(),
+                    is_archived: false,
                 })
             });
         updater(&mut thread.summary);
@@ -2955,7 +3087,7 @@ impl AppState {
         Ok(())
     }
 
-    async fn resolve_approval_item(
+    async fn resolve_interactive_request_item(
         &self,
         workspace_id: &str,
         thread_id: &str,
@@ -2970,12 +3102,12 @@ impl AppState {
             .get_mut(thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         let Some(index) = thread.items.iter().position(|item| match item {
-            ConversationItem::Approval { id, .. } => id == request_id,
+            ConversationItem::InteractiveRequest { id, .. } => id == request_id,
             _ => false,
         }) else {
             return Ok(());
         };
-        if let ConversationItem::Approval { resolved, .. } = &mut thread.items[index] {
+        if let ConversationItem::InteractiveRequest { resolved, .. } = &mut thread.items[index] {
             *resolved = true;
         }
         let item = thread.items[index].clone();
@@ -3065,7 +3197,7 @@ fn conversation_item_identity(item: &ConversationItem) -> &str {
         | ConversationItem::Plan { id, .. }
         | ConversationItem::Diff { id, .. }
         | ConversationItem::Service { id, .. }
-        | ConversationItem::Approval { id, .. } => id,
+        | ConversationItem::InteractiveRequest { id, .. } => id,
     }
 }
 
@@ -3165,6 +3297,114 @@ fn approval_title(method: &str) -> String {
     }
 }
 
+fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQuestion> {
+    params
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .map(|question| InteractiveQuestion {
+                    id: extract_string(question, &["id"]).unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    header: extract_string(question, &["header"])
+                        .unwrap_or_else(|| "Question".to_string()),
+                    question: extract_string(question, &["question"])
+                        .unwrap_or_else(|| "Provide additional input.".to_string()),
+                    is_other: question
+                        .get("isOther")
+                        .or_else(|| question.get("is_other"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    is_secret: question
+                        .get("isSecret")
+                        .or_else(|| question.get("is_secret"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    options: question.get("options").and_then(Value::as_array).map(|options| {
+                        options
+                            .iter()
+                            .map(|option| InteractiveQuestionOption {
+                                label: extract_string(option, &["label"])
+                                    .unwrap_or_else(|| "Option".to_string()),
+                                description: extract_string(option, &["description"])
+                                    .unwrap_or_default(),
+                            })
+                            .collect()
+                    }),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_interactive_response_params(
+    params: &Value,
+) -> Result<InteractiveResponsePayload, String> {
+    if let Some(response) = params.get("response") {
+        if let Some(kind) = extract_string(response, &["kind"]) {
+            return match kind.as_str() {
+                "approval" => match extract_string(response, &["decision"]).as_deref() {
+                    Some("allow") => Ok(InteractiveResponsePayload::Approval {
+                        decision: ApprovalDecision::Allow,
+                    }),
+                    Some("deny") => Ok(InteractiveResponsePayload::Approval {
+                        decision: ApprovalDecision::Deny,
+                    }),
+                    Some("always_allow") => Ok(InteractiveResponsePayload::Approval {
+                        decision: ApprovalDecision::AlwaysAllow,
+                    }),
+                    _ => Err("unsupported approval decision".to_string()),
+                },
+                "question" => Ok(InteractiveResponsePayload::Question {
+                    answers: response
+                        .get("answers")
+                        .and_then(Value::as_object)
+                        .map(|answers| {
+                            answers
+                                .iter()
+                                .map(|(question_id, value)| {
+                                    let answer_values = value
+                                        .as_array()
+                                        .map(|items| {
+                                            items.iter()
+                                                .filter_map(Value::as_str)
+                                                .map(str::to_string)
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .or_else(|| {
+                                            value.get("answers").and_then(Value::as_array).map(|items| {
+                                                items.iter()
+                                                    .filter_map(Value::as_str)
+                                                    .map(str::to_string)
+                                                    .collect::<Vec<_>>()
+                                            })
+                                        })
+                                        .unwrap_or_default();
+                                    (question_id.clone(), answer_values)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                }),
+                _ => Err("unsupported interactive response kind".to_string()),
+            };
+        }
+    }
+
+    match extract_string(params, &["decision"]).as_deref() {
+        Some("allow") => Ok(InteractiveResponsePayload::Approval {
+            decision: ApprovalDecision::Allow,
+        }),
+        Some("deny") => Ok(InteractiveResponsePayload::Approval {
+            decision: ApprovalDecision::Deny,
+        }),
+        Some("always_allow") => Ok(InteractiveResponsePayload::Approval {
+            decision: ApprovalDecision::AlwaysAllow,
+        }),
+        _ => Err("interactive response payload is missing a supported response".to_string()),
+    }
+}
+
 fn truncate_preview(input: &str, limit: usize) -> String {
     let trimmed = input.trim();
     if trimmed.chars().count() <= limit {
@@ -3222,6 +3462,7 @@ where
                 path,
                 current_thread_id: None,
                 updated_at: None,
+                archived_thread_ids: Vec::new(),
             },
             PersistedWorkspaceEntry::State(workspace) => workspace,
         })
@@ -3495,6 +3736,7 @@ mod tests {
             last_tool: None,
             last_error: None,
             codex: ThreadCodexParams::default(),
+            is_archived: false,
         };
 
         let new_thread = super::ManagedThread::new(summary.clone());

@@ -21,6 +21,7 @@ import {
   type EncryptedEnvelope,
   type EventEnvelope,
   type ImageInput,
+  type InteractiveResponsePayload,
   type MachinePresence,
   type PersistedRemoteSession,
   type QueuedRemoteAction,
@@ -31,12 +32,32 @@ import {
   type ThreadDetail,
   type ThreadHandle,
 } from '@falcondeck/client-core'
-import { ApprovalCard, Conversation, PromptInput, ThreadItem, WorkspaceGroup } from '@falcondeck/chat-ui'
+import { Conversation, InteractiveRequestCard, PromptInput, ThreadItem, WorkspaceGroup } from '@falcondeck/chat-ui'
 import { Badge, Button, EmptyState, Input, ScrollArea, StatusIndicator } from '@falcondeck/ui'
 
 import { Lock, Smartphone } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+function getDeviceLabel(): string {
+  const ua = navigator.userAgent
+  let browser = 'Browser'
+  if (ua.includes('Firefox/')) browser = 'Firefox'
+  else if (ua.includes('Edg/')) browser = 'Edge'
+  else if (ua.includes('OPR/') || ua.includes('Opera')) browser = 'Opera'
+  else if (ua.includes('Chrome/') && !ua.includes('Edg/')) browser = 'Chrome'
+  else if (ua.includes('Safari/') && !ua.includes('Chrome/')) browser = 'Safari'
+
+  let os = ''
+  if (ua.includes('iPhone')) os = 'iPhone'
+  else if (ua.includes('iPad')) os = 'iPad'
+  else if (ua.includes('Android')) os = 'Android'
+  else if (ua.includes('Mac OS')) os = 'macOS'
+  else if (ua.includes('Windows')) os = 'Windows'
+  else if (ua.includes('Linux')) os = 'Linux'
+
+  return os ? `${browser} on ${os}` : browser
+}
 
 function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
@@ -267,9 +288,12 @@ export default function App() {
     () => buildProjectGroups(snapshot?.workspaces ?? [], snapshot?.threads ?? []),
     [snapshot?.threads, snapshot?.workspaces],
   )
-  const approvals = useMemo(
-    () => (snapshot?.approvals ?? []).filter((a) => !selectedThreadId || a.thread_id === selectedThreadId),
-    [selectedThreadId, snapshot?.approvals],
+  const interactiveRequests = useMemo(
+    () =>
+      (snapshot?.interactive_requests ?? []).filter(
+        (request) => !selectedThreadId || request.thread_id === selectedThreadId,
+      ),
+    [selectedThreadId, snapshot?.interactive_requests],
   )
   const items = useMemo(
     () => threadDetail?.items ?? (selectedThreadId ? threadItems[selectedThreadId] ?? [] : []),
@@ -526,7 +550,7 @@ export default function App() {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
         pairing_code: pairingCode.trim(),
-        label: 'FalconDeck Remote Web',
+        label: getDeviceLabel(),
         client_bundle: { encryption_variant: 'data_key_v1', public_key: publicKeyToBase64(keyPair) },
       }),
     })
@@ -661,6 +685,10 @@ export default function App() {
 
   async function handleSubmit() {
     if (!selectedWorkspace || !draft.trim()) return
+    const submittedDraft = draft
+    const submittedAttachments = attachments
+    setDraft('')
+    setAttachments([])
     setIsSubmitting(true)
     try {
       let activeThreadId = selectedThreadId
@@ -678,29 +706,32 @@ export default function App() {
       await submitQueuedAction('turn.start', {
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
-        inputs: [{ type: 'text', text: draft }, ...attachments],
+        inputs: [{ type: 'text', text: submittedDraft }, ...submittedAttachments],
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         collaboration_mode_id: selectedCollaborationMode,
         approval_policy: 'on-request',
       }, { awaitCompletion: false })
-      setDraft('')
-      setAttachments([])
       setError(null)
     } catch (e) {
+      setDraft(submittedDraft)
+      setAttachments(submittedAttachments)
       setError(e instanceof Error ? e.message : 'Remote action failed')
     } finally {
       setIsSubmitting(false)
     }
   }
 
-  function handleApproval(requestId: string, decision: 'allow' | 'deny') {
-    if (!selectedWorkspace) return
-    void submitQueuedAction('approval.respond', {
-      workspace_id: selectedWorkspace.id,
+  function handleInteractiveResponse(
+    workspaceId: string,
+    requestId: string,
+    response: InteractiveResponsePayload,
+  ) {
+    void submitQueuedAction('interactive.respond', {
+      workspace_id: workspaceId,
       request_id: requestId,
-      decision,
-    }).catch((e) => setError(e instanceof Error ? e.message : 'Approval action failed'))
+      response,
+    }).catch((e) => setError(e instanceof Error ? e.message : 'Interactive response failed'))
   }
 
   // ── Sync model/effort/mode ─────────────────────────────────────────
@@ -969,7 +1000,6 @@ export default function App() {
                         setSelectedThreadId(thread.id)
                         setShowProjects(false)
                       }}
-                      compact
                     />
                   ))}
                 </WorkspaceGroup>
@@ -983,21 +1013,22 @@ export default function App() {
       ) : null}
 
       {/* Approval banners */}
-      {approvals.length > 0 ? (
+      {interactiveRequests.length > 0 ? (
         <div className="shrink-0 space-y-2 border-b border-border-subtle p-3">
-          {approvals.map((approval) => (
-            <ApprovalCard
-              key={approval.request_id}
-              approval={approval}
-              onAllow={() => handleApproval(approval.request_id, 'allow')}
-              onDeny={() => handleApproval(approval.request_id, 'deny')}
+          {interactiveRequests.map((request) => (
+            <InteractiveRequestCard
+              key={request.request_id}
+              request={request}
+              onRespond={(response) =>
+                handleInteractiveResponse(request.workspace_id, request.request_id, response)
+              }
             />
           ))}
         </div>
       ) : null}
 
       {/* Conversation */}
-      <Conversation items={items} />
+      <Conversation items={items} isThinking={isSubmitting} />
 
       {/* Prompt input */}
       <div className="shrink-0">
@@ -1016,7 +1047,6 @@ export default function App() {
           collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
           selectedCollaborationModeId={selectedCollaborationMode}
           onCollaborationModeChange={handleCollaborationModeChange}
-          approvalPolicy="on-request"
           disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
           compact
         />

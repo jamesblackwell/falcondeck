@@ -1,12 +1,16 @@
-export type ApprovalRequest = {
+export type InteractiveRequest = {
   request_id: string
   workspace_id: string
   thread_id: string | null
   method: string
+  kind: 'approval' | 'question'
   title: string
   detail: string | null
   command: string | null
   path: string | null
+  turn_id: string | null
+  item_id: string | null
+  questions: unknown[]
   created_at: string
 }
 
@@ -33,7 +37,7 @@ export type DaemonSnapshot = {
   }
   workspaces: WorkspaceSummary[]
   threads: ThreadSummary[]
-  approvals: ApprovalRequest[]
+  interactive_requests: InteractiveRequest[]
 }
 
 export type EventEnvelope = {
@@ -45,7 +49,7 @@ export type EventEnvelope = {
     | { type: 'snapshot'; snapshot: DaemonSnapshot }
     | { type: 'text'; item_id: string; delta: string }
     | { type: 'service'; message: string; level: string }
-    | { type: 'approval-request'; request: ApprovalRequest }
+    | { type: 'interactive-request'; request: InteractiveRequest }
     | { type: 'turn-start'; turn_id: string }
     | { type: 'turn-end'; turn_id: string; status: string; error?: string | null }
 }

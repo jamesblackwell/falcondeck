@@ -4,9 +4,11 @@ import type {
   EventEnvelope,
   GitDiffResponse,
   GitStatusResponse,
+  InteractiveResponsePayload,
   RemoteStatusResponse,
   ThreadDetail,
   ThreadHandle,
+  ThreadSummary,
   TurnInputItem,
   UpdateThreadPayload,
   WorkspaceSummary,
@@ -92,6 +94,20 @@ export function createDaemonApiClient(baseUrl: string) {
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/collaboration-modes`),
       )
     },
+    async archiveThread(workspaceId: string, threadId: string) {
+      return parseJson<ThreadSummary>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/archive`, {
+          method: 'POST',
+        }),
+      )
+    },
+    async unarchiveThread(workspaceId: string, threadId: string) {
+      return parseJson<ThreadSummary>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/unarchive`, {
+          method: 'POST',
+        }),
+      )
+    },
     async sendTurn(payload: SendTurnPayload) {
       return parseJson<{ ok: boolean; message?: string | null }>(
         await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/turns`, {
@@ -101,16 +117,16 @@ export function createDaemonApiClient(baseUrl: string) {
         }),
       )
     },
-    async respondApproval(
+    async respondInteractive(
       workspaceId: string,
       requestId: string,
-      decision: 'allow' | 'deny' | 'always_allow',
+      response: InteractiveResponsePayload,
     ) {
       return parseJson<{ ok: boolean; message?: string | null }>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/approvals/${requestId}/respond`, {
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/interactive-requests/${requestId}/respond`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ decision }),
+          body: JSON.stringify({ response }),
         }),
       )
     },
