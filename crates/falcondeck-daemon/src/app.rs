@@ -70,6 +70,7 @@ struct ManagedThread {
     assistant_items: HashMap<String, usize>,
     reasoning_items: HashMap<String, usize>,
     tool_items: HashMap<String, usize>,
+    requires_resume: bool,
 }
 
 #[derive(Clone)]
@@ -672,25 +673,52 @@ impl AppState {
         };
 
         let user_message = build_user_message_item(&inputs);
-        let thread = self
-            .upsert_thread(&request.workspace_id, &request.thread_id, |thread| {
-                thread.status = ThreadStatus::Running;
-                thread.codex.model_id = request.model_id.clone().or(thread.codex.model_id.clone());
-                thread.codex.reasoning_effort = request
-                    .reasoning_effort
-                    .clone()
-                    .or(thread.codex.reasoning_effort.clone());
-                thread.codex.collaboration_mode_id = request
-                    .collaboration_mode_id
-                    .clone()
-                    .or(thread.codex.collaboration_mode_id.clone());
-                thread.codex.approval_policy = Some(approval_policy.clone());
-                thread.codex.service_tier = request
-                    .service_tier
-                    .clone()
-                    .or(thread.codex.service_tier.clone());
-            })
-            .await?;
+        let (thread, requires_resume) = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get_mut(&request.workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let now = Utc::now();
+            let managed = workspace
+                .threads
+                .entry(request.thread_id.clone())
+                .or_insert_with(|| {
+                    ManagedThread::new(ThreadSummary {
+                        id: request.thread_id.clone(),
+                        workspace_id: request.workspace_id.clone(),
+                        title: "Untitled thread".to_string(),
+                        status: ThreadStatus::Idle,
+                        updated_at: now,
+                        last_message_preview: None,
+                        latest_turn_id: None,
+                        latest_plan: None,
+                        latest_diff: None,
+                        last_tool: None,
+                        last_error: None,
+                        codex: ThreadCodexParams::default(),
+                    })
+                });
+            managed.summary.status = ThreadStatus::Running;
+            managed.summary.codex.model_id =
+                request.model_id.clone().or(managed.summary.codex.model_id.clone());
+            managed.summary.codex.reasoning_effort = request
+                .reasoning_effort
+                .clone()
+                .or(managed.summary.codex.reasoning_effort.clone());
+            managed.summary.codex.collaboration_mode_id = request
+                .collaboration_mode_id
+                .clone()
+                .or(managed.summary.codex.collaboration_mode_id.clone());
+            managed.summary.codex.approval_policy = Some(approval_policy.clone());
+            managed.summary.codex.service_tier = request
+                .service_tier
+                .clone()
+                .or(managed.summary.codex.service_tier.clone());
+            managed.summary.updated_at = now;
+            workspace.summary.current_thread_id = Some(managed.summary.id.clone());
+            workspace.summary.updated_at = now;
+            (managed.summary.clone(), managed.requires_resume)
+        };
         self.push_conversation_item(
             &request.workspace_id,
             &request.thread_id,
@@ -704,7 +732,15 @@ impl AppState {
             UnifiedEvent::ThreadUpdated { thread },
         );
 
-        session.resume_thread(&request.thread_id).await?;
+        if requires_resume {
+            session.resume_thread(&request.thread_id).await?;
+            let mut workspaces = self.inner.workspaces.lock().await;
+            if let Some(workspace) = workspaces.get_mut(&request.workspace_id) {
+                if let Some(thread) = workspace.threads.get_mut(&request.thread_id) {
+                    thread.requires_resume = false;
+                }
+            }
+        }
 
         session
             .send_request(
@@ -1481,6 +1517,22 @@ impl AppState {
         let params: Value = decrypt_json(data_key, &params)
             .map_err(|error| format!("failed to decrypt remote rpc payload: {error}"))?;
         match method.as_str() {
+            "snapshot.current" => {
+                let snapshot = self.snapshot().await;
+                send_relay_message(
+                    writer,
+                    &RelayClientMessage::RpcResult {
+                        request_id,
+                        ok: true,
+                        result: Some(
+                            encrypt_json(data_key, &snapshot)
+                                .map_err(|error| format!("failed to encrypt rpc result: {error}"))?,
+                        ),
+                        error: None,
+                    },
+                )
+                .await?;
+            }
             "thread.start" => {
                 let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
                     .ok_or_else(|| "thread.start missing workspaceId".to_string())?;
@@ -2812,6 +2864,7 @@ impl ManagedThread {
             assistant_items: HashMap::new(),
             reasoning_items: HashMap::new(),
             tool_items: HashMap::new(),
+            requires_resume: false,
         }
     }
 
@@ -2833,6 +2886,7 @@ impl ManagedThread {
             }
             thread.items.push(item);
         }
+        thread.requires_resume = true;
         thread
     }
 }
@@ -3301,7 +3355,10 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::{Duration, Utc};
-    use falcondeck_core::{ImageInput, TurnInputItem, WorkspaceStatus};
+    use falcondeck_core::{
+        ConversationItem, ImageInput, ThreadCodexParams, ThreadStatus, ThreadSummary,
+        TurnInputItem, WorkspaceStatus,
+    };
     use serde_json::json;
     use tempfile::tempdir;
 
@@ -3421,6 +3478,37 @@ mod tests {
                 updated_at: None,
             }]
         );
+    }
+
+    #[test]
+    fn restored_threads_require_resume_but_new_threads_do_not() {
+        let summary = ThreadSummary {
+            id: "thread-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            title: "Thread".to_string(),
+            status: ThreadStatus::Idle,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            codex: ThreadCodexParams::default(),
+        };
+
+        let new_thread = super::ManagedThread::new(summary.clone());
+        assert!(!new_thread.requires_resume);
+
+        let restored_thread = super::ManagedThread::with_items(
+            summary,
+            vec![ConversationItem::AssistantMessage {
+                id: "assistant-1".to_string(),
+                text: "hello".to_string(),
+                created_at: Utc::now(),
+            }],
+        );
+        assert!(restored_thread.requires_resume);
     }
 
     #[tokio::test]
