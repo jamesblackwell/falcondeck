@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  applyEventToThreadDetail,
   applySnapshotEvent,
   base64ToBytes,
   bootstrapSessionCrypto,
@@ -105,6 +106,58 @@ function connectionLabel(status: string) {
   return 'Not connected'
 }
 
+function applyDaemonEventsToSnapshot(
+  current: DaemonSnapshot | null,
+  events: EventEnvelope[],
+) {
+  let next = current
+  for (const event of events) {
+    next =
+      applySnapshotEvent(next, event) ??
+      (event.event.type === 'snapshot' ? event.event.snapshot : next)
+  }
+  return next
+}
+
+function applyDaemonEventsToThreadItems(
+  current: Record<string, ConversationItem[]>,
+  events: EventEnvelope[],
+) {
+  let next = current
+  const drafts = new Map<string, ConversationItem[]>()
+
+  for (const event of events) {
+    if (!event.thread_id) continue
+    if (
+      event.event.type !== 'conversation-item-added' &&
+      event.event.type !== 'conversation-item-updated'
+    ) {
+      continue
+    }
+
+    const existing = drafts.get(event.thread_id) ?? current[event.thread_id] ?? []
+    const updated = upsertConversationItem(existing, event.event.item)
+    if (next === current) {
+      next = { ...current }
+    }
+    next[event.thread_id] = updated
+    drafts.set(event.thread_id, updated)
+  }
+
+  return next
+}
+
+function applyDaemonEventsToThreadDetail(
+  current: ThreadDetail | null,
+  events: EventEnvelope[],
+) {
+  let next = current
+  for (const event of events) {
+    next = applyEventToThreadDetail(next, event)
+  }
+  return next
+}
+
 // ── Session persistence ──────────────────────────────────────────────
 
 const STORAGE_KEY = 'falcondeck.remote.session.v1'
@@ -196,6 +249,11 @@ export default function App() {
   const clientKeyPairRef = useRef<ReturnType<typeof generateBoxKeyPair> | null>(null)
   const pendingEncryptedUpdatesRef = useRef<RelayUpdate[]>([])
   const lastReceivedSeqRef = useRef(persistedSession?.lastReceivedSeq ?? 0)
+  const pendingSessionPersistRef = useRef<Partial<PersistedRemoteSession> | null>(null)
+  const sessionPersistTimerRef = useRef<number | null>(null)
+  const pendingRelayUpdatesRef = useRef<RelayUpdate[]>([])
+  const relayFlushFrameRef = useRef<number | null>(null)
+  const relayFlushInProgressRef = useRef(false)
   const pendingRpc = useRef(
     new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: number }>(),
   )
@@ -221,6 +279,47 @@ export default function App() {
       })
     },
     [clientToken, deviceId, pairingCode, relayUrl, sessionId],
+  )
+
+  const flushPersistedSession = useCallback(() => {
+    if (sessionPersistTimerRef.current !== null) {
+      window.clearTimeout(sessionPersistTimerRef.current)
+      sessionPersistTimerRef.current = null
+    }
+
+    const pending = pendingSessionPersistRef.current
+    pendingSessionPersistRef.current = null
+    if (!pending) return
+
+    persistCurrentSession(pending)
+  }, [persistCurrentSession])
+
+  const schedulePersistCurrentSession = useCallback(
+    (
+      overrides?: Partial<PersistedRemoteSession>,
+      options?: {
+        immediate?: boolean
+      },
+    ) => {
+      pendingSessionPersistRef.current = {
+        ...(pendingSessionPersistRef.current ?? {}),
+        ...(overrides ?? {}),
+      }
+
+      if (options?.immediate) {
+        flushPersistedSession()
+        return
+      }
+
+      if (sessionPersistTimerRef.current !== null) {
+        return
+      }
+
+      sessionPersistTimerRef.current = window.setTimeout(() => {
+        flushPersistedSession()
+      }, 400)
+    },
+    [flushPersistedSession],
   )
 
   useEffect(() => {
@@ -257,8 +356,33 @@ export default function App() {
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current)
       }
+      if (sessionPersistTimerRef.current !== null) {
+        window.clearTimeout(sessionPersistTimerRef.current)
+      }
+      if (relayFlushFrameRef.current !== null) {
+        window.cancelAnimationFrame(relayFlushFrameRef.current)
+      }
     }
   }, [])
+
+  useEffect(() => {
+    const flushOnHide = () => {
+      flushPersistedSession()
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPersistedSession()
+      }
+    }
+
+    window.addEventListener('pagehide', flushOnHide)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      window.removeEventListener('pagehide', flushOnHide)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [flushPersistedSession])
 
   useEffect(() => {
     const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId)
@@ -321,6 +445,7 @@ export default function App() {
     let isCurrent = true
     socketRef.current = socket
     pendingEncryptedUpdatesRef.current = []
+    pendingRelayUpdatesRef.current = []
     setConnectionStatus('connecting')
     setError(null)
 
@@ -339,10 +464,12 @@ export default function App() {
           setConnectionStatus(`connected as ${payload.role}`)
           break
         case 'sync':
-          void processRelayUpdates(payload.updates)
+          pendingRelayUpdatesRef.current.push(...payload.updates)
+          scheduleRelayFlush()
           break
         case 'update':
-          void processRelayUpdate(payload.update)
+          pendingRelayUpdatesRef.current.push(payload.update)
+          scheduleRelayFlush()
           break
         case 'presence':
           setMachinePresence(payload.presence)
@@ -371,6 +498,11 @@ export default function App() {
         pendingRpc.current.delete(reqId)
       }
       pendingEncryptedUpdatesRef.current = []
+      pendingRelayUpdatesRef.current = []
+      if (relayFlushFrameRef.current !== null) {
+        window.cancelAnimationFrame(relayFlushFrameRef.current)
+        relayFlushFrameRef.current = null
+      }
       if (sessionId && clientToken) {
         const delay = Math.min(1000 * 2 ** reconnectAttemptRef.current, 10_000)
         reconnectAttemptRef.current += 1
@@ -412,90 +544,158 @@ export default function App() {
     }
   }
 
-  async function processRelayUpdates(updates: RelayUpdate[]) {
-    for (const u of updates) await processRelayUpdate(u)
-  }
-
-  async function processRelayUpdate(update: RelayUpdate) {
-    lastReceivedSeqRef.current = Math.max(lastReceivedSeqRef.current, update.seq)
-    if (update.body.t === 'session-bootstrap') {
-      const kp = clientKeyPairRef.current
-      if (!kp) { setError('Missing local pairing key material'); return }
-      if (update.body.material.client_public_key !== publicKeyToBase64(kp)) {
-        return
-      }
-      try {
-        sessionCryptoRef.current = bootstrapSessionCrypto(kp, update.body.material)
-        persistCurrentSession({ dataKey: bytesToBase64(sessionCryptoRef.current.dataKey), lastReceivedSeq: lastReceivedSeqRef.current })
-        setConnectionStatus('connected as client (encrypted)')
-        const pending = pendingEncryptedUpdatesRef.current
-        pendingEncryptedUpdatesRef.current = []
-        await processRelayUpdates(pending)
-      } catch (e) {
-        persistRemoteSession(null)
-        persistPendingActionIds([])
-        clientKeyPairRef.current = null
-        sessionCryptoRef.current = null
-        setSessionId(null)
-        setDeviceId(null)
-        setClientToken(null)
-        setMachinePresence(null)
-        setSnapshot(null)
-        setThreadDetail(null)
-        setThreadItems({})
-        setConnectionGeneration((value) => value + 1)
-        setError(e instanceof Error ? e.message : 'Failed to establish encrypted relay session')
-      }
+  const flushRelayUpdates = useCallback(async () => {
+    if (relayFlushInProgressRef.current) {
       return
     }
 
-    if (update.body.t === 'presence') {
-      setMachinePresence(update.body.presence)
-      persistCurrentSession({ lastReceivedSeq: lastReceivedSeqRef.current })
-      return
-    }
+    relayFlushInProgressRef.current = true
 
-    if (update.body.t === 'action-status') {
-      persistCurrentSession({ lastReceivedSeq: lastReceivedSeqRef.current })
-      return
-    }
-
-    const sc = sessionCryptoRef.current
-    if (!sc) { pendingEncryptedUpdatesRef.current.push(update); return }
-
-    let decrypted: unknown
     try {
-      decrypted = await decryptJson(sc.dataKey, update.body.envelope)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to decrypt relay update')
+      while (pendingRelayUpdatesRef.current.length > 0) {
+        const batch = pendingRelayUpdatesRef.current.splice(0)
+        const daemonEvents: EventEnvelope[] = []
+        let nextPresence: MachinePresence | null | undefined
+        let resetRemoteSession = false
+        let shouldPersistCursor = false
+
+        for (let index = 0; index < batch.length; index += 1) {
+          const update = batch[index]
+          lastReceivedSeqRef.current = Math.max(lastReceivedSeqRef.current, update.seq)
+
+          if (update.body.t === 'session-bootstrap') {
+            const kp = clientKeyPairRef.current
+            if (!kp) {
+              setError('Missing local pairing key material')
+              continue
+            }
+            if (update.body.material.client_public_key !== publicKeyToBase64(kp)) {
+              continue
+            }
+            try {
+              sessionCryptoRef.current = bootstrapSessionCrypto(kp, update.body.material)
+              setConnectionStatus('connected as client (encrypted)')
+              schedulePersistCurrentSession(
+                {
+                  dataKey: bytesToBase64(sessionCryptoRef.current.dataKey),
+                  lastReceivedSeq: lastReceivedSeqRef.current,
+                },
+                { immediate: true },
+              )
+              shouldPersistCursor = true
+
+              if (pendingEncryptedUpdatesRef.current.length > 0) {
+                batch.splice(index + 1, 0, ...pendingEncryptedUpdatesRef.current)
+                pendingEncryptedUpdatesRef.current = []
+              }
+            } catch (e) {
+              if (sessionPersistTimerRef.current !== null) {
+                window.clearTimeout(sessionPersistTimerRef.current)
+                sessionPersistTimerRef.current = null
+              }
+              pendingSessionPersistRef.current = null
+              pendingEncryptedUpdatesRef.current = []
+              pendingRelayUpdatesRef.current = []
+              persistRemoteSession(null)
+              persistPendingActionIds([])
+              clientKeyPairRef.current = null
+              sessionCryptoRef.current = null
+              setSessionId(null)
+              setDeviceId(null)
+              setClientToken(null)
+              setMachinePresence(null)
+              setSnapshot(null)
+              setThreadDetail(null)
+              setThreadItems({})
+              setConnectionGeneration((value) => value + 1)
+              setError(
+                e instanceof Error
+                  ? e.message
+                  : 'Failed to establish encrypted relay session',
+              )
+              resetRemoteSession = true
+            }
+            continue
+          }
+
+          if (update.body.t === 'presence') {
+            nextPresence = update.body.presence
+            shouldPersistCursor = true
+            continue
+          }
+
+          if (update.body.t === 'action-status') {
+            shouldPersistCursor = true
+            continue
+          }
+
+          const sc = sessionCryptoRef.current
+          if (!sc) {
+            pendingEncryptedUpdatesRef.current.push(update)
+            continue
+          }
+
+          let decrypted: unknown
+          try {
+            decrypted = await decryptJson(sc.dataKey, update.body.envelope)
+          } catch (e) {
+            setError(e instanceof Error ? e.message : 'Failed to decrypt relay update')
+            continue
+          }
+
+          const event = parseDaemonEvent(decrypted)
+          if (event) {
+            shouldPersistCursor = true
+            if (event.event.type !== 'text') {
+              daemonEvents.push(event)
+            }
+          }
+        }
+
+        if (resetRemoteSession) {
+          return
+        }
+
+        if (nextPresence !== undefined) {
+          setMachinePresence(nextPresence)
+        }
+
+        if (shouldPersistCursor) {
+          schedulePersistCurrentSession({
+            lastReceivedSeq: lastReceivedSeqRef.current,
+          })
+        }
+
+        if (daemonEvents.length > 0) {
+          setSnapshot((current) => applyDaemonEventsToSnapshot(current, daemonEvents))
+          setThreadItems((current) => applyDaemonEventsToThreadItems(current, daemonEvents))
+          setThreadDetail((current) => applyDaemonEventsToThreadDetail(current, daemonEvents))
+        }
+      }
+    } finally {
+      relayFlushInProgressRef.current = false
+      if (
+        pendingRelayUpdatesRef.current.length > 0 &&
+        relayFlushFrameRef.current === null
+      ) {
+        relayFlushFrameRef.current = window.requestAnimationFrame(() => {
+          relayFlushFrameRef.current = null
+          void flushRelayUpdates()
+        })
+      }
+    }
+  }, [schedulePersistCurrentSession])
+
+  const scheduleRelayFlush = useCallback(() => {
+    if (relayFlushFrameRef.current !== null) {
       return
     }
 
-    const event = parseDaemonEvent(decrypted)
-    if (!event) return
-
-    persistCurrentSession({ lastReceivedSeq: lastReceivedSeqRef.current })
-
-    setSnapshot((current) => {
-      return (
-        applySnapshotEvent(current, event) ??
-        (event.event.type === 'snapshot' ? event.event.snapshot : current)
-      )
+    relayFlushFrameRef.current = window.requestAnimationFrame(() => {
+      relayFlushFrameRef.current = null
+      void flushRelayUpdates()
     })
-
-    if (!event.thread_id) return
-    const de = event.event
-    if (de.type === 'conversation-item-added' || de.type === 'conversation-item-updated') {
-      setThreadItems((current) => {
-        const bucket = current[event.thread_id!] ?? []
-        return { ...current, [event.thread_id!]: upsertConversationItem(bucket, de.item) }
-      })
-      setThreadDetail((current) => {
-        if (!current || current.thread.id !== event.thread_id) return current
-        return { ...current, items: upsertConversationItem(current.items, de.item) }
-      })
-    }
-  }
+  }, [flushRelayUpdates])
 
   useEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId || !relayConnected || !hasSessionKey) {
@@ -948,9 +1148,9 @@ export default function App() {
   const desktopOnline = machinePresence?.daemon_connected ?? false
 
   return (
-    <div className="flex h-[100dvh] flex-col bg-surface-0">
+    <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
       {/* Header bar */}
-      <header className="flex shrink-0 items-center gap-3 border-b border-border-subtle px-4 py-3">
+      <header className="flex shrink-0 items-center gap-3 overflow-hidden border-b border-border-subtle px-4 py-3">
         <button
           type="button"
           onClick={() => setShowProjects((v) => !v)}

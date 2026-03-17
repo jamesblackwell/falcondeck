@@ -194,7 +194,7 @@ export const Conversation = memo(function Conversation({
       <div
         ref={scrollRef}
         data-selectable
-        className="h-full overflow-y-auto"
+        className="h-full overflow-x-hidden overflow-y-auto"
         onScroll={handleScroll}
       >
         <div ref={contentRef} className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">

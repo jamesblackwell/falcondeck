@@ -1420,6 +1420,13 @@ impl AppState {
         send_relay_message(
             &mut writer,
             &RelayClientMessage::RpcRegister {
+                method: "snapshot.current".to_string(),
+            },
+        )
+        .await?;
+        send_relay_message(
+            &mut writer,
+            &RelayClientMessage::RpcRegister {
                 method: "interactive.respond".to_string(),
             },
         )

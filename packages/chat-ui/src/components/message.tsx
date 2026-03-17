@@ -22,7 +22,7 @@ const markdownComponents = {
       return <CodeBlock code={code} language={match?.[1] ?? null} />
     }
     return (
-      <code className="rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-0.5 font-mono text-[0.9em]">
+      <code className="break-all rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-0.5 font-mono text-[0.9em]">
         {children}
       </code>
     )
