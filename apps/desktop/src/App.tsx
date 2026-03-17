@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   buildProjectGroups,
@@ -11,6 +11,7 @@ import {
   type TurnInputItem,
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput } from '@falcondeck/chat-ui'
+import { ToastProvider, useToast } from '@falcondeck/ui'
 
 import { defaultModelId, defaultReasoningEffort, reasoningOptions } from './utils'
 import { DesktopSidebar } from './components/Sidebar'
@@ -23,6 +24,15 @@ import { NewThreadState } from './components/NewThreadState'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
 
 export default function App() {
+  return (
+    <ToastProvider>
+      <AppInner />
+    </ToastProvider>
+  )
+}
+
+function AppInner() {
+  const { toast } = useToast()
   const {
     api,
     connectionState,
@@ -41,7 +51,7 @@ export default function App() {
   } = useDaemonConnection()
 
   const [draft, setDraft] = useState('')
-  const [relayUrl, setRelayUrl] = useState(
+  const [relayUrl] = useState(
     import.meta.env.VITE_FALCONDECK_RELAY_URL ?? 'https://connect.falcondeck.com',
   )
   const [attachments, setAttachments] = useState<ImageInput[]>([])
@@ -119,6 +129,13 @@ export default function App() {
     }
   }, [selectedEffort, selectedModel, selectedThread, selectedWorkspace])
 
+  // Surface connection errors as toasts
+  useEffect(() => {
+    if (connectionError) {
+      toast({ variant: 'danger', title: 'Connection error', description: connectionError })
+    }
+  }, [connectionError, toast])
+
   const applyThreadHandle = useCallback((handle: ThreadHandle) => {
     setSnapshot((current) =>
       current
@@ -165,10 +182,12 @@ export default function App() {
         setActionError(null)
       } catch (error) {
         if (requestId !== threadSettingsRequestRef.current) return
-        setActionError(error instanceof Error ? error.message : 'Failed to update thread settings')
+        const msg = error instanceof Error ? error.message : 'Failed to update thread settings'
+        setActionError(msg)
+        toast({ variant: 'danger', title: 'Failed to update settings', description: msg })
       }
     },
-    [api, applyThreadHandle, selectedThreadId, selectedWorkspace],
+    [api, applyThreadHandle, selectedThreadId, selectedWorkspace, toast],
   )
 
   const handleModelChange = useCallback(
@@ -222,7 +241,9 @@ export default function App() {
       setSelectedThreadId(workspace.current_thread_id)
       setActionError(null)
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Failed to add project')
+      const msg = error instanceof Error ? error.message : 'Failed to add project'
+      setActionError(msg)
+      toast({ variant: 'danger', title: 'Failed to add project', description: msg })
     } finally {
       setIsAddingProject(false)
     }
@@ -264,7 +285,9 @@ export default function App() {
     } catch (error) {
       setDraft(submittedDraft)
       setAttachments(submittedAttachments)
-      setActionError(error instanceof Error ? error.message : 'Failed to send turn')
+      const msg = error instanceof Error ? error.message : 'Failed to send turn'
+      setActionError(msg)
+      toast({ variant: 'danger', title: 'Failed to send message', description: msg })
     } finally {
       setIsSending(false)
     }
@@ -278,7 +301,9 @@ export default function App() {
       setRemoteStatus(nextStatus)
       setActionError(null)
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Failed to start remote pairing')
+      const msg = error instanceof Error ? error.message : 'Failed to start remote pairing'
+      setActionError(msg)
+      toast({ variant: 'danger', title: 'Failed to start pairing', description: msg })
     } finally {
       setIsStartingRemote(false)
     }
@@ -296,24 +321,32 @@ export default function App() {
       setSnapshot(nextSnapshot)
       setActionError(null)
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'Failed to respond to request')
+      const msg = error instanceof Error ? error.message : 'Failed to respond to request'
+      setActionError(msg)
+      toast({ variant: 'danger', title: 'Failed to respond', description: msg })
     }
   }
 
   // Stable callbacks for child components
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
-    setSelectedWorkspaceId(workspaceId)
-    setSelectedThreadId(threadId)
+    startTransition(() => {
+      setSelectedWorkspaceId(workspaceId)
+      setSelectedThreadId(threadId)
+    })
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleSelectThread = useCallback((workspaceId: string, threadId: string) => {
-    setSelectedWorkspaceId(workspaceId)
-    setSelectedThreadId(threadId)
+    startTransition(() => {
+      setSelectedWorkspaceId(workspaceId)
+      setSelectedThreadId(threadId)
+    })
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleNewThread = useCallback((workspaceId: string) => {
-    setSelectedWorkspaceId(workspaceId)
-    setSelectedThreadId(null)
+    startTransition(() => {
+      setSelectedWorkspaceId(workspaceId)
+      setSelectedThreadId(null)
+    })
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleInteractiveResponseCallback = useCallback(
@@ -341,6 +374,11 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, relayUrl])
 
+  const handleRefreshRemoteStatus = useCallback(() => {
+    if (!api) return
+    void api.remoteStatus().then(setRemoteStatus).catch(() => {})
+  }, [api])
+
   const handleArchiveThread = useCallback(
     (workspaceId: string, threadId: string) => {
       if (!api) return
@@ -349,9 +387,12 @@ export default function App() {
           setSelectedThreadId(null)
         }
         return api.snapshot().then(setSnapshot)
+      }).catch((error: unknown) => {
+        const msg = error instanceof Error ? error.message : 'Failed to archive thread'
+        toast({ variant: 'danger', title: 'Failed to archive thread', description: msg })
       })
     },
-    [api, selectedThreadId],
+    [api, selectedThreadId, toast],
   )
 
   // Memoized derived values
@@ -401,6 +442,7 @@ export default function App() {
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}
               onStartPairing={handleStartPairingCallback}
+              onRefreshStatus={handleRefreshRemoteStatus}
               isStartingRemote={isStartingRemote}
             />
           </SessionHeader>

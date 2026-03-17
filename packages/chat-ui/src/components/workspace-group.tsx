@@ -1,5 +1,5 @@
-import { memo } from 'react'
-import { FolderOpen, SquarePen } from 'lucide-react'
+import { memo, useState } from 'react'
+import { ChevronDown, ChevronRight, FolderClosed, SquarePen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
@@ -14,6 +14,7 @@ export type WorkspaceGroupProps = {
 
 export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelected, onSelect, onNewThread, children }: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
+  const [isOpen, setIsOpen] = useState(true)
 
   return (
     <section className="min-w-0 overflow-hidden">
@@ -28,9 +29,25 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelect
         <button
           type="button"
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
-          onClick={onSelect}
+          onClick={() => {
+            if (isOpen) {
+              setIsOpen(false)
+            } else {
+              setIsOpen(true)
+              onSelect()
+            }
+          }}
         >
-          <FolderOpen className="h-4 w-4 shrink-0 text-fg-muted" />
+          <span className="relative h-4 w-4 shrink-0">
+            {isOpen ? (
+              <>
+                <FolderClosed className="h-4 w-4 text-fg-muted group-hover:hidden" />
+                <ChevronDown className="hidden h-4 w-4 text-fg-muted group-hover:block" />
+              </>
+            ) : (
+              <ChevronRight className="h-4 w-4 text-fg-muted" />
+            )}
+          </span>
           <span className="truncate text-[length:var(--fd-text-sm)] font-medium">{pathLabel}</span>
         </button>
         {onNewThread ? (
@@ -44,9 +61,11 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelect
           </button>
         ) : null}
       </div>
-      <div className="min-w-0 pl-2">
-        {children}
-      </div>
+      {isOpen ? (
+        <div className="min-w-0 pl-2">
+          {children}
+        </div>
+      ) : null}
     </section>
   )
 })

@@ -1093,49 +1093,70 @@ impl AppState {
         daemon_token: String,
         pairing: RemotePairingState,
     ) -> Result<(), String> {
-        let client = reqwest::Client::new();
-        let (session_id, device_id, client_bundle) = loop {
-            let response = client
-                .get(format!("{relay_url}/v1/pairings/{}", pairing.pairing_id))
-                .bearer_auth(&daemon_token)
-                .send()
-                .await
-                .map_err(|error| format!("failed to poll relay pairing: {error}"))?
-                .error_for_status()
-                .map_err(|error| format!("relay pairing status failed: {error}"))?
-                .json::<PairingStatusResponse>()
-                .await
-                .map_err(|error| format!("failed to parse relay pairing status: {error}"))?;
+        // If we already have a trusted device with session + client key material,
+        // skip polling the pairing endpoint entirely — the pairing may have expired
+        // but the session is still valid.
+        let (session_id, device_id, client_bundle) = if let (
+            Some(session_id),
+            Some(device_id),
+            Some(client_bundle),
+        ) = (
+            pairing.session_id.clone(),
+            pairing.device_id.clone(),
+            pairing.client_bundle.clone(),
+        ) {
+            tracing::info!(
+                "trusted device already present, skipping pairing poll (session={session_id}, device={device_id})"
+            );
+            (session_id, device_id, client_bundle)
+        } else {
+            // No trusted device yet — poll pairing status until claimed
+            let client = reqwest::Client::new();
+            loop {
+                let response = client
+                    .get(format!("{relay_url}/v1/pairings/{}", pairing.pairing_id))
+                    .bearer_auth(&daemon_token)
+                    .send()
+                    .await
+                    .map_err(|error| format!("failed to poll relay pairing: {error}"))?
+                    .error_for_status()
+                    .map_err(|error| format!("relay pairing status failed: {error}"))?
+                    .json::<PairingStatusResponse>()
+                    .await
+                    .map_err(|error| format!("failed to parse relay pairing status: {error}"))?;
 
-            if response.status == falcondeck_core::PairingStatus::Expired {
-                return Err("relay pairing expired before it was claimed".to_string());
-            }
+                if response.status == falcondeck_core::PairingStatus::Expired {
+                    return Err("relay pairing expired before it was claimed".to_string());
+                }
 
-            {
-                let mut remote = self.inner.remote.lock().await;
-                if let Some(current_pairing) = remote.pairing.as_mut() {
-                    current_pairing.session_id = response.session_id.clone();
-                    current_pairing.device_id = response.device_id.clone();
-                    current_pairing.client_bundle = response.client_bundle.clone();
-                    if response.device_id.is_some() && current_pairing.trusted_at.is_none() {
-                        current_pairing.trusted_at = Some(Utc::now());
+                {
+                    let mut remote = self.inner.remote.lock().await;
+                    if let Some(current_pairing) = remote.pairing.as_mut() {
+                        current_pairing.session_id = response.session_id.clone();
+                        current_pairing.device_id = response.device_id.clone();
+                        current_pairing.client_bundle = response.client_bundle.clone();
+                        if response.device_id.is_some() && current_pairing.trusted_at.is_none() {
+                            current_pairing.trusted_at = Some(Utc::now());
+                        }
                     }
                 }
-            }
 
-            if let (Some(session_id), Some(device_id)) = (response.session_id, response.device_id) {
-                let client_bundle = response.client_bundle.ok_or_else(|| {
-                    "relay pairing completed without client key material".to_string()
-                })?;
-                break (session_id, device_id, client_bundle);
-            }
+                if let (Some(session_id), Some(device_id)) =
+                    (response.session_id, response.device_id)
+                {
+                    let client_bundle = response.client_bundle.ok_or_else(|| {
+                        "relay pairing completed without client key material".to_string()
+                    })?;
+                    break (session_id, device_id, client_bundle);
+                }
 
-            {
-                let mut remote = self.inner.remote.lock().await;
-                remote.status = RemoteConnectionStatus::PairingPending;
-                remote.last_error = None;
+                {
+                    let mut remote = self.inner.remote.lock().await;
+                    remote.status = RemoteConnectionStatus::PairingPending;
+                    remote.last_error = None;
+                }
+                sleep(Duration::from_secs(2)).await;
             }
-            sleep(Duration::from_secs(2)).await;
         };
 
         {

@@ -1,4 +1,4 @@
-import { memo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
@@ -71,10 +71,12 @@ function renderMarkdown(text: string) {
 }
 
 function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_message' }> }) {
+  const renderedText = useMemo(() => renderMarkdown(item.text), [item.text])
+
   return (
     <div className="ml-auto max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
       <div className="max-w-none text-[length:var(--fd-text-md)] text-fg-primary">
-        {renderMarkdown(item.text)}
+        {renderedText}
       </div>
       {item.attachments.length > 0 ? (
         <div className="mt-3 flex flex-wrap gap-2">
@@ -93,10 +95,12 @@ function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_m
 }
 
 function AssistantMessage({ item }: { item: Extract<ConversationItem, { kind: 'assistant_message' }> }) {
+  const renderedText = useMemo(() => renderMarkdown(item.text), [item.text])
+
   return (
     <div className="px-1">
       <div className="max-w-none text-[length:var(--fd-text-md)] text-fg-primary">
-        {renderMarkdown(item.text)}
+        {renderedText}
       </div>
     </div>
   )

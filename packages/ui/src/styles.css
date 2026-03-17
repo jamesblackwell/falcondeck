@@ -213,7 +213,31 @@ body {
   }
 }
 
+/* === Toast Animations === */
+@keyframes fd-toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+@keyframes fd-toast-out {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(100%);
+  }
+}
+
 @theme {
   --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-default);
   --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-default);
+  --animate-toast-in: fd-toast-in 250ms var(--fd-ease-default);
+  --animate-toast-out: fd-toast-out 200ms var(--fd-ease-default) forwards;
 }

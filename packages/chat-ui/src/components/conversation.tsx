@@ -47,7 +47,12 @@ export const Conversation = memo(function Conversation({ items, emptyState, isTh
             )
           ) : null}
           {items.map((item) => (
-            <MessageCard key={`${item.kind}-${item.id}`} item={item} />
+            <div
+              key={`${item.kind}-${item.id}`}
+              style={{ contentVisibility: 'auto', containIntrinsicSize: '160px' }}
+            >
+              <MessageCard item={item} />
+            </div>
           ))}
           {isThinking ? (
             <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   applyEventToThreadDetail,
@@ -15,6 +15,10 @@ import { detectApiBaseUrl } from '../api'
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
 
+function threadCacheKey(workspaceId: string, threadId: string) {
+  return `${workspaceId}:${threadId}`
+}
+
 export function useDaemonConnection() {
   const [baseUrl, setBaseUrl] = useState<string | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting')
@@ -25,12 +29,34 @@ export function useDaemonConnection() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
+  const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
 
   const handleEvent = useCallback((event: EventEnvelope) => {
     setSnapshot((c) => applySnapshotEvent(c, event))
-    setThreadDetail((c) => applyEventToThreadDetail(c, event))
+    setThreadDetail((c) => {
+      const next = applyEventToThreadDetail(c, event)
+      if (next) {
+        threadDetailCacheRef.current.set(
+          threadCacheKey(next.workspace.id, next.thread.id),
+          next,
+        )
+      }
+      return next
+    })
+
+    if (event.workspace_id && event.thread_id) {
+      const cacheKey = threadCacheKey(event.workspace_id, event.thread_id)
+      const cached = threadDetailCacheRef.current.get(cacheKey)
+      if (cached) {
+        const next = applyEventToThreadDetail(cached, event)
+        if (next) {
+          threadDetailCacheRef.current.set(cacheKey, next)
+        }
+      }
+    }
+
     if (event.event.type === 'turn-end') {
       setGitRefreshTrigger((c) => c + 1)
     }
@@ -88,13 +114,32 @@ export function useDaemonConnection() {
       setThreadDetail(null)
       return
     }
+
+    const cacheKey = threadCacheKey(selectedWorkspaceId, selectedThreadId)
+    const cachedDetail = threadDetailCacheRef.current.get(cacheKey) ?? null
+    const selectedSummary =
+      snapshot?.threads.find((thread) => thread.id === selectedThreadId) ?? null
+
+    if (cachedDetail) {
+      setThreadDetail(cachedDetail)
+      if (!selectedSummary || cachedDetail.thread.updated_at === selectedSummary.updated_at) {
+        return
+      }
+    }
+
     let cancelled = false
     void api
       .threadDetail(selectedWorkspaceId, selectedThreadId)
-      .then((detail) => { if (!cancelled) setThreadDetail(detail) })
-      .catch(() => { if (!cancelled) setThreadDetail(null) })
+      .then((detail) => {
+        if (cancelled) return
+        threadDetailCacheRef.current.set(cacheKey, detail)
+        setThreadDetail(detail)
+      })
+      .catch(() => {
+        if (!cancelled && !cachedDetail) setThreadDetail(null)
+      })
     return () => { cancelled = true }
-  }, [api, selectedThreadId, selectedWorkspaceId])
+  }, [api, selectedThreadId, selectedWorkspaceId, snapshot?.threads])
 
   // Poll remote status
   useEffect(() => {

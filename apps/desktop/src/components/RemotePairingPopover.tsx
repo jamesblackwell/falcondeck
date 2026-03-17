@@ -88,6 +88,7 @@ export type RemotePairingPopoverProps = {
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
   onStartPairing: () => void
+  onRefreshStatus: () => void
   isStartingRemote: boolean
 }
 
@@ -95,6 +96,7 @@ export function RemotePairingPopover({
   remoteStatus,
   pairingLink,
   onStartPairing,
+  onRefreshStatus,
   isStartingRemote,
 }: RemotePairingPopoverProps) {
   const status = remoteStatus?.status
@@ -102,7 +104,7 @@ export function RemotePairingPopover({
   const isPairing = status === 'pairing_pending'
   const isActive = isConnected || status === 'device_trusted' || status === 'connecting'
   const hasPendingPairing = !!pairingLink
-  const needsFreshPairing = !status || status === 'revoked' || status === 'error'
+  const needsFreshPairing = !status || status === 'inactive' || status === 'revoked' || status === 'error' || status === 'offline'
   const activeDevices = remoteStatus?.trusted_devices?.filter((d) => d.status === 'active') ?? []
 
   return (
@@ -132,9 +134,19 @@ export function RemotePairingPopover({
         >
           <div className="space-y-3">
             {/* Header */}
-            <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-              <RadioTower className="h-4 w-4" />
-              Remote Pairing
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                <RadioTower className="h-4 w-4" />
+                Remote Pairing
+              </div>
+              <button
+                type="button"
+                onClick={onRefreshStatus}
+                title="Refresh status"
+                className="rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </button>
             </div>
 
             {/* ── Inactive / revoked / error → prompt to start ── */}
