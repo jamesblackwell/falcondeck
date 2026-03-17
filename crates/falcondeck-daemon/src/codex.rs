@@ -716,13 +716,165 @@ fn hydrate_thread_items_from_session_file(
             continue;
         }
 
-        if let Some(item) = build_conversation_item_from_session_entry(&value) {
+        if let Some(item) = build_session_hydrated_item_from_entry(&value) {
             items.push(item);
         }
     }
 
-    items.sort_by_key(conversation_item_created_at);
-    items
+    let mut conversation_items = items
+        .iter()
+        .filter(|item| should_keep_session_hydrated_item(item, &items))
+        .cloned()
+        .into_iter()
+        .map(|item| item.item)
+        .collect::<Vec<_>>();
+    conversation_items.sort_by_key(conversation_item_created_at);
+    conversation_items
+}
+
+#[derive(Clone)]
+enum SessionHydratedItemKind {
+    UserMessage,
+    AssistantMessageFromEvent,
+    AssistantMessageFromResponse,
+    Other,
+}
+
+#[derive(Clone)]
+struct SessionHydratedItem {
+    kind: SessionHydratedItemKind,
+    item: ConversationItem,
+}
+
+fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydratedItem> {
+    let created_at =
+        extract_datetime_or_timestamp(value, &["timestamp", "createdAt", "created_at"])
+            .unwrap_or_else(Utc::now);
+    let entry_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let payload = value.get("payload")?;
+
+    match entry_type {
+        "event_msg" => match payload.get("type").and_then(Value::as_str)? {
+            "user_message" => Some(SessionHydratedItem {
+                kind: SessionHydratedItemKind::UserMessage,
+                item: ConversationItem::UserMessage {
+                    id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                        format!("session-user-{}", created_at.timestamp_millis())
+                    }),
+                    text: extract_string(payload, &["message"]).unwrap_or_default(),
+                    attachments: session_entry_attachments(payload),
+                    created_at,
+                },
+            }),
+            "agent_message" => Some(SessionHydratedItem {
+                kind: SessionHydratedItemKind::AssistantMessageFromEvent,
+                item: ConversationItem::AssistantMessage {
+                    id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                        format!("session-agent-{}", created_at.timestamp_millis())
+                    }),
+                    text: extract_string(payload, &["message"]).unwrap_or_default(),
+                    created_at,
+                },
+            }),
+            _ => None,
+        },
+        "response_item" => match payload.get("type").and_then(Value::as_str)? {
+            "message" => {
+                let role = extract_string(payload, &["role"]).unwrap_or_default();
+                let text = response_item_message_text(payload);
+                if text.is_empty() {
+                    return None;
+                }
+                match role.as_str() {
+                    "assistant" => Some(SessionHydratedItem {
+                        kind: SessionHydratedItemKind::AssistantMessageFromResponse,
+                        item: ConversationItem::AssistantMessage {
+                            id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                                format!("response-assistant-{}", created_at.timestamp_millis())
+                            }),
+                            text,
+                            created_at,
+                        },
+                    }),
+                    // Codex session files can include internal user-side response items
+                    // like environment context. The explicit user_message entry is the
+                    // one we want to show in the conversation.
+                    "user" => None,
+                    _ => None,
+                }
+            }
+            "reasoning" => Some(SessionHydratedItem {
+                kind: SessionHydratedItemKind::Other,
+                item: ConversationItem::Reasoning {
+                    id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                        format!("response-reasoning-{}", created_at.timestamp_millis())
+                    }),
+                    summary: payload
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .map(|parts| {
+                            parts
+                                .iter()
+                                .filter_map(Value::as_str)
+                                .map(str::trim)
+                                .filter(|part| !part.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .filter(|summary| !summary.is_empty()),
+                    content: payload
+                        .get("content")
+                        .and_then(|content| thread_item_text(Some(content)))
+                        .unwrap_or_default(),
+                    created_at,
+                },
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn should_keep_session_hydrated_item(
+    candidate: &SessionHydratedItem,
+    all_items: &[SessionHydratedItem],
+) -> bool {
+    match candidate.kind {
+        SessionHydratedItemKind::AssistantMessageFromEvent => {
+            let ConversationItem::AssistantMessage {
+                text: candidate_text,
+                created_at: candidate_created_at,
+                ..
+            } = &candidate.item
+            else {
+                return true;
+            };
+
+            !all_items.iter().any(|existing| {
+                matches!(
+                    existing.kind,
+                    SessionHydratedItemKind::AssistantMessageFromResponse
+                ) && matches!(&existing.item, ConversationItem::AssistantMessage {
+                    text,
+                    created_at,
+                    ..
+                } if normalized_session_message(text) == normalized_session_message(candidate_text)
+                    && created_at
+                        .signed_duration_since(*candidate_created_at)
+                        .num_seconds()
+                        .abs()
+                        <= 5)
+            })
+        }
+        _ => true,
+    }
+}
+
+fn normalized_session_message(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn hydrate_thread_summary(
@@ -859,88 +1011,6 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
             },
             created_at,
         }),
-        _ => None,
-    }
-}
-
-fn build_conversation_item_from_session_entry(value: &Value) -> Option<ConversationItem> {
-    let created_at =
-        extract_datetime_or_timestamp(value, &["timestamp", "createdAt", "created_at"])
-            .unwrap_or_else(Utc::now);
-    let entry_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let payload = value.get("payload")?;
-
-    match entry_type {
-        "event_msg" => match payload.get("type").and_then(Value::as_str)? {
-            "user_message" => Some(ConversationItem::UserMessage {
-                id: extract_string(payload, &["id"])
-                    .unwrap_or_else(|| format!("session-user-{}", created_at.timestamp_millis())),
-                text: extract_string(payload, &["message"]).unwrap_or_default(),
-                attachments: session_entry_attachments(payload),
-                created_at,
-            }),
-            "agent_message" => Some(ConversationItem::AssistantMessage {
-                id: extract_string(payload, &["id"])
-                    .unwrap_or_else(|| format!("session-agent-{}", created_at.timestamp_millis())),
-                text: extract_string(payload, &["message"]).unwrap_or_default(),
-                created_at,
-            }),
-            _ => None,
-        },
-        "response_item" => match payload.get("type").and_then(Value::as_str)? {
-            "message" => {
-                let role = extract_string(payload, &["role"]).unwrap_or_default();
-                let text = response_item_message_text(payload);
-                if text.is_empty() {
-                    return None;
-                }
-                match role.as_str() {
-                    "assistant" => Some(ConversationItem::AssistantMessage {
-                        id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                            format!("response-assistant-{}", created_at.timestamp_millis())
-                        }),
-                        text,
-                        created_at,
-                    }),
-                    "user" => Some(ConversationItem::UserMessage {
-                        id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                            format!("response-user-{}", created_at.timestamp_millis())
-                        }),
-                        text,
-                        attachments: Vec::new(),
-                        created_at,
-                    }),
-                    _ => None,
-                }
-            }
-            "reasoning" => Some(ConversationItem::Reasoning {
-                id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                    format!("response-reasoning-{}", created_at.timestamp_millis())
-                }),
-                summary: payload
-                    .get("summary")
-                    .and_then(Value::as_array)
-                    .map(|parts| {
-                        parts
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(str::trim)
-                            .filter(|part| !part.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .filter(|summary| !summary.is_empty()),
-                content: payload
-                    .get("content")
-                    .and_then(|content| thread_item_text(Some(content)))
-                    .unwrap_or_default(),
-                created_at,
-            }),
-            _ => None,
-        },
         _ => None,
     }
 }
@@ -1403,6 +1473,107 @@ mod tests {
             ConversationItem::AssistantMessage { text, .. } => {
                 assert_eq!(text, "It works from native storage.");
             }
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn filters_internal_response_user_items_and_duplicate_assistant_session_messages() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:50.000Z",
+                "type": "session_meta",
+                "payload": {
+                    "cwd": "/Users/james/project-a"
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:51.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": "hello"
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:51.100Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "<environment_context><shell>zsh</shell></environment_context>"
+                        }
+                    ]
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:52.000Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "Ok"
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&json!({
+                "timestamp": "2026-03-16T13:21:52.200Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "Ok"
+                        }
+                    ]
+                }
+            }))
+            .unwrap()
+        )
+        .unwrap();
+
+        let items = hydrate_thread_items_from_session_file(
+            file.path().to_str().unwrap(),
+            "/Users/james/project-a",
+        );
+
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            ConversationItem::UserMessage { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("expected user message, got {other:?}"),
+        }
+        match &items[1] {
+            ConversationItem::AssistantMessage { text, .. } => assert_eq!(text, "Ok"),
             other => panic!("expected assistant message, got {other:?}"),
         }
     }
