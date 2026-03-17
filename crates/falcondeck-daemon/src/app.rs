@@ -3689,11 +3689,13 @@ mod tests {
                     path: "/tmp/project-a".to_string(),
                     current_thread_id: None,
                     updated_at: None,
+                    archived_thread_ids: Vec::new(),
                 },
                 super::PersistedWorkspaceState {
                     path: "/tmp/project-b".to_string(),
                     current_thread_id: None,
                     updated_at: None,
+                    archived_thread_ids: Vec::new(),
                 },
             ]
         );
@@ -3717,6 +3719,7 @@ mod tests {
                 path: "/tmp/project-a".to_string(),
                 current_thread_id: Some("thread-123".to_string()),
                 updated_at: None,
+                archived_thread_ids: Vec::new(),
             }]
         );
     }
