@@ -704,6 +704,8 @@ impl AppState {
             UnifiedEvent::ThreadUpdated { thread },
         );
 
+        session.resume_thread(&request.thread_id).await?;
+
         session
             .send_request(
                 "turn/start",

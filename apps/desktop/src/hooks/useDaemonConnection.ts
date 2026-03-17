@@ -71,7 +71,9 @@ export function useDaemonConnection() {
 
   // Reconcile selection when snapshot changes
   useEffect(() => {
-    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId)
+    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId, {
+      preserveEmptyThreadSelection: true,
+    })
     if (nextSelection.workspaceId !== selectedWorkspaceId) {
       setSelectedWorkspaceId(nextSelection.workspaceId)
     }

@@ -254,6 +254,11 @@ impl CodexSession {
             .await
     }
 
+    pub async fn resume_thread(&self, thread_id: &str) -> Result<Value, DaemonError> {
+        self.send_request("thread/resume", json!({ "threadId": thread_id }))
+            .await
+    }
+
     pub async fn respond_to_request(
         &self,
         raw_id: Value,

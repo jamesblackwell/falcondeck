@@ -5,6 +5,10 @@ export type SnapshotSelection = {
   threadId: string | null
 }
 
+export type ReconcileSnapshotSelectionOptions = {
+  preserveEmptyThreadSelection?: boolean
+}
+
 /**
  * Applies a daemon event to the current snapshot state.
  * Shared by both desktop and remote-web apps.
@@ -61,6 +65,7 @@ export function reconcileSnapshotSelection(
   snapshot: DaemonSnapshot | null,
   selectedWorkspaceId: string | null,
   selectedThreadId: string | null,
+  options: ReconcileSnapshotSelectionOptions = {},
 ): SnapshotSelection {
   if (!snapshot) {
     return { workspaceId: null, threadId: null }
@@ -90,7 +95,13 @@ export function reconcileSnapshotSelection(
     ? snapshot.threads.filter((thread) => thread.workspace_id === workspace.id)
     : []
 
-  if (!threadId || (workspace && threadById.get(threadId)?.workspace_id !== workspace.id)) {
+  const shouldPreserveEmptyThreadSelection =
+    options.preserveEmptyThreadSelection === true &&
+    selectedThreadId === null &&
+    selectedWorkspaceId !== null &&
+    workspaceId === selectedWorkspaceId
+
+  if (!shouldPreserveEmptyThreadSelection && (!threadId || (workspace && threadById.get(threadId)?.workspace_id !== workspace.id))) {
     const preferredThreadId =
       (workspace?.current_thread_id &&
       threadById.get(workspace.current_thread_id)?.workspace_id === workspace.id

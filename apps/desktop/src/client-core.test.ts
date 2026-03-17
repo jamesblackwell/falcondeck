@@ -281,4 +281,22 @@ describe('client-core selection reconciliation', () => {
       threadId: 'thread-2',
     })
   })
+
+  it('preserves an explicit new-thread workspace selection when requested', () => {
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace({ current_thread_id: 'thread-1' })],
+      threads: [thread()],
+      approvals: [],
+    }
+
+    expect(
+      reconcileSnapshotSelection(snapshot, 'workspace-1', null, {
+        preserveEmptyThreadSelection: true,
+      }),
+    ).toEqual({
+      workspaceId: 'workspace-1',
+      threadId: null,
+    })
+  })
 })
