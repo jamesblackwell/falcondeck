@@ -32,6 +32,8 @@ export const Conversation = memo(function Conversation({
   isLoading?: boolean
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const pinToBottomFrameRef = useRef<number | null>(null)
   const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>())
   const activeThreadKeyRef = useRef<string | null>(threadKey)
   const lastRestoredThreadKeyRef = useRef<string | null>(null)
@@ -55,11 +57,24 @@ export const Conversation = memo(function Conversation({
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
-    el.scrollTop = el.scrollHeight
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
     stickyToBottomRef.current = true
     setShowJump(false)
     persistScrollPosition()
   }, [persistScrollPosition])
+
+  const schedulePinToBottom = useCallback(() => {
+    if (pinToBottomFrameRef.current !== null) {
+      window.cancelAnimationFrame(pinToBottomFrameRef.current)
+    }
+
+    pinToBottomFrameRef.current = window.requestAnimationFrame(() => {
+      pinToBottomFrameRef.current = window.requestAnimationFrame(() => {
+        scrollToBottom()
+        pinToBottomFrameRef.current = null
+      })
+    })
+  }, [scrollToBottom])
 
   const restoreThreadPosition = useCallback(() => {
     const el = scrollRef.current
@@ -67,10 +82,11 @@ export const Conversation = memo(function Conversation({
 
     const savedPosition = threadKey ? scrollPositionsRef.current.get(threadKey) ?? null : null
     if (!savedPosition || savedPosition.stickToBottom) {
-      el.scrollTop = el.scrollHeight
+      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
       stickyToBottomRef.current = true
       setShowJump(false)
       persistScrollPosition()
+      schedulePinToBottom()
       return
     }
 
@@ -79,7 +95,7 @@ export const Conversation = memo(function Conversation({
     stickyToBottomRef.current = distanceFromBottom <= AUTO_SCROLL_THRESHOLD
     setShowJump(distanceFromBottom > JUMP_THRESHOLD)
     persistScrollPosition()
-  }, [persistScrollPosition, threadKey])
+  }, [persistScrollPosition, schedulePinToBottom, threadKey])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -113,8 +129,33 @@ export const Conversation = memo(function Conversation({
       persistScrollPosition()
       return
     }
-    scrollToBottom()
-  }, [isLoading, isThinking, items, persistScrollPosition, scrollToBottom])
+    schedulePinToBottom()
+  }, [isLoading, isThinking, items, persistScrollPosition, schedulePinToBottom])
+
+  useEffect(() => {
+    if (!threadKey || isLoading) return
+
+    const content = contentRef.current
+    if (!content || typeof ResizeObserver === 'undefined') return
+
+    const observer = new ResizeObserver(() => {
+      if (!stickyToBottomRef.current) return
+      schedulePinToBottom()
+    })
+    observer.observe(content)
+
+    return () => {
+      observer.disconnect()
+    }
+  }, [isLoading, schedulePinToBottom, threadKey])
+
+  useEffect(() => {
+    return () => {
+      if (pinToBottomFrameRef.current !== null) {
+        window.cancelAnimationFrame(pinToBottomFrameRef.current)
+      }
+    }
+  }, [])
 
   const jumpToBottom = useCallback(() => {
     scrollToBottom()
@@ -128,7 +169,7 @@ export const Conversation = memo(function Conversation({
         className="h-full overflow-y-auto"
         onScroll={handleScroll}
       >
-        <div className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">
+        <div ref={contentRef} className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">
           {items.length === 0 ? (
             emptyState ?? (
               <EmptyState

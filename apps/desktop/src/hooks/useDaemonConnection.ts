@@ -30,8 +30,28 @@ export function useDaemonConnection() {
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
+  const threadDetailPrefetchRef = useRef(new Set<string>())
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
+  const selectedThreadCacheKey =
+    selectedWorkspaceId && selectedThreadId
+      ? threadCacheKey(selectedWorkspaceId, selectedThreadId)
+      : null
+  const selectedThreadDetail = useMemo(() => {
+    if (!selectedThreadCacheKey) {
+      return null
+    }
+
+    if (
+      threadDetail &&
+      threadDetail.workspace.id === selectedWorkspaceId &&
+      threadDetail.thread.id === selectedThreadId
+    ) {
+      return threadDetail
+    }
+
+    return threadDetailCacheRef.current.get(selectedThreadCacheKey) ?? null
+  }, [selectedThreadCacheKey, selectedThreadId, selectedWorkspaceId, threadDetail])
 
   const handleEvent = useCallback((event: EventEnvelope) => {
     setSnapshot((c) => applySnapshotEvent(c, event))
@@ -141,6 +161,49 @@ export function useDaemonConnection() {
     return () => { cancelled = true }
   }, [api, selectedThreadId, selectedWorkspaceId, snapshot?.threads])
 
+  // Prefetch likely-next threads so switching can render from memory immediately.
+  useEffect(() => {
+    if (!api || !snapshot) return
+
+    const targets = new Map<string, { workspaceId: string; threadId: string }>()
+    const rememberTarget = (workspaceId: string | null | undefined, threadId: string | null | undefined) => {
+      if (!workspaceId || !threadId) return
+      targets.set(threadCacheKey(workspaceId, threadId), { workspaceId, threadId })
+    }
+
+    for (const workspace of snapshot.workspaces) {
+      rememberTarget(workspace.id, workspace.current_thread_id)
+    }
+
+    if (selectedWorkspaceId) {
+      const hotThreads = snapshot.threads
+        .filter((thread) => thread.workspace_id === selectedWorkspaceId && !thread.is_archived)
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+        .slice(0, 6)
+
+      for (const thread of hotThreads) {
+        rememberTarget(thread.workspace_id, thread.id)
+      }
+    }
+
+    for (const [cacheKey, target] of targets) {
+      if (threadDetailCacheRef.current.has(cacheKey) || threadDetailPrefetchRef.current.has(cacheKey)) {
+        continue
+      }
+
+      threadDetailPrefetchRef.current.add(cacheKey)
+      void api
+        .threadDetail(target.workspaceId, target.threadId)
+        .then((detail) => {
+          threadDetailCacheRef.current.set(cacheKey, detail)
+        })
+        .catch(() => {})
+        .finally(() => {
+          threadDetailPrefetchRef.current.delete(cacheKey)
+        })
+    }
+  }, [api, selectedWorkspaceId, snapshot])
+
   // Poll remote status
   useEffect(() => {
     if (!api || !remoteStatus || remoteStatus.status === 'inactive') return
@@ -163,7 +226,7 @@ export function useDaemonConnection() {
     connectionError,
     snapshot,
     setSnapshot,
-    threadDetail,
+    threadDetail: selectedThreadDetail,
     setThreadDetail,
     remoteStatus,
     setRemoteStatus,
