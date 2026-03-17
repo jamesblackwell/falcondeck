@@ -25,3 +25,17 @@ export function reasoningOptions(
   return model?.default_reasoning_effort ? [model.default_reasoning_effort] : ['medium']
 }
 
+export function defaultReasoningEffort(
+  thread: ThreadSummary | null,
+  workspace: WorkspaceSummary | null,
+  preferredModelId?: string | null,
+) {
+  const model = workspace?.models.find(
+    (entry) => entry.id === resolveThreadModelId(thread, workspace, preferredModelId),
+  )
+  return (
+    model?.default_reasoning_effort ??
+    model?.supported_reasoning_efforts[0]?.reasoning_effort ??
+    'medium'
+  )
+}

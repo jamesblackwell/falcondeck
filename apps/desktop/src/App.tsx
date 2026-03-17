@@ -12,7 +12,7 @@ import {
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput } from '@falcondeck/chat-ui'
 
-import { defaultModelId, reasoningOptions } from './utils'
+import { defaultModelId, defaultReasoningEffort, reasoningOptions } from './utils'
 import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
 import { SessionHeader } from './components/SessionHeader'
@@ -99,14 +99,14 @@ export default function App() {
       setSelectedModel(nextModelId)
       setSelectedEffort(
         selectedThread.codex.reasoning_effort ??
-          reasoningOptions(selectedThread, selectedWorkspace, nextModelId)[0] ??
+          defaultReasoningEffort(selectedThread, selectedWorkspace, nextModelId) ??
           'medium',
       )
       setSelectedCollaborationMode(selectedThread.codex.collaboration_mode_id ?? selectedWorkspace.collaboration_modes[0]?.id ?? null)
       return
     }
     setSelectedModel(fallbackModelId)
-    setSelectedEffort(reasoningOptions(null, selectedWorkspace, fallbackModelId)[0] ?? 'medium')
+    setSelectedEffort(defaultReasoningEffort(null, selectedWorkspace, fallbackModelId) ?? 'medium')
     setSelectedCollaborationMode(selectedWorkspace.collaboration_modes[0]?.id ?? null)
   }, [selectedThread, selectedWorkspace])
 
@@ -115,7 +115,7 @@ export default function App() {
     const options = reasoningOptions(selectedThread, selectedWorkspace, selectedModel)
     if (options.length === 0) return
     if (!selectedEffort || !options.includes(selectedEffort)) {
-      setSelectedEffort(options[0] ?? 'medium')
+      setSelectedEffort(defaultReasoningEffort(selectedThread, selectedWorkspace, selectedModel))
     }
   }, [selectedEffort, selectedModel, selectedThread, selectedWorkspace])
 
@@ -178,7 +178,7 @@ export default function App() {
       const nextEffort =
         selectedEffort && nextOptions.includes(selectedEffort)
           ? selectedEffort
-          : (nextOptions[0] ?? 'medium')
+          : defaultReasoningEffort(selectedThread, selectedWorkspace, modelId)
       setSelectedEffort(nextEffort)
       void persistThreadSettings({ modelId, effort: nextEffort, collaborationModeId: selectedCollaborationMode })
     },
