@@ -5,6 +5,7 @@ import {
   applyEventToThreadDetail,
   bootstrapSessionCrypto,
   buildProjectGroups,
+  conversationItemsForSelection,
   decryptJson,
   encryptJson,
   generateBoxKeyPair,
@@ -151,6 +152,29 @@ describe('client-core conversation helpers', () => {
       thread_id: 'thread-2',
     }
     expect(applyEventToThreadDetail(detail, otherThreadEvent)).toBe(detail)
+  })
+
+  it('returns no conversation items for a new thread composer', () => {
+    const detail: ThreadDetail = {
+      workspace: workspace(),
+      thread: thread(),
+      items: [assistantMessage('a', '2026-03-15T10:00:00Z', 'hello')],
+    }
+
+    expect(conversationItemsForSelection('workspace-1', null, detail)).toEqual([])
+  })
+
+  it('ignores stale thread detail from another thread and uses fallback items', () => {
+    const detail: ThreadDetail = {
+      workspace: workspace(),
+      thread: thread(),
+      items: [assistantMessage('a', '2026-03-15T10:00:00Z', 'stale')],
+    }
+    const fallback = [assistantMessage('b', '2026-03-15T10:01:00Z', 'fresh')]
+
+    expect(
+      conversationItemsForSelection('workspace-1', 'thread-2', detail, fallback),
+    ).toEqual(fallback)
   })
 })
 

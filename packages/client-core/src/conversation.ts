@@ -4,6 +4,29 @@ export function sortConversationItems(items: ConversationItem[]) {
   return [...items].sort((left, right) => left.created_at.localeCompare(right.created_at))
 }
 
+export function conversationItemsForSelection(
+  selectedWorkspaceId: string | null,
+  selectedThreadId: string | null,
+  detail: ThreadDetail | null,
+  fallbackItems: ConversationItem[] = [],
+): ConversationItem[] {
+  if (!selectedThreadId) {
+    return []
+  }
+
+  // Thread detail can briefly lag behind selection changes, so only trust it
+  // when it still belongs to the active workspace/thread pair.
+  if (
+    detail &&
+    detail.workspace.id === selectedWorkspaceId &&
+    detail.thread.id === selectedThreadId
+  ) {
+    return detail.items
+  }
+
+  return fallbackItems
+}
+
 export function upsertConversationItem(
   items: ConversationItem[],
   next: ConversationItem,
@@ -35,4 +58,3 @@ export function applyEventToThreadDetail(detail: ThreadDetail | null, event: Eve
       return detail
   }
 }
-

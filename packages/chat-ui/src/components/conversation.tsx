@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronDown, LoaderCircle, MessageSquare } from 'lucide-react'
 
 import type { ConversationItem } from '@falcondeck/client-core'
@@ -6,27 +6,119 @@ import { EmptyState } from '@falcondeck/ui'
 
 import { MessageCard } from './message'
 
-export const Conversation = memo(function Conversation({ items, emptyState, isThinking = false }: { items: ConversationItem[]; emptyState?: React.ReactNode; isThinking?: boolean }) {
+const AUTO_SCROLL_THRESHOLD = 40
+const JUMP_THRESHOLD = 200
+
+type SavedScrollPosition = {
+  scrollTop: number
+  stickToBottom: boolean
+}
+
+function clampScrollTop(scrollTop: number, element: HTMLDivElement) {
+  return Math.min(scrollTop, Math.max(0, element.scrollHeight - element.clientHeight))
+}
+
+export const Conversation = memo(function Conversation({
+  threadKey = null,
+  items,
+  emptyState,
+  isThinking = false,
+  isLoading = false,
+}: {
+  threadKey?: string | null
+  items: ConversationItem[]
+  emptyState?: React.ReactNode
+  isThinking?: boolean
+  isLoading?: boolean
+}) {
   const scrollRef = useRef<HTMLDivElement>(null)
-  const endRef = useRef<HTMLDivElement>(null)
+  const scrollPositionsRef = useRef(new Map<string, SavedScrollPosition>())
+  const activeThreadKeyRef = useRef<string | null>(threadKey)
+  const lastRestoredThreadKeyRef = useRef<string | null>(null)
+  const stickyToBottomRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
 
-  const lastItemId = items.length > 0 ? items[items.length - 1].id : null
+  const persistScrollPosition = useCallback(
+    (keyOverride?: string | null) => {
+      const key = keyOverride ?? threadKey
+      const el = scrollRef.current
+      if (!key || !el) return
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      scrollPositionsRef.current.set(key, {
+        scrollTop: el.scrollTop,
+        stickToBottom: distanceFromBottom <= AUTO_SCROLL_THRESHOLD,
+      })
+    },
+    [threadKey],
+  )
 
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [lastItemId])
+  const scrollToBottom = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+    stickyToBottomRef.current = true
+    setShowJump(false)
+    persistScrollPosition()
+  }, [persistScrollPosition])
+
+  const restoreThreadPosition = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+
+    const savedPosition = threadKey ? scrollPositionsRef.current.get(threadKey) ?? null : null
+    if (!savedPosition || savedPosition.stickToBottom) {
+      el.scrollTop = el.scrollHeight
+      stickyToBottomRef.current = true
+      setShowJump(false)
+      persistScrollPosition()
+      return
+    }
+
+    el.scrollTop = clampScrollTop(savedPosition.scrollTop, el)
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickyToBottomRef.current = distanceFromBottom <= AUTO_SCROLL_THRESHOLD
+    setShowJump(distanceFromBottom > JUMP_THRESHOLD)
+    persistScrollPosition()
+  }, [persistScrollPosition, threadKey])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-    setShowJump(distanceFromBottom > 200)
-  }, [])
+    const isNearBottom = distanceFromBottom <= AUTO_SCROLL_THRESHOLD
+    stickyToBottomRef.current = isNearBottom
+    setShowJump(distanceFromBottom > JUMP_THRESHOLD)
+    persistScrollPosition()
+  }, [persistScrollPosition])
+
+  useEffect(() => {
+    const previousThreadKey = activeThreadKeyRef.current
+    if (previousThreadKey && previousThreadKey !== threadKey) {
+      persistScrollPosition(previousThreadKey)
+      lastRestoredThreadKeyRef.current = null
+    }
+    activeThreadKeyRef.current = threadKey
+  }, [persistScrollPosition, threadKey])
+
+  useLayoutEffect(() => {
+    if (isLoading) return
+    if (lastRestoredThreadKeyRef.current === threadKey) return
+    restoreThreadPosition()
+    lastRestoredThreadKeyRef.current = threadKey
+  }, [isLoading, restoreThreadPosition, threadKey])
+
+  useLayoutEffect(() => {
+    if (isLoading || !items.length) return
+    if (!stickyToBottomRef.current) {
+      persistScrollPosition()
+      return
+    }
+    scrollToBottom()
+  }, [isLoading, isThinking, items, persistScrollPosition, scrollToBottom])
 
   const jumpToBottom = useCallback(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [])
+    scrollToBottom()
+  }, [scrollToBottom])
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -47,10 +139,7 @@ export const Conversation = memo(function Conversation({ items, emptyState, isTh
             )
           ) : null}
           {items.map((item) => (
-            <div
-              key={`${item.kind}-${item.id}`}
-              style={{ contentVisibility: 'auto', containIntrinsicSize: '160px' }}
-            >
+            <div key={`${item.kind}-${item.id}`}>
               <MessageCard item={item} />
             </div>
           ))}
@@ -60,7 +149,6 @@ export const Conversation = memo(function Conversation({ items, emptyState, isTh
               Thinking…
             </div>
           ) : null}
-          <div ref={endRef} />
         </div>
       </div>
 

@@ -6,6 +6,7 @@ import {
   bootstrapSessionCrypto,
   buildProjectGroups,
   bytesToBase64,
+  conversationItemsForSelection,
   decryptJson,
   encryptJson,
   filesToImageInputs,
@@ -296,8 +297,14 @@ export default function App() {
     [selectedThreadId, snapshot?.interactive_requests],
   )
   const items = useMemo(
-    () => threadDetail?.items ?? (selectedThreadId ? threadItems[selectedThreadId] ?? [] : []),
-    [selectedThreadId, threadDetail, threadItems],
+    () =>
+      conversationItemsForSelection(
+        selectedWorkspaceId,
+        selectedThreadId,
+        threadDetail,
+        selectedThreadId ? threadItems[selectedThreadId] ?? [] : [],
+      ),
+    [selectedThreadId, selectedWorkspaceId, threadDetail, threadItems],
   )
 
   // ── WebSocket relay connection ─────────────────────────────────────
@@ -1028,7 +1035,15 @@ export default function App() {
       ) : null}
 
       {/* Conversation */}
-      <Conversation items={items} isThinking={isSubmitting} />
+      <Conversation
+        threadKey={
+          selectedThreadId
+            ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
+            : selectedWorkspaceId
+        }
+        items={items}
+        isThinking={isSubmitting}
+      />
 
       {/* Prompt input */}
       <div className="shrink-0">

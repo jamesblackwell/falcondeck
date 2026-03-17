@@ -2,6 +2,7 @@ import { startTransition, useCallback, useEffect, useMemo, useRef, useState } fr
 
 import {
   buildProjectGroups,
+  conversationItemsForSelection,
   filesToImageInputs,
   type ConversationItem,
   type ImageInput,
@@ -12,6 +13,7 @@ import {
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput } from '@falcondeck/chat-ui'
 import { ToastProvider, useToast } from '@falcondeck/ui'
+import { LoaderCircle } from 'lucide-react'
 
 import { defaultModelId, defaultReasoningEffort, reasoningOptions } from './utils'
 import { DesktopSidebar } from './components/Sidebar'
@@ -396,7 +398,16 @@ function AppInner() {
   )
 
   // Memoized derived values
-  const conversationItems: ConversationItem[] = threadDetail?.items ?? []
+  const isThreadDetailPending = Boolean(
+    selectedThreadId &&
+      (!threadDetail ||
+        threadDetail.workspace.id !== selectedWorkspaceId ||
+        threadDetail.thread.id !== selectedThreadId),
+  )
+  const conversationItems: ConversationItem[] = useMemo(
+    () => conversationItemsForSelection(selectedWorkspaceId, selectedThreadId, threadDetail),
+    [selectedThreadId, selectedWorkspaceId, threadDetail],
+  )
   const currentReasoningOptions = useMemo(
     () => reasoningOptions(selectedThread, selectedWorkspace, selectedModel),
     [selectedThread, selectedWorkspace, selectedModel],
@@ -416,6 +427,24 @@ function AppInner() {
     ),
     [workspaces, selectedWorkspace, handleNewThread],
   )
+  const loadingThreadState = useMemo(
+    () => (
+      <div className="flex min-h-[240px] items-center justify-center gap-2 text-[length:var(--fd-text-sm)] text-fg-muted">
+        <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
+        Loading conversation…
+      </div>
+    ),
+    [],
+  )
+  const conversationEmptyState = useMemo(() => {
+    if (isThreadDetailPending) {
+      return loadingThreadState
+    }
+    if (selectedThreadId) {
+      return undefined
+    }
+    return newThreadEmptyState
+  }, [isThreadDetailPending, loadingThreadState, newThreadEmptyState, selectedThreadId])
 
   return (
     <DesktopShell
@@ -450,7 +479,17 @@ function AppInner() {
             requests={interactiveRequests}
             onRespond={handleInteractiveResponseCallback}
           />
-          <Conversation items={conversationItems} emptyState={newThreadEmptyState} isThinking={isSending} />
+          <Conversation
+            threadKey={
+              selectedThreadId
+                ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
+                : selectedWorkspaceId
+            }
+            items={conversationItems}
+            emptyState={conversationEmptyState}
+            isThinking={isSending}
+            isLoading={isThreadDetailPending}
+          />
           <PromptInput
             value={draft}
             onValueChange={setDraft}
