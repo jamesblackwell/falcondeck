@@ -139,14 +139,16 @@ export function RemotePairingPopover({
                 <RadioTower className="h-4 w-4" />
                 Remote Pairing
               </div>
-              <button
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon"
                 onClick={onRefreshStatus}
                 title="Refresh status"
-                className="rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
+                className="h-7 w-7 text-fg-muted hover:text-fg-secondary"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
-              </button>
+              </Button>
             </div>
 
             {/* ── Inactive / revoked / error → prompt to start ── */}
