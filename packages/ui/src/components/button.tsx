@@ -5,7 +5,7 @@ import { Slot } from '@radix-ui/react-slot'
 import { cn } from '../lib/utils'
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap text-[length:var(--fd-text-sm)] font-medium transition-colors duration-[var(--fd-duration-fast)] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-40 active:scale-[0.98]',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap text-[length:var(--fd-text-sm)] font-medium transition-colors duration-[var(--fd-duration-fast)] focus-visible:outline-none disabled:pointer-events-none disabled:opacity-40',
   {
     variants: {
       variant: {

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useCallback, useEffect, useState } from 'react'
 import { ChevronDown, FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
@@ -30,7 +30,7 @@ export type DesktopSidebarProps = {
   isAddingProject: boolean
 }
 
-function ThreadList({
+const ThreadList = memo(function ThreadList({
   group,
   selectedThreadId,
   onSelectThread,
@@ -71,19 +71,19 @@ function ThreadList({
         <button
           type="button"
           onClick={() => setExpanded(!showAll)}
-          className="flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
+          className="flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
         >
           <ChevronDown
-            className={`h-3 w-3 transition-transform ${showAll ? 'rotate-180' : ''}`}
+            className={`h-3 w-3 ${showAll ? 'rotate-180' : ''}`}
           />
           {showAll ? 'Show less' : `${hiddenCount} older threads`}
         </button>
       ) : null}
     </>
   )
-}
+})
 
-export function DesktopSidebar({
+export const DesktopSidebar = memo(function DesktopSidebar({
   connectionError,
   actionError,
   groups,
@@ -96,15 +96,51 @@ export function DesktopSidebar({
   onAddProject,
   isAddingProject,
 }: DesktopSidebarProps) {
+  const [optimisticSelection, setOptimisticSelection] = useState<{
+    workspaceId: string | null
+    threadId: string | null
+  } | null>(null)
+
+  useEffect(() => {
+    setOptimisticSelection(null)
+  }, [selectedWorkspaceId, selectedThreadId])
+
+  const visualSelectedWorkspaceId = optimisticSelection?.workspaceId ?? selectedWorkspaceId
+  const visualSelectedThreadId = optimisticSelection?.threadId ?? selectedThreadId
+
+  const handleSelectWorkspace = useCallback(
+    (workspaceId: string, threadId: string | null) => {
+      setOptimisticSelection({ workspaceId, threadId })
+      onSelectWorkspace(workspaceId, threadId)
+    },
+    [onSelectWorkspace],
+  )
+
+  const handleSelectThread = useCallback(
+    (workspaceId: string, threadId: string) => {
+      setOptimisticSelection({ workspaceId, threadId })
+      onSelectThread(workspaceId, threadId)
+    },
+    [onSelectThread],
+  )
+
+  const handleNewThread = useCallback(
+    (workspaceId: string) => {
+      setOptimisticSelection({ workspaceId, threadId: null })
+      onNewThread(workspaceId)
+    },
+    [onNewThread],
+  )
+
   return (
     <SidebarShell>
       <SidebarHeader>
         <div className="flex items-center justify-between">
-          {selectedWorkspaceId ? (
+          {visualSelectedWorkspaceId ? (
             <button
               type="button"
-              onClick={() => onNewThread(selectedWorkspaceId)}
-              className="flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+              onClick={() => handleNewThread(visualSelectedWorkspaceId)}
+              className="flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
             >
               <SquarePen className="h-3.5 w-3.5" />
               New thread
@@ -142,19 +178,19 @@ export function DesktopSidebar({
             <WorkspaceGroup
               key={group.workspace.id}
               workspace={group.workspace}
-              isSelected={selectedWorkspaceId === group.workspace.id}
+              isSelected={visualSelectedWorkspaceId === group.workspace.id}
               onSelect={() =>
-                onSelectWorkspace(
+                handleSelectWorkspace(
                   group.workspace.id,
                   group.workspace.current_thread_id ?? group.threads[0]?.id ?? null,
                 )
               }
-              onNewThread={() => onNewThread(group.workspace.id)}
+              onNewThread={() => handleNewThread(group.workspace.id)}
             >
               <ThreadList
                 group={group}
-                selectedThreadId={selectedThreadId}
-                onSelectThread={onSelectThread}
+                selectedThreadId={visualSelectedThreadId}
+                onSelectThread={handleSelectThread}
                 onArchiveThread={onArchiveThread}
               />
             </WorkspaceGroup>
@@ -170,4 +206,4 @@ export function DesktopSidebar({
       </SidebarContent>
     </SidebarShell>
   )
-}
+})

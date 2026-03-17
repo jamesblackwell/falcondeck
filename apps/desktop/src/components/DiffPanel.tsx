@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { memo, useState } from 'react'
 
 import type { createDaemonApiClient } from '@falcondeck/client-core'
 
@@ -13,7 +13,7 @@ export type DiffPanelProps = {
   refreshTrigger: number
 }
 
-export function DiffPanel({ api, workspaceId, refreshTrigger }: DiffPanelProps) {
+export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrigger }: DiffPanelProps) {
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const { status, isLoading, error, refresh } = useGitStatus(api, workspaceId, refreshTrigger)
   const { diff, isLoading: isDiffLoading, error: diffError } = useGitDiff(api, workspaceId, selectedFile)
@@ -44,4 +44,4 @@ export function DiffPanel({ api, workspaceId, refreshTrigger }: DiffPanelProps) 
       />
     </div>
   )
-}
+})

@@ -20,10 +20,10 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelect
     <section className="min-w-0 overflow-hidden">
       <div
         className={cn(
-          'group flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 transition-colors duration-[var(--fd-duration-fast)]',
+          'group flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5',
           isSelected
-            ? 'text-fg-primary'
-            : 'text-fg-secondary hover:text-fg-primary',
+            ? 'bg-surface-2 text-fg-primary'
+            : 'text-fg-secondary hover:bg-surface-2 hover:text-fg-primary',
         )}
       >
         <button
@@ -55,7 +55,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelect
             type="button"
             onClick={onNewThread}
             title={`Start new thread in ${pathLabel}`}
-            className="shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary"
+            className="shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
           >
             <SquarePen className="h-3.5 w-3.5" />
           </button>

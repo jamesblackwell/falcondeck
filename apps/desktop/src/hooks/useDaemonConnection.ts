@@ -204,6 +204,30 @@ export function useDaemonConnection() {
     }
   }, [api, selectedWorkspaceId, snapshot])
 
+  useEffect(() => {
+    if (!snapshot) {
+      threadDetailCacheRef.current.clear()
+      threadDetailPrefetchRef.current.clear()
+      return
+    }
+
+    const validKeys = new Set(
+      snapshot.threads.map((thread) => threadCacheKey(thread.workspace_id, thread.id)),
+    )
+
+    for (const key of threadDetailCacheRef.current.keys()) {
+      if (!validKeys.has(key)) {
+        threadDetailCacheRef.current.delete(key)
+      }
+    }
+
+    for (const key of threadDetailPrefetchRef.current) {
+      if (!validKeys.has(key)) {
+        threadDetailPrefetchRef.current.delete(key)
+      }
+    }
+  }, [snapshot])
+
   // Poll remote status
   useEffect(() => {
     if (!api || !remoteStatus || remoteStatus.status === 'inactive') return

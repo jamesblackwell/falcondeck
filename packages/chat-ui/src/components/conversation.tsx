@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, LoaderCircle, MessageSquare } from 'lucide-react'
 
 import type { ConversationItem } from '@falcondeck/client-core'
@@ -8,6 +8,7 @@ import { MessageCard } from './message'
 
 const AUTO_SCROLL_THRESHOLD = 40
 const JUMP_THRESHOLD = 200
+const MAX_THREAD_UI_STATE = 48
 
 type SavedScrollPosition = {
   scrollTop: number
@@ -39,13 +40,35 @@ export const Conversation = memo(function Conversation({
   const lastRestoredThreadKeyRef = useRef<string | null>(null)
   const stickyToBottomRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
+  const renderableItems = useMemo(
+    () => items.filter((item) => item.kind !== 'reasoning'),
+    [items],
+  )
+
+  useEffect(() => {
+    if (!threadKey) return
+
+    const savedPosition = scrollPositionsRef.current.get(threadKey)
+    if (savedPosition) {
+      scrollPositionsRef.current.delete(threadKey)
+      scrollPositionsRef.current.set(threadKey, savedPosition)
+    }
+
+    while (scrollPositionsRef.current.size > MAX_THREAD_UI_STATE) {
+      const oldestKey = scrollPositionsRef.current.keys().next().value
+      if (!oldestKey) break
+      scrollPositionsRef.current.delete(oldestKey)
+    }
+  }, [threadKey])
 
   const persistScrollPosition = useCallback(
     (keyOverride?: string | null) => {
       const key = keyOverride ?? threadKey
       const el = scrollRef.current
       if (!key || !el) return
+
       const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+      scrollPositionsRef.current.delete(key)
       scrollPositionsRef.current.set(key, {
         scrollTop: el.scrollTop,
         stickToBottom: distanceFromBottom <= AUTO_SCROLL_THRESHOLD,
@@ -57,6 +80,7 @@ export const Conversation = memo(function Conversation({
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+
     el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
     stickyToBottomRef.current = true
     setShowJump(false)
@@ -82,10 +106,7 @@ export const Conversation = memo(function Conversation({
 
     const savedPosition = threadKey ? scrollPositionsRef.current.get(threadKey) ?? null : null
     if (!savedPosition || savedPosition.stickToBottom) {
-      el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
-      stickyToBottomRef.current = true
-      setShowJump(false)
-      persistScrollPosition()
+      scrollToBottom()
       schedulePinToBottom()
       return
     }
@@ -95,11 +116,12 @@ export const Conversation = memo(function Conversation({
     stickyToBottomRef.current = distanceFromBottom <= AUTO_SCROLL_THRESHOLD
     setShowJump(distanceFromBottom > JUMP_THRESHOLD)
     persistScrollPosition()
-  }, [persistScrollPosition, schedulePinToBottom, threadKey])
+  }, [persistScrollPosition, schedulePinToBottom, scrollToBottom, threadKey])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
     if (!el) return
+
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     const isNearBottom = distanceFromBottom <= AUTO_SCROLL_THRESHOLD
     stickyToBottomRef.current = isNearBottom
@@ -108,29 +130,31 @@ export const Conversation = memo(function Conversation({
   }, [persistScrollPosition])
 
   useEffect(() => {
-    const previousThreadKey = activeThreadKeyRef.current
-    if (previousThreadKey && previousThreadKey !== threadKey) {
-      persistScrollPosition(previousThreadKey)
-      lastRestoredThreadKeyRef.current = null
-    }
+    if (activeThreadKeyRef.current === threadKey) return
+
+    lastRestoredThreadKeyRef.current = null
     activeThreadKeyRef.current = threadKey
-  }, [persistScrollPosition, threadKey])
+  }, [threadKey])
 
   useLayoutEffect(() => {
     if (isLoading) return
     if (lastRestoredThreadKeyRef.current === threadKey) return
+
     restoreThreadPosition()
     lastRestoredThreadKeyRef.current = threadKey
   }, [isLoading, restoreThreadPosition, threadKey])
 
   useLayoutEffect(() => {
-    if (isLoading || !items.length) return
+    if (isLoading) return
+    if (!renderableItems.length && !isThinking) return
+
     if (!stickyToBottomRef.current) {
       persistScrollPosition()
       return
     }
+
     schedulePinToBottom()
-  }, [isLoading, isThinking, items, persistScrollPosition, schedulePinToBottom])
+  }, [isLoading, isThinking, persistScrollPosition, renderableItems, schedulePinToBottom])
 
   useEffect(() => {
     if (!threadKey || isLoading) return
@@ -139,7 +163,11 @@ export const Conversation = memo(function Conversation({
     if (!content || typeof ResizeObserver === 'undefined') return
 
     const observer = new ResizeObserver(() => {
-      if (!stickyToBottomRef.current) return
+      if (!stickyToBottomRef.current) {
+        persistScrollPosition()
+        return
+      }
+
       schedulePinToBottom()
     })
     observer.observe(content)
@@ -147,7 +175,7 @@ export const Conversation = memo(function Conversation({
     return () => {
       observer.disconnect()
     }
-  }, [isLoading, schedulePinToBottom, threadKey])
+  }, [isLoading, persistScrollPosition, schedulePinToBottom, threadKey])
 
   useEffect(() => {
     return () => {
@@ -170,21 +198,31 @@ export const Conversation = memo(function Conversation({
         onScroll={handleScroll}
       >
         <div ref={contentRef} className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">
-          {items.length === 0 ? (
-            emptyState ?? (
-              <EmptyState
-                icon={<MessageSquare className="h-6 w-6" />}
-                title="Ready for instructions"
-                description="Send a prompt to start a conversation with Codex."
-              />
-            )
+          {renderableItems.length === 0 ? (
+            <div className="flex flex-col gap-3">
+              {emptyState ?? (
+                <EmptyState
+                  icon={<MessageSquare className="h-6 w-6" />}
+                  title="Ready for instructions"
+                  description="Send a prompt to start a conversation with Codex."
+                />
+              )}
+              {isThinking ? (
+                <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
+                  <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
+                  Thinking…
+                </div>
+              ) : null}
+            </div>
           ) : null}
-          {items.map((item) => (
-            <div key={`${item.kind}-${item.id}`}>
+
+          {renderableItems.map((item) => (
+            <div key={`${item.kind}-${item.id}`} className="min-w-0">
               <MessageCard item={item} />
             </div>
           ))}
-          {isThinking ? (
+
+          {renderableItems.length > 0 && isThinking ? (
             <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
               <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
               Thinking…

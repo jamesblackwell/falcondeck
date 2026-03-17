@@ -1,4 +1,4 @@
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   buildProjectGroups,
@@ -222,7 +222,7 @@ function AppInner() {
     [persistThreadSettings, selectedEffort, selectedModel],
   )
 
-  async function handleAddProject() {
+  const handleAddProject = useCallback(async () => {
     if (!api) return
     setIsAddingProject(true)
     try {
@@ -249,7 +249,7 @@ function AppInner() {
     } finally {
       setIsAddingProject(false)
     }
-  }
+  }, [api, setSnapshot, setSelectedThreadId, setSelectedWorkspaceId, toast])
 
   async function handleSubmit() {
     if (!api || !selectedWorkspace || !draft.trim()) return
@@ -331,24 +331,18 @@ function AppInner() {
 
   // Stable callbacks for child components
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
-    startTransition(() => {
-      setSelectedWorkspaceId(workspaceId)
-      setSelectedThreadId(threadId)
-    })
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(threadId)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleSelectThread = useCallback((workspaceId: string, threadId: string) => {
-    startTransition(() => {
-      setSelectedWorkspaceId(workspaceId)
-      setSelectedThreadId(threadId)
-    })
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(threadId)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleNewThread = useCallback((workspaceId: string) => {
-    startTransition(() => {
-      setSelectedWorkspaceId(workspaceId)
-      setSelectedThreadId(null)
-    })
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(null)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleInteractiveResponseCallback = useCallback(

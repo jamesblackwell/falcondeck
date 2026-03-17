@@ -30,10 +30,10 @@ export const ThreadItem = memo(
     return (
       <div
         className={cn(
-          'group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2 transition-colors duration-[var(--fd-duration-fast)]',
+          'group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2',
           isSelected
             ? 'bg-accent-dim'
-            : 'hover:bg-surface-3',
+            : 'hover:bg-surface-3 active:bg-surface-4',
         )}
       >
         <button
@@ -59,7 +59,7 @@ export const ThreadItem = memo(
               onArchive()
             }}
             title="Archive thread"
-            className="hidden shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted transition-colors hover:text-fg-secondary group-hover:block"
+            className="hidden shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:text-fg-secondary group-hover:block"
           >
             <Archive className="h-3.5 w-3.5" />
           </button>
