@@ -1569,11 +1569,15 @@ impl AppState {
             .map_err(|error| format!("failed to persist connected remote state: {error}"))?;
 
         let mut events = self.subscribe();
+        let mut min_forward_seq: u64 = 0;
         loop {
             tokio::select! {
                 event = events.recv() => {
                     match event {
                         Ok(event) => {
+                            if event.seq < min_forward_seq {
+                                continue;
+                            }
                             send_relay_message(
                                 &mut writer,
                                 &RelayClientMessage::Update {
@@ -1585,8 +1589,9 @@ impl AppState {
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!("remote daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
+                            let resync_seq = self.inner.sequence.fetch_add(1, Ordering::Relaxed);
                             let snapshot_event = EventEnvelope {
-                                seq: 0,
+                                seq: resync_seq,
                                 emitted_at: Utc::now(),
                                 workspace_id: None,
                                 thread_id: None,
@@ -1602,6 +1607,7 @@ impl AppState {
                                     },
                                 },
                             ).await?;
+                            min_forward_seq = resync_seq.saturating_add(1);
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(RemoteBridgeError::Persistent(
