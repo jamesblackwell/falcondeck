@@ -37,7 +37,6 @@ function AppInner() {
   const { toast } = useToast()
   const {
     api,
-    connectionState,
     connectionError,
     snapshot,
     setSnapshot,
@@ -444,9 +443,6 @@ function AppInner() {
     <DesktopShell
       sidebar={
         <DesktopSidebar
-          connectionState={connectionState}
-          connectionError={connectionError}
-          actionError={actionError}
           groups={groups}
           selectedWorkspaceId={selectedWorkspaceId}
           selectedThreadId={selectedThreadId}
@@ -456,6 +452,7 @@ function AppInner() {
           onArchiveThread={handleArchiveThread}
           onAddProject={handleAddProject}
           isAddingProject={isAddingProject}
+          errors={[connectionError, actionError].filter((value): value is string => Boolean(value))}
         />
       }
       main={
