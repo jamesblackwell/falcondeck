@@ -5,14 +5,17 @@ import {
   applySnapshotEvent,
   base64ToBytes,
   bootstrapSessionCrypto,
+  buildPairingPublicKeyBundle,
   buildProjectGroups,
   bytesToBase64,
   conversationItemsForSelection,
   defaultCollaborationModeId,
   decryptJson,
+  deriveIdentityKeyPair,
   encryptJson,
   filesToImageInputs,
   generateBoxKeyPair,
+  identityPublicKeyToBase64,
   isPlanModeEnabled,
   publicKeyToBase64,
   reconcileSnapshotSelection,
@@ -22,6 +25,9 @@ import {
   supportsPlanMode,
   togglePlanMode,
   upsertConversationItem,
+  verifyPairingPublicKeyBundle,
+  verifySessionKeyMaterial,
+  type ClaimPairingResponse,
   type ConversationItem,
   type DaemonSnapshot,
   type EncryptedEnvelope,
@@ -33,6 +39,7 @@ import {
   type QueuedRemoteAction,
   type RelayClientMessage,
   type RelayServerMessage,
+  type RelayWebSocketTicketResponse,
   type RelayUpdate,
   type SessionCryptoState,
   type ThreadDetail,
@@ -47,7 +54,7 @@ import {
 } from '@falcondeck/chat-ui'
 import { Badge, Button, Input } from '@falcondeck/ui'
 
-import { Lock, PanelLeft, Smartphone } from 'lucide-react'
+import { Lock, PanelLeft, Smartphone, X } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -209,10 +216,19 @@ function collectConversationItemUpdates(events: EventEnvelope[]) {
   }
 }
 
+function markInteractiveRequestResolved(items: ConversationItem[], requestId: string): ConversationItem[] {
+  return items.map((item) =>
+    item.kind === 'interactive_request' && item.id === requestId
+      ? { ...item, resolved: true }
+      : item,
+  )
+}
+
 // ── Session persistence ──────────────────────────────────────────────
 
 const STORAGE_KEY = 'falcondeck.remote.session.v1'
 const PENDING_ACTIONS_KEY = 'falcondeck.remote.pending-actions.v1'
+const CLIENT_KEYPAIR_STORAGE_KEY = 'falcondeck.remote.client-keypair.v1'
 
 function loadPersistedRemoteSession(): PersistedRemoteSession | null {
   try {
@@ -230,6 +246,19 @@ function persistRemoteSession(value: PersistedRemoteSession | null) {
   } else {
     window.localStorage.removeItem(STORAGE_KEY)
   }
+}
+
+function loadOrCreateClientKeyPair() {
+  try {
+    const raw = window.localStorage.getItem(CLIENT_KEYPAIR_STORAGE_KEY)
+    if (raw) return restoreBoxKeyPair(raw)
+  } catch {
+    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
+  }
+
+  const keyPair = generateBoxKeyPair()
+  window.localStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(keyPair))
+  return keyPair
 }
 
 function loadPendingActionIds() {
@@ -270,6 +299,7 @@ export default function App() {
       'https://connect.falcondeck.com',
   )
   const [pairingCode, setPairingCode] = useState(params.get('code') ?? persistedSession?.pairingCode ?? '')
+  const [pairingId, setPairingId] = useState<string | null>(persistedSession?.pairingId ?? null)
   const [sessionId, setSessionId] = useState<string | null>(persistedSession?.sessionId ?? null)
   const [deviceId, setDeviceId] = useState<string | null>(persistedSession?.deviceId ?? null)
   const [clientToken, setClientToken] = useState<string | null>(persistedSession?.clientToken ?? null)
@@ -298,6 +328,8 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null)
   const sessionCryptoRef = useRef<SessionCryptoState | null>(null)
   const clientKeyPairRef = useRef<ReturnType<typeof generateBoxKeyPair> | null>(null)
+  const trustedDaemonPublicKeyRef = useRef<string | null>(persistedSession?.daemonPublicKey ?? null)
+  const trustedDaemonIdentityPublicKeyRef = useRef<string | null>(persistedSession?.daemonIdentityPublicKey ?? null)
   const pendingEncryptedUpdatesRef = useRef<RelayUpdate[]>([])
   const lastReceivedSeqRef = useRef(persistedSession?.lastReceivedSeq ?? 0)
   const pendingSessionPersistRef = useRef<Partial<PersistedRemoteSession> | null>(null)
@@ -320,16 +352,19 @@ export default function App() {
       persistRemoteSession({
         relayUrl: relayUrl.trim(),
         pairingCode: pairingCode.trim(),
+        pairingId,
         sessionId,
         deviceId,
         clientToken,
         clientSecretKey: secretKeyToBase64(clientKeyPairRef.current),
+        daemonPublicKey: trustedDaemonPublicKeyRef.current,
+        daemonIdentityPublicKey: trustedDaemonIdentityPublicKeyRef.current,
         dataKey: sessionCryptoRef.current ? bytesToBase64(sessionCryptoRef.current.dataKey) : null,
         lastReceivedSeq: lastReceivedSeqRef.current,
         ...overrides,
       })
     },
-    [clientToken, deviceId, pairingCode, relayUrl, sessionId],
+    [clientToken, deviceId, pairingCode, pairingId, relayUrl, sessionId],
   )
 
   const flushPersistedSession = useCallback(() => {
@@ -373,10 +408,33 @@ export default function App() {
     [flushPersistedSession],
   )
 
+  const failCurrentConnection = useCallback(
+    (message: string) => {
+      sessionCryptoRef.current = null
+      pendingEncryptedUpdatesRef.current = []
+      pendingRelayUpdatesRef.current = []
+      if (relayFlushFrameRef.current !== null) {
+        window.cancelAnimationFrame(relayFlushFrameRef.current)
+        relayFlushFrameRef.current = null
+      }
+      schedulePersistCurrentSession(
+        {
+          dataKey: null,
+          lastReceivedSeq: lastReceivedSeqRef.current,
+        },
+        { immediate: true },
+      )
+      setError(message)
+      socketRef.current?.close()
+    },
+    [schedulePersistCurrentSession],
+  )
+
   useEffect(() => {
     if (persistedSession?.clientSecretKey) {
       try {
         clientKeyPairRef.current = restoreBoxKeyPair(persistedSession.clientSecretKey)
+        window.localStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, persistedSession.clientSecretKey)
         if (persistedSession.dataKey) {
           sessionCryptoRef.current = {
             dataKey: base64ToBytes(persistedSession.dataKey),
@@ -386,6 +444,8 @@ export default function App() {
       } catch {
         persistRemoteSession(null)
       }
+    } else {
+      clientKeyPairRef.current = loadOrCreateClientKeyPair()
     }
   }, [])
 
@@ -490,58 +550,16 @@ export default function App() {
       window.clearTimeout(reconnectTimerRef.current)
       reconnectTimerRef.current = null
     }
-    const socket = new WebSocket(
-      `${relayWsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(clientToken)}`,
-    )
     let isCurrent = true
-    socketRef.current = socket
+    let socket: WebSocket | null = null
+    socketRef.current = null
     pendingEncryptedUpdatesRef.current = []
     pendingRelayUpdatesRef.current = []
     setConnectionStatus('connecting')
     setMachinePresence(null)
     setError(null)
 
-    socket.onopen = () => {
-      if (!isCurrent) return
-      reconnectAttemptRef.current = 0
-      setConnectionStatus('connected')
-      sendRelayMessage(socket, { type: 'sync', after_seq: lastReceivedSeqRef.current })
-    }
-
-    socket.onmessage = (message) => {
-      if (!isCurrent) return
-      const payload = JSON.parse(message.data) as RelayServerMessage
-      switch (payload.type) {
-        case 'ready':
-          setConnectionStatus(`connected as ${payload.role}`)
-          break
-        case 'sync':
-          pendingRelayUpdatesRef.current.push(...payload.updates)
-          scheduleRelayFlush()
-          break
-        case 'update':
-          pendingRelayUpdatesRef.current.push(payload.update)
-          scheduleRelayFlush()
-          break
-        case 'presence':
-          setMachinePresence(payload.presence)
-          break
-        case 'action-updated':
-          break
-        case 'rpc-result':
-          if (payload.request_id && pendingRpc.current.has(payload.request_id)) {
-            void resolvePendingRpc(payload.request_id, payload.ok, payload.result ?? null, payload.error ?? null)
-            return
-          }
-          if (!payload.ok) setError('Remote action failed')
-          break
-        case 'error':
-          setError(payload.message)
-          break
-      }
-    }
-
-    socket.onclose = () => {
+    const scheduleReconnect = () => {
       if (!isCurrent) return
       setConnectionStatus('disconnected')
       setMachinePresence(null)
@@ -566,11 +584,89 @@ export default function App() {
       }
     }
 
+    void fetch(`${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${clientToken}`,
+      },
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null
+          throw new Error(payload?.error ?? `Failed with status ${response.status}`)
+        }
+        return response.json() as Promise<RelayWebSocketTicketResponse>
+      })
+      .then((ticket) => {
+        if (!isCurrent) return
+        socket = new WebSocket(
+          `${relayWsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
+        )
+        socketRef.current = socket
+
+        socket.onopen = () => {
+          if (!isCurrent || !socket) return
+          reconnectAttemptRef.current = 0
+          setConnectionStatus('connected')
+          sendRelayMessage(socket, { type: 'sync', after_seq: lastReceivedSeqRef.current })
+        }
+
+        socket.onmessage = (message) => {
+          if (!isCurrent) return
+          let payload: RelayServerMessage
+          try {
+            payload = JSON.parse(message.data) as RelayServerMessage
+          } catch {
+            if (isCurrent) {
+              failCurrentConnection('Received malformed relay message')
+            }
+            return
+          }
+          switch (payload.type) {
+            case 'ready':
+              setConnectionStatus(`connected as ${payload.role}`)
+              break
+            case 'sync':
+              pendingRelayUpdatesRef.current.push(...payload.updates)
+              scheduleRelayFlush()
+              break
+            case 'update':
+              pendingRelayUpdatesRef.current.push(payload.update)
+              scheduleRelayFlush()
+              break
+            case 'presence':
+              setMachinePresence(payload.presence)
+              break
+            case 'action-updated':
+              break
+            case 'rpc-result':
+              if (payload.request_id && pendingRpc.current.has(payload.request_id)) {
+                void resolvePendingRpc(payload.request_id, payload.ok, payload.result ?? null, payload.error ?? null)
+                return
+              }
+              if (!payload.ok) setError('Remote action failed')
+              break
+            case 'error':
+              setError(payload.message)
+              break
+          }
+        }
+
+        socket.onclose = () => {
+          scheduleReconnect()
+        }
+      })
+      .catch((error) => {
+        if (!isCurrent) return
+        setError(error instanceof Error ? error.message : 'Failed to connect to relay')
+        scheduleReconnect()
+      })
+
     return () => {
       isCurrent = false
-      socket.close()
+      socket?.close()
     }
-  }, [clientToken, connectionGeneration, relayWsUrl, sessionId])
+  }, [clientToken, connectionGeneration, failCurrentConnection, relayUrl, relayWsUrl, sessionId])
 
   async function resolvePendingRpc(
     requestId: string,
@@ -609,7 +705,6 @@ export default function App() {
         const batch = pendingRelayUpdatesRef.current.splice(0)
         const daemonEvents: EventEnvelope[] = []
         let nextPresence: MachinePresence | null | undefined
-        let resetRemoteSession = false
         let shouldPersistCursor = false
 
         for (let index = 0; index < batch.length; index += 1) {
@@ -622,14 +717,32 @@ export default function App() {
               setError('Missing local pairing key material')
               continue
             }
-            if (update.body.material.client_public_key !== publicKeyToBase64(kp)) {
+            const expectedClientPublicKey = publicKeyToBase64(kp)
+            const expectedClientIdentityPublicKey = identityPublicKeyToBase64(deriveIdentityKeyPair(kp))
+            if (update.body.material.client_public_key !== expectedClientPublicKey) {
               continue
             }
             try {
+              verifySessionKeyMaterial(update.body.material, {
+                expectedSessionId: sessionId,
+                expectedPairingId: pairingId,
+                expectedDaemonPublicKey: trustedDaemonPublicKeyRef.current,
+                expectedDaemonIdentityPublicKey: trustedDaemonIdentityPublicKeyRef.current,
+                expectedClientPublicKey,
+                expectedClientIdentityPublicKey,
+              })
               sessionCryptoRef.current = bootstrapSessionCrypto(kp, update.body.material)
+              trustedDaemonPublicKeyRef.current ??= update.body.material.daemon_public_key
+              trustedDaemonIdentityPublicKeyRef.current ??= update.body.material.daemon_identity_public_key
+              if (!pairingId) {
+                setPairingId(update.body.material.pairing_id)
+              }
               setConnectionStatus('connected as client (encrypted)')
               schedulePersistCurrentSession(
                 {
+                  pairingId: update.body.material.pairing_id,
+                  daemonPublicKey: trustedDaemonPublicKeyRef.current,
+                  daemonIdentityPublicKey: trustedDaemonIdentityPublicKeyRef.current,
                   dataKey: bytesToBase64(sessionCryptoRef.current.dataKey),
                   lastReceivedSeq: lastReceivedSeqRef.current,
                 },
@@ -642,31 +755,11 @@ export default function App() {
                 pendingEncryptedUpdatesRef.current = []
               }
             } catch (e) {
-              if (sessionPersistTimerRef.current !== null) {
-                window.clearTimeout(sessionPersistTimerRef.current)
-                sessionPersistTimerRef.current = null
-              }
-              pendingSessionPersistRef.current = null
-              pendingEncryptedUpdatesRef.current = []
-              pendingRelayUpdatesRef.current = []
-              persistRemoteSession(null)
-              persistPendingActionIds([])
-              clientKeyPairRef.current = null
-              sessionCryptoRef.current = null
-              setSessionId(null)
-              setDeviceId(null)
-              setClientToken(null)
-              setMachinePresence(null)
-              setSnapshot(null)
-              setThreadDetail(null)
-              setThreadItems({})
-              setConnectionGeneration((value) => value + 1)
-              setError(
+              failCurrentConnection(
                 e instanceof Error
                   ? e.message
                   : 'Failed to establish encrypted relay session',
               )
-              resetRemoteSession = true
             }
             continue
           }
@@ -703,10 +796,6 @@ export default function App() {
               daemonEvents.push(event)
             }
           }
-        }
-
-        if (resetRemoteSession) {
-          return
         }
 
         if (nextPresence !== undefined) {
@@ -751,7 +840,7 @@ export default function App() {
         })
       }
     }
-  }, [schedulePersistCurrentSession])
+  }, [failCurrentConnection, pairingId, schedulePersistCurrentSession, sessionId])
 
   const scheduleRelayFlush = useCallback(() => {
     if (relayFlushFrameRef.current !== null) {
@@ -819,7 +908,7 @@ export default function App() {
   // ── Actions ────────────────────────────────────────────────────────
 
   async function handleClaimPairing() {
-    const keyPair = generateBoxKeyPair()
+    const keyPair = loadOrCreateClientKeyPair()
     clientKeyPairRef.current = keyPair
     const response = await fetch(`${relayUrl.replace(/\/$/, '')}/v1/pairings/claim`, {
       method: 'POST',
@@ -827,16 +916,28 @@ export default function App() {
       body: JSON.stringify({
         pairing_code: pairingCode.trim(),
         label: getDeviceLabel(),
-        client_bundle: { encryption_variant: 'data_key_v1', public_key: publicKeyToBase64(keyPair) },
+        client_bundle: buildPairingPublicKeyBundle(keyPair),
       }),
     })
     if (!response.ok) {
-      clientKeyPairRef.current = null
       const payload = (await response.json().catch(() => null)) as { error?: string } | null
       setError(payload?.error ?? `Failed with status ${response.status}`)
       return
     }
-    const claim = (await response.json()) as { session_id: string; device_id: string; client_token: string }
+    const claim = (await response.json()) as ClaimPairingResponse
+    if (!claim.daemon_bundle) {
+      setError('Relay claim response is missing daemon key material')
+      return
+    }
+    try {
+      verifyPairingPublicKeyBundle(claim.daemon_bundle)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Relay claim response has an invalid daemon signature')
+      return
+    }
+    trustedDaemonPublicKeyRef.current = claim.daemon_bundle.public_key
+    trustedDaemonIdentityPublicKeyRef.current = claim.daemon_bundle.identity_public_key
+    setPairingId(claim.pairing_id)
     setSessionId(claim.session_id)
     setDeviceId(claim.device_id)
     setClientToken(claim.client_token)
@@ -850,10 +951,13 @@ export default function App() {
     persistRemoteSession({
       relayUrl: relayUrl.trim(),
       pairingCode: pairingCode.trim(),
+      pairingId: claim.pairing_id,
       sessionId: claim.session_id,
       deviceId: claim.device_id,
       clientToken: claim.client_token,
       clientSecretKey: secretKeyToBase64(keyPair),
+      daemonPublicKey: claim.daemon_bundle.public_key,
+      daemonIdentityPublicKey: claim.daemon_bundle.identity_public_key,
       dataKey: null,
       lastReceivedSeq: 0,
     })
@@ -1006,6 +1110,20 @@ export default function App() {
     requestId: string,
     response: InteractiveResponsePayload,
   ) {
+    if (selectedThreadId) {
+      setThreadItems((current) => ({
+        ...current,
+        [selectedThreadId]: markInteractiveRequestResolved(current[selectedThreadId] ?? [], requestId),
+      }))
+    }
+    setThreadDetail((current) =>
+      current && current.workspace.id === workspaceId
+        ? {
+            ...current,
+            items: markInteractiveRequestResolved(current.items, requestId),
+          }
+        : current,
+    )
     void submitQueuedAction('interactive.respond', {
       workspace_id: workspaceId,
       request_id: requestId,
@@ -1239,6 +1357,16 @@ export default function App() {
 
   const desktopOnline = machinePresence?.daemon_connected ?? false
 
+  useEffect(() => {
+    if (!showProjects) return
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [showProjects])
+
   return (
     <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
       <SessionHeader
@@ -1270,32 +1398,76 @@ export default function App() {
       </SessionHeader>
 
       {showProjects ? (
-        <div className="shrink-0 border-b border-border-subtle bg-surface-1">
-          <WorkspaceSidebar
-            groups={groups}
-            selectedWorkspaceId={selectedWorkspaceId}
-            selectedThreadId={selectedThreadId}
-            onSelectWorkspace={handleSelectWorkspace}
-            onSelectThread={handleSelectThread}
-            onNewThread={handleNewThread}
-            title="Projects"
-            errors={error ? [error] : []}
-            emptyState={{
-              title: 'Waiting for projects',
-              description: 'Projects will appear after the desktop shares its current snapshot.',
-            }}
-            className="h-[min(32rem,60dvh)] bg-surface-1"
-            headerClassName="pt-4"
-          />
-        </div>
-      ) : null}
+        <>
+          <div className="fixed inset-0 z-40 bg-surface-0/80 backdrop-blur-sm md:hidden">
+            <button
+              type="button"
+              className="absolute inset-0 h-full w-full"
+              aria-label="Close projects"
+              onClick={() => setShowProjects(false)}
+            />
+            <div className="absolute inset-y-0 left-0 flex w-full max-w-none animate-in slide-in-from-left-8 duration-200">
+              <div className="flex h-full w-full flex-col border-r border-border-default bg-surface-1 shadow-2xl">
+                <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
+                  <div>
+                    <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">
+                      Navigation
+                    </p>
+                    <h2 className="mt-1 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
+                      Projects
+                    </h2>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 rounded-full"
+                    onClick={() => setShowProjects(false)}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+                <WorkspaceSidebar
+                  groups={groups}
+                  selectedWorkspaceId={selectedWorkspaceId}
+                  selectedThreadId={selectedThreadId}
+                  onSelectWorkspace={handleSelectWorkspace}
+                  onSelectThread={handleSelectThread}
+                  onNewThread={handleNewThread}
+                  title="Projects"
+                  errors={error ? [error] : []}
+                  emptyState={{
+                    title: 'Waiting for projects',
+                    description: 'Projects will appear after the desktop shares its current snapshot.',
+                  }}
+                  className="h-full min-h-0 bg-surface-1"
+                  headerClassName="hidden"
+                  contentClassName="px-4 pb-8 pt-4"
+                />
+              </div>
+            </div>
+          </div>
 
-      <InteractiveRequestBar
-        requests={interactiveRequests}
-        onRespond={(request, response) =>
-          handleInteractiveResponse(request.workspace_id, request.request_id, response)
-        }
-      />
+          <div className="hidden shrink-0 border-b border-border-subtle bg-surface-1 md:block">
+            <WorkspaceSidebar
+              groups={groups}
+              selectedWorkspaceId={selectedWorkspaceId}
+              selectedThreadId={selectedThreadId}
+              onSelectWorkspace={handleSelectWorkspace}
+              onSelectThread={handleSelectThread}
+              onNewThread={handleNewThread}
+              title="Projects"
+              errors={error ? [error] : []}
+              emptyState={{
+                title: 'Waiting for projects',
+                description: 'Projects will appear after the desktop shares its current snapshot.',
+              }}
+              className="h-[min(32rem,60dvh)] bg-surface-1"
+              headerClassName="pt-4"
+            />
+          </div>
+        </>
+      ) : null}
 
       <Conversation
         threadKey={
@@ -1308,6 +1480,12 @@ export default function App() {
       />
 
       <div className="shrink-0">
+        <InteractiveRequestBar
+          requests={interactiveRequests}
+          onRespond={(request, response) =>
+            handleInteractiveResponse(request.workspace_id, request.request_id, response)
+          }
+        />
         <PromptInput
           value={draft}
           onValueChange={setDraft}

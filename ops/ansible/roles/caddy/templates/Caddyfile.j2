@@ -4,6 +4,10 @@
   tls {{ falcondeck_tls_email }}
 
   root * /var/www/falcondeck-app
+  @app_assets path /assets/*
+  header @app_assets Cache-Control "public, max-age=31536000, immutable"
+  @app_html path / /index.html
+  header @app_html Cache-Control "no-store, must-revalidate"
   try_files {path} /index.html
   file_server
 }
@@ -22,6 +26,10 @@
   tls {{ falcondeck_tls_email }}
 
   root * /var/www/falcondeck-site
+  @site_assets path /assets/*
+  header @site_assets Cache-Control "public, max-age=31536000, immutable"
+  @site_html path / /index.html
+  header @site_html Cache-Control "no-store, must-revalidate"
   try_files {path} /index.html
   file_server
 }

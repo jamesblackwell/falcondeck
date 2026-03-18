@@ -43,6 +43,7 @@ Current structure:
 - Keep `AGENTS.md` concise and operational. Put deep design rationale in `docs/`.
 - Keep real deployment inventory and secrets out of git. Commit examples/templates only.
 - Do not add Electron, custom crypto, or forced account/login flows for v1.
+- You have permission to use Ansible for FalconDeck deploys and to SSH into the production relay/app server when needed for deployment, debugging, or verification.
 
 ## UI and Hosting Defaults
 
