@@ -4,9 +4,10 @@ use chrono::Duration;
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
     PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
-    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
-    StartPairingResponse, SubmitQueuedActionRequest, TrustedDevicesResponse,
-    crypto::{LocalBoxKeyPair, encrypt_json, generate_data_key},
+    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse,
+    RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
+    SubmitQueuedActionRequest, TrustedDevicesResponse,
+    crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, encrypt_json, generate_data_key},
 };
 use falcondeck_relay::{AppState, router};
 use futures_util::{SinkExt, StreamExt};
@@ -153,19 +154,68 @@ async fn additional_pairings_attach_new_devices_to_the_same_session() {
 }
 
 #[tokio::test]
+async fn query_tokens_are_rejected_and_ws_tickets_are_required() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let http_response = client
+        .get(format!(
+            "{}/v1/sessions/{}/updates?after_seq=0&token={}",
+            server.http_base, claim.session_id, claim.client_token
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(http_response.status(), StatusCode::UNAUTHORIZED);
+
+    let ws_result = connect_async(format!(
+        "{}/v1/updates/ws?session_id={}&token={}",
+        server.ws_base, claim.session_id, pairing.daemon_token
+    ))
+    .await;
+    assert!(
+        ws_result.is_err(),
+        "legacy websocket token URL should be rejected"
+    );
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    assert!(matches!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+}
+
+#[tokio::test]
 async fn websocket_fanout_and_rpc_forwarding_work() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
     let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
 
-    let daemon_url = format!(
-        "{}/v1/updates/ws?session_id={}&token={}",
-        server.ws_base, claim.session_id, pairing.daemon_token
-    );
-    let client_url = format!(
-        "{}/v1/updates/ws?session_id={}&token={}",
-        server.ws_base, claim.session_id, claim.client_token
-    );
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
 
     let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
     let (mut client_ws, _) = connect_async(client_url).await.unwrap();
@@ -353,10 +403,14 @@ async fn queued_actions_are_not_redispatched_while_the_daemon_is_still_connected
     let client = reqwest::Client::new();
     let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
 
-    let daemon_url = format!(
-        "{}/v1/updates/ws?session_id={}&token={}",
-        server.ws_base, claim.session_id, pairing.daemon_token
-    );
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
     let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
     let _ = recv_server_message(&mut daemon_ws).await;
 
@@ -423,10 +477,14 @@ async fn dispatched_actions_are_requeued_after_daemon_disconnect() {
     let client = reqwest::Client::new();
     let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
 
-    let daemon_url = format!(
-        "{}/v1/updates/ws?session_id={}&token={}",
-        server.ws_base, claim.session_id, pairing.daemon_token
-    );
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
     let (mut daemon_ws, _) = connect_async(&daemon_url).await.unwrap();
     let _ = recv_server_message(&mut daemon_ws).await;
 
@@ -455,7 +513,88 @@ async fn dispatched_actions_are_requeued_after_daemon_disconnect() {
 
     daemon_ws.close(None).await.unwrap();
 
-    let (mut reconnected_ws, _) = connect_async(daemon_url).await.unwrap();
+    let reconnect_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut reconnected_ws, _) = connect_async(reconnect_url).await.unwrap();
+    let _ = recv_server_message(&mut reconnected_ws).await;
+    let RelayServerMessage::ActionRequested {
+        action: retried_request,
+        ..
+    } = recv_until_action_requested(&mut reconnected_ws).await
+    else {
+        unreachable!();
+    };
+    assert_eq!(retried_request.action_id, action.action_id);
+}
+
+#[tokio::test]
+async fn executing_actions_are_requeued_after_daemon_disconnect() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(&daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    let action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "idempotency-executing-requeue".to_string(),
+            action_type: "turn.start".to_string(),
+            payload: test_envelope("payload-executing-requeue"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let RelayServerMessage::ActionRequested {
+        action: initial_request,
+        ..
+    } = recv_until_action_requested(&mut daemon_ws).await
+    else {
+        unreachable!();
+    };
+    assert_eq!(initial_request.action_id, action.action_id);
+
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::ActionUpdate {
+            action_id: action.action_id.clone(),
+            status: falcondeck_core::QueuedRemoteActionStatus::Executing,
+            error: None,
+            result: None,
+        },
+    )
+    .await;
+
+    daemon_ws.close(None).await.unwrap();
+
+    let reconnect_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut reconnected_ws, _) = connect_async(reconnect_url).await.unwrap();
     let _ = recv_server_message(&mut reconnected_ws).await;
     let RelayServerMessage::ActionRequested {
         action: retried_request,
@@ -476,10 +615,14 @@ async fn persisted_updates_survive_restart() {
     let client = reqwest::Client::new();
     let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
 
-    let daemon_url = format!(
-        "{}/v1/updates/ws?session_id={}&token={}",
-        server.ws_base, claim.session_id, pairing.daemon_token
-    );
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
     let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
     let _ = recv_server_message(&mut daemon_ws).await;
     send_client_message(
@@ -492,6 +635,7 @@ async fn persisted_updates_survive_restart() {
     )
     .await;
     let _ = recv_until_update(&mut daemon_ws).await;
+    tokio::time::sleep(TokioDuration::from_millis(250)).await;
 
     server.task.abort();
     let _keep_tempdir = temp_dir;
@@ -521,6 +665,104 @@ async fn persisted_updates_survive_restart() {
 }
 
 #[tokio::test]
+async fn persisted_inflight_actions_are_requeued_on_restart() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("relay-state.json");
+
+    let server = spawn_server_at(state_path.clone()).await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(&daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    let dispatched = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "restart-dispatched".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("restart-dispatched"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let executing = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "restart-executing".to_string(),
+            action_type: "turn.start".to_string(),
+            payload: test_envelope("restart-executing"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let first_request = recv_until_action_requested(&mut daemon_ws).await;
+    let second_request = recv_until_action_requested(&mut daemon_ws).await;
+    let executing_action_id = match (&first_request, &second_request) {
+        (
+            RelayServerMessage::ActionRequested { action, .. },
+            RelayServerMessage::ActionRequested { action: other, .. },
+        ) if action.action_id == executing.action_id || other.action_id == executing.action_id => {
+            executing.action_id.clone()
+        }
+        _ => unreachable!(),
+    };
+
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::ActionUpdate {
+            action_id: executing_action_id,
+            status: falcondeck_core::QueuedRemoteActionStatus::Executing,
+            error: None,
+            result: None,
+        },
+    )
+    .await;
+    tokio::time::sleep(TokioDuration::from_millis(250)).await;
+
+    server.task.abort();
+    let restarted = spawn_server_at(state_path).await;
+    let restarted_daemon_url = ws_url_for(
+        &client,
+        &restarted.http_base,
+        &restarted.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut restarted_ws, _) = connect_async(restarted_daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut restarted_ws).await;
+
+    let mut action_ids = Vec::new();
+    for _ in 0..2 {
+        let RelayServerMessage::ActionRequested { action, .. } =
+            recv_until_action_requested(&mut restarted_ws).await
+        else {
+            unreachable!();
+        };
+        action_ids.push(action.action_id);
+    }
+    assert!(action_ids.contains(&dispatched.action_id));
+    assert!(action_ids.contains(&executing.action_id));
+}
+
+#[tokio::test]
 async fn persisted_state_does_not_store_plaintext_session_markers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("relay-state.json");
@@ -528,10 +770,14 @@ async fn persisted_state_does_not_store_plaintext_session_markers() {
     let client = reqwest::Client::new();
     let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
 
-    let daemon_url = format!(
-        "{}/v1/updates/ws?session_id={}&token={}",
-        server.ws_base, claim.session_id, pairing.daemon_token
-    );
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
     let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
     let _ = recv_server_message(&mut daemon_ws).await;
 
@@ -554,6 +800,247 @@ async fn persisted_state_does_not_store_plaintext_session_markers() {
         !persisted.contains(marker),
         "relay state should not contain plaintext session payloads"
     );
+}
+
+#[tokio::test]
+async fn bursty_updates_are_streamed_without_waiting_for_file_persistence() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+    let _ = recv_server_message(&mut client_ws).await;
+
+    for index in 0..100 {
+        send_client_message(
+            &mut daemon_ws,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted {
+                    envelope: test_envelope(&format!("burst-{index}")),
+                },
+            },
+        )
+        .await;
+    }
+
+    let received = timeout(TokioDuration::from_secs(2), async {
+        let mut count = 0;
+        while count < 100 {
+            let _ = recv_until_update(&mut client_ws).await;
+            count += 1;
+        }
+        count
+    })
+    .await
+    .unwrap();
+    assert_eq!(received, 100);
+}
+
+#[tokio::test]
+async fn duplicate_daemon_peers_cannot_complete_non_owned_actions() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_a, _) = connect_async(&daemon_url).await.unwrap();
+    let daemon_b_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_b, _) = connect_async(&daemon_b_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_a).await;
+    let _ = recv_server_message(&mut daemon_b).await;
+
+    let action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "duplicate-daemon-owner".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("duplicate-daemon-owner"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+
+    let first_owner_message = tokio::time::timeout(
+        TokioDuration::from_millis(250),
+        recv_until_action_requested(&mut daemon_a),
+    )
+    .await;
+    let (owner, stale, owner_action) =
+        if let Ok(RelayServerMessage::ActionRequested { action, .. }) = first_owner_message {
+            (&mut daemon_a, &mut daemon_b, action)
+        } else {
+            let RelayServerMessage::ActionRequested { action, .. } =
+                recv_until_action_requested(&mut daemon_b).await
+            else {
+                unreachable!();
+            };
+            (&mut daemon_b, &mut daemon_a, action)
+        };
+    assert_eq!(owner_action.action_id, action.action_id);
+
+    send_client_message(
+        stale,
+        &RelayClientMessage::ActionUpdate {
+            action_id: action.action_id.clone(),
+            status: falcondeck_core::QueuedRemoteActionStatus::Completed,
+            error: None,
+            result: Some(test_envelope("stale-result")),
+        },
+    )
+    .await;
+
+    let current = get_json::<falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions/{}",
+            server.http_base, claim.session_id, action.action_id
+        ),
+        Some(&claim.client_token),
+    )
+    .await;
+    assert_ne!(
+        current.status,
+        falcondeck_core::QueuedRemoteActionStatus::Completed
+    );
+
+    send_client_message(
+        owner,
+        &RelayClientMessage::ActionUpdate {
+            action_id: action.action_id.clone(),
+            status: falcondeck_core::QueuedRemoteActionStatus::Completed,
+            error: None,
+            result: Some(test_envelope("owner-result")),
+        },
+    )
+    .await;
+
+    let completed = get_json::<falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions/{}",
+            server.http_base, claim.session_id, action.action_id
+        ),
+        Some(&claim.client_token),
+    )
+    .await;
+    assert_eq!(
+        completed.status,
+        falcondeck_core::QueuedRemoteActionStatus::Completed
+    );
+}
+
+#[tokio::test]
+async fn queued_action_idempotency_is_scoped_per_device() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, first_claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let second_pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("tablet".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: Some(pairing.session_id.clone()),
+            daemon_token: Some(pairing.daemon_token.clone()),
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+    let second_claim = post_json::<_, ClaimPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings/claim", server.http_base),
+        &ClaimPairingRequest {
+            pairing_code: second_pairing.pairing_code,
+            label: Some("tablet".to_string()),
+            client_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    let first_action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, first_claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "shared-idempotency".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("first-device"),
+        },
+        Some(&first_claim.client_token),
+    )
+    .await;
+    let second_action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, second_claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "shared-idempotency".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("second-device"),
+        },
+        Some(&second_claim.client_token),
+    )
+    .await;
+    assert_ne!(first_action.action_id, second_action.action_id);
+
+    let conflict = client
+        .post(format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, first_claim.session_id
+        ))
+        .bearer_auth(&first_claim.client_token)
+        .json(&SubmitQueuedActionRequest {
+            idempotency_key: "shared-idempotency".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("first-device-mismatch"),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -694,6 +1181,30 @@ async fn send_client_message(
     socket.send(Message::Text(payload.into())).await.unwrap();
 }
 
+async fn ws_url_for(
+    client: &reqwest::Client,
+    http_base: &str,
+    ws_base: &str,
+    session_id: &str,
+    bearer: &str,
+) -> String {
+    let ticket = client
+        .post(format!("{http_base}/v1/sessions/{session_id}/ws-ticket"))
+        .bearer_auth(bearer)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<RelayWebSocketTicketResponse>()
+        .await
+        .unwrap();
+    format!(
+        "{ws_base}/v1/updates/ws?session_id={}&ticket={}",
+        session_id, ticket.ticket
+    )
+}
+
 async fn recv_server_message(
     socket: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -795,10 +1306,7 @@ fn format_addr(addr: SocketAddr) -> String {
 
 fn test_bundle() -> PairingPublicKeyBundle {
     let key_pair = LocalBoxKeyPair::generate();
-    PairingPublicKeyBundle {
-        encryption_variant: EncryptionVariant::DataKeyV1,
-        public_key: key_pair.public_key_base64().to_string(),
-    }
+    build_pairing_public_key_bundle(&key_pair)
 }
 
 fn test_envelope(marker: &str) -> EncryptedEnvelope {

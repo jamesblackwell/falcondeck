@@ -11,18 +11,23 @@ use falcondeck_core::{
     QueuedRemoteActionStatus, RelayClientMessage, RelayHealthResponse, RelayPeerRole,
     RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
     StartPairingResponse, SubmitQueuedActionRequest, SyncCursor, TrustedDevice,
-    TrustedDeviceStatus, TrustedDevicesResponse,
+    TrustedDeviceStatus, TrustedDevicesResponse, crypto::verify_pairing_public_key_bundle,
 };
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
     sync::{Mutex, mpsc},
+    task::JoinHandle,
 };
 use tokio_postgres::{Client as PostgresClient, NoTls};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::error::RelayError;
+
+const PEER_QUEUE_CAPACITY: usize = 256;
+const FILE_PERSIST_DEBOUNCE_MS: u64 = 150;
+const WS_TICKET_TTL_SECONDS: i64 = 30;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -36,6 +41,7 @@ struct InnerState {
     store: Mutex<Store>,
     persist_lock: Mutex<()>,
     postgres: Option<PostgresPersistence>,
+    file_persist_task: Mutex<Option<JoinHandle<()>>>,
 }
 
 struct PostgresPersistence {
@@ -45,6 +51,7 @@ struct PostgresPersistence {
 struct Store {
     data: PersistedState,
     live_sessions: HashMap<String, LiveSession>,
+    ws_tickets: HashMap<String, WebSocketTicket>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -120,6 +127,15 @@ struct LiveSession {
 
 struct PendingRpc {
     requester_peer_id: String,
+    responder_peer_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct WebSocketTicket {
+    session_id: String,
+    role: RelayPeerRole,
+    device_id: Option<String>,
+    expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -135,13 +151,15 @@ struct QueuedActionRecord {
     updated_at: DateTime<Utc>,
     error: Option<String>,
     result: Option<EncryptedEnvelope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner_peer_id: Option<String>,
 }
 
 #[derive(Clone)]
 struct PeerHandle {
     role: RelayPeerRole,
     device_id: Option<String>,
-    tx: mpsc::UnboundedSender<RelayServerMessage>,
+    tx: mpsc::Sender<RelayServerMessage>,
 }
 
 #[derive(Debug, Clone)]
@@ -149,6 +167,12 @@ pub struct SessionAuth {
     pub session_id: String,
     pub role: RelayPeerRole,
     pub device_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PersistMode {
+    Deferred,
+    Immediate,
 }
 
 impl AppState {
@@ -161,7 +185,8 @@ impl AppState {
         for session in data.sessions.values_mut() {
             session.migrate_legacy_device_fields();
         }
-        Ok(Self {
+        let normalized = normalize_in_flight_actions(&mut data);
+        let state = Self {
             inner: Arc::new(InnerState {
                 version,
                 state_path,
@@ -169,11 +194,17 @@ impl AppState {
                 store: Mutex::new(Store {
                     data,
                     live_sessions: HashMap::new(),
+                    ws_tickets: HashMap::new(),
                 }),
                 persist_lock: Mutex::new(()),
                 postgres: None,
+                file_persist_task: Mutex::new(None),
             }),
-        })
+        };
+        if normalized {
+            state.persist_current().await?;
+        }
+        Ok(state)
     }
 
     pub async fn load_postgres(
@@ -186,7 +217,8 @@ impl AppState {
         for session in data.sessions.values_mut() {
             session.migrate_legacy_device_fields();
         }
-        Ok(Self {
+        let normalized = normalize_in_flight_actions(&mut data);
+        let state = Self {
             inner: Arc::new(InnerState {
                 version,
                 state_path: PathBuf::new(),
@@ -194,13 +226,19 @@ impl AppState {
                 store: Mutex::new(Store {
                     data,
                     live_sessions: HashMap::new(),
+                    ws_tickets: HashMap::new(),
                 }),
                 persist_lock: Mutex::new(()),
                 postgres: Some(PostgresPersistence {
                     client: Mutex::new(client),
                 }),
+                file_persist_task: Mutex::new(None),
             }),
-        })
+        };
+        if normalized {
+            state.persist_current().await?;
+        }
+        Ok(state)
     }
 
     pub async fn health(&self) -> RelayHealthResponse {
@@ -239,6 +277,11 @@ impl AppState {
                 "daemon_bundle with a public key is required".to_string(),
             ));
         }
+        if let Some(bundle) = request.daemon_bundle.as_ref() {
+            verify_pairing_public_key_bundle(bundle).map_err(|_| {
+                RelayError::BadRequest("daemon_bundle signature is invalid".to_string())
+            })?;
+        }
 
         let now = Utc::now();
         let expires_at = now + Duration::seconds(ttl_seconds as i64);
@@ -247,9 +290,10 @@ impl AppState {
         let pairing_code;
         let mut daemon_token = format!("daemon-{}", Uuid::new_v4().simple());
 
-        {
+        let (session_snapshot, pairing_snapshot) = {
             let mut store = self.inner.store.lock().await;
             pairing_code = generate_pairing_code(&store.data);
+            let session_snapshot;
             if let Some(existing_session_id) = request.existing_session_id.as_ref() {
                 let session = store
                     .data
@@ -265,47 +309,54 @@ impl AppState {
                 session.updated_at = now;
                 session_id = existing_session_id.clone();
                 daemon_token = session.daemon_token.clone();
+                session_snapshot = session.clone();
             } else {
-                store.data.sessions.insert(
-                    session_id.clone(),
-                    SessionRecord {
-                        session_id: session_id.clone(),
-                        pairing_id: pairing_id.clone(),
-                        daemon_token: daemon_token.clone(),
-                        daemon_last_seen_at: None,
-                        devices: HashMap::new(),
-                        device_id: None,
-                        device_created_at: None,
-                        client_token: None,
-                        client_label: None,
-                        client_public_key: None,
-                        client_last_seen_at: None,
-                        revoked_at: None,
-                        created_at: now,
-                        updated_at: now,
-                        updates: Vec::new(),
-                        actions: HashMap::new(),
-                    },
-                );
-            }
-            store.data.pairings.insert(
-                pairing_id.clone(),
-                PairingRecord {
-                    pairing_id: pairing_id.clone(),
-                    pairing_code: pairing_code.clone(),
-                    daemon_token: daemon_token.clone(),
-                    label: request.label,
+                let session = SessionRecord {
                     session_id: session_id.clone(),
+                    pairing_id: pairing_id.clone(),
+                    daemon_token: daemon_token.clone(),
+                    daemon_last_seen_at: None,
+                    devices: HashMap::new(),
                     device_id: None,
-                    daemon_bundle: request.daemon_bundle,
-                    client_bundle: None,
+                    device_created_at: None,
+                    client_token: None,
+                    client_label: None,
+                    client_public_key: None,
+                    client_last_seen_at: None,
+                    revoked_at: None,
                     created_at: now,
-                    expires_at,
-                },
-            );
-        }
+                    updated_at: now,
+                    updates: Vec::new(),
+                    actions: HashMap::new(),
+                };
+                session_snapshot = session.clone();
+                store.data.sessions.insert(session_id.clone(), session);
+            }
+            let pairing = PairingRecord {
+                pairing_id: pairing_id.clone(),
+                pairing_code: pairing_code.clone(),
+                daemon_token: daemon_token.clone(),
+                label: request.label,
+                session_id: session_id.clone(),
+                device_id: None,
+                daemon_bundle: request.daemon_bundle,
+                client_bundle: None,
+                created_at: now,
+                expires_at,
+            };
+            store
+                .data
+                .pairings
+                .insert(pairing_id.clone(), pairing.clone());
+            (session_snapshot, pairing)
+        };
 
-        self.persist_current().await?;
+        self.persist_pairing_state(
+            Some(&session_snapshot),
+            Some(&pairing_snapshot),
+            PersistMode::Immediate,
+        )
+        .await?;
 
         Ok(StartPairingResponse {
             pairing_id,
@@ -331,34 +382,42 @@ impl AppState {
                 "client_bundle with a public key is required".to_string(),
             ));
         }
+        if let Some(bundle) = request.client_bundle.as_ref() {
+            verify_pairing_public_key_bundle(bundle).map_err(|_| {
+                RelayError::BadRequest("client_bundle signature is invalid".to_string())
+            })?;
+        }
 
         let now = Utc::now();
-        let response = {
+        let (response, session_snapshot, pairing_snapshot, device_id) = {
             let mut store = self.inner.store.lock().await;
-            let pairing = store
+            let pairing_id = store
                 .data
                 .pairings
-                .values_mut()
-                .find(|pairing| pairing.pairing_code == pairing_code)
+                .iter()
+                .find_map(|(pairing_id, pairing)| {
+                    (pairing.pairing_code == pairing_code).then_some(pairing_id.clone())
+                })
                 .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
+            let session_id = {
+                let pairing = store
+                    .data
+                    .pairings
+                    .get(&pairing_id)
+                    .expect("pairing exists");
+                if pairing.device_id.is_some() {
+                    return Err(RelayError::Conflict(
+                        "pairing has already been claimed".to_string(),
+                    ));
+                }
+                if pairing.expires_at <= now {
+                    return Err(RelayError::Conflict("pairing has expired".to_string()));
+                }
+                pairing.session_id.clone()
+            };
 
-            if pairing.device_id.is_some() {
-                return Err(RelayError::Conflict(
-                    "pairing has already been claimed".to_string(),
-                ));
-            }
-            if pairing.expires_at <= now {
-                return Err(RelayError::Conflict("pairing has expired".to_string()));
-            }
-
-            let session_id = pairing.session_id.clone();
             let device_id = format!("device-{}", Uuid::new_v4().simple());
             let client_token = format!("client-{}", Uuid::new_v4().simple());
-
-            pairing.client_bundle = request.client_bundle.clone();
-            pairing.device_id = Some(device_id.clone());
-
-            let daemon_bundle = pairing.daemon_bundle.clone();
             let session = store
                 .data
                 .sessions
@@ -389,17 +448,40 @@ impl AppState {
                 .ok_or_else(|| {
                     RelayError::Conflict("trusted device was not created".to_string())
                 })?;
+            let session_snapshot = session.clone();
+            let pairing = store
+                .data
+                .pairings
+                .get_mut(&pairing_id)
+                .expect("pairing exists");
+            pairing.client_bundle = request.client_bundle.clone();
+            pairing.device_id = Some(device_id.clone());
+            let daemon_bundle = pairing.daemon_bundle.clone();
+            let pairing_snapshot = pairing.clone();
 
-            ClaimPairingResponse {
-                session_id,
+            (
+                ClaimPairingResponse {
+                    pairing_id: pairing_id.clone(),
+                    session_id,
+                    device_id: device_id.clone(),
+                    client_token,
+                    trusted_device,
+                    daemon_bundle,
+                },
+                session_snapshot,
+                pairing_snapshot,
                 device_id,
-                client_token,
-                trusted_device,
-                daemon_bundle,
-            }
+            )
         };
 
-        self.persist_current().await?;
+        self.persist_pairing_state(
+            Some(&session_snapshot),
+            Some(&pairing_snapshot),
+            PersistMode::Immediate,
+        )
+        .await?;
+        self.persist_device_state(&session_snapshot, Some(&device_id), PersistMode::Immediate)
+            .await?;
         Ok(response)
     }
 
@@ -506,6 +588,55 @@ impl AppState {
         })
     }
 
+    pub async fn issue_ws_ticket(
+        &self,
+        session_id: &str,
+        token: &str,
+    ) -> Result<falcondeck_core::RelayWebSocketTicketResponse, RelayError> {
+        let auth = self.authenticate_session(session_id, token).await?;
+        let expires_at = Utc::now() + Duration::seconds(WS_TICKET_TTL_SECONDS);
+        let ticket = format!("wst-{}", Uuid::new_v4().simple());
+        let mut store = self.inner.store.lock().await;
+        store
+            .ws_tickets
+            .retain(|_, entry| entry.expires_at > Utc::now());
+        store.ws_tickets.insert(
+            ticket.clone(),
+            WebSocketTicket {
+                session_id: auth.session_id.clone(),
+                role: auth.role,
+                device_id: auth.device_id,
+                expires_at,
+            },
+        );
+        Ok(falcondeck_core::RelayWebSocketTicketResponse { ticket, expires_at })
+    }
+
+    pub async fn consume_ws_ticket(
+        &self,
+        session_id: &str,
+        ticket: &str,
+    ) -> Result<SessionAuth, RelayError> {
+        let mut store = self.inner.store.lock().await;
+        store
+            .ws_tickets
+            .retain(|_, entry| entry.expires_at > Utc::now());
+        let entry = store
+            .ws_tickets
+            .remove(ticket)
+            .ok_or_else(|| RelayError::Unauthorized("invalid websocket ticket".to_string()))?;
+        if entry.session_id != session_id {
+            return Err(RelayError::Unauthorized(
+                "websocket ticket does not match session".to_string(),
+            ));
+        }
+        Ok(SessionAuth {
+            session_id: entry.session_id,
+            role: entry.role,
+            device_id: entry.device_id,
+        })
+    }
+
     pub async fn register_peer(
         &self,
         session_id: &str,
@@ -514,12 +645,12 @@ impl AppState {
     ) -> Result<
         (
             String,
-            mpsc::UnboundedReceiver<RelayServerMessage>,
+            mpsc::Receiver<RelayServerMessage>,
             RelayServerMessage,
         ),
         RelayError,
     > {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(PEER_QUEUE_CAPACITY);
         let mut store = self.inner.store.lock().await;
         let session = store
             .data
@@ -577,13 +708,12 @@ impl AppState {
     pub async fn unregister_peer(&self, session_id: &str, peer_id: &str) {
         let mut deferred = Vec::new();
         let mut requeued_actions = Vec::new();
-        let mut needs_persist = false;
+        let mut session_snapshot = None;
+        let mut should_redispatch = false;
         {
             let mut store = self.inner.store.lock().await;
-            let mut daemon_disconnected = false;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
-                let removed_role = live.peers.remove(peer_id).map(|peer| peer.role);
-                daemon_disconnected = matches!(removed_role, Some(RelayPeerRole::Daemon));
+                live.peers.remove(peer_id);
                 live.rpc_methods
                     .retain(|_, owner_peer_id| owner_peer_id != peer_id);
 
@@ -602,21 +732,30 @@ impl AppState {
                     live.pending_rpc.remove(&request_id);
                 }
 
-                if daemon_disconnected {
-                    let failed_request_ids = live.pending_rpc.keys().cloned().collect::<Vec<_>>();
-                    for request_id in failed_request_ids {
-                        if let Some(pending) = live.pending_rpc.remove(&request_id) {
-                            if let Some(requester) = live.peers.get(&pending.requester_peer_id) {
-                                deferred.push((
-                                    requester.tx.clone(),
-                                    RelayServerMessage::RpcResult {
-                                        request_id,
-                                        ok: false,
-                                        result: None,
-                                        error: None,
-                                    },
-                                ));
-                            }
+                let failed_request_ids = live
+                    .pending_rpc
+                    .iter()
+                    .filter_map(|(request_id, pending)| {
+                        if pending.responder_peer_id == peer_id {
+                            Some(request_id.clone())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                for request_id in failed_request_ids {
+                    if let Some(pending) = live.pending_rpc.remove(&request_id) {
+                        if let Some(requester) = live.peers.get(&pending.requester_peer_id) {
+                            deferred.push((
+                                pending.requester_peer_id.clone(),
+                                requester.tx.clone(),
+                                RelayServerMessage::RpcResult {
+                                    request_id,
+                                    ok: false,
+                                    result: None,
+                                    error: None,
+                                },
+                            ));
                         }
                     }
                 }
@@ -627,31 +766,56 @@ impl AppState {
             }
             if let Some(session) = store.data.sessions.get_mut(session_id) {
                 let now = Utc::now();
-                if daemon_disconnected {
-                    for action in session.actions.values_mut() {
-                        if !matches!(action.status, QueuedRemoteActionStatus::Dispatched) {
-                            continue;
-                        }
-                        action.status = QueuedRemoteActionStatus::Queued;
-                        action.updated_at = now;
-                        requeued_actions.push(action.to_public());
+                for action in session.actions.values_mut() {
+                    if action.owner_peer_id.as_deref() != Some(peer_id) {
+                        continue;
                     }
-                    needs_persist = !requeued_actions.is_empty();
+                    if !matches!(
+                        action.status,
+                        QueuedRemoteActionStatus::Dispatched | QueuedRemoteActionStatus::Executing
+                    ) {
+                        continue;
+                    }
+                    action.status = QueuedRemoteActionStatus::Queued;
+                    action.updated_at = now;
+                    action.error = None;
+                    action.result = None;
+                    action.owner_peer_id = None;
+                    requeued_actions.push(action.to_public());
+                    should_redispatch = true;
                 }
                 session.updated_at = now;
+                session_snapshot = Some(session.clone());
             }
         }
 
-        if needs_persist {
-            let _ = self.persist_current().await;
+        if let Some(session) = session_snapshot.as_ref() {
+            let action_ids = requeued_actions
+                .iter()
+                .map(|action| action.action_id.as_str())
+                .collect::<Vec<_>>();
+            let _ = self
+                .persist_action_state(
+                    session,
+                    (!action_ids.is_empty()).then_some(action_ids.as_slice()),
+                    PersistMode::Immediate,
+                )
+                .await;
         }
-        for (tx, message) in deferred {
-            let _ = tx.send(message);
+        for (requester_peer_id, tx, message) in deferred {
+            self.queue_message(session_id, &requester_peer_id, &tx, message);
         }
         for action in requeued_actions {
             let _ = self
-                .append_update(session_id, RelayUpdateBody::ActionStatus { action })
+                .append_update(
+                    session_id,
+                    RelayUpdateBody::ActionStatus { action },
+                    PersistMode::Immediate,
+                )
                 .await;
+        }
+        if should_redispatch {
+            self.dispatch_pending_actions(session_id).await;
         }
         self.broadcast_presence(session_id).await;
     }
@@ -693,7 +857,8 @@ impl AppState {
                 .await;
             }
             RelayClientMessage::Update { body } => {
-                self.append_update(session_id, body).await?;
+                self.append_update(session_id, body, PersistMode::Deferred)
+                    .await?;
             }
             RelayClientMessage::Ephemeral { body } => {
                 self.broadcast(session_id, RelayServerMessage::Ephemeral { body })
@@ -740,7 +905,7 @@ impl AppState {
                         "only daemon peers may resolve rpc calls".to_string(),
                     ));
                 }
-                self.resolve_rpc(session_id, request_id, ok, result, error)
+                self.resolve_rpc(session_id, peer_id, request_id, ok, result, error)
                     .await;
             }
             RelayClientMessage::ActionUpdate {
@@ -754,7 +919,7 @@ impl AppState {
                         "only daemon peers may update queued actions".to_string(),
                     ));
                 }
-                self.update_action(session_id, &action_id, status, error, result)
+                self.update_action(session_id, peer_id, &action_id, status, error, result)
                     .await?;
             }
         }
@@ -766,44 +931,54 @@ impl AppState {
         &self,
         session_id: &str,
         body: RelayUpdateBody,
+        persist_mode: PersistMode,
     ) -> Result<(), RelayError> {
-        let (update, recipients) = {
+        let (update, session, recipients) = {
             let mut store = self.inner.store.lock().await;
-            let session = store
-                .data
-                .sessions
-                .get_mut(session_id)
-                .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
-            let update = RelayUpdate {
-                id: format!("update-{}", Uuid::new_v4().simple()),
-                seq: session.next_seq(),
-                body,
-                created_at: Utc::now(),
-            };
-            session.updated_at = update.created_at;
-            session.updates.push(update.clone());
+            let update;
+            let session_snapshot;
+            {
+                let session = store
+                    .data
+                    .sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+                update = RelayUpdate {
+                    id: format!("update-{}", Uuid::new_v4().simple()),
+                    seq: session.next_seq(),
+                    body,
+                    created_at: Utc::now(),
+                };
+                session.updated_at = update.created_at;
+                session.updates.push(update.clone());
+                session_snapshot = session.clone();
+            }
             let recipients = store
                 .live_sessions
                 .get(session_id)
                 .map(|live| {
                     live.peers
-                        .values()
-                        .map(|peer| peer.tx.clone())
+                        .iter()
+                        .map(|(peer_id, peer)| (peer_id.clone(), peer.tx.clone()))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            (update, recipients)
+            (update, session_snapshot, recipients)
         };
 
-        self.persist_current().await?;
-
-        for tx in recipients {
-            // Send failures are expected when a peer disconnects — their
-            // socket_loop will detect the closed channel and unregister.
-            let _ = tx.send(RelayServerMessage::Update {
-                update: update.clone(),
-            });
+        for (peer_id, tx) in recipients {
+            self.queue_message(
+                session_id,
+                &peer_id,
+                &tx,
+                RelayServerMessage::Update {
+                    update: update.clone(),
+                },
+            );
         }
+
+        self.persist_update_state(&session, &update, persist_mode)
+            .await?;
 
         Ok(())
     }
@@ -819,7 +994,12 @@ impl AppState {
         }
 
         if let Some(tx) = ack {
-            let _ = tx.send(RelayServerMessage::RpcRegistered { method });
+            self.queue_message(
+                session_id,
+                peer_id,
+                &tx,
+                RelayServerMessage::RpcRegistered { method },
+            );
         }
     }
 
@@ -840,7 +1020,12 @@ impl AppState {
         }
 
         if let Some(tx) = ack {
-            let _ = tx.send(RelayServerMessage::RpcUnregistered { method });
+            self.queue_message(
+                session_id,
+                peer_id,
+                &tx,
+                RelayServerMessage::RpcUnregistered { method },
+            );
         }
     }
 
@@ -861,6 +1046,7 @@ impl AppState {
                 if live.pending_rpc.contains_key(&request_id) {
                     response = requester.map(|tx| {
                         (
+                            peer_id.to_string(),
                             tx,
                             RelayServerMessage::RpcResult {
                                 request_id: request_id.clone(),
@@ -876,13 +1062,15 @@ impl AppState {
                             request_id.clone(),
                             PendingRpc {
                                 requester_peer_id: peer_id.to_string(),
+                                responder_peer_id: owner_peer_id.clone(),
                             },
                         );
-                        target = Some(owner.tx.clone());
+                        target = Some((owner_peer_id, owner.tx.clone()));
                     } else {
                         live.rpc_methods.remove(&method);
                         response = requester.map(|tx| {
                             (
+                                peer_id.to_string(),
                                 tx,
                                 RelayServerMessage::RpcResult {
                                     request_id: request_id.clone(),
@@ -896,6 +1084,7 @@ impl AppState {
                 } else {
                     response = requester.map(|tx| {
                         (
+                            peer_id.to_string(),
                             tx,
                             RelayServerMessage::RpcResult {
                                 request_id: request_id.clone(),
@@ -909,20 +1098,26 @@ impl AppState {
             }
         }
 
-        if let Some(tx) = target {
-            let _ = tx.send(RelayServerMessage::RpcRequest {
-                request_id,
-                method,
-                params,
-            });
-        } else if let Some((tx, message)) = response {
-            let _ = tx.send(message);
+        if let Some((owner_peer_id, tx)) = target {
+            self.queue_message(
+                session_id,
+                &owner_peer_id,
+                &tx,
+                RelayServerMessage::RpcRequest {
+                    request_id,
+                    method,
+                    params,
+                },
+            );
+        } else if let Some((requester_peer_id, tx, message)) = response {
+            self.queue_message(session_id, &requester_peer_id, &tx, message);
         }
     }
 
     async fn resolve_rpc(
         &self,
         session_id: &str,
+        peer_id: &str,
         request_id: String,
         ok: bool,
         result: Option<EncryptedEnvelope>,
@@ -933,21 +1128,37 @@ impl AppState {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
                 if let Some(pending) = live.pending_rpc.remove(&request_id) {
-                    response = live
-                        .peers
-                        .get(&pending.requester_peer_id)
-                        .map(|peer| peer.tx.clone());
+                    if pending.responder_peer_id != peer_id {
+                        warn!(
+                            session_id,
+                            request_id,
+                            peer_id,
+                            owner_peer_id = %pending.responder_peer_id,
+                            "rejecting rpc result from non-owner daemon peer"
+                        );
+                        live.pending_rpc.insert(request_id.clone(), pending);
+                    } else {
+                        response = live
+                            .peers
+                            .get(&pending.requester_peer_id)
+                            .map(|peer| (pending.requester_peer_id.clone(), peer.tx.clone()));
+                    }
                 }
             }
         }
 
-        if let Some(tx) = response {
-            let _ = tx.send(RelayServerMessage::RpcResult {
-                request_id,
-                ok,
-                result,
-                error,
-            });
+        if let Some((requester_peer_id, tx)) = response {
+            self.queue_message(
+                session_id,
+                &requester_peer_id,
+                &tx,
+                RelayServerMessage::RpcResult {
+                    request_id,
+                    ok,
+                    result,
+                    error,
+                },
+            );
         }
     }
 
@@ -966,7 +1177,7 @@ impl AppState {
         let device_id = auth
             .device_id
             .ok_or_else(|| RelayError::Unauthorized("missing trusted device".to_string()))?;
-        let action = {
+        let (action, session) = {
             let mut store = self.inner.store.lock().await;
             let session = store
                 .data
@@ -974,12 +1185,22 @@ impl AppState {
                 .get_mut(session_id)
                 .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
 
-            if let Some(existing) = session
+            let action = if let Some(existing) = session
                 .actions
                 .values()
-                .find(|action| action.idempotency_key == request.idempotency_key)
+                .find(|action| {
+                    action.device_id == device_id
+                        && action.idempotency_key == request.idempotency_key
+                })
                 .cloned()
             {
+                if existing.action_type != request.action_type
+                    || existing.payload != request.payload
+                {
+                    return Err(RelayError::Conflict(
+                        "idempotency key already used for a different queued action".to_string(),
+                    ));
+                }
                 existing.to_public()
             } else {
                 let now = Utc::now();
@@ -995,21 +1216,26 @@ impl AppState {
                     updated_at: now,
                     error: None,
                     result: None,
+                    owner_peer_id: None,
                 };
                 session
                     .actions
                     .insert(action.action_id.clone(), action.clone());
                 session.updated_at = now;
                 action.to_public()
-            }
+            };
+            (action, session.clone())
         };
 
-        self.persist_current().await?;
+        let action_ids = [action.action_id.as_str()];
+        self.persist_action_state(&session, Some(&action_ids), PersistMode::Immediate)
+            .await?;
         self.append_update(
             session_id,
             RelayUpdateBody::ActionStatus {
                 action: action.clone(),
             },
+            PersistMode::Immediate,
         )
         .await?;
         self.dispatch_pending_actions(session_id).await;
@@ -1073,21 +1299,25 @@ impl AppState {
                 "only daemon peers may revoke trusted devices".to_string(),
             ));
         }
-        let revoked_peer_ids = {
+        let (revoked_peer_ids, session) = {
             let mut store = self.inner.store.lock().await;
-            let session = store
-                .data
-                .sessions
-                .get_mut(session_id)
-                .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
-            session.migrate_legacy_device_fields();
-            let device = session
-                .devices
-                .get_mut(device_id)
-                .ok_or_else(|| RelayError::NotFound("trusted device not found".to_string()))?;
-            device.revoked_at = Some(Utc::now());
-            session.updated_at = Utc::now();
-            store
+            let session_snapshot;
+            {
+                let session = store
+                    .data
+                    .sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+                session.migrate_legacy_device_fields();
+                let device = session
+                    .devices
+                    .get_mut(device_id)
+                    .ok_or_else(|| RelayError::NotFound("trusted device not found".to_string()))?;
+                device.revoked_at = Some(Utc::now());
+                session.updated_at = Utc::now();
+                session_snapshot = session.clone();
+            }
+            let revoked_peer_ids = store
                 .live_sessions
                 .get(session_id)
                 .map(|live| {
@@ -1104,9 +1334,11 @@ impl AppState {
                         })
                         .collect::<Vec<_>>()
                 })
-                .unwrap_or_default()
+                .unwrap_or_default();
+            (revoked_peer_ids, session_snapshot)
         };
-        self.persist_current().await?;
+        self.persist_device_state(&session, Some(device_id), PersistMode::Immediate)
+            .await?;
         for peer_id in revoked_peer_ids {
             self.unregister_peer(session_id, &peer_id).await;
         }
@@ -1117,12 +1349,13 @@ impl AppState {
     async fn update_action(
         &self,
         session_id: &str,
+        peer_id: &str,
         action_id: &str,
         status: QueuedRemoteActionStatus,
         error: Option<String>,
         result: Option<EncryptedEnvelope>,
     ) -> Result<(), RelayError> {
-        let action = {
+        let (action, session) = {
             let mut store = self.inner.store.lock().await;
             let session = store
                 .data
@@ -1133,18 +1366,45 @@ impl AppState {
                 .actions
                 .get_mut(action_id)
                 .ok_or_else(|| RelayError::NotFound("queued action not found".to_string()))?;
+            if action.owner_peer_id.as_deref() != Some(peer_id) {
+                warn!(
+                    session_id,
+                    action_id,
+                    peer_id,
+                    owner_peer_id = ?action.owner_peer_id,
+                    "rejecting queued action update from non-owner daemon peer"
+                );
+                return Err(RelayError::Conflict(
+                    "queued action is owned by a different daemon peer".to_string(),
+                ));
+            }
             action.status = status;
             action.error = error;
             action.result = result;
+            if matches!(
+                action.status,
+                QueuedRemoteActionStatus::Completed | QueuedRemoteActionStatus::Failed
+            ) {
+                action.owner_peer_id = None;
+            }
             action.updated_at = Utc::now();
             session.updated_at = action.updated_at;
-            action.to_public()
+            (action.to_public(), session.clone())
         };
-        self.append_update(session_id, RelayUpdateBody::ActionStatus { action })
-            .await
+        let action_ids = [action_id];
+        self.persist_action_state(&session, Some(&action_ids), PersistMode::Immediate)
+            .await?;
+        self.append_update(
+            session_id,
+            RelayUpdateBody::ActionStatus { action },
+            PersistMode::Immediate,
+        )
+        .await
     }
 
     async fn touch_presence(&self, session_id: &str, role: RelayPeerRole, device_id: Option<&str>) {
+        let mut session_snapshot = None;
+        let mut touched_device_id = None;
         let mut store = self.inner.store.lock().await;
         if let Some(session) = store.data.sessions.get_mut(session_id) {
             let now = Utc::now();
@@ -1155,11 +1415,19 @@ impl AppState {
                     if let Some(current_device_id) = device_id {
                         if let Some(device) = session.devices.get_mut(current_device_id) {
                             device.last_seen_at = Some(now);
+                            touched_device_id = Some(current_device_id.to_string());
                         }
                     }
                 }
             }
             session.updated_at = now;
+            session_snapshot = Some(session.clone());
+        }
+        drop(store);
+        if let Some(session) = session_snapshot.as_ref() {
+            let _ = self
+                .persist_device_state(session, touched_device_id.as_deref(), PersistMode::Deferred)
+                .await;
         }
     }
 
@@ -1182,24 +1450,25 @@ impl AppState {
             },
         )
         .await;
-        let _ = self
-            .append_update(session_id, RelayUpdateBody::Presence { presence })
-            .await;
+        let _ = self.append_update(
+            session_id,
+            RelayUpdateBody::Presence { presence },
+            PersistMode::Deferred,
+        );
     }
 
     async fn dispatch_pending_actions(&self, session_id: &str) {
         let mut to_send = Vec::new();
-        let mut need_persist = false;
-        {
+        let session_snapshot = {
             let mut store = self.inner.store.lock().await;
             let Some(live) = store.live_sessions.get_mut(session_id) else {
                 return;
             };
-            let Some(target) = live
+            let Some((target_peer_id, target)) = live
                 .peers
-                .values()
-                .find(|peer| matches!(peer.role, RelayPeerRole::Daemon))
-                .map(|peer| peer.tx.clone())
+                .iter()
+                .find(|(_, peer)| matches!(peer.role, RelayPeerRole::Daemon))
+                .map(|(peer_id, peer)| (peer_id.clone(), peer.tx.clone()))
             else {
                 return;
             };
@@ -1212,22 +1481,51 @@ impl AppState {
                 }
                 action.status = QueuedRemoteActionStatus::Dispatched;
                 action.updated_at = Utc::now();
-                need_persist = true;
-                to_send.push((target.clone(), action.to_public(), action.payload.clone()));
+                action.error = None;
+                action.result = None;
+                action.owner_peer_id = Some(target_peer_id.clone());
+                to_send.push((
+                    target_peer_id.clone(),
+                    target.clone(),
+                    action.to_public(),
+                    action.payload.clone(),
+                ));
+            }
+            Some(session.clone())
+        };
+
+        if let Some(session) = session_snapshot.as_ref() {
+            let action_ids = to_send
+                .iter()
+                .map(|(_, _, action, _)| action.action_id.as_str())
+                .collect::<Vec<_>>();
+            if !action_ids.is_empty() {
+                let _ = self
+                    .persist_action_state(
+                        session,
+                        Some(action_ids.as_slice()),
+                        PersistMode::Immediate,
+                    )
+                    .await;
             }
         }
 
-        if need_persist {
-            let _ = self.persist_current().await;
-        }
-
-        for (tx, action, payload) in to_send {
-            let _ = tx.send(RelayServerMessage::ActionRequested {
-                action: action.clone(),
-                payload,
-            });
+        for (peer_id, tx, action, payload) in to_send {
+            self.queue_message(
+                session_id,
+                &peer_id,
+                &tx,
+                RelayServerMessage::ActionRequested {
+                    action: action.clone(),
+                    payload,
+                },
+            );
             let _ = self
-                .append_update(session_id, RelayUpdateBody::ActionStatus { action })
+                .append_update(
+                    session_id,
+                    RelayUpdateBody::ActionStatus { action },
+                    PersistMode::Immediate,
+                )
                 .await;
         }
     }
@@ -1280,11 +1578,7 @@ impl AppState {
         };
 
         if let Some(tx) = tx {
-            if tx.send(message).is_err() {
-                // The peer's socket_loop will detect the closed channel and
-                // call unregister_peer — no need to clean up here.
-                tracing::warn!(session_id, peer_id, "send_to_peer failed — channel closed");
-            }
+            self.queue_message(session_id, peer_id, &tx, message);
         }
     }
 
@@ -1296,17 +1590,160 @@ impl AppState {
                 .get(session_id)
                 .map(|live| {
                     live.peers
-                        .values()
-                        .map(|peer| peer.tx.clone())
+                        .iter()
+                        .map(|(peer_id, peer)| (peer_id.clone(), peer.tx.clone()))
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default()
         };
 
-        for tx in recipients {
-            // Send failures are expected when a peer disconnects — their
-            // socket_loop will detect the closed channel and unregister.
-            let _ = tx.send(message.clone());
+        for (peer_id, tx) in recipients {
+            self.queue_message(session_id, &peer_id, &tx, message.clone());
+        }
+    }
+
+    fn queue_message(
+        &self,
+        session_id: &str,
+        peer_id: &str,
+        tx: &mpsc::Sender<RelayServerMessage>,
+        message: RelayServerMessage,
+    ) {
+        match tx.try_send(message) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                warn!(
+                    session_id,
+                    peer_id, "disconnecting slow relay peer after outbound queue overflow"
+                );
+                let state = self.clone();
+                let session_id = session_id.to_string();
+                let peer_id = peer_id.to_string();
+                tokio::spawn(async move {
+                    state.unregister_peer(&session_id, &peer_id).await;
+                });
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                let state = self.clone();
+                let session_id = session_id.to_string();
+                let peer_id = peer_id.to_string();
+                tokio::spawn(async move {
+                    state.unregister_peer(&session_id, &peer_id).await;
+                });
+            }
+        }
+    }
+
+    async fn persist_pairing_state(
+        &self,
+        session: Option<&SessionRecord>,
+        pairing: Option<&PairingRecord>,
+        mode: PersistMode,
+    ) -> Result<(), RelayError> {
+        if let Some(postgres) = &self.inner.postgres {
+            let mut client = postgres.client.lock().await;
+            if let Some(session) = session {
+                upsert_postgres_session(&mut client, session).await?;
+            }
+            if let Some(pairing) = pairing {
+                upsert_postgres_pairing(&mut client, pairing).await?;
+            }
+            Ok(())
+        } else {
+            self.persist_file(mode).await
+        }
+    }
+
+    async fn persist_device_state(
+        &self,
+        session: &SessionRecord,
+        device_id: Option<&str>,
+        mode: PersistMode,
+    ) -> Result<(), RelayError> {
+        if let Some(postgres) = &self.inner.postgres {
+            let mut client = postgres.client.lock().await;
+            upsert_postgres_session(&mut client, session).await?;
+            if let Some(device_id) = device_id {
+                if let Some(device) = session.devices.get(device_id) {
+                    upsert_postgres_device(&mut client, &session.session_id, device).await?;
+                }
+            }
+            Ok(())
+        } else {
+            self.persist_file(mode).await
+        }
+    }
+
+    async fn persist_action_state(
+        &self,
+        session: &SessionRecord,
+        action_ids: Option<&[&str]>,
+        mode: PersistMode,
+    ) -> Result<(), RelayError> {
+        if let Some(postgres) = &self.inner.postgres {
+            let mut client = postgres.client.lock().await;
+            upsert_postgres_session(&mut client, session).await?;
+            let ids = if let Some(action_ids) = action_ids {
+                action_ids
+                    .iter()
+                    .filter_map(|action_id| session.actions.get(*action_id))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            } else {
+                session.actions.values().cloned().collect::<Vec<_>>()
+            };
+            for action in ids {
+                upsert_postgres_action(&mut client, &action).await?;
+            }
+            Ok(())
+        } else {
+            self.persist_file(mode).await
+        }
+    }
+
+    async fn persist_update_state(
+        &self,
+        session: &SessionRecord,
+        update: &RelayUpdate,
+        mode: PersistMode,
+    ) -> Result<(), RelayError> {
+        if let Some(postgres) = &self.inner.postgres {
+            let mut client = postgres.client.lock().await;
+            upsert_postgres_session(&mut client, session).await?;
+            upsert_postgres_update(&mut client, &session.session_id, update).await?;
+            Ok(())
+        } else {
+            self.persist_file(mode).await
+        }
+    }
+
+    async fn persist_file(&self, mode: PersistMode) -> Result<(), RelayError> {
+        if self.inner.postgres.is_some() {
+            return Ok(());
+        }
+
+        match mode {
+            PersistMode::Immediate => {
+                let mut task = self.inner.file_persist_task.lock().await;
+                if let Some(handle) = task.take() {
+                    handle.abort();
+                }
+                drop(task);
+                self.persist_current().await
+            }
+            PersistMode::Deferred => {
+                let mut task = self.inner.file_persist_task.lock().await;
+                if let Some(handle) = task.take() {
+                    handle.abort();
+                }
+                let state = self.clone();
+                *task = Some(tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(FILE_PERSIST_DEBOUNCE_MS))
+                        .await;
+                    let _ = state.persist_current().await;
+                }));
+                Ok(())
+            }
         }
     }
 
@@ -1440,6 +1877,168 @@ async fn connect_postgres(database_url: &str) -> Result<PostgresClient, RelayErr
     Ok(client)
 }
 
+async fn upsert_postgres_session(
+    client: &mut PostgresClient,
+    session: &SessionRecord,
+) -> Result<(), RelayError> {
+    client
+        .execute(
+            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (session_id) DO UPDATE SET
+               pairing_id = EXCLUDED.pairing_id,
+               daemon_token = EXCLUDED.daemon_token,
+               daemon_last_seen_at = EXCLUDED.daemon_last_seen_at,
+               created_at = EXCLUDED.created_at,
+               updated_at = EXCLUDED.updated_at",
+            &[
+                &session.session_id,
+                &session.pairing_id,
+                &session.daemon_token,
+                &session.daemon_last_seen_at,
+                &session.created_at,
+                &session.updated_at,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
+async fn upsert_postgres_pairing(
+    client: &mut PostgresClient,
+    pairing: &PairingRecord,
+) -> Result<(), RelayError> {
+    client
+        .execute(
+            "INSERT INTO relay_pairings (pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, created_at, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (pairing_id) DO UPDATE SET
+               pairing_code = EXCLUDED.pairing_code,
+               daemon_token = EXCLUDED.daemon_token,
+               label = EXCLUDED.label,
+               session_id = EXCLUDED.session_id,
+               device_id = EXCLUDED.device_id,
+               daemon_bundle = EXCLUDED.daemon_bundle,
+               client_bundle = EXCLUDED.client_bundle,
+               created_at = EXCLUDED.created_at,
+               expires_at = EXCLUDED.expires_at",
+            &[
+                &pairing.pairing_id,
+                &pairing.pairing_code,
+                &pairing.daemon_token,
+                &pairing.label,
+                &pairing.session_id,
+                &pairing.device_id,
+                &encode_optional_json_field(pairing.daemon_bundle.as_ref())?,
+                &encode_optional_json_field(pairing.client_bundle.as_ref())?,
+                &pairing.created_at,
+                &pairing.expires_at,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
+async fn upsert_postgres_device(
+    client: &mut PostgresClient,
+    session_id: &str,
+    device: &TrustedDeviceRecord,
+) -> Result<(), RelayError> {
+    client
+        .execute(
+            "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (session_id, device_id) DO UPDATE SET
+               client_token = EXCLUDED.client_token,
+               label = EXCLUDED.label,
+               public_key = EXCLUDED.public_key,
+               created_at = EXCLUDED.created_at,
+               last_seen_at = EXCLUDED.last_seen_at,
+               revoked_at = EXCLUDED.revoked_at",
+            &[
+                &session_id,
+                &device.device_id,
+                &device.client_token,
+                &device.label,
+                &device.public_key,
+                &device.created_at,
+                &device.last_seen_at,
+                &device.revoked_at,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
+async fn upsert_postgres_update(
+    client: &mut PostgresClient,
+    session_id: &str,
+    update: &RelayUpdate,
+) -> Result<(), RelayError> {
+    let seq = i64::try_from(update.seq)
+        .map_err(|_| RelayError::StatePersist("update sequence overflow".to_string()))?;
+    client
+        .execute(
+            "INSERT INTO relay_updates (session_id, seq, update_id, body, created_at)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (session_id, seq) DO UPDATE SET
+               update_id = EXCLUDED.update_id,
+               body = EXCLUDED.body,
+               created_at = EXCLUDED.created_at",
+            &[
+                &session_id,
+                &seq,
+                &update.id,
+                &encode_json_field(&update.body)?,
+                &update.created_at,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
+async fn upsert_postgres_action(
+    client: &mut PostgresClient,
+    action: &QueuedActionRecord,
+) -> Result<(), RelayError> {
+    client
+        .execute(
+            "INSERT INTO relay_actions (action_id, session_id, device_id, action_type, idempotency_key, payload, status, created_at, updated_at, error, result)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (action_id) DO UPDATE SET
+               session_id = EXCLUDED.session_id,
+               device_id = EXCLUDED.device_id,
+               action_type = EXCLUDED.action_type,
+               idempotency_key = EXCLUDED.idempotency_key,
+               payload = EXCLUDED.payload,
+               status = EXCLUDED.status,
+               created_at = EXCLUDED.created_at,
+               updated_at = EXCLUDED.updated_at,
+               error = EXCLUDED.error,
+               result = EXCLUDED.result",
+            &[
+                &action.action_id,
+                &action.session_id,
+                &action.device_id,
+                &action.action_type,
+                &action.idempotency_key,
+                &encode_json_field(&action.payload)?,
+                &queued_action_status_to_db(&action.status),
+                &action.created_at,
+                &action.updated_at,
+                &action.error,
+                &encode_optional_json_field(action.result.as_ref())?,
+            ],
+        )
+        .await
+        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    Ok(())
+}
+
 async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError> {
     client
         .batch_execute(
@@ -1494,9 +2093,15 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
                 error TEXT NULL,
-                result JSONB NULL,
-                UNIQUE (session_id, idempotency_key)
+                result JSONB NULL
             );
+            ALTER TABLE relay_actions
+                DROP CONSTRAINT IF EXISTS relay_actions_session_idempotency_key_key;
+            ALTER TABLE relay_actions
+                DROP CONSTRAINT IF EXISTS relay_actions_session_device_idempotency_key_key;
+            ALTER TABLE relay_actions
+                ADD CONSTRAINT relay_actions_session_device_idempotency_key_key
+                UNIQUE (session_id, device_id, idempotency_key);
             CREATE INDEX IF NOT EXISTS relay_updates_session_seq_idx
                 ON relay_updates(session_id, seq);
             CREATE INDEX IF NOT EXISTS relay_actions_session_idx
@@ -1635,6 +2240,7 @@ async fn load_postgres_state(client: &PostgresClient) -> Result<PersistedState, 
                 updated_at: row.get("updated_at"),
                 error: row.get("error"),
                 result: decode_optional_json_field(row.get("result"))?,
+                owner_peer_id: None,
             };
             session.actions.insert(action.action_id.clone(), action);
         }
@@ -1812,6 +2418,36 @@ fn queued_action_status_from_db(value: &str) -> Result<QueuedRemoteActionStatus,
     }
 }
 
+fn normalize_in_flight_actions(state: &mut PersistedState) -> bool {
+    let now = Utc::now();
+    let mut changed = false;
+    for session in state.sessions.values_mut() {
+        let mut session_changed = false;
+        for action in session.actions.values_mut() {
+            if matches!(
+                action.status,
+                QueuedRemoteActionStatus::Dispatched | QueuedRemoteActionStatus::Executing
+            ) {
+                action.status = QueuedRemoteActionStatus::Queued;
+                action.updated_at = now;
+                action.error = None;
+                action.result = None;
+                action.owner_peer_id = None;
+                changed = true;
+                session_changed = true;
+            } else if action.owner_peer_id.is_some() {
+                action.owner_peer_id = None;
+                changed = true;
+                session_changed = true;
+            }
+        }
+        if session_changed {
+            session.updated_at = now;
+        }
+    }
+    changed
+}
+
 async fn load_state(path: &Path) -> Result<PersistedState, RelayError> {
     match fs::read_to_string(path).await {
         Ok(contents) => match serde_json::from_str(&contents) {
@@ -1864,11 +2500,15 @@ fn load_compatible_state(contents: &str) -> Result<PersistedState, RelayError> {
                     }
                     match serde_json::from_value::<SessionRecord>(patched) {
                         Ok(session) => {
-                            warn!("recovered legacy session {session_id} (cleared incompatible updates)");
+                            warn!(
+                                "recovered legacy session {session_id} (cleared incompatible updates)"
+                            );
                             state.sessions.insert(session_id.clone(), session);
                         }
                         Err(_) => {
-                            warn!("skipping incompatible legacy session record {session_id}: {first_error}");
+                            warn!(
+                                "skipping incompatible legacy session record {session_id}: {first_error}"
+                            );
                         }
                     }
                 }

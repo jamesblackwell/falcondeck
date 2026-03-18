@@ -445,11 +445,24 @@ pub enum EncryptionVariant {
     DataKeyV1,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityVariant {
+    #[default]
+    Ed25519V1,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingPublicKeyBundle {
     #[serde(default)]
     pub encryption_variant: EncryptionVariant,
+    #[serde(default)]
+    pub identity_variant: IdentityVariant,
     pub public_key: String,
+    #[serde(default)]
+    pub identity_public_key: String,
+    #[serde(default)]
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -463,10 +476,20 @@ pub struct WrappedDataKey {
 pub struct SessionKeyMaterial {
     #[serde(default)]
     pub encryption_variant: EncryptionVariant,
+    #[serde(default)]
+    pub identity_variant: IdentityVariant,
+    pub pairing_id: String,
+    pub session_id: String,
     pub daemon_public_key: String,
+    #[serde(default)]
+    pub daemon_identity_public_key: String,
     pub client_public_key: String,
+    #[serde(default)]
+    pub client_identity_public_key: String,
     pub client_wrapped_data_key: WrappedDataKey,
     pub daemon_wrapped_data_key: Option<WrappedDataKey>,
+    #[serde(default)]
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -512,6 +535,7 @@ pub struct ClaimPairingRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimPairingResponse {
+    pub pairing_id: String,
     pub session_id: String,
     pub device_id: String,
     pub client_token: String,
@@ -642,6 +666,12 @@ pub struct RemotePairingSession {
     pub pairing_id: String,
     pub pairing_code: String,
     pub session_id: Option<String>,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RelayWebSocketTicketResponse {
+    pub ticket: String,
     pub expires_at: DateTime<Utc>,
 }
 

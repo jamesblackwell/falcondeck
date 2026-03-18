@@ -4,11 +4,15 @@ use aes_gcm::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::{RngCore, rngs::OsRng};
 use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
-use crate::{EncryptedEnvelope, EncryptionVariant, WrappedDataKey};
+use crate::{
+    EncryptedEnvelope, EncryptionVariant, IdentityVariant, PairingPublicKeyBundle,
+    SessionKeyMaterial, WrappedDataKey,
+};
 
 const AES_GCM_VERSION: u8 = 0;
 const WRAPPED_KEY_VERSION: u8 = 0;
@@ -17,6 +21,8 @@ const AES_TAG_LEN: usize = 16;
 const BOX_PUBKEY_LEN: usize = 32;
 const BOX_NONCE_LEN: usize = 24;
 const DATA_KEY_LEN: usize = 32;
+const SIGNING_PUBKEY_LEN: usize = 32;
+const SIGNATURE_LEN: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum CryptoError {
@@ -28,6 +34,8 @@ pub enum CryptoError {
     InvalidKeyMaterial,
     #[error("invalid encrypted envelope")]
     InvalidEnvelope,
+    #[error("invalid signature")]
+    InvalidSignature,
     #[error("failed to encrypt payload")]
     EncryptFailed,
     #[error("failed to decrypt payload")]
@@ -42,6 +50,35 @@ pub enum CryptoError {
 pub struct LocalBoxKeyPair {
     secret_key: SecretKey,
     public_key_base64: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalIdentityKeyPair {
+    signing_key: SigningKey,
+    public_key_base64: String,
+}
+
+impl LocalIdentityKeyPair {
+    pub fn from_seed(seed: &[u8; DATA_KEY_LEN]) -> Self {
+        let signing_key = SigningKey::from_bytes(seed);
+        let public_key_base64 = BASE64.encode(signing_key.verifying_key().as_bytes());
+        Self {
+            signing_key,
+            public_key_base64,
+        }
+    }
+
+    pub fn from_box_key_pair(key_pair: &LocalBoxKeyPair) -> Self {
+        Self::from_seed(&key_pair.secret_key_bytes())
+    }
+
+    pub fn public_key_base64(&self) -> &str {
+        &self.public_key_base64
+    }
+
+    pub fn sign_bytes(&self, payload: &[u8]) -> String {
+        BASE64.encode(self.signing_key.sign(payload).to_bytes())
+    }
 }
 
 impl LocalBoxKeyPair {
@@ -157,6 +194,114 @@ fn decode_public_key(public_key_base64: &str) -> Result<PublicKey, CryptoError> 
     let key_bytes = <[u8; BOX_PUBKEY_LEN]>::try_from(bytes.as_slice())
         .map_err(|_| CryptoError::InvalidKeyMaterial)?;
     Ok(PublicKey::from(key_bytes))
+}
+
+fn decode_signing_public_key(public_key_base64: &str) -> Result<VerifyingKey, CryptoError> {
+    let bytes = BASE64
+        .decode(public_key_base64)
+        .map_err(|_| CryptoError::InvalidBase64)?;
+    let key_bytes = <[u8; SIGNING_PUBKEY_LEN]>::try_from(bytes.as_slice())
+        .map_err(|_| CryptoError::InvalidKeyMaterial)?;
+    VerifyingKey::from_bytes(&key_bytes).map_err(|_| CryptoError::InvalidKeyMaterial)
+}
+
+fn decode_signature(signature_base64: &str) -> Result<Signature, CryptoError> {
+    let bytes = BASE64
+        .decode(signature_base64)
+        .map_err(|_| CryptoError::InvalidBase64)?;
+    let signature_bytes = <[u8; SIGNATURE_LEN]>::try_from(bytes.as_slice())
+        .map_err(|_| CryptoError::InvalidSignature)?;
+    Ok(Signature::from_bytes(&signature_bytes))
+}
+
+fn pairing_bundle_signing_payload(bundle: &PairingPublicKeyBundle) -> Vec<u8> {
+    format!(
+        "falcondeck-pairing-bundle-v1\ndata_key_v1\ned25519_v1\n{}\n{}",
+        bundle.public_key, bundle.identity_public_key
+    )
+    .into_bytes()
+}
+
+fn session_key_material_signing_payload(material: &SessionKeyMaterial) -> Vec<u8> {
+    format!(
+        "falcondeck-session-bootstrap-v1\ndata_key_v1\ned25519_v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        material.pairing_id,
+        material.session_id,
+        material.daemon_public_key,
+        material.daemon_identity_public_key,
+        material.client_public_key,
+        material.client_identity_public_key,
+        material.client_wrapped_data_key.wrapped_key,
+        material
+            .daemon_wrapped_data_key
+            .as_ref()
+            .map(|wrapped| wrapped.wrapped_key.as_str())
+            .unwrap_or("")
+    )
+    .into_bytes()
+}
+
+pub fn build_pairing_public_key_bundle(key_pair: &LocalBoxKeyPair) -> PairingPublicKeyBundle {
+    let identity_key_pair = LocalIdentityKeyPair::from_box_key_pair(key_pair);
+    let mut bundle = PairingPublicKeyBundle {
+        encryption_variant: EncryptionVariant::DataKeyV1,
+        identity_variant: IdentityVariant::Ed25519V1,
+        public_key: key_pair.public_key_base64().to_string(),
+        identity_public_key: identity_key_pair.public_key_base64().to_string(),
+        signature: String::new(),
+    };
+    bundle.signature = identity_key_pair.sign_bytes(&pairing_bundle_signing_payload(&bundle));
+    bundle
+}
+
+pub fn verify_pairing_public_key_bundle(
+    bundle: &PairingPublicKeyBundle,
+) -> Result<(), CryptoError> {
+    if bundle.encryption_variant != EncryptionVariant::DataKeyV1
+        || bundle.identity_variant != IdentityVariant::Ed25519V1
+        || bundle.public_key.is_empty()
+        || bundle.identity_public_key.is_empty()
+        || bundle.signature.is_empty()
+    {
+        return Err(CryptoError::InvalidSignature);
+    }
+    let public_key = decode_signing_public_key(&bundle.identity_public_key)?;
+    let signature = decode_signature(&bundle.signature)?;
+    public_key
+        .verify(&pairing_bundle_signing_payload(bundle), &signature)
+        .map_err(|_| CryptoError::InvalidSignature)
+}
+
+pub fn sign_session_key_material(
+    identity_key_pair: &LocalIdentityKeyPair,
+    material: &mut SessionKeyMaterial,
+) -> Result<(), CryptoError> {
+    if material.identity_variant != IdentityVariant::Ed25519V1 {
+        return Err(CryptoError::UnsupportedVariant);
+    }
+    material.signature =
+        identity_key_pair.sign_bytes(&session_key_material_signing_payload(material));
+    Ok(())
+}
+
+pub fn verify_session_key_material(material: &SessionKeyMaterial) -> Result<(), CryptoError> {
+    if material.encryption_variant != EncryptionVariant::DataKeyV1
+        || material.identity_variant != IdentityVariant::Ed25519V1
+        || material.pairing_id.is_empty()
+        || material.session_id.is_empty()
+        || material.daemon_public_key.is_empty()
+        || material.daemon_identity_public_key.is_empty()
+        || material.client_public_key.is_empty()
+        || material.client_identity_public_key.is_empty()
+        || material.signature.is_empty()
+    {
+        return Err(CryptoError::InvalidSignature);
+    }
+    let public_key = decode_signing_public_key(&material.daemon_identity_public_key)?;
+    let signature = decode_signature(&material.signature)?;
+    public_key
+        .verify(&session_key_material_signing_payload(material), &signature)
+        .map_err(|_| CryptoError::InvalidSignature)
 }
 
 pub fn encrypt_bytes(
@@ -288,5 +433,56 @@ mod tests {
             LocalBoxKeyPair::from_secret_key_base64(&key_pair.secret_key_base64()).unwrap();
         assert_eq!(restored.public_key_base64(), key_pair.public_key_base64());
         assert_eq!(restored.secret_key_bytes(), key_pair.secret_key_bytes());
+    }
+
+    #[test]
+    fn pairing_bundle_signature_round_trip() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let bundle = build_pairing_public_key_bundle(&key_pair);
+        verify_pairing_public_key_bundle(&bundle).unwrap();
+    }
+
+    #[test]
+    fn tampered_pairing_bundle_signature_is_rejected() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let mut bundle = build_pairing_public_key_bundle(&key_pair);
+        bundle.public_key = LocalBoxKeyPair::generate().public_key_base64().to_string();
+        assert!(verify_pairing_public_key_bundle(&bundle).is_err());
+    }
+
+    #[test]
+    fn session_bootstrap_signature_round_trip() {
+        let daemon = LocalBoxKeyPair::generate();
+        let client = LocalBoxKeyPair::generate();
+        let data_key = generate_data_key();
+        let mut material = SessionKeyMaterial {
+            encryption_variant: EncryptionVariant::DataKeyV1,
+            identity_variant: IdentityVariant::Ed25519V1,
+            pairing_id: "pairing-1".to_string(),
+            session_id: "session-1".to_string(),
+            daemon_public_key: daemon.public_key_base64().to_string(),
+            daemon_identity_public_key: LocalIdentityKeyPair::from_box_key_pair(&daemon)
+                .public_key_base64()
+                .to_string(),
+            client_public_key: client.public_key_base64().to_string(),
+            client_identity_public_key: LocalIdentityKeyPair::from_box_key_pair(&client)
+                .public_key_base64()
+                .to_string(),
+            client_wrapped_data_key: daemon
+                .wrap_data_key(client.public_key_base64(), &data_key)
+                .unwrap(),
+            daemon_wrapped_data_key: Some(
+                daemon
+                    .wrap_data_key(daemon.public_key_base64(), &data_key)
+                    .unwrap(),
+            ),
+            signature: String::new(),
+        };
+        sign_session_key_material(
+            &LocalIdentityKeyPair::from_box_key_pair(&daemon),
+            &mut material,
+        )
+        .unwrap();
+        verify_session_key_material(&material).unwrap();
     }
 }

@@ -200,6 +200,7 @@ function InteractiveRequestMessage({
 }: {
   item: Extract<ConversationItem, { kind: 'interactive_request' }>
 }) {
+  if (!item.resolved) return null
   return <InteractiveRequestCard request={item.request} resolved={item.resolved} />
 }
 

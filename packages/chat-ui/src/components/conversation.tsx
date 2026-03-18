@@ -41,7 +41,10 @@ export const Conversation = memo(function Conversation({
   const stickyToBottomRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
   const renderableItems = useMemo(
-    () => items.filter((item) => item.kind !== 'reasoning'),
+    () =>
+      items.filter(
+        (item) => item.kind !== 'reasoning' && !(item.kind === 'interactive_request' && !item.resolved),
+      ),
     [items],
   )
   const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
@@ -196,7 +199,7 @@ export const Conversation = memo(function Conversation({
       <div
         ref={scrollRef}
         data-selectable
-        className="h-full overflow-x-hidden overflow-y-auto"
+        className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
         onScroll={handleScroll}
       >
         <div ref={contentRef} className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">

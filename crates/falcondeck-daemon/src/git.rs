@@ -45,20 +45,34 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
         .filter(|line| line.len() >= 4)
         .map(|line| {
             let xy = &line[..2];
-            let path = line[3..].to_string();
-            let status = match xy.trim() {
-                "A" | "AM" => GitFileStatus::Added,
-                "M" | "MM" | "MT" => GitFileStatus::Modified,
-                "D" => GitFileStatus::Deleted,
-                "R" | "RM" => GitFileStatus::Renamed,
-                "C" => GitFileStatus::Copied,
-                "??" => GitFileStatus::Untracked,
-                s if s.starts_with('A') => GitFileStatus::Added,
-                s if s.starts_with('M') => GitFileStatus::Modified,
-                s if s.starts_with('D') => GitFileStatus::Deleted,
-                s if s.starts_with('R') => GitFileStatus::Renamed,
-                _ => GitFileStatus::Modified,
+            let raw_path = &line[3..];
+
+            let (status, path) = match xy.trim() {
+                "A" | "AM" => (GitFileStatus::Added, raw_path.to_string()),
+                "M" | "MM" | "MT" => (GitFileStatus::Modified, raw_path.to_string()),
+                "D" => (GitFileStatus::Deleted, raw_path.to_string()),
+                "R" | "RM" => {
+                    if let Some((_old, new)) = raw_path.split_once(" -> ") {
+                        (GitFileStatus::Renamed, new.to_string())
+                    } else {
+                        (GitFileStatus::Renamed, raw_path.to_string())
+                    }
+                }
+                "C" => (GitFileStatus::Copied, raw_path.to_string()),
+                "??" => (GitFileStatus::Untracked, raw_path.to_string()),
+                s if s.starts_with('A') => (GitFileStatus::Added, raw_path.to_string()),
+                s if s.starts_with('M') => (GitFileStatus::Modified, raw_path.to_string()),
+                s if s.starts_with('D') => (GitFileStatus::Deleted, raw_path.to_string()),
+                s if s.starts_with('R') => {
+                    if let Some((_old, new)) = raw_path.split_once(" -> ") {
+                        (GitFileStatus::Renamed, new.to_string())
+                    } else {
+                        (GitFileStatus::Renamed, raw_path.to_string())
+                    }
+                }
+                _ => (GitFileStatus::Modified, raw_path.to_string()),
             };
+
             GitStatusEntry {
                 path,
                 status,

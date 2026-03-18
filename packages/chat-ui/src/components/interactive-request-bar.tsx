@@ -12,16 +12,16 @@ export type InteractiveRequestBarProps = {
 }
 
 export function InteractiveRequestBar({ requests, onRespond }: InteractiveRequestBarProps) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(true)
 
   if (requests.length === 0) return null
 
   return (
-    <div className="border-b border-border-subtle">
+    <div className="shrink-0 border-t border-border-subtle bg-surface-1">
       <button
         type="button"
         onClick={() => setExpanded((current) => !current)}
-        className="flex w-full items-center gap-2 bg-warning-muted/30 px-4 py-2 text-[length:var(--fd-text-xs)] font-medium text-warning transition-colors hover:bg-warning-muted/50"
+        className="flex w-full items-center gap-2 bg-warning-muted/20 px-4 py-2 text-[length:var(--fd-text-xs)] font-medium text-warning transition-colors hover:bg-warning-muted/35"
       >
         <BellDot className="h-3.5 w-3.5" />
         {requests.length === 1 ? '1 response pending' : `${requests.length} responses pending`}
@@ -33,7 +33,7 @@ export function InteractiveRequestBar({ requests, onRespond }: InteractiveReques
         </span>
       </button>
       {expanded ? (
-        <div className="max-h-[360px] space-y-2 overflow-y-auto bg-surface-1 p-3">
+        <div className="mx-auto flex w-full max-w-3xl flex-col gap-2 px-5 py-3">
           {requests.map((request) => (
             <InteractiveRequestCard
               key={request.request_id}

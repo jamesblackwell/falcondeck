@@ -325,6 +325,11 @@ export type RemotePairingSession = {
   expires_at: string
 }
 
+export type RelayWebSocketTicketResponse = {
+  ticket: string
+  expires_at: string
+}
+
 export type RemoteStatusResponse = {
   status: RemoteConnectionStatus
   relay_url: string | null
@@ -335,17 +340,23 @@ export type RemoteStatusResponse = {
 }
 
 export type ClaimPairingResponse = {
+  pairing_id: string
   session_id: string
   device_id: string
   client_token: string
   trusted_device: TrustedDevice
+  daemon_bundle?: PairingPublicKeyBundle | null
 }
 
 export type EncryptionVariant = 'data_key_v1'
+export type IdentityVariant = 'ed25519_v1'
 
 export type PairingPublicKeyBundle = {
   encryption_variant: EncryptionVariant
+  identity_variant: IdentityVariant
   public_key: string
+  identity_public_key: string
+  signature: string
 }
 
 export type WrappedDataKey = {
@@ -355,10 +366,16 @@ export type WrappedDataKey = {
 
 export type SessionKeyMaterial = {
   encryption_variant: EncryptionVariant
+  identity_variant: IdentityVariant
+  pairing_id: string
+  session_id: string
   daemon_public_key: string
+  daemon_identity_public_key: string
   client_public_key: string
+  client_identity_public_key: string
   client_wrapped_data_key: WrappedDataKey
   daemon_wrapped_data_key: WrappedDataKey | null
+  signature: string
 }
 
 export type EncryptedEnvelope = {

@@ -1,10 +1,13 @@
 export type PersistedRemoteSession = {
   relayUrl: string
   pairingCode: string
+  pairingId?: string | null
   sessionId: string
   deviceId?: string | null
   clientToken: string
   clientSecretKey: string
+  daemonPublicKey?: string | null
+  daemonIdentityPublicKey?: string | null
   dataKey?: string | null
   lastReceivedSeq?: number
 }

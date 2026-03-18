@@ -29,6 +29,14 @@ import { DiffPanel } from './components/DiffPanel'
 import { NewThreadState } from './components/NewThreadState'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
 
+function markInteractiveRequestResolved(items: ConversationItem[], requestId: string): ConversationItem[] {
+  return items.map((item) =>
+    item.kind === 'interactive_request' && item.id === requestId
+      ? { ...item, resolved: true }
+      : item,
+  )
+}
+
 export default function App() {
   return (
     <ToastProvider>
@@ -325,6 +333,14 @@ function AppInner() {
     if (!api) return
     try {
       await api.respondInteractive(workspaceId, requestId, response)
+      setThreadDetail((current) =>
+        current && current.workspace.id === workspaceId
+          ? {
+              ...current,
+              items: markInteractiveRequestResolved(current.items, requestId),
+            }
+          : current,
+      )
       const nextSnapshot = await api.snapshot()
       setSnapshot(nextSnapshot)
       setActionError(null)
@@ -478,10 +494,6 @@ function AppInner() {
               isStartingRemote={isStartingRemote}
             />
           </SessionHeader>
-          <InteractiveRequestBar
-            requests={interactiveRequests}
-            onRespond={handleInteractiveResponseCallback}
-          />
           <Conversation
             threadKey={
               selectedThreadId
@@ -492,6 +504,10 @@ function AppInner() {
             emptyState={conversationEmptyState}
             isThinking={isSending || selectedThread?.status === 'running'}
             isLoading={isThreadDetailPending}
+          />
+          <InteractiveRequestBar
+            requests={interactiveRequests}
+            onRespond={handleInteractiveResponseCallback}
           />
           <PromptInput
             value={draft}

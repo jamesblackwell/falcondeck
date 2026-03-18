@@ -2,9 +2,10 @@ use std::path::PathBuf;
 
 use chrono::Duration;
 use falcondeck_core::{
-    ClaimPairingRequest, ClaimPairingResponse, DaemonSnapshot, EncryptionVariant, HealthResponse,
+    ClaimPairingRequest, ClaimPairingResponse, DaemonSnapshot, HealthResponse,
     PairingPublicKeyBundle, RelayUpdateBody, RelayUpdatesResponse, RemoteStatusResponse,
-    StartRemotePairingRequest, WorkspaceStatus, crypto::LocalBoxKeyPair,
+    StartRemotePairingRequest, WorkspaceStatus,
+    crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle},
 };
 use falcondeck_daemon::{DaemonConfig, spawn_embedded};
 use falcondeck_relay::{AppState as RelayState, router as relay_router};
@@ -318,10 +319,7 @@ async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstra
 
 fn test_bundle() -> PairingPublicKeyBundle {
     let key_pair = LocalBoxKeyPair::generate();
-    PairingPublicKeyBundle {
-        encryption_variant: EncryptionVariant::DataKeyV1,
-        public_key: key_pair.public_key_base64().to_string(),
-    }
+    build_pairing_public_key_bundle(&key_pair)
 }
 
 async fn wait_for_connected(

@@ -31,6 +31,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pairings/{pairing_id}", get(pairing_status))
         .route("/v1/sessions/{session_id}/updates", get(session_updates))
         .route("/v1/sessions/{session_id}/actions", post(submit_action))
+        .route("/v1/sessions/{session_id}/ws-ticket", post(issue_ws_ticket))
         .route(
             "/v1/sessions/{session_id}/actions/{action_id}",
             get(action_status),
@@ -53,18 +54,12 @@ pub fn router(state: AppState) -> Router {
 #[derive(Debug, Deserialize)]
 struct UpdatesRequestQuery {
     after_seq: Option<u64>,
-    token: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct PairingAuthQuery {
-    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct WebSocketQuery {
     session_id: String,
-    token: String,
+    ticket: String,
 }
 
 async fn health(State(state): State<AppState>) -> Json<falcondeck_core::RelayHealthResponse> {
@@ -88,10 +83,9 @@ async fn claim_pairing(
 async fn pairing_status(
     State(state): State<AppState>,
     Path(pairing_id): Path<String>,
-    Query(query): Query<PairingAuthQuery>,
     headers: HeaderMap,
 ) -> Result<Json<falcondeck_core::PairingStatusResponse>, RelayError> {
-    let token = auth_token(&headers, query.token.as_deref())?;
+    let token = auth_token(&headers)?;
     Ok(Json(state.pairing_status(&pairing_id, &token).await?))
 }
 
@@ -104,12 +98,21 @@ async fn session_updates(
     let relay_query = RelayUpdatesQuery {
         after_seq: query.after_seq,
     };
-    let token = auth_token(&headers, query.token.as_deref())?;
+    let token = auth_token(&headers)?;
     Ok(Json(
         state
             .session_updates(&session_id, &token, relay_query.after_seq.unwrap_or(0))
             .await?,
     ))
+}
+
+async fn issue_ws_ticket(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<falcondeck_core::RelayWebSocketTicketResponse>, RelayError> {
+    let token = auth_token(&headers)?;
+    Ok(Json(state.issue_ws_ticket(&session_id, &token).await?))
 }
 
 async fn updates_ws(
@@ -118,7 +121,7 @@ async fn updates_ws(
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, RelayError> {
     let auth = state
-        .authenticate_session(&query.session_id, &query.token)
+        .consume_ws_ticket(&query.session_id, &query.ticket)
         .await?;
     Ok(ws.on_upgrade(move |socket| socket_loop(socket, state, auth)))
 }
@@ -231,7 +234,7 @@ async fn submit_action(
     headers: HeaderMap,
     Json(request): Json<SubmitQueuedActionRequest>,
 ) -> Result<Json<falcondeck_core::QueuedRemoteAction>, RelayError> {
-    let token = auth_token(&headers, None)?;
+    let token = auth_token(&headers)?;
     Ok(Json(
         state.submit_action(&session_id, &token, request).await?,
     ))
@@ -242,7 +245,7 @@ async fn action_status(
     Path((session_id, action_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<falcondeck_core::QueuedRemoteAction>, RelayError> {
-    let token = auth_token(&headers, None)?;
+    let token = auth_token(&headers)?;
     Ok(Json(
         state.action_status(&session_id, &token, &action_id).await?,
     ))
@@ -253,7 +256,7 @@ async fn trusted_devices(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<falcondeck_core::TrustedDevicesResponse>, RelayError> {
-    let token = auth_token(&headers, None)?;
+    let token = auth_token(&headers)?;
     Ok(Json(state.trusted_devices(&session_id, &token).await?))
 }
 
@@ -262,7 +265,7 @@ async fn revoke_trusted_device(
     Path((session_id, device_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<falcondeck_core::TrustedDevicesResponse>, RelayError> {
-    let token = auth_token(&headers, None)?;
+    let token = auth_token(&headers)?;
     Ok(Json(
         state
             .revoke_trusted_device(&session_id, &token, &device_id)
@@ -285,7 +288,7 @@ async fn send_raw_error(mut socket: WebSocket, message: String) -> Result<(), ax
     socket.send(Message::Text(payload.into())).await
 }
 
-fn auth_token(headers: &HeaderMap, fallback: Option<&str>) -> Result<String, RelayError> {
+fn auth_token(headers: &HeaderMap) -> Result<String, RelayError> {
     if let Some(header) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(value) = header.to_str() {
             if let Some(token) = value.strip_prefix("Bearer ") {
@@ -297,12 +300,6 @@ fn auth_token(headers: &HeaderMap, fallback: Option<&str>) -> Result<String, Rel
         }
     }
 
-    if let Some(token) = fallback {
-        if !token.trim().is_empty() {
-            return Ok(token.trim().to_string());
-        }
-    }
-
     Err(RelayError::Unauthorized("missing bearer token".to_string()))
 }
 
@@ -311,9 +308,9 @@ mod tests {
     use super::auth_token;
 
     #[test]
-    fn falls_back_to_query_token() {
+    fn requires_authorization_header() {
         let headers = axum::http::HeaderMap::new();
-        let token = auth_token(&headers, Some("abc123")).unwrap();
-        assert_eq!(token, "abc123");
+        let error = auth_token(&headers).unwrap_err();
+        assert_eq!(error.to_string(), "missing bearer token");
     }
 }
