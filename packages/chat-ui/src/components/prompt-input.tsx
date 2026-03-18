@@ -1,4 +1,4 @@
-import { ImagePlus, Send } from 'lucide-react'
+import { ImagePlus, Map, Send } from 'lucide-react'
 import { memo, useCallback, useRef, type ChangeEvent } from 'react'
 
 import type { CollaborationModeSummary, ImageInput, ModelSummary } from '@falcondeck/client-core'
@@ -129,14 +129,15 @@ export const PromptInput = memo(function PromptInput({
             <Button
               type="button"
               variant={planModeEnabled ? 'secondary' : 'ghost'}
-              size="sm"
+              size="icon"
               disabled={disabled}
               onClick={() => onPlanModeChange?.(!planModeEnabled)}
-              className="rounded-full px-3"
+              className="rounded-full"
               aria-pressed={planModeEnabled}
               title="Enable plan mode"
+              aria-label="Enable plan mode"
             >
-              Enable plan mode
+              <Map className="h-4 w-4" />
             </Button>
           ) : null}
 

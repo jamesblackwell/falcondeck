@@ -38,10 +38,16 @@ import {
   type ThreadDetail,
   type ThreadHandle,
 } from '@falcondeck/client-core'
-import { Conversation, InteractiveRequestCard, PromptInput, ThreadItem, WorkspaceGroup } from '@falcondeck/chat-ui'
-import { Badge, Button, EmptyState, Input, ScrollArea, StatusIndicator } from '@falcondeck/ui'
+import {
+  Conversation,
+  InteractiveRequestBar,
+  PromptInput,
+  SessionHeader,
+  WorkspaceSidebar,
+} from '@falcondeck/chat-ui'
+import { Badge, Button, Input } from '@falcondeck/ui'
 
-import { Lock, Smartphone } from 'lucide-react'
+import { Lock, PanelLeft, Smartphone } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -1150,6 +1156,21 @@ export default function App() {
     () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace),
     [selectedCollaborationMode, selectedWorkspace],
   )
+  const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(threadId)
+    setShowProjects(false)
+  }, [])
+  const handleSelectThread = useCallback((workspaceId: string, threadId: string) => {
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(threadId)
+    setShowProjects(false)
+  }, [])
+  const handleNewThread = useCallback((workspaceId: string) => {
+    setSelectedWorkspaceId(workspaceId)
+    setSelectedThreadId(null)
+    setShowProjects(false)
+  }, [])
 
   useEffect(() => {
     if (!snapshot) return
@@ -1213,30 +1234,25 @@ export default function App() {
 
   // ── Connected session ──────────────────────────────────────────────
 
-  const pathLabel = selectedWorkspace?.path.split('/').pop()
   const desktopOnline = machinePresence?.daemon_connected ?? false
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
-      {/* Header bar */}
-      <header className="flex shrink-0 items-center gap-3 overflow-hidden border-b border-border-subtle px-4 py-3">
-        <button
-          type="button"
-          onClick={() => setShowProjects((v) => !v)}
-          className="flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-left transition-colors hover:bg-surface-2"
-        >
-          <StatusIndicator
-            status={isEncrypted ? 'connected' : connectionStatus === 'disconnected' ? 'disconnected' : 'active'}
-            size="md"
-            pulse={connectionStatus === 'connecting'}
-          />
-          <div className="min-w-0">
-            <p className="truncate text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
-              {pathLabel ?? 'FalconDeck'}
-            </p>
-          </div>
-        </button>
-
+      <SessionHeader
+        workspace={selectedWorkspace}
+        thread={selectedThread}
+        className="border-b border-border-subtle pt-3 md:pt-10"
+        navigation={
+          <button
+            type="button"
+            onClick={() => setShowProjects((value) => !value)}
+            className="flex shrink-0 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-secondary transition-colors hover:bg-surface-2 hover:text-fg-primary"
+            aria-label={showProjects ? 'Hide projects' : 'Show projects'}
+          >
+            <PanelLeft className="h-4 w-4" />
+          </button>
+        }
+      >
         <div className="ml-auto flex items-center gap-2">
           <Badge
             variant={relayConnected ? 'success' : connectionStatus === 'disconnected' ? 'danger' : 'warning'}
@@ -1248,62 +1264,36 @@ export default function App() {
             {desktopOnline ? 'Desktop online' : 'Desktop retrying'}
           </Badge>
         </div>
-      </header>
+      </SessionHeader>
 
-      {/* Project switcher drawer */}
       {showProjects ? (
         <div className="shrink-0 border-b border-border-subtle bg-surface-1">
-          <ScrollArea className="max-h-64">
-            <div className="space-y-2 p-3">
-              {groups.map((group) => (
-                <WorkspaceGroup
-                  key={group.workspace.id}
-                  workspace={group.workspace}
-                  isSelected={selectedWorkspaceId === group.workspace.id}
-                  onSelect={() => {
-                    setSelectedWorkspaceId(group.workspace.id)
-                    setSelectedThreadId(group.workspace.current_thread_id ?? group.threads[0]?.id ?? null)
-                    setShowProjects(false)
-                  }}
-                >
-                  {group.threads.map((thread) => (
-                    <ThreadItem
-                      key={thread.id}
-                      thread={thread}
-                      isSelected={selectedThreadId === thread.id}
-                      onSelect={() => {
-                        setSelectedWorkspaceId(group.workspace.id)
-                        setSelectedThreadId(thread.id)
-                        setShowProjects(false)
-                      }}
-                    />
-                  ))}
-                </WorkspaceGroup>
-              ))}
-              {groups.length === 0 ? (
-                <EmptyState title="Waiting for projects" className="py-6" />
-              ) : null}
-            </div>
-          </ScrollArea>
+          <WorkspaceSidebar
+            groups={groups}
+            selectedWorkspaceId={selectedWorkspaceId}
+            selectedThreadId={selectedThreadId}
+            onSelectWorkspace={handleSelectWorkspace}
+            onSelectThread={handleSelectThread}
+            onNewThread={handleNewThread}
+            title="Projects"
+            errors={error ? [error] : []}
+            emptyState={{
+              title: 'Waiting for projects',
+              description: 'Projects will appear after the desktop shares its current snapshot.',
+            }}
+            className="h-[min(32rem,60dvh)] bg-surface-1"
+            headerClassName="pt-4"
+          />
         </div>
       ) : null}
 
-      {/* Approval banners */}
-      {interactiveRequests.length > 0 ? (
-        <div className="shrink-0 space-y-2 border-b border-border-subtle p-3">
-          {interactiveRequests.map((request) => (
-            <InteractiveRequestCard
-              key={request.request_id}
-              request={request}
-              onRespond={(response) =>
-                handleInteractiveResponse(request.workspace_id, request.request_id, response)
-              }
-            />
-          ))}
-        </div>
-      ) : null}
+      <InteractiveRequestBar
+        requests={interactiveRequests}
+        onRespond={(request, response) =>
+          handleInteractiveResponse(request.workspace_id, request.request_id, response)
+        }
+      />
 
-      {/* Conversation */}
       <Conversation
         threadKey={
           selectedThreadId
@@ -1314,7 +1304,6 @@ export default function App() {
         isThinking={isSubmitting || selectedThread?.status === 'running'}
       />
 
-      {/* Prompt input */}
       <div className="shrink-0">
         <PromptInput
           value={draft}
