@@ -115,7 +115,7 @@ export const PromptInput = memo(function PromptInput({
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={disabled ? 'Add a project to get started...' : 'Ask Codex anything...'}
-          className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[length:var(--fd-text-base)] leading-relaxed text-fg-primary placeholder:text-fg-secondary focus:outline-none"
+          className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[16px] leading-relaxed text-fg-primary placeholder:text-fg-secondary focus:outline-none md:text-[length:var(--fd-text-base)]"
           style={{ minHeight: '52px', maxHeight: '200px' }}
           rows={1}
         />
