@@ -1469,17 +1469,19 @@ export default function App() {
         </>
       ) : null}
 
-      <Conversation
-        threadKey={
-          selectedThreadId
-            ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
-            : selectedWorkspaceId
-        }
-        items={items}
-        isThinking={isSubmitting || selectedThread?.status === 'running'}
-      />
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <Conversation
+          threadKey={
+            selectedThreadId
+              ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
+              : selectedWorkspaceId
+          }
+          items={items}
+          isThinking={isSubmitting || selectedThread?.status === 'running'}
+        />
+      </div>
 
-      <div className="shrink-0">
+      <div className="shrink-0 border-t border-border-subtle bg-surface-0/95 backdrop-blur md:border-t-0 md:bg-transparent md:backdrop-blur-0">
         <InteractiveRequestBar
           requests={interactiveRequests}
           onRespond={(request, response) =>

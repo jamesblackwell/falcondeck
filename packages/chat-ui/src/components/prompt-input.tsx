@@ -91,7 +91,7 @@ export const PromptInput = memo(function PromptInput({
   )
 
   return (
-    <div className="mx-auto mb-3 w-full max-w-3xl">
+    <div className="mx-auto w-full max-w-3xl px-3 pt-2 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-3 md:px-0 md:pt-0 md:pb-0">
       <div className="rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2">
         {/* Attachment previews */}
         {attachments.length > 0 ? (
