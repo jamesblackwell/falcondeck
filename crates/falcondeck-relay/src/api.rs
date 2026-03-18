@@ -144,6 +144,13 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
         .after_peer_ready(&auth.session_id, auth.role.clone())
         .await;
 
+    // Peers send heartbeat pings every 15s; 45s without any message
+    // indicates a half-open or dead connection.
+    let idle_timeout = tokio::time::Duration::from_secs(45);
+    let mut last_activity = tokio::time::Instant::now();
+    let mut idle_check = tokio::time::interval(tokio::time::Duration::from_secs(10));
+    idle_check.tick().await; // consume the immediate first tick
+
     loop {
         tokio::select! {
             maybe_message = rx.recv() => {
@@ -159,6 +166,7 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
             incoming = receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
+                        last_activity = tokio::time::Instant::now();
                         let parsed = serde_json::from_str::<RelayClientMessage>(&text);
                         match parsed {
                             Ok(message) => {
@@ -185,8 +193,11 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                         }
                     }
                     Some(Ok(Message::Close(_))) => break,
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                        last_activity = tokio::time::Instant::now();
+                    }
                     Some(Ok(Message::Binary(_))) => {
+                        last_activity = tokio::time::Instant::now();
                         let server_message = RelayServerMessage::Error {
                             message: "binary websocket payloads are not supported".to_string(),
                         };
@@ -195,6 +206,17 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                         }
                     }
                     Some(Err(_)) | None => break,
+                }
+            }
+            _ = idle_check.tick() => {
+                if last_activity.elapsed() > idle_timeout {
+                    tracing::warn!(
+                        session_id = %auth.session_id,
+                        peer_id = %peer_id,
+                        "peer idle for {:?}, closing connection",
+                        last_activity.elapsed()
+                    );
+                    break;
                 }
             }
         }

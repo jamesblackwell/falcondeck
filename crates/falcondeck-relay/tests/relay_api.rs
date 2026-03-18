@@ -557,7 +557,7 @@ async fn persisted_state_does_not_store_plaintext_session_markers() {
 }
 
 #[tokio::test]
-async fn legacy_plaintext_state_is_skipped_instead_of_crashing() {
+async fn legacy_state_recovers_sessions_and_skips_incompatible_pairings() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("relay-state.json");
     std::fs::write(
@@ -600,8 +600,10 @@ async fn legacy_plaintext_state_is_skipped_instead_of_crashing() {
         .await
         .unwrap();
     let health = state.health().await;
+    // Pairing is skipped (incompatible daemon_bundle format), but the
+    // session is recovered with its incompatible updates cleared.
     assert_eq!(health.pending_pairings, 0);
-    assert_eq!(health.active_sessions, 0);
+    assert_eq!(health.active_sessions, 1);
 }
 
 async fn create_claimed_session(

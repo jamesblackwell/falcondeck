@@ -42,6 +42,36 @@ use crate::{
     error::DaemonError,
 };
 
+/// Classifies errors from the remote relay connection so the retry loop can
+/// apply appropriate backoff.  Most errors (network drops, broadcast lag) are
+/// transient and should retry quickly.  Only permanent failures (channel
+/// closed, internal shutdown) use exponential backoff.
+enum RemoteBridgeError {
+    Transient(String),
+    Persistent(String),
+}
+
+impl RemoteBridgeError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Transient(msg) | Self::Persistent(msg) => msg,
+        }
+    }
+
+    fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient(_))
+    }
+}
+
+/// All bare `String` errors produced by `.map_err(|e| format!(...))` are
+/// treated as transient by default — only explicitly-constructed `Persistent`
+/// values bypass fast retry.
+impl From<String> for RemoteBridgeError {
+    fn from(s: String) -> Self {
+        Self::Transient(s)
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<InnerState>,
@@ -147,7 +177,7 @@ impl AppState {
     }
 
     pub fn new_with_state_path(version: String, codex_bin: String, state_path: PathBuf) -> Self {
-        let (broadcaster, _) = broadcast::channel(512);
+        let (broadcaster, _) = broadcast::channel(2048);
         Self {
             inner: Arc::new(InnerState {
                 daemon: DaemonInfo {
@@ -1086,23 +1116,26 @@ impl AppState {
                     backoff_seconds = 1;
                 }
                 Err(error) => {
+                    let error_msg = error.message().to_string();
+                    let is_transient = error.is_transient();
+
                     let mut remote = self.inner.remote.lock().await;
                     let should_clear_pairing = remote.pairing.as_ref().is_some_and(|pairing| {
                         pairing.device_id.is_none() && pairing.expires_at <= Utc::now()
                     });
-                    let revoked = error.contains("invalid session token")
-                        || error.contains("session not found")
-                        || error.contains("trusted device");
+                    let revoked = error_msg.contains("invalid session token")
+                        || error_msg.contains("session not found")
+                        || error_msg.contains("trusted device");
                     remote.status = if should_clear_pairing {
                         RemoteConnectionStatus::Inactive
                     } else if revoked {
                         RemoteConnectionStatus::Revoked
-                    } else if backoff_seconds >= 8 {
+                    } else if !is_transient && backoff_seconds >= 8 {
                         RemoteConnectionStatus::Offline
                     } else {
                         RemoteConnectionStatus::Degraded
                     };
-                    remote.last_error = Some(error);
+                    remote.last_error = Some(error_msg);
                     if should_clear_pairing || revoked {
                         remote.relay_url = None;
                         remote.daemon_token = None;
@@ -1113,8 +1146,13 @@ impl AppState {
                     if should_clear_pairing || revoked {
                         break;
                     }
-                    sleep(Duration::from_secs(backoff_seconds)).await;
-                    backoff_seconds = (backoff_seconds * 2).min(16);
+                    if is_transient {
+                        sleep(Duration::from_secs(1)).await;
+                        backoff_seconds = 1;
+                    } else {
+                        sleep(Duration::from_secs(backoff_seconds)).await;
+                        backoff_seconds = (backoff_seconds * 2).min(16);
+                    }
                 }
             }
         }
@@ -1125,7 +1163,7 @@ impl AppState {
         relay_url: String,
         daemon_token: String,
         pairing: RemotePairingState,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteBridgeError> {
         // If we already have a trusted device with session + client key material,
         // skip polling the pairing endpoint entirely — the pairing may have expired
         // but the session is still valid.
@@ -1159,7 +1197,9 @@ impl AppState {
                     .map_err(|error| format!("failed to parse relay pairing status: {error}"))?;
 
                 if response.status == falcondeck_core::PairingStatus::Expired {
-                    return Err("relay pairing expired before it was claimed".to_string());
+                    return Err(RemoteBridgeError::Persistent(
+                        "relay pairing expired before it was claimed".to_string(),
+                    ));
                 }
 
                 {
@@ -1178,7 +1218,9 @@ impl AppState {
                     (response.session_id, response.device_id)
                 {
                     let client_bundle = response.client_bundle.ok_or_else(|| {
-                        "relay pairing completed without client key material".to_string()
+                        RemoteBridgeError::Persistent(
+                            "relay pairing completed without client key material".to_string(),
+                        )
                     })?;
                     break (session_id, device_id, client_bundle);
                 }
@@ -1418,7 +1460,7 @@ impl AppState {
         session_id: String,
         pairing: RemotePairingState,
         client_bundle: PairingPublicKeyBundle,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteBridgeError> {
         let ws_url = relay_ws_url(&relay_url, &session_id, &daemon_token);
         let (socket, _) = connect_async(&ws_url)
             .await
@@ -1530,15 +1572,43 @@ impl AppState {
         loop {
             tokio::select! {
                 event = events.recv() => {
-                    let event = event.map_err(|error| format!("remote event stream ended: {error}"))?;
-                    send_relay_message(
-                        &mut writer,
-                        &RelayClientMessage::Update {
-                            body: RelayUpdateBody::Encrypted {
-                                envelope: encrypt_remote_daemon_event(&pairing.data_key, &event)?,
-                            },
-                        },
-                    ).await?;
+                    match event {
+                        Ok(event) => {
+                            send_relay_message(
+                                &mut writer,
+                                &RelayClientMessage::Update {
+                                    body: RelayUpdateBody::Encrypted {
+                                        envelope: encrypt_remote_daemon_event(&pairing.data_key, &event)?,
+                                    },
+                                },
+                            ).await?;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!("remote daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
+                            let snapshot_event = EventEnvelope {
+                                seq: 0,
+                                emitted_at: Utc::now(),
+                                workspace_id: None,
+                                thread_id: None,
+                                event: UnifiedEvent::Snapshot {
+                                    snapshot: self.snapshot().await,
+                                },
+                            };
+                            send_relay_message(
+                                &mut writer,
+                                &RelayClientMessage::Update {
+                                    body: RelayUpdateBody::Encrypted {
+                                        envelope: encrypt_remote_daemon_event(&pairing.data_key, &snapshot_event)?,
+                                    },
+                                },
+                            ).await?;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(RemoteBridgeError::Persistent(
+                                "remote event stream closed".to_string(),
+                            ));
+                        }
+                    }
                 }
                 _ = heartbeat.tick() => {
                     send_relay_message(&mut writer, &RelayClientMessage::Ping).await?;
@@ -1559,11 +1629,11 @@ impl AppState {
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => {
-                            return Err("relay websocket disconnected".to_string());
+                            return Err("relay websocket disconnected".to_string().into());
                         }
                         Some(Ok(_)) => {}
                         Some(Err(error)) => {
-                            return Err(format!("relay websocket error: {error}"));
+                            return Err(format!("relay websocket error: {error}").into());
                         }
                     }
                 }

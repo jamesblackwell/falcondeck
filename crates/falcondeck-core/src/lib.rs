@@ -438,26 +438,30 @@ pub struct RelayHealthResponse {
     pub active_sessions: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EncryptionVariant {
+    #[default]
     DataKeyV1,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingPublicKeyBundle {
+    #[serde(default)]
     pub encryption_variant: EncryptionVariant,
     pub public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WrappedDataKey {
+    #[serde(default)]
     pub encryption_variant: EncryptionVariant,
     pub wrapped_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionKeyMaterial {
+    #[serde(default)]
     pub encryption_variant: EncryptionVariant,
     pub daemon_public_key: String,
     pub client_public_key: String,
@@ -467,6 +471,7 @@ pub struct SessionKeyMaterial {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EncryptedEnvelope {
+    #[serde(default)]
     pub encryption_variant: EncryptionVariant,
     pub ciphertext: String,
 }
