@@ -153,7 +153,7 @@ impl CodexSession {
             .send_request(
                 "thread/list",
                 json!({
-                    "limit": 50,
+                    "limit": 100,
                     "sourceKinds": [
                         "cli",
                         "vscode",
@@ -1129,7 +1129,10 @@ fn extract_datetime(value: &Value, keys: &[&str]) -> Option<chrono::DateTime<Utc
         .ok()
 }
 
-fn extract_datetime_or_timestamp(value: &Value, keys: &[&str]) -> Option<chrono::DateTime<Utc>> {
+pub(crate) fn extract_datetime_or_timestamp(
+    value: &Value,
+    keys: &[&str],
+) -> Option<chrono::DateTime<Utc>> {
     extract_datetime(value, keys).or_else(|| extract_unix_timestamp(value, keys))
 }
 

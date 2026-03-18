@@ -14,18 +14,23 @@ use falcondeck_core::{
     ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope, EventEnvelope, HealthResponse,
     InteractiveQuestion, InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind,
     InteractiveResponsePayload, PairingPublicKeyBundle, PairingStatusResponse, RelayClientMessage,
-    RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus, RemotePairingSession,
-    RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial, StartPairingRequest,
-    StartPairingResponse, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
-    ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary, TurnInputItem,
-    UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
-    crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
+    RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
+    RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
+    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
+    StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
+    TurnInputItem, UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    crypto::{
+        LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle, decrypt_json,
+        encrypt_json, generate_data_key, sign_session_key_material,
+        verify_pairing_public_key_bundle,
+    },
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::{
     fs,
+    sync::mpsc,
     sync::{Mutex, broadcast},
     task::JoinHandle,
     time::{Duration, sleep},
@@ -36,8 +41,8 @@ use uuid::Uuid;
 
 use crate::{
     codex::{
-        CodexBootstrap, CodexSession, extract_string, extract_thread_id, extract_thread_title,
-        parse_account, parse_thread_plan,
+        CodexBootstrap, CodexSession, extract_datetime_or_timestamp, extract_string,
+        extract_thread_id, extract_thread_title, parse_account, parse_thread_plan,
     },
     error::DaemonError,
 };
@@ -118,9 +123,10 @@ struct RemoteBridgeState {
     last_error: Option<String>,
     task: Option<JoinHandle<()>>,
     pairing_watch_task: Option<JoinHandle<()>>,
+    command_tx: Option<mpsc::UnboundedSender<RemoteBridgeCommand>>,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct RemotePairingState {
     pairing_id: String,
     pairing_code: String,
@@ -166,9 +172,20 @@ struct PersistedRemoteState {
     device_id: Option<String>,
     trusted_at: Option<chrono::DateTime<Utc>>,
     expires_at: chrono::DateTime<Utc>,
+    #[serde(default)]
+    client_bundle: Option<PairingPublicKeyBundle>,
+    #[serde(default)]
     client_public_key: Option<String>,
     local_secret_key_base64: String,
     data_key_base64: String,
+}
+
+#[derive(Debug, Clone)]
+enum RemoteBridgeCommand {
+    PublishBootstrap {
+        pairing: RemotePairingState,
+        client_bundle: PairingPublicKeyBundle,
+    },
 }
 
 impl AppState {
@@ -198,6 +215,7 @@ impl AppState {
                     last_error: None,
                     task: None,
                     pairing_watch_task: None,
+                    command_tx: None,
                 }),
             }),
         }
@@ -239,6 +257,13 @@ impl AppState {
                 );
                 self.clear_remote_bridge_state().await;
                 self.persist_local_state().await?;
+            } else if let Some(reason) = invalid_persisted_remote_reason(&remote) {
+                tracing::info!(
+                    "discarding persisted remote pairing {}: {reason}",
+                    remote.pairing_id
+                );
+                self.clear_remote_bridge_state().await;
+                self.persist_local_state().await?;
             } else if let Err(error) = self.resume_remote_bridge(remote).await {
                 tracing::warn!("failed to restore remote bridge: {error}");
             }
@@ -269,6 +294,7 @@ impl AppState {
         remote.pairing = None;
         remote.daemon_token = None;
         remote.last_error = None;
+        remote.command_tx = None;
     }
 
     pub async fn remote_status(&self) -> RemoteStatusResponse {
@@ -362,10 +388,7 @@ impl AppState {
                 ttl_seconds: Some(600),
                 existing_session_id: existing_session_id.clone(),
                 daemon_token: existing_daemon_token.clone(),
-                daemon_bundle: Some(PairingPublicKeyBundle {
-                    encryption_variant: falcondeck_core::EncryptionVariant::DataKeyV1,
-                    public_key: local_key_pair.public_key_base64().to_string(),
-                }),
+                daemon_bundle: Some(build_pairing_public_key_bundle(&local_key_pair)),
             })
             .send()
             .await
@@ -431,10 +454,13 @@ impl AppState {
                 });
                 remote.pairing_watch_task = Some(watch_task);
             } else {
+                let (command_tx, command_rx) = mpsc::unbounded_channel();
                 let app = self.clone();
                 let task = tokio::spawn(async move {
-                    app.run_remote_bridge(relay_url, pairing.daemon_token).await;
+                    app.run_remote_bridge(relay_url, pairing.daemon_token, command_rx)
+                        .await;
                 });
+                remote.command_tx = Some(command_tx);
                 remote.task = Some(task);
             }
             build_remote_status_response(&remote)
@@ -991,13 +1017,13 @@ impl AppState {
         response: InteractiveResponsePayload,
     ) -> Result<CommandResponse, DaemonError> {
         let session = self.session_for(&workspace_id).await?;
-        let pending = self
-            .inner
-            .interactive_requests
-            .lock()
-            .await
-            .remove(&(workspace_id.clone(), request_id.clone()))
-            .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?;
+        let pending = {
+            let requests = self.inner.interactive_requests.lock().await;
+            requests
+                .get(&(workspace_id.clone(), request_id.clone()))
+                .cloned()
+                .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?
+        };
 
         let result = match (&pending.request.kind, response) {
             (
@@ -1038,6 +1064,12 @@ impl AppState {
         };
 
         session.respond_to_request(pending.raw_id, result).await?;
+
+        self.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&(workspace_id.clone(), request_id.clone()));
 
         if let Some(thread_id) = pending.request.thread_id {
             self.with_thread_mut(&workspace_id, &thread_id, |thread| {
@@ -1094,7 +1126,12 @@ impl AppState {
         })
     }
 
-    async fn run_remote_bridge(&self, relay_url: String, daemon_token: String) {
+    async fn run_remote_bridge(
+        &self,
+        relay_url: String,
+        daemon_token: String,
+        mut command_rx: mpsc::UnboundedReceiver<RemoteBridgeCommand>,
+    ) {
         let mut backoff_seconds = 1u64;
         loop {
             let Some(pairing) = ({
@@ -1109,6 +1146,7 @@ impl AppState {
                     relay_url.clone(),
                     daemon_token.clone(),
                     pairing.clone(),
+                    &mut command_rx,
                 )
                 .await;
             match result {
@@ -1147,8 +1185,8 @@ impl AppState {
                         break;
                     }
                     if is_transient {
-                        sleep(Duration::from_secs(1)).await;
-                        backoff_seconds = 1;
+                        sleep(Duration::from_secs(backoff_seconds)).await;
+                        backoff_seconds = (backoff_seconds * 2).min(10);
                     } else {
                         sleep(Duration::from_secs(backoff_seconds)).await;
                         backoff_seconds = (backoff_seconds * 2).min(16);
@@ -1163,6 +1201,7 @@ impl AppState {
         relay_url: String,
         daemon_token: String,
         pairing: RemotePairingState,
+        command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
     ) -> Result<(), RemoteBridgeError> {
         // If we already have a trusted device with session + client key material,
         // skip polling the pairing endpoint entirely — the pairing may have expired
@@ -1176,6 +1215,11 @@ impl AppState {
             pairing.device_id.clone(),
             pairing.client_bundle.clone(),
         ) {
+            verify_pairing_public_key_bundle(&client_bundle).map_err(|error| {
+                RemoteBridgeError::Persistent(format!(
+                    "trusted client bundle is not signed; please pair the remote device again: {error}"
+                ))
+            })?;
             tracing::info!(
                 "trusted device already present, skipping pairing poll (session={session_id}, device={device_id})"
             );
@@ -1195,6 +1239,14 @@ impl AppState {
                     .json::<PairingStatusResponse>()
                     .await
                     .map_err(|error| format!("failed to parse relay pairing status: {error}"))?;
+
+                if let Some(client_bundle) = response.client_bundle.as_ref() {
+                    verify_pairing_public_key_bundle(client_bundle).map_err(|error| {
+                        RemoteBridgeError::Persistent(format!(
+                            "relay pairing returned an invalid client bundle: {error}"
+                        ))
+                    })?;
+                }
 
                 if response.status == falcondeck_core::PairingStatus::Expired {
                     return Err(RemoteBridgeError::Persistent(
@@ -1260,8 +1312,15 @@ impl AppState {
             .await
             .map_err(|error| format!("failed to persist remote pairing state: {error}"))?;
 
-        self.connect_remote_session(relay_url, daemon_token, session_id, pairing, client_bundle)
-            .await
+        self.connect_remote_session(
+            relay_url,
+            daemon_token,
+            session_id,
+            pairing,
+            client_bundle,
+            command_rx,
+        )
+        .await
     }
 
     async fn watch_pairing_claim(
@@ -1317,6 +1376,20 @@ impl AppState {
                     continue;
                 }
             };
+
+            if let Some(client_bundle) = response.client_bundle.as_ref() {
+                if let Err(error) = verify_pairing_public_key_bundle(client_bundle) {
+                    self.set_pairing_watch_error(
+                        &relay_url,
+                        &daemon_token,
+                        &pairing_id,
+                        format!("relay pairing returned an invalid client bundle: {error}"),
+                    )
+                    .await;
+                    sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+            }
 
             if !self
                 .pairing_watch_still_current(&relay_url, &daemon_token, &pairing_id)
@@ -1395,56 +1468,45 @@ impl AppState {
                         return;
                     };
 
-                    let should_restart =
+                    let command_to_publish =
                         {
                             let mut remote = self.inner.remote.lock().await;
                             if remote.relay_url.as_deref() != Some(relay_url.as_str())
                                 || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
                             {
-                                false
+                                None
                             } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
                                 current_pairing.pairing_id != pairing_id
                             }) {
-                                false
+                                None
                             } else {
-                                {
+                                let pairing_snapshot = {
                                     let current_pairing =
                                         remote.pairing.as_mut().expect("pairing checked above");
                                     current_pairing.session_id = Some(session_id);
                                     current_pairing.device_id = Some(device_id);
-                                    current_pairing.client_bundle = Some(client_bundle);
+                                    current_pairing.client_bundle = Some(client_bundle.clone());
                                     if current_pairing.trusted_at.is_none() {
                                         current_pairing.trusted_at = Some(Utc::now());
                                     }
-                                }
-                                remote.status = RemoteConnectionStatus::Connecting;
+                                    current_pairing.clone()
+                                };
                                 remote.last_error = None;
-                                if let Some(task) = remote.task.take() {
-                                    task.abort();
-                                }
                                 remote.pairing_watch_task = None;
-                                true
+                                remote.command_tx.clone().map(|command_tx| {
+                                    (
+                                        command_tx,
+                                        RemoteBridgeCommand::PublishBootstrap {
+                                            pairing: pairing_snapshot,
+                                            client_bundle,
+                                        },
+                                    )
+                                })
                             }
                         };
 
-                    if should_restart {
-                        let app = self.clone();
-                        let restart_relay_url = relay_url.clone();
-                        let restart_daemon_token = daemon_token.clone();
-                        let task = tokio::spawn(async move {
-                            app.run_remote_bridge(restart_relay_url, restart_daemon_token)
-                                .await;
-                        });
-                        {
-                            let mut remote = self.inner.remote.lock().await;
-                            if remote.relay_url.as_deref() == Some(relay_url.as_str())
-                                && remote.daemon_token.as_deref() == Some(daemon_token.as_str())
-                            {
-                                remote.task = Some(task);
-                            } else {
-                                task.abort();
-                            }
-                        }
+                    if let Some((command_tx, command)) = command_to_publish {
+                        let _ = command_tx.send(command);
                         let _ = self.persist_local_state().await;
                     }
                     return;
@@ -1460,32 +1522,22 @@ impl AppState {
         session_id: String,
         pairing: RemotePairingState,
         client_bundle: PairingPublicKeyBundle,
+        command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
     ) -> Result<(), RemoteBridgeError> {
-        let ws_url = relay_ws_url(&relay_url, &session_id, &daemon_token);
+        let ws_ticket = self
+            .fetch_relay_ws_ticket(&relay_url, &session_id, &daemon_token)
+            .await
+            .map_err(|error| format!("failed to issue relay websocket ticket: {error}"))?;
+        let ws_url = relay_ws_url(&relay_url, &session_id, &ws_ticket.ticket);
         let (socket, _) = connect_async(&ws_url)
             .await
             .map_err(|error| format!("failed to connect daemon relay websocket: {error}"))?;
         let (mut writer, mut reader) = socket.split();
-        let client_wrapped_data_key = pairing
-            .local_key_pair
-            .wrap_data_key(&client_bundle.public_key, &pairing.data_key)
-            .map_err(|error| format!("failed to wrap remote session key: {error}"))?;
-        let daemon_wrapped_data_key = pairing
-            .local_key_pair
-            .wrap_data_key(
-                pairing.local_key_pair.public_key_base64(),
-                &pairing.data_key,
-            )
-            .map_err(|error| format!("failed to wrap daemon session key: {error}"))?;
-        let session_material = SessionKeyMaterial {
-            encryption_variant: falcondeck_core::EncryptionVariant::DataKeyV1,
-            daemon_public_key: pairing.local_key_pair.public_key_base64().to_string(),
-            client_public_key: client_bundle.public_key,
-            client_wrapped_data_key,
-            daemon_wrapped_data_key: Some(daemon_wrapped_data_key),
-        };
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+        let mut events = self.subscribe();
+        let fence_seq = self.inner.sequence.load(Ordering::Relaxed);
+        let snapshot = self.snapshot().await;
 
         send_relay_message(
             &mut writer,
@@ -1529,34 +1581,24 @@ impl AppState {
             },
         )
         .await?;
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::Update {
-                body: RelayUpdateBody::SessionBootstrap {
-                    material: session_material,
-                },
-            },
-        )
-        .await?;
+        self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle)
+            .await?;
+        self.publish_remote_snapshot(&mut writer, &pairing.data_key, snapshot)
+            .await?;
 
-        let snapshot_event = EventEnvelope {
-            seq: 0,
-            emitted_at: Utc::now(),
-            workspace_id: None,
-            thread_id: None,
-            event: UnifiedEvent::Snapshot {
-                snapshot: self.snapshot().await,
-            },
-        };
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::Update {
-                body: RelayUpdateBody::Encrypted {
-                    envelope: encrypt_remote_daemon_event(&pairing.data_key, &snapshot_event)?,
-                },
-            },
-        )
-        .await?;
+        while let Ok(event) = events.try_recv() {
+            if event.seq >= fence_seq {
+                send_relay_message(
+                    &mut writer,
+                    &RelayClientMessage::Update {
+                        body: RelayUpdateBody::Encrypted {
+                            envelope: encrypt_remote_daemon_event(&pairing.data_key, &event)?,
+                        },
+                    },
+                )
+                .await?;
+            }
+        }
 
         {
             let mut remote = self.inner.remote.lock().await;
@@ -1568,8 +1610,7 @@ impl AppState {
             .await
             .map_err(|error| format!("failed to persist connected remote state: {error}"))?;
 
-        let mut events = self.subscribe();
-        let mut min_forward_seq: u64 = 0;
+        let min_forward_seq: u64 = fence_seq;
         loop {
             tokio::select! {
                 event = events.recv() => {
@@ -1589,25 +1630,8 @@ impl AppState {
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!("remote daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
-                            let resync_seq = self.inner.sequence.fetch_add(1, Ordering::Relaxed);
-                            let snapshot_event = EventEnvelope {
-                                seq: resync_seq,
-                                emitted_at: Utc::now(),
-                                workspace_id: None,
-                                thread_id: None,
-                                event: UnifiedEvent::Snapshot {
-                                    snapshot: self.snapshot().await,
-                                },
-                            };
-                            send_relay_message(
-                                &mut writer,
-                                &RelayClientMessage::Update {
-                                    body: RelayUpdateBody::Encrypted {
-                                        envelope: encrypt_remote_daemon_event(&pairing.data_key, &snapshot_event)?,
-                                    },
-                                },
-                            ).await?;
-                            min_forward_seq = resync_seq.saturating_add(1);
+                            self.publish_remote_snapshot(&mut writer, &pairing.data_key, self.snapshot().await)
+                                .await?;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             return Err(RemoteBridgeError::Persistent(
@@ -1618,6 +1642,15 @@ impl AppState {
                 }
                 _ = heartbeat.tick() => {
                     send_relay_message(&mut writer, &RelayClientMessage::Ping).await?;
+                }
+                command = command_rx.recv() => {
+                    if let Some(command) = command {
+                        match command {
+                            RemoteBridgeCommand::PublishBootstrap { pairing, client_bundle } => {
+                                self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle).await?;
+                            }
+                        }
+                    }
                 }
                 message = reader.next() => {
                     match message {
@@ -1676,6 +1709,184 @@ impl AppState {
             })
     }
 
+    async fn fetch_relay_ws_ticket(
+        &self,
+        relay_url: &str,
+        session_id: &str,
+        daemon_token: &str,
+    ) -> Result<RelayWebSocketTicketResponse, DaemonError> {
+        reqwest::Client::new()
+            .post(format!(
+                "{}/v1/sessions/{}/ws-ticket",
+                relay_url.trim_end_matches('/'),
+                session_id
+            ))
+            .bearer_auth(daemon_token)
+            .send()
+            .await
+            .map_err(|error| {
+                DaemonError::Rpc(format!("failed to fetch relay websocket ticket: {error}"))
+            })?
+            .error_for_status()
+            .map_err(|error| {
+                DaemonError::Rpc(format!("relay websocket ticket request failed: {error}"))
+            })?
+            .json::<RelayWebSocketTicketResponse>()
+            .await
+            .map_err(|error| {
+                DaemonError::Rpc(format!("failed to parse relay websocket ticket: {error}"))
+            })
+    }
+
+    async fn publish_session_bootstrap(
+        &self,
+        writer: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        pairing: &RemotePairingState,
+        client_bundle: &PairingPublicKeyBundle,
+    ) -> Result<(), String> {
+        let session_id = pairing
+            .session_id
+            .as_ref()
+            .ok_or_else(|| "missing session id for remote bootstrap".to_string())?;
+        let daemon_identity_key_pair =
+            LocalIdentityKeyPair::from_box_key_pair(&pairing.local_key_pair);
+        let client_wrapped_data_key = pairing
+            .local_key_pair
+            .wrap_data_key(&client_bundle.public_key, &pairing.data_key)
+            .map_err(|error| format!("failed to wrap remote session key: {error}"))?;
+        let daemon_wrapped_data_key = pairing
+            .local_key_pair
+            .wrap_data_key(
+                pairing.local_key_pair.public_key_base64(),
+                &pairing.data_key,
+            )
+            .map_err(|error| format!("failed to wrap daemon session key: {error}"))?;
+        let mut session_material = SessionKeyMaterial {
+            encryption_variant: falcondeck_core::EncryptionVariant::DataKeyV1,
+            identity_variant: falcondeck_core::IdentityVariant::Ed25519V1,
+            pairing_id: pairing.pairing_id.clone(),
+            session_id: session_id.clone(),
+            daemon_public_key: pairing.local_key_pair.public_key_base64().to_string(),
+            daemon_identity_public_key: daemon_identity_key_pair.public_key_base64().to_string(),
+            client_public_key: client_bundle.public_key.clone(),
+            client_identity_public_key: client_bundle.identity_public_key.clone(),
+            client_wrapped_data_key,
+            daemon_wrapped_data_key: Some(daemon_wrapped_data_key),
+            signature: String::new(),
+        };
+        sign_session_key_material(&daemon_identity_key_pair, &mut session_material)
+            .map_err(|error| format!("failed to sign remote session bootstrap: {error}"))?;
+
+        send_relay_message(
+            writer,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::SessionBootstrap {
+                    material: session_material,
+                },
+            },
+        )
+        .await
+    }
+
+    async fn publish_remote_snapshot(
+        &self,
+        writer: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        data_key: &[u8; 32],
+        snapshot: DaemonSnapshot,
+    ) -> Result<(), String> {
+        let snapshot_event = EventEnvelope {
+            seq: 0,
+            emitted_at: Utc::now(),
+            workspace_id: None,
+            thread_id: None,
+            event: UnifiedEvent::Snapshot { snapshot },
+        };
+        send_relay_message(
+            writer,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted {
+                    envelope: encrypt_remote_daemon_event(data_key, &snapshot_event)?,
+                },
+            },
+        )
+        .await
+    }
+
+    async fn send_remote_rpc_result(
+        &self,
+        writer: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        data_key: &[u8; 32],
+        request_id: String,
+        rpc_result: Result<Value, String>,
+    ) -> Result<(), String> {
+        let (ok, result, error) = match rpc_result {
+            Ok(value) => (
+                true,
+                Some(
+                    encrypt_json(data_key, &value)
+                        .map_err(|error| format!("failed to encrypt rpc result: {error}"))?,
+                ),
+                None,
+            ),
+            Err(message) => (
+                false,
+                None,
+                Some(
+                    encrypt_json(data_key, &json!({ "message": message }))
+                        .map_err(|error| format!("failed to encrypt rpc error: {error}"))?,
+                ),
+            ),
+        };
+        send_relay_message(
+            writer,
+            &RelayClientMessage::RpcResult {
+                request_id,
+                ok,
+                result,
+                error,
+            },
+        )
+        .await
+    }
+
+    async fn send_remote_action_failure(
+        &self,
+        writer: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        action_id: String,
+        message: &str,
+    ) -> Result<(), String> {
+        send_relay_message(
+            writer,
+            &RelayClientMessage::ActionUpdate {
+                action_id,
+                status: falcondeck_core::QueuedRemoteActionStatus::Failed,
+                error: Some(message.to_string()),
+                result: None,
+            },
+        )
+        .await
+    }
+
     async fn pairing_watch_still_current(
         &self,
         relay_url: &str,
@@ -1731,417 +1942,29 @@ impl AppState {
         method: String,
         params: EncryptedEnvelope,
     ) -> Result<(), String> {
-        let params: Value = decrypt_json(data_key, &params)
-            .map_err(|error| format!("failed to decrypt remote rpc payload: {error}"))?;
-        match method.as_str() {
-            "snapshot.current" => {
-                let snapshot = self.snapshot().await;
-                send_relay_message(
+        let params: Value = match decrypt_json(data_key, &params) {
+            Ok(params) => params,
+            Err(error) => {
+                tracing::warn!("failed to decrypt remote rpc payload: {error}");
+                self.send_remote_rpc_result(
                     writer,
-                    &RelayClientMessage::RpcResult {
-                        request_id,
-                        ok: true,
-                        result: Some(
-                            encrypt_json(data_key, &snapshot).map_err(|error| {
-                                format!("failed to encrypt rpc result: {error}")
-                            })?,
-                        ),
-                        error: None,
-                    },
+                    data_key,
+                    request_id,
+                    Err("invalid remote rpc payload".to_string()),
                 )
                 .await?;
+                return Ok(());
             }
+        };
+        let required = |keys: &[&str]| {
+            extract_string(&params, keys).ok_or_else(|| "invalid remote rpc payload".to_string())
+        };
+        let rpc_result = match method.as_str() {
+            "snapshot.current" => serde_json::to_value(self.snapshot().await)
+                .map_err(|error| format!("failed to serialize snapshot: {error}")),
             "thread.start" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "thread.start missing workspaceId".to_string())?;
                 let request = StartThreadRequest {
-                    workspace_id,
-                    model_id: extract_string(&params, &["modelId", "model_id"]),
-                    collaboration_mode_id: extract_string(
-                        &params,
-                        &["collaborationModeId", "collaboration_mode_id"],
-                    ),
-                    approval_policy: extract_string(
-                        &params,
-                        &["approvalPolicy", "approval_policy"],
-                    ),
-                };
-                match self.start_thread(request).await {
-                    Ok(handle) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: true,
-                                result: Some(encrypt_json(data_key, &handle).map_err(|error| {
-                                    format!("failed to encrypt rpc result: {error}")
-                                })?),
-                                error: None,
-                            },
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: false,
-                                result: None,
-                                error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": error.to_string() }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
-                                            format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
-                                ),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            "thread.detail" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "thread.detail missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "thread.detail missing threadId".to_string())?;
-                match self.thread_detail(&workspace_id, &thread_id).await {
-                    Ok(detail) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: true,
-                                result: Some(encrypt_json(data_key, &detail).map_err(|error| {
-                                    format!("failed to encrypt rpc result: {error}")
-                                })?),
-                                error: None,
-                            },
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: false,
-                                result: None,
-                                error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": error.to_string() }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
-                                            format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
-                                ),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            "thread.update" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "thread.update missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "thread.update missing threadId".to_string())?;
-                let request = UpdateThreadRequest {
-                    workspace_id,
-                    thread_id,
-                    model_id: extract_string(&params, &["modelId", "model_id"]),
-                    reasoning_effort: extract_string(
-                        &params,
-                        &["reasoningEffort", "reasoning_effort"],
-                    ),
-                    collaboration_mode_id: extract_string(
-                        &params,
-                        &["collaborationModeId", "collaboration_mode_id"],
-                    ),
-                };
-                match self.update_thread(request).await {
-                    Ok(handle) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: true,
-                                result: Some(encrypt_json(data_key, &handle).map_err(|error| {
-                                    format!("failed to encrypt rpc result: {error}")
-                                })?),
-                                error: None,
-                            },
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: false,
-                                result: None,
-                                error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": error.to_string() }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
-                                            format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
-                                ),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            "turn.start" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "turn.start missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "turn.start missing threadId".to_string())?;
-                let inputs = params
-                    .get("inputs")
-                    .cloned()
-                    .and_then(|value| serde_json::from_value(value).ok())
-                    .unwrap_or_default();
-                let request = SendTurnRequest {
-                    workspace_id,
-                    thread_id,
-                    inputs,
-                    model_id: extract_string(&params, &["modelId", "model_id"]),
-                    reasoning_effort: extract_string(
-                        &params,
-                        &["reasoningEffort", "reasoning_effort"],
-                    ),
-                    collaboration_mode_id: extract_string(
-                        &params,
-                        &["collaborationModeId", "collaboration_mode_id"],
-                    ),
-                    approval_policy: extract_string(
-                        &params,
-                        &["approvalPolicy", "approval_policy"],
-                    ),
-                    service_tier: extract_string(&params, &["serviceTier", "service_tier"]),
-                };
-                match self.send_turn(request).await {
-                    Ok(response) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: true,
-                                result: Some(encrypt_json(data_key, &response).map_err(
-                                    |error| format!("failed to encrypt rpc result: {error}"),
-                                )?),
-                                error: None,
-                            },
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: false,
-                                result: None,
-                                error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": error.to_string() }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
-                                            format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
-                                ),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            "turn.interrupt" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "turn.interrupt missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "turn.interrupt missing threadId".to_string())?;
-                match self.interrupt_turn(workspace_id, thread_id).await {
-                    Ok(response) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: true,
-                                result: Some(encrypt_json(data_key, &response).map_err(
-                                    |error| format!("failed to encrypt rpc result: {error}"),
-                                )?),
-                                error: None,
-                            },
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: false,
-                                result: None,
-                                error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": error.to_string() }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
-                                            format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
-                                ),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            "interactive.respond" | "approval.respond" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "interactive.respond missing workspaceId".to_string())?;
-                let request_id_param = extract_string(&params, &["requestId", "request_id"])
-                    .ok_or_else(|| "interactive.respond missing requestId".to_string())?;
-                let response = match parse_interactive_response_params(&params) {
-                    Ok(response) => response,
-                    Err(message) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: false,
-                                result: None,
-                                error: Some(
-                                    encrypt_json(data_key, &json!({ "message": message }))
-                                        .map_err(|encrypt_error| {
-                                            format!("failed to encrypt rpc error: {encrypt_error}")
-                                        })?,
-                                ),
-                            },
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                };
-
-                match self
-                    .respond_to_interactive_request(workspace_id, request_id_param, response)
-                    .await
-                {
-                    Ok(_) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: true,
-                                result: Some(
-                                    encrypt_json(data_key, &json!({ "ok": true })).map_err(
-                                        |error| format!("failed to encrypt rpc result: {error}"),
-                                    )?,
-                                ),
-                                error: None,
-                            },
-                        )
-                        .await?;
-                    }
-                    Err(error) => {
-                        send_relay_message(
-                            writer,
-                            &RelayClientMessage::RpcResult {
-                                request_id,
-                                ok: false,
-                                result: None,
-                                error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": error.to_string() }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
-                                            format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
-                                ),
-                            },
-                        )
-                        .await?;
-                    }
-                }
-            }
-            _ => {
-                send_relay_message(
-                    writer,
-                    &RelayClientMessage::RpcResult {
-                        request_id,
-                        ok: false,
-                        result: None,
-                        error: Some(
-                            encrypt_json(data_key, &json!({ "message": format!("unsupported remote rpc method `{method}`") }))
-                                .map_err(|encrypt_error| format!("failed to encrypt rpc error: {encrypt_error}"))?,
-                        ),
-                    },
-                )
-                .await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_queued_remote_action(
-        &self,
-        writer: &mut futures_util::stream::SplitSink<
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            Message,
-        >,
-        data_key: &[u8; 32],
-        action_id: String,
-        action_type: String,
-        payload: EncryptedEnvelope,
-    ) -> Result<(), String> {
-        send_relay_message(
-            writer,
-            &RelayClientMessage::ActionUpdate {
-                action_id: action_id.clone(),
-                status: falcondeck_core::QueuedRemoteActionStatus::Executing,
-                error: None,
-                result: None,
-            },
-        )
-        .await?;
-
-        let params: Value = decrypt_json(data_key, &payload)
-            .map_err(|error| format!("failed to decrypt queued action payload: {error}"))?;
-
-        let outcome: Result<Value, DaemonError> = match action_type.as_str() {
-            "thread.start" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "thread.start missing workspaceId".to_string())?;
-                let request = StartThreadRequest {
-                    workspace_id,
+                    workspace_id: required(&["workspaceId", "workspace_id"])?,
                     model_id: extract_string(&params, &["modelId", "model_id"]),
                     collaboration_mode_id: extract_string(
                         &params,
@@ -2155,15 +1978,20 @@ impl AppState {
                 self.start_thread(request)
                     .await
                     .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
+            "thread.detail" => {
+                let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                let thread_id = required(&["threadId", "thread_id"])?;
+                self.thread_detail(&workspace_id, &thread_id)
+                    .await
+                    .and_then(|detail| serde_json::to_value(detail).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
             }
             "thread.update" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "thread.update missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "thread.update missing threadId".to_string())?;
                 let request = UpdateThreadRequest {
-                    workspace_id,
-                    thread_id,
+                    workspace_id: required(&["workspaceId", "workspace_id"])?,
+                    thread_id: required(&["threadId", "thread_id"])?,
                     model_id: extract_string(&params, &["modelId", "model_id"]),
                     reasoning_effort: extract_string(
                         &params,
@@ -2177,21 +2005,17 @@ impl AppState {
                 self.update_thread(request)
                     .await
                     .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
             }
             "turn.start" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "turn.start missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "turn.start missing threadId".to_string())?;
-                let inputs = params
-                    .get("inputs")
-                    .cloned()
-                    .and_then(|value| serde_json::from_value(value).ok())
-                    .unwrap_or_default();
                 let request = SendTurnRequest {
-                    workspace_id,
-                    thread_id,
-                    inputs,
+                    workspace_id: required(&["workspaceId", "workspace_id"])?,
+                    thread_id: required(&["threadId", "thread_id"])?,
+                    inputs: params
+                        .get("inputs")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or_default(),
                     model_id: extract_string(&params, &["modelId", "model_id"]),
                     reasoning_effort: extract_string(
                         &params,
@@ -2210,43 +2034,230 @@ impl AppState {
                 self.send_turn(request)
                     .await
                     .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
             }
             "turn.interrupt" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "turn.interrupt missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "turn.interrupt missing threadId".to_string())?;
+                let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                let thread_id = required(&["threadId", "thread_id"])?;
                 self.interrupt_turn(workspace_id, thread_id)
                     .await
                     .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
-            }
-            "thread.archive" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "thread.archive missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "thread.archive missing threadId".to_string())?;
-                self.archive_thread(&workspace_id, &thread_id)
-                    .await
-                    .and_then(|summary| serde_json::to_value(summary).map_err(DaemonError::from))
-            }
-            "thread.unarchive" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "thread.unarchive missing workspaceId".to_string())?;
-                let thread_id = extract_string(&params, &["threadId", "thread_id"])
-                    .ok_or_else(|| "thread.unarchive missing threadId".to_string())?;
-                self.unarchive_thread(&workspace_id, &thread_id)
-                    .await
-                    .and_then(|summary| serde_json::to_value(summary).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
             }
             "interactive.respond" | "approval.respond" => {
-                let workspace_id = extract_string(&params, &["workspaceId", "workspace_id"])
-                    .ok_or_else(|| "interactive.respond missing workspaceId".to_string())?;
-                let request_id_param = extract_string(&params, &["requestId", "request_id"])
-                    .ok_or_else(|| "interactive.respond missing requestId".to_string())?;
-                let response = parse_interactive_response_params(&params)?;
+                let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                let request_id_param = required(&["requestId", "request_id"])?;
+                let response = parse_interactive_response_params(&params)
+                    .map_err(|_| "invalid remote rpc payload".to_string())?;
                 self.respond_to_interactive_request(workspace_id, request_id_param, response)
                     .await
                     .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
+            _ => Err(format!("unsupported remote rpc method `{method}`")),
+        };
+
+        self.send_remote_rpc_result(writer, data_key, request_id, rpc_result)
+            .await
+    }
+
+    async fn handle_queued_remote_action(
+        &self,
+        writer: &mut futures_util::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        data_key: &[u8; 32],
+        action_id: String,
+        action_type: String,
+        payload: EncryptedEnvelope,
+    ) -> Result<(), String> {
+        let params: Value = match decrypt_json(data_key, &payload) {
+            Ok(params) => params,
+            Err(error) => {
+                tracing::warn!("failed to decrypt queued action payload: {error}");
+                self.send_remote_action_failure(writer, action_id, "invalid queued action payload")
+                    .await?;
+                return Ok(());
+            }
+        };
+        let required = |keys: &[&str]| extract_string(&params, keys);
+
+        send_relay_message(
+            writer,
+            &RelayClientMessage::ActionUpdate {
+                action_id: action_id.clone(),
+                status: falcondeck_core::QueuedRemoteActionStatus::Executing,
+                error: None,
+                result: None,
+            },
+        )
+        .await?;
+
+        let outcome: Result<Value, DaemonError> = match action_type.as_str() {
+            "thread.start" => {
+                if let Some(workspace_id) = required(&["workspaceId", "workspace_id"]) {
+                    let request = StartThreadRequest {
+                        workspace_id,
+                        model_id: extract_string(&params, &["modelId", "model_id"]),
+                        collaboration_mode_id: extract_string(
+                            &params,
+                            &["collaborationModeId", "collaboration_mode_id"],
+                        ),
+                        approval_policy: extract_string(
+                            &params,
+                            &["approvalPolicy", "approval_policy"],
+                        ),
+                    };
+                    self.start_thread(request)
+                        .await
+                        .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "thread.update" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    let request = UpdateThreadRequest {
+                        workspace_id,
+                        thread_id,
+                        model_id: extract_string(&params, &["modelId", "model_id"]),
+                        reasoning_effort: extract_string(
+                            &params,
+                            &["reasoningEffort", "reasoning_effort"],
+                        ),
+                        collaboration_mode_id: extract_string(
+                            &params,
+                            &["collaborationModeId", "collaboration_mode_id"],
+                        ),
+                    };
+                    self.update_thread(request)
+                        .await
+                        .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "turn.start" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    let inputs = params
+                        .get("inputs")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or_default();
+                    let request = SendTurnRequest {
+                        workspace_id,
+                        thread_id,
+                        inputs,
+                        model_id: extract_string(&params, &["modelId", "model_id"]),
+                        reasoning_effort: extract_string(
+                            &params,
+                            &["reasoningEffort", "reasoning_effort"],
+                        ),
+                        collaboration_mode_id: extract_string(
+                            &params,
+                            &["collaborationModeId", "collaboration_mode_id"],
+                        ),
+                        approval_policy: extract_string(
+                            &params,
+                            &["approvalPolicy", "approval_policy"],
+                        ),
+                        service_tier: extract_string(&params, &["serviceTier", "service_tier"]),
+                    };
+                    self.send_turn(request).await.and_then(|response| {
+                        serde_json::to_value(response).map_err(DaemonError::from)
+                    })
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "turn.interrupt" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    self.interrupt_turn(workspace_id, thread_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "thread.archive" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    self.archive_thread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|summary| {
+                            serde_json::to_value(summary).map_err(DaemonError::from)
+                        })
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "thread.unarchive" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    self.unarchive_thread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|summary| {
+                            serde_json::to_value(summary).map_err(DaemonError::from)
+                        })
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "interactive.respond" | "approval.respond" => {
+                if let (Some(workspace_id), Some(request_id_param)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["requestId", "request_id"]),
+                ) {
+                    match parse_interactive_response_params(&params).map_err(|_| {
+                        DaemonError::BadRequest("invalid queued action payload".to_string())
+                    }) {
+                        Ok(response) => self
+                            .respond_to_interactive_request(
+                                workspace_id,
+                                request_id_param,
+                                response,
+                            )
+                            .await
+                            .and_then(|response| {
+                                serde_json::to_value(response).map_err(DaemonError::from)
+                            }),
+                        Err(error) => Err(error),
+                    }
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
             }
             other => Err(DaemonError::BadRequest(format!(
                 "unsupported queued action `{other}`"
@@ -2302,12 +2313,7 @@ impl AppState {
             device_id: remote.device_id,
             trusted_at: remote.trusted_at,
             expires_at: remote.expires_at,
-            client_bundle: remote
-                .client_public_key
-                .map(|public_key| PairingPublicKeyBundle {
-                    encryption_variant: falcondeck_core::EncryptionVariant::DataKeyV1,
-                    public_key,
-                }),
+            client_bundle: remote.client_bundle,
             local_key_pair,
             data_key,
         };
@@ -2331,10 +2337,13 @@ impl AppState {
             current.pairing = Some(pairing.clone());
             current.last_error = None;
 
+            let (command_tx, command_rx) = mpsc::unbounded_channel();
             let app = self.clone();
             let task = tokio::spawn(async move {
-                app.run_remote_bridge(relay_url, daemon_token).await;
+                app.run_remote_bridge(relay_url, daemon_token, command_rx)
+                    .await;
             });
+            current.command_tx = Some(command_tx);
             current.task = Some(task);
         }
 
@@ -2385,10 +2394,13 @@ impl AppState {
                 if let Some(thread_id) = extract_thread_id(&params) {
                     let title = extract_thread_title(&params)
                         .unwrap_or_else(|| "Untitled thread".to_string());
+                    let updated_at =
+                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                     let thread = self
                         .upsert_thread(workspace_id, &thread_id, |thread| {
                             thread.title = title.clone();
                             thread.status = ThreadStatus::Idle;
+                            thread.updated_at = updated_at;
                             if let Some(model_id) =
                                 extract_string(&params, &["model", "modelId", "model_id"])
                             {
@@ -2418,9 +2430,12 @@ impl AppState {
                 if let Some(thread_id) = extract_thread_id(&params) {
                     let title = extract_thread_title(&params)
                         .unwrap_or_else(|| "Untitled thread".to_string());
+                    let updated_at =
+                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                     let thread = self
                         .upsert_thread(workspace_id, &thread_id, |thread| {
                             thread.title = title.clone();
+                            thread.updated_at = updated_at;
                         })
                         .await?;
                     self.emit(
@@ -2434,11 +2449,14 @@ impl AppState {
                 if let Some(thread_id) = extract_thread_id(&params) {
                     let turn_id = extract_string(&params, &["turnId", "turn_id"])
                         .unwrap_or_else(|| "turn".to_string());
+                    let updated_at =
+                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                     let thread = self
                         .upsert_thread(workspace_id, &thread_id, |thread| {
                             thread.status = ThreadStatus::Running;
                             thread.latest_turn_id = Some(turn_id.clone());
                             thread.last_error = None;
+                            thread.updated_at = updated_at;
                             if let Some(model_id) =
                                 extract_string(&params, &["model", "modelId", "model_id"])
                             {
@@ -2483,6 +2501,8 @@ impl AppState {
                     let error = extract_string(&params, &["error"]).or_else(|| {
                         extract_string(params.get("error").unwrap_or(&Value::Null), &["message"])
                     });
+                    let updated_at =
+                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                     let thread = self
                         .upsert_thread(workspace_id, &thread_id, |thread| {
                             thread.status = if error.is_some() {
@@ -2491,6 +2511,7 @@ impl AppState {
                                 ThreadStatus::Idle
                             };
                             thread.last_error = error.clone();
+                            thread.updated_at = updated_at;
                         })
                         .await?;
                     self.emit(
@@ -2509,12 +2530,61 @@ impl AppState {
                     );
                 }
             }
+            "turn/step/started" | "turn/step/completed" => {
+                if let Some(thread_id) = extract_thread_id(&params) {
+                    let step = extract_string(&params, &["step"]);
+                    let status = plan_step_status(method, &params);
+                    let turn_id = extract_string(&params, &["turnId", "turn_id"]);
+                    let updated_at =
+                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
+
+                    let thread = self
+                        .upsert_thread(workspace_id, &thread_id, |thread| {
+                            thread.updated_at = updated_at;
+                            if let Some(plan) = &mut thread.latest_plan {
+                                if let Some(s) = step.clone() {
+                                    if let Some(step_obj) =
+                                        plan.steps.iter_mut().find(|st| st.step == s)
+                                    {
+                                        if let Some(st) = status.clone() {
+                                            step_obj.status = st;
+                                        }
+                                    }
+                                }
+                            }
+                        })
+                        .await?;
+
+                    if let (Some(turn_id), Some(plan)) = (turn_id, thread.latest_plan.clone()) {
+                        self.push_conversation_item(
+                            workspace_id,
+                            &thread_id,
+                            ConversationItem::Plan {
+                                id: format!("plan-{turn_id}"),
+                                plan,
+                                created_at: updated_at,
+                            },
+                            true,
+                        )
+                        .await?;
+                    }
+
+                    self.emit(
+                        Some(workspace_id.to_string()),
+                        Some(thread_id),
+                        UnifiedEvent::ThreadUpdated { thread },
+                    );
+                }
+            }
             "turn/plan/updated" => {
                 if let Some(thread_id) = extract_thread_id(&params) {
                     let plan = parse_thread_plan(&params);
+                    let updated_at =
+                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                     let thread = self
                         .upsert_thread(workspace_id, &thread_id, |thread| {
                             thread.latest_plan = plan.clone();
+                            thread.updated_at = updated_at;
                         })
                         .await?;
                     if let Some(plan) = plan {
@@ -2528,7 +2598,7 @@ impl AppState {
                                         .unwrap_or_else(|| thread_id.clone())
                                 ),
                                 plan,
-                                created_at: Utc::now(),
+                                created_at: updated_at,
                             },
                             true,
                         )
@@ -2545,9 +2615,12 @@ impl AppState {
                 if let Some(thread_id) = extract_thread_id(&params) {
                     let diff = extract_string(&params, &["diff", "patch"]);
                     if let Some(diff) = diff {
+                        let updated_at =
+                            notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                         let thread = self
                             .upsert_thread(workspace_id, &thread_id, |thread| {
                                 thread.latest_diff = Some(diff.clone());
+                                thread.updated_at = updated_at;
                             })
                             .await?;
                         self.push_conversation_item(
@@ -2560,7 +2633,7 @@ impl AppState {
                                         .unwrap_or_else(|| thread_id.clone())
                                 ),
                                 diff,
-                                created_at: Utc::now(),
+                                created_at: updated_at,
                             },
                             true,
                         )
@@ -2578,49 +2651,71 @@ impl AppState {
                     let item_id = extract_string(&params, &["itemId", "item_id"])
                         .unwrap_or_else(|| "message".to_string());
                     let delta = extract_string(&params, &["delta"]).unwrap_or_default();
-                    self.upsert_thread(workspace_id, &thread_id, |thread| {
-                        thread.last_message_preview = Some(truncate_preview(
+
+                    let next = {
+                        let mut workspaces = self.inner.workspaces.lock().await;
+                        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+                            DaemonError::NotFound("workspace not found".to_string())
+                        })?;
+                        let thread = workspace
+                            .threads
+                            .get_mut(&thread_id)
+                            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+
+                        thread.summary.last_message_preview = Some(truncate_preview(
                             &format!(
                                 "{}{}",
-                                thread.last_message_preview.clone().unwrap_or_default(),
+                                thread
+                                    .summary
+                                    .last_message_preview
+                                    .clone()
+                                    .unwrap_or_default(),
                                 delta
                             ),
                             160,
                         ));
-                    })
-                    .await?;
-                    let detail = self
-                        .thread_detail(workspace_id, &thread_id)
-                        .await
-                        .ok()
-                        .and_then(|detail| {
-                            detail.items.into_iter().find(|item| match item {
-                                ConversationItem::AssistantMessage { id, .. } => id == &item_id,
-                                _ => false,
-                            })
-                        });
-                    let next = match detail {
-                        Some(ConversationItem::AssistantMessage {
-                            id,
-                            text,
-                            created_at,
-                        }) => ConversationItem::AssistantMessage {
-                            id,
-                            text: format!("{text}{delta}"),
-                            created_at,
-                        },
-                        _ => ConversationItem::AssistantMessage {
-                            id: item_id.clone(),
-                            text: delta.clone(),
-                            created_at: Utc::now(),
-                        },
+                        thread.summary.updated_at = Utc::now();
+                        workspace.summary.current_thread_id = Some(thread_id.clone());
+                        workspace.summary.updated_at = Utc::now();
+
+                        let existing_index = thread.assistant_items.get(&item_id).copied();
+                        let next = match existing_index.and_then(|i| thread.items.get(i)) {
+                            Some(ConversationItem::AssistantMessage {
+                                id,
+                                text,
+                                created_at,
+                            }) => ConversationItem::AssistantMessage {
+                                id: id.clone(),
+                                text: format!("{text}{delta}"),
+                                created_at: *created_at,
+                            },
+                            _ => ConversationItem::AssistantMessage {
+                                id: item_id.clone(),
+                                text: delta.clone(),
+                                created_at: Utc::now(),
+                            },
+                        };
+
+                        if let Some(index) = existing_index {
+                            thread.items[index] = next.clone();
+                        } else {
+                            thread.items.push(next.clone());
+                            thread
+                                .assistant_items
+                                .insert(item_id.clone(), thread.items.len() - 1);
+                        }
+                        next
                     };
-                    self.push_conversation_item(workspace_id, &thread_id, next, true)
-                        .await?;
+
+                    self.emit(
+                        Some(workspace_id.to_string()),
+                        Some(thread_id.clone()),
+                        UnifiedEvent::Text { item_id, delta },
+                    );
                     self.emit(
                         Some(workspace_id.to_string()),
                         Some(thread_id),
-                        UnifiedEvent::Text { item_id, delta },
+                        UnifiedEvent::ConversationItemUpdated { item: next },
                     );
                 }
             }
@@ -2629,60 +2724,81 @@ impl AppState {
                     let item_id = extract_string(&params, &["itemId", "item_id"])
                         .unwrap_or_else(|| "reasoning".to_string());
                     let delta = extract_string(&params, &["delta"]).unwrap_or_default();
-                    let existing = self
-                        .thread_detail(workspace_id, &thread_id)
-                        .await
-                        .ok()
-                        .and_then(|detail| {
-                            detail.items.into_iter().find(|item| match item {
-                                ConversationItem::Reasoning { id, .. } => id == &item_id,
-                                _ => false,
-                            })
-                        });
-                    let next = match existing {
-                        Some(ConversationItem::Reasoning {
-                            id,
-                            summary,
-                            content,
-                            created_at,
-                        }) => {
-                            if method.ends_with("summaryTextDelta") {
-                                ConversationItem::Reasoning {
-                                    id,
-                                    summary: Some(format!(
-                                        "{}{}",
-                                        summary.unwrap_or_default(),
-                                        delta
-                                    )),
-                                    content,
-                                    created_at,
-                                }
-                            } else {
-                                ConversationItem::Reasoning {
-                                    id,
-                                    summary,
-                                    content: format!("{content}{delta}"),
-                                    created_at,
+
+                    let next = {
+                        let mut workspaces = self.inner.workspaces.lock().await;
+                        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
+                            DaemonError::NotFound("workspace not found".to_string())
+                        })?;
+                        let thread = workspace
+                            .threads
+                            .get_mut(&thread_id)
+                            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+
+                        thread.summary.updated_at = Utc::now();
+                        workspace.summary.current_thread_id = Some(thread_id.clone());
+                        workspace.summary.updated_at = Utc::now();
+
+                        let existing_index = thread.reasoning_items.get(&item_id).copied();
+                        let next = match existing_index.and_then(|i| thread.items.get(i)) {
+                            Some(ConversationItem::Reasoning {
+                                id,
+                                summary,
+                                content,
+                                created_at,
+                            }) => {
+                                if method.ends_with("summaryTextDelta") {
+                                    ConversationItem::Reasoning {
+                                        id: id.clone(),
+                                        summary: Some(format!(
+                                            "{}{}",
+                                            summary.as_deref().unwrap_or_default(),
+                                            delta
+                                        )),
+                                        content: content.clone(),
+                                        created_at: *created_at,
+                                    }
+                                } else {
+                                    ConversationItem::Reasoning {
+                                        id: id.clone(),
+                                        summary: summary.clone(),
+                                        content: format!("{content}{delta}"),
+                                        created_at: *created_at,
+                                    }
                                 }
                             }
+                            _ => ConversationItem::Reasoning {
+                                id: item_id.clone(),
+                                summary: if method.ends_with("summaryTextDelta") {
+                                    Some(delta.clone())
+                                } else {
+                                    None
+                                },
+                                content: if method.ends_with("summaryTextDelta") {
+                                    String::new()
+                                } else {
+                                    delta.clone()
+                                },
+                                created_at: Utc::now(),
+                            },
+                        };
+
+                        if let Some(index) = existing_index {
+                            thread.items[index] = next.clone();
+                        } else {
+                            thread.items.push(next.clone());
+                            thread
+                                .reasoning_items
+                                .insert(item_id.clone(), thread.items.len() - 1);
                         }
-                        _ => ConversationItem::Reasoning {
-                            id: item_id,
-                            summary: if method.ends_with("summaryTextDelta") {
-                                Some(delta.clone())
-                            } else {
-                                None
-                            },
-                            content: if method.ends_with("summaryTextDelta") {
-                                String::new()
-                            } else {
-                                delta
-                            },
-                            created_at: Utc::now(),
-                        },
+                        next
                     };
-                    self.push_conversation_item(workspace_id, &thread_id, next, true)
-                        .await?;
+
+                    self.emit(
+                        Some(workspace_id.to_string()),
+                        Some(thread_id),
+                        UnifiedEvent::ConversationItemUpdated { item: next },
+                    );
                 }
             }
             "item/started" => {
@@ -3094,10 +3210,15 @@ impl AppState {
                     is_archived: false,
                 })
             });
+        let before = thread.summary.updated_at;
         updater(&mut thread.summary);
-        thread.summary.updated_at = now;
+        if thread.summary.updated_at == before {
+            thread.summary.updated_at = now;
+        }
         workspace.summary.current_thread_id = Some(thread.summary.id.clone());
-        workspace.summary.updated_at = now;
+        if thread.summary.updated_at > workspace.summary.updated_at {
+            workspace.summary.updated_at = thread.summary.updated_at;
+        }
         Ok(thread.summary.clone())
     }
 
@@ -3487,6 +3608,55 @@ fn approval_title(method: &str) -> String {
     }
 }
 
+fn notification_timestamp(method: &str, params: &Value) -> Option<chrono::DateTime<Utc>> {
+    let preferred_keys: &[&str] = match method {
+        "thread/started" => &[
+            "timestamp",
+            "startedAt",
+            "started_at",
+            "createdAt",
+            "created_at",
+        ],
+        "thread/name/updated" | "turn/plan/updated" | "turn/diff/updated" => &[
+            "timestamp",
+            "updatedAt",
+            "updated_at",
+            "createdAt",
+            "created_at",
+        ],
+        "turn/started" | "turn/step/started" => &[
+            "timestamp",
+            "startedAt",
+            "started_at",
+            "createdAt",
+            "created_at",
+        ],
+        "turn/completed" | "turn/step/completed" => &[
+            "timestamp",
+            "completedAt",
+            "completed_at",
+            "updatedAt",
+            "updated_at",
+        ],
+        _ => &[
+            "timestamp",
+            "updatedAt",
+            "updated_at",
+            "createdAt",
+            "created_at",
+        ],
+    };
+    extract_datetime_or_timestamp(params, preferred_keys)
+}
+
+fn plan_step_status(method: &str, params: &Value) -> Option<String> {
+    extract_string(params, &["status"]).or_else(|| match method {
+        "turn/step/started" => Some("in_progress".to_string()),
+        "turn/step/completed" => Some("completed".to_string()),
+        _ => None,
+    })
+}
+
 fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQuestion> {
     params
         .get("questions")
@@ -3689,13 +3859,29 @@ fn persisted_remote_state(remote: &RemoteBridgeState) -> Option<PersistedRemoteS
         device_id: pairing.device_id.clone(),
         trusted_at: pairing.trusted_at,
         expires_at: pairing.expires_at,
-        client_public_key: pairing
-            .client_bundle
-            .as_ref()
-            .map(|bundle| bundle.public_key.clone()),
+        client_bundle: pairing.client_bundle.clone(),
+        client_public_key: None,
         local_secret_key_base64: pairing.local_key_pair.secret_key_base64(),
         data_key_base64: encode_base64(&pairing.data_key),
     })
+}
+
+fn invalid_persisted_remote_reason(remote: &PersistedRemoteState) -> Option<String> {
+    if remote.device_id.is_none() {
+        return None;
+    }
+
+    let Some(client_bundle) = remote.client_bundle.as_ref() else {
+        return if remote.client_public_key.is_some() {
+            Some("trusted remote only has legacy unsigned client key material".to_string())
+        } else {
+            Some("trusted remote is missing signed client key material".to_string())
+        };
+    };
+
+    verify_pairing_public_key_bundle(client_bundle)
+        .err()
+        .map(|error| format!("trusted remote has invalid signed client key material: {error}"))
 }
 
 fn encode_base64(bytes: &[u8]) -> String {
@@ -3793,18 +3979,18 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        CollaborationModeSummary, ConversationItem, EncryptionVariant, ImageInput,
-        PairingPublicKeyBundle, ThreadCodexParams, ThreadStatus, ThreadSummary, TurnInputItem,
-        WorkspaceStatus, WorkspaceSummary,
-        crypto::{LocalBoxKeyPair, generate_data_key},
+        CollaborationModeSummary, ConversationItem, ImageInput, ThreadCodexParams, ThreadStatus,
+        ThreadSummary, TurnInputItem, WorkspaceStatus, WorkspaceSummary,
+        crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
     };
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
         AppState, PersistedAppState, PersistedRemoteState, codex_inputs,
-        codex_inputs_with_plan_mode_shim, collaboration_mode_payload, should_surface_tool_item,
-        should_use_plan_mode_shim, workspace_status_after_account_update,
+        codex_inputs_with_plan_mode_shim, collaboration_mode_payload, notification_timestamp,
+        plan_step_status, should_surface_tool_item, should_use_plan_mode_shim,
+        workspace_status_after_account_update,
     };
 
     #[test]
@@ -3932,6 +4118,47 @@ mod tests {
     }
 
     #[test]
+    fn infers_plan_step_status_from_notification_method() {
+        assert_eq!(
+            plan_step_status("turn/step/started", &json!({ "step": "Inspect" })),
+            Some("in_progress".to_string())
+        );
+        assert_eq!(
+            plan_step_status("turn/step/completed", &json!({ "step": "Inspect" })),
+            Some("completed".to_string())
+        );
+        assert_eq!(
+            plan_step_status(
+                "turn/step/started",
+                &json!({ "step": "Inspect", "status": "running" }),
+            ),
+            Some("running".to_string())
+        );
+    }
+
+    #[test]
+    fn uses_notification_timestamps_when_available() {
+        let timestamp = notification_timestamp(
+            "turn/completed",
+            &json!({
+                "timestamp": "2026-03-18T10:15:30Z",
+                "completedAt": "2026-03-18T10:15:29Z"
+            }),
+        )
+        .expect("notification timestamp");
+        assert_eq!(timestamp.to_rfc3339(), "2026-03-18T10:15:30+00:00");
+
+        let fallback = notification_timestamp(
+            "turn/completed",
+            &json!({
+                "completedAt": "2026-03-18T10:15:29Z"
+            }),
+        )
+        .expect("fallback timestamp");
+        assert_eq!(fallback.to_rfc3339(), "2026-03-18T10:15:29+00:00");
+    }
+
+    #[test]
     fn persisted_state_reads_legacy_workspace_paths() {
         let payload = json!({
             "workspaces": ["/tmp/project-a", "/tmp/project-b"],
@@ -4028,10 +4255,7 @@ mod tests {
         let updated_pairing = super::RemotePairingState {
             device_id: Some("device-1".to_string()),
             trusted_at: Some(Utc::now()),
-            client_bundle: Some(PairingPublicKeyBundle {
-                encryption_variant: EncryptionVariant::DataKeyV1,
-                public_key: "client-public-key".to_string(),
-            }),
+            client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
             ..initial_pairing.clone()
         };
         let remote = super::RemoteBridgeState {
@@ -4042,6 +4266,7 @@ mod tests {
             last_error: None,
             task: None,
             pairing_watch_task: None,
+            command_tx: None,
         };
 
         let pairing = super::current_pairing_for_remote_attempt(
@@ -4058,7 +4283,10 @@ mod tests {
                 .client_bundle
                 .as_ref()
                 .map(|bundle| bundle.public_key.as_str()),
-            Some("client-public-key")
+            updated_pairing
+                .client_bundle
+                .as_ref()
+                .map(|bundle| bundle.public_key.as_str())
         );
     }
 
@@ -4077,6 +4305,7 @@ mod tests {
                 device_id: None,
                 trusted_at: None,
                 expires_at: Utc::now() - Duration::seconds(5),
+                client_bundle: None,
                 client_public_key: None,
                 local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
                 data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
@@ -4124,7 +4353,56 @@ mod tests {
                 device_id: None,
                 trusted_at: None,
                 expires_at: Utc::now() + Duration::minutes(10),
+                client_bundle: None,
                 client_public_key: None,
+                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            }),
+        };
+
+        tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+            .await
+            .unwrap();
+
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            PathBuf::from(&state_path),
+        );
+        app.restore_local_state().await.unwrap();
+
+        let remote = app.inner.remote.lock().await;
+        assert_eq!(
+            remote.status,
+            falcondeck_core::RemoteConnectionStatus::Inactive
+        );
+        assert!(remote.relay_url.is_none());
+        assert!(remote.daemon_token.is_none());
+        assert!(remote.pairing.is_none());
+        drop(remote);
+
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        assert!(persisted_after.remote.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_skips_trusted_remote_with_legacy_unsigned_client_key() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let persisted = PersistedAppState {
+            workspaces: vec![],
+            remote: Some(PersistedRemoteState {
+                relay_url: "https://connect.falcondeck.com".to_string(),
+                daemon_token: "daemon-token".to_string(),
+                pairing_id: "pairing-legacy-client".to_string(),
+                pairing_code: "ABCDEFGHJKLM".to_string(),
+                session_id: Some("session-1".to_string()),
+                device_id: Some("device-1".to_string()),
+                trusted_at: Some(Utc::now()),
+                expires_at: Utc::now() + Duration::minutes(10),
+                client_bundle: None,
+                client_public_key: Some("legacy-public-key".to_string()),
                 local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
                 data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
             }),
@@ -4170,7 +4448,7 @@ fn normalize_relay_url(input: &str) -> Result<String, DaemonError> {
     Ok(trimmed.to_string())
 }
 
-fn relay_ws_url(relay_url: &str, session_id: &str, token: &str) -> String {
+fn relay_ws_url(relay_url: &str, session_id: &str, ticket: &str) -> String {
     let base = if let Some(rest) = relay_url.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = relay_url.strip_prefix("http://") {
@@ -4178,7 +4456,7 @@ fn relay_ws_url(relay_url: &str, session_id: &str, token: &str) -> String {
     } else {
         relay_url.to_string()
     };
-    format!("{base}/v1/updates/ws?session_id={session_id}&token={token}")
+    format!("{base}/v1/updates/ws?session_id={session_id}&ticket={ticket}")
 }
 
 fn relay_url_looks_legacy_loopback(relay_url: &str) -> bool {

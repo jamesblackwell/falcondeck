@@ -31,10 +31,40 @@ export function upsertConversationItem(
   items: ConversationItem[],
   next: ConversationItem,
 ): ConversationItem[] {
+  const last = items.at(-1)
+  if (!last) {
+    return [next]
+  }
+
+  // Conversation items are expected to have stable `(kind, id)` identities.
+  // Streaming updates usually target the tail item, and new items normally
+  // arrive in timestamp order, so handle those hot paths without a scan.
+  if (last.id === next.id && last.kind === next.kind) {
+    const clone = items.slice()
+    clone[clone.length - 1] = next
+    const previous = clone.at(-2)
+    if (!previous || next.created_at >= previous.created_at) {
+      return clone
+    }
+    return sortConversationItems(clone)
+  }
+
+  if (next.created_at >= last.created_at) {
+    return [...items, next]
+  }
+
   const index = items.findIndex((item) => item.id === next.id && item.kind === next.kind)
   if (index === -1) {
     return sortConversationItems([...items, next])
   }
+
+  const existing = items[index]
+  if (existing.created_at === next.created_at) {
+    const clone = items.slice()
+    clone[index] = next
+    return clone
+  }
+
   const clone = items.slice()
   clone[index] = next
   return sortConversationItems(clone)
