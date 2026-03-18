@@ -956,7 +956,7 @@ export default function App() {
   }
 
   async function handleSubmit() {
-    if (!selectedWorkspace || !draft.trim()) return
+    if (!selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
     const submittedAttachments = attachments
     setDraft('')
@@ -978,7 +978,10 @@ export default function App() {
       await submitQueuedAction('turn.start', {
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
-        inputs: [{ type: 'text', text: submittedDraft }, ...submittedAttachments],
+        inputs: [
+          ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft }] : []),
+          ...submittedAttachments,
+        ],
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         collaboration_mode_id: selectedCollaborationMode,

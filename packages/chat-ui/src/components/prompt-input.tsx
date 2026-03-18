@@ -44,6 +44,7 @@ export const PromptInput = memo(function PromptInput({
   compact = false,
 }: PromptInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const canSubmit = (value.trim().length > 0 || attachments.length > 0) && !disabled
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     onPickImages?.(event.target.files)
@@ -58,10 +59,19 @@ export const PromptInput = memo(function PromptInput({
       }
       // Plain Enter → submit
       event.preventDefault()
-      if (value.trim() && !disabled) {
+      if (canSubmit) {
         onSubmit()
       }
     }
+  }
+
+  function handlePaste(event: React.ClipboardEvent<HTMLTextAreaElement>) {
+    const hasImage = Array.from(event.clipboardData.items).some(
+      (item) => item.kind === 'file' && item.type.startsWith('image/'),
+    )
+    if (!hasImage) return
+    event.preventDefault()
+    onPickImages?.(event.clipboardData.files)
   }
 
   const handleChange = useCallback(
@@ -100,6 +110,7 @@ export const PromptInput = memo(function PromptInput({
           value={value}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={disabled ? 'Add a project to get started...' : 'Ask Codex anything...'}
           className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[length:var(--fd-text-base)] leading-relaxed text-fg-primary placeholder:text-fg-secondary focus:outline-none"
           style={{ minHeight: '52px', maxHeight: '200px' }}
@@ -127,7 +138,7 @@ export const PromptInput = memo(function PromptInput({
             <Button
               type="button"
               onClick={onSubmit}
-              disabled={disabled || !value.trim()}
+              disabled={!canSubmit}
               className="h-9 w-9 rounded-full p-0"
             >
               <Send className="h-4 w-4" />

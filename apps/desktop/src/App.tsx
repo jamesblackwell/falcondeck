@@ -251,7 +251,7 @@ function AppInner() {
   }, [api, setSnapshot, setSelectedThreadId, setSelectedWorkspaceId, toast])
 
   async function handleSubmit() {
-    if (!api || !selectedWorkspace || !draft.trim()) return
+    if (!api || !selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
     const submittedAttachments = attachments
     setDraft('')
@@ -272,7 +272,10 @@ function AppInner() {
           c ? { ...c, threads: [handle.thread, ...c.threads.filter((t) => t.id !== handle.thread.id)] } : c,
         )
       }
-      const inputs: TurnInputItem[] = [{ type: 'text', text: submittedDraft }, ...submittedAttachments]
+      const inputs: TurnInputItem[] = [
+        ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft } satisfies TurnInputItem] : []),
+        ...submittedAttachments,
+      ]
       await api.sendTurn({
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
