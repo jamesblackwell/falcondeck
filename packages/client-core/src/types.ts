@@ -25,8 +25,10 @@ export type ModelSummary = {
 export type CollaborationModeSummary = {
   id: string
   label: string
+  mode?: string | null
   model_id: string | null
   reasoning_effort: string | null
+  is_native?: boolean
 }
 
 export type AccountSummary = {
@@ -48,6 +50,8 @@ export type WorkspaceSummary = {
   status: WorkspaceStatus
   models: ModelSummary[]
   collaboration_modes: CollaborationModeSummary[]
+  supports_plan_mode?: boolean
+  supports_native_plan_mode?: boolean
   account: AccountSummary
   current_thread_id: string | null
   connected_at: string

@@ -498,6 +498,7 @@ fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
             Some(CollaborationModeSummary {
                 id: id.clone(),
                 label: extract_string(entry, &["label", "name"]).unwrap_or(id),
+                mode: extract_string(entry, &["mode"]),
                 model_id: extract_string(entry, &["model", "modelId", "model_id"]).or_else(|| {
                     settings.and_then(|settings| {
                         extract_string(settings, &["model", "modelId", "model_id"])
@@ -509,6 +510,7 @@ fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
                             extract_string(settings, &["reasoningEffort", "reasoning_effort"])
                         })
                     }),
+                is_native: true,
             })
         })
         .collect()
@@ -1314,8 +1316,10 @@ mod tests {
         assert_eq!(modes.len(), 1);
         assert_eq!(modes[0].id, "plan");
         assert_eq!(modes[0].label, "Plan");
+        assert_eq!(modes[0].mode.as_deref(), Some("plan"));
         assert_eq!(modes[0].model_id.as_deref(), Some("gpt-5.4"));
         assert_eq!(modes[0].reasoning_effort.as_deref(), Some("high"));
+        assert!(modes[0].is_native);
     }
 
     #[test]

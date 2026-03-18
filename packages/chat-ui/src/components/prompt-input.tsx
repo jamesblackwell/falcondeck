@@ -1,10 +1,10 @@
-import { ImagePlus, Send } from 'lucide-react'
+import { ImagePlus, Map, Send } from 'lucide-react'
 import { memo, useCallback, useRef, type ChangeEvent } from 'react'
 
 import type { CollaborationModeSummary, ImageInput, ModelSummary } from '@falcondeck/client-core'
 import { Button } from '@falcondeck/ui'
 
-import { CollaborationModeSelector, ModelSelector, ReasoningSelector } from './model-selector'
+import { ModelSelector, ReasoningSelector } from './model-selector'
 
 export type PromptInputProps = {
   value: string
@@ -21,6 +21,9 @@ export type PromptInputProps = {
   collaborationModes: CollaborationModeSummary[]
   selectedCollaborationModeId: string | null
   onCollaborationModeChange: (value: string) => void
+  showPlanModeToggle?: boolean
+  planModeEnabled?: boolean
+  onPlanModeChange?: (enabled: boolean) => void
   disabled?: boolean
   compact?: boolean
 }
@@ -37,9 +40,9 @@ export const PromptInput = memo(function PromptInput({
   reasoningOptions,
   selectedEffort,
   onEffortChange,
-  collaborationModes,
-  selectedCollaborationModeId,
-  onCollaborationModeChange,
+  showPlanModeToggle = false,
+  planModeEnabled = false,
+  onPlanModeChange,
   disabled = false,
   compact = false,
 }: PromptInputProps) {
@@ -130,8 +133,23 @@ export const PromptInput = memo(function PromptInput({
             <>
               <ModelSelector value={selectedModelId} models={models} onValueChange={onModelChange} />
               <ReasoningSelector value={selectedEffort} options={reasoningOptions} onValueChange={onEffortChange} />
-              <CollaborationModeSelector value={selectedCollaborationModeId} modes={collaborationModes} onValueChange={onCollaborationModeChange} />
             </>
+          ) : null}
+
+          {showPlanModeToggle ? (
+            <Button
+              type="button"
+              variant={planModeEnabled ? 'secondary' : 'ghost'}
+              size="icon"
+              disabled={disabled}
+              onClick={() => onPlanModeChange?.(!planModeEnabled)}
+              className="rounded-full"
+              aria-pressed={planModeEnabled}
+              title="Enable plan mode"
+              aria-label="Enable plan mode"
+            >
+              <Map className="h-4 w-4" />
+            </Button>
           ) : null}
 
           <div className="ml-auto flex items-center gap-2">

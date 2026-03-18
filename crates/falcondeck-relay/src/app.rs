@@ -798,6 +798,8 @@ impl AppState {
         self.persist_current().await?;
 
         for tx in recipients {
+            // Send failures are expected when a peer disconnects — their
+            // socket_loop will detect the closed channel and unregister.
             let _ = tx.send(RelayServerMessage::Update {
                 update: update.clone(),
             });
@@ -1278,7 +1280,11 @@ impl AppState {
         };
 
         if let Some(tx) = tx {
-            let _ = tx.send(message);
+            if tx.send(message).is_err() {
+                // The peer's socket_loop will detect the closed channel and
+                // call unregister_peer — no need to clean up here.
+                tracing::warn!(session_id, peer_id, "send_to_peer failed — channel closed");
+            }
         }
     }
 
@@ -1298,6 +1304,8 @@ impl AppState {
         };
 
         for tx in recipients {
+            // Send failures are expected when a peer disconnects — their
+            // socket_loop will detect the closed channel and unregister.
             let _ = tx.send(message.clone());
         }
     }
@@ -1845,8 +1853,24 @@ fn load_compatible_state(contents: &str) -> Result<PersistedState, RelayError> {
                 Ok(session) => {
                     state.sessions.insert(session_id.clone(), session);
                 }
-                Err(error) => {
-                    warn!("skipping incompatible legacy session record {session_id}: {error}");
+                Err(first_error) => {
+                    // Old updates may use a different serialization format for
+                    // RelayUpdateBody (e.g. missing the "t" tag). Clear them and
+                    // retry — clients will re-bootstrap on connect anyway.
+                    let mut patched = session_value.clone();
+                    if let Some(obj) = patched.as_object_mut() {
+                        obj.insert("updates".to_string(), serde_json::json!([]));
+                        obj.insert("actions".to_string(), serde_json::json!({}));
+                    }
+                    match serde_json::from_value::<SessionRecord>(patched) {
+                        Ok(session) => {
+                            warn!("recovered legacy session {session_id} (cleared incompatible updates)");
+                            state.sessions.insert(session_id.clone(), session);
+                        }
+                        Err(_) => {
+                            warn!("skipping incompatible legacy session record {session_id}: {first_error}");
+                        }
+                    }
                 }
             }
         }

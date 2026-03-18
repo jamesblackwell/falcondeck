@@ -3,7 +3,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   buildProjectGroups,
   conversationItemsForSelection,
+  defaultCollaborationModeId,
   filesToImageInputs,
+  isPlanModeEnabled,
+  supportsPlanMode,
+  togglePlanMode,
   type ConversationItem,
   type ImageInput,
   type InteractiveRequest,
@@ -113,12 +117,12 @@ function AppInner() {
           defaultReasoningEffort(selectedThread, selectedWorkspace, nextModelId) ??
           'medium',
       )
-      setSelectedCollaborationMode(selectedThread.codex.collaboration_mode_id ?? selectedWorkspace.collaboration_modes[0]?.id ?? null)
+      setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
       return
     }
     setSelectedModel(fallbackModelId)
     setSelectedEffort(defaultReasoningEffort(null, selectedWorkspace, fallbackModelId) ?? 'medium')
-    setSelectedCollaborationMode(selectedWorkspace.collaboration_modes[0]?.id ?? null)
+    setSelectedCollaborationMode(null)
   }, [selectedThread, selectedWorkspace])
 
   useEffect(() => {
@@ -214,7 +218,7 @@ function AppInner() {
   )
 
   const handleCollaborationModeChange = useCallback(
-    (modeId: string) => {
+    (modeId: string | null) => {
       setSelectedCollaborationMode(modeId)
       void persistThreadSettings({ modelId: selectedModel, effort: selectedEffort, collaborationModeId: modeId })
     },
@@ -410,6 +414,11 @@ function AppInner() {
   )
   const models = useMemo(() => selectedWorkspace?.models ?? [], [selectedWorkspace?.models])
   const collaborationModes = useMemo(() => selectedWorkspace?.collaboration_modes ?? [], [selectedWorkspace?.collaboration_modes])
+  const showPlanModeToggle = useMemo(() => supportsPlanMode(selectedWorkspace), [selectedWorkspace])
+  const planModeEnabled = useMemo(
+    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace),
+    [selectedCollaborationMode, selectedWorkspace],
+  )
   const isDisabled = !selectedWorkspace || isSending
   const workspaces = useMemo(() => snapshot?.workspaces ?? [], [snapshot?.workspaces])
 
@@ -498,7 +507,14 @@ function AppInner() {
             onEffortChange={handleEffortChange}
             collaborationModes={collaborationModes}
             selectedCollaborationModeId={selectedCollaborationMode}
-            onCollaborationModeChange={handleCollaborationModeChange}
+            onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
+            showPlanModeToggle={showPlanModeToggle}
+            planModeEnabled={planModeEnabled}
+            onPlanModeChange={(enabled) =>
+              handleCollaborationModeChange(
+                togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
+              )
+            }
             disabled={isDisabled}
           />
         </section>

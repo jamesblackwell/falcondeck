@@ -8,11 +8,13 @@ use axum::{
     routing::{get, post},
 };
 use futures_util::StreamExt;
+use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest, SendTurnRequest,
-    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, UnifiedEvent, UpdateThreadRequest,
+    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, UnifiedEvent,
+    UpdateThreadRequest,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -58,7 +60,10 @@ pub fn router(state: AppState) -> Router {
             "/api/workspaces/{workspace_id}/interactive-requests/{request_id}/respond",
             post(respond_interactive_request),
         )
-        .route("/api/workspaces/{workspace_id}/approvals/{request_id}/respond", post(respond_approval))
+        .route(
+            "/api/workspaces/{workspace_id}/approvals/{request_id}/respond",
+            post(respond_approval),
+        )
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
         .layer(
@@ -142,7 +147,9 @@ async fn unarchive_thread(
     State(state): State<AppState>,
     Path((workspace_id, thread_id)): Path<(String, String)>,
 ) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
-    Ok(Json(state.unarchive_thread(&workspace_id, &thread_id).await?))
+    Ok(Json(
+        state.unarchive_thread(&workspace_id, &thread_id).await?,
+    ))
 }
 
 async fn send_turn(
@@ -267,7 +274,29 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
                             break;
                         }
                     }
-                    Err(_) => break,
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!("local daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
+                        let snapshot = state.snapshot().await;
+                        let snapshot_event = falcondeck_core::EventEnvelope {
+                            seq: 0,
+                            emitted_at: chrono::Utc::now(),
+                            workspace_id: None,
+                            thread_id: None,
+                            event: UnifiedEvent::Snapshot { snapshot },
+                        };
+                        if socket
+                            .send(Message::Text(
+                                serde_json::to_string(&snapshot_event)
+                                    .unwrap_or_else(|_| "{}".to_string())
+                                    .into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             message = socket.next() => {

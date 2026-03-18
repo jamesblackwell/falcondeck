@@ -10,15 +10,15 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    ApprovalDecision, CollaborationModeSummary, CommandResponse,
-    ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope,
-    EventEnvelope, HealthResponse, PairingPublicKeyBundle, PairingStatusResponse,
-    RelayClientMessage, RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus,
-    RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
-    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
+    ApprovalDecision, CollaborationModeSummary, CommandResponse, ConnectWorkspaceRequest,
+    ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope, EventEnvelope, HealthResponse,
+    InteractiveQuestion, InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind,
+    InteractiveResponsePayload, PairingPublicKeyBundle, PairingStatusResponse, RelayClientMessage,
+    RelayServerMessage, RelayUpdateBody, RemoteConnectionStatus, RemotePairingSession,
+    RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial, StartPairingRequest,
+    StartPairingResponse, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
     ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary, TurnInputItem,
-    UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary, InteractiveQuestion,
-    InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload,
+    UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, decrypt_json, encrypt_json, generate_data_key},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -41,6 +41,36 @@ use crate::{
     },
     error::DaemonError,
 };
+
+/// Classifies errors from the remote relay connection so the retry loop can
+/// apply appropriate backoff.  Most errors (network drops, broadcast lag) are
+/// transient and should retry quickly.  Only permanent failures (channel
+/// closed, internal shutdown) use exponential backoff.
+enum RemoteBridgeError {
+    Transient(String),
+    Persistent(String),
+}
+
+impl RemoteBridgeError {
+    fn message(&self) -> &str {
+        match self {
+            Self::Transient(msg) | Self::Persistent(msg) => msg,
+        }
+    }
+
+    fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient(_))
+    }
+}
+
+/// All bare `String` errors produced by `.map_err(|e| format!(...))` are
+/// treated as transient by default — only explicitly-constructed `Persistent`
+/// values bypass fast retry.
+impl From<String> for RemoteBridgeError {
+    fn from(s: String) -> Self {
+        Self::Transient(s)
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -147,7 +177,7 @@ impl AppState {
     }
 
     pub fn new_with_state_path(version: String, codex_bin: String, state_path: PathBuf) -> Self {
-        let (broadcaster, _) = broadcast::channel(512);
+        let (broadcaster, _) = broadcast::channel(2048);
         Self {
             inner: Arc::new(InnerState {
                 daemon: DaemonInfo {
@@ -403,8 +433,7 @@ impl AppState {
             } else {
                 let app = self.clone();
                 let task = tokio::spawn(async move {
-                    app.run_remote_bridge(relay_url, pairing.daemon_token)
-                        .await;
+                    app.run_remote_bridge(relay_url, pairing.daemon_token).await;
                 });
                 remote.task = Some(task);
             }
@@ -544,6 +573,8 @@ impl AppState {
             },
             models,
             collaboration_modes: collaboration_modes.clone(),
+            supports_plan_mode: true,
+            supports_native_plan_mode: true,
             account,
             current_thread_id,
             connected_at: now,
@@ -594,6 +625,13 @@ impl AppState {
         &self,
         request: StartThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
+        let supports_native_plan_mode = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(&request.workspace_id)
+                .map(|workspace| workspace.summary.supports_native_plan_mode)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?
+        };
         let session = self.session_for(&request.workspace_id).await?;
         let workspace_path = session.workspace_path().to_string();
         let approval_policy = request
@@ -606,7 +644,12 @@ impl AppState {
                 json!({
                     "cwd": workspace_path,
                     "model": request.model_id,
-                    "collaborationMode": request.collaboration_mode_id,
+                    "collaborationMode": collaboration_mode_payload(
+                        request.collaboration_mode_id.as_deref(),
+                        request.model_id.as_deref(),
+                        None,
+                        supports_native_plan_mode,
+                    ),
                     "approvalPolicy": approval_policy
                 }),
             )
@@ -737,7 +780,7 @@ impl AppState {
         };
 
         let user_message = build_user_message_item(&inputs);
-        let (thread, requires_resume) = {
+        let (thread, requires_resume, use_plan_mode_shim) = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get_mut(&request.workspace_id)
@@ -764,25 +807,38 @@ impl AppState {
                     })
                 });
             managed.summary.status = ThreadStatus::Running;
-            managed.summary.codex.model_id =
-                request.model_id.clone().or(managed.summary.codex.model_id.clone());
-            managed.summary.codex.reasoning_effort = request
+            managed.summary.codex.model_id = request.model_id.clone().or(managed
+                .summary
+                .codex
+                .model_id
+                .clone());
+            managed.summary.codex.reasoning_effort = request.reasoning_effort.clone().or(managed
+                .summary
+                .codex
                 .reasoning_effort
-                .clone()
-                .or(managed.summary.codex.reasoning_effort.clone());
+                .clone());
             managed.summary.codex.collaboration_mode_id = request
                 .collaboration_mode_id
                 .clone()
                 .or(managed.summary.codex.collaboration_mode_id.clone());
             managed.summary.codex.approval_policy = Some(approval_policy.clone());
-            managed.summary.codex.service_tier = request
+            managed.summary.codex.service_tier = request.service_tier.clone().or(managed
+                .summary
+                .codex
                 .service_tier
-                .clone()
-                .or(managed.summary.codex.service_tier.clone());
+                .clone());
+            let use_plan_mode_shim = should_use_plan_mode_shim(
+                &workspace.summary,
+                request.collaboration_mode_id.as_deref(),
+            );
             managed.summary.updated_at = now;
             workspace.summary.current_thread_id = Some(managed.summary.id.clone());
             workspace.summary.updated_at = now;
-            (managed.summary.clone(), managed.requires_resume)
+            (
+                managed.summary.clone(),
+                managed.requires_resume,
+                use_plan_mode_shim,
+            )
         };
         self.push_conversation_item(
             &request.workspace_id,
@@ -812,7 +868,7 @@ impl AppState {
                 "turn/start",
                 json!({
                     "threadId": request.thread_id,
-                    "input": codex_inputs(&inputs),
+                    "input": codex_inputs_with_plan_mode_shim(&inputs, use_plan_mode_shim),
                     "cwd": workspace_path,
                     "model": request.model_id,
                     "effort": request.reasoning_effort,
@@ -820,6 +876,7 @@ impl AppState {
                         request.collaboration_mode_id.as_deref(),
                         request.model_id.as_deref(),
                         request.reasoning_effort.as_deref(),
+                        !use_plan_mode_shim,
                     ),
                     "approvalPolicy": approval_policy,
                     "serviceTier": request.service_tier
@@ -943,7 +1000,10 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?;
 
         let result = match (&pending.request.kind, response) {
-            (InteractiveRequestKind::Approval, InteractiveResponsePayload::Approval { decision }) => {
+            (
+                InteractiveRequestKind::Approval,
+                InteractiveResponsePayload::Approval { decision },
+            ) => {
                 let decision = match decision {
                     ApprovalDecision::Allow => "allow",
                     ApprovalDecision::Deny => "deny",
@@ -954,7 +1014,10 @@ impl AppState {
                     "acceptSettings": {"forSession": true}
                 })
             }
-            (InteractiveRequestKind::Question, InteractiveResponsePayload::Question { answers }) => json!({
+            (
+                InteractiveRequestKind::Question,
+                InteractiveResponsePayload::Question { answers },
+            ) => json!({
                 "answers": answers
                     .into_iter()
                     .map(|(question_id, question_answers)| {
@@ -974,9 +1037,7 @@ impl AppState {
             }
         };
 
-        session
-            .respond_to_request(pending.raw_id, result)
-            .await?;
+        session.respond_to_request(pending.raw_id, result).await?;
 
         if let Some(thread_id) = pending.request.thread_id {
             self.with_thread_mut(&workspace_id, &thread_id, |thread| {
@@ -1033,11 +1094,7 @@ impl AppState {
         })
     }
 
-    async fn run_remote_bridge(
-        &self,
-        relay_url: String,
-        daemon_token: String,
-    ) {
+    async fn run_remote_bridge(&self, relay_url: String, daemon_token: String) {
         let mut backoff_seconds = 1u64;
         loop {
             let Some(pairing) = ({
@@ -1059,23 +1116,26 @@ impl AppState {
                     backoff_seconds = 1;
                 }
                 Err(error) => {
+                    let error_msg = error.message().to_string();
+                    let is_transient = error.is_transient();
+
                     let mut remote = self.inner.remote.lock().await;
                     let should_clear_pairing = remote.pairing.as_ref().is_some_and(|pairing| {
                         pairing.device_id.is_none() && pairing.expires_at <= Utc::now()
                     });
-                    let revoked = error.contains("invalid session token")
-                        || error.contains("session not found")
-                        || error.contains("trusted device");
+                    let revoked = error_msg.contains("invalid session token")
+                        || error_msg.contains("session not found")
+                        || error_msg.contains("trusted device");
                     remote.status = if should_clear_pairing {
                         RemoteConnectionStatus::Inactive
                     } else if revoked {
                         RemoteConnectionStatus::Revoked
-                    } else if backoff_seconds >= 8 {
+                    } else if !is_transient && backoff_seconds >= 8 {
                         RemoteConnectionStatus::Offline
                     } else {
                         RemoteConnectionStatus::Degraded
                     };
-                    remote.last_error = Some(error);
+                    remote.last_error = Some(error_msg);
                     if should_clear_pairing || revoked {
                         remote.relay_url = None;
                         remote.daemon_token = None;
@@ -1086,8 +1146,13 @@ impl AppState {
                     if should_clear_pairing || revoked {
                         break;
                     }
-                    sleep(Duration::from_secs(backoff_seconds)).await;
-                    backoff_seconds = (backoff_seconds * 2).min(16);
+                    if is_transient {
+                        sleep(Duration::from_secs(1)).await;
+                        backoff_seconds = 1;
+                    } else {
+                        sleep(Duration::from_secs(backoff_seconds)).await;
+                        backoff_seconds = (backoff_seconds * 2).min(16);
+                    }
                 }
             }
         }
@@ -1098,7 +1163,7 @@ impl AppState {
         relay_url: String,
         daemon_token: String,
         pairing: RemotePairingState,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteBridgeError> {
         // If we already have a trusted device with session + client key material,
         // skip polling the pairing endpoint entirely — the pairing may have expired
         // but the session is still valid.
@@ -1132,7 +1197,9 @@ impl AppState {
                     .map_err(|error| format!("failed to parse relay pairing status: {error}"))?;
 
                 if response.status == falcondeck_core::PairingStatus::Expired {
-                    return Err("relay pairing expired before it was claimed".to_string());
+                    return Err(RemoteBridgeError::Persistent(
+                        "relay pairing expired before it was claimed".to_string(),
+                    ));
                 }
 
                 {
@@ -1151,7 +1218,9 @@ impl AppState {
                     (response.session_id, response.device_id)
                 {
                     let client_bundle = response.client_bundle.ok_or_else(|| {
-                        "relay pairing completed without client key material".to_string()
+                        RemoteBridgeError::Persistent(
+                            "relay pairing completed without client key material".to_string(),
+                        )
                     })?;
                     break (session_id, device_id, client_bundle);
                 }
@@ -1326,36 +1395,37 @@ impl AppState {
                         return;
                     };
 
-                    let should_restart = {
-                        let mut remote = self.inner.remote.lock().await;
-                        if remote.relay_url.as_deref() != Some(relay_url.as_str())
-                            || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
+                    let should_restart =
                         {
-                            false
-                        } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
-                            current_pairing.pairing_id != pairing_id
-                        }) {
-                            false
-                        } else {
+                            let mut remote = self.inner.remote.lock().await;
+                            if remote.relay_url.as_deref() != Some(relay_url.as_str())
+                                || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
                             {
-                                let current_pairing =
-                                    remote.pairing.as_mut().expect("pairing checked above");
-                                current_pairing.session_id = Some(session_id);
-                                current_pairing.device_id = Some(device_id);
-                                current_pairing.client_bundle = Some(client_bundle);
-                                if current_pairing.trusted_at.is_none() {
-                                    current_pairing.trusted_at = Some(Utc::now());
+                                false
+                            } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
+                                current_pairing.pairing_id != pairing_id
+                            }) {
+                                false
+                            } else {
+                                {
+                                    let current_pairing =
+                                        remote.pairing.as_mut().expect("pairing checked above");
+                                    current_pairing.session_id = Some(session_id);
+                                    current_pairing.device_id = Some(device_id);
+                                    current_pairing.client_bundle = Some(client_bundle);
+                                    if current_pairing.trusted_at.is_none() {
+                                        current_pairing.trusted_at = Some(Utc::now());
+                                    }
                                 }
+                                remote.status = RemoteConnectionStatus::Connecting;
+                                remote.last_error = None;
+                                if let Some(task) = remote.task.take() {
+                                    task.abort();
+                                }
+                                remote.pairing_watch_task = None;
+                                true
                             }
-                            remote.status = RemoteConnectionStatus::Connecting;
-                            remote.last_error = None;
-                            if let Some(task) = remote.task.take() {
-                                task.abort();
-                            }
-                            remote.pairing_watch_task = None;
-                            true
-                        }
-                    };
+                        };
 
                     if should_restart {
                         let app = self.clone();
@@ -1390,7 +1460,7 @@ impl AppState {
         session_id: String,
         pairing: RemotePairingState,
         client_bundle: PairingPublicKeyBundle,
-    ) -> Result<(), String> {
+    ) -> Result<(), RemoteBridgeError> {
         let ws_url = relay_ws_url(&relay_url, &session_id, &daemon_token);
         let (socket, _) = connect_async(&ws_url)
             .await
@@ -1499,18 +1569,52 @@ impl AppState {
             .map_err(|error| format!("failed to persist connected remote state: {error}"))?;
 
         let mut events = self.subscribe();
+        let mut min_forward_seq: u64 = 0;
         loop {
             tokio::select! {
                 event = events.recv() => {
-                    let event = event.map_err(|error| format!("remote event stream ended: {error}"))?;
-                    send_relay_message(
-                        &mut writer,
-                        &RelayClientMessage::Update {
-                            body: RelayUpdateBody::Encrypted {
-                                envelope: encrypt_remote_daemon_event(&pairing.data_key, &event)?,
-                            },
-                        },
-                    ).await?;
+                    match event {
+                        Ok(event) => {
+                            if event.seq < min_forward_seq {
+                                continue;
+                            }
+                            send_relay_message(
+                                &mut writer,
+                                &RelayClientMessage::Update {
+                                    body: RelayUpdateBody::Encrypted {
+                                        envelope: encrypt_remote_daemon_event(&pairing.data_key, &event)?,
+                                    },
+                                },
+                            ).await?;
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!("remote daemon event stream lagged, skipped {skipped} events; sending fresh snapshot");
+                            let resync_seq = self.inner.sequence.fetch_add(1, Ordering::Relaxed);
+                            let snapshot_event = EventEnvelope {
+                                seq: resync_seq,
+                                emitted_at: Utc::now(),
+                                workspace_id: None,
+                                thread_id: None,
+                                event: UnifiedEvent::Snapshot {
+                                    snapshot: self.snapshot().await,
+                                },
+                            };
+                            send_relay_message(
+                                &mut writer,
+                                &RelayClientMessage::Update {
+                                    body: RelayUpdateBody::Encrypted {
+                                        envelope: encrypt_remote_daemon_event(&pairing.data_key, &snapshot_event)?,
+                                    },
+                                },
+                            ).await?;
+                            min_forward_seq = resync_seq.saturating_add(1);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(RemoteBridgeError::Persistent(
+                                "remote event stream closed".to_string(),
+                            ));
+                        }
+                    }
                 }
                 _ = heartbeat.tick() => {
                     send_relay_message(&mut writer, &RelayClientMessage::Ping).await?;
@@ -1531,11 +1635,11 @@ impl AppState {
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => {
-                            return Err("relay websocket disconnected".to_string());
+                            return Err("relay websocket disconnected".to_string().into());
                         }
                         Some(Ok(_)) => {}
                         Some(Err(error)) => {
-                            return Err(format!("relay websocket error: {error}"));
+                            return Err(format!("relay websocket error: {error}").into());
                         }
                     }
                 }
@@ -1638,8 +1742,9 @@ impl AppState {
                         request_id,
                         ok: true,
                         result: Some(
-                            encrypt_json(data_key, &snapshot)
-                                .map_err(|error| format!("failed to encrypt rpc result: {error}"))?,
+                            encrypt_json(data_key, &snapshot).map_err(|error| {
+                                format!("failed to encrypt rpc result: {error}")
+                            })?,
                         ),
                         error: None,
                     },
@@ -1928,15 +2033,10 @@ impl AppState {
                                 ok: false,
                                 result: None,
                                 error: Some(
-                                    encrypt_json(
-                                        data_key,
-                                        &json!({ "message": message }),
-                                    )
-                                    .map_err(
-                                        |encrypt_error| {
+                                    encrypt_json(data_key, &json!({ "message": message }))
+                                        .map_err(|encrypt_error| {
                                             format!("failed to encrypt rpc error: {encrypt_error}")
-                                        },
-                                    )?,
+                                        })?,
                                 ),
                             },
                         )
@@ -2233,8 +2333,7 @@ impl AppState {
 
             let app = self.clone();
             let task = tokio::spawn(async move {
-                app.run_remote_bridge(relay_url, daemon_token)
-                    .await;
+                app.run_remote_bridge(relay_url, daemon_token).await;
             });
             current.task = Some(task);
         }
@@ -3280,11 +3379,60 @@ fn codex_inputs(inputs: &[TurnInputItem]) -> Vec<Value> {
         .collect()
 }
 
+fn codex_inputs_with_plan_mode_shim(
+    inputs: &[TurnInputItem],
+    use_plan_mode_shim: bool,
+) -> Vec<Value> {
+    if !use_plan_mode_shim {
+        return codex_inputs(inputs);
+    }
+
+    let mut shimmed_inputs = vec![json!({
+        "type": "text",
+        "text": plan_mode_prompt_shim(),
+    })];
+    shimmed_inputs.extend(codex_inputs(inputs));
+    shimmed_inputs
+}
+
+fn plan_mode_prompt_shim() -> &'static str {
+    "Enter plan mode for this turn. Explore first, ask clarifying questions if needed, and produce a decision-complete implementation plan before making repo-tracked changes. Do not perform mutating work until the user explicitly exits plan mode."
+}
+
+fn mode_matches_plan(mode: &CollaborationModeSummary) -> bool {
+    mode.mode
+        .as_deref()
+        .unwrap_or(mode.id.as_str())
+        .eq_ignore_ascii_case("plan")
+}
+
+fn should_use_plan_mode_shim(summary: &WorkspaceSummary, mode_id: Option<&str>) -> bool {
+    if !summary.supports_plan_mode || summary.supports_native_plan_mode {
+        return false;
+    }
+
+    let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return false;
+    };
+
+    summary
+        .collaboration_modes
+        .iter()
+        .find(|mode| mode.id == mode_id)
+        .map(mode_matches_plan)
+        .unwrap_or_else(|| mode_id.eq_ignore_ascii_case("plan"))
+}
+
 fn collaboration_mode_payload(
     mode_id: Option<&str>,
     model_id: Option<&str>,
     reasoning_effort: Option<&str>,
+    supports_native_plan_mode: bool,
 ) -> Value {
+    if !supports_native_plan_mode {
+        return Value::Null;
+    }
+
     let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) else {
         return Value::Null;
     };
@@ -3347,7 +3495,8 @@ fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQuestion> {
             questions
                 .iter()
                 .map(|question| InteractiveQuestion {
-                    id: extract_string(question, &["id"]).unwrap_or_else(|| Uuid::new_v4().to_string()),
+                    id: extract_string(question, &["id"])
+                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
                     header: extract_string(question, &["header"])
                         .unwrap_or_else(|| "Question".to_string()),
                     question: extract_string(question, &["question"])
@@ -3362,26 +3511,27 @@ fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQuestion> {
                         .or_else(|| question.get("is_secret"))
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                    options: question.get("options").and_then(Value::as_array).map(|options| {
-                        options
-                            .iter()
-                            .map(|option| InteractiveQuestionOption {
-                                label: extract_string(option, &["label"])
-                                    .unwrap_or_else(|| "Option".to_string()),
-                                description: extract_string(option, &["description"])
-                                    .unwrap_or_default(),
-                            })
-                            .collect()
-                    }),
+                    options: question
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .map(|option| InteractiveQuestionOption {
+                                    label: extract_string(option, &["label"])
+                                        .unwrap_or_else(|| "Option".to_string()),
+                                    description: extract_string(option, &["description"])
+                                        .unwrap_or_default(),
+                                })
+                                .collect()
+                        }),
                 })
                 .collect()
         })
         .unwrap_or_default()
 }
 
-fn parse_interactive_response_params(
-    params: &Value,
-) -> Result<InteractiveResponsePayload, String> {
+fn parse_interactive_response_params(params: &Value) -> Result<InteractiveResponsePayload, String> {
     if let Some(response) = params.get("response") {
         if let Some(kind) = extract_string(response, &["kind"]) {
             return match kind.as_str() {
@@ -3408,18 +3558,22 @@ fn parse_interactive_response_params(
                                     let answer_values = value
                                         .as_array()
                                         .map(|items| {
-                                            items.iter()
+                                            items
+                                                .iter()
                                                 .filter_map(Value::as_str)
                                                 .map(str::to_string)
                                                 .collect::<Vec<_>>()
                                         })
                                         .or_else(|| {
-                                            value.get("answers").and_then(Value::as_array).map(|items| {
-                                                items.iter()
-                                                    .filter_map(Value::as_str)
-                                                    .map(str::to_string)
-                                                    .collect::<Vec<_>>()
-                                            })
+                                            value.get("answers").and_then(Value::as_array).map(
+                                                |items| {
+                                                    items
+                                                        .iter()
+                                                        .filter_map(Value::as_str)
+                                                        .map(str::to_string)
+                                                        .collect::<Vec<_>>()
+                                                },
+                                            )
                                         })
                                         .unwrap_or_default();
                                     (question_id.clone(), answer_values)
@@ -3639,8 +3793,9 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        ConversationItem, EncryptionVariant, ImageInput, PairingPublicKeyBundle,
-        ThreadCodexParams, ThreadStatus, ThreadSummary, TurnInputItem, WorkspaceStatus,
+        CollaborationModeSummary, ConversationItem, EncryptionVariant, ImageInput,
+        PairingPublicKeyBundle, ThreadCodexParams, ThreadStatus, ThreadSummary, TurnInputItem,
+        WorkspaceStatus, WorkspaceSummary,
         crypto::{LocalBoxKeyPair, generate_data_key},
     };
     use serde_json::json;
@@ -3648,8 +3803,8 @@ mod tests {
 
     use super::{
         AppState, PersistedAppState, PersistedRemoteState, codex_inputs,
-        collaboration_mode_payload, should_surface_tool_item,
-        workspace_status_after_account_update,
+        codex_inputs_with_plan_mode_shim, collaboration_mode_payload, should_surface_tool_item,
+        should_use_plan_mode_shim, workspace_status_after_account_update,
     };
 
     #[test]
@@ -3662,7 +3817,7 @@ mod tests {
 
     #[test]
     fn builds_structured_collaboration_mode_payload() {
-        let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"));
+        let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), true);
         assert_eq!(
             payload,
             json!({
@@ -3673,6 +3828,64 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn skips_structured_collaboration_mode_payload_for_non_native_plan_mode() {
+        let payload =
+            collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), false);
+        assert_eq!(payload, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn injects_plan_mode_prompt_shim_before_user_inputs() {
+        let payload = codex_inputs_with_plan_mode_shim(
+            &[TurnInputItem::Text {
+                id: None,
+                text: "Inspect the repo".to_string(),
+            }],
+            true,
+        );
+        assert_eq!(payload.len(), 2);
+        assert_eq!(payload[0]["type"], "text");
+        assert!(
+            payload[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Enter plan mode for this turn")
+        );
+        assert_eq!(payload[1]["text"], "Inspect the repo");
+    }
+
+    #[test]
+    fn only_uses_plan_mode_shim_for_non_native_plan_mode_workspaces() {
+        let workspace = WorkspaceSummary {
+            id: "workspace-1".to_string(),
+            path: "/tmp/falcondeck".to_string(),
+            status: WorkspaceStatus::Ready,
+            models: Vec::new(),
+            collaboration_modes: vec![CollaborationModeSummary {
+                id: "plan".to_string(),
+                label: "Plan".to_string(),
+                mode: Some("plan".to_string()),
+                model_id: None,
+                reasoning_effort: Some("medium".to_string()),
+                is_native: false,
+            }],
+            supports_plan_mode: true,
+            supports_native_plan_mode: false,
+            account: falcondeck_core::AccountSummary {
+                status: falcondeck_core::AccountStatus::Ready,
+                label: "ready".to_string(),
+            },
+            current_thread_id: None,
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+        };
+
+        assert!(should_use_plan_mode_shim(&workspace, Some("plan")));
+        assert!(!should_use_plan_mode_shim(&workspace, None));
     }
 
     #[test]
