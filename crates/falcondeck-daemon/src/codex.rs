@@ -26,6 +26,7 @@ use tokio::{
 use tracing::warn;
 
 use crate::{app::AppState, error::DaemonError};
+use crate::skills::canonical_skill_alias;
 
 pub struct CodexBootstrap {
     pub session: Arc<CodexSession>,
@@ -1127,7 +1128,7 @@ fn parse_user_message_content(item_id: &str, content: &[Value]) -> (String, Vec<
             }
             "skill" => {
                 if let Some(name) = extract_string(entry, &["name"]) {
-                    text_parts.push(format!("${name}"));
+                    text_parts.push(canonical_skill_alias(&name));
                 }
             }
             _ => {}

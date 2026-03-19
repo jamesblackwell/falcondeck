@@ -8,6 +8,7 @@ import type {
   InteractiveResponsePayload,
   MarkThreadReadPayload,
   RemoteStatusResponse,
+  SelectedSkillReference,
   FalconDeckPreferences,
   ThreadDetail,
   ThreadHandle,
@@ -38,6 +39,7 @@ export type SendTurnPayload = {
   workspace_id: string
   thread_id: string
   inputs: TurnInputItem[]
+  selected_skills?: SelectedSkillReference[]
   provider?: AgentProvider | null
   model_id?: string | null
   reasoning_effort?: string | null

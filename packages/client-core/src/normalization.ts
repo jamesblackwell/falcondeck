@@ -2,6 +2,7 @@ import type {
   AccountSummary,
   AgentProvider,
   ConversationPreferences,
+  SkillSummary,
   DaemonSnapshot,
   EventEnvelope,
   FalconDeckPreferences,
@@ -18,6 +19,11 @@ const DEFAULT_ACCOUNT: AccountSummary = {
   status: 'unknown',
   label: 'Unavailable',
 }
+
+const DEFAULT_SKILL_TRANSLATIONS = {
+  codex: null,
+  claude: null,
+} as const
 
 const DEFAULT_THREAD_AGENT: ThreadAgentParams = {
   model_id: null,
@@ -89,12 +95,47 @@ function normalizeThreadAgent(value: unknown): ThreadAgentParams {
   }
 }
 
+function normalizeSkillAvailability(value: unknown): SkillSummary['availability'] {
+  return value === 'claude' || value === 'both' ? value : 'codex'
+}
+
+function normalizeSkillSourceKind(value: unknown): SkillSummary['source_kind'] {
+  return value === 'project_file' || value === 'home_file' ? value : 'provider_native'
+}
+
+function normalizeSkill(value: unknown): SkillSummary {
+  const skill = (value ?? {}) as Partial<SkillSummary>
+  const alias =
+    typeof skill.alias === 'string' && skill.alias.trim().length > 0
+      ? skill.alias.startsWith('/')
+        ? skill.alias
+        : `/${skill.alias}`
+      : '/'
+  return {
+    id: skill.id ?? alias,
+    label:
+      typeof skill.label === 'string' && skill.label.trim().length > 0
+        ? skill.label
+        : alias.slice(1) || 'skill',
+    alias,
+    availability: normalizeSkillAvailability(skill.availability),
+    source_kind: normalizeSkillSourceKind(skill.source_kind),
+    source_path: skill.source_path ?? null,
+    description: skill.description ?? null,
+    provider_translations: {
+      ...DEFAULT_SKILL_TRANSLATIONS,
+      ...(skill.provider_translations ?? {}),
+    },
+  }
+}
+
 function fallbackWorkspaceAgent(workspace: Partial<WorkspaceSummary>): WorkspaceAgentSummary {
   return {
     provider: 'codex',
     account: normalizeAccount(workspace.account),
     models: workspace.models ?? [],
     collaboration_modes: workspace.collaboration_modes ?? [],
+    skills: (workspace.skills ?? []).map((skill) => normalizeSkill(skill)),
     supports_plan_mode: workspace.supports_plan_mode ?? true,
     supports_native_plan_mode: workspace.supports_native_plan_mode ?? true,
     capabilities: { supports_review: true },
@@ -115,6 +156,7 @@ function normalizeWorkspaceAgent(
     account: normalizeAccount(agent.account),
     models: agent.models ?? [],
     collaboration_modes: agent.collaboration_modes ?? [],
+    skills: (agent.skills ?? []).map((skill) => normalizeSkill(skill)),
     supports_plan_mode: agent.supports_plan_mode ?? true,
     supports_native_plan_mode: agent.supports_native_plan_mode ?? true,
     capabilities: {
@@ -168,6 +210,7 @@ export function normalizeWorkspaceSummary(
     path: workspace.path ?? '',
     status: workspace.status ?? 'disconnected',
     agents: agents.length > 0 ? agents : [fallbackWorkspaceAgent(workspace)],
+    skills: (workspace.skills ?? []).map((skill) => normalizeSkill(skill)),
     default_provider: normalizeProvider(workspace.default_provider),
     models: workspace.models ?? [],
     collaboration_modes: workspace.collaboration_modes ?? [],

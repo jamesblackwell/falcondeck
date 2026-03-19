@@ -1,9 +1,16 @@
+//! Local daemon runtime for `FalconDeck`.
+//!
+//! This crate owns the localhost-first control plane that brokers workspaces,
+//! agent sessions, remote pairing, and the HTTP API consumed by the desktop,
+//! mobile, and remote web shells.
+
 mod api;
 mod app;
 mod claude;
 mod codex;
 mod error;
 mod git;
+mod skills;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -12,11 +19,16 @@ pub use app::AppState;
 pub use error::DaemonError;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
+/// Runtime configuration for an embedded daemon instance.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
+    /// Socket address bound by the daemon HTTP server.
     pub bind_addr: SocketAddr,
+    /// Executable name or path used for Codex-backed sessions.
     pub codex_bin: String,
+    /// Executable name or path used for Claude-backed sessions.
     pub claude_bin: String,
+    /// Optional persisted state location for daemon-local state.
     pub state_path: Option<PathBuf>,
 }
 
@@ -35,6 +47,7 @@ impl Default for DaemonConfig {
 }
 
 pub struct EmbeddedDaemonHandle {
+    /// Resolved local bind address for the embedded daemon.
     pub local_addr: SocketAddr,
     state: AppState,
     shutdown: Option<oneshot::Sender<()>>,
@@ -42,10 +55,12 @@ pub struct EmbeddedDaemonHandle {
 }
 
 impl EmbeddedDaemonHandle {
+    /// Returns the base HTTP URL for the embedded daemon.
     pub fn base_url(&self) -> String {
         format!("http://{}", self.local_addr)
     }
 
+    /// Stops the daemon and waits for the server task to exit.
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
         let _ = self.state.shutdown().await;
         if let Some(shutdown) = self.shutdown.take() {
@@ -55,6 +70,7 @@ impl EmbeddedDaemonHandle {
     }
 }
 
+/// Starts the daemon in-process and returns a handle for interacting with it.
 pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle, DaemonError> {
     let state = AppState::new_with_state_path(
         "0.1.0".to_string(),
@@ -96,6 +112,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     })
 }
 
+/// Runs the daemon until the process receives `Ctrl-C`.
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     tracing_subscriber::fmt()
         .with_env_filter(

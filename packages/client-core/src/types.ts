@@ -42,11 +42,41 @@ export type AgentCapabilitySummary = {
   supports_review?: boolean
 }
 
+export type SkillAvailability = 'codex' | 'claude' | 'both'
+export type SkillSourceKind = 'provider_native' | 'project_file' | 'home_file'
+
+export type CodexSkillTranslation = {
+  native_id?: string | null
+  native_name?: string | null
+}
+
+export type ClaudeSkillTranslation = {
+  command_name?: string | null
+  prompt_reference_path?: string | null
+}
+
+export type SkillProviderTranslations = {
+  codex?: CodexSkillTranslation | null
+  claude?: ClaudeSkillTranslation | null
+}
+
+export type SkillSummary = {
+  id: string
+  label: string
+  alias: string
+  availability: SkillAvailability
+  source_kind: SkillSourceKind
+  source_path?: string | null
+  description?: string | null
+  provider_translations?: SkillProviderTranslations | null
+}
+
 export type WorkspaceAgentSummary = {
   provider: AgentProvider
   account: AccountSummary
   models: ModelSummary[]
   collaboration_modes: CollaborationModeSummary[]
+  skills?: SkillSummary[]
   supports_plan_mode?: boolean
   supports_native_plan_mode?: boolean
   capabilities?: AgentCapabilitySummary
@@ -109,6 +139,7 @@ export type WorkspaceSummary = {
   path: string
   status: WorkspaceStatus
   agents: WorkspaceAgentSummary[]
+  skills?: SkillSummary[]
   default_provider?: AgentProvider
   models: ModelSummary[]
   collaboration_modes: CollaborationModeSummary[]
@@ -220,6 +251,11 @@ export type TextInput = {
 }
 
 export type TurnInputItem = TextInput | ImageInput
+
+export type SelectedSkillReference = {
+  skill_id: string
+  alias: string
+}
 
 export type ConversationItem =
   | {

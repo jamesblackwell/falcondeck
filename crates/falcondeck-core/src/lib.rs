@@ -302,6 +302,88 @@ pub struct ImageInput {
     pub local_path: Option<String>,
 }
 
+/// Normalized provider availability for a skill entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillAvailability {
+    /// The skill can only be used with Codex.
+    Codex,
+    /// The skill can only be used with Claude.
+    Claude,
+    /// The skill can be translated for both providers.
+    Both,
+}
+
+/// Source classification used when merging skill catalogs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSourceKind {
+    /// Native provider-reported entry.
+    ProviderNative,
+    /// Project-local file-backed entry.
+    ProjectFile,
+    /// Home-directory/global file-backed entry.
+    HomeFile,
+}
+
+/// Provider-specific Codex translation metadata for a skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CodexSkillTranslation {
+    /// Native skill identifier, if Codex reported one.
+    pub native_id: Option<String>,
+    /// Native skill name, if Codex reported one.
+    pub native_name: Option<String>,
+}
+
+/// Provider-specific Claude translation metadata for a skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ClaudeSkillTranslation {
+    /// Native slash command name for Claude, without the leading slash.
+    pub command_name: Option<String>,
+    /// Optional file path FalconDeck should reference in a prompt preamble.
+    pub prompt_reference_path: Option<String>,
+}
+
+/// Provider-specific skill translation metadata.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SkillProviderTranslations {
+    /// Codex translation details, when available.
+    pub codex: Option<CodexSkillTranslation>,
+    /// Claude translation details, when available.
+    pub claude: Option<ClaudeSkillTranslation>,
+}
+
+/// Normalized skill summary exposed to FalconDeck clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillSummary {
+    /// Stable FalconDeck skill identifier.
+    pub id: String,
+    /// Human-readable display name.
+    pub label: String,
+    /// Canonical slash alias including the leading slash.
+    pub alias: String,
+    /// Which providers can use this skill.
+    pub availability: SkillAvailability,
+    /// Winning merged source for this entry.
+    pub source_kind: SkillSourceKind,
+    /// Optional source file path when the entry is file-backed.
+    pub source_path: Option<String>,
+    /// Short description shown in the picker, if available.
+    pub description: Option<String>,
+    /// Provider-specific translation metadata.
+    #[serde(default)]
+    pub provider_translations: SkillProviderTranslations,
+}
+
+/// Structured skill selection carried alongside a turn payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SelectedSkillReference {
+    /// Stable FalconDeck skill identifier from the workspace catalog.
+    pub skill_id: String,
+    /// Canonical slash alias selected by the user.
+    pub alias: String,
+}
+
 /// Individual input items accepted by a user turn.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -352,6 +434,9 @@ pub struct SendTurnRequest {
     pub thread_id: String,
     /// Ordered input items for the turn.
     pub inputs: Vec<TurnInputItem>,
+    /// Structured skill selections parsed from the user-authored prompt.
+    #[serde(default)]
+    pub selected_skills: Vec<SelectedSkillReference>,
     /// Optional provider override for this turn.
     #[serde(default)]
     pub provider: Option<AgentProvider>,
@@ -441,6 +526,9 @@ pub struct WorkspaceSummary {
     /// Provider-specific agent summaries for the workspace.
     #[serde(default)]
     pub agents: Vec<WorkspaceAgentSummary>,
+    /// Merged workspace-level skill catalog for the universal picker.
+    #[serde(default)]
+    pub skills: Vec<SkillSummary>,
     /// Default provider used for new threads in the workspace.
     #[serde(default)]
     pub default_provider: AgentProvider,
@@ -491,6 +579,9 @@ pub struct WorkspaceAgentSummary {
     /// Collaboration modes available for the provider.
     #[serde(default)]
     pub collaboration_modes: Vec<CollaborationModeSummary>,
+    /// Provider-scoped skill catalog for the workspace.
+    #[serde(default)]
+    pub skills: Vec<SkillSummary>,
     /// Whether plan mode is supported through a compatibility layer.
     #[serde(default = "default_true")]
     pub supports_plan_mode: bool,
