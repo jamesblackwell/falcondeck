@@ -71,6 +71,13 @@ describe('MessageBubble', () => {
       status: 'completed',
       output: 'success',
       exit_code: 0,
+      display: {
+        is_read_only: false,
+        has_side_effect: true,
+        is_error: false,
+        artifact_kind: 'command_output',
+        summary_hint: null,
+      },
       created_at: '2026-03-16T10:02:00Z',
       completed_at: '2026-03-16T10:02:01Z',
     }
@@ -90,6 +97,13 @@ describe('MessageBubble', () => {
       status: 'running',
       output: null,
       exit_code: null,
+      display: {
+        is_read_only: false,
+        has_side_effect: true,
+        is_error: false,
+        artifact_kind: 'none',
+        summary_hint: null,
+      },
       created_at: '2026-03-16T10:02:00Z',
       completed_at: null,
     }

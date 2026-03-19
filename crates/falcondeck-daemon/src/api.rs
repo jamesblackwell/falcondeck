@@ -14,7 +14,7 @@ use tower_http::cors::{Any, CorsLayer};
 use falcondeck_core::{
     ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest,
     MarkThreadReadRequest, SendTurnRequest, StartRemotePairingRequest, StartReviewRequest,
-    StartThreadRequest, UnifiedEvent, UpdateThreadRequest,
+    StartThreadRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -23,6 +23,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
+        .route("/api/preferences", get(preferences).patch(update_preferences))
         .route("/api/remote/status", get(remote_status))
         .route("/api/remote/pairing", post(start_remote_pairing))
         .route(
@@ -89,6 +90,17 @@ async fn health(State(state): State<AppState>) -> Json<falcondeck_core::HealthRe
 
 async fn snapshot(State(state): State<AppState>) -> Json<falcondeck_core::DaemonSnapshot> {
     Json(state.snapshot().await)
+}
+
+async fn preferences(State(state): State<AppState>) -> Json<falcondeck_core::FalconDeckPreferences> {
+    Json(state.preferences().await)
+}
+
+async fn update_preferences(
+    State(state): State<AppState>,
+    Json(request): Json<UpdatePreferencesRequest>,
+) -> Result<Json<falcondeck_core::FalconDeckPreferences>, DaemonError> {
+    Ok(Json(state.update_preferences(request).await?))
 }
 
 async fn remote_status(
@@ -286,8 +298,8 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
     let mut receiver = state.subscribe();
     loop {
         tokio::select! {
-            received = receiver.recv() => {
-                match received {
+            event_result = receiver.recv() => {
+                match event_result {
                     Ok(event) => {
                         if socket
                             .send(Message::Text(

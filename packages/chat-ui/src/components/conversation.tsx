@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, LoaderCircle, MessageSquare } from 'lucide-react'
 
-import type { ConversationItem } from '@falcondeck/client-core'
+import type { ConversationItem, FalconDeckPreferences } from '@falcondeck/client-core'
+import { deriveConversationRenderBlocks, normalizePreferences } from '@falcondeck/client-core'
 import { EmptyState } from '@falcondeck/ui'
 
-import { MessageCard } from './message'
+import { MessageCard, ToolBurstCard } from './message'
 
 const AUTO_SCROLL_THRESHOLD = 40
 const JUMP_THRESHOLD = 200
@@ -22,12 +23,14 @@ function clampScrollTop(scrollTop: number, element: HTMLDivElement) {
 export const Conversation = memo(function Conversation({
   threadKey = null,
   items,
+  preferences = null,
   emptyState,
   isThinking = false,
   isLoading = false,
 }: {
   threadKey?: string | null
   items: ConversationItem[]
+  preferences?: FalconDeckPreferences | null
   emptyState?: React.ReactNode
   isThinking?: boolean
   isLoading?: boolean
@@ -40,6 +43,7 @@ export const Conversation = memo(function Conversation({
   const lastRestoredThreadKeyRef = useRef<string | null>(null)
   const stickyToBottomRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
+  const [expansionMode, setExpansionMode] = useState<'default' | 'expanded' | 'collapsed'>('default')
   const renderableItems = useMemo(
     () =>
       items.filter(
@@ -47,8 +51,13 @@ export const Conversation = memo(function Conversation({
       ),
     [items],
   )
+  const normalizedPreferences = useMemo(() => normalizePreferences(preferences), [preferences])
+  const renderBlocks = useMemo(
+    () => deriveConversationRenderBlocks(renderableItems, normalizedPreferences),
+    [normalizedPreferences, renderableItems],
+  )
   const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
-  const showEmptyState = renderableItems.length === 0 && !hasHiddenOnlyItems
+  const showEmptyState = renderBlocks.length === 0 && !hasHiddenOnlyItems
 
   useEffect(() => {
     if (!threadKey) return
@@ -139,6 +148,7 @@ export const Conversation = memo(function Conversation({
 
     lastRestoredThreadKeyRef.current = null
     activeThreadKeyRef.current = threadKey
+    setExpansionMode('default')
   }, [threadKey])
 
   useLayoutEffect(() => {
@@ -151,7 +161,7 @@ export const Conversation = memo(function Conversation({
 
   useLayoutEffect(() => {
     if (isLoading) return
-    if (!renderableItems.length && !isThinking) return
+    if (!renderBlocks.length && !isThinking) return
 
     if (!stickyToBottomRef.current) {
       persistScrollPosition()
@@ -159,7 +169,7 @@ export const Conversation = memo(function Conversation({
     }
 
     schedulePinToBottom()
-  }, [isLoading, isThinking, persistScrollPosition, renderableItems, schedulePinToBottom])
+  }, [isLoading, isThinking, persistScrollPosition, renderBlocks, schedulePinToBottom])
 
   useEffect(() => {
     if (!threadKey || isLoading) return
@@ -203,7 +213,7 @@ export const Conversation = memo(function Conversation({
         onScroll={handleScroll}
       >
         <div ref={contentRef} className="mx-auto flex min-h-full max-w-3xl flex-col gap-3 px-5 py-4">
-          {showEmptyState || (renderableItems.length === 0 && isThinking) ? (
+          {showEmptyState || (renderBlocks.length === 0 && isThinking) ? (
             <div className="flex min-h-full flex-1 flex-col gap-3">
               {showEmptyState
                 ? emptyState ?? (
@@ -223,13 +233,47 @@ export const Conversation = memo(function Conversation({
             </div>
           ) : null}
 
-          {renderableItems.map((item) => (
-            <div key={`${item.kind}-${item.id}`} className="min-w-0">
-              <MessageCard item={item} />
+          {renderBlocks.length > 0 && normalizedPreferences.conversation.show_expand_all_controls ? (
+            <div className="flex items-center justify-end gap-2 px-1">
+              <button
+                type="button"
+                onClick={() => setExpansionMode('expanded')}
+                className="text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary"
+              >
+                Expand all
+              </button>
+              <button
+                type="button"
+                onClick={() => setExpansionMode('collapsed')}
+                className="text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary"
+              >
+                Collapse all
+              </button>
+            </div>
+          ) : null}
+
+          {renderBlocks.map((block) => (
+            <div key={block.id} className="min-w-0">
+              {block.kind === 'item' ? (
+                <MessageCard
+                  item={block.item}
+                  defaultOpen={block.default_open}
+                  expansionMode={expansionMode}
+                  suppressReadOnlyDetail={block.suppress_read_only_detail}
+                />
+              ) : (
+                <ToolBurstCard
+                  items={block.items}
+                  summary={block.summary}
+                  defaultOpen={block.default_open}
+                  expansionMode={expansionMode}
+                  suppressReadOnlyDetail={block.suppress_read_only_detail}
+                />
+              )}
             </div>
           ))}
 
-          {renderableItems.length > 0 && isThinking ? (
+          {renderBlocks.length > 0 && isThinking ? (
             <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
               <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
               Thinking…

@@ -64,6 +64,11 @@ export function applySnapshotEvent(
           ),
         ],
       }
+    case 'preferences-updated':
+      return {
+        ...snapshot,
+        preferences: daemonEvent.preferences,
+      }
     default:
       return snapshot
   }

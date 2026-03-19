@@ -13,16 +13,18 @@ use std::{
 use chrono::Utc;
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
-    CommandResponse, ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot,
-    EncryptedEnvelope, EventEnvelope, HealthResponse, InteractiveQuestion,
+    CommandResponse, ConnectWorkspaceRequest, ConversationAutoExpandPreferencesPatch,
+    ConversationItem, DaemonInfo, DaemonSnapshot,
+    EncryptedEnvelope, EventEnvelope, FalconDeckPreferences, HealthResponse, InteractiveQuestion,
     InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind,
     InteractiveResponsePayload, PairingPublicKeyBundle, PairingStatusResponse, RelayClientMessage,
     RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
     RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
     StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
     StartThreadRequest, ThreadAgentParams, ThreadAttention, ThreadAttentionLevel, ThreadDetail,
-    ThreadHandle, ThreadStatus, ThreadSummary, TurnInputItem, UnifiedEvent, UpdateThreadRequest,
-    WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
+    ThreadHandle, ThreadStatus, ThreadSummary, ToolArtifactKind, ToolCallDisplay,
+    ToolDetailsMode, TurnInputItem, UnifiedEvent, UpdatePreferencesRequest,
+    UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
     crypto::{
         LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle, decrypt_json,
         encrypt_json, generate_data_key, sign_session_key_material,
@@ -93,11 +95,13 @@ struct InnerState {
     codex_bin: String,
     claude_bin: String,
     state_path: PathBuf,
+    preferences_path: PathBuf,
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
+    preferences: Mutex<FalconDeckPreferences>,
     remote: Mutex<RemoteBridgeState>,
 }
 
@@ -243,6 +247,7 @@ impl AppState {
         state_path: PathBuf,
     ) -> Self {
         let (broadcaster, _) = broadcast::channel(2048);
+        let preferences_path = default_preferences_path(&state_path);
         Self {
             inner: Arc::new(InnerState {
                 daemon: DaemonInfo {
@@ -252,11 +257,13 @@ impl AppState {
                 codex_bin,
                 claude_bin,
                 state_path,
+                preferences_path,
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
                 saved_workspaces: Mutex::new(HashMap::new()),
                 interactive_requests: Mutex::new(HashMap::new()),
+                preferences: Mutex::new(FalconDeckPreferences::default()),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,
@@ -276,6 +283,13 @@ impl AppState {
     }
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
+        let preferences = load_preferences(&self.inner.preferences_path).await?;
+        {
+            let mut current = self.inner.preferences.lock().await;
+            *current = preferences.clone();
+        }
+        persist_preferences(&self.inner.preferences_path, &preferences).await?;
+
         let persisted = load_persisted_app_state(&self.inner.state_path).await?;
         {
             let mut saved_workspaces = self.inner.saved_workspaces.lock().await;
@@ -839,6 +853,7 @@ impl AppState {
     pub async fn snapshot(&self) -> DaemonSnapshot {
         let workspaces = self.inner.workspaces.lock().await;
         let interactive_requests = self.inner.interactive_requests.lock().await;
+        let preferences = self.inner.preferences.lock().await.clone();
 
         let mut workspace_list = workspaces
             .values()
@@ -875,7 +890,44 @@ impl AppState {
             workspaces: workspace_list,
             threads,
             interactive_requests: interactive_request_list,
+            preferences,
         }
+    }
+
+    pub async fn preferences(&self) -> FalconDeckPreferences {
+        self.inner.preferences.lock().await.clone()
+    }
+
+    pub async fn update_preferences(
+        &self,
+        request: UpdatePreferencesRequest,
+    ) -> Result<FalconDeckPreferences, DaemonError> {
+        let updated = {
+            let preferences = self.inner.preferences.lock().await;
+            let mut next = preferences.clone();
+            apply_preferences_patch(&mut next, request);
+            next
+        };
+        persist_preferences(&self.inner.preferences_path, &updated).await?;
+        {
+            let mut preferences = self.inner.preferences.lock().await;
+            *preferences = updated.clone();
+        }
+        self.emit(
+            None,
+            None,
+            UnifiedEvent::PreferencesUpdated {
+                preferences: updated.clone(),
+            },
+        );
+        self.emit(
+            None,
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
+        Ok(updated)
     }
 
     pub async fn connect_workspace(
@@ -2698,6 +2750,8 @@ impl AppState {
         let rpc_result = match method.as_str() {
             "snapshot.current" => serde_json::to_value(self.snapshot().await)
                 .map_err(|error| format!("failed to serialize snapshot: {error}")),
+            "preferences.read" => serde_json::to_value(self.preferences().await)
+                .map_err(|error| format!("failed to serialize preferences: {error}")),
             "thread.start" => {
                 let request = StartThreadRequest {
                     workspace_id: required(&["workspaceId", "workspace_id"])?,
@@ -2806,6 +2860,17 @@ impl AppState {
                     .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
                     .map_err(|error| error.to_string())
             }
+            "preferences.update" => {
+                let request: UpdatePreferencesRequest =
+                    serde_json::from_value(params.clone())
+                        .map_err(|_| "invalid remote rpc payload".to_string())?;
+                self.update_preferences(request)
+                    .await
+                    .and_then(|preferences| {
+                        serde_json::to_value(preferences).map_err(DaemonError::from)
+                    })
+                    .map_err(|error| error.to_string())
+            }
             _ => Err(format!("unsupported remote rpc method `{method}`")),
         };
 
@@ -2849,6 +2914,16 @@ impl AppState {
         .await?;
 
         let outcome: Result<Value, DaemonError> = match action_type.as_str() {
+            "preferences.update" => {
+                match serde_json::from_value::<UpdatePreferencesRequest>(params.clone()) {
+                    Ok(request) => self.update_preferences(request).await.and_then(|preferences| {
+                        serde_json::to_value(preferences).map_err(DaemonError::from)
+                    }),
+                    Err(_) => Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    )),
+                }
+            }
             "thread.start" => {
                 if let Some(workspace_id) = required(&["workspaceId", "workspace_id"]) {
                     let request = StartThreadRequest {
@@ -3661,15 +3736,20 @@ impl AppState {
                     self.push_conversation_item(
                         workspace_id,
                         &thread_id,
-                        ConversationItem::ToolCall {
+                        {
+                            let display =
+                                tool_display_metadata(&title, &kind, "running", None, None);
+                            ConversationItem::ToolCall {
                             id: item_id,
                             title,
                             tool_kind: kind,
                             status: "running".to_string(),
                             output: None,
                             exit_code: None,
+                            display,
                             created_at: Utc::now(),
                             completed_at: None,
+                            }
                         },
                         true,
                     )
@@ -3730,15 +3810,27 @@ impl AppState {
                     self.push_conversation_item(
                         workspace_id,
                         &thread_id,
-                        ConversationItem::ToolCall {
+                        {
+                            let display = tool_display_metadata(
+                                &title,
+                                &kind,
+                                &status,
+                                exit_code,
+                                item.get("output")
+                                    .or_else(|| item.get("result"))
+                                    .and_then(Value::as_str),
+                            );
+                            ConversationItem::ToolCall {
                             id: item_id.clone(),
                             title: title.clone(),
                             tool_kind: kind.clone(),
                             status: status.clone(),
                             output: existing_output,
                             exit_code,
+                            display,
                             created_at: Utc::now(),
                             completed_at: Some(Utc::now()),
+                            }
                         },
                         true,
                     )
@@ -4196,11 +4288,18 @@ impl AppState {
                             };
                             let item = ConversationItem::ToolCall {
                                 id: tool_id,
-                                title,
+                                title: title.clone(),
                                 tool_kind: "claude_tool".to_string(),
-                                status,
-                                output,
+                                status: status.clone(),
+                                output: output.clone(),
                                 exit_code: None,
+                                display: tool_display_metadata(
+                                    &title,
+                                    "claude_tool",
+                                    &status,
+                                    None,
+                                    output.as_deref(),
+                                ),
                                 created_at: Utc::now(),
                                 completed_at,
                             };
@@ -5095,11 +5194,108 @@ fn should_surface_tool_item(kind: &str) -> bool {
     )
 }
 
+fn tool_display_metadata(
+    title: &str,
+    kind: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    output: Option<&str>,
+) -> ToolCallDisplay {
+    let normalized_title = title.to_ascii_lowercase();
+    let normalized_kind = kind.to_ascii_lowercase();
+    let normalized_output = output.unwrap_or_default().to_ascii_lowercase();
+
+    let is_read_only = normalized_kind.contains("read")
+        || normalized_kind.contains("search")
+        || normalized_kind.contains("list")
+        || normalized_kind.contains("grep")
+        || normalized_kind.contains("inspect")
+        || normalized_title.starts_with("cat ")
+        || normalized_title.starts_with("sed ")
+        || normalized_title.starts_with("ls ")
+        || normalized_title.starts_with("find ")
+        || normalized_title.starts_with("rg ")
+        || normalized_title.starts_with("git diff")
+        || normalized_title.starts_with("git status")
+        || normalized_title.starts_with("pwd");
+
+    let artifact_kind = if normalized_kind.contains("filechange")
+        || normalized_kind.contains("file_change")
+    {
+        ToolArtifactKind::Diff
+    } else if normalized_title.contains("test")
+        || normalized_kind.contains("test")
+        || normalized_output.contains("test failed")
+        || normalized_output.contains("failing")
+    {
+        ToolArtifactKind::Test
+    } else if normalized_title.contains("approval")
+        || normalized_kind.contains("approval")
+        || normalized_title.contains("permission")
+    {
+        ToolArtifactKind::ApprovalRelated
+    } else if output.map(|value| !value.trim().is_empty()).unwrap_or(false) {
+        ToolArtifactKind::CommandOutput
+    } else {
+        ToolArtifactKind::None
+    };
+
+    let is_error = status.eq_ignore_ascii_case("failed")
+        || status.eq_ignore_ascii_case("error")
+        || exit_code.unwrap_or_default() != 0;
+    let has_side_effect = !is_read_only
+        || normalized_kind.contains("write")
+        || normalized_kind.contains("edit")
+        || normalized_kind.contains("patch")
+        || normalized_title.contains("apply_patch")
+        || normalized_title.contains("npm install")
+        || normalized_title.contains("cargo add")
+        || normalized_title.contains("curl ")
+        || normalized_title.contains("wget ")
+        || is_error;
+    let summary_hint = summarize_tool_title(title);
+
+    ToolCallDisplay {
+        is_read_only,
+        has_side_effect,
+        is_error,
+        artifact_kind,
+        summary_hint,
+    }
+}
+
+fn summarize_tool_title(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(path) = trimmed.strip_prefix("cat ") {
+        return Some(format!("Read {}", path.trim()));
+    }
+    if let Some(path) = trimmed.strip_prefix("sed -n ") {
+        return Some(format!("Inspect {}", path.trim()));
+    }
+    if trimmed.starts_with("rg ") {
+        return Some("Search workspace".to_string());
+    }
+    if trimmed.starts_with("ls ") {
+        return Some("List files".to_string());
+    }
+    None
+}
+
 fn default_state_path() -> PathBuf {
     let home = env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     home.join(".falcondeck").join("daemon-state.json")
+}
+
+fn default_preferences_path(state_path: &PathBuf) -> PathBuf {
+    state_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("falcondeck.json")
 }
 
 fn default_persisted_provider() -> Option<AgentProvider> {
@@ -5111,6 +5307,19 @@ async fn load_persisted_app_state(path: &PathBuf) -> Result<PersistedAppState, D
         Ok(contents) => serde_json::from_str(&contents).map_err(DaemonError::from),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             Ok(PersistedAppState::default())
+        }
+        Err(error) => Err(DaemonError::Io(error)),
+    }
+}
+
+async fn load_preferences(path: &PathBuf) -> Result<FalconDeckPreferences, DaemonError> {
+    match fs::read_to_string(path).await {
+        Ok(contents) => {
+            let value: Value = serde_json::from_str(&contents)?;
+            Ok(merge_preferences_from_value(value))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(FalconDeckPreferences::default())
         }
         Err(error) => Err(DaemonError::Io(error)),
     }
@@ -5157,6 +5366,110 @@ async fn persist_app_state(path: &PathBuf, state: &PersistedAppState) -> Result<
     fs::write(&tmp_path, payload).await?;
     fs::rename(&tmp_path, path).await?;
     Ok(())
+}
+
+async fn persist_preferences(
+    path: &PathBuf,
+    preferences: &FalconDeckPreferences,
+) -> Result<(), DaemonError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let payload = serde_json::to_vec_pretty(preferences)?;
+    fs::write(&tmp_path, payload).await?;
+    fs::rename(&tmp_path, path).await?;
+    Ok(())
+}
+
+fn merge_preferences_from_value(value: Value) -> FalconDeckPreferences {
+    let mut preferences = FalconDeckPreferences::default();
+    if let Some(version) = value.get("version").and_then(Value::as_u64) {
+        preferences.version = version as u32;
+    }
+
+    if let Some(conversation) = value.get("conversation") {
+        if let Some(mode) = extract_string(conversation, &["tool_details_mode"]) {
+            preferences.conversation.tool_details_mode = parse_tool_details_mode(&mode);
+        }
+        if let Some(group) = conversation
+            .get("group_read_only_tools")
+            .and_then(Value::as_bool)
+        {
+            preferences.conversation.group_read_only_tools = group;
+        }
+        if let Some(show) = conversation
+            .get("show_expand_all_controls")
+            .and_then(Value::as_bool)
+        {
+            preferences.conversation.show_expand_all_controls = show;
+        }
+        if let Some(auto_expand) = conversation.get("auto_expand") {
+            if let Some(value) = auto_expand.get("approvals").and_then(Value::as_bool) {
+                preferences.conversation.auto_expand.approvals = value;
+            }
+            if let Some(value) = auto_expand.get("errors").and_then(Value::as_bool) {
+                preferences.conversation.auto_expand.errors = value;
+            }
+            if let Some(value) = auto_expand.get("first_diff").and_then(Value::as_bool) {
+                preferences.conversation.auto_expand.first_diff = value;
+            }
+            if let Some(value) = auto_expand.get("failed_tests").and_then(Value::as_bool) {
+                preferences.conversation.auto_expand.failed_tests = value;
+            }
+        }
+    }
+
+    preferences
+}
+
+fn apply_preferences_patch(
+    preferences: &mut FalconDeckPreferences,
+    request: UpdatePreferencesRequest,
+) {
+    let Some(conversation) = request.conversation else {
+        return;
+    };
+
+    if let Some(mode) = conversation.tool_details_mode {
+        preferences.conversation.tool_details_mode = mode;
+    }
+    if let Some(value) = conversation.group_read_only_tools {
+        preferences.conversation.group_read_only_tools = value;
+    }
+    if let Some(value) = conversation.show_expand_all_controls {
+        preferences.conversation.show_expand_all_controls = value;
+    }
+    if let Some(auto_expand) = conversation.auto_expand {
+        apply_auto_expand_patch(&mut preferences.conversation.auto_expand, auto_expand);
+    }
+}
+
+fn apply_auto_expand_patch(
+    current: &mut falcondeck_core::ConversationAutoExpandPreferences,
+    patch: ConversationAutoExpandPreferencesPatch,
+) {
+    if let Some(value) = patch.approvals {
+        current.approvals = value;
+    }
+    if let Some(value) = patch.errors {
+        current.errors = value;
+    }
+    if let Some(value) = patch.first_diff {
+        current.first_diff = value;
+    }
+    if let Some(value) = patch.failed_tests {
+        current.failed_tests = value;
+    }
+}
+
+fn parse_tool_details_mode(value: &str) -> ToolDetailsMode {
+    match value {
+        "expanded" => ToolDetailsMode::Expanded,
+        "compact" => ToolDetailsMode::Compact,
+        "hide_read_only_details" => ToolDetailsMode::HideReadOnlyDetails,
+        _ => ToolDetailsMode::Auto,
+    }
 }
 
 fn persisted_remote_state(

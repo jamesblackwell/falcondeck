@@ -60,6 +60,50 @@ export type ThreadAgentParams = {
   service_tier: string | null
 }
 
+export type ToolDetailsMode = 'auto' | 'expanded' | 'compact' | 'hide_read_only_details'
+
+export type ConversationAutoExpandPreferences = {
+  approvals: boolean
+  errors: boolean
+  first_diff: boolean
+  failed_tests: boolean
+}
+
+export type ConversationPreferences = {
+  tool_details_mode: ToolDetailsMode
+  auto_expand: ConversationAutoExpandPreferences
+  group_read_only_tools: boolean
+  show_expand_all_controls: boolean
+}
+
+export type FalconDeckPreferences = {
+  version: number
+  conversation: ConversationPreferences
+}
+
+export type UpdateConversationAutoExpandPreferences = Partial<ConversationAutoExpandPreferences>
+
+export type UpdateConversationPreferences = {
+  tool_details_mode?: ToolDetailsMode | null
+  auto_expand?: UpdateConversationAutoExpandPreferences | null
+  group_read_only_tools?: boolean | null
+  show_expand_all_controls?: boolean | null
+}
+
+export type UpdatePreferencesPayload = {
+  conversation?: UpdateConversationPreferences | null
+}
+
+export type ToolArtifactKind = 'none' | 'diff' | 'test' | 'command_output' | 'approval_related'
+
+export type ToolCallDisplay = {
+  is_read_only: boolean
+  has_side_effect: boolean
+  is_error: boolean
+  artifact_kind: ToolArtifactKind
+  summary_hint: string | null
+}
+
 export type WorkspaceSummary = {
   id: string
   path: string
@@ -206,6 +250,7 @@ export type ConversationItem =
       status: string
       output: string | null
       exit_code: number | null
+      display: ToolCallDisplay
       created_at: string
       completed_at: string | null
     }
@@ -250,6 +295,7 @@ export type DaemonSnapshot = {
   workspaces: WorkspaceSummary[]
   threads: ThreadSummary[]
   interactive_requests: InteractiveRequest[]
+  preferences: FalconDeckPreferences
 }
 
 export type EventEnvelope = {
@@ -278,6 +324,7 @@ export type EventEnvelope = {
     | { type: 'interactive-request'; request: InteractiveRequest }
     | { type: 'thread-started'; thread: ThreadSummary }
     | { type: 'thread-updated'; thread: ThreadSummary }
+    | { type: 'preferences-updated'; preferences: FalconDeckPreferences }
     | { type: 'conversation-item-added'; item: ConversationItem }
     | { type: 'conversation-item-updated'; item: ConversationItem }
 }

@@ -3,6 +3,7 @@
  * Mirrors the pattern from apps/desktop/src/client-core.test.ts.
  */
 import type {
+  FalconDeckPreferences,
   WorkspaceSummary,
   ThreadSummary,
   ConversationItem,
@@ -68,6 +69,25 @@ export function snapshot(overrides: Partial<DaemonSnapshot> = {}): DaemonSnapsho
     workspaces: [workspace()],
     threads: [thread()],
     interactive_requests: [],
+    preferences: preferences(),
+    ...overrides,
+  }
+}
+
+export function preferences(overrides: Partial<FalconDeckPreferences> = {}): FalconDeckPreferences {
+  return {
+    version: 1,
+    conversation: {
+      tool_details_mode: 'auto',
+      auto_expand: {
+        approvals: true,
+        errors: true,
+        first_diff: true,
+        failed_tests: true,
+      },
+      group_read_only_tools: true,
+      show_expand_all_controls: true,
+    },
     ...overrides,
   }
 }
@@ -81,7 +101,24 @@ export function assistantMessage(id: string, text: string, created_at = '2026-03
 }
 
 export function toolCall(id: string, title: string, status = 'completed', created_at = '2026-03-16T10:02:00Z'): ConversationItem {
-  return { kind: 'tool_call', id, title, tool_kind: 'bash', status, output: null, exit_code: null, created_at, completed_at: null }
+  return {
+    kind: 'tool_call',
+    id,
+    title,
+    tool_kind: 'bash',
+    status,
+    output: null,
+    exit_code: null,
+    display: {
+      is_read_only: false,
+      has_side_effect: true,
+      is_error: false,
+      artifact_kind: 'none',
+      summary_hint: null,
+    },
+    created_at,
+    completed_at: null,
+  }
 }
 
 export function serviceMessage(id: string, message: string, level: 'info' | 'warning' | 'error' = 'info'): ConversationItem {

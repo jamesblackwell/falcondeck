@@ -14,7 +14,7 @@ use chrono::Utc;
 use falcondeck_core::{
     AccountStatus, AccountSummary, AgentProvider, CollaborationModeSummary, ConversationItem,
     ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams, ThreadAttention,
-    ThreadPlan, ThreadStatus, ThreadSummary,
+    ThreadPlan, ThreadStatus, ThreadSummary, ToolCallDisplay,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -738,7 +738,6 @@ fn hydrate_thread_items_from_session_file(
         .iter()
         .filter(|item| should_keep_session_hydrated_item(item, &items))
         .cloned()
-        .into_iter()
         .map(|item| item.item)
         .collect::<Vec<_>>();
     conversation_items.sort_by_key(conversation_item_created_at);
@@ -1014,6 +1013,7 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
                     .or_else(|| item.get("exit_code"))
                     .and_then(Value::as_i64)
                     .map(|value| value as i32),
+                display: ToolCallDisplay::default(),
                 created_at,
                 completed_at: extract_datetime_or_timestamp(item, &["completedAt", "completed_at"]),
             })
@@ -1728,6 +1728,7 @@ mod tests {
                     status: "completed".to_string(),
                     output: Some("done".to_string()),
                     exit_code: Some(0),
+                    display: ToolCallDisplay::default(),
                     created_at: Utc::now(),
                     completed_at: Some(Utc::now()),
                 },

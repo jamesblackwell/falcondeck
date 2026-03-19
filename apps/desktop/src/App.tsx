@@ -20,8 +20,9 @@ import {
   type InteractiveResponsePayload,
   type ThreadHandle,
   type TurnInputItem,
+  type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
-import { Conversation, PromptInput } from '@falcondeck/chat-ui'
+import { Conversation, NewThreadState, PromptInput } from '@falcondeck/chat-ui'
 import { ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
@@ -32,7 +33,6 @@ import { SessionHeader } from './components/SessionHeader'
 import { RemotePairingPopover } from './components/RemotePairingPopover'
 import { InteractiveRequestBar } from './components/InteractiveRequestBar'
 import { DiffPanel } from './components/DiffPanel'
-import { NewThreadState } from './components/NewThreadState'
 import { SettingsView } from './components/SettingsView'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
 
@@ -509,6 +509,10 @@ function AppInner() {
     [],
   )
 
+  const handleRemoveAttachment = useCallback((attachmentId: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId))
+  }, [])
+
   const handleStartPairingCallback = useCallback(() => {
     void handleStartRemotePairing()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -518,6 +522,22 @@ function AppInner() {
     if (!api) return
     void api.remoteStatus().then(setRemoteStatus).catch(() => {})
   }, [api, setRemoteStatus])
+
+  const handleUpdatePreferences = useCallback(
+    async (payload: UpdatePreferencesPayload) => {
+      if (!api) return
+      try {
+        const preferences = await api.updatePreferences(payload)
+        setSnapshot((current) => (current ? { ...current, preferences } : current))
+        setActionError(null)
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : 'Failed to update preferences'
+        setActionError(msg)
+        toast({ variant: 'danger', title: 'Failed to save preferences', description: msg })
+      }
+    },
+    [api, setSnapshot, toast],
+  )
 
   const handleOpenSettings = useCallback(() => {
     setIsSettingsOpen(true)
@@ -657,11 +677,13 @@ function AppInner() {
           isSettingsOpen ? (
             <SettingsView
               workspace={selectedWorkspace}
+              preferences={snapshot?.preferences ?? null}
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}
               relayUrl={relayUrl}
               isStartingRemote={isStartingRemote}
               revokingDeviceId={revokingDeviceId}
+              onUpdatePreferences={handleUpdatePreferences}
               onStartPairing={handleStartPairingCallback}
               onRefreshRemoteStatus={handleRefreshRemoteStatus}
               onRevokeDevice={handleRevokeDevice}
@@ -685,6 +707,7 @@ function AppInner() {
                     : selectedWorkspaceId
                 }
                 items={conversationItems}
+                preferences={snapshot?.preferences ?? null}
                 emptyState={conversationEmptyState}
                 isThinking={isSending || selectedThread?.status === 'running'}
                 isLoading={isThreadDetailPending}
@@ -698,6 +721,7 @@ function AppInner() {
                 onValueChange={setDraft}
                 onSubmit={handleSubmitCallback}
                 onPickImages={handlePickImages}
+                onRemoveAttachment={handleRemoveAttachment}
                 attachments={attachments}
                 selectedProvider={selectedProvider}
                 onProviderChange={handleProviderChange}

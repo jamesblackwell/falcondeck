@@ -1,10 +1,10 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 
-import type { ConversationItem } from '@falcondeck/client-core'
+import type { ConversationItem, ToolBurstSummary } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
 import { CodeBlock } from './code-block'
@@ -113,9 +113,41 @@ function toolCallLabel(title: string) {
   return title
 }
 
-function ToolCallMessage({ item }: { item: Extract<ConversationItem, { kind: 'tool_call' }> }) {
-  const [open, setOpen] = useState(false)
+type ExpansionMode = 'default' | 'expanded' | 'collapsed'
+
+function useExpansionState(defaultOpen: boolean, expansionMode: ExpansionMode, seed: string) {
+  const [open, setOpen] = useState(defaultOpen)
+
+  useEffect(() => {
+    if (expansionMode === 'expanded') {
+      setOpen(true)
+      return
+    }
+    if (expansionMode === 'collapsed') {
+      setOpen(false)
+      return
+    }
+    setOpen(defaultOpen)
+  }, [defaultOpen, expansionMode, seed])
+
+  return [open, setOpen] as const
+}
+
+function ToolCallMessage({
+  item,
+  defaultOpen = false,
+  expansionMode = 'default',
+  suppressReadOnlyDetail = false,
+}: {
+  item: Extract<ConversationItem, { kind: 'tool_call' }>
+  defaultOpen?: boolean
+  expansionMode?: ExpansionMode
+  suppressReadOnlyDetail?: boolean
+}) {
+  const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, item.id)
   const isCompleted = item.status === 'completed'
+  const hasOutput = Boolean(item.output)
+  const detailAvailable = hasOutput && !suppressReadOnlyDetail
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
@@ -143,10 +175,14 @@ function ToolCallMessage({ item }: { item: Extract<ConversationItem, { kind: 'to
         </button>
       </Collapsible.Trigger>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
-        {item.output ? (
+        {detailAvailable ? (
           <div className="mt-1 ml-6">
-            <CodeBlock code={item.output} language={null} />
+            <CodeBlock code={item.output ?? ''} language={null} />
           </div>
+        ) : suppressReadOnlyDetail && hasOutput ? (
+          <p className="mt-1 ml-6 text-[length:var(--fd-text-xs)] text-fg-muted">
+            Read-only tool details hidden by preference.
+          </p>
         ) : null}
       </Collapsible.Content>
     </Collapsible.Root>
@@ -186,12 +222,98 @@ function PlanMessage({ item }: { item: Extract<ConversationItem, { kind: 'plan' 
   )
 }
 
-function DiffMessage({ item }: { item: Extract<ConversationItem, { kind: 'diff' }> }) {
+function DiffMessage({
+  item,
+  defaultOpen = false,
+  expansionMode = 'default',
+}: {
+  item: Extract<ConversationItem, { kind: 'diff' }>
+  defaultOpen?: boolean
+  expansionMode?: ExpansionMode
+}) {
+  const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, item.id)
+
   return (
-    <div>
-      <p className="mb-1 px-1 text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary">Patch</p>
-      <CodeBlock code={item.diff} language="diff" />
-    </div>
+    <Collapsible.Root open={open} onOpenChange={setOpen}>
+      <Collapsible.Trigger asChild>
+        <button
+          type="button"
+          aria-expanded={open}
+          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors hover:bg-surface-2"
+        >
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+          <span className="flex-1 text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary">
+            Patch
+          </span>
+          <ChevronRight
+            className={cn(
+              'h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)]',
+              open && 'rotate-90',
+            )}
+          />
+        </button>
+      </Collapsible.Trigger>
+      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
+        <CodeBlock code={item.diff} language="diff" />
+      </Collapsible.Content>
+    </Collapsible.Root>
+  )
+}
+
+function ToolBurstMessage({
+  summary,
+  items,
+  defaultOpen = false,
+  expansionMode = 'default',
+  suppressReadOnlyDetail = false,
+}: {
+  summary: ToolBurstSummary
+  items: Extract<ConversationItem, { kind: 'tool_call' }>[]
+  defaultOpen?: boolean
+  expansionMode?: ExpansionMode
+  suppressReadOnlyDetail?: boolean
+}) {
+  const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, items[0]?.id ?? 'tool-burst')
+  const header = `${summary.count} read-only tools`
+  const subtitle = summary.labels.slice(0, 2).join(' · ')
+
+  return (
+    <Collapsible.Root open={open} onOpenChange={setOpen}>
+      <Collapsible.Trigger asChild>
+        <button
+          type="button"
+          aria-expanded={open}
+          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 px-3 py-2 text-left transition-colors hover:bg-surface-2"
+        >
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
+              {header}
+            </p>
+            <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+              {subtitle || summary.summary_hint || 'Grouped workspace inspection'}
+            </p>
+          </div>
+          <ChevronRight
+            className={cn(
+              'h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)]',
+              open && 'rotate-90',
+            )}
+          />
+        </button>
+      </Collapsible.Trigger>
+      <Collapsible.Content className="space-y-1 overflow-hidden pt-2 data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
+        {items.map((item) => (
+          <ToolCallMessage
+            key={item.id}
+            item={item}
+            defaultOpen={defaultOpen}
+            expansionMode={expansionMode}
+            suppressReadOnlyDetail={suppressReadOnlyDetail}
+          />
+        ))}
+      </Collapsible.Content>
+    </Collapsible.Root>
   )
 }
 
@@ -212,23 +334,50 @@ function ServiceMessage({ item }: { item: Extract<ConversationItem, { kind: 'ser
   )
 }
 
-export const MessageCard = memo(function MessageCard({ item }: { item: ConversationItem }) {
+export const MessageCard = memo(function MessageCard({
+  item,
+  defaultOpen = false,
+  expansionMode = 'default',
+  suppressReadOnlyDetail = false,
+}: {
+  item: ConversationItem
+  defaultOpen?: boolean
+  expansionMode?: ExpansionMode
+  suppressReadOnlyDetail?: boolean
+}) {
   switch (item.kind) {
     case 'user_message':
       return <UserMessage item={item} />
     case 'assistant_message':
       return <AssistantMessage item={item} />
     case 'tool_call':
-      return <ToolCallMessage item={item} />
+      return (
+        <ToolCallMessage
+          item={item}
+          defaultOpen={defaultOpen}
+          expansionMode={expansionMode}
+          suppressReadOnlyDetail={suppressReadOnlyDetail}
+        />
+      )
     case 'reasoning':
       return null
     case 'plan':
       return <PlanMessage item={item} />
     case 'diff':
-      return <DiffMessage item={item} />
+      return <DiffMessage item={item} defaultOpen={defaultOpen} expansionMode={expansionMode} />
     case 'interactive_request':
       return <InteractiveRequestMessage item={item} />
     case 'service':
       return <ServiceMessage item={item} />
   }
+})
+
+export const ToolBurstCard = memo(function ToolBurstCard(props: {
+  summary: ToolBurstSummary
+  items: Extract<ConversationItem, { kind: 'tool_call' }>[]
+  defaultOpen?: boolean
+  expansionMode?: ExpansionMode
+  suppressReadOnlyDetail?: boolean
+}) {
+  return <ToolBurstMessage {...props} />
 })

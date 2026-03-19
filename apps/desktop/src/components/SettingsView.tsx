@@ -1,6 +1,14 @@
 import { useMemo, useState } from 'react'
 
-import type { RemoteStatusResponse, TrustedDevice, WorkspaceSummary } from '@falcondeck/client-core'
+import type {
+  FalconDeckPreferences,
+  RemoteStatusResponse,
+  ToolDetailsMode,
+  TrustedDevice,
+  UpdatePreferencesPayload,
+  WorkspaceSummary,
+} from '@falcondeck/client-core'
+import { normalizePreferences } from '@falcondeck/client-core'
 import {
   Badge,
   Button,
@@ -15,13 +23,11 @@ import {
 import {
   ArrowLeft,
   ExternalLink,
-  Gauge,
   LaptopMinimal,
   LoaderCircle,
   Radio,
   RefreshCw,
   Settings,
-  Shield,
   Smartphone,
   Trash2,
   Wifi,
@@ -31,11 +37,13 @@ type SettingsSectionId = 'general' | 'remote'
 
 type SettingsViewProps = {
   workspace?: WorkspaceSummary | null
+  preferences: FalconDeckPreferences | null
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
   relayUrl: string
   isStartingRemote: boolean
   revokingDeviceId: string | null
+  onUpdatePreferences: (payload: UpdatePreferencesPayload) => void
   onStartPairing: () => void
   onRefreshRemoteStatus: () => void
   onRevokeDevice: (device: TrustedDevice) => void
@@ -145,13 +153,76 @@ function deviceIcon(label: string | null) {
     : LaptopMinimal
 }
 
-function GeneralSettingsPanel({ workspace }: { workspace?: WorkspaceSummary | null }) {
-  const futureSections = [
-    'Appearance and theme controls',
-    'Default open behavior for links and files',
-    'Composer and thread display preferences',
-    'Notifications and desktop integrations',
-  ]
+const TOOL_DETAIL_OPTIONS: Array<{
+  value: ToolDetailsMode
+  label: string
+  description: string
+}> = [
+  {
+    value: 'auto',
+    label: 'Auto',
+    description: 'Collapse repeated read-only tool chatter, but auto-open diffs, approvals, and failures.',
+  },
+  {
+    value: 'expanded',
+    label: 'Expanded',
+    description: 'Keep tool output open by default for dense debugging sessions.',
+  },
+  {
+    value: 'compact',
+    label: 'Compact',
+    description: 'Prefer grouped summaries for read-only work while keeping artifacts visible.',
+  },
+  {
+    value: 'hide_read_only_details',
+    label: 'Hide read-only details',
+    description: 'Show grouped summaries for read-only inspection without rendering their raw output.',
+  },
+]
+
+function PreferenceToggle({
+  label,
+  description,
+  enabled,
+  onToggle,
+}: {
+  label: string
+  description: string
+  enabled: boolean
+  onToggle: (next: boolean) => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onToggle(!enabled)}
+      className={cn(
+        'flex w-full items-start justify-between gap-4 rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors',
+        enabled
+          ? 'border-accent/40 bg-accent/10'
+          : 'border-border-subtle bg-surface-2 hover:bg-surface-3',
+      )}
+    >
+      <div>
+        <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">{label}</p>
+        <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">{description}</p>
+      </div>
+      <Badge variant={enabled ? 'success' : 'default'} dot>
+        {enabled ? 'On' : 'Off'}
+      </Badge>
+    </button>
+  )
+}
+
+function GeneralSettingsPanel({
+  workspace,
+  preferences,
+  onUpdatePreferences,
+}: {
+  workspace?: WorkspaceSummary | null
+  preferences: FalconDeckPreferences | null
+  onUpdatePreferences: (payload: UpdatePreferencesPayload) => void
+}) {
+  const current = normalizePreferences(preferences)
 
   return (
     <div className="space-y-6">
@@ -163,60 +234,95 @@ function GeneralSettingsPanel({ workspace }: { workspace?: WorkspaceSummary | nu
           General
         </h1>
         <p className="max-w-2xl text-[length:var(--fd-text-sm)] text-fg-tertiary">
-          This is the home for app-wide FalconDeck settings. It is intentionally structured like a
-          real settings area so we can expand it over time without overloading the main app shell.
+          FalconDeck stores these preferences in a daemon-owned `falcondeck.json` file so desktop
+          and remote surfaces stay aligned.
         </p>
       </header>
 
       <Card>
         <CardHeader>
-          <CardTitle>Settings Home</CardTitle>
+          <CardTitle>Conversation Density</CardTitle>
           <CardDescription>
-            FalconDeck now has a dedicated settings surface instead of burying account and device
-            controls in one-off popovers.
+            Choose how much raw tool detail the thread should show by default.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">
-          <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
-            <div className="flex items-center gap-2 text-fg-primary">
-              <Settings className="h-4 w-4" />
-              <p className="text-[length:var(--fd-text-sm)] font-medium">Designed to grow</p>
-            </div>
-            <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-              The left settings nav gives us room to add Codex-style sections without reshuffling
-              the main app every time.
-            </p>
-          </div>
-          <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
-            <div className="flex items-center gap-2 text-fg-primary">
-              <Shield className="h-4 w-4" />
-              <p className="text-[length:var(--fd-text-sm)] font-medium">Remote controls moved out</p>
-            </div>
-            <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-              Device pairing and removal now have a stable home under Remote Access instead of
-              relying on ambiguous wording in the pairing popover.
-            </p>
-          </div>
+          {TOOL_DETAIL_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              onClick={() => onUpdatePreferences({ conversation: { tool_details_mode: option.value } })}
+              className={cn(
+                'rounded-[var(--fd-radius-xl)] border p-4 text-left transition-colors',
+                current.conversation.tool_details_mode === option.value
+                  ? 'border-accent/50 bg-accent/10'
+                  : 'border-border-subtle bg-surface-2 hover:bg-surface-3',
+              )}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                  {option.label}
+                </p>
+                <Badge
+                  variant={
+                    current.conversation.tool_details_mode === option.value ? 'success' : 'default'
+                  }
+                >
+                  {current.conversation.tool_details_mode === option.value ? 'Selected' : 'Available'}
+                </Badge>
+              </div>
+              <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                {option.description}
+              </p>
+            </button>
+          ))}
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>Planned Sections</CardTitle>
+          <CardTitle>Auto-Expand Rules</CardTitle>
           <CardDescription>
-            The first step is structure. The next step is filling it with real preferences.
+            Keep risky or high-signal artifacts obvious even when read-only chatter is grouped.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {futureSections.map((item) => (
-            <div
-              key={item}
-              className="flex items-center gap-3 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 px-4 py-3"
-            >
-              <Gauge className="h-4 w-4 text-fg-muted" />
-              <span className="text-[length:var(--fd-text-sm)] text-fg-secondary">{item}</span>
-            </div>
-          ))}
+          <PreferenceToggle
+            label="Group read-only tool bursts"
+            description="Collapse consecutive file reads, searches, and similar inspection commands into a compact summary row."
+            enabled={current.conversation.group_read_only_tools}
+            onToggle={(next) => onUpdatePreferences({ conversation: { group_read_only_tools: next } })}
+          />
+          <PreferenceToggle
+            label="Show expand/collapse all controls"
+            description="Expose quick thread-level controls above the conversation when tool cards are present."
+            enabled={current.conversation.show_expand_all_controls}
+            onToggle={(next) => onUpdatePreferences({ conversation: { show_expand_all_controls: next } })}
+          />
+          <PreferenceToggle
+            label="Auto-open approvals"
+            description="Always expand approval-related artifacts so side effects stay obvious."
+            enabled={current.conversation.auto_expand.approvals}
+            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { approvals: next } } })}
+          />
+          <PreferenceToggle
+            label="Auto-open errors"
+            description="Expand errors immediately so debugging does not hide behind compact mode."
+            enabled={current.conversation.auto_expand.errors}
+            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { errors: next } } })}
+          />
+          <PreferenceToggle
+            label="Auto-open failed tests"
+            description="Keep failing test runs visible even when successful inspection bursts are collapsed."
+            enabled={current.conversation.auto_expand.failed_tests}
+            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { failed_tests: next } } })}
+          />
+          <PreferenceToggle
+            label="Auto-open the first diff"
+            description="Keep the first patch in a thread visible even when inspection noise is collapsed."
+            enabled={current.conversation.auto_expand.first_diff}
+            onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { first_diff: next } } })}
+          />
         </CardContent>
       </Card>
 
@@ -555,7 +661,11 @@ export function SettingsView(props: SettingsViewProps) {
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-10">
         <div className="mx-auto w-full max-w-4xl">
           {activeSection === 'general' ? (
-            <GeneralSettingsPanel workspace={props.workspace} />
+            <GeneralSettingsPanel
+              workspace={props.workspace}
+              preferences={props.preferences}
+              onUpdatePreferences={props.onUpdatePreferences}
+            />
           ) : (
             <RemoteAccessPanel
               remoteStatus={props.remoteStatus}

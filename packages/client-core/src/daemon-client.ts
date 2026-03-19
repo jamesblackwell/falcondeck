@@ -8,16 +8,19 @@ import type {
   InteractiveResponsePayload,
   MarkThreadReadPayload,
   RemoteStatusResponse,
+  FalconDeckPreferences,
   ThreadDetail,
   ThreadHandle,
   ThreadSummary,
   TurnInputItem,
+  UpdatePreferencesPayload,
   UpdateThreadPayload,
   WorkspaceSummary,
 } from './types'
 import {
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
+  normalizePreferences,
   normalizeThreadDetail,
   normalizeThreadHandle,
   normalizeThreadSummary,
@@ -56,6 +59,22 @@ export function createDaemonApiClient(baseUrl: string) {
     async snapshot() {
       return normalizeDaemonSnapshot(
         await parseJson<DaemonSnapshot>(await fetch(`${baseUrl}/api/snapshot`)),
+      )
+    },
+    async preferences() {
+      return normalizePreferences(
+        await parseJson<FalconDeckPreferences>(await fetch(`${baseUrl}/api/preferences`)),
+      )
+    },
+    async updatePreferences(payload: UpdatePreferencesPayload) {
+      return normalizePreferences(
+        await parseJson<FalconDeckPreferences>(
+          await fetch(`${baseUrl}/api/preferences`, {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(payload),
+          }),
+        ),
       )
     },
     async remoteStatus() {

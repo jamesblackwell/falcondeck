@@ -1,12 +1,15 @@
 import type {
   AccountSummary,
   AgentProvider,
+  ConversationPreferences,
   DaemonSnapshot,
   EventEnvelope,
+  FalconDeckPreferences,
   ThreadHandle,
   ThreadAgentParams,
   ThreadDetail,
   ThreadSummary,
+  ToolCallDisplay,
   WorkspaceAgentSummary,
   WorkspaceSummary,
 } from './types'
@@ -22,6 +25,31 @@ const DEFAULT_THREAD_AGENT: ThreadAgentParams = {
   collaboration_mode_id: null,
   approval_policy: null,
   service_tier: null,
+}
+
+const DEFAULT_TOOL_CALL_DISPLAY: ToolCallDisplay = {
+  is_read_only: false,
+  has_side_effect: false,
+  is_error: false,
+  artifact_kind: 'none',
+  summary_hint: null,
+}
+
+const DEFAULT_CONVERSATION_PREFERENCES: ConversationPreferences = {
+  tool_details_mode: 'auto',
+  auto_expand: {
+    approvals: true,
+    errors: true,
+    first_diff: true,
+    failed_tests: true,
+  },
+  group_read_only_tools: true,
+  show_expand_all_controls: true,
+}
+
+const DEFAULT_PREFERENCES: FalconDeckPreferences = {
+  version: 1,
+  conversation: DEFAULT_CONVERSATION_PREFERENCES,
 }
 
 function normalizeProvider(value: unknown): AgentProvider {
@@ -158,7 +186,14 @@ export function normalizeThreadDetail(value: ThreadDetail | unknown): ThreadDeta
   return {
     workspace: normalizeWorkspaceSummary(detail.workspace),
     thread: normalizeThreadSummary(detail.thread),
-    items: detail.items ?? [],
+    items: (detail.items ?? []).map((item) =>
+      item.kind === 'tool_call'
+        ? {
+            ...item,
+            display: normalizeToolCallDisplay((item as { display?: unknown }).display),
+          }
+        : item,
+    ),
   }
 }
 
@@ -182,6 +217,7 @@ export function normalizeDaemonSnapshot(value: DaemonSnapshot | unknown): Daemon
     ),
     threads: (snapshot.threads ?? []).map((thread) => normalizeThreadSummary(thread)),
     interactive_requests: snapshot.interactive_requests ?? [],
+    preferences: normalizePreferences(snapshot.preferences),
   }
 }
 
@@ -209,5 +245,81 @@ export function normalizeEventEnvelope(value: EventEnvelope | unknown): EventEnv
     }
   }
 
+  if (event?.type === 'preferences-updated') {
+    return {
+      ...(envelope as EventEnvelope),
+      event: {
+        ...event,
+        preferences: normalizePreferences(event.preferences),
+      },
+    }
+  }
+
   return envelope as EventEnvelope
+}
+
+export function normalizeToolCallDisplay(value: unknown): ToolCallDisplay {
+  if (!value || typeof value !== 'object') {
+    return { ...DEFAULT_TOOL_CALL_DISPLAY }
+  }
+
+  const display = value as Partial<ToolCallDisplay>
+  const artifactKind =
+    display.artifact_kind === 'diff' ||
+    display.artifact_kind === 'test' ||
+    display.artifact_kind === 'command_output' ||
+    display.artifact_kind === 'approval_related'
+      ? display.artifact_kind
+      : 'none'
+
+  return {
+    is_read_only: display.is_read_only ?? false,
+    has_side_effect: display.has_side_effect ?? false,
+    is_error: display.is_error ?? false,
+    artifact_kind: artifactKind,
+    summary_hint:
+      typeof display.summary_hint === 'string' && display.summary_hint.trim().length > 0
+        ? display.summary_hint
+        : null,
+  }
+}
+
+export function normalizePreferences(value: unknown): FalconDeckPreferences {
+  if (!value || typeof value !== 'object') {
+    return {
+      ...DEFAULT_PREFERENCES,
+      conversation: {
+        ...DEFAULT_CONVERSATION_PREFERENCES,
+        auto_expand: { ...DEFAULT_CONVERSATION_PREFERENCES.auto_expand },
+      },
+    }
+  }
+
+  const raw = value as Partial<FalconDeckPreferences>
+  const conversation = (raw.conversation ?? {}) as Partial<ConversationPreferences>
+  const autoExpand = (conversation.auto_expand ?? {}) as Partial<
+    ConversationPreferences['auto_expand']
+  >
+
+  const toolDetailsMode =
+    conversation.tool_details_mode === 'expanded' ||
+    conversation.tool_details_mode === 'compact' ||
+    conversation.tool_details_mode === 'hide_read_only_details'
+      ? conversation.tool_details_mode
+      : 'auto'
+
+  return {
+    version: typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : 1,
+    conversation: {
+      tool_details_mode: toolDetailsMode,
+      auto_expand: {
+        approvals: autoExpand.approvals ?? true,
+        errors: autoExpand.errors ?? true,
+        first_diff: autoExpand.first_diff ?? true,
+        failed_tests: autoExpand.failed_tests ?? true,
+      },
+      group_read_only_tools: conversation.group_read_only_tools ?? true,
+      show_expand_all_controls: conversation.show_expand_all_controls ?? true,
+    },
+  }
 }

@@ -21,6 +21,7 @@ import {
   isPlanModeEnabled,
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
+  normalizePreferences,
   normalizeThreadDetail,
   normalizeThreadHandle,
   normalizeThreadSummary,
@@ -56,6 +57,7 @@ import {
   type ThreadDetail,
   type ThreadHandle,
   type ThreadSummary,
+  type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
 import {
   Conversation,
@@ -67,7 +69,7 @@ import {
 } from '@falcondeck/chat-ui'
 import { Badge, Button, Input } from '@falcondeck/ui'
 
-import { LoaderCircle, Lock, PanelLeft, Smartphone, X } from 'lucide-react'
+import { LoaderCircle, Lock, PanelLeft, Settings, Smartphone, X } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -374,6 +376,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
+  const [showPreferences, setShowPreferences] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
   const notifiedAttentionRef = useRef(new Map<string, string>())
@@ -1385,6 +1388,21 @@ export default function App() {
     [applyThreadHandle, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace],
   )
 
+  const handleUpdatePreferences = useCallback(
+    async (payload: UpdatePreferencesPayload) => {
+      try {
+        const preferences = normalizePreferences(
+          await submitQueuedAction('preferences.update', payload),
+        )
+        setSnapshot((current) => (current ? { ...current, preferences } : current))
+        setError(null)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Remote action failed')
+      }
+    },
+    [],
+  )
+
   const handleModelChange = useCallback(
     (modelId: string) => {
       setSelectedModel(modelId)
@@ -1664,6 +1682,25 @@ export default function App() {
 
   const desktopOnline = machinePresence?.daemon_connected ?? false
   const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline)
+  const preferences = normalizePreferences(snapshot?.preferences)
+  const toolDetailOptions = [
+    { value: 'auto', label: 'Auto' },
+    { value: 'expanded', label: 'Expanded' },
+    { value: 'compact', label: 'Compact' },
+    { value: 'hide_read_only_details', label: 'Hide read-only details' },
+  ] as const
+  const preferenceToggles = [
+    {
+      key: 'group_read_only_tools' as const,
+      enabled: preferences.conversation.group_read_only_tools,
+      label: 'Group read-only tool bursts',
+    },
+    {
+      key: 'show_expand_all_controls' as const,
+      enabled: preferences.conversation.show_expand_all_controls,
+      label: 'Show expand/collapse all controls',
+    },
+  ]
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
@@ -1683,11 +1720,90 @@ export default function App() {
         }
       >
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowPreferences(true)}
+          >
+            <Settings className="h-4 w-4" />
+            Preferences
+          </Button>
           <Badge variant={headerConnectionState.variant} dot>
             {headerConnectionState.label}
           </Badge>
         </div>
       </SessionHeader>
+
+      {showPreferences ? (
+        <div className="fixed inset-0 z-50 bg-surface-0/80 backdrop-blur-sm">
+          <button
+            type="button"
+            className="absolute inset-0 h-full w-full"
+            aria-label="Close preferences"
+            onClick={() => setShowPreferences(false)}
+          />
+          <div className="absolute inset-x-4 top-20 mx-auto w-full max-w-xl rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">
+                  Preferences
+                </p>
+                <h2 className="mt-1 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
+                  Conversation density
+                </h2>
+                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                  These settings are stored in FalconDeck&apos;s shared `falcondeck.json`.
+                </p>
+              </div>
+              <Button type="button" variant="ghost" size="icon" onClick={() => setShowPreferences(false)}>
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+
+            <div className="mt-4 grid gap-3 md:grid-cols-2">
+              {toolDetailOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() =>
+                    void handleUpdatePreferences({
+                      conversation: { tool_details_mode: option.value },
+                    })
+                  }
+                  className={`rounded-[var(--fd-radius-lg)] border p-3 text-left transition-colors ${
+                    preferences.conversation.tool_details_mode === option.value
+                      ? 'border-accent/50 bg-accent/10'
+                      : 'border-border-subtle bg-surface-2 hover:bg-surface-3'
+                  }`}
+                >
+                  <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">{option.label}</p>
+                </button>
+              ))}
+            </div>
+
+            <div className="mt-4 space-y-2">
+              {preferenceToggles.map((toggle) => (
+                <button
+                  key={toggle.key}
+                  type="button"
+                  onClick={() =>
+                    void handleUpdatePreferences({
+                      conversation: { [toggle.key]: !toggle.enabled } as UpdatePreferencesPayload['conversation'],
+                    })
+                  }
+                  className="flex w-full items-center justify-between rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 px-4 py-3 text-left"
+                >
+                  <span className="text-[length:var(--fd-text-sm)] text-fg-primary">{toggle.label}</span>
+                  <Badge variant={toggle.enabled ? 'success' : 'default'} dot>
+                    {toggle.enabled ? 'On' : 'Off'}
+                  </Badge>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showProjects ? (
         <div className="fixed inset-0 z-40 bg-surface-0/80 backdrop-blur-sm md:hidden">
@@ -1767,6 +1883,7 @@ export default function App() {
                   : selectedWorkspaceId
               }
               items={items}
+              preferences={snapshot?.preferences ?? null}
               emptyState={conversationEmptyState}
               isThinking={isSubmitting || selectedThread?.status === 'running'}
               isLoading={isThreadDetailPending}
