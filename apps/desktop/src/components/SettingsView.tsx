@@ -369,6 +369,24 @@ function GeneralSettingsPanel({
             </div>
           ))}
         </CardContent>
+        {workspace?.last_error && /could not find|could not be started|failed to start/i.test(workspace.last_error) ? (
+          <CardContent className="pt-0">
+            <div className="rounded-[var(--fd-radius-xl)] border border-warning/20 bg-warning/10 p-4">
+              <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                FalconDeck could not launch one of the local agent CLIs
+              </p>
+              <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                FalconDeck now auto-detects `claude` and `codex` from the app PATH, common install
+                locations, and your login shell. If a provider still fails to launch, relaunch the
+                app after installing the CLI or set `FALCONDECK_CLAUDE_BIN` / `FALCONDECK_CODEX_BIN`
+                before starting FalconDeck.
+              </p>
+              <p className="mt-3 rounded-[var(--fd-radius-lg)] bg-surface-1 px-3 py-2 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                {workspace.last_error}
+              </p>
+            </div>
+          </CardContent>
+        ) : null}
       </Card>
     </div>
   )

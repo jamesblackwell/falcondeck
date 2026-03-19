@@ -20,6 +20,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
 use crate::error::DaemonError;
 
 pub struct ClaudeBootstrap {
@@ -53,13 +54,14 @@ impl ClaudeRuntime {
         workspace_path: String,
         claude_bin: String,
     ) -> Result<ClaudeBootstrap, DaemonError> {
+        let resolved = resolve_agent_binary("claude", &claude_bin);
         let runtime = Arc::new(Self {
             workspace_path: workspace_path.clone(),
-            claude_bin: claude_bin.clone(),
+            claude_bin: resolved.executable.clone(),
             active_turns: Mutex::new(HashMap::new()),
         });
 
-        let account = read_auth_status(&claude_bin).await;
+        let account = read_auth_status(&resolved.executable).await;
         let models = curated_models();
         let collaboration_modes = vec![CollaborationModeSummary {
             id: "plan".to_string(),
@@ -95,7 +97,8 @@ impl ClaudeRuntime {
         let next_session_id = session_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
-        let mut command = Command::new(&self.claude_bin);
+        let resolved = resolve_agent_binary("claude", &self.claude_bin);
+        let mut command = Command::new(&resolved.executable);
         command
             .arg("-p")
             .arg(prompt)
@@ -126,7 +129,18 @@ impl ClaudeRuntime {
 
         let mut child = command
             .spawn()
-            .map_err(|error| DaemonError::Process(format!("failed to start claude: {error}")))?;
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    let message = missing_binary_message(
+                        "Claude Code",
+                        "claude",
+                        &resolved.diagnostics,
+                        "Install Claude Code in a standard location or relaunch FalconDeck after your shell PATH is set up.",
+                    );
+                    return DaemonError::Process(message);
+                }
+                DaemonError::Process(format!("failed to start claude: {error}"))
+            })?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         self.active_turns

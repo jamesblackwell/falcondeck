@@ -25,8 +25,9 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::{app::AppState, error::DaemonError};
+use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
 use crate::skills::canonical_skill_alias;
+use crate::{app::AppState, error::DaemonError};
 
 pub struct CodexBootstrap {
     pub session: Arc<CodexSession>,
@@ -63,7 +64,8 @@ impl CodexSession {
         codex_bin: String,
         state: AppState,
     ) -> Result<CodexBootstrap, DaemonError> {
-        let mut child = Command::new(codex_bin)
+        let resolved = resolve_agent_binary("codex", &codex_bin);
+        let mut child = Command::new(&resolved.executable)
             .arg("app-server")
             .current_dir(PathBuf::from(&workspace_path))
             .stdin(Stdio::piped())
@@ -71,6 +73,15 @@ impl CodexSession {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    let message = missing_binary_message(
+                        "Codex",
+                        "codex",
+                        &resolved.diagnostics,
+                        "Install Codex in a standard location or relaunch FalconDeck after your shell PATH is set up.",
+                    );
+                    return DaemonError::Process(message);
+                }
                 DaemonError::Process(format!("failed to start codex app-server: {error}"))
             })?;
 
