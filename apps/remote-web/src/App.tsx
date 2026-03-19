@@ -1302,6 +1302,16 @@ export default function App() {
     })
   }, [snapshot])
 
+  useEffect(() => {
+    if (!showProjects) return
+
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previousOverflow
+    }
+  }, [showProjects])
+
   // ── Pairing screen (not connected) ─────────────────────────────────
 
   if (!isConnected) {
@@ -1356,16 +1366,6 @@ export default function App() {
   // ── Connected session ──────────────────────────────────────────────
 
   const desktopOnline = machinePresence?.daemon_connected ?? false
-
-  useEffect(() => {
-    if (!showProjects) return
-
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      document.body.style.overflow = previousOverflow
-    }
-  }, [showProjects])
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
