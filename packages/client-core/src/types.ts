@@ -373,6 +373,7 @@ export type ThreadHandle = {
 export type UpdateThreadPayload = {
   workspace_id: string
   thread_id: string
+  title?: string | null
   provider?: AgentProvider | null
   model_id?: string | null
   reasoning_effort?: string | null

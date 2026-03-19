@@ -269,6 +269,8 @@ pub struct UpdateThreadRequest {
     pub workspace_id: String,
     /// Thread identifier being updated.
     pub thread_id: String,
+    /// Optional thread title override.
+    pub title: Option<String>,
     /// Optional provider override for the thread.
     #[serde(default)]
     pub provider: Option<AgentProvider>,

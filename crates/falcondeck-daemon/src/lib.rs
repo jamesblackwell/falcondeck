@@ -4,6 +4,7 @@
 //! agent sessions, remote pairing, and the HTTP API consumed by the desktop,
 //! mobile, and remote web shells.
 
+mod agent_binary;
 mod api;
 mod app;
 mod claude;
@@ -15,6 +16,7 @@ mod skills;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
+pub use agent_binary::{AgentBinaryResolution, ResolutionDiagnostics, resolve_agent_binary};
 pub use app::AppState;
 pub use error::DaemonError;
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};

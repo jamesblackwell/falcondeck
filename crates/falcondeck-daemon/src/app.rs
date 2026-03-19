@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     env,
     path::PathBuf,
+    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -14,17 +15,18 @@ use chrono::Utc;
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
     CommandResponse, ConnectWorkspaceRequest, ConversationAutoExpandPreferencesPatch,
-    ConversationItem, DaemonInfo, DaemonSnapshot, SelectedSkillReference, SkillSummary,
-    EncryptedEnvelope, EventEnvelope, FalconDeckPreferences, HealthResponse, InteractiveQuestion,
-    InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind,
-    InteractiveResponsePayload, PairingPublicKeyBundle, PairingStatusResponse, RelayClientMessage,
-    RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
-    RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
-    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
-    StartThreadRequest, ThreadAgentParams, ThreadAttention, ThreadAttentionLevel, ThreadDetail,
-    ThreadHandle, ThreadStatus, ThreadSummary, ToolArtifactKind, ToolCallDisplay,
-    ToolDetailsMode, TurnInputItem, UnifiedEvent, UpdatePreferencesRequest,
-    UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
+    ConversationItem, DaemonInfo, DaemonSnapshot, EncryptedEnvelope, EventEnvelope,
+    FalconDeckPreferences, HealthResponse, InteractiveQuestion, InteractiveQuestionOption,
+    InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload, PairingPublicKeyBundle,
+    PairingStatusResponse, RelayClientMessage, RelayServerMessage, RelayUpdateBody,
+    RelayWebSocketTicketResponse, RemoteConnectionStatus, RemotePairingSession,
+    RemoteStatusResponse, SelectedSkillReference, SendTurnRequest, ServiceLevel,
+    SessionKeyMaterial, SkillSummary, StartPairingRequest, StartPairingResponse,
+    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, ThreadAgentParams,
+    ThreadAttention, ThreadAttentionLevel, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
+    ToolArtifactKind, ToolCallDisplay, ToolDetailsMode, TurnInputItem, UnifiedEvent,
+    UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
+    WorkspaceSummary,
     crypto::{
         LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle, decrypt_json,
         encrypt_json, generate_data_key, sign_session_key_material,
@@ -37,6 +39,7 @@ use serde_json::{Value, json};
 use tokio::{
     fs,
     io::AsyncBufReadExt,
+    process::Command,
     sync::mpsc,
     sync::{Mutex, broadcast},
     task::JoinHandle,
@@ -47,6 +50,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
+    agent_binary::resolve_agent_binary,
     claude::{ClaudeBootstrap, ClaudeRuntime},
     codex::{
         CodexBootstrap, CodexSession, extract_datetime_or_timestamp, extract_string,
@@ -54,8 +58,8 @@ use crate::{
     },
     error::DaemonError,
     skills::{
-        canonical_skill_alias, discover_file_backed_skills, merge_skills, parse_codex_provider_skills,
-        skills_for_provider,
+        canonical_skill_alias, discover_file_backed_skills, merge_skills,
+        parse_codex_provider_skills, skills_for_provider,
     },
 };
 
@@ -122,6 +126,9 @@ struct ManagedThread {
     assistant_items: HashMap<String, usize>,
     reasoning_items: HashMap<String, usize>,
     tool_items: HashMap<String, usize>,
+    manual_title: bool,
+    ai_title_generated: bool,
+    ai_title_in_flight: bool,
     requires_resume: bool,
 }
 
@@ -188,6 +195,10 @@ struct PersistedThreadState {
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
+    manual_title: bool,
+    #[serde(default)]
+    ai_title_generated: bool,
+    #[serde(default)]
     status: Option<ThreadStatus>,
     #[serde(default)]
     last_error: Option<String>,
@@ -195,6 +206,12 @@ struct PersistedThreadState {
     last_read_seq: u64,
     #[serde(default)]
     last_agent_activity_seq: u64,
+}
+
+struct AiThreadTitleInput {
+    workspace_path: String,
+    prompt: String,
+    prefer_claude: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -446,7 +463,12 @@ impl AppState {
                     .archived_thread_ids
                     .contains(&state.thread_id),
             };
-            threads.insert(state.thread_id.clone(), ManagedThread::new(summary));
+            let mut thread = ManagedThread::new(summary);
+            thread.manual_title = state.manual_title;
+            thread.ai_title_generated = state.ai_title_generated
+                || (!is_placeholder_thread_title(&thread.summary.title)
+                    && !is_provisional_thread_title(&thread.summary.title));
+            threads.insert(state.thread_id.clone(), thread);
         }
         let summary = WorkspaceSummary {
             id: workspace_id.clone(),
@@ -684,8 +706,7 @@ impl AppState {
         let existing_remote = {
             let remote = self.inner.remote.lock().await;
             let should_reuse_pending = remote.relay_url.as_deref() == Some(relay_url.as_str())
-                && status_pairing(&remote)
-                    .is_some_and(|pairing| pairing.expires_at > Utc::now())
+                && status_pairing(&remote).is_some_and(|pairing| pairing.expires_at > Utc::now())
                 && (matches!(remote.status, RemoteConnectionStatus::PairingPending)
                     || remote.pending_pairing.is_some());
             if should_reuse_pending {
@@ -1217,10 +1238,17 @@ impl AppState {
                             thread.summary.attention.last_agent_activity_seq =
                                 state.last_agent_activity_seq;
                         }
-                        (
-                            thread.summary.id.clone(),
-                            ManagedThread::with_items(thread.summary, thread.items),
-                        )
+                        (thread.summary.id.clone(), {
+                            let mut managed =
+                                ManagedThread::with_items(thread.summary, thread.items);
+                            if let Some(state) = persisted_thread_states.get(&managed.summary.id) {
+                                managed.manual_title = state.manual_title;
+                                managed.ai_title_generated = state.ai_title_generated
+                                    || (!is_placeholder_thread_title(&managed.summary.title)
+                                        && !is_provisional_thread_title(&managed.summary.title));
+                            }
+                            managed
+                        })
                     })
                     .collect(),
             },
@@ -1518,8 +1546,19 @@ impl AppState {
                 &provider,
                 request.collaboration_mode_id.as_deref(),
             );
-            let selected_skills =
-                resolve_selected_skills(&workspace.summary.skills, &request.selected_skills, &provider);
+            let selected_skills = resolve_selected_skills(
+                &workspace.summary.skills,
+                &request.selected_skills,
+                &provider,
+            );
+            if !managed.manual_title
+                && !managed.ai_title_generated
+                && is_placeholder_thread_title(&managed.summary.title)
+            {
+                if let Some(title) = provisional_thread_title_from_inputs(&inputs) {
+                    managed.summary.title = title;
+                }
+            }
             managed.summary.updated_at = now;
             workspace.summary.current_thread_id = Some(managed.summary.id.clone());
             workspace.summary.default_provider = provider.clone();
@@ -1668,6 +1707,18 @@ impl AppState {
                 }
             }
 
+            if let Some(title) = request.title.as_deref().map(str::trim) {
+                if title.is_empty() {
+                    return Err(DaemonError::BadRequest(
+                        "thread title cannot be empty".to_string(),
+                    ));
+                }
+                thread.summary.title = title.to_string();
+                thread.manual_title = true;
+                thread.ai_title_generated = true;
+                thread.ai_title_in_flight = false;
+            }
+
             thread.summary.agent.model_id = request.model_id.clone();
             thread.summary.agent.reasoning_effort = request.reasoning_effort.clone();
             thread.summary.agent.collaboration_mode_id = request.collaboration_mode_id.clone();
@@ -1688,6 +1739,7 @@ impl AppState {
                 thread: thread.clone(),
             },
         );
+        let _ = self.persist_local_state().await;
 
         Ok(ThreadHandle {
             workspace: workspace_summary,
@@ -2311,9 +2363,9 @@ impl AppState {
                                 || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
                             {
                                 None
-                            } else if remote.pending_pairing.as_ref().is_none_or(|current_pairing| {
-                                current_pairing.pairing_id != pairing_id
-                            }) {
+                            } else if remote.pending_pairing.as_ref().is_none_or(
+                                |current_pairing| current_pairing.pairing_id != pairing_id,
+                            ) {
                                 None
                             } else {
                                 let Some(current_pairing) = remote.pending_pairing.as_mut() else {
@@ -2831,6 +2883,7 @@ impl AppState {
                 let request = UpdateThreadRequest {
                     workspace_id: required(&["workspaceId", "workspace_id"])?,
                     thread_id: required(&["threadId", "thread_id"])?,
+                    title: extract_string(&params, &["title"]),
                     provider: extract_string(&params, &["provider"]).and_then(parse_agent_provider),
                     model_id: extract_string(&params, &["modelId", "model_id"]),
                     reasoning_effort: extract_string(
@@ -2915,9 +2968,8 @@ impl AppState {
                     .map_err(|error| error.to_string())
             }
             "preferences.update" => {
-                let request: UpdatePreferencesRequest =
-                    serde_json::from_value(params.clone())
-                        .map_err(|_| "invalid remote rpc payload".to_string())?;
+                let request: UpdatePreferencesRequest = serde_json::from_value(params.clone())
+                    .map_err(|_| "invalid remote rpc payload".to_string())?;
                 self.update_preferences(request)
                     .await
                     .and_then(|preferences| {
@@ -2970,9 +3022,12 @@ impl AppState {
         let outcome: Result<Value, DaemonError> = match action_type.as_str() {
             "preferences.update" => {
                 match serde_json::from_value::<UpdatePreferencesRequest>(params.clone()) {
-                    Ok(request) => self.update_preferences(request).await.and_then(|preferences| {
-                        serde_json::to_value(preferences).map_err(DaemonError::from)
-                    }),
+                    Ok(request) => self
+                        .update_preferences(request)
+                        .await
+                        .and_then(|preferences| {
+                            serde_json::to_value(preferences).map_err(DaemonError::from)
+                        }),
                     Err(_) => Err(DaemonError::BadRequest(
                         "invalid queued action payload".to_string(),
                     )),
@@ -3011,6 +3066,7 @@ impl AppState {
                     let request = UpdateThreadRequest {
                         workspace_id,
                         thread_id,
+                        title: extract_string(&params, &["title"]),
                         provider: extract_string(&params, &["provider"])
                             .and_then(parse_agent_provider),
                         model_id: extract_string(&params, &["modelId", "model_id"]),
@@ -3303,6 +3359,8 @@ impl AppState {
                     provider: Some(thread.summary.provider.clone()),
                     native_session_id: thread.summary.native_session_id.clone(),
                     title: Some(thread.summary.title.clone()),
+                    manual_title: thread.manual_title,
+                    ai_title_generated: thread.ai_title_generated,
                     status: Some(thread.summary.status.clone()),
                     last_error: thread.summary.last_error.clone(),
                     last_read_seq: thread.summary.attention.last_read_seq,
@@ -3387,12 +3445,18 @@ impl AppState {
                         .unwrap_or_else(|| "Untitled thread".to_string());
                     let updated_at =
                         notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.title = title.clone();
-                            thread.updated_at = updated_at;
-                        })
-                        .await?;
+                    self.with_managed_thread_mut(workspace_id, &thread_id, |thread| {
+                        thread.summary.title = title.clone();
+                        thread.summary.updated_at = updated_at;
+                        if !is_placeholder_thread_title(&title)
+                            && !is_provisional_thread_title(&title)
+                        {
+                            thread.ai_title_generated = true;
+                            thread.ai_title_in_flight = false;
+                        }
+                    })
+                    .await?;
+                    let thread = self.thread_summary(workspace_id, &thread_id).await?;
                     self.emit(
                         Some(workspace_id.to_string()),
                         Some(thread_id),
@@ -3476,13 +3540,15 @@ impl AppState {
                     );
                     self.emit(
                         Some(workspace_id.to_string()),
-                        Some(thread_id),
+                        Some(thread_id.clone()),
                         UnifiedEvent::TurnEnd {
                             turn_id,
                             status,
                             error,
                         },
                     );
+                    self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id)
+                        .await;
                 }
             }
             "turn/step/started" | "turn/step/completed" => {
@@ -3801,15 +3867,15 @@ impl AppState {
                             let display =
                                 tool_display_metadata(&title, &kind, "running", None, None);
                             ConversationItem::ToolCall {
-                            id: item_id,
-                            title,
-                            tool_kind: kind,
-                            status: "running".to_string(),
-                            output: None,
-                            exit_code: None,
-                            display,
-                            created_at: Utc::now(),
-                            completed_at: None,
+                                id: item_id,
+                                title,
+                                tool_kind: kind,
+                                status: "running".to_string(),
+                                output: None,
+                                exit_code: None,
+                                display,
+                                created_at: Utc::now(),
+                                completed_at: None,
                             }
                         },
                         true,
@@ -3882,15 +3948,15 @@ impl AppState {
                                     .and_then(Value::as_str),
                             );
                             ConversationItem::ToolCall {
-                            id: item_id.clone(),
-                            title: title.clone(),
-                            tool_kind: kind.clone(),
-                            status: status.clone(),
-                            output: existing_output,
-                            exit_code,
-                            display,
-                            created_at: Utc::now(),
-                            completed_at: Some(Utc::now()),
+                                id: item_id.clone(),
+                                title: title.clone(),
+                                tool_kind: kind.clone(),
+                                status: status.clone(),
+                                output: existing_output,
+                                exit_code,
+                                display,
+                                created_at: Utc::now(),
+                                completed_at: Some(Utc::now()),
                             }
                         },
                         true,
@@ -4261,6 +4327,32 @@ impl AppState {
         Ok(())
     }
 
+    async fn with_managed_thread_mut<F>(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        updater: F,
+    ) -> Result<(), DaemonError>
+    where
+        F: FnOnce(&mut ManagedThread),
+    {
+        let mut workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        updater(thread);
+        let updated_at = thread.summary.updated_at;
+        workspace.summary.current_thread_id = Some(thread.summary.id.clone());
+        if updated_at > workspace.summary.updated_at {
+            workspace.summary.updated_at = updated_at;
+        }
+        Ok(())
+    }
+
     async fn thread_summary(
         &self,
         workspace_id: &str,
@@ -4285,6 +4377,155 @@ impl AppState {
             interactive_request_counts(&interactive_requests, &summary.id);
         refresh_thread_attention(&mut summary, pending_approval_count, pending_question_count);
         summary
+    }
+
+    async fn maybe_schedule_ai_thread_title(&self, workspace_id: String, thread_id: String) {
+        let title_input = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                return;
+            };
+            let Some(thread) = workspace.threads.get_mut(&thread_id) else {
+                return;
+            };
+            if thread.manual_title || thread.ai_title_generated || thread.ai_title_in_flight {
+                return;
+            }
+            if !should_generate_ai_thread_title(thread) {
+                return;
+            }
+            thread.ai_title_in_flight = true;
+            AiThreadTitleInput {
+                workspace_path: workspace.summary.path.clone(),
+                prompt: build_ai_thread_title_prompt(&thread.items),
+                prefer_claude: workspace.summary.agents.iter().any(|agent| {
+                    agent.provider == AgentProvider::Claude
+                        && matches!(agent.account.status, falcondeck_core::AccountStatus::Ready)
+                }),
+            }
+        };
+
+        let app = self.clone();
+        tokio::spawn(async move {
+            let generated = app.generate_ai_thread_title(&title_input).await;
+            match generated {
+                Some(title) => {
+                    let _ = app
+                        .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
+                            if thread.manual_title
+                                || thread.ai_title_generated
+                                || (!is_placeholder_thread_title(&thread.summary.title)
+                                    && !is_provisional_thread_title(&thread.summary.title))
+                            {
+                                thread.ai_title_in_flight = false;
+                                return;
+                            }
+                            thread.summary.title = title.clone();
+                            thread.summary.updated_at = Utc::now();
+                            thread.ai_title_generated = true;
+                            thread.ai_title_in_flight = false;
+                        })
+                        .await;
+                    if let Ok(thread) = app.thread_summary(&workspace_id, &thread_id).await {
+                        app.emit(
+                            Some(workspace_id.clone()),
+                            Some(thread_id.clone()),
+                            UnifiedEvent::ThreadUpdated { thread },
+                        );
+                        let _ = app.persist_local_state().await;
+                    }
+                }
+                None => {
+                    let _ = app
+                        .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
+                            thread.ai_title_in_flight = false;
+                        })
+                        .await;
+                }
+            }
+        });
+    }
+
+    async fn generate_ai_thread_title(&self, input: &AiThreadTitleInput) -> Option<String> {
+        if input.prefer_claude {
+            if let Some(title) = self.generate_ai_thread_title_with_claude(input).await {
+                return Some(title);
+            }
+        }
+        self.generate_ai_thread_title_with_codex(input).await
+    }
+
+    async fn generate_ai_thread_title_with_claude(
+        &self,
+        input: &AiThreadTitleInput,
+    ) -> Option<String> {
+        let resolved = resolve_agent_binary("claude", &self.inner.claude_bin);
+        let output = timeout(
+            Duration::from_secs(20),
+            Command::new(&resolved.executable)
+                .arg("-p")
+                .arg(&input.prompt)
+                .arg("--model")
+                .arg("haiku")
+                .arg("--output-format")
+                .arg("text")
+                .arg("--tools")
+                .arg("")
+                .arg("--no-session-persistence")
+                .current_dir(&input.workspace_path)
+                .stdin(Stdio::null())
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        normalize_generated_thread_title(String::from_utf8_lossy(&output.stdout).as_ref())
+    }
+
+    async fn generate_ai_thread_title_with_codex(
+        &self,
+        input: &AiThreadTitleInput,
+    ) -> Option<String> {
+        let resolved = resolve_agent_binary("codex", &self.inner.codex_bin);
+        let output_path = std::env::temp_dir().join(format!(
+            "falcondeck-thread-title-{}.txt",
+            Uuid::new_v4().simple()
+        ));
+        let output = timeout(
+            Duration::from_secs(25),
+            Command::new(&resolved.executable)
+                .arg("exec")
+                .arg("--skip-git-repo-check")
+                .arg("--ephemeral")
+                .arg("--color")
+                .arg("never")
+                .arg("-s")
+                .arg("read-only")
+                .arg("-o")
+                .arg(&output_path)
+                .arg(&input.prompt)
+                .current_dir(&input.workspace_path)
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output(),
+        )
+        .await
+        .ok()?
+        .ok()?;
+
+        if !output.status.success() {
+            let _ = fs::remove_file(&output_path).await;
+            return None;
+        }
+
+        let generated = fs::read_to_string(&output_path).await.ok();
+        let _ = fs::remove_file(&output_path).await;
+        normalize_generated_thread_title(generated.as_deref().unwrap_or_default())
     }
 
     async fn monitor_claude_turn(
@@ -4412,8 +4653,7 @@ impl AppState {
                     if status.success() && !saw_agent_output && turn_error.is_none() =>
                 {
                     turn_error = Some(
-                        "Claude turn completed without emitting any assistant output"
-                            .to_string(),
+                        "Claude turn completed without emitting any assistant output".to_string(),
                     );
                 }
                 Ok(_) | Err(_) => {}
@@ -4433,22 +4673,31 @@ impl AppState {
             .await;
         if let Ok(thread) = self.thread_summary(&workspace_id, &thread_id).await {
             self.emit(
-                Some(workspace_id),
-                Some(thread_id),
+                Some(workspace_id.clone()),
+                Some(thread_id.clone()),
                 UnifiedEvent::ThreadUpdated { thread },
             );
+        }
+        if turn_error.is_none() && saw_agent_output {
+            self.maybe_schedule_ai_thread_title(workspace_id, thread_id)
+                .await;
         }
     }
 }
 
 impl ManagedThread {
     fn new(summary: ThreadSummary) -> Self {
+        let ai_title_generated = !is_placeholder_thread_title(&summary.title)
+            && !is_provisional_thread_title(&summary.title);
         Self {
             summary,
             items: Vec::new(),
             assistant_items: HashMap::new(),
             reasoning_items: HashMap::new(),
             tool_items: HashMap::new(),
+            manual_title: false,
+            ai_title_generated,
+            ai_title_in_flight: false,
             requires_resume: false,
         }
     }
@@ -4737,10 +4986,19 @@ fn resolve_selected_skills(
                 .filter(|skill| {
                     matches!(
                         (provider, &skill.availability),
-                        (AgentProvider::Codex, falcondeck_core::SkillAvailability::Codex)
-                            | (AgentProvider::Codex, falcondeck_core::SkillAvailability::Both)
-                            | (AgentProvider::Claude, falcondeck_core::SkillAvailability::Claude)
-                            | (AgentProvider::Claude, falcondeck_core::SkillAvailability::Both)
+                        (
+                            AgentProvider::Codex,
+                            falcondeck_core::SkillAvailability::Codex
+                        ) | (
+                            AgentProvider::Codex,
+                            falcondeck_core::SkillAvailability::Both
+                        ) | (
+                            AgentProvider::Claude,
+                            falcondeck_core::SkillAvailability::Claude
+                        ) | (
+                            AgentProvider::Claude,
+                            falcondeck_core::SkillAvailability::Both
+                        )
                     )
                 })
                 .cloned()
@@ -4756,7 +5014,8 @@ fn codex_inputs(inputs: &[TurnInputItem], selected_skills: &[ResolvedSelectedSki
     let fallback_text_skill_names = selected_skills
         .iter()
         .filter_map(|skill| {
-            skill.summary
+            skill
+                .summary
                 .provider_translations
                 .codex
                 .as_ref()
@@ -4772,7 +5031,8 @@ fn codex_inputs(inputs: &[TurnInputItem], selected_skills: &[ResolvedSelectedSki
     let mut structured_skill_inputs = selected_skills
         .iter()
         .filter_map(|skill| {
-            skill.summary
+            skill
+                .summary
                 .provider_translations
                 .codex
                 .as_ref()
@@ -4804,7 +5064,8 @@ fn codex_inputs(inputs: &[TurnInputItem], selected_skills: &[ResolvedSelectedSki
         .map(|item| match item {
             TurnInputItem::Text { text, .. } => {
                 let translated = replace_selected_skill_aliases(text, selected_skills, |skill| {
-                    skill.summary
+                    skill
+                        .summary
                         .provider_translations
                         .codex
                         .as_ref()
@@ -4888,7 +5149,8 @@ fn claude_prompt_from_inputs(
 
 fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSkill]) -> String {
     let mut translated = replace_selected_skill_aliases(text, selected_skills, |skill| {
-        skill.summary
+        skill
+            .summary
             .provider_translations
             .claude
             .as_ref()
@@ -4921,7 +5183,8 @@ fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSk
         translated = selected_skills
             .iter()
             .filter_map(|skill| {
-                skill.summary
+                skill
+                    .summary
                     .provider_translations
                     .claude
                     .as_ref()
@@ -5271,6 +5534,166 @@ fn build_user_message_item(inputs: &[TurnInputItem]) -> ConversationItem {
     }
 }
 
+fn provisional_thread_title_from_inputs(inputs: &[TurnInputItem]) -> Option<String> {
+    let text = inputs.iter().find_map(|input| match input {
+        TurnInputItem::Text { text, .. } => Some(text.as_str()),
+        TurnInputItem::Image(_) => None,
+    })?;
+    provisional_thread_title_from_text(text)
+}
+
+fn provisional_thread_title_from_text(text: &str) -> Option<String> {
+    let words = text.split_whitespace().take(4).collect::<Vec<_>>();
+    if words.is_empty() {
+        return None;
+    }
+    Some(format!("{}...", words.join(" ")))
+}
+
+fn should_generate_ai_thread_title(thread: &ManagedThread) -> bool {
+    let has_user_message = thread
+        .items
+        .iter()
+        .any(|item| matches!(item, ConversationItem::UserMessage { .. }));
+    let has_agent_output = thread.items.iter().any(|item| {
+        matches!(
+            item,
+            ConversationItem::AssistantMessage { .. } | ConversationItem::ToolCall { .. }
+        )
+    });
+
+    has_user_message
+        && has_agent_output
+        && !thread.manual_title
+        && !thread.ai_title_generated
+        && (is_placeholder_thread_title(&thread.summary.title)
+            || is_provisional_thread_title(&thread.summary.title))
+}
+
+fn is_placeholder_thread_title(title: &str) -> bool {
+    matches!(
+        title.trim().to_ascii_lowercase().as_str(),
+        "" | "untitled thread"
+            | "new thread"
+            | "new claude thread"
+            | "claude thread"
+            | "restored thread"
+    )
+}
+
+fn is_provisional_thread_title(title: &str) -> bool {
+    title.trim().ends_with("...")
+}
+
+fn build_ai_thread_title_prompt(items: &[ConversationItem]) -> String {
+    let mut excerpts = Vec::new();
+    let user_messages = items
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::UserMessage { text, .. } => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>();
+    if let Some(first) = user_messages.first() {
+        excerpts.push(format!(
+            "First user message:\n{}",
+            truncate_preview(first, 600)
+        ));
+    }
+
+    let recent = items
+        .iter()
+        .rev()
+        .filter_map(|item| match item {
+            ConversationItem::UserMessage { text, .. } => Some(format!("User: {}", text.trim())),
+            ConversationItem::AssistantMessage { text, .. } => {
+                Some(format!("Assistant: {}", text.trim()))
+            }
+            ConversationItem::ToolCall { title, output, .. } => Some(format!(
+                "Tool: {}{}",
+                title.trim(),
+                output
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!(" -> {}", truncate_preview(value, 180)))
+                    .unwrap_or_default()
+            )),
+            _ => None,
+        })
+        .filter(|text| !text.trim().is_empty())
+        .take(4)
+        .collect::<Vec<_>>();
+    if !recent.is_empty() {
+        let ordered_recent = recent.into_iter().rev().collect::<Vec<_>>().join("\n");
+        excerpts.push(format!("Recent messages:\n{ordered_recent}"));
+    }
+
+    format!(
+        "You are a session renaming tool.\n\
+Write a short, specific thread title for this coding conversation.\n\
+\n\
+Rules:\n\
+- 3 to 7 words\n\
+- no quotes\n\
+- no trailing punctuation\n\
+- prefer concrete task nouns\n\
+- avoid generic titles like Debugging or Code Help\n\
+- return only the title\n\
+\n\
+{}\n",
+        excerpts.join("\n\n")
+    )
+}
+
+fn normalize_generated_thread_title(output: &str) -> Option<String> {
+    let candidate = output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| is_valid_generated_title_line(line))?;
+    let candidate = candidate
+        .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '`')
+        .trim()
+        .trim_end_matches(|ch: char| matches!(ch, '.' | '!' | '?' | ':' | ';' | ','))
+        .trim();
+    if candidate.is_empty()
+        || is_placeholder_thread_title(candidate)
+        || is_provisional_thread_title(candidate)
+    {
+        return None;
+    }
+    Some(truncate_preview(candidate, 80))
+}
+
+fn is_valid_generated_title_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "user" | "assistant" | "codex" | "claude" | "tokens used"
+    ) {
+        return false;
+    }
+
+    if normalized.starts_with("openai codex v") || normalized.starts_with("workdir:") {
+        return false;
+    }
+
+    if trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_digit() || ch == ',' || ch == '.' || ch.is_whitespace())
+    {
+        return false;
+    }
+
+    true
+}
+
 fn approval_title(method: &str) -> String {
     match method {
         "item/commandExecution/requestApproval" => "Approve command".to_string(),
@@ -5494,26 +5917,28 @@ fn tool_display_metadata(
         || normalized_title.starts_with("git status")
         || normalized_title.starts_with("pwd");
 
-    let artifact_kind = if normalized_kind.contains("filechange")
-        || normalized_kind.contains("file_change")
-    {
-        ToolArtifactKind::Diff
-    } else if normalized_title.contains("test")
-        || normalized_kind.contains("test")
-        || normalized_output.contains("test failed")
-        || normalized_output.contains("failing")
-    {
-        ToolArtifactKind::Test
-    } else if normalized_title.contains("approval")
-        || normalized_kind.contains("approval")
-        || normalized_title.contains("permission")
-    {
-        ToolArtifactKind::ApprovalRelated
-    } else if output.map(|value| !value.trim().is_empty()).unwrap_or(false) {
-        ToolArtifactKind::CommandOutput
-    } else {
-        ToolArtifactKind::None
-    };
+    let artifact_kind =
+        if normalized_kind.contains("filechange") || normalized_kind.contains("file_change") {
+            ToolArtifactKind::Diff
+        } else if normalized_title.contains("test")
+            || normalized_kind.contains("test")
+            || normalized_output.contains("test failed")
+            || normalized_output.contains("failing")
+        {
+            ToolArtifactKind::Test
+        } else if normalized_title.contains("approval")
+            || normalized_kind.contains("approval")
+            || normalized_title.contains("permission")
+        {
+            ToolArtifactKind::ApprovalRelated
+        } else if output
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            ToolArtifactKind::CommandOutput
+        } else {
+            ToolArtifactKind::None
+        };
 
     let is_error = status.eq_ignore_ascii_case("failed")
         || status.eq_ignore_ascii_case("error")
@@ -6027,8 +6452,8 @@ mod tests {
     use chrono::{Duration, Utc};
     use falcondeck_core::{
         AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput, ThreadAgentParams,
-        ThreadAttention, ThreadStatus, ThreadSummary, TurnInputItem, WorkspaceAgentSummary,
-        WorkspaceStatus, WorkspaceSummary,
+        ThreadAttention, ThreadStatus, ThreadSummary, TurnInputItem, UpdateThreadRequest,
+        WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
         crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
     };
     use serde_json::json;
@@ -6158,13 +6583,16 @@ mod tests {
 
     #[test]
     fn encodes_local_images_for_codex() {
-        let payload = codex_inputs(&[TurnInputItem::Image(ImageInput {
-            id: "img-1".to_string(),
-            name: Some("diagram.png".to_string()),
-            mime_type: Some("image/png".to_string()),
-            url: "ignored".to_string(),
-            local_path: Some("/tmp/diagram.png".to_string()),
-        })], &[]);
+        let payload = codex_inputs(
+            &[TurnInputItem::Image(ImageInput {
+                id: "img-1".to_string(),
+                name: Some("diagram.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: "ignored".to_string(),
+                local_path: Some("/tmp/diagram.png".to_string()),
+            })],
+            &[],
+        );
         assert_eq!(
             payload,
             vec![json!({
@@ -6416,6 +6844,124 @@ mod tests {
     }
 
     #[test]
+    fn provisional_thread_title_uses_first_four_words() {
+        assert_eq!(
+            super::provisional_thread_title_from_text(
+                "Implement session renaming with fast fallback model now"
+            ),
+            Some("Implement session renaming with...".to_string())
+        );
+    }
+
+    #[test]
+    fn generated_thread_title_uses_last_meaningful_line() {
+        assert_eq!(
+            super::normalize_generated_thread_title(
+                "OpenAI Codex v0.115.0\nuser\nName this thread\ncodex\nSession renaming flow\n"
+            ),
+            Some("Session renaming flow".to_string())
+        );
+    }
+
+    #[test]
+    fn generated_thread_title_skips_cli_noise_lines() {
+        assert_eq!(
+            super::normalize_generated_thread_title(
+                "OpenAI Codex v0.115.0\ncodex\nImplement session rename\n\
+tokens used\n5,767\n"
+            ),
+            Some("Implement session rename".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn update_thread_title_marks_thread_as_manual() {
+        let temp_dir = tempdir().unwrap();
+        let workspace_path = temp_dir.path().join("project-a");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            PathBuf::from(&state_path),
+        );
+
+        let workspace_id = "workspace-1".to_string();
+        let thread_id = "thread-1".to_string();
+        app.inner.workspaces.lock().await.insert(
+            workspace_id.clone(),
+            super::ManagedWorkspace {
+                summary: WorkspaceSummary {
+                    id: workspace_id.clone(),
+                    path: workspace_path.to_string_lossy().to_string(),
+                    status: WorkspaceStatus::Ready,
+                    agents: Vec::new(),
+                    skills: Vec::new(),
+                    default_provider: AgentProvider::Codex,
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    supports_plan_mode: true,
+                    supports_native_plan_mode: true,
+                    account: falcondeck_core::AccountSummary::default(),
+                    current_thread_id: Some(thread_id.clone()),
+                    connected_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_error: None,
+                },
+                codex_session: None,
+                claude_runtime: None,
+                threads: [(
+                    thread_id.clone(),
+                    super::ManagedThread::new(ThreadSummary {
+                        id: thread_id.clone(),
+                        workspace_id: workspace_id.clone(),
+                        title: "Untitled thread".to_string(),
+                        provider: AgentProvider::Codex,
+                        native_session_id: None,
+                        status: ThreadStatus::Idle,
+                        updated_at: Utc::now(),
+                        last_message_preview: None,
+                        latest_turn_id: None,
+                        latest_plan: None,
+                        latest_diff: None,
+                        last_tool: None,
+                        last_error: None,
+                        agent: ThreadAgentParams::default(),
+                        attention: ThreadAttention::default(),
+                        is_archived: false,
+                    }),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+
+        let handle = app
+            .update_thread(UpdateThreadRequest {
+                workspace_id: workspace_id.clone(),
+                thread_id: thread_id.clone(),
+                title: Some("Session renaming flow".to_string()),
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                collaboration_mode_id: None,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(handle.thread.title, "Session renaming flow");
+        let workspaces = app.inner.workspaces.lock().await;
+        let thread = workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.threads.get(&thread_id))
+            .unwrap();
+        assert!(thread.manual_title);
+        assert!(thread.ai_title_generated);
+        assert_eq!(thread.summary.title, "Session renaming flow");
+    }
+
+    #[test]
     fn reconnect_attempt_uses_current_trusted_pairing_state() {
         let initial_pairing = super::RemotePairingState {
             pairing_id: "pairing-1".to_string(),
@@ -6586,6 +7132,8 @@ mod tests {
                     provider: Some(AgentProvider::Claude),
                     native_session_id: Some("native-session-1".to_string()),
                     title: Some("Recovered thread".to_string()),
+                    manual_title: false,
+                    ai_title_generated: false,
                     status: Some(ThreadStatus::Running),
                     last_error: None,
                     last_read_seq: 2,
@@ -6689,6 +7237,8 @@ mod tests {
                         provider: Some(AgentProvider::Codex),
                         native_session_id: Some("native-a".to_string()),
                         title: Some("Thread A".to_string()),
+                        manual_title: false,
+                        ai_title_generated: false,
                         status: Some(ThreadStatus::Idle),
                         last_error: None,
                         last_read_seq: 0,
@@ -6710,6 +7260,8 @@ mod tests {
                         provider: Some(AgentProvider::Claude),
                         native_session_id: Some("native-b".to_string()),
                         title: Some("Thread B".to_string()),
+                        manual_title: false,
+                        ai_title_generated: false,
                         status: Some(ThreadStatus::Error),
                         last_error: Some("Still disconnected".to_string()),
                         last_read_seq: 1,
