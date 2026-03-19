@@ -80,6 +80,7 @@ function AppInner() {
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
   const [isAddingProject, setIsAddingProject] = useState(false)
+  const [isImportingProjectSessions, setIsImportingProjectSessions] = useState(false)
   const [isStartingRemote, setIsStartingRemote] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isSending, setIsSending] = useState(false)
@@ -361,6 +362,7 @@ function AppInner() {
         setIsAddingProject(false)
         return
       }
+      setIsImportingProjectSessions(true)
       const workspace = await api.connectWorkspace(path)
       const nextSnapshot = await api.snapshot()
       setSnapshot(nextSnapshot)
@@ -372,6 +374,7 @@ function AppInner() {
       setActionError(msg)
       toast({ variant: 'danger', title: 'Failed to add project', description: msg })
     } finally {
+      setIsImportingProjectSessions(false)
       setIsAddingProject(false)
     }
   }, [api, setSnapshot, setSelectedThreadId, setSelectedWorkspaceId, toast])
@@ -632,98 +635,119 @@ function AppInner() {
   }, [isThreadDetailPending, loadingThreadState, newThreadEmptyState, selectedThreadId])
 
   return (
-    <DesktopShell
-      sidebar={
-        <DesktopSidebar
-          groups={groups}
-          selectedWorkspaceId={selectedWorkspaceId}
-          selectedThreadId={selectedThreadId}
-          onSelectWorkspace={handleSelectWorkspace}
-          onSelectThread={handleSelectThread}
-          onNewThread={handleNewThread}
-          onArchiveThread={handleArchiveThread}
-          onAddProject={handleAddProject}
-          isAddingProject={isAddingProject}
-          onOpenSettings={handleOpenSettings}
-          settingsOpen={isSettingsOpen}
-          errors={[connectionError, actionError].filter((value): value is string => Boolean(value))}
-        />
-      }
-      main={
-        isSettingsOpen ? (
-          <SettingsView
-            workspace={selectedWorkspace}
-            remoteStatus={remoteStatus}
-            pairingLink={pairingLink}
-            relayUrl={relayUrl}
-            isStartingRemote={isStartingRemote}
-            revokingDeviceId={revokingDeviceId}
-            onStartPairing={handleStartPairingCallback}
-            onRefreshRemoteStatus={handleRefreshRemoteStatus}
-            onRevokeDevice={handleRevokeDevice}
-            onClose={() => setIsSettingsOpen(false)}
+    <>
+      <DesktopShell
+        sidebar={
+          <DesktopSidebar
+            groups={groups}
+            selectedWorkspaceId={selectedWorkspaceId}
+            selectedThreadId={selectedThreadId}
+            onSelectWorkspace={handleSelectWorkspace}
+            onSelectThread={handleSelectThread}
+            onNewThread={handleNewThread}
+            onArchiveThread={handleArchiveThread}
+            onAddProject={handleAddProject}
+            isAddingProject={isAddingProject}
+            onOpenSettings={handleOpenSettings}
+            settingsOpen={isSettingsOpen}
+            errors={[connectionError, actionError].filter((value): value is string => Boolean(value))}
           />
-        ) : (
-          <section className="flex h-full min-h-0 flex-col bg-surface-1">
-            <SessionHeader workspace={selectedWorkspace} thread={selectedThread}>
-              <RemotePairingPopover
-                remoteStatus={remoteStatus}
-                pairingLink={pairingLink}
-                onStartPairing={handleStartPairingCallback}
-                onRefreshStatus={handleRefreshRemoteStatus}
-                isStartingRemote={isStartingRemote}
+        }
+        main={
+          isSettingsOpen ? (
+            <SettingsView
+              workspace={selectedWorkspace}
+              remoteStatus={remoteStatus}
+              pairingLink={pairingLink}
+              relayUrl={relayUrl}
+              isStartingRemote={isStartingRemote}
+              revokingDeviceId={revokingDeviceId}
+              onStartPairing={handleStartPairingCallback}
+              onRefreshRemoteStatus={handleRefreshRemoteStatus}
+              onRevokeDevice={handleRevokeDevice}
+              onClose={() => setIsSettingsOpen(false)}
+            />
+          ) : (
+            <section className="flex h-full min-h-0 flex-col bg-surface-1">
+              <SessionHeader workspace={selectedWorkspace} thread={selectedThread}>
+                <RemotePairingPopover
+                  remoteStatus={remoteStatus}
+                  pairingLink={pairingLink}
+                  onStartPairing={handleStartPairingCallback}
+                  onRefreshStatus={handleRefreshRemoteStatus}
+                  isStartingRemote={isStartingRemote}
+                />
+              </SessionHeader>
+              <Conversation
+                threadKey={
+                  selectedThreadId
+                    ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
+                    : selectedWorkspaceId
+                }
+                items={conversationItems}
+                emptyState={conversationEmptyState}
+                isThinking={isSending || selectedThread?.status === 'running'}
+                isLoading={isThreadDetailPending}
               />
-            </SessionHeader>
-            <Conversation
-              threadKey={
-                selectedThreadId
-                  ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
-                  : selectedWorkspaceId
-              }
-              items={conversationItems}
-              emptyState={conversationEmptyState}
-              isThinking={isSending || selectedThread?.status === 'running'}
-              isLoading={isThreadDetailPending}
-            />
-            <InteractiveRequestBar
-              requests={interactiveRequests}
-              onRespond={handleInteractiveResponseCallback}
-            />
-            <PromptInput
-              value={draft}
-              onValueChange={setDraft}
-              onSubmit={handleSubmitCallback}
-              onPickImages={handlePickImages}
-              attachments={attachments}
-              selectedProvider={selectedProvider}
-              onProviderChange={handleProviderChange}
-              providerLocked={Boolean(selectedThread)}
-              models={models}
-              selectedModelId={selectedModel}
-              onModelChange={handleModelChange}
-              reasoningOptions={currentReasoningOptions}
-              selectedEffort={selectedEffort}
-              onEffortChange={handleEffortChange}
-              collaborationModes={collaborationModes}
-              selectedCollaborationModeId={selectedCollaborationMode}
-              onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
-              showPlanModeToggle={showPlanModeToggle}
-              planModeEnabled={planModeEnabled}
-              onPlanModeChange={(enabled) =>
-                handleCollaborationModeChange(
-                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, selectedProvider),
-                )
-              }
-              disabled={isDisabled}
-            />
-          </section>
-        )
-      }
-      rail={
-        isSettingsOpen
-          ? undefined
-          : <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
-      }
-    />
+              <InteractiveRequestBar
+                requests={interactiveRequests}
+                onRespond={handleInteractiveResponseCallback}
+              />
+              <PromptInput
+                value={draft}
+                onValueChange={setDraft}
+                onSubmit={handleSubmitCallback}
+                onPickImages={handlePickImages}
+                attachments={attachments}
+                selectedProvider={selectedProvider}
+                onProviderChange={handleProviderChange}
+                providerLocked={Boolean(selectedThread)}
+                models={models}
+                selectedModelId={selectedModel}
+                onModelChange={handleModelChange}
+                reasoningOptions={currentReasoningOptions}
+                selectedEffort={selectedEffort}
+                onEffortChange={handleEffortChange}
+                collaborationModes={collaborationModes}
+                selectedCollaborationModeId={selectedCollaborationMode}
+                onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
+                showPlanModeToggle={showPlanModeToggle}
+                planModeEnabled={planModeEnabled}
+                onPlanModeChange={(enabled) =>
+                  handleCollaborationModeChange(
+                    togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, selectedProvider),
+                  )
+                }
+                disabled={isDisabled}
+              />
+            </section>
+          )
+        }
+        rail={
+          isSettingsOpen
+            ? undefined
+            : <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
+        }
+      />
+      {isImportingProjectSessions ? (
+        <div className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-6 shadow-[var(--fd-shadow-lg)]">
+            <div className="flex items-start gap-3">
+              <div className="mt-0.5 rounded-full bg-surface-3 p-2 text-accent">
+                <LoaderCircle className="h-5 w-5 animate-spin" />
+              </div>
+              <div className="space-y-1">
+                <h2 className="text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
+                  Importing existing Claude and Codex sessions
+                </h2>
+                <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
+                  This might take a moment.
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   )
 }
