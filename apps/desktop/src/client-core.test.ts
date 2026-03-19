@@ -62,6 +62,15 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
       approval_policy: null,
       service_tier: null,
     },
+    attention: {
+      level: 'none',
+      badge_label: null,
+      unread: false,
+      pending_approval_count: 0,
+      pending_question_count: 0,
+      last_agent_activity_seq: 0,
+      last_read_seq: 0,
+    },
     ...overrides,
   }
 }

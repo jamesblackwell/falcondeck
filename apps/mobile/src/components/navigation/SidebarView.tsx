@@ -81,6 +81,7 @@ export const SidebarView = memo(function SidebarView({
                   title={thread.title ?? 'New thread'}
                   isRunning={thread.status === 'running'}
                   updatedAt={thread.updated_at}
+                  attention={thread.attention}
                   isSelected={selectedThreadId === thread.id}
                   onSelect={() => onSelectThread(group.workspace.id, thread.id)}
                 />

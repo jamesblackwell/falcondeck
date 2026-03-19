@@ -5,6 +5,7 @@ import type {
   GitDiffResponse,
   GitStatusResponse,
   InteractiveResponsePayload,
+  MarkThreadReadPayload,
   RemoteStatusResponse,
   ThreadDetail,
   ThreadHandle,
@@ -121,6 +122,15 @@ export function createDaemonApiClient(baseUrl: string) {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
+        }),
+      )
+    },
+    async markThreadRead(payload: MarkThreadReadPayload) {
+      return parseJson<ThreadSummary>(
+        await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/read`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ read_seq: payload.read_seq }),
         }),
       )
     },

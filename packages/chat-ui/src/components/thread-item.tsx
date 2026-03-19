@@ -1,8 +1,8 @@
 import { memo, useMemo } from 'react'
 import { Archive, LoaderCircle } from 'lucide-react'
 
-import type { ThreadSummary } from '@falcondeck/client-core'
-import { cn } from '@falcondeck/ui'
+import { deriveThreadAttentionPresentation, type ThreadSummary } from '@falcondeck/client-core'
+import { Badge, cn } from '@falcondeck/ui'
 
 export type ThreadItemProps = {
   thread: ThreadSummary
@@ -33,7 +33,7 @@ export const ThreadItem = memo(
     onArchive,
     nowTick = 0,
   }: ThreadItemProps) {
-    const isRunning = thread.status === 'running'
+    const attention = deriveThreadAttentionPresentation(thread)
     const timeString = useMemo(() => timeAgo(thread.updated_at), [nowTick, thread.updated_at])
 
     return (
@@ -50,16 +50,32 @@ export const ThreadItem = memo(
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
           onClick={() => onSelect(workspaceId, thread.id)}
         >
-          {isRunning ? (
-            <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-          ) : null}
+          <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+            {attention.showSpinner ? (
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin text-accent" />
+            ) : attention.level === 'error' ? (
+              <span className="h-2.5 w-2.5 rounded-full bg-danger" />
+            ) : attention.level === 'awaiting_response' ? (
+              <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-color-warning-muted)]" />
+            ) : attention.showUnreadDot ? (
+              <span className="h-2.5 w-2.5 rounded-full bg-info" />
+            ) : (
+              <span className="h-3 w-3 rounded-full border border-fg-faint" />
+            )}
+          </span>
           <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] text-fg-primary">
             {thread.title}
           </span>
         </button>
-        <span className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-faint group-hover:hidden">
-          {timeString}
-        </span>
+        {attention.showBadge ? (
+          <Badge variant="success" className="shrink-0 bg-success/15 text-success">
+            {attention.badgeLabel}
+          </Badge>
+        ) : (
+          <span className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-faint group-hover:hidden">
+            {timeString}
+          </span>
+        )}
         {onArchive ? (
           <button
             type="button"

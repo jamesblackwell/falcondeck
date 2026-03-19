@@ -389,6 +389,10 @@ impl AppState {
         }
 
         let now = Utc::now();
+        let claimed_public_key = request
+            .client_bundle
+            .as_ref()
+            .map(|bundle| bundle.public_key.clone());
         let (response, session_snapshot, pairing_snapshot, device_id) = {
             let mut store = self.inner.store.lock().await;
             let pairing_id = store
@@ -416,28 +420,45 @@ impl AppState {
                 pairing.session_id.clone()
             };
 
-            let device_id = format!("device-{}", Uuid::new_v4().simple());
-            let client_token = format!("client-{}", Uuid::new_v4().simple());
             let session = store
                 .data
                 .sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
-            session.devices.insert(
-                device_id.clone(),
-                TrustedDeviceRecord {
-                    device_id: device_id.clone(),
-                    client_token: client_token.clone(),
-                    label: request.label.clone(),
-                    public_key: request
-                        .client_bundle
-                        .as_ref()
-                        .map(|bundle| bundle.public_key.clone()),
-                    created_at: now,
-                    last_seen_at: Some(now),
-                    revoked_at: None,
-                },
-            );
+            let existing_device_id = claimed_public_key.as_ref().and_then(|public_key| {
+                session.devices.iter().find_map(|(device_id, device)| {
+                    (device.revoked_at.is_none() && device.public_key.as_ref() == Some(public_key))
+                        .then_some(device_id.clone())
+                })
+            });
+            let (device_id, client_token) = if let Some(existing_device_id) = existing_device_id {
+                let existing = session
+                    .devices
+                    .get_mut(&existing_device_id)
+                    .expect("existing trusted device");
+                existing.label = request.label.clone();
+                existing.last_seen_at = Some(now);
+                if existing.public_key.is_none() {
+                    existing.public_key = claimed_public_key.clone();
+                }
+                (existing_device_id, existing.client_token.clone())
+            } else {
+                let device_id = format!("device-{}", Uuid::new_v4().simple());
+                let client_token = format!("client-{}", Uuid::new_v4().simple());
+                session.devices.insert(
+                    device_id.clone(),
+                    TrustedDeviceRecord {
+                        device_id: device_id.clone(),
+                        client_token: client_token.clone(),
+                        label: request.label.clone(),
+                        public_key: claimed_public_key.clone(),
+                        created_at: now,
+                        last_seen_at: Some(now),
+                        revoked_at: None,
+                    },
+                );
+                (device_id, client_token)
+            };
             session.updated_at = now;
             session.clear_legacy_device_fields();
 

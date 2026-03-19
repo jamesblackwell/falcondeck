@@ -1,12 +1,14 @@
-import { useCallback } from 'react'
-import { View } from 'react-native'
+import { useCallback, useEffect, useState } from 'react'
+import { AppState, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
+import { encryptJson } from '@falcondeck/client-core'
 
 import {
   useConversationItems,
   useApprovals,
+  useSelectedThread,
   useSelectedWorkspace,
   useRelayStore,
   useUIStore,
@@ -32,14 +34,58 @@ export default function HomeScreen() {
 
   const items = useConversationItems()
   const approvals = useApprovals()
+  const selectedThread = useSelectedThread()
   const workspace = useSelectedWorkspace()
   const connectionStatus = useRelayStore((s) => s.connectionStatus)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const machinePresence = useRelayStore((s) => s.machinePresence)
+  const relayUrl = useRelayStore((s) => s.relayUrl)
+  const sessionId = useRelayStore((s) => s.sessionId)
   const draft = useUIStore((s) => s.draft)
   const isSubmitting = useUIStore((s) => s.isSubmitting)
   const { setDraft } = useUIStore.getState()
   const { submitTurn, respondApproval } = useSessionActions()
+  const [appState, setAppState] = useState(AppState.currentState)
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', setAppState)
+    return () => {
+      subscription.remove()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (appState !== 'active' || !workspace || !selectedThread || !sessionId || !isEncrypted) return
+
+    const readSeq = selectedThread.attention.last_agent_activity_seq
+    if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return
+
+    const relay = useRelayStore.getState()
+    const clientToken = relay._getClientToken()
+    const sessionCrypto = relay._getSessionCrypto()
+    if (!clientToken || !sessionCrypto) return
+
+    void encryptJson(sessionCrypto.dataKey, {
+      workspace_id: workspace.id,
+      thread_id: selectedThread.id,
+      read_seq: readSeq,
+    })
+      .then((payload) =>
+        fetch(`${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}/actions`, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${clientToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            idempotency_key: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
+            action_type: 'thread.mark_read',
+            payload,
+          }),
+        }),
+      )
+      .catch(() => {})
+  }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace])
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

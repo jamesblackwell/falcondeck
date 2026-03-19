@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   buildProjectGroups,
+  countAwaitingResponseThreads,
   conversationItemsForSelection,
   defaultCollaborationModeId,
+  deriveThreadAttentionPresentation,
   filesToImageInputs,
   isPlanModeEnabled,
   supportsPlanMode,
@@ -78,8 +80,10 @@ function AppInner() {
   const [isSending, setIsSending] = useState(false)
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
+  const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
+  const notifiedAttentionRef = useRef(new Map<string, string>())
 
   const selectedWorkspace = useMemo(
     () => snapshot?.workspaces.find((w) => w.id === selectedWorkspaceId) ?? null,
@@ -144,6 +148,92 @@ function AppInner() {
       setSelectedEffort(defaultReasoningEffort(selectedThread, selectedWorkspace, selectedModel))
     }
   }, [selectedEffort, selectedModel, selectedThread, selectedWorkspace])
+
+  useEffect(() => {
+    const handleFocus = () => setWindowFocused(true)
+    const handleBlur = () => setWindowFocused(false)
+    const handleVisibility = () => {
+      setWindowFocused(document.visibilityState !== 'hidden' && document.hasFocus())
+    }
+
+    window.addEventListener('focus', handleFocus)
+    window.addEventListener('blur', handleBlur)
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      window.removeEventListener('focus', handleFocus)
+      window.removeEventListener('blur', handleBlur)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!api || !selectedWorkspaceId || !selectedThread) return
+    if (!windowFocused) return
+    const readSeq = selectedThread.attention.last_agent_activity_seq
+    if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return
+
+    void api
+      .markThreadRead({
+        workspace_id: selectedWorkspaceId,
+        thread_id: selectedThread.id,
+        read_seq: readSeq,
+      })
+      .then((thread) => {
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                threads: current.threads.map((entry) => (entry.id === thread.id ? thread : entry)),
+              }
+            : current,
+        )
+      })
+      .catch(() => {})
+  }, [api, selectedThread, selectedWorkspaceId, setSnapshot, windowFocused])
+
+  useEffect(() => {
+    const count = countAwaitingResponseThreads(snapshot?.threads ?? [])
+    document.title = count > 0 ? `(${count}) FalconDeck` : 'FalconDeck'
+
+    if (!window.__TAURI_INTERNALS__) return
+    void import('@tauri-apps/api/window')
+      .then(({ getCurrentWindow }) => getCurrentWindow().setBadgeCount(count || undefined))
+      .catch(() => {})
+  }, [snapshot?.threads])
+
+  useEffect(() => {
+    if (!snapshot?.threads?.length) return
+
+    for (const thread of snapshot.threads) {
+      const attention = deriveThreadAttentionPresentation(thread, snapshot.interactive_requests)
+      if (
+        attention.level === 'none' ||
+        (windowFocused && selectedThreadId === thread.id)
+      ) {
+        notifiedAttentionRef.current.delete(thread.id)
+        continue
+      }
+
+      const previous = notifiedAttentionRef.current.get(thread.id)
+      if (previous === attention.level) continue
+      notifiedAttentionRef.current.set(thread.id, attention.level)
+
+      if (typeof Notification === 'undefined') continue
+      if (Notification.permission === 'default') {
+        void Notification.requestPermission().catch(() => {})
+        continue
+      }
+      if (Notification.permission !== 'granted') continue
+
+      const body =
+        attention.level === 'awaiting_response'
+          ? 'The agent needs a response in this thread.'
+          : attention.level === 'error'
+            ? 'The latest run ended with an error.'
+            : 'New activity in this thread.'
+      new Notification(thread.title || 'FalconDeck thread', { body })
+    }
+  }, [selectedThreadId, snapshot?.interactive_requests, snapshot?.threads, windowFocused])
 
   // Surface connection errors as toasts
   useEffect(() => {

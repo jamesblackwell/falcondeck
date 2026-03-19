@@ -8,9 +8,11 @@ import {
   buildPairingPublicKeyBundle,
   buildProjectGroups,
   bytesToBase64,
+  countAwaitingResponseThreads,
   conversationItemsForSelection,
   defaultCollaborationModeId,
   decryptJson,
+  deriveThreadAttentionPresentation,
   deriveIdentityKeyPair,
   encryptJson,
   filesToImageInputs,
@@ -44,6 +46,7 @@ import {
   type SessionCryptoState,
   type ThreadDetail,
   type ThreadHandle,
+  type ThreadSummary,
 } from '@falcondeck/client-core'
 import {
   Conversation,
@@ -350,6 +353,7 @@ export default function App() {
   const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null)
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
+  const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<ImageInput[]>([])
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
@@ -360,6 +364,7 @@ export default function App() {
   const [showProjects, setShowProjects] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
+  const notifiedAttentionRef = useRef(new Map<string, string>())
   const reconnectTimerRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
   const [connectionGeneration, setConnectionGeneration] = useState(0)
@@ -562,16 +567,23 @@ export default function App() {
       flushPersistedSession()
     }
     const handleVisibilityChange = () => {
+      setWindowFocused(document.visibilityState !== 'hidden' && document.hasFocus())
       if (document.visibilityState === 'hidden') {
         flushPersistedSession()
       }
     }
+    const handleFocus = () => setWindowFocused(true)
+    const handleBlur = () => setWindowFocused(false)
 
     window.addEventListener('pagehide', flushOnHide)
+    window.addEventListener('focus', handleFocus)
+    window.addEventListener('blur', handleBlur)
     document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
       window.removeEventListener('pagehide', flushOnHide)
+      window.removeEventListener('focus', handleFocus)
+      window.removeEventListener('blur', handleBlur)
       document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [flushPersistedSession])
@@ -1412,6 +1424,66 @@ export default function App() {
       return next.length === Object.keys(current).length ? current : Object.fromEntries(next)
     })
   }, [snapshot])
+
+  useEffect(() => {
+    const count = countAwaitingResponseThreads(snapshot?.threads ?? [])
+    document.title = count > 0 ? `(${count}) FalconDeck Remote` : 'FalconDeck Remote'
+  }, [snapshot?.threads])
+
+  useEffect(() => {
+    if (!selectedWorkspaceId || !selectedThread || !windowFocused) return
+    const readSeq = selectedThread.attention.last_agent_activity_seq
+    if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return
+
+    void submitQueuedAction<ThreadSummary>('thread.mark_read', {
+      workspace_id: selectedWorkspaceId,
+      thread_id: selectedThread.id,
+      read_seq: readSeq,
+    }).then((thread) => {
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              threads: current.threads.map((entry) => (entry.id === thread.id ? thread : entry)),
+            }
+          : current,
+      )
+      setThreadDetail((current) =>
+        current && current.thread.id === thread.id ? { ...current, thread } : current,
+      )
+    }).catch(() => {})
+  }, [selectedThread, selectedWorkspaceId, windowFocused])
+
+  useEffect(() => {
+    if (!snapshot?.threads?.length) return
+
+    for (const thread of snapshot.threads) {
+      const attention = deriveThreadAttentionPresentation(thread, snapshot.interactive_requests)
+      if (attention.level === 'none' || (windowFocused && selectedThreadId === thread.id)) {
+        notifiedAttentionRef.current.delete(thread.id)
+        continue
+      }
+
+      const previous = notifiedAttentionRef.current.get(thread.id)
+      if (previous === attention.level) continue
+      notifiedAttentionRef.current.set(thread.id, attention.level)
+
+      if (typeof Notification === 'undefined') continue
+      if (Notification.permission === 'default') {
+        void Notification.requestPermission().catch(() => {})
+        continue
+      }
+      if (Notification.permission !== 'granted') continue
+
+      const body =
+        attention.level === 'awaiting_response'
+          ? 'The agent needs a response in this thread.'
+          : attention.level === 'error'
+            ? 'The latest run ended with an error.'
+            : 'New activity in this thread.'
+      new Notification(thread.title || 'FalconDeck thread', { body })
+    }
+  }, [selectedThreadId, snapshot?.interactive_requests, snapshot?.threads, windowFocused])
 
   useEffect(() => {
     if (!showProjects) return

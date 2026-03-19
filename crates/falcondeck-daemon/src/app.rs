@@ -7,6 +7,8 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
 };
+#[cfg(test)]
+use std::sync::OnceLock;
 
 use chrono::Utc;
 use falcondeck_core::{
@@ -17,8 +19,9 @@ use falcondeck_core::{
     RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
     RemotePairingSession, RemoteStatusResponse, SendTurnRequest, ServiceLevel, SessionKeyMaterial,
     StartPairingRequest, StartPairingResponse, StartRemotePairingRequest, StartReviewRequest,
-    StartThreadRequest, ThreadCodexParams, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary,
-    TurnInputItem, UnifiedEvent, UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
+    StartThreadRequest, ThreadAttention, ThreadAttentionLevel, ThreadCodexParams, ThreadDetail,
+    ThreadHandle, ThreadStatus, ThreadSummary, TurnInputItem, UnifiedEvent, UpdateThreadRequest,
+    WorkspaceStatus, WorkspaceSummary,
     crypto::{
         LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle, decrypt_json,
         encrypt_json, generate_data_key, sign_session_key_material,
@@ -153,6 +156,17 @@ struct PersistedWorkspaceState {
     updated_at: Option<chrono::DateTime<Utc>>,
     #[serde(default)]
     archived_thread_ids: Vec<String>,
+    #[serde(default)]
+    thread_states: Vec<PersistedThreadState>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct PersistedThreadState {
+    thread_id: String,
+    #[serde(default)]
+    last_read_seq: u64,
+    #[serde(default)]
+    last_agent_activity_seq: u64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -176,6 +190,16 @@ struct PersistedRemoteState {
     client_bundle: Option<PairingPublicKeyBundle>,
     #[serde(default)]
     client_public_key: Option<String>,
+    #[serde(default)]
+    secure_storage_key: Option<String>,
+    #[serde(default)]
+    local_secret_key_base64: Option<String>,
+    #[serde(default)]
+    data_key_base64: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct PersistedRemoteSecrets {
     local_secret_key_base64: String,
     data_key_base64: String,
 }
@@ -242,6 +266,9 @@ impl AppState {
         }
 
         if let Some(remote) = persisted.remote {
+            let should_migrate_secure_storage = remote.secure_storage_key.is_none()
+                || remote.local_secret_key_base64.is_some()
+                || remote.data_key_base64.is_some();
             if remote.device_id.is_none() && relay_url_looks_legacy_loopback(&remote.relay_url) {
                 tracing::info!(
                     "skipping legacy loopback remote pairing {} for relay {}",
@@ -266,6 +293,8 @@ impl AppState {
                 self.persist_local_state().await?;
             } else if let Err(error) = self.resume_remote_bridge(remote).await {
                 tracing::warn!("failed to restore remote bridge: {error}");
+            } else if should_migrate_secure_storage {
+                self.persist_local_state().await?;
             }
         }
 
@@ -283,6 +312,15 @@ impl AppState {
 
     async fn clear_remote_bridge_state(&self) {
         let mut remote = self.inner.remote.lock().await;
+        if let (Some(relay_url), Some(pairing)) = (remote.relay_url.as_ref(), remote.pairing.as_ref()) {
+            if let Err(error) = delete_remote_secrets(remote_secret_storage_key(
+                relay_url,
+                &pairing.pairing_id,
+                pairing.session_id.as_deref(),
+            )) {
+                tracing::warn!("failed to clear remote secure storage: {error}");
+            }
+        }
         if let Some(task) = remote.task.take() {
             task.abort();
         }
@@ -530,7 +568,17 @@ impl AppState {
                 workspace
                     .threads
                     .values()
-                    .map(|thread| thread.summary.clone())
+                    .map(|thread| {
+                        let mut summary = thread.summary.clone();
+                        let (pending_approval_count, pending_question_count) =
+                            interactive_request_counts(&interactive_requests, &summary.id);
+                        refresh_thread_attention(
+                            &mut summary,
+                            pending_approval_count,
+                            pending_question_count,
+                        );
+                        summary
+                    })
             })
             .collect::<Vec<_>>();
         threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
@@ -623,6 +671,15 @@ impl AppState {
 
         let now = Utc::now();
         threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
+        let persisted_thread_states = persisted_workspace
+            .map(|workspace| {
+                workspace
+                    .thread_states
+                    .iter()
+                    .map(|state| (state.thread_id.clone(), state.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
         let current_thread_id = persisted_workspace
             .and_then(|workspace| workspace.current_thread_id.as_deref())
             .and_then(|thread_id| {
@@ -667,6 +724,11 @@ impl AppState {
                             .unwrap_or(false)
                         {
                             thread.summary.is_archived = true;
+                        }
+                        if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
+                            thread.summary.attention.last_read_seq = state.last_read_seq;
+                            thread.summary.attention.last_agent_activity_seq =
+                                state.last_agent_activity_seq;
                         }
                         (
                             thread.summary.id.clone(),
@@ -752,6 +814,7 @@ impl AppState {
                 approval_policy: Some(approval_policy),
                 service_tier: None,
             },
+            attention: ThreadAttention::default(),
             is_archived: false,
         };
         workspace.summary.current_thread_id = Some(thread_id.clone());
@@ -762,9 +825,10 @@ impl AppState {
         let workspace_summary = workspace.summary.clone();
         drop(workspaces);
 
+        let thread = self.thread_summary(&request.workspace_id, &thread.id).await?;
         self.emit(
             Some(request.workspace_id),
-            Some(thread_id),
+            Some(thread.id.clone()),
             UnifiedEvent::ThreadStarted {
                 thread: thread.clone(),
             },
@@ -790,8 +854,8 @@ impl AppState {
             .get_mut(thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         thread.summary.is_archived = true;
-        let summary = thread.summary.clone();
         drop(workspaces);
+        let summary = self.thread_summary(workspace_id, thread_id).await?;
         self.emit(
             Some(workspace_id.to_string()),
             Some(thread_id.to_string()),
@@ -817,8 +881,8 @@ impl AppState {
             .get_mut(thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         thread.summary.is_archived = false;
-        let summary = thread.summary.clone();
         drop(workspaces);
+        let summary = self.thread_summary(workspace_id, thread_id).await?;
         self.emit(
             Some(workspace_id.to_string()),
             Some(thread_id.to_string()),
@@ -872,6 +936,7 @@ impl AppState {
                         last_tool: None,
                         last_error: None,
                         codex: ThreadCodexParams::default(),
+                        attention: ThreadAttention::default(),
                         is_archived: false,
                     })
                 });
@@ -963,7 +1028,7 @@ impl AppState {
         &self,
         request: UpdateThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
-        let (thread, workspace_summary) = {
+        let workspace_summary = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get_mut(&request.workspace_id)
@@ -981,8 +1046,9 @@ impl AppState {
             workspace.summary.current_thread_id = Some(request.thread_id.clone());
             workspace.summary.updated_at = now;
 
-            (thread.summary.clone(), workspace.summary.clone())
+            workspace.summary.clone()
         };
+        let thread = self.thread_summary(&request.workspace_id, &request.thread_id).await?;
 
         self.emit(
             Some(request.workspace_id.clone()),
@@ -1161,12 +1227,52 @@ impl AppState {
             .threads
             .get(thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let workspace_summary = workspace.summary.clone();
+        let thread_summary = thread.summary.clone();
+        let items = thread.items.clone();
+        drop(workspaces);
 
         Ok(ThreadDetail {
-            workspace: workspace.summary.clone(),
-            thread: thread.summary.clone(),
-            items: thread.items.clone(),
+            workspace: workspace_summary,
+            thread: self.build_thread_summary_from_clone(thread_summary).await,
+            items,
         })
+    }
+
+    pub async fn mark_thread_read(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        read_seq: u64,
+    ) -> Result<ThreadSummary, DaemonError> {
+        let mut changed = false;
+        {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let thread = workspace
+                .threads
+                .get_mut(thread_id)
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+            if read_seq > thread.summary.attention.last_read_seq {
+                thread.summary.attention.last_read_seq = read_seq;
+                changed = true;
+            }
+        }
+
+        let thread = self.thread_summary(workspace_id, thread_id).await?;
+        if changed {
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ThreadUpdated {
+                    thread: thread.clone(),
+                },
+            );
+            self.persist_local_state().await?;
+        }
+        Ok(thread)
     }
 
     async fn run_remote_bridge(
@@ -1218,6 +1324,17 @@ impl AppState {
                     };
                     remote.last_error = Some(error_msg);
                     if should_clear_pairing || revoked {
+                        if let (Some(current_relay_url), Some(current_pairing)) =
+                            (remote.relay_url.as_ref(), remote.pairing.as_ref())
+                        {
+                            if let Err(error) = delete_remote_secrets(remote_secret_storage_key(
+                                current_relay_url,
+                                &current_pairing.pairing_id,
+                                current_pairing.session_id.as_deref(),
+                            )) {
+                                tracing::warn!("failed to clear remote secure storage: {error}");
+                            }
+                        }
                         remote.relay_url = None;
                         remote.daemon_token = None;
                         remote.pairing = None;
@@ -2050,6 +2167,19 @@ impl AppState {
                     .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
                     .map_err(|error| error.to_string())
             }
+            "thread.mark_read" => {
+                let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                let thread_id = required(&["threadId", "thread_id"])?;
+                let read_seq = params
+                    .get("readSeq")
+                    .or_else(|| params.get("read_seq"))
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| "invalid remote rpc payload".to_string())?;
+                self.mark_thread_read(&workspace_id, &thread_id, read_seq)
+                    .await
+                    .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
             "turn.start" => {
                 let request = SendTurnRequest {
                     workspace_id: required(&["workspaceId", "workspace_id"])?,
@@ -2184,6 +2314,32 @@ impl AppState {
                     self.update_thread(request)
                         .await
                         .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "thread.mark_read" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    if let Some(read_seq) = params
+                        .get("readSeq")
+                        .or_else(|| params.get("read_seq"))
+                        .and_then(Value::as_u64)
+                    {
+                        self.mark_thread_read(&workspace_id, &thread_id, read_seq)
+                            .await
+                            .and_then(|thread| {
+                                serde_json::to_value(thread).map_err(DaemonError::from)
+                            })
+                    } else {
+                        Err(DaemonError::BadRequest(
+                            "invalid queued action payload".to_string(),
+                        ))
+                    }
                 } else {
                     Err(DaemonError::BadRequest(
                         "invalid queued action payload".to_string(),
@@ -2340,13 +2496,22 @@ impl AppState {
     }
 
     async fn resume_remote_bridge(&self, remote: PersistedRemoteState) -> Result<(), DaemonError> {
-        let local_key_pair = LocalBoxKeyPair::from_secret_key_base64(
-            &remote.local_secret_key_base64,
-        )
-        .map_err(|error| {
-            DaemonError::BadRequest(format!("invalid persisted local key pair: {error}"))
-        })?;
-        let data_key = decode_fixed_base64::<32>(&remote.data_key_base64).map_err(|error| {
+        let secure_storage_key = remote
+            .secure_storage_key
+            .clone()
+            .unwrap_or_else(|| remote_secret_storage_key(
+                &remote.relay_url,
+                &remote.pairing_id,
+                remote.session_id.as_deref(),
+            ));
+        let secrets = load_remote_secrets(&remote, &secure_storage_key)?;
+        let local_key_pair =
+            LocalBoxKeyPair::from_secret_key_base64(&secrets.local_secret_key_base64).map_err(
+                |error| {
+                    DaemonError::BadRequest(format!("invalid persisted local key pair: {error}"))
+                },
+            )?;
+        let data_key = decode_fixed_base64::<32>(&secrets.data_key_base64).map_err(|error| {
             DaemonError::BadRequest(format!("invalid persisted relay data key: {error}"))
         })?;
         let pairing = RemotePairingState {
@@ -2404,11 +2569,22 @@ impl AppState {
                     .filter(|thread| thread.summary.is_archived)
                     .map(|thread| thread.summary.id.clone())
                     .collect();
+                let mut thread_states = workspace
+                    .threads
+                    .values()
+                    .map(|thread| PersistedThreadState {
+                        thread_id: thread.summary.id.clone(),
+                        last_read_seq: thread.summary.attention.last_read_seq,
+                        last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
+                    })
+                    .collect::<Vec<_>>();
+                thread_states.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
                 PersistedWorkspaceState {
                     path: workspace.summary.path.clone(),
                     current_thread_id: workspace.summary.current_thread_id.clone(),
                     updated_at: Some(workspace.summary.updated_at),
                     archived_thread_ids,
+                    thread_states,
                 }
             })
             .collect::<Vec<_>>();
@@ -2419,7 +2595,7 @@ impl AppState {
         let remote = self.inner.remote.lock().await;
         let persisted = PersistedAppState {
             workspaces: persisted_workspaces,
-            remote: persisted_remote_state(&remote),
+            remote: persisted_remote_state(&remote)?,
         };
         drop(remote);
 
@@ -3250,6 +3426,7 @@ impl AppState {
                     last_tool: None,
                     last_error: None,
                     codex: ThreadCodexParams::default(),
+                    attention: ThreadAttention::default(),
                     is_archived: false,
                 })
             });
@@ -3276,6 +3453,36 @@ impl AppState {
     {
         self.upsert_thread(workspace_id, thread_id, updater).await?;
         Ok(())
+    }
+
+    async fn thread_summary(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<ThreadSummary, DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let summary = thread.summary.clone();
+        drop(workspaces);
+        Ok(self.build_thread_summary_from_clone(summary).await)
+    }
+
+    async fn build_thread_summary_from_clone(&self, mut summary: ThreadSummary) -> ThreadSummary {
+        let interactive_requests = self.inner.interactive_requests.lock().await;
+        let (pending_approval_count, pending_question_count) =
+            interactive_request_counts(&interactive_requests, &summary.id);
+        refresh_thread_attention(
+            &mut summary,
+            pending_approval_count,
+            pending_question_count,
+        );
+        summary
     }
 }
 
@@ -3345,12 +3552,29 @@ impl AppState {
         if update_existing {
             if let Some(index) = existing_index {
                 thread.items[index] = item.clone();
+                let track_attention = marks_agent_activity(&item);
+                if track_attention {
+                    thread.summary.attention.last_agent_activity_seq = thread
+                        .summary
+                        .attention
+                        .last_agent_activity_seq
+                        .max(self.inner.sequence.load(Ordering::Relaxed));
+                }
                 drop(workspaces);
                 self.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id.to_string()),
                     UnifiedEvent::ConversationItemUpdated { item },
                 );
+                if track_attention {
+                    let thread = self.thread_summary(workspace_id, thread_id).await?;
+                    self.emit(
+                        Some(workspace_id.to_string()),
+                        Some(thread_id.to_string()),
+                        UnifiedEvent::ThreadUpdated { thread },
+                    );
+                    self.persist_local_state().await?;
+                }
                 return Ok(());
             }
         }
@@ -3369,12 +3593,29 @@ impl AppState {
             _ => {}
         }
         thread.items.push(item.clone());
+        let track_attention = marks_agent_activity(&item);
+        if track_attention {
+            thread.summary.attention.last_agent_activity_seq = thread
+                .summary
+                .attention
+                .last_agent_activity_seq
+                .max(self.inner.sequence.load(Ordering::Relaxed));
+        }
         drop(workspaces);
         self.emit(
             Some(workspace_id.to_string()),
             Some(thread_id.to_string()),
             UnifiedEvent::ConversationItemAdded { item },
         );
+        if track_attention {
+            let thread = self.thread_summary(workspace_id, thread_id).await?;
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+            self.persist_local_state().await?;
+        }
         Ok(())
     }
 
@@ -3872,6 +4113,7 @@ where
                 current_thread_id: None,
                 updated_at: None,
                 archived_thread_ids: Vec::new(),
+                thread_states: Vec::new(),
             },
             PersistedWorkspaceEntry::State(workspace) => workspace,
         })
@@ -3889,11 +4131,29 @@ async fn persist_app_state(path: &PathBuf, state: &PersistedAppState) -> Result<
     Ok(())
 }
 
-fn persisted_remote_state(remote: &RemoteBridgeState) -> Option<PersistedRemoteState> {
-    let relay_url = remote.relay_url.clone()?;
-    let daemon_token = remote.daemon_token.clone()?;
-    let pairing = remote.pairing.as_ref()?;
-    Some(PersistedRemoteState {
+fn persisted_remote_state(remote: &RemoteBridgeState) -> Result<Option<PersistedRemoteState>, DaemonError> {
+    let Some(relay_url) = remote.relay_url.clone() else {
+        return Ok(None);
+    };
+    let Some(daemon_token) = remote.daemon_token.clone() else {
+        return Ok(None);
+    };
+    let Some(pairing) = remote.pairing.as_ref() else {
+        return Ok(None);
+    };
+    let secure_storage_key = remote_secret_storage_key(
+        &relay_url,
+        &pairing.pairing_id,
+        pairing.session_id.as_deref(),
+    );
+    save_remote_secrets(
+        &secure_storage_key,
+        &PersistedRemoteSecrets {
+            local_secret_key_base64: pairing.local_key_pair.secret_key_base64(),
+            data_key_base64: encode_base64(&pairing.data_key),
+        },
+    )?;
+    Ok(Some(PersistedRemoteState {
         relay_url,
         daemon_token,
         pairing_id: pairing.pairing_id.clone(),
@@ -3904,9 +4164,10 @@ fn persisted_remote_state(remote: &RemoteBridgeState) -> Option<PersistedRemoteS
         expires_at: pairing.expires_at,
         client_bundle: pairing.client_bundle.clone(),
         client_public_key: None,
-        local_secret_key_base64: pairing.local_key_pair.secret_key_base64(),
-        data_key_base64: encode_base64(&pairing.data_key),
-    })
+        secure_storage_key: Some(secure_storage_key),
+        local_secret_key_base64: None,
+        data_key_base64: None,
+    }))
 }
 
 fn invalid_persisted_remote_reason(remote: &PersistedRemoteState) -> Option<String> {
@@ -3925,6 +4186,124 @@ fn invalid_persisted_remote_reason(remote: &PersistedRemoteState) -> Option<Stri
     verify_pairing_public_key_bundle(client_bundle)
         .err()
         .map(|error| format!("trusted remote has invalid signed client key material: {error}"))
+}
+
+fn remote_secret_storage_key(relay_url: &str, pairing_id: &str, session_id: Option<&str>) -> String {
+    let identity = session_id.unwrap_or(pairing_id);
+    format!("{relay_url}|{identity}")
+}
+
+fn load_remote_secrets(
+    remote: &PersistedRemoteState,
+    secure_storage_key: &str,
+) -> Result<PersistedRemoteSecrets, DaemonError> {
+    if let (Some(local_secret_key_base64), Some(data_key_base64)) = (
+        remote.local_secret_key_base64.clone(),
+        remote.data_key_base64.clone(),
+    ) {
+        return Ok(PersistedRemoteSecrets {
+            local_secret_key_base64,
+            data_key_base64,
+        });
+    }
+
+    load_remote_secrets_from_secure_storage(secure_storage_key)
+}
+
+fn save_remote_secrets(
+    secure_storage_key: &str,
+    secrets: &PersistedRemoteSecrets,
+) -> Result<(), DaemonError> {
+    save_remote_secrets_to_secure_storage(secure_storage_key, secrets)
+}
+
+fn delete_remote_secrets(secure_storage_key: String) -> Result<(), DaemonError> {
+    delete_remote_secrets_from_secure_storage(&secure_storage_key)
+}
+
+#[cfg(not(test))]
+fn save_remote_secrets_to_secure_storage(
+    secure_storage_key: &str,
+    secrets: &PersistedRemoteSecrets,
+) -> Result<(), DaemonError> {
+    let payload = serde_json::to_string(secrets)?;
+    let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
+        .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
+    entry
+        .set_password(&payload)
+        .map_err(|error| DaemonError::Process(format!("failed to write secure storage: {error}")))
+}
+
+#[cfg(not(test))]
+fn load_remote_secrets_from_secure_storage(
+    secure_storage_key: &str,
+) -> Result<PersistedRemoteSecrets, DaemonError> {
+    let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
+        .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
+    let payload = entry
+        .get_password()
+        .map_err(|error| DaemonError::Process(format!("failed to read secure storage: {error}")))?;
+    serde_json::from_str::<PersistedRemoteSecrets>(&payload)
+        .map_err(|error| DaemonError::BadRequest(format!("invalid secure storage payload: {error}")))
+}
+
+#[cfg(not(test))]
+fn delete_remote_secrets_from_secure_storage(secure_storage_key: &str) -> Result<(), DaemonError> {
+    let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
+        .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
+    match entry.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(DaemonError::Process(format!(
+            "failed to delete secure storage entry: {error}"
+        ))),
+    }
+}
+
+#[cfg(test)]
+static TEST_REMOTE_SECRET_STORE: OnceLock<std::sync::Mutex<HashMap<String, String>>> = OnceLock::new();
+
+#[cfg(test)]
+fn test_remote_secret_store() -> &'static std::sync::Mutex<HashMap<String, String>> {
+    TEST_REMOTE_SECRET_STORE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+#[cfg(test)]
+fn save_remote_secrets_to_secure_storage(
+    secure_storage_key: &str,
+    secrets: &PersistedRemoteSecrets,
+) -> Result<(), DaemonError> {
+    let payload = serde_json::to_string(secrets)?;
+    test_remote_secret_store()
+        .lock()
+        .unwrap()
+        .insert(secure_storage_key.to_string(), payload);
+    Ok(())
+}
+
+#[cfg(test)]
+fn load_remote_secrets_from_secure_storage(
+    secure_storage_key: &str,
+) -> Result<PersistedRemoteSecrets, DaemonError> {
+    let payload = test_remote_secret_store()
+        .lock()
+        .unwrap()
+        .get(secure_storage_key)
+        .cloned()
+        .ok_or_else(|| {
+            DaemonError::BadRequest("missing persisted relay secrets in secure storage".to_string())
+        })?;
+    serde_json::from_str::<PersistedRemoteSecrets>(&payload)
+        .map_err(|error| DaemonError::BadRequest(format!("invalid secure storage payload: {error}")))
+}
+
+#[cfg(test)]
+fn delete_remote_secrets_from_secure_storage(secure_storage_key: &str) -> Result<(), DaemonError> {
+    test_remote_secret_store()
+        .lock()
+        .unwrap()
+        .remove(secure_storage_key);
+    Ok(())
 }
 
 fn encode_base64(bytes: &[u8]) -> String {
@@ -4022,17 +4401,18 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        CollaborationModeSummary, ConversationItem, ImageInput, ThreadCodexParams, ThreadStatus,
-        ThreadSummary, TurnInputItem, WorkspaceStatus, WorkspaceSummary,
+        CollaborationModeSummary, ConversationItem, ImageInput, ThreadAttention,
+        ThreadCodexParams, ThreadStatus, ThreadSummary, TurnInputItem, WorkspaceStatus,
+        WorkspaceSummary,
         crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
     };
     use serde_json::json;
     use tempfile::tempdir;
 
     use super::{
-        AppState, PersistedAppState, PersistedRemoteState, codex_inputs,
+        AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, codex_inputs,
         codex_inputs_with_plan_mode_shim, collaboration_mode_payload, notification_timestamp,
-        plan_step_status, should_surface_tool_item, should_use_plan_mode_shim,
+        encode_base64, plan_step_status, should_surface_tool_item, should_use_plan_mode_shim,
         workspace_status_after_account_update,
     };
 
@@ -4216,12 +4596,14 @@ mod tests {
                     current_thread_id: None,
                     updated_at: None,
                     archived_thread_ids: Vec::new(),
+                    thread_states: Vec::new(),
                 },
                 super::PersistedWorkspaceState {
                     path: "/tmp/project-b".to_string(),
                     current_thread_id: None,
                     updated_at: None,
                     archived_thread_ids: Vec::new(),
+                    thread_states: Vec::new(),
                 },
             ]
         );
@@ -4246,6 +4628,7 @@ mod tests {
                 current_thread_id: Some("thread-123".to_string()),
                 updated_at: None,
                 archived_thread_ids: Vec::new(),
+                thread_states: Vec::new(),
             }]
         );
     }
@@ -4265,6 +4648,7 @@ mod tests {
             last_tool: None,
             last_error: None,
             codex: ThreadCodexParams::default(),
+            attention: ThreadAttention::default(),
             is_archived: false,
         };
 
@@ -4350,8 +4734,13 @@ mod tests {
                 expires_at: Utc::now() - Duration::seconds(5),
                 client_bundle: None,
                 client_public_key: None,
-                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
-                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                secure_storage_key: None,
+                local_secret_key_base64: Some(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                ),
+                data_key_base64: Some(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                ),
             }),
         };
 
@@ -4398,8 +4787,13 @@ mod tests {
                 expires_at: Utc::now() + Duration::minutes(10),
                 client_bundle: None,
                 client_public_key: None,
-                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
-                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                secure_storage_key: None,
+                local_secret_key_base64: Some(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                ),
+                data_key_base64: Some(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                ),
             }),
         };
 
@@ -4446,8 +4840,13 @@ mod tests {
                 expires_at: Utc::now() + Duration::minutes(10),
                 client_bundle: None,
                 client_public_key: Some("legacy-public-key".to_string()),
-                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
-                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                secure_storage_key: None,
+                local_secret_key_base64: Some(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                ),
+                data_key_base64: Some(
+                    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                ),
             }),
         };
 
@@ -4476,6 +4875,112 @@ mod tests {
             serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
         assert!(persisted_after.remote.is_none());
     }
+
+    #[tokio::test]
+    async fn persisted_remote_state_moves_secrets_out_of_the_state_file() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            PathBuf::from(&state_path),
+        );
+        let pairing = super::RemotePairingState {
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "ABCDEFGHJKLM".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: Some("device-1".to_string()),
+            trusted_at: Some(Utc::now()),
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let expected_secret = pairing.local_key_pair.secret_key_base64();
+        let expected_data_key = encode_base64(&pairing.data_key);
+
+        {
+            let mut remote = app.inner.remote.lock().await;
+            remote.status = falcondeck_core::RemoteConnectionStatus::DeviceTrusted;
+            remote.relay_url = Some("https://connect.falcondeck.com".to_string());
+            remote.daemon_token = Some("daemon-token".to_string());
+            remote.pairing = Some(pairing);
+        }
+
+        app.persist_local_state().await.unwrap();
+
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        let persisted_remote = persisted_after.remote.expect("persisted remote state");
+        assert!(persisted_remote.secure_storage_key.is_some());
+        assert!(persisted_remote.local_secret_key_base64.is_none());
+        assert!(persisted_remote.data_key_base64.is_none());
+
+        let stored = super::load_remote_secrets_from_secure_storage(
+            persisted_remote
+                .secure_storage_key
+                .as_deref()
+                .expect("secure storage key"),
+        )
+        .unwrap();
+        assert_eq!(stored.local_secret_key_base64, expected_secret);
+        assert_eq!(stored.data_key_base64, expected_data_key);
+    }
+
+    #[tokio::test]
+    async fn restore_reads_remote_secrets_from_secure_storage() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let secure_storage_key = "https://connect.falcondeck.com|session-1".to_string();
+        super::save_remote_secrets_to_secure_storage(
+            &secure_storage_key,
+            &PersistedRemoteSecrets {
+                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            },
+        )
+        .unwrap();
+        let persisted = PersistedAppState {
+            workspaces: vec![],
+            remote: Some(PersistedRemoteState {
+                relay_url: "https://connect.falcondeck.com".to_string(),
+                daemon_token: "daemon-token".to_string(),
+                pairing_id: "pairing-1".to_string(),
+                pairing_code: "ABCDEFGHJKLM".to_string(),
+                session_id: Some("session-1".to_string()),
+                device_id: Some("device-1".to_string()),
+                trusted_at: Some(Utc::now()),
+                expires_at: Utc::now() + Duration::minutes(10),
+                client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
+                client_public_key: None,
+                secure_storage_key: Some(secure_storage_key),
+                local_secret_key_base64: None,
+                data_key_base64: None,
+            }),
+        };
+
+        tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+            .await
+            .unwrap();
+
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            PathBuf::from(&state_path),
+        );
+        app.restore_local_state().await.unwrap();
+
+        let remote = app.inner.remote.lock().await;
+        assert_eq!(
+            remote.status,
+            falcondeck_core::RemoteConnectionStatus::DeviceTrusted
+        );
+        assert_eq!(
+            remote.relay_url.as_deref(),
+            Some("https://connect.falcondeck.com")
+        );
+        assert!(remote.pairing.is_some());
+    }
 }
 
 fn normalize_relay_url(input: &str) -> Result<String, DaemonError> {
@@ -4489,6 +4994,54 @@ fn normalize_relay_url(input: &str) -> Result<String, DaemonError> {
         ));
     }
     Ok(trimmed.to_string())
+}
+
+fn interactive_request_counts(
+    requests: &HashMap<(String, String), PendingServerRequest>,
+    thread_id: &str,
+) -> (u32, u32) {
+    requests
+        .values()
+        .filter(|request| request.request.thread_id.as_deref() == Some(thread_id))
+        .fold((0_u32, 0_u32), |(approvals, questions), request| {
+            match request.request.kind {
+                InteractiveRequestKind::Approval => (approvals + 1, questions),
+                InteractiveRequestKind::Question => (approvals, questions + 1),
+            }
+        })
+}
+
+fn refresh_thread_attention(
+    thread: &mut ThreadSummary,
+    pending_approval_count: u32,
+    pending_question_count: u32,
+) {
+    let unread = thread.attention.last_agent_activity_seq > thread.attention.last_read_seq;
+    let level = if matches!(thread.status, ThreadStatus::Error) {
+        ThreadAttentionLevel::Error
+    } else if pending_approval_count + pending_question_count > 0 {
+        ThreadAttentionLevel::AwaitingResponse
+    } else if matches!(thread.status, ThreadStatus::Running) {
+        ThreadAttentionLevel::Running
+    } else if unread {
+        ThreadAttentionLevel::Unread
+    } else {
+        ThreadAttentionLevel::None
+    };
+
+    thread.attention.level = level;
+    thread.attention.badge_label = if pending_approval_count + pending_question_count > 0 {
+        Some("Awaiting response".to_string())
+    } else {
+        None
+    };
+    thread.attention.unread = unread;
+    thread.attention.pending_approval_count = pending_approval_count;
+    thread.attention.pending_question_count = pending_question_count;
+}
+
+fn marks_agent_activity(item: &ConversationItem) -> bool {
+    !matches!(item, ConversationItem::UserMessage { .. })
 }
 
 fn relay_ws_url(relay_url: &str, session_id: &str, ticket: &str) -> String {

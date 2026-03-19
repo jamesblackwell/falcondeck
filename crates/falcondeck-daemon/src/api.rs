@@ -12,9 +12,9 @@ use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest, SendTurnRequest,
-    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, UnifiedEvent,
-    UpdateThreadRequest,
+    ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest,
+    MarkThreadReadRequest, SendTurnRequest, StartRemotePairingRequest, StartReviewRequest,
+    StartThreadRequest, UnifiedEvent, UpdateThreadRequest,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -48,6 +48,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/turns",
             post(send_turn),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/read",
+            post(mark_thread_read),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/interrupt",
@@ -168,6 +172,18 @@ async fn send_turn(
     request.workspace_id = workspace_id;
     request.thread_id = thread_id;
     Ok(Json(state.send_turn(request).await?))
+}
+
+async fn mark_thread_read(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(request): Json<MarkThreadReadRequest>,
+) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
+    Ok(Json(
+        state
+            .mark_thread_read(&workspace_id, &thread_id, request.read_seq)
+            .await?,
+    ))
 }
 
 async fn interrupt_turn(

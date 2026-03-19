@@ -154,6 +154,81 @@ async fn additional_pairings_attach_new_devices_to_the_same_session() {
 }
 
 #[tokio::test]
+async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let client_bundle = test_bundle();
+
+    let first_pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    let first_claim = post_json::<_, ClaimPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings/claim", server.http_base),
+        &ClaimPairingRequest {
+            pairing_code: first_pairing.pairing_code.clone(),
+            label: Some("Safari on iPhone".to_string()),
+            client_bundle: Some(client_bundle.clone()),
+        },
+        None,
+    )
+    .await;
+
+    let second_pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: Some(first_pairing.session_id.clone()),
+            daemon_token: Some(first_pairing.daemon_token.clone()),
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    let second_claim = post_json::<_, ClaimPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings/claim", server.http_base),
+        &ClaimPairingRequest {
+            pairing_code: second_pairing.pairing_code.clone(),
+            label: Some("Safari on iPhone".to_string()),
+            client_bundle: Some(client_bundle),
+        },
+        None,
+    )
+    .await;
+
+    assert_eq!(second_claim.session_id, first_claim.session_id);
+    assert_eq!(second_claim.device_id, first_claim.device_id);
+    assert_eq!(second_claim.client_token, first_claim.client_token);
+
+    let devices = get_json::<TrustedDevicesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/devices",
+            server.http_base, first_claim.session_id
+        ),
+        Some(&first_pairing.daemon_token),
+    )
+    .await;
+    assert_eq!(devices.devices.len(), 1);
+    assert_eq!(devices.devices[0].device_id, first_claim.device_id);
+}
+
+#[tokio::test]
 async fn query_tokens_are_rejected_and_ws_tickets_are_required() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();

@@ -68,6 +68,15 @@ describe('SessionListItem props contract', () => {
       title: 'Test thread',
       isRunning: false,
       updatedAt: '2026-03-16T10:00:00Z',
+      attention: {
+        level: 'none' as const,
+        badge_label: null,
+        unread: false,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 0,
+        last_read_seq: 0,
+      },
       isSelected: true,
       onSelect: (_threadId: string) => {},
     }
@@ -77,6 +86,7 @@ describe('SessionListItem props contract', () => {
     expect(typeof props.title).toBe('string')
     expect(typeof props.isRunning).toBe('boolean')
     expect(typeof props.updatedAt).toBe('string')
+    expect(typeof props.attention).toBe('object')
     expect(typeof props.isSelected).toBe('boolean')
     expect(typeof props.onSelect).toBe('function')
   })

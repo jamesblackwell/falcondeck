@@ -13,8 +13,8 @@ use std::{
 use chrono::Utc;
 use falcondeck_core::{
     AccountStatus, AccountSummary, CollaborationModeSummary, ConversationItem, ImageInput,
-    ModelSummary, ReasoningEffortSummary, ThreadCodexParams, ThreadPlan, ThreadStatus,
-    ThreadSummary,
+    ModelSummary, ReasoningEffortSummary, ThreadAttention, ThreadCodexParams, ThreadPlan,
+    ThreadStatus, ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -579,6 +579,7 @@ fn parse_threads(
                         ),
                         service_tier: extract_string(entry, &["serviceTier", "service_tier"]),
                     },
+                    attention: ThreadAttention::default(),
                     is_archived: false,
                 },
                 session_path: extract_string(entry, &["path"]),
@@ -1689,12 +1690,13 @@ mod tests {
                 last_message_preview: None,
                 latest_turn_id: None,
                 latest_plan: None,
-                latest_diff: None,
-                last_tool: None,
-                last_error: None,
-                codex: ThreadCodexParams::default(),
-                is_archived: false,
-            },
+                    latest_diff: None,
+                    last_tool: None,
+                    last_error: None,
+                    codex: ThreadCodexParams::default(),
+                    attention: ThreadAttention::default(),
+                    is_archived: false,
+                },
             &thread_read,
             &[
                 ConversationItem::Reasoning {
@@ -1748,6 +1750,7 @@ mod tests {
                 last_tool: None,
                 last_error: None,
                 codex: ThreadCodexParams::default(),
+                attention: ThreadAttention::default(),
                 is_archived: false,
             },
             &json!({ "thread": { "turns": [{ "id": "turn-1", "status": "completed" }] } }),
@@ -1779,6 +1782,7 @@ mod tests {
                 last_tool: None,
                 last_error: None,
                 codex: ThreadCodexParams::default(),
+                attention: ThreadAttention::default(),
                 is_archived: false,
             },
             &json!({ "thread": { "turns": [] } }),

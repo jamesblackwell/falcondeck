@@ -55,6 +55,11 @@ pub struct UpdateThreadRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MarkThreadReadRequest {
+    pub read_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageInput {
     pub id: String,
     pub name: Option<String>,
@@ -218,7 +223,38 @@ pub struct ThreadSummary {
     pub last_error: Option<String>,
     pub codex: ThreadCodexParams,
     #[serde(default)]
+    pub attention: ThreadAttention,
+    #[serde(default)]
     pub is_archived: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ThreadAttention {
+    #[serde(default)]
+    pub level: ThreadAttentionLevel,
+    #[serde(default)]
+    pub badge_label: Option<String>,
+    #[serde(default)]
+    pub unread: bool,
+    #[serde(default)]
+    pub pending_approval_count: u32,
+    #[serde(default)]
+    pub pending_question_count: u32,
+    #[serde(default)]
+    pub last_agent_activity_seq: u64,
+    #[serde(default)]
+    pub last_read_seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadAttentionLevel {
+    #[default]
+    None,
+    Unread,
+    Running,
+    AwaitingResponse,
+    Error,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

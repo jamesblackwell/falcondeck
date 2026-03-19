@@ -8,6 +8,7 @@ export type WorkspaceStatus =
 
 export type ThreadStatus = 'idle' | 'running' | 'waiting_for_input' | 'error'
 export type ServiceLevel = 'info' | 'warning' | 'error'
+export type ThreadAttentionLevel = 'none' | 'unread' | 'running' | 'awaiting_response' | 'error'
 
 export type ReasoningEffortOption = {
   reasoning_effort: string
@@ -69,6 +70,16 @@ export type ThreadPlan = {
   steps: ThreadPlanStep[]
 }
 
+export type ThreadAttention = {
+  level: ThreadAttentionLevel
+  badge_label: string | null
+  unread: boolean
+  pending_approval_count: number
+  pending_question_count: number
+  last_agent_activity_seq: number
+  last_read_seq: number
+}
+
 export type ThreadSummary = {
   id: string
   workspace_id: string
@@ -82,6 +93,7 @@ export type ThreadSummary = {
   last_tool: string | null
   last_error: string | null
   codex: ThreadCodexParams
+  attention: ThreadAttention
   is_archived: boolean
 }
 
@@ -262,6 +274,12 @@ export type UpdateThreadPayload = {
   model_id?: string | null
   reasoning_effort?: string | null
   collaboration_mode_id?: string | null
+}
+
+export type MarkThreadReadPayload = {
+  workspace_id: string
+  thread_id: string
+  read_seq: number
 }
 
 export type GitFileStatus = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked' | 'copied'

@@ -1,17 +1,19 @@
 import { memo, useCallback } from 'react'
-import { Pressable } from 'react-native'
+import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Loader } from 'lucide-react-native'
 
+import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
 import type { ThreadSummary } from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { Badge, Text } from '@/components/ui'
 
 interface SessionListItemProps {
   threadId: string
   title: string
   isRunning: boolean
   updatedAt: string
+  attention: ThreadSummary['attention']
   isSelected: boolean
   onSelect: (threadId: string) => void
 }
@@ -32,10 +34,33 @@ export const SessionListItem = memo(function SessionListItem({
   title,
   isRunning,
   updatedAt,
+  attention,
   isSelected,
   onSelect,
 }: SessionListItemProps) {
   const { theme } = useUnistyles()
+  const presentation = deriveThreadAttentionPresentation({
+    id: threadId,
+    workspace_id: '',
+    title,
+    status: isRunning ? 'running' : 'idle',
+    updated_at: updatedAt,
+    last_message_preview: null,
+    latest_turn_id: null,
+    latest_plan: null,
+    latest_diff: null,
+    last_tool: null,
+    last_error: presentationError(attention),
+    codex: {
+      model_id: null,
+      reasoning_effort: null,
+      collaboration_mode_id: null,
+      approval_policy: null,
+      service_tier: null,
+    },
+    attention,
+    is_archived: false,
+  })
 
   /* v8 ignore start — Pressable callback, tested via E2E */
   const handlePress = useCallback(() => {
@@ -48,6 +73,26 @@ export const SessionListItem = memo(function SessionListItem({
       style={[styles.container, isSelected ? styles.selected : undefined]}
       onPress={handlePress}
     >
+      <View style={styles.indicatorSlot}>
+        {presentation.showSpinner ? (
+          <Loader size={14} color={theme.colors.accent.default} />
+        ) : presentation.level === 'error' ? (
+          <View style={[styles.dot, { backgroundColor: theme.colors.danger.default }]} />
+        ) : presentation.level === 'awaiting_response' ? (
+          <View style={[styles.dot, { backgroundColor: theme.colors.warning.default }]} />
+        ) : presentation.showUnreadDot ? (
+          <View style={[styles.dot, { backgroundColor: theme.colors.info.default }]} />
+        ) : (
+          <View
+            style={[
+              styles.ring,
+              {
+                borderColor: theme.colors.fg.faint,
+              },
+            ]}
+          />
+        )}
+      </View>
       <Text
         variant="label"
         color={isSelected ? 'primary' : 'secondary'}
@@ -56,8 +101,8 @@ export const SessionListItem = memo(function SessionListItem({
       >
         {title}
       </Text>
-      {isRunning ? (
-        <Loader size={14} color={theme.colors.accent.default} />
+      {presentation.showBadge ? (
+        <Badge variant="success">{presentation.badgeLabel ?? 'Awaiting response'}</Badge>
       ) : (
         <Text variant="caption" color="muted" size="2xs">
           {timeAgo(updatedAt)}
@@ -83,4 +128,24 @@ const styles = StyleSheet.create((theme) => ({
   title: {
     flex: 1,
   },
+  indicatorSlot: {
+    width: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+  },
+  ring: {
+    width: 12,
+    height: 12,
+    borderRadius: 999,
+    borderWidth: 1,
+  },
 }))
+
+function presentationError(attention: ThreadSummary['attention']) {
+  return attention.level === 'error' ? 'Attention required' : null
+}

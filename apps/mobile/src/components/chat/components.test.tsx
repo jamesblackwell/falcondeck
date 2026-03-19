@@ -71,23 +71,33 @@ describe('CodeBlock component', () => {
 })
 
 describe('SessionListItem component', () => {
+  const attention = {
+    level: 'none' as const,
+    badge_label: null,
+    unread: false,
+    pending_approval_count: 0,
+    pending_question_count: 0,
+    last_agent_activity_seq: 0,
+    last_read_seq: 0,
+  }
+
   it('renders unselected', () => {
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Test" isRunning={false} updatedAt={new Date().toISOString()} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem threadId="t1" title="Test" isRunning={false} updatedAt={new Date().toISOString()} attention={attention} isSelected={false} onSelect={vi.fn()} />,
     )
     expect(textOf(r)).toContain('Test')
   })
 
   it('renders selected', () => {
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Test" isRunning={false} updatedAt={new Date().toISOString()} isSelected={true} onSelect={vi.fn()} />,
+      <SessionListItem threadId="t1" title="Test" isRunning={false} updatedAt={new Date().toISOString()} attention={attention} isSelected={true} onSelect={vi.fn()} />,
     )
     expect(r.toJSON()).toBeTruthy()
   })
 
   it('renders running', () => {
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Running" isRunning={true} updatedAt={new Date().toISOString()} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem threadId="t1" title="Running" isRunning={true} updatedAt={new Date().toISOString()} attention={attention} isSelected={false} onSelect={vi.fn()} />,
     )
     expect(r.toJSON()).toBeTruthy()
   })
@@ -95,7 +105,7 @@ describe('SessionListItem component', () => {
   it('renders with old date (days ago)', () => {
     const oldDate = new Date(Date.now() - 3 * 86_400_000).toISOString()
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Old" isRunning={false} updatedAt={oldDate} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem threadId="t1" title="Old" isRunning={false} updatedAt={oldDate} attention={attention} isSelected={false} onSelect={vi.fn()} />,
     )
     expect(textOf(r)).toContain('3d')
   })
@@ -103,7 +113,7 @@ describe('SessionListItem component', () => {
   it('renders with hours-ago date', () => {
     const hoursAgo = new Date(Date.now() - 5 * 3_600_000).toISOString()
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Hours" isRunning={false} updatedAt={hoursAgo} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem threadId="t1" title="Hours" isRunning={false} updatedAt={hoursAgo} attention={attention} isSelected={false} onSelect={vi.fn()} />,
     )
     expect(textOf(r)).toContain('5h')
   })

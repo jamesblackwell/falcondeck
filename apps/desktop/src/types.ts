@@ -8,6 +8,7 @@ export type WorkspaceStatus =
 
 export type ThreadStatus = 'idle' | 'running' | 'waiting_for_input' | 'error'
 export type ServiceLevel = 'info' | 'warning' | 'error'
+export type ThreadAttentionLevel = 'none' | 'unread' | 'running' | 'awaiting_response' | 'error'
 
 export type ModelSummary = {
   id: string
@@ -42,6 +43,16 @@ export type ThreadPlan = {
   steps: ThreadPlanStep[]
 }
 
+export type ThreadAttention = {
+  level: ThreadAttentionLevel
+  badge_label: string | null
+  unread: boolean
+  pending_approval_count: number
+  pending_question_count: number
+  last_agent_activity_seq: number
+  last_read_seq: number
+}
+
 export type ThreadSummary = {
   id: string
   workspace_id: string
@@ -54,6 +65,7 @@ export type ThreadSummary = {
   latest_diff: string | null
   last_tool: string | null
   last_error: string | null
+  attention: ThreadAttention
 }
 
 export type InteractiveRequestKind = 'approval' | 'question'
