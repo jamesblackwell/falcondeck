@@ -228,7 +228,7 @@ export function RemotePairingPopover({
                 ) : (
                   <RefreshCw className="h-3 w-3" />
                 )}
-                {hasPendingPairing ? 'Generate new code' : 'Pair another device'}
+                {hasPendingPairing ? 'New pairing code' : 'Pair another device'}
               </button>
             ) : null}
 

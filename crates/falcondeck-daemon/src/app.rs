@@ -471,6 +471,49 @@ impl AppState {
         Ok(response)
     }
 
+    pub async fn revoke_remote_device(
+        &self,
+        device_id: &str,
+    ) -> Result<RemoteStatusResponse, DaemonError> {
+        let (relay_url, session_id, daemon_token) = {
+            let remote = self.inner.remote.lock().await;
+            let relay_url = remote
+                .relay_url
+                .clone()
+                .ok_or_else(|| DaemonError::Rpc("remote relay is not configured".to_string()))?;
+            let session_id = remote
+                .pairing
+                .as_ref()
+                .and_then(|pairing| pairing.session_id.clone())
+                .ok_or_else(|| DaemonError::Rpc("remote session is not ready".to_string()))?;
+            let daemon_token = remote
+                .daemon_token
+                .clone()
+                .ok_or_else(|| DaemonError::Rpc("remote daemon token is missing".to_string()))?;
+            (relay_url, session_id, daemon_token)
+        };
+
+        reqwest::Client::new()
+            .delete(format!(
+                "{}/v1/sessions/{}/devices/{}",
+                relay_url.trim_end_matches('/'),
+                session_id,
+                device_id
+            ))
+            .bearer_auth(&daemon_token)
+            .send()
+            .await
+            .map_err(|error| {
+                DaemonError::Rpc(format!("failed to revoke remote device: {error}"))
+            })?
+            .error_for_status()
+            .map_err(|error| {
+                DaemonError::Rpc(format!("remote device revoke request failed: {error}"))
+            })?;
+
+        Ok(self.remote_status().await)
+    }
+
     pub async fn snapshot(&self) -> DaemonSnapshot {
         let workspaces = self.inner.workspaces.lock().await;
         let interactive_requests = self.inner.interactive_requests.lock().await;

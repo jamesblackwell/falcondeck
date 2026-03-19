@@ -6,9 +6,11 @@ import { cn } from '@falcondeck/ui'
 
 export type ThreadItemProps = {
   thread: ThreadSummary
+  workspaceId: string
   isSelected: boolean
-  onSelect: () => void
-  onArchive?: () => void
+  onSelect: (workspaceId: string, threadId: string) => void
+  onArchive?: (workspaceId: string, threadId: string) => void
+  nowTick?: number
 }
 
 function timeAgo(dateStr: string) {
@@ -23,9 +25,16 @@ function timeAgo(dateStr: string) {
 }
 
 export const ThreadItem = memo(
-  function ThreadItem({ thread, isSelected, onSelect, onArchive }: ThreadItemProps) {
+  function ThreadItem({
+    thread,
+    workspaceId,
+    isSelected,
+    onSelect,
+    onArchive,
+    nowTick = 0,
+  }: ThreadItemProps) {
     const isRunning = thread.status === 'running'
-    const timeString = useMemo(() => timeAgo(thread.updated_at), [thread.updated_at])
+    const timeString = useMemo(() => timeAgo(thread.updated_at), [nowTick, thread.updated_at])
 
     return (
       <div
@@ -39,7 +48,7 @@ export const ThreadItem = memo(
         <button
           type="button"
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
-          onClick={onSelect}
+          onClick={() => onSelect(workspaceId, thread.id)}
         >
           {isRunning ? (
             <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
@@ -56,7 +65,7 @@ export const ThreadItem = memo(
             type="button"
             onClick={(e) => {
               e.stopPropagation()
-              onArchive()
+              onArchive(workspaceId, thread.id)
             }}
             title="Archive thread"
             className="hidden shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:text-fg-secondary group-hover:block"
@@ -69,6 +78,9 @@ export const ThreadItem = memo(
   },
   (prev, next) =>
     prev.thread === next.thread &&
+    prev.workspaceId === next.workspaceId &&
     prev.isSelected === next.isSelected &&
-    Boolean(prev.onArchive) === Boolean(next.onArchive),
+    prev.nowTick === next.nowTick &&
+    prev.onSelect === next.onSelect &&
+    prev.onArchive === next.onArchive,
 )

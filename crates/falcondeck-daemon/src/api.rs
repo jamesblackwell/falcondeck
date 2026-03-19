@@ -5,7 +5,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use futures_util::StreamExt;
 use tokio::sync::broadcast;
@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/snapshot", get(snapshot))
         .route("/api/remote/status", get(remote_status))
         .route("/api/remote/pairing", post(start_remote_pairing))
+        .route("/api/remote/devices/{device_id}", delete(revoke_remote_device))
         .route("/api/events", get(events))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route(
@@ -94,6 +95,13 @@ async fn start_remote_pairing(
     Json(request): Json<StartRemotePairingRequest>,
 ) -> Result<Json<falcondeck_core::RemoteStatusResponse>, DaemonError> {
     Ok(Json(state.start_remote_pairing(request).await?))
+}
+
+async fn revoke_remote_device(
+    State(state): State<AppState>,
+    Path(device_id): Path<String>,
+) -> Result<Json<falcondeck_core::RemoteStatusResponse>, DaemonError> {
+    Ok(Json(state.revoke_remote_device(&device_id).await?))
 }
 
 async fn connect_workspace(

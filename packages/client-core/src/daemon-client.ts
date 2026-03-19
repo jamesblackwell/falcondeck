@@ -57,6 +57,13 @@ export function createDaemonApiClient(baseUrl: string) {
         }),
       )
     },
+    async revokeRemoteDevice(deviceId: string) {
+      return parseJson<RemoteStatusResponse>(
+        await fetch(`${baseUrl}/api/remote/devices/${encodeURIComponent(deviceId)}`, {
+          method: 'DELETE',
+        }),
+      )
+    },
     async connectWorkspace(path: string) {
       return parseJson<WorkspaceSummary>(
         await fetch(`${baseUrl}/api/workspaces/connect`, {

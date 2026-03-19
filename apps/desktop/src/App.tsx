@@ -27,6 +27,7 @@ import { RemotePairingPopover } from './components/RemotePairingPopover'
 import { InteractiveRequestBar } from './components/InteractiveRequestBar'
 import { DiffPanel } from './components/DiffPanel'
 import { NewThreadState } from './components/NewThreadState'
+import { SettingsView } from './components/SettingsView'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
 
 function markInteractiveRequestResolved(items: ConversationItem[], requestId: string): ConversationItem[] {
@@ -73,7 +74,9 @@ function AppInner() {
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
   const [isAddingProject, setIsAddingProject] = useState(false)
   const [isStartingRemote, setIsStartingRemote] = useState(false)
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isSending, setIsSending] = useState(false)
+  const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
@@ -353,16 +356,19 @@ function AppInner() {
 
   // Stable callbacks for child components
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
+    setIsSettingsOpen(false)
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(threadId)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleSelectThread = useCallback((workspaceId: string, threadId: string) => {
+    setIsSettingsOpen(false)
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(threadId)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleNewThread = useCallback((workspaceId: string) => {
+    setIsSettingsOpen(false)
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(null)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
@@ -396,6 +402,42 @@ function AppInner() {
     if (!api) return
     void api.remoteStatus().then(setRemoteStatus).catch(() => {})
   }, [api, setRemoteStatus])
+
+  const handleOpenSettings = useCallback(() => {
+    setIsSettingsOpen(true)
+  }, [])
+
+  const handleRevokeDevice = useCallback(
+    (device: { device_id: string; label: string | null }) => {
+      if (!api) return
+      const confirmed = window.confirm(
+        `Remove ${device.label ?? 'this device'} from trusted devices? It will need a new pairing code to reconnect.`,
+      )
+      if (!confirmed) return
+
+      setRevokingDeviceId(device.device_id)
+      void api
+        .revokeRemoteDevice(device.device_id)
+        .then((nextStatus) => {
+          setRemoteStatus(nextStatus)
+          setActionError(null)
+          toast({
+            variant: 'success',
+            title: 'Device removed',
+            description: `${device.label ?? 'Device'} can no longer access this session.`,
+          })
+        })
+        .catch((error: unknown) => {
+          const msg = error instanceof Error ? error.message : 'Failed to remove device'
+          setActionError(msg)
+          toast({ variant: 'danger', title: 'Failed to remove device', description: msg })
+        })
+        .finally(() => {
+          setRevokingDeviceId(null)
+        })
+    },
+    [api, toast, setRemoteStatus],
+  )
 
   const handleArchiveThread = useCallback(
     (workspaceId: string, threadId: string) => {
@@ -480,63 +522,81 @@ function AppInner() {
           onArchiveThread={handleArchiveThread}
           onAddProject={handleAddProject}
           isAddingProject={isAddingProject}
+          onOpenSettings={handleOpenSettings}
+          settingsOpen={isSettingsOpen}
           errors={[connectionError, actionError].filter((value): value is string => Boolean(value))}
         />
       }
       main={
-        <section className="flex h-full min-h-0 flex-col bg-surface-1">
-          <SessionHeader workspace={selectedWorkspace} thread={selectedThread}>
-            <RemotePairingPopover
-              remoteStatus={remoteStatus}
-              pairingLink={pairingLink}
-              onStartPairing={handleStartPairingCallback}
-              onRefreshStatus={handleRefreshRemoteStatus}
-              isStartingRemote={isStartingRemote}
+        isSettingsOpen ? (
+          <SettingsView
+            remoteStatus={remoteStatus}
+            pairingLink={pairingLink}
+            relayUrl={relayUrl}
+            isStartingRemote={isStartingRemote}
+            revokingDeviceId={revokingDeviceId}
+            onStartPairing={handleStartPairingCallback}
+            onRefreshRemoteStatus={handleRefreshRemoteStatus}
+            onRevokeDevice={handleRevokeDevice}
+            onClose={() => setIsSettingsOpen(false)}
+          />
+        ) : (
+          <section className="flex h-full min-h-0 flex-col bg-surface-1">
+            <SessionHeader workspace={selectedWorkspace} thread={selectedThread}>
+              <RemotePairingPopover
+                remoteStatus={remoteStatus}
+                pairingLink={pairingLink}
+                onStartPairing={handleStartPairingCallback}
+                onRefreshStatus={handleRefreshRemoteStatus}
+                isStartingRemote={isStartingRemote}
+              />
+            </SessionHeader>
+            <Conversation
+              threadKey={
+                selectedThreadId
+                  ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
+                  : selectedWorkspaceId
+              }
+              items={conversationItems}
+              emptyState={conversationEmptyState}
+              isThinking={isSending || selectedThread?.status === 'running'}
+              isLoading={isThreadDetailPending}
             />
-          </SessionHeader>
-          <Conversation
-            threadKey={
-              selectedThreadId
-                ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
-                : selectedWorkspaceId
-            }
-            items={conversationItems}
-            emptyState={conversationEmptyState}
-            isThinking={isSending || selectedThread?.status === 'running'}
-            isLoading={isThreadDetailPending}
-          />
-          <InteractiveRequestBar
-            requests={interactiveRequests}
-            onRespond={handleInteractiveResponseCallback}
-          />
-          <PromptInput
-            value={draft}
-            onValueChange={setDraft}
-            onSubmit={handleSubmitCallback}
-            onPickImages={handlePickImages}
-            attachments={attachments}
-            models={models}
-            selectedModelId={selectedModel}
-            onModelChange={handleModelChange}
-            reasoningOptions={currentReasoningOptions}
-            selectedEffort={selectedEffort}
-            onEffortChange={handleEffortChange}
-            collaborationModes={collaborationModes}
-            selectedCollaborationModeId={selectedCollaborationMode}
-            onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
-            showPlanModeToggle={showPlanModeToggle}
-            planModeEnabled={planModeEnabled}
-            onPlanModeChange={(enabled) =>
-              handleCollaborationModeChange(
-                togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
-              )
-            }
-            disabled={isDisabled}
-          />
-        </section>
+            <InteractiveRequestBar
+              requests={interactiveRequests}
+              onRespond={handleInteractiveResponseCallback}
+            />
+            <PromptInput
+              value={draft}
+              onValueChange={setDraft}
+              onSubmit={handleSubmitCallback}
+              onPickImages={handlePickImages}
+              attachments={attachments}
+              models={models}
+              selectedModelId={selectedModel}
+              onModelChange={handleModelChange}
+              reasoningOptions={currentReasoningOptions}
+              selectedEffort={selectedEffort}
+              onEffortChange={handleEffortChange}
+              collaborationModes={collaborationModes}
+              selectedCollaborationModeId={selectedCollaborationMode}
+              onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
+              showPlanModeToggle={showPlanModeToggle}
+              planModeEnabled={planModeEnabled}
+              onPlanModeChange={(enabled) =>
+                handleCollaborationModeChange(
+                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
+                )
+              }
+              disabled={isDisabled}
+            />
+          </section>
+        )
       }
       rail={
-        <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
+        isSettingsOpen
+          ? undefined
+          : <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
       }
     />
   )

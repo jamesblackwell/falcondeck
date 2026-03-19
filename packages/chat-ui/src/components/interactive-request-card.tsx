@@ -1,7 +1,7 @@
 import { AlertTriangle, ArrowLeft, ArrowRight, HelpCircle, Lock } from 'lucide-react'
 import { memo, useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 
-import type { InteractiveQuestion, InteractiveRequest, InteractiveResponsePayload } from '@falcondeck/client-core'
+import type { InteractiveRequest, InteractiveResponsePayload } from '@falcondeck/client-core'
 import { Badge, Button, Input } from '@falcondeck/ui'
 
 export type InteractiveRequestCardProps = {
@@ -11,7 +11,6 @@ export type InteractiveRequestCardProps = {
 }
 
 function mergeQuestionAnswers(
-  question: InteractiveQuestion,
   selectedOption: string | null,
   customAnswer: string,
 ) {
@@ -39,7 +38,6 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
         request.questions.map((question) => [
             question.id,
             mergeQuestionAnswers(
-              question,
               selectedOptions[question.id] ?? null,
               customAnswers[question.id] ?? '',
             ),

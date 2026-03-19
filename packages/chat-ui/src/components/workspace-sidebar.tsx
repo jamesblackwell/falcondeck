@@ -1,4 +1,4 @@
-import { memo, useCallback, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
@@ -15,6 +15,8 @@ import { ThreadItem } from './thread-item'
 import { WorkspaceGroup } from './workspace-group'
 
 const VISIBLE_THREAD_LIMIT = 5
+const RELATIVE_TIME_TICK_MS = 60_000
+const OPTIMISTIC_SELECTION_TTL_MS = 1_500
 
 type SidebarEmptyState = {
   title: string
@@ -34,6 +36,7 @@ export type WorkspaceSidebarProps = {
   title?: string
   errors?: string[]
   emptyState?: SidebarEmptyState
+  footer?: React.ReactNode
   className?: string
   headerClassName?: string
   contentClassName?: string
@@ -44,11 +47,13 @@ const ThreadList = memo(function ThreadList({
   selectedThreadId,
   onSelectThread,
   onArchiveThread,
+  nowTick,
 }: {
   group: ProjectGroup
   selectedThreadId: string | null
   onSelectThread: (workspaceId: string, threadId: string) => void
   onArchiveThread?: (workspaceId: string, threadId: string) => void
+  nowTick: number
 }) {
   const [expanded, setExpanded] = useState(false)
   const hasOverflow = group.threads.length > VISIBLE_THREAD_LIMIT
@@ -71,11 +76,11 @@ const ThreadList = memo(function ThreadList({
         <ThreadItem
           key={thread.id}
           thread={thread}
+          workspaceId={group.workspace.id}
           isSelected={selectedThreadId === thread.id}
-          onSelect={() => onSelectThread(group.workspace.id, thread.id)}
-          onArchive={
-            onArchiveThread ? () => onArchiveThread(group.workspace.id, thread.id) : undefined
-          }
+          onSelect={onSelectThread}
+          onArchive={onArchiveThread}
+          nowTick={nowTick}
         />
       ))}
       {hasOverflow ? (
@@ -108,6 +113,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     title: 'No projects',
     description: 'Add a project folder to get started.',
   },
+  footer,
   className,
   headerClassName,
   contentClassName,
@@ -116,6 +122,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     workspaceId: string | null
     threadId: string | null
   } | null>(null)
+  const [nowTick, setNowTick] = useState(() => Math.floor(Date.now() / RELATIVE_TIME_TICK_MS))
   const pendingSelection =
     optimisticSelection &&
     (optimisticSelection.workspaceId !== selectedWorkspaceId ||
@@ -125,6 +132,60 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const visualSelectedWorkspaceId = pendingSelection?.workspaceId ?? selectedWorkspaceId
   const visualSelectedThreadId = pendingSelection?.threadId ?? selectedThreadId
+
+  const groupMetadata = useMemo(
+    () =>
+      new Map(
+        groups.map((group) => [
+          group.workspace.id,
+          {
+            initialThreadId: group.workspace.current_thread_id ?? group.threads[0]?.id ?? null,
+            threadIds: new Set(group.threads.map((thread) => thread.id)),
+          },
+        ]),
+      ),
+    [groups],
+  )
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setNowTick(Math.floor(Date.now() / RELATIVE_TIME_TICK_MS))
+    }, RELATIVE_TIME_TICK_MS)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [])
+
+  useEffect(() => {
+    setOptimisticSelection((current) => {
+      if (!current) return null
+      if (current.workspaceId === selectedWorkspaceId && current.threadId === selectedThreadId) {
+        return null
+      }
+
+      const metadata = current.workspaceId ? groupMetadata.get(current.workspaceId) : null
+      if (!metadata) {
+        return null
+      }
+      if (current.threadId === null) {
+        return current
+      }
+      return metadata.threadIds.has(current.threadId) ? current : null
+    })
+  }, [groupMetadata, selectedThreadId, selectedWorkspaceId])
+
+  useEffect(() => {
+    if (!pendingSelection) return
+
+    const timeout = window.setTimeout(() => {
+      setOptimisticSelection((current) => (current === pendingSelection ? null : current))
+    }, OPTIMISTIC_SELECTION_TTL_MS)
+
+    return () => {
+      window.clearTimeout(timeout)
+    }
+  }, [pendingSelection])
 
   const handleSelectWorkspace = useCallback(
     (workspaceId: string, threadId: string | null) => {
@@ -204,7 +265,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               onSelect={() =>
                 handleSelectWorkspace(
                   group.workspace.id,
-                  group.workspace.current_thread_id ?? group.threads[0]?.id ?? null,
+                  groupMetadata.get(group.workspace.id)?.initialThreadId ?? null,
                 )
               }
               onNewThread={onNewThread ? () => handleNewThread(group.workspace.id) : undefined}
@@ -214,6 +275,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 selectedThreadId={visualSelectedThreadId}
                 onSelectThread={handleSelectThread}
                 onArchiveThread={onArchiveThread}
+                nowTick={nowTick}
               />
             </WorkspaceGroup>
           ))}
@@ -226,6 +288,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           ) : null}
         </div>
       </SidebarContent>
+      {footer ? <div className="border-t border-border-subtle p-3">{footer}</div> : null}
     </SidebarShell>
   )
 })
