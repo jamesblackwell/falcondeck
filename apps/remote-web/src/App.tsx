@@ -292,11 +292,39 @@ function persistPendingActionIds(actionIds: string[]) {
   window.localStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(actionIds))
 }
 
+function clearPendingActionIds() {
+  window.localStorage.removeItem(PENDING_ACTIONS_KEY)
+}
+
 function shouldDiscardPendingAction(error: unknown) {
   if (!(error instanceof Error)) return false
   return /failed with status 401|failed with status 404|queued action not found|invalid session token/i.test(
     error.message,
   )
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError'
+}
+
+function waitForPollInterval(ms: number, signal?: AbortSignal) {
+  if (signal?.aborted) {
+    return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      signal?.removeEventListener('abort', handleAbort)
+      resolve()
+    }, ms)
+
+    const handleAbort = () => {
+      window.clearTimeout(timeout)
+      reject(new DOMException('The operation was aborted.', 'AbortError'))
+    }
+
+    signal?.addEventListener('abort', handleAbort, { once: true })
+  })
 }
 
 // ── App ──────────────────────────────────────────────────────────────
@@ -349,6 +377,7 @@ export default function App() {
   const pendingRelayUpdatesRef = useRef<RelayUpdate[]>([])
   const relayFlushFrameRef = useRef<number | null>(null)
   const relayFlushInProgressRef = useRef(false)
+  const pendingActionPollsRef = useRef(new Set<AbortController>())
   const pendingRpc = useRef(
     new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: number }>(),
   )
@@ -357,6 +386,14 @@ export default function App() {
   const relayConnected = connectionStatus.startsWith('connected')
   const hasSessionKey = !!sessionCryptoRef.current
   const isEncrypted = relayConnected && hasSessionKey
+  const selectedThreadItems = selectedThreadId ? threadItems[selectedThreadId] ?? [] : []
+
+  const abortPendingActionPolls = useCallback(() => {
+    for (const controller of pendingActionPollsRef.current) {
+      controller.abort()
+    }
+    pendingActionPollsRef.current.clear()
+  }, [])
 
   const persistCurrentSession = useCallback(
     (overrides?: Partial<PersistedRemoteSession>) => {
@@ -463,19 +500,45 @@ export default function App() {
 
   useEffect(() => {
     if (!sessionId || !clientToken || !isEncrypted) return
+    const controllers = new Map<string, AbortController>()
+
     for (const actionId of loadPendingActionIds()) {
-      void pollQueuedAction(actionId)
+      const controller = new AbortController()
+      controllers.set(actionId, controller)
+      pendingActionPollsRef.current.add(controller)
+
+      void pollQueuedAction(actionId, {
+        signal: controller.signal,
+        clientTokenOverride: clientToken,
+        sessionIdOverride: sessionId,
+      })
         .then(() => forgetPendingAction(actionId))
         .catch((queuedError) => {
+          if (isAbortError(queuedError)) return
           if (shouldDiscardPendingAction(queuedError)) {
             forgetPendingAction(actionId)
           }
         })
+        .finally(() => {
+          const activeController = controllers.get(actionId)
+          if (!activeController) return
+          pendingActionPollsRef.current.delete(activeController)
+          controllers.delete(actionId)
+        })
+    }
+
+    return () => {
+      for (const controller of controllers.values()) {
+        controller.abort()
+        pendingActionPollsRef.current.delete(controller)
+      }
+      controllers.clear()
     }
   }, [clientToken, isEncrypted, sessionId])
 
   useEffect(() => {
     return () => {
+      abortPendingActionPolls()
       if (reconnectTimerRef.current !== null) {
         window.clearTimeout(reconnectTimerRef.current)
       }
@@ -486,7 +549,13 @@ export default function App() {
         window.cancelAnimationFrame(relayFlushFrameRef.current)
       }
     }
-  }, [])
+  }, [abortPendingActionPolls])
+
+  useEffect(() => {
+    return () => {
+      abortPendingActionPolls()
+    }
+  }, [abortPendingActionPolls, clientToken, sessionId])
 
   useEffect(() => {
     const flushOnHide = () => {
@@ -508,7 +577,9 @@ export default function App() {
   }, [flushPersistedSession])
 
   useEffect(() => {
-    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId)
+    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId, {
+      preserveEmptyThreadSelection: true,
+    })
     if (nextSelection.workspaceId !== selectedWorkspaceId) {
       setSelectedWorkspaceId(nextSelection.workspaceId)
     }
@@ -549,9 +620,9 @@ export default function App() {
         selectedWorkspaceId,
         selectedThreadId,
         threadDetail,
-        selectedThreadId ? threadItems[selectedThreadId] ?? [] : [],
+        selectedThreadItems,
       ),
-    [selectedThreadId, selectedWorkspaceId, threadDetail, threadItems],
+    [selectedThreadId, selectedThreadItems, selectedWorkspaceId, threadDetail],
   )
 
   // ── WebSocket relay connection ─────────────────────────────────────
@@ -920,6 +991,7 @@ export default function App() {
   // ── Actions ────────────────────────────────────────────────────────
 
   async function handleClaimPairing() {
+    abortPendingActionPolls()
     const keyPair = loadOrCreateClientKeyPair()
     clientKeyPairRef.current = keyPair
     const response = await fetch(`${relayUrl.replace(/\/$/, '')}/v1/pairings/claim`, {
@@ -949,6 +1021,7 @@ export default function App() {
     }
     trustedDaemonPublicKeyRef.current = claim.daemon_bundle.public_key
     trustedDaemonIdentityPublicKeyRef.current = claim.daemon_bundle.identity_public_key
+    clearPendingActionIds()
     setPairingId(claim.pairing_id)
     setSessionId(claim.session_id)
     setDeviceId(claim.device_id)
@@ -992,13 +1065,28 @@ export default function App() {
     })
   }
 
-  async function pollQueuedAction<T = unknown>(actionId: string) {
-    if (!sessionId || !clientToken) throw new Error('Remote session is not ready')
+  async function pollQueuedAction<T = unknown>(
+    actionId: string,
+    options?: {
+      signal?: AbortSignal
+      sessionIdOverride?: string | null
+      clientTokenOverride?: string | null
+    },
+  ) {
+    const currentSessionId = options?.sessionIdOverride ?? sessionId
+    const currentClientToken = options?.clientTokenOverride ?? clientToken
+    if (!currentSessionId || !currentClientToken) throw new Error('Remote session is not ready')
+
     for (;;) {
+      if (options?.signal?.aborted) {
+        throw new DOMException('The operation was aborted.', 'AbortError')
+      }
+
       const response = await fetch(
-        `${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}/actions/${encodeURIComponent(actionId)}`,
+        `${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(currentSessionId)}/actions/${encodeURIComponent(actionId)}`,
         {
-          headers: { authorization: `Bearer ${clientToken}` },
+          headers: { authorization: `Bearer ${currentClientToken}` },
+          signal: options?.signal,
         },
       )
       if (!response.ok) {
@@ -1014,7 +1102,7 @@ export default function App() {
       if (action.status === 'failed') {
         throw new Error(action.error ?? 'Remote action failed')
       }
-      await new Promise((resolve) => window.setTimeout(resolve, 800))
+      await waitForPollInterval(800, options?.signal)
     }
   }
 
@@ -1060,11 +1148,22 @@ export default function App() {
     const action = (await response.json()) as QueuedRemoteAction
     rememberPendingAction(action.action_id)
     if (options?.awaitCompletion === false) {
-      void pollQueuedAction(action.action_id)
+      const controller = new AbortController()
+      pendingActionPollsRef.current.add(controller)
+
+      void pollQueuedAction(action.action_id, {
+        signal: controller.signal,
+        clientTokenOverride: clientToken,
+        sessionIdOverride: sessionId,
+      })
         .then(() => forgetPendingAction(action.action_id))
         .catch((queuedError) => {
+          if (isAbortError(queuedError)) return
           forgetPendingAction(action.action_id)
           setError(queuedError instanceof Error ? queuedError.message : 'Remote action failed')
+        })
+        .finally(() => {
+          pendingActionPollsRef.current.delete(controller)
         })
       return null as T
     }
@@ -1378,6 +1477,7 @@ export default function App() {
   // ── Connected session ──────────────────────────────────────────────
 
   const desktopOnline = machinePresence?.daemon_connected ?? false
+  const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline)
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
@@ -1389,7 +1489,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setShowProjects((value) => !value)}
-            className="flex shrink-0 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-secondary transition-colors hover:bg-surface-2 hover:text-fg-primary"
+            className="flex shrink-0 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-secondary transition-colors hover:bg-surface-2 hover:text-fg-primary md:hidden"
             aria-label={showProjects ? 'Hide projects' : 'Show projects'}
           >
             <PanelLeft className="h-4 w-4" />
@@ -1404,122 +1504,121 @@ export default function App() {
       </SessionHeader>
 
       {showProjects ? (
-        <>
-          <div className="fixed inset-0 z-40 bg-surface-0/80 backdrop-blur-sm md:hidden">
-            <button
-              type="button"
-              className="absolute inset-0 h-full w-full"
-              aria-label="Close projects"
-              onClick={() => setShowProjects(false)}
-            />
-            <div className="absolute inset-y-0 left-0 flex w-full max-w-none animate-in slide-in-from-left-8 duration-200">
-              <div className="flex h-full w-full flex-col border-r border-border-default bg-surface-1 shadow-2xl">
-                <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
-                  <div>
-                    <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">
-                      Navigation
-                    </p>
-                    <h2 className="mt-1 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
-                      Projects
-                    </h2>
-                  </div>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    className="h-9 w-9 rounded-full"
-                    onClick={() => setShowProjects(false)}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
+        <div className="fixed inset-0 z-40 bg-surface-0/80 backdrop-blur-sm md:hidden">
+          <button
+            type="button"
+            className="absolute inset-0 h-full w-full"
+            aria-label="Close projects"
+            onClick={() => setShowProjects(false)}
+          />
+          <div className="absolute inset-y-0 left-0 flex w-full max-w-none animate-in slide-in-from-left-8 duration-200">
+            <div className="flex h-full w-full flex-col border-r border-border-default bg-surface-1 shadow-2xl">
+              <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
+                <div>
+                  <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">
+                    Navigation
+                  </p>
+                  <h2 className="mt-1 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
+                    Projects
+                  </h2>
                 </div>
-                <WorkspaceSidebar
-                  groups={groups}
-                  selectedWorkspaceId={selectedWorkspaceId}
-                  selectedThreadId={selectedThreadId}
-                  onSelectWorkspace={handleSelectWorkspace}
-                  onSelectThread={handleSelectThread}
-                  onNewThread={handleNewThread}
-                  title="Projects"
-                  errors={error ? [error] : []}
-                  emptyState={{
-                    title: 'Waiting for projects',
-                    description: 'Projects will appear after the desktop shares its current snapshot.',
-                  }}
-                  className="h-full min-h-0 bg-surface-1"
-                  headerClassName="hidden"
-                  contentClassName="px-4 pb-8 pt-4"
-                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-9 w-9 rounded-full"
+                  onClick={() => setShowProjects(false)}
+                >
+                  <X className="h-4 w-4" />
+                </Button>
               </div>
+              <WorkspaceSidebar
+                groups={groups}
+                selectedWorkspaceId={selectedWorkspaceId}
+                selectedThreadId={selectedThreadId}
+                onSelectWorkspace={handleSelectWorkspace}
+                onSelectThread={handleSelectThread}
+                onNewThread={handleNewThread}
+                title="Projects"
+                errors={error ? [error] : []}
+                emptyState={{
+                  title: 'Waiting for projects',
+                  description: 'Projects will appear after the desktop shares its current snapshot.',
+                }}
+                className="h-full min-h-0 bg-surface-1"
+                headerClassName="hidden"
+                contentClassName="px-4 pb-8 pt-4"
+              />
             </div>
           </div>
-
-          <div className="hidden shrink-0 border-b border-border-subtle bg-surface-1 md:block">
-            <WorkspaceSidebar
-              groups={groups}
-              selectedWorkspaceId={selectedWorkspaceId}
-              selectedThreadId={selectedThreadId}
-              onSelectWorkspace={handleSelectWorkspace}
-              onSelectThread={handleSelectThread}
-              onNewThread={handleNewThread}
-              title="Projects"
-              errors={error ? [error] : []}
-              emptyState={{
-                title: 'Waiting for projects',
-  const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline)
-                description: 'Projects will appear after the desktop shares its current snapshot.',
-              }}
-              className="h-[min(32rem,60dvh)] bg-surface-1"
-              headerClassName="pt-4"
-            />
-          </div>
-        </>
+        </div>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-        <Conversation
-          threadKey={
-            selectedThreadId
-              ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
-              : selectedWorkspaceId
-          }
-          items={items}
-          isThinking={isSubmitting || selectedThread?.status === 'running'}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <WorkspaceSidebar
+          groups={groups}
+          selectedWorkspaceId={selectedWorkspaceId}
+          selectedThreadId={selectedThreadId}
+          onSelectWorkspace={handleSelectWorkspace}
+          onSelectThread={handleSelectThread}
+          onNewThread={handleNewThread}
+          title="Projects"
+          errors={error ? [error] : []}
+          emptyState={{
+            title: 'Waiting for projects',
+            description: 'Projects will appear after the desktop shares its current snapshot.',
+          }}
+          className="hidden h-full min-h-0 w-[280px] shrink-0 border-r border-border-subtle bg-surface-1 md:flex"
+          headerClassName="pt-4"
         />
-      </div>
 
-      <div className="shrink-0 border-t border-border-subtle bg-surface-0/95 backdrop-blur md:border-t-0 md:bg-transparent md:backdrop-blur-0">
-        <InteractiveRequestBar
-          requests={interactiveRequests}
-          onRespond={(request, response) =>
-            handleInteractiveResponse(request.workspace_id, request.request_id, response)
-          }
-        />
-        <PromptInput
-          value={draft}
-          onValueChange={setDraft}
-          onSubmit={() => void handleSubmit()}
-          onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
-          attachments={attachments}
-          models={selectedWorkspace?.models ?? []}
-          selectedModelId={selectedModel}
-          onModelChange={handleModelChange}
-          reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedModel)}
-          selectedEffort={selectedEffort}
-          onEffortChange={handleEffortChange}
-          collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
-          selectedCollaborationModeId={selectedCollaborationMode}
-          onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
-          showPlanModeToggle={showPlanModeToggle}
-          planModeEnabled={planModeEnabled}
-          onPlanModeChange={(enabled) =>
-            handleCollaborationModeChange(
-              togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
-            )
-          }
-          disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
-          compact
-        />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+            <Conversation
+              threadKey={
+                selectedThreadId
+                  ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
+                  : selectedWorkspaceId
+              }
+              items={items}
+              isThinking={isSubmitting || selectedThread?.status === 'running'}
+            />
+          </div>
+
+          <div className="shrink-0 border-t border-border-subtle bg-surface-0/95 backdrop-blur md:bg-transparent md:backdrop-blur-0">
+            <InteractiveRequestBar
+              requests={interactiveRequests}
+              onRespond={(request, response) =>
+                handleInteractiveResponse(request.workspace_id, request.request_id, response)
+              }
+            />
+            <PromptInput
+              value={draft}
+              onValueChange={setDraft}
+              onSubmit={() => void handleSubmit()}
+              onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
+              attachments={attachments}
+              models={selectedWorkspace?.models ?? []}
+              selectedModelId={selectedModel}
+              onModelChange={handleModelChange}
+              reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedModel)}
+              selectedEffort={selectedEffort}
+              onEffortChange={handleEffortChange}
+              collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
+              selectedCollaborationModeId={selectedCollaborationMode}
+              onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
+              showPlanModeToggle={showPlanModeToggle}
+              planModeEnabled={planModeEnabled}
+              onPlanModeChange={(enabled) =>
+                handleCollaborationModeChange(
+                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
+                )
+              }
+              disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
+              compact
+            />
+          </div>
+        </div>
       </div>
     </div>
   )
