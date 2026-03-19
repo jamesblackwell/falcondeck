@@ -1,10 +1,15 @@
 import { ImagePlus, Map, Send } from 'lucide-react'
 import { memo, useCallback, useRef, type ChangeEvent } from 'react'
 
-import type { CollaborationModeSummary, ImageInput, ModelSummary } from '@falcondeck/client-core'
+import type {
+  AgentProvider,
+  CollaborationModeSummary,
+  ImageInput,
+  ModelSummary,
+} from '@falcondeck/client-core'
 import { Button } from '@falcondeck/ui'
 
-import { ModelSelector, ReasoningSelector } from './model-selector'
+import { ModelSelector, ProviderSelector, ReasoningSelector } from './model-selector'
 
 export type PromptInputProps = {
   value: string
@@ -12,6 +17,9 @@ export type PromptInputProps = {
   onSubmit: () => void
   onPickImages?: (files: FileList | null) => void
   attachments: ImageInput[]
+  selectedProvider: AgentProvider
+  onProviderChange: (value: AgentProvider) => void
+  providerLocked?: boolean
   models: ModelSummary[]
   selectedModelId: string | null
   onModelChange: (value: string) => void
@@ -34,6 +42,9 @@ export const PromptInput = memo(function PromptInput({
   onSubmit,
   onPickImages,
   attachments,
+  selectedProvider,
+  onProviderChange,
+  providerLocked = false,
   models,
   selectedModelId,
   onModelChange,
@@ -114,7 +125,7 @@ export const PromptInput = memo(function PromptInput({
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
-          placeholder={disabled ? 'Add a project to get started...' : 'Ask Codex anything...'}
+          placeholder={disabled ? 'Add a project to get started...' : 'Ask your coding agent anything...'}
           className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[16px] leading-relaxed text-fg-primary placeholder:text-fg-secondary focus:outline-none md:text-[length:var(--fd-text-base)]"
           style={{ minHeight: '52px', maxHeight: '200px' }}
           rows={1}
@@ -131,6 +142,11 @@ export const PromptInput = memo(function PromptInput({
 
           {!compact ? (
             <>
+              <ProviderSelector
+                value={selectedProvider}
+                onValueChange={onProviderChange}
+                disabled={disabled || providerLocked}
+              />
               <ModelSelector value={selectedModelId} models={models} onValueChange={onModelChange} />
               <ReasoningSelector value={selectedEffort} options={reasoningOptions} onValueChange={onEffortChange} />
             </>

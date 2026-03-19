@@ -6,6 +6,7 @@ export type WorkspaceStatus =
   | 'disconnected'
   | 'error'
 
+export type AgentProvider = 'codex' | 'claude'
 export type ThreadStatus = 'idle' | 'running' | 'waiting_for_input' | 'error'
 export type ServiceLevel = 'info' | 'warning' | 'error'
 export type ThreadAttentionLevel = 'none' | 'unread' | 'running' | 'awaiting_response' | 'error'
@@ -37,7 +38,21 @@ export type AccountSummary = {
   label: string
 }
 
-export type ThreadCodexParams = {
+export type AgentCapabilitySummary = {
+  supports_review?: boolean
+}
+
+export type WorkspaceAgentSummary = {
+  provider: AgentProvider
+  account: AccountSummary
+  models: ModelSummary[]
+  collaboration_modes: CollaborationModeSummary[]
+  supports_plan_mode?: boolean
+  supports_native_plan_mode?: boolean
+  capabilities?: AgentCapabilitySummary
+}
+
+export type ThreadAgentParams = {
   model_id: string | null
   reasoning_effort: string | null
   collaboration_mode_id: string | null
@@ -49,6 +64,8 @@ export type WorkspaceSummary = {
   id: string
   path: string
   status: WorkspaceStatus
+  agents: WorkspaceAgentSummary[]
+  default_provider?: AgentProvider
   models: ModelSummary[]
   collaboration_modes: CollaborationModeSummary[]
   supports_plan_mode?: boolean
@@ -84,6 +101,8 @@ export type ThreadSummary = {
   id: string
   workspace_id: string
   title: string
+  provider: AgentProvider
+  native_session_id?: string | null
   status: ThreadStatus
   updated_at: string
   last_message_preview: string | null
@@ -92,7 +111,7 @@ export type ThreadSummary = {
   latest_diff: string | null
   last_tool: string | null
   last_error: string | null
-  codex: ThreadCodexParams
+  agent: ThreadAgentParams
   attention: ThreadAttention
   is_archived: boolean
 }
@@ -271,6 +290,7 @@ export type ThreadHandle = {
 export type UpdateThreadPayload = {
   workspace_id: string
   thread_id: string
+  provider?: AgentProvider | null
   model_id?: string | null
   reasoning_effort?: string | null
   collaboration_mode_id?: string | null

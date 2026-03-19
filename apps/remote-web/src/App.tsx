@@ -19,6 +19,7 @@ import {
   generateBoxKeyPair,
   identityPublicKeyToBase64,
   isPlanModeEnabled,
+  providerForThread,
   publicKeyToBase64,
   reconcileSnapshotSelection,
   restoreBoxKeyPair,
@@ -29,6 +30,9 @@ import {
   upsertConversationItem,
   verifyPairingPublicKeyBundle,
   verifySessionKeyMaterial,
+  workspaceCollaborationModes,
+  workspaceModels,
+  type AgentProvider,
   type ClaimPairingResponse,
   type ConversationItem,
   type DaemonSnapshot,
@@ -105,10 +109,11 @@ function encryptedRpcErrorMessage(payload: unknown) {
 function reasoningOptions(
   snapshot: DaemonSnapshot | null,
   workspaceId: string | null,
+  provider: AgentProvider,
   modelId: string | null,
 ) {
   const workspace = snapshot?.workspaces.find((e) => e.id === workspaceId)
-  const model = workspace?.models.find((e) => e.id === modelId)
+  const model = workspaceModels(workspace, provider).find((e) => e.id === modelId)
   const supported = model?.supported_reasoning_efforts.map((e) => e.reasoning_effort) ?? []
   if (supported.length > 0) return supported
   return model?.default_reasoning_effort ? [model.default_reasoning_effort] : ['medium']
@@ -356,6 +361,7 @@ export default function App() {
   const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
   const [draft, setDraft] = useState('')
   const [attachments, setAttachments] = useState<ImageInput[]>([])
+  const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
@@ -1198,6 +1204,7 @@ export default function App() {
       if (!activeThreadId) {
         const handle = await submitQueuedAction<ThreadHandle>('thread.start', {
           workspace_id: selectedWorkspace.id,
+          provider: selectedProvider,
           model_id: selectedModel,
           collaboration_mode_id: selectedCollaborationMode,
           approval_policy: 'on-request',
@@ -1213,6 +1220,7 @@ export default function App() {
           ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft }] : []),
           ...submittedAttachments,
         ],
+        provider: selectedThread?.provider ?? selectedProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         collaboration_mode_id: selectedCollaborationMode,
@@ -1258,6 +1266,7 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedWorkspace) {
+      setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
       setSelectedCollaborationMode(null)
@@ -1268,32 +1277,37 @@ export default function App() {
     if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
 
+    const nextProvider = providerForThread(selectedThread, selectedWorkspace)
+    setSelectedProvider(nextProvider)
+    const providerModels = workspaceModels(selectedWorkspace, nextProvider)
     const fallbackModelId =
-      selectedWorkspace.models.find((m) => m.is_default)?.id ?? selectedWorkspace.models[0]?.id ?? null
+      providerModels.find((m) => m.is_default)?.id ?? providerModels[0]?.id ?? null
     if (selectedThread) {
-      const nextModelId = selectedThread.codex.model_id ?? fallbackModelId
+      const nextModelId = selectedThread.agent.model_id ?? fallbackModelId
       setSelectedModel(nextModelId)
       setSelectedEffort(
-        selectedThread.codex.reasoning_effort ??
-          reasoningOptions(snapshot, selectedWorkspace.id, nextModelId)[0] ??
+        selectedThread.agent.reasoning_effort ??
+          reasoningOptions(snapshot, selectedWorkspace.id, nextProvider, nextModelId)[0] ??
           'medium',
       )
       setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
       return
     }
     setSelectedModel(fallbackModelId)
-    setSelectedEffort(reasoningOptions(snapshot, selectedWorkspace.id, fallbackModelId)[0] ?? 'medium')
+    setSelectedEffort(
+      reasoningOptions(snapshot, selectedWorkspace.id, nextProvider, fallbackModelId)[0] ?? 'medium',
+    )
     setSelectedCollaborationMode(null)
   }, [selectedThread, selectedWorkspace, snapshot])
 
   useEffect(() => {
     if (!selectedWorkspace) return
-    const options = reasoningOptions(snapshot, selectedWorkspace.id, selectedModel)
+    const options = reasoningOptions(snapshot, selectedWorkspace.id, selectedProvider, selectedModel)
     if (options.length === 0) return
     if (!selectedEffort || !options.includes(selectedEffort)) {
       setSelectedEffort(options[0] ?? 'medium')
     }
-  }, [selectedEffort, selectedModel, selectedWorkspace, snapshot])
+  }, [selectedEffort, selectedModel, selectedProvider, selectedWorkspace, snapshot])
 
   const applyThreadHandle = useCallback((handle: ThreadHandle) => {
     setSnapshot((current) =>
@@ -1332,6 +1346,7 @@ export default function App() {
         const handle = await submitQueuedAction<ThreadHandle>('thread.update', {
           workspace_id: selectedWorkspace.id,
           thread_id: selectedThreadId,
+          provider: selectedThread?.provider ?? selectedProvider,
           model_id: modelId,
           reasoning_effort: effort,
           collaboration_mode_id: collaborationModeId,
@@ -1344,13 +1359,18 @@ export default function App() {
         setError(e instanceof Error ? e.message : 'Remote action failed')
       }
     },
-    [applyThreadHandle, selectedThreadId, selectedWorkspace],
+    [applyThreadHandle, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace],
   )
 
   const handleModelChange = useCallback(
     (modelId: string) => {
       setSelectedModel(modelId)
-      const nextOptions = reasoningOptions(snapshot, selectedWorkspace?.id ?? null, modelId)
+      const nextOptions = reasoningOptions(
+        snapshot,
+        selectedWorkspace?.id ?? null,
+        selectedProvider,
+        modelId,
+      )
       const nextEffort =
         selectedEffort && nextOptions.includes(selectedEffort)
           ? selectedEffort
@@ -1368,6 +1388,7 @@ export default function App() {
       selectedEffort,
       selectedWorkspace?.id,
       snapshot,
+      selectedProvider,
     ],
   )
 
@@ -1395,10 +1416,28 @@ export default function App() {
     [persistThreadSettings, selectedEffort, selectedModel],
   )
 
-  const showPlanModeToggle = useMemo(() => supportsPlanMode(selectedWorkspace), [selectedWorkspace])
+  const handleProviderChange = useCallback(
+    (provider: AgentProvider) => {
+      if (selectedThread) return
+      setSelectedProvider(provider)
+      const models = workspaceModels(selectedWorkspace, provider)
+      const fallbackModelId = models.find((model) => model.is_default)?.id ?? models[0]?.id ?? null
+      setSelectedModel(fallbackModelId)
+      setSelectedEffort(
+        reasoningOptions(snapshot, selectedWorkspace?.id ?? null, provider, fallbackModelId)[0] ?? 'medium',
+      )
+      setSelectedCollaborationMode(null)
+    },
+    [selectedThread, selectedWorkspace, snapshot],
+  )
+
+  const showPlanModeToggle = useMemo(
+    () => supportsPlanMode(selectedWorkspace, selectedProvider),
+    [selectedProvider, selectedWorkspace],
+  )
   const planModeEnabled = useMemo(
-    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace),
-    [selectedCollaborationMode, selectedWorkspace],
+    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, selectedProvider),
+    [selectedCollaborationMode, selectedProvider, selectedWorkspace],
   )
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
     setSelectedWorkspaceId(workspaceId)
@@ -1670,20 +1709,23 @@ export default function App() {
               onSubmit={() => void handleSubmit()}
               onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
               attachments={attachments}
-              models={selectedWorkspace?.models ?? []}
+              selectedProvider={selectedProvider}
+              onProviderChange={handleProviderChange}
+              providerLocked={Boolean(selectedThread)}
+              models={workspaceModels(selectedWorkspace, selectedProvider)}
               selectedModelId={selectedModel}
               onModelChange={handleModelChange}
-              reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedModel)}
+              reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedProvider, selectedModel)}
               selectedEffort={selectedEffort}
               onEffortChange={handleEffortChange}
-              collaborationModes={selectedWorkspace?.collaboration_modes ?? []}
+              collaborationModes={workspaceCollaborationModes(selectedWorkspace, selectedProvider)}
               selectedCollaborationModeId={selectedCollaborationMode}
               onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
               showPlanModeToggle={showPlanModeToggle}
               planModeEnabled={planModeEnabled}
               onPlanModeChange={(enabled) =>
                 handleCollaborationModeChange(
-                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
+                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, selectedProvider),
                 )
               }
               disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}

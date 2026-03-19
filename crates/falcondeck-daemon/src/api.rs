@@ -25,7 +25,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/snapshot", get(snapshot))
         .route("/api/remote/status", get(remote_status))
         .route("/api/remote/pairing", post(start_remote_pairing))
-        .route("/api/remote/devices/{device_id}", delete(revoke_remote_device))
+        .route(
+            "/api/remote/devices/{device_id}",
+            delete(revoke_remote_device),
+        )
         .route("/api/events", get(events))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route(

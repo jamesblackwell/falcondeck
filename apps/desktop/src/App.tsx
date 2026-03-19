@@ -8,8 +8,12 @@ import {
   deriveThreadAttentionPresentation,
   filesToImageInputs,
   isPlanModeEnabled,
+  providerForThread,
   supportsPlanMode,
   togglePlanMode,
+  workspaceCollaborationModes,
+  workspaceModels,
+  type AgentProvider,
   type ConversationItem,
   type ImageInput,
   type InteractiveRequest,
@@ -71,6 +75,7 @@ function AppInner() {
     import.meta.env.VITE_FALCONDECK_RELAY_URL ?? 'https://connect.falcondeck.com',
   )
   const [attachments, setAttachments] = useState<ImageInput[]>([])
+  const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
@@ -113,6 +118,7 @@ function AppInner() {
   // Sync model/effort/mode selections from thread/workspace
   useEffect(() => {
     if (!selectedWorkspace) {
+      setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
       setSelectedCollaborationMode(null)
@@ -123,12 +129,14 @@ function AppInner() {
     if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
 
-    const fallbackModelId = defaultModelId(selectedWorkspace)
+    const nextProvider = providerForThread(selectedThread, selectedWorkspace)
+    setSelectedProvider(nextProvider)
+    const fallbackModelId = defaultModelId(selectedWorkspace, nextProvider)
     if (selectedThread) {
-      const nextModelId = selectedThread.codex.model_id ?? fallbackModelId
+      const nextModelId = selectedThread.agent.model_id ?? fallbackModelId
       setSelectedModel(nextModelId)
       setSelectedEffort(
-        selectedThread.codex.reasoning_effort ??
+        selectedThread.agent.reasoning_effort ??
           defaultReasoningEffort(selectedThread, selectedWorkspace, nextModelId) ??
           'medium',
       )
@@ -279,6 +287,7 @@ function AppInner() {
         const handle = await api.updateThread({
           workspace_id: selectedWorkspace.id,
           thread_id: selectedThreadId,
+          provider: selectedThread?.provider ?? selectedProvider,
           model_id: modelId,
           reasoning_effort: effort,
           collaboration_mode_id: collaborationModeId,
@@ -293,7 +302,7 @@ function AppInner() {
         toast({ variant: 'danger', title: 'Failed to update settings', description: msg })
       }
     },
-    [api, applyThreadHandle, selectedThreadId, selectedWorkspace, toast],
+    [api, applyThreadHandle, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace, toast],
   )
 
   const handleModelChange = useCallback(
@@ -324,6 +333,18 @@ function AppInner() {
       void persistThreadSettings({ modelId: selectedModel, effort: selectedEffort, collaborationModeId: modeId })
     },
     [persistThreadSettings, selectedEffort, selectedModel],
+  )
+
+  const handleProviderChange = useCallback(
+    (provider: AgentProvider) => {
+      if (selectedThread) return
+      setSelectedProvider(provider)
+      const fallbackModelId = defaultModelId(selectedWorkspace, provider)
+      setSelectedModel(fallbackModelId)
+      setSelectedEffort(defaultReasoningEffort(null, selectedWorkspace, fallbackModelId) ?? 'medium')
+      setSelectedCollaborationMode(null)
+    },
+    [selectedThread, selectedWorkspace],
   )
 
   const handleAddProject = useCallback(async () => {
@@ -367,6 +388,7 @@ function AppInner() {
       if (!activeThreadId) {
         const handle = await api.startThread({
           workspace_id: selectedWorkspace.id,
+          provider: selectedProvider,
           model_id: selectedModel,
           collaboration_mode_id: selectedCollaborationMode,
           approval_policy: 'on-request',
@@ -385,6 +407,7 @@ function AppInner() {
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
         inputs,
+        provider: selectedThread?.provider ?? selectedProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         collaboration_mode_id: selectedCollaborationMode,
@@ -560,12 +583,21 @@ function AppInner() {
     () => reasoningOptions(selectedThread, selectedWorkspace, selectedModel),
     [selectedThread, selectedWorkspace, selectedModel],
   )
-  const models = useMemo(() => selectedWorkspace?.models ?? [], [selectedWorkspace?.models])
-  const collaborationModes = useMemo(() => selectedWorkspace?.collaboration_modes ?? [], [selectedWorkspace?.collaboration_modes])
-  const showPlanModeToggle = useMemo(() => supportsPlanMode(selectedWorkspace), [selectedWorkspace])
+  const models = useMemo(
+    () => workspaceModels(selectedWorkspace, selectedProvider),
+    [selectedProvider, selectedWorkspace],
+  )
+  const collaborationModes = useMemo(
+    () => workspaceCollaborationModes(selectedWorkspace, selectedProvider),
+    [selectedProvider, selectedWorkspace],
+  )
+  const showPlanModeToggle = useMemo(
+    () => supportsPlanMode(selectedWorkspace, selectedProvider),
+    [selectedProvider, selectedWorkspace],
+  )
   const planModeEnabled = useMemo(
-    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace),
-    [selectedCollaborationMode, selectedWorkspace],
+    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, selectedProvider),
+    [selectedCollaborationMode, selectedProvider, selectedWorkspace],
   )
   const isDisabled = !selectedWorkspace || isSending
   const workspaces = useMemo(() => snapshot?.workspaces ?? [], [snapshot?.workspaces])
@@ -620,6 +652,7 @@ function AppInner() {
       main={
         isSettingsOpen ? (
           <SettingsView
+            workspace={selectedWorkspace}
             remoteStatus={remoteStatus}
             pairingLink={pairingLink}
             relayUrl={relayUrl}
@@ -662,6 +695,9 @@ function AppInner() {
               onSubmit={handleSubmitCallback}
               onPickImages={handlePickImages}
               attachments={attachments}
+              selectedProvider={selectedProvider}
+              onProviderChange={handleProviderChange}
+              providerLocked={Boolean(selectedThread)}
               models={models}
               selectedModelId={selectedModel}
               onModelChange={handleModelChange}
@@ -675,7 +711,7 @@ function AppInner() {
               planModeEnabled={planModeEnabled}
               onPlanModeChange={(enabled) =>
                 handleCollaborationModeChange(
-                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode),
+                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, selectedProvider),
                 )
               }
               disabled={isDisabled}

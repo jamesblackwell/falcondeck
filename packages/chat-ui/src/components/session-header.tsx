@@ -2,7 +2,7 @@ import { memo } from 'react'
 import * as React from 'react'
 
 import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
-import { StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
+import { Badge, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
 
 function threadStatusDisplay(status: ThreadSummary['status']) {
   switch (status) {
@@ -46,12 +46,21 @@ export const SessionHeader = memo(function SessionHeader({
           />
         ) : null}
         <div className="min-w-0">
-          <p className="truncate text-[length:var(--fd-text-2xs)] uppercase tracking-[0.12em] text-fg-muted">
-            {pathLabel ?? 'No project'}
-          </p>
-          <p className="truncate text-[length:var(--fd-text-md)] font-semibold text-fg-primary">
-            {thread?.title ?? 'Select a thread'}
-          </p>
+          <div className="flex items-center gap-2">
+            <p className="truncate text-[length:var(--fd-text-2xs)] uppercase tracking-[0.12em] text-fg-muted">
+              {pathLabel ?? 'No project'}
+            </p>
+            {thread ? (
+              <Badge variant="default" className="h-5 px-1.5 text-[10px] uppercase tracking-[0.08em]">
+                {thread.provider}
+              </Badge>
+            ) : null}
+          </div>
+          {thread ? (
+            <p className="truncate text-[length:var(--fd-text-md)] font-semibold text-fg-primary">
+              {thread.title}
+            </p>
+          ) : null}
         </div>
       </div>
 

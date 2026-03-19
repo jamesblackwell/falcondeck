@@ -16,6 +16,8 @@ function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
     id: 'workspace-1',
     path: '/Users/james/falcondeck',
     status: 'ready',
+    agents: [],
+    default_provider: 'codex',
     models: [],
     collaboration_modes: [],
     account: { status: 'ready', label: 'ready' },
@@ -34,6 +36,8 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     id: 'thread-1',
     workspace_id: 'workspace-1',
     title: 'Thread',
+    provider: 'codex',
+    native_session_id: null,
     status: 'idle',
     updated_at: '2026-03-17T08:00:00Z',
     last_message_preview: null,
@@ -42,7 +46,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     latest_diff: null,
     last_tool: null,
     last_error: null,
-    codex: {
+    agent: {
       model_id: null,
       reasoning_effort: null,
       collaboration_mode_id: null,
@@ -178,7 +182,7 @@ describe('desktop selection utils', () => {
       ],
     })
     const selectedThread = thread({
-      codex: {
+      agent: {
         model_id: 'gpt-5.3-codex-spark',
         reasoning_effort: null,
         collaboration_mode_id: null,

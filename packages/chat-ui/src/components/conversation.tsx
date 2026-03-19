@@ -202,15 +202,15 @@ export const Conversation = memo(function Conversation({
         className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
         onScroll={handleScroll}
       >
-        <div ref={contentRef} className="mx-auto flex max-w-3xl flex-col gap-3 px-5 py-4">
+        <div ref={contentRef} className="mx-auto flex min-h-full max-w-3xl flex-col gap-3 px-5 py-4">
           {showEmptyState || (renderableItems.length === 0 && isThinking) ? (
-            <div className="flex flex-col gap-3">
+            <div className="flex min-h-full flex-1 flex-col gap-3">
               {showEmptyState
                 ? emptyState ?? (
                     <EmptyState
                       icon={<MessageSquare className="h-6 w-6" />}
                       title="Ready for instructions"
-                      description="Send a prompt to start a conversation with Codex."
+                      description="Send a prompt to start a conversation."
                     />
                   )
                 : null}

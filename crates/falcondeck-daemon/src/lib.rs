@@ -1,5 +1,6 @@
 mod api;
 mod app;
+mod claude;
 mod codex;
 mod error;
 mod git;
@@ -15,6 +16,7 @@ use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 pub struct DaemonConfig {
     pub bind_addr: SocketAddr,
     pub codex_bin: String,
+    pub claude_bin: String,
     pub state_path: Option<PathBuf>,
 }
 
@@ -26,6 +28,7 @@ impl Default for DaemonConfig {
                 falcondeck_core::DEFAULT_DAEMON_PORT,
             ),
             codex_bin: "codex".to_string(),
+            claude_bin: "claude".to_string(),
             state_path: None,
         }
     }
@@ -54,6 +57,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     let state = AppState::new_with_state_path(
         "0.1.0".to_string(),
         config.codex_bin,
+        config.claude_bin,
         config.state_path.unwrap_or_else(|| {
             std::env::var("FALCONDECK_STATE_PATH")
                 .map(PathBuf::from)

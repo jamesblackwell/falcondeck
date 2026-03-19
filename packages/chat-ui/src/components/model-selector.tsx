@@ -1,9 +1,41 @@
-import type { CollaborationModeSummary, ModelSummary } from '@falcondeck/client-core'
+import type { AgentProvider, CollaborationModeSummary, ModelSummary } from '@falcondeck/client-core'
 
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@falcondeck/ui'
+import { Button, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@falcondeck/ui'
 
 function formatModelLabel(label: string): string {
-  return label.replace(/\b(gpt|codex|spark)\b/gi, (match) => match.toUpperCase())
+  return label.replace(/\b(gpt|codex|spark|claude)\b/gi, (match) => match.toUpperCase())
+}
+
+export function ProviderSelector({
+  value,
+  onValueChange,
+  disabled = false,
+}: {
+  value: AgentProvider
+  onValueChange: (value: AgentProvider) => void
+  disabled?: boolean
+}) {
+  return (
+    <div className="inline-flex items-center rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1">
+      {(['codex', 'claude'] as AgentProvider[]).map((provider) => {
+        const active = value === provider
+        return (
+          <Button
+            key={provider}
+            type="button"
+            variant={active ? 'secondary' : 'ghost'}
+            size="sm"
+            disabled={disabled}
+            onClick={() => onValueChange(provider)}
+            className={cn('h-7 px-3 capitalize', !active && 'text-fg-muted')}
+            aria-pressed={active}
+          >
+            {provider}
+          </Button>
+        )
+      })}
+    </div>
+  )
 }
 
 export function ModelSelector({

@@ -1,4 +1,5 @@
 import type {
+  AgentProvider,
   CollaborationModeSummary,
   DaemonSnapshot,
   EventEnvelope,
@@ -27,6 +28,7 @@ export type SendTurnPayload = {
   workspace_id: string
   thread_id: string
   inputs: TurnInputItem[]
+  provider?: AgentProvider | null
   model_id?: string | null
   reasoning_effort?: string | null
   collaboration_mode_id?: string | null
@@ -36,6 +38,7 @@ export type SendTurnPayload = {
 
 export type StartThreadPayload = {
   workspace_id: string
+  provider?: AgentProvider | null
   model_id?: string | null
   collaboration_mode_id?: string | null
   approval_policy?: string | null

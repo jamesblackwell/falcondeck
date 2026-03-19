@@ -40,6 +40,8 @@ pub struct ConnectWorkspaceRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartThreadRequest {
     pub workspace_id: String,
+    #[serde(default)]
+    pub provider: Option<AgentProvider>,
     pub model_id: Option<String>,
     pub collaboration_mode_id: Option<String>,
     pub approval_policy: Option<String>,
@@ -49,6 +51,8 @@ pub struct StartThreadRequest {
 pub struct UpdateThreadRequest {
     pub workspace_id: String,
     pub thread_id: String,
+    #[serde(default)]
+    pub provider: Option<AgentProvider>,
     pub model_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub collaboration_mode_id: Option<String>,
@@ -76,7 +80,7 @@ pub enum TurnInputItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub struct ThreadCodexParams {
+pub struct ThreadAgentParams {
     pub model_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub collaboration_mode_id: Option<String>,
@@ -84,11 +88,21 @@ pub struct ThreadCodexParams {
     pub service_tier: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentProvider {
+    #[default]
+    Codex,
+    Claude,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SendTurnRequest {
     pub workspace_id: String,
     pub thread_id: String,
     pub inputs: Vec<TurnInputItem>,
+    #[serde(default)]
+    pub provider: Option<AgentProvider>,
     pub model_id: Option<String>,
     pub reasoning_effort: Option<String>,
     pub collaboration_mode_id: Option<String>,
@@ -143,17 +157,47 @@ pub struct WorkspaceSummary {
     pub id: String,
     pub path: String,
     pub status: WorkspaceStatus,
+    #[serde(default)]
+    pub agents: Vec<WorkspaceAgentSummary>,
+    #[serde(default)]
+    pub default_provider: AgentProvider,
+    // Legacy aliases kept during the provider-aware migration.
+    #[serde(default)]
     pub models: Vec<ModelSummary>,
+    #[serde(default)]
     pub collaboration_modes: Vec<CollaborationModeSummary>,
     #[serde(default = "default_true")]
     pub supports_plan_mode: bool,
     #[serde(default = "default_true")]
     pub supports_native_plan_mode: bool,
+    #[serde(default)]
     pub account: AccountSummary,
     pub current_thread_id: Option<String>,
     pub connected_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentCapabilitySummary {
+    #[serde(default)]
+    pub supports_review: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentSummary {
+    pub provider: AgentProvider,
+    pub account: AccountSummary,
+    #[serde(default)]
+    pub models: Vec<ModelSummary>,
+    #[serde(default)]
+    pub collaboration_modes: Vec<CollaborationModeSummary>,
+    #[serde(default = "default_true")]
+    pub supports_plan_mode: bool,
+    #[serde(default = "default_true")]
+    pub supports_native_plan_mode: bool,
+    #[serde(default)]
+    pub capabilities: AgentCapabilitySummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,15 +238,16 @@ pub struct CollaborationModeSummary {
     pub is_native: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AccountSummary {
     pub status: AccountStatus,
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountStatus {
+    #[default]
     Unknown,
     Ready,
     NeedsAuth,
@@ -213,6 +258,10 @@ pub struct ThreadSummary {
     pub id: String,
     pub workspace_id: String,
     pub title: String,
+    #[serde(default)]
+    pub provider: AgentProvider,
+    #[serde(default)]
+    pub native_session_id: Option<String>,
     pub status: ThreadStatus,
     pub updated_at: DateTime<Utc>,
     pub last_message_preview: Option<String>,
@@ -221,7 +270,8 @@ pub struct ThreadSummary {
     pub latest_diff: Option<String>,
     pub last_tool: Option<String>,
     pub last_error: Option<String>,
-    pub codex: ThreadCodexParams,
+    #[serde(default, alias = "codex")]
+    pub agent: ThreadAgentParams,
     #[serde(default)]
     pub attention: ThreadAttention,
     #[serde(default)]

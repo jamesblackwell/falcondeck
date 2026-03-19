@@ -30,6 +30,8 @@ function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
     id: 'workspace-1',
     path: '/Users/james/falcondeck',
     status: 'ready',
+    agents: [],
+    default_provider: 'codex',
     models: [],
     collaboration_modes: [],
     account: { status: 'ready', label: 'ready' },
@@ -46,6 +48,8 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     id: 'thread-1',
     workspace_id: 'workspace-1',
     title: 'Main thread',
+    provider: 'codex',
+    native_session_id: null,
     status: 'idle',
     updated_at: '2026-03-15T10:00:00Z',
     last_message_preview: null,
@@ -55,7 +59,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     last_tool: null,
     last_error: null,
     is_archived: false,
-    codex: {
+    agent: {
       model_id: null,
       reasoning_effort: null,
       collaboration_mode_id: null,

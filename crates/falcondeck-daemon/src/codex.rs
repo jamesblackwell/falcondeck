@@ -12,9 +12,9 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    AccountStatus, AccountSummary, CollaborationModeSummary, ConversationItem, ImageInput,
-    ModelSummary, ReasoningEffortSummary, ThreadAttention, ThreadCodexParams, ThreadPlan,
-    ThreadStatus, ThreadSummary,
+    AccountStatus, AccountSummary, AgentProvider, CollaborationModeSummary, ConversationItem,
+    ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams, ThreadAttention,
+    ThreadPlan, ThreadStatus, ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -542,6 +542,8 @@ fn parse_threads(
                         .or(preview.clone())
                         .map(|title| truncate_preview(&title))
                         .unwrap_or_else(|| "Untitled thread".to_string()),
+                    provider: AgentProvider::Codex,
+                    native_session_id: None,
                     status: ThreadStatus::Idle,
                     updated_at: extract_datetime_or_timestamp(
                         entry,
@@ -563,7 +565,7 @@ fn parse_threads(
                     latest_diff: None,
                     last_tool: None,
                     last_error: None,
-                    codex: ThreadCodexParams {
+                    agent: ThreadAgentParams {
                         model_id: extract_string(entry, &["model", "modelId", "model_id"]),
                         reasoning_effort: extract_string(
                             entry,
@@ -885,6 +887,10 @@ fn hydrate_thread_summary(
     value: &Value,
     items: &[ConversationItem],
 ) -> ThreadSummary {
+    if summary.native_session_id.is_none() {
+        summary.native_session_id = Some(summary.id.clone());
+    }
+
     if let Some(last_message) = items.iter().rev().find_map(|item| match item {
         ConversationItem::AssistantMessage { text, .. }
         | ConversationItem::UserMessage { text, .. } => Some(text.clone()),
@@ -1355,23 +1361,23 @@ mod tests {
 
         assert_eq!(threads.len(), 1);
         assert_eq!(
-            threads[0].summary.codex.model_id.as_deref(),
+            threads[0].summary.agent.model_id.as_deref(),
             Some("gpt-5.4")
         );
         assert_eq!(
-            threads[0].summary.codex.reasoning_effort.as_deref(),
+            threads[0].summary.agent.reasoning_effort.as_deref(),
             Some("high")
         );
         assert_eq!(
-            threads[0].summary.codex.collaboration_mode_id.as_deref(),
+            threads[0].summary.agent.collaboration_mode_id.as_deref(),
             Some("plan")
         );
         assert_eq!(
-            threads[0].summary.codex.approval_policy.as_deref(),
+            threads[0].summary.agent.approval_policy.as_deref(),
             Some("on-request")
         );
         assert_eq!(
-            threads[0].summary.codex.service_tier.as_deref(),
+            threads[0].summary.agent.service_tier.as_deref(),
             Some("fast")
         );
         assert_eq!(
@@ -1685,18 +1691,20 @@ mod tests {
                 id: "thread-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
                 title: "Restored".to_string(),
+                provider: AgentProvider::Codex,
+                native_session_id: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,
                 latest_turn_id: None,
                 latest_plan: None,
-                    latest_diff: None,
-                    last_tool: None,
-                    last_error: None,
-                    codex: ThreadCodexParams::default(),
-                    attention: ThreadAttention::default(),
-                    is_archived: false,
-                },
+                latest_diff: None,
+                last_tool: None,
+                last_error: None,
+                agent: ThreadAgentParams::default(),
+                attention: ThreadAttention::default(),
+                is_archived: false,
+            },
             &thread_read,
             &[
                 ConversationItem::Reasoning {
@@ -1739,6 +1747,8 @@ mod tests {
                 id: "thread-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
                 title: "Restored".to_string(),
+                provider: AgentProvider::Codex,
+                native_session_id: None,
                 status: ThreadStatus::Idle,
                 updated_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T09:00:00Z")
                     .unwrap()
@@ -1749,7 +1759,7 @@ mod tests {
                 latest_diff: None,
                 last_tool: None,
                 last_error: None,
-                codex: ThreadCodexParams::default(),
+                agent: ThreadAgentParams::default(),
                 attention: ThreadAttention::default(),
                 is_archived: false,
             },
@@ -1773,6 +1783,8 @@ mod tests {
                 id: "thread-1".to_string(),
                 workspace_id: "workspace-1".to_string(),
                 title: "Restored".to_string(),
+                provider: AgentProvider::Codex,
+                native_session_id: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,
@@ -1781,7 +1793,7 @@ mod tests {
                 latest_diff: None,
                 last_tool: None,
                 last_error: None,
-                codex: ThreadCodexParams::default(),
+                agent: ThreadAgentParams::default(),
                 attention: ThreadAttention::default(),
                 is_archived: false,
             },

@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 
-import type { RemoteStatusResponse, TrustedDevice } from '@falcondeck/client-core'
+import type { RemoteStatusResponse, TrustedDevice, WorkspaceSummary } from '@falcondeck/client-core'
 import {
   Badge,
   Button,
@@ -30,6 +30,7 @@ import {
 type SettingsSectionId = 'general' | 'remote'
 
 type SettingsViewProps = {
+  workspace?: WorkspaceSummary | null
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
   relayUrl: string
@@ -144,7 +145,7 @@ function deviceIcon(label: string | null) {
     : LaptopMinimal
 }
 
-function GeneralSettingsPanel() {
+function GeneralSettingsPanel({ workspace }: { workspace?: WorkspaceSummary | null }) {
   const futureSections = [
     'Appearance and theme controls',
     'Default open behavior for links and files',
@@ -214,6 +215,51 @@ function GeneralSettingsPanel() {
             >
               <Gauge className="h-4 w-4 text-fg-muted" />
               <span className="text-[length:var(--fd-text-sm)] text-fg-secondary">{item}</span>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Agent Status</CardTitle>
+          <CardDescription>
+            Provider-specific readiness for Codex and Claude now lives here so the new composer toggle has real operational context behind it.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2">
+          {(workspace?.agents ?? []).map((agent) => (
+            <div
+              key={agent.provider}
+              className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4"
+            >
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-[length:var(--fd-text-sm)] font-medium capitalize text-fg-primary">
+                  {agent.provider}
+                </p>
+                <Badge
+                  variant={
+                    agent.account.status === 'ready'
+                      ? 'success'
+                      : agent.account.status === 'needs_auth'
+                        ? 'warning'
+                        : 'default'
+                  }
+                  dot
+                >
+                  {agent.account.status === 'ready'
+                    ? 'Ready'
+                    : agent.account.status === 'needs_auth'
+                      ? 'Needs auth'
+                      : 'Unknown'}
+                </Badge>
+              </div>
+              <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                {agent.account.label}
+              </p>
+              <p className="mt-3 text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+                {agent.models.length} model options
+              </p>
             </div>
           ))}
         </CardContent>
@@ -509,7 +555,7 @@ export function SettingsView(props: SettingsViewProps) {
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-10">
         <div className="mx-auto w-full max-w-4xl">
           {activeSection === 'general' ? (
-            <GeneralSettingsPanel />
+            <GeneralSettingsPanel workspace={props.workspace} />
           ) : (
             <RemoteAccessPanel
               remoteStatus={props.remoteStatus}
