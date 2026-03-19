@@ -1556,7 +1556,7 @@ export default function App() {
       <SessionHeader
         workspace={selectedWorkspace}
         thread={selectedThread}
-        className="border-b border-border-subtle pt-3 md:pt-10"
+        className="border-b border-border-subtle pt-0"
         navigation={
           <button
             type="button"
