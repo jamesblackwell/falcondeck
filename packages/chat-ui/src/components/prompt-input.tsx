@@ -20,6 +20,7 @@ export type PromptInputProps = {
   selectedProvider: AgentProvider
   onProviderChange: (value: AgentProvider) => void
   providerLocked?: boolean
+  showProviderSelector?: boolean
   models: ModelSummary[]
   selectedModelId: string | null
   onModelChange: (value: string) => void
@@ -45,6 +46,7 @@ export const PromptInput = memo(function PromptInput({
   selectedProvider,
   onProviderChange,
   providerLocked = false,
+  showProviderSelector = true,
   models,
   selectedModelId,
   onModelChange,
@@ -142,11 +144,13 @@ export const PromptInput = memo(function PromptInput({
 
           {!compact ? (
             <>
-              <ProviderSelector
-                value={selectedProvider}
-                onValueChange={onProviderChange}
-                disabled={disabled || providerLocked}
-              />
+              {showProviderSelector ? (
+                <ProviderSelector
+                  value={selectedProvider}
+                  onValueChange={onProviderChange}
+                  disabled={disabled || providerLocked}
+                />
+              ) : null}
               <ModelSelector value={selectedModelId} models={models} onValueChange={onModelChange} />
               <ReasoningSelector value={selectedEffort} options={reasoningOptions} onValueChange={onEffortChange} />
             </>

@@ -726,6 +726,7 @@ function AppInner() {
                 selectedProvider={selectedProvider}
                 onProviderChange={handleProviderChange}
                 providerLocked={Boolean(selectedThread)}
+                showProviderSelector={!selectedThread}
                 models={models}
                 selectedModelId={selectedModel}
                 onModelChange={handleModelChange}
