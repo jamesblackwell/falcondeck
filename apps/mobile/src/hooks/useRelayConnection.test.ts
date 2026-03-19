@@ -79,16 +79,22 @@ describe('processUpdate routing logic', () => {
     const update: RelayUpdate = {
       id: 'u1',
       seq: 1,
-      body: {
-        t: 'session-bootstrap',
-        material: {
-          encryption_variant: 'data_key_v1',
-          daemon_public_key: 'abc',
-          client_public_key: 'def',
-          client_wrapped_data_key: { encryption_variant: 'data_key_v1', wrapped_key: 'xxx' },
-          daemon_wrapped_data_key: null,
+        body: {
+          t: 'session-bootstrap',
+          material: {
+            encryption_variant: 'data_key_v1',
+            identity_variant: 'ed25519_v1',
+            pairing_id: 'pairing-1',
+            session_id: 'session-1',
+            daemon_public_key: 'abc',
+            daemon_identity_public_key: 'ghi',
+            client_public_key: 'def',
+            client_identity_public_key: 'jkl',
+            client_wrapped_data_key: { encryption_variant: 'data_key_v1', wrapped_key: 'xxx' },
+            daemon_wrapped_data_key: null,
+            signature: 'sig',
+          },
         },
-      },
       created_at: '2026-03-16T10:00:00Z',
     }
     expect(classifyUpdate(update)).toBe('bootstrap')
@@ -135,7 +141,7 @@ describe('processUpdate routing logic', () => {
 })
 
 describe('WebSocket URL construction', () => {
-  function buildWsUrl(relayUrl: string, sessionId: string, clientToken: string): string {
+  function buildWsUrl(relayUrl: string, sessionId: string, ticket: string): string {
     const url = relayUrl.trim().replace(/\/$/, '')
     const wsUrl = url.startsWith('https://')
       ? `wss://${url.slice('https://'.length)}`
@@ -143,32 +149,32 @@ describe('WebSocket URL construction', () => {
         ? `ws://${url.slice('http://'.length)}`
         : url
 
-    return `${wsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&token=${encodeURIComponent(clientToken)}`
+    return `${wsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket)}`
   }
 
   it('converts https to wss', () => {
     const url = buildWsUrl('https://relay.example.com', 's1', 't1')
-    expect(url).toBe('wss://relay.example.com/v1/updates/ws?session_id=s1&token=t1')
+    expect(url).toBe('wss://relay.example.com/v1/updates/ws?session_id=s1&ticket=t1')
   })
 
   it('converts http to ws', () => {
     const url = buildWsUrl('http://localhost:8080', 's1', 't1')
-    expect(url).toBe('ws://localhost:8080/v1/updates/ws?session_id=s1&token=t1')
+    expect(url).toBe('ws://localhost:8080/v1/updates/ws?session_id=s1&ticket=t1')
   })
 
   it('strips trailing slashes', () => {
     const url = buildWsUrl('https://relay.example.com/', 's1', 't1')
-    expect(url).toBe('wss://relay.example.com/v1/updates/ws?session_id=s1&token=t1')
+    expect(url).toBe('wss://relay.example.com/v1/updates/ws?session_id=s1&ticket=t1')
   })
 
-  it('encodes special characters in session ID and token', () => {
-    const url = buildWsUrl('https://relay.test', 'session with spaces', 'token/special=chars')
+  it('encodes special characters in session ID and ticket', () => {
+    const url = buildWsUrl('https://relay.test', 'session with spaces', 'ticket/special=chars')
     expect(url).toContain('session_id=session%20with%20spaces')
-    expect(url).toContain('token=token%2Fspecial%3Dchars')
+    expect(url).toContain('ticket=ticket%2Fspecial%3Dchars')
   })
 
   it('passes through non-http URLs unchanged', () => {
     const url = buildWsUrl('wss://already-ws.test', 's1', 't1')
-    expect(url).toBe('wss://already-ws.test/v1/updates/ws?session_id=s1&token=t1')
+    expect(url).toBe('wss://already-ws.test/v1/updates/ws?session_id=s1&ticket=t1')
   })
 })

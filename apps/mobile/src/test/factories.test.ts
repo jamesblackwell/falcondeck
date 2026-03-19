@@ -36,7 +36,7 @@ describe('test factories', () => {
     expect(t.id).toBe('thread-1')
     expect(t.workspace_id).toBe('workspace-1')
     expect(t.status).toBe('idle')
-    expect(t.codex).toBeDefined()
+    expect(t.agent).toBeDefined()
   })
 
   it('snapshot contains workspace and thread arrays', () => {

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
+import { buildPairingPublicKeyBundle, generateBoxKeyPair } from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
@@ -105,9 +106,20 @@ describe('relay-store', () => {
       globalThis.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({
+          pairing_id: 'pairing-1',
           session_id: 'session-abc',
           device_id: 'device-xyz',
           client_token: 'token-123',
+          trusted_device: {
+            device_id: 'device-xyz',
+            session_id: 'session-abc',
+            label: 'FalconDeck iPhone',
+            status: 'active',
+            created_at: '2026-03-16T10:00:00Z',
+            last_seen_at: '2026-03-16T10:00:00Z',
+            revoked_at: null,
+          },
+          daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
         }),
       })
 
@@ -118,6 +130,42 @@ describe('relay-store', () => {
       expect(state.sessionId).toBe('session-abc')
       expect(state.deviceId).toBe('device-xyz')
       expect(state.isConnected).toBe(true)
+    })
+
+    it('clears stale encrypted state when claiming a fresh pairing', async () => {
+      const { setRelayUrl, setPairingCode, claimPairing, _setSessionCrypto, _getSessionCrypto } =
+        useRelayStore.getState()
+      setRelayUrl('https://relay.test')
+      setPairingCode('GOOD-CODE')
+      _setSessionCrypto({
+        dataKey: new Uint8Array(32),
+        material: null,
+      })
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          pairing_id: 'pairing-1',
+          session_id: 'session-abc',
+          device_id: 'device-xyz',
+          client_token: 'token-123',
+          trusted_device: {
+            device_id: 'device-xyz',
+            session_id: 'session-abc',
+            label: 'FalconDeck iPhone',
+            status: 'active',
+            created_at: '2026-03-16T10:00:00Z',
+            last_seen_at: '2026-03-16T10:00:00Z',
+            revoked_at: null,
+          },
+          daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
+        }),
+      })
+
+      await claimPairing()
+
+      expect(useRelayStore.getState().isEncrypted).toBe(false)
+      expect(_getSessionCrypto()).toBeNull()
     })
   })
 

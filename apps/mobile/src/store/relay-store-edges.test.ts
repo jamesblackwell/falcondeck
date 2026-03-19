@@ -3,7 +3,13 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 
-import { generateBoxKeyPair, secretKeyToBase64, bytesToBase64 } from '@falcondeck/client-core'
+import {
+  REMOTE_SESSION_STORAGE_VERSION,
+  buildPairingPublicKeyBundle,
+  generateBoxKeyPair,
+  secretKeyToBase64,
+  bytesToBase64,
+} from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
@@ -42,10 +48,14 @@ describe('relay-store edge cases', () => {
 
     it('returns false when MMKV has session but SecureStore missing keys', async () => {
       setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
         relayUrl: 'https://relay.test',
         pairingCode: 'CODE-123',
+        pairingId: 'pairing-1',
         sessionId: 'session-1',
         deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
         lastReceivedSeq: 5,
       })
       // SecureStore has no keys
@@ -61,10 +71,14 @@ describe('relay-store edge cases', () => {
       const secretB64 = secretKeyToBase64(kp)
 
       setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
         relayUrl: 'https://relay.test',
         pairingCode: 'CODE-123',
+        pairingId: 'pairing-1',
         sessionId: 'session-1',
         deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
         lastReceivedSeq: 10,
       })
 
@@ -85,10 +99,14 @@ describe('relay-store edge cases', () => {
 
     it('returns false when secret key is corrupt (catch branch)', async () => {
       setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
         relayUrl: 'https://relay.test',
         pairingCode: 'CODE-123',
+        pairingId: 'pairing-1',
         sessionId: 'session-1',
         deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
         lastReceivedSeq: 5,
       })
 
@@ -107,10 +125,14 @@ describe('relay-store edge cases', () => {
       const dataKeyB64 = bytesToBase64(dataKey)
 
       setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
         relayUrl: 'https://relay.test',
         pairingCode: 'CODE-123',
+        pairingId: 'pairing-1',
         sessionId: 'session-1',
         deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
         lastReceivedSeq: 10,
       })
 
@@ -125,18 +147,36 @@ describe('relay-store edge cases', () => {
   })
 
   describe('_persistSession', () => {
-    it('persists current session state to MMKV', () => {
-      useRelayStore.setState({
-        relayUrl: 'https://relay.test',
-        pairingCode: 'ABCD',
-        sessionId: 'session-xyz',
-        deviceId: 'device-123',
+    it('persists current session state to MMKV', async () => {
+      const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
+      useRelayStore.getState().setRelayUrl('https://relay.test')
+      useRelayStore.getState().setPairingCode('ABCD')
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          pairing_id: 'pairing-1',
+          session_id: 'session-xyz',
+          device_id: 'device-123',
+          client_token: 'token-xyz',
+          trusted_device: {
+            device_id: 'device-123',
+            session_id: 'session-xyz',
+            label: 'FalconDeck iPhone',
+            status: 'active',
+            created_at: '2026-03-16T10:00:00Z',
+            last_seen_at: '2026-03-16T10:00:00Z',
+            revoked_at: null,
+          },
+          daemon_bundle: daemonBundle,
+        }),
       })
 
+      await useRelayStore.getState().claimPairing()
       useRelayStore.getState()._persistSession()
 
       const persisted = getJson<any>('relay.session')
       expect(persisted).toBeTruthy()
+      expect(persisted.version).toBe(REMOTE_SESSION_STORAGE_VERSION)
       expect(persisted.sessionId).toBe('session-xyz')
       expect(persisted.pairingCode).toBe('ABCD')
     })
@@ -224,12 +264,24 @@ describe('relay-store edge cases', () => {
       let capturedBody: any = null
       globalThis.fetch = vi.fn().mockImplementation(async (url: string, opts: any) => {
         capturedBody = JSON.parse(opts.body)
+        const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
         return {
           ok: true,
           json: async () => ({
+            pairing_id: 'pairing-1',
             session_id: 'session-1',
             device_id: 'device-1',
             client_token: 'token-1',
+            trusted_device: {
+              device_id: 'device-1',
+              session_id: 'session-1',
+              label: 'FalconDeck iPhone',
+              status: 'active',
+              created_at: '2026-03-16T10:00:00Z',
+              last_seen_at: '2026-03-16T10:00:00Z',
+              revoked_at: null,
+            },
+            daemon_bundle: daemonBundle,
           }),
         }
       })
@@ -240,7 +292,10 @@ describe('relay-store edge cases', () => {
       expect(capturedBody.pairing_code).toBe('TEST-CODE')
       expect(capturedBody.label).toBe('FalconDeck iPhone')
       expect(capturedBody.client_bundle.encryption_variant).toBe('data_key_v1')
+      expect(capturedBody.client_bundle.identity_variant).toBe('ed25519_v1')
+      expect(typeof capturedBody.client_bundle.identity_public_key).toBe('string')
       expect(typeof capturedBody.client_bundle.public_key).toBe('string')
+      expect(typeof capturedBody.client_bundle.signature).toBe('string')
       expect(capturedBody.client_bundle.public_key.length).toBeGreaterThan(0)
     })
 
@@ -252,12 +307,24 @@ describe('relay-store edge cases', () => {
       let capturedUrl: string = ''
       globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
         capturedUrl = url
+        const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
         return {
           ok: true,
           json: async () => ({
+            pairing_id: 'pairing-1',
             session_id: 's1',
             device_id: 'd1',
             client_token: 't1',
+            trusted_device: {
+              device_id: 'd1',
+              session_id: 's1',
+              label: 'FalconDeck iPhone',
+              status: 'active',
+              created_at: '2026-03-16T10:00:00Z',
+              last_seen_at: '2026-03-16T10:00:00Z',
+              revoked_at: null,
+            },
+            daemon_bundle: daemonBundle,
           }),
         }
       })

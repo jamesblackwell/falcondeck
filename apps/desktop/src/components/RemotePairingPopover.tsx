@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   ChevronDown,
+  Copy,
   LoaderCircle,
   Lock,
   Monitor,
@@ -19,35 +20,49 @@ import { Button, CopyButton, StatusIndicator } from '@falcondeck/ui'
 
 function PairingCard({ link, code }: { link: string; code: string }) {
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <p className="text-center text-[length:var(--fd-text-sm)] text-fg-secondary">
-        Scan or open the link to connect
+        Scan the QR code or copy a secure link to connect.
       </p>
 
       <div className="flex justify-center rounded-[var(--fd-radius-lg)] bg-surface-0 p-5">
         <QRCodeSVG value={link} size={160} bgColor="transparent" fgColor="#f0f5f1" />
       </div>
 
-      <div className="flex items-center justify-between rounded-[var(--fd-radius-md)] bg-surface-2 px-3 py-2">
-        <span className="text-[length:var(--fd-text-xs)] text-fg-muted">Pairing code</span>
-        <div className="flex items-center gap-1.5">
-          <span className="font-mono text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
-            {code}
-          </span>
-          <CopyButton text={code} />
-        </div>
-      </div>
-
-      <div className="flex items-center gap-1.5">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <CopyButton
+          text={link}
+          variant="labeled"
+          className="h-9 justify-center rounded-[var(--fd-radius-lg)] bg-accent px-3 text-surface-0 hover:bg-accent-strong hover:text-surface-0"
+        />
         <a
           href={link}
           target="_blank"
           rel="noopener noreferrer"
-          className="min-w-0 flex-1 truncate text-[length:var(--fd-text-2xs)] text-fg-muted transition-colors hover:text-accent"
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-[var(--fd-radius-lg)] bg-surface-3 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-4"
         >
-          {link}
+          <Copy className="h-3.5 w-3.5" />
+          Open link
         </a>
-        <CopyButton text={link} />
+      </div>
+
+      <div className="rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-3 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[length:var(--fd-text-xs)] font-medium text-fg-secondary">
+              Pairing code
+            </p>
+            <p className="mt-0.5 text-[length:var(--fd-text-2xs)] text-fg-muted">
+              Use this only if you need to type the code manually.
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="font-mono text-[length:var(--fd-text-sm)] font-semibold tracking-[0.2em] text-fg-primary">
+              {code}
+            </span>
+            <CopyButton text={code} />
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -96,7 +111,7 @@ export function RemotePairingPopover({
   remoteStatus,
   pairingLink,
   onStartPairing,
-  onRefreshStatus,
+  onRefreshStatus: _onRefreshStatus,
   isStartingRemote,
 }: RemotePairingPopoverProps) {
   const status = remoteStatus?.status
@@ -133,25 +148,16 @@ export function RemotePairingPopover({
           className="z-50 w-[340px] rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-4 shadow-xl animate-in fade-in slide-in-from-top-1"
         >
           <div className="space-y-3">
-            {/* Header */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                 <RadioTower className="h-4 w-4" />
                 Remote Pairing
               </div>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={onRefreshStatus}
-                title="Refresh status"
-                className="h-7 w-7 text-fg-muted hover:text-fg-secondary"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-              </Button>
+              <span className="text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-faint">
+                End-to-end encrypted
+              </span>
             </div>
 
-            {/* ── Inactive / revoked / error → prompt to start ── */}
             {needsFreshPairing && !isPairing ? (
               <>
                 <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
@@ -174,12 +180,10 @@ export function RemotePairingPopover({
               </>
             ) : null}
 
-            {/* ── Active pairing session → show QR code ── */}
             {hasPendingPairing ? (
               <PairingCard link={pairingLink} code={remoteStatus?.pairing?.pairing_code ?? ''} />
             ) : null}
 
-            {/* ── Connected / trusted / connecting → show status ── */}
             {isActive ? (
               <div className="rounded-[var(--fd-radius-md)] bg-surface-2 px-3 py-2.5">
                 {status === 'connecting' ? (
@@ -205,7 +209,6 @@ export function RemotePairingPopover({
               </div>
             ) : null}
 
-            {/* ── Degraded / offline → show retry info ── */}
             {(status === 'degraded' || status === 'offline') ? (
               <div className="flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-warning-muted px-3 py-2.5 text-[length:var(--fd-text-sm)] text-warning">
                 <RefreshCw className="h-3.5 w-3.5" />
@@ -215,7 +218,6 @@ export function RemotePairingPopover({
               </div>
             ) : null}
 
-            {/* ── Pair another device (when already active or pairing) ── */}
             {(isActive || isPairing) ? (
               <button
                 type="button"
@@ -232,7 +234,6 @@ export function RemotePairingPopover({
               </button>
             ) : null}
 
-            {/* ── Error details ── */}
             {remoteStatus?.last_error ? (
               <div className="rounded-[var(--fd-radius-md)] border border-danger/20 bg-danger-muted px-3 py-2.5">
                 <div className="flex items-center gap-2 text-[length:var(--fd-text-xs)] font-medium text-danger">
@@ -242,10 +243,9 @@ export function RemotePairingPopover({
               </div>
             ) : null}
 
-            {/* ── E2E badge ── */}
             <div className="flex items-center gap-1.5 pt-1 text-[length:var(--fd-text-2xs)] text-fg-faint">
               <Lock className="h-3 w-3" />
-              End-to-end encrypted
+              Share pairing links and codes only with your own devices.
             </div>
           </div>
         </Popover.Content>

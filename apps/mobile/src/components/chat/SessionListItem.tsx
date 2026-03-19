@@ -43,6 +43,7 @@ export const SessionListItem = memo(function SessionListItem({
     id: threadId,
     workspace_id: '',
     title,
+    provider: 'codex',
     status: isRunning ? 'running' : 'idle',
     updated_at: updatedAt,
     last_message_preview: null,
@@ -51,7 +52,7 @@ export const SessionListItem = memo(function SessionListItem({
     latest_diff: null,
     last_tool: null,
     last_error: presentationError(attention),
-    codex: {
+    agent: {
       model_id: null,
       reasoning_effort: null,
       collaboration_mode_id: null,

@@ -9,6 +9,7 @@ import {
   filesToImageInputs,
   isPlanModeEnabled,
   providerForThread,
+  selectedSkillsFromText,
   supportsPlanMode,
   togglePlanMode,
   workspaceCollaborationModes,
@@ -111,9 +112,18 @@ function AppInner() {
     [selectedThreadId, snapshot?.interactive_requests],
   )
   const remoteWebUrl = import.meta.env.VITE_FALCONDECK_REMOTE_WEB_URL ?? 'https://app.falcondeck.com'
+  const defaultRelayUrl = 'https://connect.falcondeck.com'
   const pairingLink =
     remoteStatus?.pairing && remoteStatus.relay_url
-      ? `${remoteWebUrl}?relay=${encodeURIComponent(remoteStatus.relay_url)}&code=${encodeURIComponent(remoteStatus.pairing.pairing_code)}`
+      ? (() => {
+          const params = new URLSearchParams({
+            code: remoteStatus.pairing.pairing_code,
+          })
+          if (remoteStatus.relay_url !== defaultRelayUrl) {
+            params.set('relay', remoteStatus.relay_url)
+          }
+          return `${remoteWebUrl}?${params.toString()}`
+        })()
       : null
 
   // Sync model/effort/mode selections from thread/workspace
@@ -383,6 +393,7 @@ function AppInner() {
     if (!api || !selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
     const submittedAttachments = attachments
+    const submittedSkills = selectedSkillsFromText(submittedDraft, selectedWorkspace.skills ?? [])
     setDraft('')
     setAttachments([])
     setIsSending(true)
@@ -410,6 +421,7 @@ function AppInner() {
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
         inputs,
+        selected_skills: submittedSkills,
         provider: selectedThread?.provider ?? selectedProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
@@ -723,6 +735,7 @@ function AppInner() {
                 onPickImages={handlePickImages}
                 onRemoveAttachment={handleRemoveAttachment}
                 attachments={attachments}
+                skills={selectedWorkspace?.skills ?? []}
                 selectedProvider={selectedProvider}
                 onProviderChange={handleProviderChange}
                 providerLocked={Boolean(selectedThread)}

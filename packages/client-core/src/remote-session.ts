@@ -1,4 +1,8 @@
+export const DEFAULT_REMOTE_RELAY_URL = 'https://connect.falcondeck.com'
+export const REMOTE_SESSION_STORAGE_VERSION = 2
+
 export type PersistedRemoteSession = {
+  version: typeof REMOTE_SESSION_STORAGE_VERSION
   relayUrl: string
   pairingCode: string
   pairingId?: string | null
@@ -17,15 +21,20 @@ export function shouldReusePersistedRemoteSession(
   persistedSession: PersistedRemoteSession | null,
 ) {
   if (!persistedSession) return null
+  if (persistedSession.version !== REMOTE_SESSION_STORAGE_VERSION) {
+    return null
+  }
 
   const queryRelayUrl = params.get('relay')
   const queryPairingCode = params.get('code')
+  const effectiveQueryRelayUrl =
+    queryPairingCode && !queryRelayUrl ? DEFAULT_REMOTE_RELAY_URL : queryRelayUrl
 
   if (queryPairingCode && queryPairingCode !== persistedSession.pairingCode) {
     return null
   }
 
-  if (queryRelayUrl && queryRelayUrl !== persistedSession.relayUrl) {
+  if (effectiveQueryRelayUrl && effectiveQueryRelayUrl !== persistedSession.relayUrl) {
     return null
   }
 

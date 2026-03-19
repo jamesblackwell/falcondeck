@@ -14,7 +14,7 @@ use chrono::Utc;
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
     CommandResponse, ConnectWorkspaceRequest, ConversationAutoExpandPreferencesPatch,
-    ConversationItem, DaemonInfo, DaemonSnapshot,
+    ConversationItem, DaemonInfo, DaemonSnapshot, SelectedSkillReference, SkillSummary,
     EncryptedEnvelope, EventEnvelope, FalconDeckPreferences, HealthResponse, InteractiveQuestion,
     InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind,
     InteractiveResponsePayload, PairingPublicKeyBundle, PairingStatusResponse, RelayClientMessage,
@@ -53,6 +53,10 @@ use crate::{
         extract_thread_id, extract_thread_title, parse_account, parse_thread_plan,
     },
     error::DaemonError,
+    skills::{
+        canonical_skill_alias, discover_file_backed_skills, merge_skills, parse_codex_provider_skills,
+        skills_for_provider,
+    },
 };
 
 /// Classifies errors from the remote relay connection so the retry loop can
@@ -131,6 +135,7 @@ struct RemoteBridgeState {
     status: RemoteConnectionStatus,
     relay_url: Option<String>,
     pairing: Option<RemotePairingState>,
+    pending_pairing: Option<RemotePairingState>,
     daemon_token: Option<String>,
     last_error: Option<String>,
     task: Option<JoinHandle<()>>,
@@ -268,6 +273,7 @@ impl AppState {
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,
                     pairing: None,
+                    pending_pairing: None,
                     daemon_token: None,
                     last_error: None,
                     task: None,
@@ -455,6 +461,7 @@ impl AppState {
                     },
                     models: Vec::new(),
                     collaboration_modes: Vec::new(),
+                    skills: Vec::new(),
                     supports_plan_mode: true,
                     supports_native_plan_mode: true,
                     capabilities: AgentCapabilitySummary {
@@ -469,6 +476,7 @@ impl AppState {
                     },
                     models: Vec::new(),
                     collaboration_modes: Vec::new(),
+                    skills: Vec::new(),
                     supports_plan_mode: true,
                     supports_native_plan_mode: true,
                     capabilities: AgentCapabilitySummary {
@@ -476,6 +484,7 @@ impl AppState {
                     },
                 },
             ],
+            skills: Vec::new(),
             default_provider: persisted_workspace
                 .default_provider
                 .clone()
@@ -631,6 +640,7 @@ impl AppState {
         remote.status = RemoteConnectionStatus::Inactive;
         remote.relay_url = None;
         remote.pairing = None;
+        remote.pending_pairing = None;
         remote.daemon_token = None;
         remote.last_error = None;
         remote.command_tx = None;
@@ -674,11 +684,10 @@ impl AppState {
         let existing_remote = {
             let remote = self.inner.remote.lock().await;
             let should_reuse_pending = remote.relay_url.as_deref() == Some(relay_url.as_str())
-                && matches!(remote.status, RemoteConnectionStatus::PairingPending)
-                && remote
-                    .pairing
-                    .as_ref()
-                    .is_some_and(|pairing| pairing.expires_at > Utc::now());
+                && status_pairing(&remote)
+                    .is_some_and(|pairing| pairing.expires_at > Utc::now())
+                && (matches!(remote.status, RemoteConnectionStatus::PairingPending)
+                    || remote.pending_pairing.is_some());
             if should_reuse_pending {
                 return Ok(build_remote_status_response(&remote));
             }
@@ -781,11 +790,16 @@ impl AppState {
                 remote.status = RemoteConnectionStatus::PairingPending;
             }
             remote.relay_url = Some(relay_url.clone());
-            remote.pairing = Some(remote_pairing.clone());
             remote.daemon_token = Some(pairing.daemon_token.clone());
             remote.last_error = None;
 
             if additional_pairing {
+                remote.pending_pairing = Some(RemotePairingState {
+                    device_id: None,
+                    trusted_at: None,
+                    client_bundle: None,
+                    ..remote_pairing.clone()
+                });
                 let app = self.clone();
                 let watch_task = tokio::spawn(async move {
                     app.watch_pairing_claim(relay_url, pairing.daemon_token, pairing.pairing_id)
@@ -793,6 +807,8 @@ impl AppState {
                 });
                 remote.pairing_watch_task = Some(watch_task);
             } else {
+                remote.pending_pairing = None;
+                remote.pairing = Some(remote_pairing.clone());
                 let (command_tx, command_rx) = mpsc::unbounded_channel();
                 let app = self.clone();
                 let task = tokio::spawn(async move {
@@ -1037,6 +1053,19 @@ impl AppState {
             capabilities: claude_capabilities,
             threads: claude_threads,
         } = ClaudeRuntime::connect(path_string.clone(), self.inner.claude_bin.clone()).await?;
+        let file_backed_skills = discover_file_backed_skills(&path_string);
+        let codex_provider_skills = self
+            .load_codex_provider_skills(&codex_session)
+            .await
+            .unwrap_or_default();
+        let merged_skills = merge_skills(
+            file_backed_skills
+                .into_iter()
+                .chain(codex_provider_skills)
+                .collect(),
+        );
+        let codex_skills = skills_for_provider(&merged_skills, AgentProvider::Codex);
+        let claude_skills = skills_for_provider(&merged_skills, AgentProvider::Claude);
 
         let now = Utc::now();
         let mut threads = codex_threads;
@@ -1112,6 +1141,7 @@ impl AppState {
                 account: codex_account.clone(),
                 models: codex_models.clone(),
                 collaboration_modes: codex_collaboration_modes.clone(),
+                skills: codex_skills.clone(),
                 supports_plan_mode: true,
                 supports_native_plan_mode: true,
                 capabilities: AgentCapabilitySummary {
@@ -1123,6 +1153,7 @@ impl AppState {
                 account: claude_account.clone(),
                 models: claude_models.clone(),
                 collaboration_modes: claude_collaboration_modes.clone(),
+                skills: claude_skills.clone(),
                 supports_plan_mode: true,
                 supports_native_plan_mode: true,
                 capabilities: claude_capabilities,
@@ -1145,6 +1176,7 @@ impl AppState {
                 WorkspaceStatus::Ready
             },
             agents,
+            skills: merged_skills,
             default_provider: default_provider.clone(),
             models: codex_models,
             collaboration_modes: codex_collaboration_modes.clone(),
@@ -1420,7 +1452,7 @@ impl AppState {
             .unwrap_or_else(|| "on-request".to_string());
 
         let user_message = build_user_message_item(&inputs);
-        let (thread, requires_resume, use_plan_mode_shim, provider) = {
+        let (thread, requires_resume, use_plan_mode_shim, provider, selected_skills) = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get_mut(&request.workspace_id)
@@ -1486,6 +1518,8 @@ impl AppState {
                 &provider,
                 request.collaboration_mode_id.as_deref(),
             );
+            let selected_skills =
+                resolve_selected_skills(&workspace.summary.skills, &request.selected_skills, &provider);
             managed.summary.updated_at = now;
             workspace.summary.current_thread_id = Some(managed.summary.id.clone());
             workspace.summary.default_provider = provider.clone();
@@ -1495,6 +1529,7 @@ impl AppState {
                 managed.requires_resume,
                 use_plan_mode_shim,
                 provider,
+                selected_skills,
             )
         };
         self.push_conversation_item(
@@ -1531,7 +1566,7 @@ impl AppState {
                         "turn/start",
                         json!({
                             "threadId": request.thread_id,
-                            "input": codex_inputs_with_plan_mode_shim(&inputs, use_plan_mode_shim),
+                            "input": codex_inputs_with_plan_mode_shim(&inputs, &selected_skills, use_plan_mode_shim),
                             "cwd": workspace_path,
                             "model": request.model_id,
                             "effort": request.reasoning_effort,
@@ -1555,7 +1590,7 @@ impl AppState {
                     .spawn_turn(
                         &request.thread_id,
                         session_id.as_deref(),
-                        &claude_prompt_from_inputs(&inputs),
+                        &claude_prompt_from_inputs(&inputs, &selected_skills),
                         thread.agent.model_id.as_deref(),
                         thread.agent.reasoning_effort.as_deref(),
                         is_claude_plan_mode(thread.agent.collaboration_mode_id.as_deref()),
@@ -1841,6 +1876,17 @@ impl AppState {
             .find(|agent| agent.provider == workspace.summary.default_provider)
             .map(|agent| agent.collaboration_modes.clone())
             .unwrap_or_else(|| workspace.summary.collaboration_modes.clone()))
+    }
+
+    async fn load_codex_provider_skills(
+        &self,
+        session: &Arc<CodexSession>,
+    ) -> Result<Vec<SkillSummary>, DaemonError> {
+        let value = session
+            .send_request("skills/list", json!({ "limit": 200 }))
+            .await
+            .unwrap_or(Value::Null);
+        Ok(parse_codex_provider_skills(&value))
     }
 
     pub async fn thread_detail(
@@ -2191,7 +2237,7 @@ impl AppState {
                 falcondeck_core::PairingStatus::Pending => {
                     {
                         let mut remote = self.inner.remote.lock().await;
-                        if let Some(current_pairing) = remote.pairing.as_mut() {
+                        if let Some(current_pairing) = remote.pending_pairing.as_mut() {
                             if current_pairing.pairing_id == pairing_id {
                                 current_pairing.session_id = response.session_id.clone();
                                 current_pairing.client_bundle = response.client_bundle.clone();
@@ -2209,13 +2255,14 @@ impl AppState {
                         {
                             false
                         } else {
-                            if let Some(current_pairing) = remote.pairing.as_ref() {
+                            if let Some(current_pairing) = remote.pending_pairing.as_ref() {
                                 if current_pairing.pairing_id == pairing_id {
                                     remote.last_error = Some(
                                         "remote pairing expired before it was claimed".to_string(),
                                     );
                                 }
                             }
+                            remote.pending_pairing = None;
                             remote.pairing_watch_task = None;
                             true
                         }
@@ -2264,12 +2311,12 @@ impl AppState {
                                 || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
                             {
                                 None
-                            } else if remote.pairing.as_ref().is_none_or(|current_pairing| {
+                            } else if remote.pending_pairing.as_ref().is_none_or(|current_pairing| {
                                 current_pairing.pairing_id != pairing_id
                             }) {
                                 None
                             } else {
-                                let Some(current_pairing) = remote.pairing.as_mut() else {
+                                let Some(current_pairing) = remote.pending_pairing.as_mut() else {
                                     return;
                                 };
                                 current_pairing.session_id = Some(session_id);
@@ -2280,6 +2327,7 @@ impl AppState {
                                 }
                                 let pairing_snapshot = current_pairing.clone();
                                 remote.last_error = None;
+                                remote.pending_pairing = None;
                                 remote.pairing_watch_task = None;
                                 remote.command_tx.clone().map(|command_tx| {
                                     (
@@ -2685,7 +2733,7 @@ impl AppState {
         remote.relay_url.as_deref() == Some(relay_url)
             && remote.daemon_token.as_deref() == Some(daemon_token)
             && remote
-                .pairing
+                .pending_pairing
                 .as_ref()
                 .is_some_and(|pairing| pairing.pairing_id == pairing_id)
     }
@@ -2702,7 +2750,7 @@ impl AppState {
             if remote.relay_url.as_deref() != Some(relay_url)
                 || remote.daemon_token.as_deref() != Some(daemon_token)
                 || !remote
-                    .pairing
+                    .pending_pairing
                     .as_ref()
                     .is_some_and(|pairing| pairing.pairing_id == pairing_id)
             {
@@ -2818,6 +2866,12 @@ impl AppState {
                     thread_id: required(&["threadId", "thread_id"])?,
                     inputs: params
                         .get("inputs")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .unwrap_or_default(),
+                    selected_skills: params
+                        .get("selectedSkills")
+                        .or_else(|| params.get("selected_skills"))
                         .cloned()
                         .and_then(|value| serde_json::from_value(value).ok())
                         .unwrap_or_default(),
@@ -3018,6 +3072,12 @@ impl AppState {
                         workspace_id,
                         thread_id,
                         inputs,
+                        selected_skills: params
+                            .get("selectedSkills")
+                            .or_else(|| params.get("selected_skills"))
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                            .unwrap_or_default(),
                         provider: extract_string(&params, &["provider"])
                             .and_then(parse_agent_provider),
                         model_id: extract_string(&params, &["modelId", "model_id"]),
@@ -3202,6 +3262,7 @@ impl AppState {
             current.relay_url = Some(relay_url.clone());
             current.daemon_token = Some(daemon_token.clone());
             current.pairing = Some(pairing.clone());
+            current.pending_pairing = None;
             current.last_error = None;
 
             let (command_tx, command_rx) = mpsc::unbounded_channel();
@@ -4237,6 +4298,7 @@ impl AppState {
         let assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
         let mut assistant_text = String::new();
         let mut turn_error: Option<String> = None;
+        let mut saw_agent_output = false;
         let stderr_task = stderr.map(|stderr| {
             let app = self.clone();
             let workspace_id = workspace_id.clone();
@@ -4270,6 +4332,7 @@ impl AppState {
                     Ok(value) => {
                         if let Some(delta) = extract_claude_text_delta(&value) {
                             assistant_text = merge_claude_assistant_text(&assistant_text, &delta);
+                            saw_agent_output = true;
                             let item = ConversationItem::AssistantMessage {
                                 id: assistant_id.clone(),
                                 text: assistant_text.clone(),
@@ -4281,6 +4344,7 @@ impl AppState {
                         } else if let Some((tool_id, title, status, output)) =
                             extract_claude_tool_event(&value)
                         {
+                            saw_agent_output = true;
                             let completed_at = if status == "running" {
                                 None
                             } else {
@@ -4343,6 +4407,14 @@ impl AppState {
                         Some(code) => format!("Claude turn failed with exit code {code}"),
                         None => "Claude turn failed".to_string(),
                     });
+                }
+                Ok(Some(status))
+                    if status.success() && !saw_agent_output && turn_error.is_none() =>
+                {
+                    turn_error = Some(
+                        "Claude turn completed without emitting any assistant output"
+                            .to_string(),
+                    );
                 }
                 Ok(_) | Err(_) => {}
             }
@@ -4594,11 +4666,15 @@ fn build_remote_status_response(remote: &RemoteBridgeState) -> RemoteStatusRespo
     RemoteStatusResponse {
         status: remote.status.clone(),
         relay_url: remote.relay_url.clone(),
-        pairing: remote.pairing.as_ref().map(|pairing| pairing.to_response()),
+        pairing: status_pairing(remote).map(|pairing| pairing.to_response()),
         trusted_devices,
         presence,
         last_error: remote.last_error.clone(),
     }
+}
+
+fn status_pairing(remote: &RemoteBridgeState) -> Option<&RemotePairingState> {
+    remote.pending_pairing.as_ref().or(remote.pairing.as_ref())
 }
 
 fn current_pairing_for_remote_attempt(
@@ -4636,14 +4712,116 @@ fn conversation_item_identity(item: &ConversationItem) -> &str {
     }
 }
 
-fn codex_inputs(inputs: &[TurnInputItem]) -> Vec<Value> {
+#[derive(Debug, Clone)]
+struct ResolvedSelectedSkill {
+    alias: String,
+    summary: SkillSummary,
+}
+
+fn resolve_selected_skills(
+    available_skills: &[SkillSummary],
+    selected_skills: &[SelectedSkillReference],
+    provider: &AgentProvider,
+) -> Vec<ResolvedSelectedSkill> {
+    selected_skills
+        .iter()
+        .filter_map(|selection| {
+            available_skills
+                .iter()
+                .find(|skill| {
+                    skill.id == selection.skill_id
+                        || skill.alias.eq_ignore_ascii_case(&selection.alias)
+                        || canonical_skill_alias(&skill.alias)
+                            == canonical_skill_alias(&selection.alias)
+                })
+                .filter(|skill| {
+                    matches!(
+                        (provider, &skill.availability),
+                        (AgentProvider::Codex, falcondeck_core::SkillAvailability::Codex)
+                            | (AgentProvider::Codex, falcondeck_core::SkillAvailability::Both)
+                            | (AgentProvider::Claude, falcondeck_core::SkillAvailability::Claude)
+                            | (AgentProvider::Claude, falcondeck_core::SkillAvailability::Both)
+                    )
+                })
+                .cloned()
+                .map(|summary| ResolvedSelectedSkill {
+                    alias: selection.alias.clone(),
+                    summary,
+                })
+        })
+        .collect()
+}
+
+fn codex_inputs(inputs: &[TurnInputItem], selected_skills: &[ResolvedSelectedSkill]) -> Vec<Value> {
+    let fallback_text_skill_names = selected_skills
+        .iter()
+        .filter_map(|skill| {
+            skill.summary
+                .provider_translations
+                .codex
+                .as_ref()
+                .and_then(|translation| {
+                    if translation.native_id.is_some() {
+                        None
+                    } else {
+                        translation.native_name.clone()
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut structured_skill_inputs = selected_skills
+        .iter()
+        .filter_map(|skill| {
+            skill.summary
+                .provider_translations
+                .codex
+                .as_ref()
+                .and_then(|translation| translation.native_id.clone())
+                .map(|native_id| {
+                    let name = skill
+                        .summary
+                        .provider_translations
+                        .codex
+                        .as_ref()
+                        .and_then(|translation| translation.native_name.clone())
+                        .unwrap_or_else(|| native_id.clone());
+                    json!({
+                        "type": "skill",
+                        "id": native_id,
+                        "name": name,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut translated_inputs = Vec::new();
+
+    if !structured_skill_inputs.is_empty() {
+        translated_inputs.append(&mut structured_skill_inputs);
+    }
+
     inputs
         .iter()
         .map(|item| match item {
-            TurnInputItem::Text { text, .. } => json!({
-                "type": "text",
-                "text": text,
-            }),
+            TurnInputItem::Text { text, .. } => {
+                let translated = replace_selected_skill_aliases(text, selected_skills, |skill| {
+                    skill.summary
+                        .provider_translations
+                        .codex
+                        .as_ref()
+                        .and_then(|translation| {
+                            if translation.native_id.is_some() {
+                                None
+                            } else {
+                                translation.native_name.clone()
+                            }
+                        })
+                        .map(|name| format!("${name}"))
+                });
+                json!({
+                    "type": "text",
+                    "text": translated,
+                })
+            }
             TurnInputItem::Image(image) => {
                 if let Some(local_path) = image
                     .local_path
@@ -4670,14 +4848,34 @@ fn codex_inputs(inputs: &[TurnInputItem]) -> Vec<Value> {
                 }
             }
         })
-        .collect()
+        .for_each(|item| translated_inputs.push(item));
+
+    if translated_inputs
+        .iter()
+        .all(|entry| entry.get("type").and_then(Value::as_str) != Some("text"))
+        && !fallback_text_skill_names.is_empty()
+    {
+        translated_inputs.push(json!({
+            "type": "text",
+            "text": fallback_text_skill_names
+                .into_iter()
+                .map(|name| format!("${name}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }));
+    }
+
+    translated_inputs
 }
 
-fn claude_prompt_from_inputs(inputs: &[TurnInputItem]) -> String {
+fn claude_prompt_from_inputs(
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> String {
     inputs
         .iter()
         .map(|input| match input {
-            TurnInputItem::Text { text, .. } => text.clone(),
+            TurnInputItem::Text { text, .. } => translate_claude_text_input(text, selected_skills),
             TurnInputItem::Image(image) => image
                 .local_path
                 .as_ref()
@@ -4686,6 +4884,82 @@ fn claude_prompt_from_inputs(inputs: &[TurnInputItem]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSkill]) -> String {
+    let mut translated = replace_selected_skill_aliases(text, selected_skills, |skill| {
+        skill.summary
+            .provider_translations
+            .claude
+            .as_ref()
+            .and_then(|translation| translation.command_name.clone())
+            .map(|name| format!("/{name}"))
+    });
+
+    let prompt_preambles = selected_skills
+        .iter()
+        .filter_map(|skill| {
+            skill.summary
+                .provider_translations
+                .claude
+                .as_ref()
+                .and_then(|translation| {
+                    if translation.command_name.is_some() {
+                        None
+                    } else {
+                        translation.prompt_reference_path.as_ref().map(|path| {
+                            format!(
+                                "Use the FalconDeck skill defined at {path}. Follow it as the governing skill for this request."
+                            )
+                        })
+                    }
+                })
+        })
+        .collect::<Vec<_>>();
+
+    if translated.trim().is_empty() && !selected_skills.is_empty() {
+        translated = selected_skills
+            .iter()
+            .filter_map(|skill| {
+                skill.summary
+                    .provider_translations
+                    .claude
+                    .as_ref()
+                    .and_then(|translation| translation.command_name.clone())
+                    .map(|name| format!("/{name}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+
+    if prompt_preambles.is_empty() {
+        translated
+    } else if translated.trim().is_empty() {
+        prompt_preambles.join("\n\n")
+    } else {
+        format!("{}\n\n{translated}", prompt_preambles.join("\n\n"))
+    }
+}
+
+fn replace_selected_skill_aliases<F>(
+    text: &str,
+    selected_skills: &[ResolvedSelectedSkill],
+    replacement_for_skill: F,
+) -> String
+where
+    F: Fn(&ResolvedSelectedSkill) -> Option<String>,
+{
+    let mut translated = text.to_string();
+    for skill in selected_skills {
+        let alias = canonical_skill_alias(&skill.alias);
+        let Some(replacement) = replacement_for_skill(skill) else {
+            continue;
+        };
+        if translated.contains(&alias) {
+            translated = translated.replacen(&alias, &replacement, 1);
+        }
+    }
+    translated
 }
 
 fn is_claude_plan_mode(mode_id: Option<&str>) -> bool {
@@ -4880,17 +5154,18 @@ fn parse_agent_provider(value: String) -> Option<AgentProvider> {
 
 fn codex_inputs_with_plan_mode_shim(
     inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
     use_plan_mode_shim: bool,
 ) -> Vec<Value> {
     if !use_plan_mode_shim {
-        return codex_inputs(inputs);
+        return codex_inputs(inputs, selected_skills);
     }
 
     let mut shimmed_inputs = vec![json!({
         "type": "text",
         "text": plan_mode_prompt_shim(),
     })];
-    shimmed_inputs.extend(codex_inputs(inputs));
+    shimmed_inputs.extend(codex_inputs(inputs, selected_skills));
     shimmed_inputs
 }
 
@@ -5804,6 +6079,7 @@ mod tests {
                 id: None,
                 text: "Inspect the repo".to_string(),
             }],
+            &[],
             true,
         );
         assert_eq!(payload.len(), 2);
@@ -5838,12 +6114,14 @@ mod tests {
                     reasoning_effort: Some("medium".to_string()),
                     is_native: false,
                 }],
+                skills: Vec::new(),
                 supports_plan_mode: true,
                 supports_native_plan_mode: false,
                 capabilities: falcondeck_core::AgentCapabilitySummary {
                     supports_review: true,
                 },
             }],
+            skills: Vec::new(),
             default_provider: AgentProvider::Codex,
             models: Vec::new(),
             collaboration_modes: vec![CollaborationModeSummary {
@@ -5886,7 +6164,7 @@ mod tests {
             mime_type: Some("image/png".to_string()),
             url: "ignored".to_string(),
             local_path: Some("/tmp/diagram.png".to_string()),
-        })]);
+        })], &[]);
         assert_eq!(
             payload,
             vec![json!({
@@ -6160,6 +6438,7 @@ mod tests {
             status: falcondeck_core::RemoteConnectionStatus::Connected,
             relay_url: Some("https://connect.falcondeck.com".to_string()),
             pairing: Some(updated_pairing.clone()),
+            pending_pairing: None,
             daemon_token: Some("daemon-token".to_string()),
             last_error: None,
             task: None,
@@ -6186,6 +6465,54 @@ mod tests {
                 .as_ref()
                 .map(|bundle| bundle.public_key.as_str())
         );
+    }
+
+    #[test]
+    fn reconnect_attempt_ignores_pending_additional_pairing_state() {
+        let active_pairing = super::RemotePairingState {
+            pairing_id: "pairing-active".to_string(),
+            pairing_code: "ACTIVECODE12".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: Some("device-1".to_string()),
+            trusted_at: Some(Utc::now()),
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let pending_pairing = super::RemotePairingState {
+            pairing_id: "pairing-pending".to_string(),
+            pairing_code: "PENDINGCODE1".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: None,
+            trusted_at: None,
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: None,
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let remote = super::RemoteBridgeState {
+            status: falcondeck_core::RemoteConnectionStatus::Connected,
+            relay_url: Some("https://connect.falcondeck.com".to_string()),
+            pairing: Some(active_pairing.clone()),
+            pending_pairing: Some(pending_pairing),
+            daemon_token: Some("daemon-token".to_string()),
+            last_error: None,
+            task: None,
+            pairing_watch_task: None,
+            command_tx: None,
+        };
+
+        let pairing = super::current_pairing_for_remote_attempt(
+            &remote,
+            "https://connect.falcondeck.com",
+            "daemon-token",
+        )
+        .expect("current pairing for reconnect");
+
+        assert_eq!(pairing.pairing_id, active_pairing.pairing_id);
+        assert_eq!(pairing.device_id, active_pairing.device_id);
+        assert!(pairing.client_bundle.is_some());
     }
 
     #[tokio::test]
@@ -6420,6 +6747,7 @@ mod tests {
             path: workspace_a.to_string_lossy().to_string(),
             status: WorkspaceStatus::Ready,
             agents: Vec::new(),
+            skills: Vec::new(),
             default_provider: AgentProvider::Codex,
             models: Vec::new(),
             collaboration_modes: Vec::new(),
@@ -6521,6 +6849,7 @@ mod tests {
             path: workspace_path.to_string_lossy().to_string(),
             status: WorkspaceStatus::Busy,
             agents: Vec::new(),
+            skills: Vec::new(),
             default_provider: AgentProvider::Codex,
             models: Vec::new(),
             collaboration_modes: Vec::new(),
@@ -6702,6 +7031,7 @@ mod tests {
             remote.relay_url = Some("https://connect.falcondeck.com".to_string());
             remote.daemon_token = Some("daemon-token".to_string());
             remote.pairing = Some(pairing);
+            remote.pending_pairing = None;
         }
 
         app.persist_local_state().await.unwrap();

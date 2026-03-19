@@ -471,21 +471,22 @@ impl AppState {
                     (pairing.pairing_code == pairing_code).then_some(pairing_id.clone())
                 })
                 .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
-            let session_id = {
+            let (session_id, claimed_device_id, stored_client_bundle, daemon_bundle, pairing_snapshot) = {
                 let pairing = store
                     .data
                     .pairings
                     .get(&pairing_id)
-                    .expect("pairing exists");
-                if pairing.device_id.is_some() {
-                    return Err(RelayError::Conflict(
-                        "pairing has already been claimed".to_string(),
-                    ));
-                }
+                    .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
                 if pairing.expires_at <= now {
                     return Err(RelayError::Conflict("pairing has expired".to_string()));
                 }
-                pairing.session_id.clone()
+                (
+                    pairing.session_id.clone(),
+                    pairing.device_id.clone(),
+                    pairing.client_bundle.clone(),
+                    pairing.daemon_bundle.clone(),
+                    pairing.clone(),
+                )
             };
 
             let session = store
@@ -493,6 +494,61 @@ impl AppState {
                 .sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+            if let Some(claimed_device_id) = claimed_device_id {
+                let matches_claimed_device = stored_client_bundle
+                    .as_ref()
+                    .zip(claimed_public_key.as_ref())
+                    .is_some_and(|(bundle, public_key)| &bundle.public_key == public_key)
+                    || session.devices.get(&claimed_device_id).is_some_and(|device| {
+                        device.revoked_at.is_none()
+                            && device.public_key.as_ref() == claimed_public_key.as_ref()
+                    });
+                if !matches_claimed_device {
+                    return Err(RelayError::Conflict(
+                        "pairing has already been claimed".to_string(),
+                    ));
+                }
+
+                let client_token = {
+                    let existing = session
+                        .devices
+                        .get_mut(&claimed_device_id)
+                        .ok_or_else(|| {
+                            RelayError::NotFound("existing trusted device not found".to_string())
+                        })?;
+                    existing.label = request.label.clone();
+                    existing.last_seen_at = Some(now);
+                    if existing.public_key.is_none() {
+                        existing.public_key = claimed_public_key.clone();
+                    }
+                    existing.client_token.clone()
+                };
+                session.updated_at = now;
+                session.clear_legacy_device_fields();
+
+                let trusted_device = session
+                    .trusted_devices()
+                    .into_iter()
+                    .find(|device| device.device_id == claimed_device_id)
+                    .ok_or_else(|| {
+                        RelayError::Conflict("trusted device was not created".to_string())
+                    })?;
+                let session_snapshot = session.clone();
+
+                (
+                    ClaimPairingResponse {
+                        pairing_id: pairing_id.clone(),
+                        session_id,
+                        device_id: claimed_device_id.clone(),
+                        client_token,
+                        trusted_device,
+                        daemon_bundle,
+                    },
+                    session_snapshot,
+                    pairing_snapshot,
+                    claimed_device_id,
+                )
+            } else {
             let existing_device_id = claimed_public_key.as_ref().and_then(|public_key| {
                 session.devices.iter().find_map(|(device_id, device)| {
                     (device.revoked_at.is_none() && device.public_key.as_ref() == Some(public_key))
@@ -503,7 +559,9 @@ impl AppState {
                 let existing = session
                     .devices
                     .get_mut(&existing_device_id)
-                    .expect("existing trusted device");
+                    .ok_or_else(|| {
+                        RelayError::NotFound("existing trusted device not found".to_string())
+                    })?;
                 existing.label = request.label.clone();
                 existing.last_seen_at = Some(now);
                 if existing.public_key.is_none() {
@@ -538,29 +596,30 @@ impl AppState {
                     RelayError::Conflict("trusted device was not created".to_string())
                 })?;
             let session_snapshot = session.clone();
-            let pairing = store
-                .data
-                .pairings
-                .get_mut(&pairing_id)
-                .expect("pairing exists");
-            pairing.client_bundle = request.client_bundle.clone();
-            pairing.device_id = Some(device_id.clone());
-            let daemon_bundle = pairing.daemon_bundle.clone();
-            let pairing_snapshot = pairing.clone();
+                let pairing = store
+                    .data
+                    .pairings
+                    .get_mut(&pairing_id)
+                    .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
+                pairing.client_bundle = request.client_bundle.clone();
+                pairing.device_id = Some(device_id.clone());
+                let daemon_bundle = pairing.daemon_bundle.clone();
+                let pairing_snapshot = pairing.clone();
 
-            (
-                ClaimPairingResponse {
-                    pairing_id: pairing_id.clone(),
-                    session_id,
-                    device_id: device_id.clone(),
-                    client_token,
-                    trusted_device,
-                    daemon_bundle,
-                },
-                session_snapshot,
-                pairing_snapshot,
-                device_id,
-            )
+                (
+                    ClaimPairingResponse {
+                        pairing_id: pairing_id.clone(),
+                        session_id,
+                        device_id: device_id.clone(),
+                        client_token,
+                        trusted_device,
+                        daemon_bundle,
+                    },
+                    session_snapshot,
+                    pairing_snapshot,
+                    device_id,
+                )
+            }
         };
 
         self.persist_pairing_state(
@@ -2281,7 +2340,7 @@ async fn upsert_postgres_action(
 async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError> {
     client
         .batch_execute(
-            r#"
+            r"
             CREATE TABLE IF NOT EXISTS relay_sessions (
                 session_id TEXT PRIMARY KEY,
                 pairing_id TEXT NOT NULL,
@@ -2350,7 +2409,7 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 ON relay_actions(session_id, created_at);
             CREATE INDEX IF NOT EXISTS relay_devices_session_idx
                 ON relay_devices(session_id, created_at);
-            "#,
+            ",
         )
         .await
         .map_err(|error| RelayError::StateLoad(error.to_string()))?;
@@ -2505,13 +2564,13 @@ async fn persist_postgres_state(
         .map_err(|error| RelayError::StatePersist(error.to_string()))?;
 
     tx.batch_execute(
-        r#"
+        r"
         DELETE FROM relay_pairings;
         DELETE FROM relay_actions;
         DELETE FROM relay_updates;
         DELETE FROM relay_devices;
         DELETE FROM relay_sessions;
-        "#,
+        ",
     )
     .await
     .map_err(|error| RelayError::StatePersist(error.to_string()))?;

@@ -229,6 +229,55 @@ async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
 }
 
 #[tokio::test]
+async fn reclaiming_the_same_pairing_code_with_the_same_client_key_is_idempotent() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let client_bundle = test_bundle();
+
+    let pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    let first_claim = post_json::<_, ClaimPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings/claim", server.http_base),
+        &ClaimPairingRequest {
+            pairing_code: pairing.pairing_code.clone(),
+            label: Some("Safari on iPhone".to_string()),
+            client_bundle: Some(client_bundle.clone()),
+        },
+        None,
+    )
+    .await;
+
+    let second_claim = post_json::<_, ClaimPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings/claim", server.http_base),
+        &ClaimPairingRequest {
+            pairing_code: pairing.pairing_code.clone(),
+            label: Some("Safari on iPhone".to_string()),
+            client_bundle: Some(client_bundle),
+        },
+        None,
+    )
+    .await;
+
+    assert_eq!(second_claim.session_id, first_claim.session_id);
+    assert_eq!(second_claim.device_id, first_claim.device_id);
+    assert_eq!(second_claim.client_token, first_claim.client_token);
+}
+
+#[tokio::test]
 async fn query_tokens_are_rejected_and_ws_tickets_are_required() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
@@ -384,9 +433,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
     let sync = recv_server_message(&mut client_ws).await;
     match sync {
         RelayServerMessage::Sync {
-            updates,
-            next_seq,
-            ..
+            updates, next_seq, ..
         } => {
             assert!(next_seq >= 2);
             let encrypted_updates = updates

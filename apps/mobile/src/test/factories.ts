@@ -18,6 +18,8 @@ export function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceS
     id: 'workspace-1',
     path: '/Users/james/falcondeck',
     status: 'ready',
+    agents: [],
+    default_provider: 'codex',
     models: [],
     collaboration_modes: [],
     account: { status: 'ready', label: 'ready' },
@@ -34,6 +36,7 @@ export function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     id: 'thread-1',
     workspace_id: 'workspace-1',
     title: 'Test thread',
+    provider: 'codex',
     status: 'idle',
     updated_at: '2026-03-16T10:00:00Z',
     last_message_preview: null,
@@ -42,7 +45,7 @@ export function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     latest_diff: null,
     last_tool: null,
     last_error: null,
-    codex: {
+    agent: {
       model_id: null,
       reasoning_effort: null,
       collaboration_mode_id: null,

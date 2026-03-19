@@ -383,7 +383,17 @@ function RemoteAccessPanel({
   onStartPairing,
   onRefreshRemoteStatus,
   onRevokeDevice,
-}: Omit<SettingsViewProps, 'onClose'>) {
+}: Pick<
+  SettingsViewProps,
+  | 'remoteStatus'
+  | 'pairingLink'
+  | 'relayUrl'
+  | 'isStartingRemote'
+  | 'revokingDeviceId'
+  | 'onStartPairing'
+  | 'onRefreshRemoteStatus'
+  | 'onRevokeDevice'
+>) {
   const devices = remoteStatus?.trusted_devices ?? []
   const hasActivePairing = Boolean(remoteStatus?.pairing)
   const isRemovingDevice = revokingDeviceId !== null

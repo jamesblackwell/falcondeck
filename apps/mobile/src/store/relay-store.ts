@@ -12,21 +12,29 @@ import * as Device from 'expo-device'
 import { create } from 'zustand'
 
 import {
+  buildPairingPublicKeyBundle,
   generateBoxKeyPair,
   restoreBoxKeyPair,
   publicKeyToBase64,
+  identityPublicKeyToBase64,
+  deriveIdentityKeyPair,
   secretKeyToBase64,
   bootstrapSessionCrypto,
   encryptJson,
   decryptJson,
   bytesToBase64,
   base64ToBytes,
+  verifyPairingPublicKeyBundle,
+  verifySessionKeyMaterial,
+  REMOTE_SESSION_STORAGE_VERSION,
+  type ClaimPairingResponse,
   type BoxKeyPair,
   type SessionCryptoState,
   type EncryptedEnvelope,
   type MachinePresence,
   type RelayClientMessage,
   type RelayServerMessage,
+  type RelayWebSocketTicketResponse,
   type RelayUpdate,
 } from '@falcondeck/client-core'
 
@@ -52,10 +60,14 @@ type ConnectionStatus =
   | 'disconnected'
 
 interface PersistedRelay {
+  version: typeof REMOTE_SESSION_STORAGE_VERSION
   relayUrl: string
   pairingCode: string
+  pairingId: string
   sessionId: string
   deviceId: string
+  daemonPublicKey: string
+  daemonIdentityPublicKey: string
   lastReceivedSeq: number
 }
 
@@ -105,6 +117,9 @@ let _sessionCrypto: SessionCryptoState | null = null
 let _clientKeyPair: BoxKeyPair | null = null
 let _clientToken: string | null = null
 let _lastReceivedSeq = 0
+let _pairingId: string | null = null
+let _trustedDaemonPublicKey: string | null = null
+let _trustedDaemonIdentityPublicKey: string | null = null
 
 // ── Store ──────────────────────────────────────────────────────────
 
@@ -129,19 +144,16 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     set({ connectionStatus: 'claiming', error: null })
 
     const keyPair = generateBoxKeyPair()
-    _clientKeyPair = keyPair
 
     try {
+      const clientBundle = buildPairingPublicKeyBundle(keyPair)
       const response = await fetch(`${relayUrl.replace(/\/$/, '')}/v1/pairings/claim`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
           pairing_code: pairingCode.trim(),
           label: Device.deviceName ?? `FalconDeck ${Platform.OS === 'ios' ? 'iPhone' : 'Android'}`,
-          client_bundle: {
-            encryption_variant: 'data_key_v1',
-            public_key: publicKeyToBase64(keyPair),
-          },
+          client_bundle: clientBundle,
         }),
       })
 
@@ -155,27 +167,39 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         return
       }
 
-      const claim = (await response.json()) as {
-        session_id: string
-        device_id: string
-        client_token: string
+      const claim = (await response.json()) as ClaimPairingResponse
+      if (!claim.daemon_bundle) {
+        throw new Error('Relay claim response is missing daemon key material')
       }
-
-      _clientToken = claim.client_token
-      _lastReceivedSeq = 0
+      verifyPairingPublicKeyBundle(claim.daemon_bundle)
 
       // Persist to secure storage
+      await clearSecureSession()
       await Promise.all([
         persistClientSecretKey(secretKeyToBase64(keyPair)),
         persistClientToken(claim.client_token),
       ])
 
+      _socket?.close()
+      _socket = null
+      _sessionCrypto = null
+      _clientKeyPair = keyPair
+      _clientToken = claim.client_token
+      _lastReceivedSeq = 0
+      _pairingId = claim.pairing_id
+      _trustedDaemonPublicKey = claim.daemon_bundle.public_key
+      _trustedDaemonIdentityPublicKey = claim.daemon_bundle.identity_public_key
+
       // Persist non-secret session data to MMKV
       setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
         relayUrl: relayUrl.trim(),
         pairingCode: pairingCode.trim(),
+        pairingId: claim.pairing_id,
         sessionId: claim.session_id,
         deviceId: claim.device_id,
+        daemonPublicKey: claim.daemon_bundle.public_key,
+        daemonIdentityPublicKey: claim.daemon_bundle.identity_public_key,
         lastReceivedSeq: 0,
       } satisfies PersistedRelay)
 
@@ -184,10 +208,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         deviceId: claim.device_id,
         connectionStatus: 'connecting',
         isConnected: true,
+        isEncrypted: false,
+        machinePresence: null,
         error: null,
       })
     } catch (e) {
-      _clientKeyPair = null
       set({
         connectionStatus: 'not_connected',
         error: e instanceof Error ? e.message : 'Failed to claim pairing',
@@ -198,6 +223,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   restoreSession: async () => {
     const persisted = getJson<PersistedRelay>('relay.session')
     if (!persisted) return false
+    if (persisted.version !== REMOTE_SESSION_STORAGE_VERSION) {
+      removeKey('relay.session')
+      await clearSecureSession()
+      return false
+    }
 
     const [secretKey, dataKey, clientToken] = await Promise.all([
       loadClientSecretKey(),
@@ -206,6 +236,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     ])
 
     if (!secretKey || !clientToken) {
+      _pairingId = null
+      _trustedDaemonPublicKey = null
+      _trustedDaemonIdentityPublicKey = null
       removeKey('relay.session')
       await clearSecureSession()
       return false
@@ -214,7 +247,10 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     try {
       _clientKeyPair = restoreBoxKeyPair(secretKey)
       _clientToken = clientToken
-      _lastReceivedSeq = persisted.lastReceivedSeq
+      _lastReceivedSeq = persisted.lastReceivedSeq ?? 0
+      _pairingId = persisted.pairingId
+      _trustedDaemonPublicKey = persisted.daemonPublicKey
+      _trustedDaemonIdentityPublicKey = persisted.daemonIdentityPublicKey
 
       if (dataKey) {
         _sessionCrypto = { dataKey: base64ToBytes(dataKey), material: null }
@@ -232,6 +268,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
       return true
     } catch {
+      _pairingId = null
+      _trustedDaemonPublicKey = null
+      _trustedDaemonIdentityPublicKey = null
       removeKey('relay.session')
       await clearSecureSession()
       return false
@@ -245,6 +284,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     _clientKeyPair = null
     _clientToken = null
     _lastReceivedSeq = 0
+    _pairingId = null
+    _trustedDaemonPublicKey = null
+    _trustedDaemonIdentityPublicKey = null
 
     removeKey('relay.session')
     await clearSecureSession()
@@ -283,12 +325,21 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
   _persistSession: () => {
     const { relayUrl, pairingCode, sessionId, deviceId } = get()
-    if (!sessionId) return
+    if (
+      !sessionId ||
+      !_pairingId ||
+      !_trustedDaemonPublicKey ||
+      !_trustedDaemonIdentityPublicKey
+    ) return
     setJson('relay.session', {
+      version: REMOTE_SESSION_STORAGE_VERSION,
       relayUrl,
       pairingCode,
+      pairingId: _pairingId,
       sessionId,
       deviceId: deviceId ?? '',
+      daemonPublicKey: _trustedDaemonPublicKey,
+      daemonIdentityPublicKey: _trustedDaemonIdentityPublicKey,
       lastReceivedSeq: _lastReceivedSeq,
     } satisfies PersistedRelay)
     if (_sessionCrypto) {
@@ -322,9 +373,19 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       return
     }
     /* v8 ignore start — requires module-level _clientKeyPair from claimPairing, tested via E2E */
-    if (update.body.material.client_public_key !== publicKeyToBase64(kp)) return
+    const expectedClientPublicKey = publicKeyToBase64(kp)
+    const expectedClientIdentityPublicKey = identityPublicKeyToBase64(deriveIdentityKeyPair(kp))
+    if (update.body.material.client_public_key !== expectedClientPublicKey) return
 
     try {
+      verifySessionKeyMaterial(update.body.material, {
+        expectedSessionId: get().sessionId,
+        expectedPairingId: _pairingId,
+        expectedDaemonPublicKey: _trustedDaemonPublicKey,
+        expectedDaemonIdentityPublicKey: _trustedDaemonIdentityPublicKey,
+        expectedClientPublicKey,
+        expectedClientIdentityPublicKey,
+      })
       _sessionCrypto = bootstrapSessionCrypto(kp, update.body.material)
       set({ isEncrypted: true, connectionStatus: 'encrypted' })
       get()._persistSession()

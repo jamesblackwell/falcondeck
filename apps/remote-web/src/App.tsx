@@ -11,6 +11,7 @@ import {
   countAwaitingResponseThreads,
   conversationItemsForSelection,
   defaultCollaborationModeId,
+  DEFAULT_REMOTE_RELAY_URL,
   decryptJson,
   deriveThreadAttentionPresentation,
   deriveIdentityKeyPair,
@@ -29,8 +30,10 @@ import {
   publicKeyToBase64,
   reconcileSnapshotSelection,
   restoreBoxKeyPair,
+  selectedSkillsFromText,
   secretKeyToBase64,
   shouldReusePersistedRemoteSession,
+  REMOTE_SESSION_STORAGE_VERSION,
   supportsPlanMode,
   togglePlanMode,
   upsertConversationItem,
@@ -67,7 +70,7 @@ import {
   SessionHeader,
   WorkspaceSidebar,
 } from '@falcondeck/chat-ui'
-import { Badge, Button, Input } from '@falcondeck/ui'
+import { Badge, Button, Input, Panel, PanelContent, PanelHeader } from '@falcondeck/ui'
 
 import { LoaderCircle, Lock, PanelLeft, Settings, Smartphone, X } from 'lucide-react'
 
@@ -257,20 +260,33 @@ function markInteractiveRequestResolved(items: ConversationItem[], requestId: st
 const STORAGE_KEY = 'falcondeck.remote.session.v1'
 const PENDING_ACTIONS_KEY = 'falcondeck.remote.pending-actions.v1'
 const CLIENT_KEYPAIR_STORAGE_KEY = 'falcondeck.remote.client-keypair.v1'
+const DEFAULT_RELAY_URL = DEFAULT_REMOTE_RELAY_URL
 
 function loadPersistedRemoteSession(): PersistedRemoteSession | null {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
-    return JSON.parse(raw) as PersistedRemoteSession
+    const parsed = JSON.parse(raw) as PersistedRemoteSession
+    if (parsed.version !== REMOTE_SESSION_STORAGE_VERSION) {
+      window.localStorage.removeItem(STORAGE_KEY)
+      return null
+    }
+    return parsed
   } catch {
+    window.localStorage.removeItem(STORAGE_KEY)
     return null
   }
 }
 
 function persistRemoteSession(value: PersistedRemoteSession | null) {
   if (value) {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value))
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({
+        ...value,
+        version: REMOTE_SESSION_STORAGE_VERSION,
+      } satisfies PersistedRemoteSession),
+    )
   } else {
     window.localStorage.removeItem(STORAGE_KEY)
   }
@@ -343,6 +359,132 @@ function waitForPollInterval(ms: number, signal?: AbortSignal) {
   })
 }
 
+function relayHostLabel(relayUrl: string) {
+  try {
+    return new URL(relayUrl).host
+  } catch {
+    return relayUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+  }
+}
+
+function maskIdentifier(value: string | null | undefined) {
+  if (!value) return 'Unavailable'
+  if (value.length <= 18) return value
+  return `${value.slice(0, 8)}...${value.slice(-6)}`
+}
+
+function isClaimedPairingError(message: string | null) {
+  return !!message && /pairing has already been claimed/i.test(message)
+}
+
+function isInvalidSavedSessionError(message: string | null) {
+  return !!message && /invalid session token|session not found|trusted device/i.test(message)
+}
+
+type ConnectionHelpState = {
+  tone: 'warning' | 'danger'
+  title: string
+  description: string
+  steps: string[]
+}
+
+function deriveConnectionHelpState({
+  connectionStatus,
+  desktopOnline,
+  error,
+  hasSessionKey,
+  isConnected,
+}: {
+  connectionStatus: string
+  desktopOnline: boolean
+  error: string | null
+  hasSessionKey: boolean
+  isConnected: boolean
+}): ConnectionHelpState | null {
+  if (isClaimedPairingError(error)) {
+    return {
+      tone: 'warning',
+      title: 'This pairing code has already been used',
+      description:
+        'That usually means this browser already claimed the code before, or another device finished the pairing first.',
+      steps: [
+        'If this is the same browser you paired earlier, reset the saved browser connection and reopen the pairing link.',
+        'If this is a different device, generate a fresh pairing code from FalconDeck on desktop.',
+        'Avoid sharing screenshots of this screen while the pairing code is active.',
+      ],
+    }
+  }
+
+  if (isInvalidSavedSessionError(error)) {
+    return {
+      tone: 'warning',
+      title: 'Saved browser pairing is no longer valid',
+      description:
+        'FalconDeck still has old local browser state, but the relay or desktop no longer accepts that trusted session.',
+      steps: [
+        'Reset the saved browser connection below.',
+        'Open a fresh pairing link or scan a new QR code from desktop.',
+        'If the desktop still shows this browser as trusted, remove it there before pairing again.',
+      ],
+    }
+  }
+
+  if (isConnected && connectionStatus.startsWith('connected') && !desktopOnline) {
+    return {
+      tone: 'warning',
+      title: 'Browser connected, desktop retrying',
+      description:
+        'Your browser is attached to the relay, but the desktop daemon is not currently online for this remote session.',
+      steps: [
+        'Keep FalconDeck open on your desktop and give it a few seconds to reconnect.',
+        'If it stays stuck, generate a fresh pairing code from desktop.',
+        'If this browser looks stale, reset the saved browser connection and pair again.',
+      ],
+    }
+  }
+
+  if (connectionStatus.includes('claimed') && !hasSessionKey) {
+    return {
+      tone: 'warning',
+      title: 'Waiting for encrypted session setup',
+      description:
+        'The browser has claimed the pairing code and is now waiting for the desktop to complete the secure handshake.',
+      steps: [
+        'Keep FalconDeck open on the desktop that created this pairing code.',
+        'If setup does not finish, create a fresh pairing code and try again.',
+      ],
+    }
+  }
+
+  if (connectionStatus === 'disconnected') {
+    return {
+      tone: 'danger',
+      title: 'Relay connection dropped',
+      description:
+        'The browser lost its live connection to the relay, so FalconDeck cannot receive updates from the desktop right now.',
+      steps: [
+        'Check that this browser can still reach the internet and the relay.',
+        'Leave the page open for a moment while FalconDeck retries.',
+        'If reconnect keeps failing, reset the saved browser connection and pair again.',
+      ],
+    }
+  }
+
+  if (error) {
+    return {
+      tone: 'danger',
+      title: 'Remote connection needs attention',
+      description: error,
+      steps: [
+        'Review the local debug details below before pairing again.',
+        'If this looks like stale browser state, reset the saved browser connection.',
+      ],
+    }
+  }
+
+  return null
+}
+
 // ── App ──────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -382,6 +524,7 @@ export default function App() {
   const notifiedAttentionRef = useRef(new Map<string, string>())
   const reconnectTimerRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
+  const suppressReconnectRef = useRef(false)
   const [connectionGeneration, setConnectionGeneration] = useState(0)
 
   const requestCounter = useRef(1)
@@ -406,7 +549,33 @@ export default function App() {
   const relayConnected = connectionStatus.startsWith('connected')
   const hasSessionKey = !!sessionCryptoRef.current
   const isEncrypted = relayConnected && hasSessionKey
+  const desktopOnline = machinePresence?.daemon_connected ?? false
   const selectedThreadItems = selectedThreadId ? threadItems[selectedThreadId] ?? [] : []
+  const connectionHelp = useMemo(
+    () =>
+      deriveConnectionHelpState({
+        connectionStatus,
+        desktopOnline,
+        error,
+        hasSessionKey,
+        isConnected,
+      }),
+    [connectionStatus, desktopOnline, error, hasSessionKey, isConnected],
+  )
+  const connectionDebugRows = useMemo(
+    () => [
+      ['Relay', relayHostLabel(relayUrl.trim() || DEFAULT_RELAY_URL)],
+      ['Pairing code', pairingCode.trim() ? 'present in browser' : 'not set'],
+      ['Session', isConnected ? 'claimed' : 'not claimed'],
+      ['Desktop', desktopOnline ? 'online' : 'offline or retrying'],
+      ['Encryption', hasSessionKey ? 'ready' : 'waiting'],
+      ['Connection', connectionStatus],
+      ['Session ID', maskIdentifier(sessionId)],
+      ['Device ID', maskIdentifier(deviceId)],
+      ['Last seq', String(lastReceivedSeqRef.current)],
+    ] as const,
+    [connectionStatus, desktopOnline, deviceId, hasSessionKey, isConnected, pairingCode, relayUrl, sessionId],
+  )
 
   const abortPendingActionPolls = useCallback(() => {
     for (const controller of pendingActionPollsRef.current) {
@@ -415,10 +584,58 @@ export default function App() {
     pendingActionPollsRef.current.clear()
   }, [])
 
+  const resetSavedRemoteConnection = useCallback(() => {
+    suppressReconnectRef.current = true
+    abortPendingActionPolls()
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current)
+      reconnectTimerRef.current = null
+    }
+    if (sessionPersistTimerRef.current !== null) {
+      window.clearTimeout(sessionPersistTimerRef.current)
+      sessionPersistTimerRef.current = null
+    }
+    if (relayFlushFrameRef.current !== null) {
+      window.cancelAnimationFrame(relayFlushFrameRef.current)
+      relayFlushFrameRef.current = null
+    }
+    for (const pending of pendingRpc.current.values()) {
+      window.clearTimeout(pending.timeout)
+      pending.reject(new Error('Remote connection was reset'))
+    }
+    pendingRpc.current.clear()
+    socketRef.current?.close()
+    socketRef.current = null
+    sessionCryptoRef.current = null
+    clientKeyPairRef.current = null
+    trustedDaemonPublicKeyRef.current = null
+    trustedDaemonIdentityPublicKeyRef.current = null
+    pendingEncryptedUpdatesRef.current = []
+    pendingSessionPersistRef.current = null
+    pendingRelayUpdatesRef.current = []
+    lastReceivedSeqRef.current = 0
+    persistRemoteSession(null)
+    clearPendingActionIds()
+    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
+    setPairingId(null)
+    setSessionId(null)
+    setDeviceId(null)
+    setClientToken(null)
+    setConnectionStatus('not connected')
+    setMachinePresence(null)
+    setSnapshot(null)
+    setThreadItems({})
+    setThreadDetail(null)
+    setSelectedWorkspaceId(null)
+    setSelectedThreadId(null)
+    setError(null)
+  }, [abortPendingActionPolls])
+
   const persistCurrentSession = useCallback(
     (overrides?: Partial<PersistedRemoteSession>) => {
       if (!sessionId || !clientToken || !deviceId || !clientKeyPairRef.current) return
       persistRemoteSession({
+        version: REMOTE_SESSION_STORAGE_VERSION,
         relayUrl: relayUrl.trim(),
         pairingCode: pairingCode.trim(),
         pairingId,
@@ -517,6 +734,12 @@ export default function App() {
       clientKeyPairRef.current = loadOrCreateClientKeyPair()
     }
   }, [])
+
+  useEffect(() => {
+    if (sessionId && clientToken) {
+      suppressReconnectRef.current = false
+    }
+  }, [clientToken, sessionId])
 
   useEffect(() => {
     if (!sessionId || !clientToken || !isEncrypted) return
@@ -671,6 +894,7 @@ export default function App() {
 
     const scheduleReconnect = () => {
       if (!isCurrent) return
+      if (suppressReconnectRef.current) return
       setConnectionStatus('disconnected')
       setMachinePresence(null)
       for (const [reqId, pending] of pendingRpc.current.entries()) {
@@ -1031,9 +1255,9 @@ export default function App() {
   // ── Actions ────────────────────────────────────────────────────────
 
   async function handleClaimPairing() {
+    suppressReconnectRef.current = false
     abortPendingActionPolls()
-    const keyPair = loadOrCreateClientKeyPair()
-    clientKeyPairRef.current = keyPair
+    const keyPair = clientKeyPairRef.current ?? generateBoxKeyPair()
     const response = await fetch(`${relayUrl.replace(/\/$/, '')}/v1/pairings/claim`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -1059,6 +1283,15 @@ export default function App() {
       setError(e instanceof Error ? e.message : 'Relay claim response has an invalid daemon signature')
       return
     }
+    clientKeyPairRef.current = keyPair
+    window.localStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(keyPair))
+    sessionCryptoRef.current = null
+    pendingEncryptedUpdatesRef.current = []
+    pendingRelayUpdatesRef.current = []
+    if (relayFlushFrameRef.current !== null) {
+      window.cancelAnimationFrame(relayFlushFrameRef.current)
+      relayFlushFrameRef.current = null
+    }
     trustedDaemonPublicKeyRef.current = claim.daemon_bundle.public_key
     trustedDaemonIdentityPublicKeyRef.current = claim.daemon_bundle.identity_public_key
     clearPendingActionIds()
@@ -1074,6 +1307,7 @@ export default function App() {
     setConnectionStatus('claimed, awaiting encrypted session')
     setError(null)
     persistRemoteSession({
+      version: REMOTE_SESSION_STORAGE_VERSION,
       relayUrl: relayUrl.trim(),
       pairingCode: pairingCode.trim(),
       pairingId: claim.pairing_id,
@@ -1218,6 +1452,7 @@ export default function App() {
     if (!selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
     const submittedAttachments = attachments
+    const submittedSkills = selectedSkillsFromText(submittedDraft, selectedWorkspace.skills ?? [])
     setDraft('')
     setAttachments([])
     setIsSubmitting(true)
@@ -1244,6 +1479,7 @@ export default function App() {
           ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft }] : []),
           ...submittedAttachments,
         ],
+        selected_skills: submittedSkills,
         provider: selectedThread?.provider ?? selectedProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
@@ -1632,7 +1868,7 @@ export default function App() {
   if (!isConnected) {
     return (
       <div className="flex h-[100dvh] flex-col items-center justify-center bg-surface-0 p-6">
-        <div className="w-full max-w-sm space-y-6">
+        <div className="w-full max-w-md space-y-6">
           <div className="text-center">
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-surface-2">
               <Smartphone className="h-7 w-7 text-fg-tertiary" />
@@ -1665,14 +1901,62 @@ export default function App() {
             </Button>
           </div>
 
+          {connectionHelp ? (
+            <div
+              className={`rounded-[var(--fd-radius-xl)] border px-4 py-4 ${
+                connectionHelp.tone === 'danger'
+                  ? 'border-danger/25 bg-danger-muted/70'
+                  : 'border-warning/25 bg-warning-muted/70'
+              }`}
+            >
+              <div className="space-y-2">
+                <div>
+                  <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
+                    {connectionHelp.title}
+                  </p>
+                  <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
+                    {connectionHelp.description}
+                  </p>
+                </div>
+
+                <div className="space-y-1.5 text-[length:var(--fd-text-xs)] text-fg-secondary">
+                  {connectionHelp.steps.map((step) => (
+                    <p key={step}>{step}</p>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <Button type="button" variant="outline" size="sm" onClick={resetSavedRemoteConnection}>
+                    Reset saved browser connection
+                  </Button>
+                </div>
+              </div>
+
+              <Panel collapsible defaultOpen={false} className="mt-4 border-0">
+                <PanelHeader collapsible className="px-0 pb-2 pt-0 text-[length:var(--fd-text-xs)]">
+                  Local debug details
+                </PanelHeader>
+                <PanelContent collapsible className="px-0 pb-0">
+                  <div className="space-y-2 rounded-[var(--fd-radius-lg)] bg-surface-1 px-3 py-3 text-[length:var(--fd-text-xs)]">
+                    {connectionDebugRows.map(([label, value]) => (
+                      <div key={label} className="flex items-center justify-between gap-3">
+                        <span className="text-fg-muted">{label}</span>
+                        <span className="text-right font-mono text-fg-secondary">{value}</span>
+                      </div>
+                    ))}
+                    <p className="pt-1 text-fg-faint">
+                      Local-only diagnostics. Do not share active pairing codes or tokens in screenshots.
+                    </p>
+                  </div>
+                </PanelContent>
+              </Panel>
+            </div>
+          ) : null}
+
           <div className="flex items-center justify-center gap-2 text-[length:var(--fd-text-xs)] text-fg-muted">
             <Lock className="h-3 w-3" />
             End-to-end encrypted
           </div>
-
-          {error ? (
-            <p className="text-center text-[length:var(--fd-text-sm)] text-danger">{error}</p>
-          ) : null}
         </div>
       </div>
     )
@@ -1680,7 +1964,6 @@ export default function App() {
 
   // ── Connected session ──────────────────────────────────────────────
 
-  const desktopOnline = machinePresence?.daemon_connected ?? false
   const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline)
   const preferences = normalizePreferences(snapshot?.preferences)
   const toolDetailOptions = [
@@ -1734,6 +2017,55 @@ export default function App() {
           </Badge>
         </div>
       </SessionHeader>
+
+      {connectionHelp ? (
+        <div className="border-b border-border-subtle bg-surface-1 px-4 py-3 md:px-5">
+          <div
+            className={`mx-auto w-full rounded-[var(--fd-radius-xl)] border px-4 py-4 ${
+              connectionHelp.tone === 'danger'
+                ? 'border-danger/25 bg-danger-muted/60'
+                : 'border-warning/25 bg-warning-muted/60'
+            }`}
+          >
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div className="space-y-1.5">
+                <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
+                  {connectionHelp.title}
+                </p>
+                <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+                  {connectionHelp.description}
+                </p>
+                <div className="space-y-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
+                  {connectionHelp.steps.map((step) => (
+                    <p key={step}>{step}</p>
+                  ))}
+                </div>
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={resetSavedRemoteConnection}>
+                  Reset saved browser connection
+                </Button>
+              </div>
+            </div>
+
+            <Panel collapsible defaultOpen={false} className="mt-4 border-0">
+              <PanelHeader collapsible className="px-0 pb-2 pt-0 text-[length:var(--fd-text-xs)]">
+                Connection debug details
+              </PanelHeader>
+              <PanelContent collapsible className="px-0 pb-0">
+                <div className="grid gap-2 rounded-[var(--fd-radius-lg)] bg-surface-0/60 px-3 py-3 text-[length:var(--fd-text-xs)] md:grid-cols-2">
+                  {connectionDebugRows.map(([label, value]) => (
+                    <div key={label} className="flex items-center justify-between gap-3">
+                      <span className="text-fg-muted">{label}</span>
+                      <span className="text-right font-mono text-fg-secondary">{value}</span>
+                    </div>
+                  ))}
+                </div>
+              </PanelContent>
+            </Panel>
+          </div>
+        </div>
+      ) : null}
 
       {showPreferences ? (
         <div className="fixed inset-0 z-50 bg-surface-0/80 backdrop-blur-sm">
@@ -1904,6 +2236,7 @@ export default function App() {
               onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
               onRemoveAttachment={handleRemoveAttachment}
               attachments={attachments}
+              skills={selectedWorkspace?.skills ?? []}
               selectedProvider={selectedProvider}
               onProviderChange={handleProviderChange}
               providerLocked={Boolean(selectedThread)}

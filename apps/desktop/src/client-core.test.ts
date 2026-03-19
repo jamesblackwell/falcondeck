@@ -12,13 +12,18 @@ import {
   encryptJson,
   generateBoxKeyPair,
   identityPublicKeyToBase64,
+  normalizePreferences,
   projectLabel,
   publicKeyToBase64,
   reconcileSnapshotSelection,
+  REMOTE_SESSION_STORAGE_VERSION,
+  selectedSkillsFromText,
+  activeSlashQuery,
   shouldReusePersistedRemoteSession,
   upsertConversationItem,
   type ConversationItem,
   type EventEnvelope,
+  type PersistedRemoteSession,
   type SessionKeyMaterial,
   type ThreadDetail,
   type ThreadSummary,
@@ -113,6 +118,44 @@ describe('client-core grouping', () => {
   it('extracts a friendly project label from a path', () => {
     expect(projectLabel('/Users/james/work/falcondeck')).toBe('falcondeck')
     expect(projectLabel('falcondeck')).toBe('falcondeck')
+  })
+})
+
+describe('client-core skills helpers', () => {
+  it('parses selected skills from slash aliases without treating paths as skills', () => {
+    const skills = [
+      {
+        id: 'skill:search-web',
+        label: 'Search Web',
+        alias: '/search-web',
+        availability: 'both' as const,
+        source_kind: 'project_file' as const,
+      },
+      {
+        id: 'skill:review',
+        label: 'Review',
+        alias: '/review',
+        availability: 'codex' as const,
+        source_kind: 'provider_native' as const,
+      },
+    ]
+
+    expect(
+      selectedSkillsFromText(
+        'Use /search-web for context and inspect /Users/james/falcondeck afterwards.',
+        skills,
+      ),
+    ).toEqual([{ skill_id: 'skill:search-web', alias: '/search-web' }])
+    expect(selectedSkillsFromText('/search-web/docs', skills)).toEqual([])
+  })
+
+  it('detects an active slash query near the caret', () => {
+    expect(activeSlashQuery('Please run /search', 'Please run /search'.length)).toEqual({
+      query: 'search',
+      rangeStart: 11,
+      rangeEnd: 18,
+    })
+    expect(activeSlashQuery('/Users/james/project', '/Users/james/project'.length)).toBeNull()
   })
 })
 
@@ -320,12 +363,13 @@ describe('client-core relay crypto helpers', () => {
 describe('client-core remote session persistence', () => {
   it('ignores a saved session when a fresh QR pairing code is opened', () => {
     const persisted = {
+      version: REMOTE_SESSION_STORAGE_VERSION,
       relayUrl: 'https://connect.falcondeck.com',
       pairingCode: 'OLDPAIR123456',
       sessionId: 'session-old',
       clientToken: 'client-old',
       clientSecretKey: 'secret',
-    }
+    } satisfies PersistedRemoteSession
 
     const params = new URLSearchParams({
       relay: 'https://connect.falcondeck.com',
@@ -337,14 +381,45 @@ describe('client-core remote session persistence', () => {
 
   it('reuses a saved session when the URL does not override it', () => {
     const persisted = {
+      version: REMOTE_SESSION_STORAGE_VERSION,
       relayUrl: 'https://connect.falcondeck.com',
       pairingCode: 'PAIRCODE1234',
       sessionId: 'session-1',
       clientToken: 'client-1',
       clientSecretKey: 'secret',
-    }
+    } satisfies PersistedRemoteSession
 
     expect(shouldReusePersistedRemoteSession(new URLSearchParams(), persisted)).toEqual(persisted)
+  })
+
+  it('ignores a saved custom-relay session when a default-relay pairing link omits relay=', () => {
+    const persisted = {
+      version: REMOTE_SESSION_STORAGE_VERSION,
+      relayUrl: 'https://staging-connect.falcondeck.com',
+      pairingCode: 'PAIRCODE1234',
+      sessionId: 'session-1',
+      clientToken: 'client-1',
+      clientSecretKey: 'secret',
+    } satisfies PersistedRemoteSession
+
+    const params = new URLSearchParams({
+      code: 'PAIRCODE1234',
+    })
+
+    expect(shouldReusePersistedRemoteSession(params, persisted)).toBeNull()
+  })
+
+  it('ignores a saved session from an older persistence version', () => {
+    const persisted = {
+      version: 1,
+      relayUrl: 'https://connect.falcondeck.com',
+      pairingCode: 'PAIRCODE1234',
+      sessionId: 'session-1',
+      clientToken: 'client-1',
+      clientSecretKey: 'secret',
+    } as any
+
+    expect(shouldReusePersistedRemoteSession(new URLSearchParams(), persisted)).toBeNull()
   })
 })
 
@@ -366,6 +441,7 @@ describe('client-core selection reconciliation', () => {
       workspaces: [workspace(), currentWorkspace],
       threads: [currentThread, thread()],
       interactive_requests: [],
+      preferences: normalizePreferences(null),
     }
 
     expect(
@@ -382,6 +458,7 @@ describe('client-core selection reconciliation', () => {
       workspaces: [workspace({ current_thread_id: 'thread-1' })],
       threads: [thread()],
       interactive_requests: [],
+      preferences: normalizePreferences(null),
     }
 
     expect(
