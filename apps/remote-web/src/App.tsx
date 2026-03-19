@@ -123,6 +123,18 @@ function connectionLabel(status: string) {
   return 'Not connected'
 }
 
+function connectionBadgeState(status: string, desktopOnline: boolean) {
+  if (status.startsWith('connected')) {
+    if (desktopOnline) return { variant: 'success' as const, label: 'Connected' }
+    return { variant: 'warning' as const, label: 'Desktop retrying' }
+  }
+
+  return {
+    variant: status === 'disconnected' ? ('danger' as const) : ('warning' as const),
+    label: connectionLabel(status),
+  }
+}
+
 function applyDaemonEventsToSnapshot(
   current: DaemonSnapshot | null,
   events: EventEnvelope[],
@@ -1385,14 +1397,8 @@ export default function App() {
         }
       >
         <div className="ml-auto flex items-center gap-2">
-          <Badge
-            variant={relayConnected ? 'success' : connectionStatus === 'disconnected' ? 'danger' : 'warning'}
-            dot
-          >
-            {connectionLabel(connectionStatus)}
-          </Badge>
-          <Badge variant={desktopOnline ? 'success' : 'warning'} dot>
-            {desktopOnline ? 'Desktop online' : 'Desktop retrying'}
+          <Badge variant={headerConnectionState.variant} dot>
+            {headerConnectionState.label}
           </Badge>
         </div>
       </SessionHeader>
@@ -1460,6 +1466,7 @@ export default function App() {
               errors={error ? [error] : []}
               emptyState={{
                 title: 'Waiting for projects',
+  const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline)
                 description: 'Projects will appear after the desktop shares its current snapshot.',
               }}
               className="h-[min(32rem,60dvh)] bg-surface-1"
