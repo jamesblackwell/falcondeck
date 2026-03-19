@@ -3,6 +3,7 @@ import type {
   AgentProvider,
   DaemonSnapshot,
   EventEnvelope,
+  ThreadHandle,
   ThreadAgentParams,
   ThreadDetail,
   ThreadSummary,
@@ -158,6 +159,14 @@ export function normalizeThreadDetail(value: ThreadDetail | unknown): ThreadDeta
     workspace: normalizeWorkspaceSummary(detail.workspace),
     thread: normalizeThreadSummary(detail.thread),
     items: detail.items ?? [],
+  }
+}
+
+export function normalizeThreadHandle(value: ThreadHandle | unknown): ThreadHandle {
+  const handle = (value ?? {}) as Partial<ThreadHandle>
+  return {
+    workspace: normalizeWorkspaceSummary(handle.workspace),
+    thread: normalizeThreadSummary(handle.thread),
   }
 }
 

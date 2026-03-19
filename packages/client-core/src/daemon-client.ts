@@ -19,6 +19,8 @@ import {
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
   normalizeThreadDetail,
+  normalizeThreadHandle,
+  normalizeThreadSummary,
 } from './normalization'
 
 async function parseJson<T>(response: Response): Promise<T> {
@@ -85,12 +87,12 @@ export function createDaemonApiClient(baseUrl: string) {
       )
     },
     async startThread(payload: StartThreadPayload) {
-      return parseJson<ThreadHandle>(
-        await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads`, {
+      return normalizeThreadHandle(
+        await parseJson<ThreadHandle>(await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
-        }),
+        })),
       )
     },
     async threadDetail(workspaceId: string, threadId: string) {
@@ -101,12 +103,12 @@ export function createDaemonApiClient(baseUrl: string) {
       )
     },
     async updateThread(payload: UpdateThreadPayload) {
-      return parseJson<ThreadHandle>(
-        await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}`, {
+      return normalizeThreadHandle(
+        await parseJson<ThreadHandle>(await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}`, {
           method: 'PATCH',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
-        }),
+        })),
       )
     },
     async collaborationModes(workspaceId: string) {
@@ -115,17 +117,17 @@ export function createDaemonApiClient(baseUrl: string) {
       )
     },
     async archiveThread(workspaceId: string, threadId: string) {
-      return parseJson<ThreadSummary>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/archive`, {
+      return normalizeThreadSummary(
+        await parseJson<ThreadSummary>(await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/archive`, {
           method: 'POST',
-        }),
+        })),
       )
     },
     async unarchiveThread(workspaceId: string, threadId: string) {
-      return parseJson<ThreadSummary>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/unarchive`, {
+      return normalizeThreadSummary(
+        await parseJson<ThreadSummary>(await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/unarchive`, {
           method: 'POST',
-        }),
+        })),
       )
     },
     async sendTurn(payload: SendTurnPayload) {
@@ -138,12 +140,12 @@ export function createDaemonApiClient(baseUrl: string) {
       )
     },
     async markThreadRead(payload: MarkThreadReadPayload) {
-      return parseJson<ThreadSummary>(
-        await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/read`, {
+      return normalizeThreadSummary(
+        await parseJson<ThreadSummary>(await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/read`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ read_seq: payload.read_seq }),
-        }),
+        })),
       )
     },
     async respondInteractive(

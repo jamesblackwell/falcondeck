@@ -22,6 +22,8 @@ import {
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
   normalizeThreadDetail,
+  normalizeThreadHandle,
+  normalizeThreadSummary,
   providerForThread,
   publicKeyToBase64,
   reconcileSnapshotSelection,
@@ -1218,13 +1220,15 @@ export default function App() {
     try {
       let activeThreadId = selectedThreadId
       if (!activeThreadId) {
-        const handle = await submitQueuedAction<ThreadHandle>('thread.start', {
-          workspace_id: selectedWorkspace.id,
-          provider: selectedProvider,
-          model_id: selectedModel,
-          collaboration_mode_id: selectedCollaborationMode,
-          approval_policy: 'on-request',
-        })
+        const handle = normalizeThreadHandle(
+          await submitQueuedAction<ThreadHandle>('thread.start', {
+            workspace_id: selectedWorkspace.id,
+            provider: selectedProvider,
+            model_id: selectedModel,
+            collaboration_mode_id: selectedCollaborationMode,
+            approval_policy: 'on-request',
+          }),
+        )
         activeThreadId = handle.thread.id
         setSelectedWorkspaceId(handle.workspace.id)
         setSelectedThreadId(handle.thread.id)
@@ -1359,14 +1363,16 @@ export default function App() {
       if (!selectedWorkspace || !selectedThreadId) return
       const requestId = ++threadSettingsRequestRef.current
       try {
-        const handle = await submitQueuedAction<ThreadHandle>('thread.update', {
-          workspace_id: selectedWorkspace.id,
-          thread_id: selectedThreadId,
-          provider: selectedThread?.provider ?? selectedProvider,
-          model_id: modelId,
-          reasoning_effort: effort,
-          collaboration_mode_id: collaborationModeId,
-        })
+        const handle = normalizeThreadHandle(
+          await submitQueuedAction<ThreadHandle>('thread.update', {
+            workspace_id: selectedWorkspace.id,
+            thread_id: selectedThreadId,
+            provider: selectedThread?.provider ?? selectedProvider,
+            model_id: modelId,
+            reasoning_effort: effort,
+            collaboration_mode_id: collaborationModeId,
+          }),
+        )
         if (requestId !== threadSettingsRequestRef.current) return
         applyThreadHandle(handle)
         setError(null)
@@ -1495,16 +1501,21 @@ export default function App() {
       thread_id: selectedThread.id,
       read_seq: readSeq,
     }).then((thread) => {
+      const normalizedThread = normalizeThreadSummary(thread)
       setSnapshot((current) =>
         current
           ? {
-              ...current,
-              threads: current.threads.map((entry) => (entry.id === thread.id ? thread : entry)),
-            }
+            ...current,
+            threads: current.threads.map((entry) =>
+              entry.id === normalizedThread.id ? normalizedThread : entry,
+            ),
+          }
           : current,
       )
       setThreadDetail((current) =>
-        current && current.thread.id === thread.id ? { ...current, thread } : current,
+        current && current.thread.id === normalizedThread.id
+          ? { ...current, thread: normalizedThread }
+          : current,
       )
     }).catch(() => {})
   }, [selectedThread, selectedWorkspaceId, windowFocused])
