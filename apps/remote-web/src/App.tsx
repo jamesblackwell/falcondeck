@@ -60,13 +60,14 @@ import {
 import {
   Conversation,
   InteractiveRequestBar,
+  NewThreadState,
   PromptInput,
   SessionHeader,
   WorkspaceSidebar,
 } from '@falcondeck/chat-ui'
 import { Badge, Button, Input } from '@falcondeck/ui'
 
-import { Lock, PanelLeft, Smartphone, X } from 'lucide-react'
+import { LoaderCircle, Lock, PanelLeft, Smartphone, X } from 'lucide-react'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -1462,19 +1463,66 @@ export default function App() {
     [selectedCollaborationMode, selectedProvider, selectedWorkspace],
   )
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
+    setThreadDetail(null)
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(threadId)
     setShowProjects(false)
   }, [])
   const handleSelectThread = useCallback((workspaceId: string, threadId: string) => {
+    setThreadDetail(null)
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(threadId)
     setShowProjects(false)
   }, [])
   const handleNewThread = useCallback((workspaceId: string) => {
+    setThreadDetail(null)
     setSelectedWorkspaceId(workspaceId)
     setSelectedThreadId(null)
     setShowProjects(false)
+  }, [])
+  const isThreadDetailPending = useMemo(
+    () =>
+      Boolean(
+        selectedThreadId &&
+          (!threadDetail ||
+            threadDetail.workspace.id !== selectedWorkspaceId ||
+            threadDetail.thread.id !== selectedThreadId),
+      ),
+    [selectedThreadId, selectedWorkspaceId, threadDetail],
+  )
+  const loadingThreadState = useMemo(
+    () => (
+      <div className="flex min-h-[240px] items-center justify-center gap-2 text-[length:var(--fd-text-sm)] text-fg-muted">
+        <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
+        Loading conversation...
+      </div>
+    ),
+    [],
+  )
+  const conversationEmptyState = useMemo(() => {
+    if (isThreadDetailPending) {
+      return loadingThreadState
+    }
+    if (selectedThreadId) {
+      return undefined
+    }
+    return (
+      <NewThreadState
+        workspaces={snapshot?.workspaces ?? []}
+        selectedWorkspace={selectedWorkspace}
+        onSelectWorkspace={handleNewThread}
+      />
+    )
+  }, [
+    handleNewThread,
+    isThreadDetailPending,
+    loadingThreadState,
+    selectedThreadId,
+    selectedWorkspace,
+    snapshot?.workspaces,
+  ])
+  const handleRemoveAttachment = useCallback((attachmentId: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId))
   }, [])
 
   useEffect(() => {
@@ -1622,7 +1670,7 @@ export default function App() {
       <SessionHeader
         workspace={selectedWorkspace}
         thread={selectedThread}
-        className="border-b border-border-subtle pt-0"
+        className="border-b border-border-subtle pt-3"
         navigation={
           <button
             type="button"
@@ -1719,7 +1767,9 @@ export default function App() {
                   : selectedWorkspaceId
               }
               items={items}
+              emptyState={conversationEmptyState}
               isThinking={isSubmitting || selectedThread?.status === 'running'}
+              isLoading={isThreadDetailPending}
             />
           </div>
 
@@ -1735,6 +1785,7 @@ export default function App() {
               onValueChange={setDraft}
               onSubmit={() => void handleSubmit()}
               onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
+              onRemoveAttachment={handleRemoveAttachment}
               attachments={attachments}
               selectedProvider={selectedProvider}
               onProviderChange={handleProviderChange}

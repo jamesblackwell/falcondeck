@@ -76,6 +76,12 @@ ansible-playbook -i inventory/local/hosts.yml \
   playbooks/relay.yml
 ```
 
+Or from the repo root:
+
+```bash
+./deploy.sh
+```
+
 The deploy playbook syncs your current checkout to the server, builds the Linux relay there, installs the npm workspace at the repo root, builds both web apps there, and configures Caddy for:
 
 - `connect.falcondeck.com` -> relay
