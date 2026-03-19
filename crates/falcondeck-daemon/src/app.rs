@@ -38,7 +38,7 @@ use tokio::{
     sync::mpsc,
     sync::{Mutex, broadcast},
     task::JoinHandle,
-    time::{Duration, sleep},
+    time::{Duration, sleep, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::debug;
@@ -96,14 +96,15 @@ struct InnerState {
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
+    saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
     remote: Mutex<RemoteBridgeState>,
 }
 
 struct ManagedWorkspace {
     summary: WorkspaceSummary,
-    codex_session: Arc<CodexSession>,
-    claude_runtime: Arc<ClaudeRuntime>,
+    codex_session: Option<Arc<CodexSession>>,
+    claude_runtime: Option<Arc<ClaudeRuntime>>,
     threads: HashMap<String, ManagedThread>,
 }
 
@@ -161,6 +162,8 @@ struct PersistedWorkspaceState {
     #[serde(default = "default_persisted_provider")]
     default_provider: Option<AgentProvider>,
     #[serde(default)]
+    last_error: Option<String>,
+    #[serde(default)]
     archived_thread_ids: Vec<String>,
     #[serde(default)]
     thread_states: Vec<PersistedThreadState>,
@@ -175,6 +178,10 @@ struct PersistedThreadState {
     native_session_id: Option<String>,
     #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    status: Option<ThreadStatus>,
+    #[serde(default)]
+    last_error: Option<String>,
     #[serde(default)]
     last_read_seq: u64,
     #[serde(default)]
@@ -248,6 +255,7 @@ impl AppState {
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
+                saved_workspaces: Mutex::new(HashMap::new()),
                 interactive_requests: Mutex::new(HashMap::new()),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
@@ -269,18 +277,61 @@ impl AppState {
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
         let persisted = load_persisted_app_state(&self.inner.state_path).await?;
-        for workspace in persisted.workspaces {
-            if let Err(error) = self
-                .connect_workspace_internal(
-                    ConnectWorkspaceRequest {
-                        path: workspace.path.clone(),
-                    },
-                    Some(&workspace),
-                )
-                .await
-            {
-                tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
+        {
+            let mut saved_workspaces = self.inner.saved_workspaces.lock().await;
+            saved_workspaces.clear();
+            for workspace in &persisted.workspaces {
+                let mut normalized_workspace = workspace.clone();
+                normalized_workspace.path = normalize_workspace_path(&workspace.path);
+                saved_workspaces.insert(normalized_workspace.path.clone(), normalized_workspace);
             }
+        }
+
+        for mut workspace in persisted.workspaces {
+            workspace.path = normalize_workspace_path(&workspace.path);
+            let restored = self
+                .restore_workspace_placeholder(
+                    &workspace,
+                    WorkspaceStatus::Connecting,
+                    workspace.last_error.clone(),
+                )
+                .await?;
+            self.emit(
+                Some(restored.id.clone()),
+                None,
+                UnifiedEvent::Snapshot {
+                    snapshot: self.snapshot().await,
+                },
+            );
+
+            let app = self.clone();
+            tokio::spawn(async move {
+                let result = timeout(
+                    Duration::from_secs(8),
+                    app.connect_workspace_internal(
+                        ConnectWorkspaceRequest {
+                            path: workspace.path.clone(),
+                        },
+                        Some(&workspace),
+                    ),
+                )
+                .await;
+
+                if let Err(error) = match result {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Err("workspace restore timed out".to_string()),
+                } {
+                    tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
+                    let _ = app
+                        .update_workspace_placeholder_status(
+                            &workspace.path,
+                            WorkspaceStatus::Disconnected,
+                            Some(error),
+                        )
+                        .await;
+                }
+            });
         }
 
         if let Some(remote) = persisted.remote {
@@ -319,6 +370,171 @@ impl AppState {
         Ok(())
     }
 
+    async fn restore_workspace_placeholder(
+        &self,
+        persisted_workspace: &PersistedWorkspaceState,
+        status: WorkspaceStatus,
+        last_error: Option<String>,
+    ) -> Result<WorkspaceSummary, DaemonError> {
+        let path_string = normalize_workspace_path(&persisted_workspace.path);
+        let now = Utc::now();
+        let workspace_id = format!("workspace-{}", Uuid::new_v4().simple());
+        let workspace_last_error = last_error
+            .clone()
+            .or_else(|| persisted_workspace.last_error.clone());
+        let current_thread_id = persisted_workspace.current_thread_id.clone().or_else(|| {
+            persisted_workspace
+                .thread_states
+                .iter()
+                .max_by_key(|thread| thread.thread_id.clone())
+                .map(|thread| thread.thread_id.clone())
+        });
+        let mut threads = HashMap::new();
+        for state in &persisted_workspace.thread_states {
+            let status = match state.status.clone().unwrap_or(ThreadStatus::Idle) {
+                ThreadStatus::Running => ThreadStatus::Error,
+                other => other,
+            };
+            let thread_last_error = state.last_error.clone().or_else(|| {
+                matches!(state.status, Some(ThreadStatus::Running))
+                    .then(|| "FalconDeck was closed while this turn was running".to_string())
+            });
+            let summary = ThreadSummary {
+                id: state.thread_id.clone(),
+                workspace_id: workspace_id.clone(),
+                title: state
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "Restored thread".to_string()),
+                provider: state.provider.clone().unwrap_or(AgentProvider::Codex),
+                native_session_id: state.native_session_id.clone(),
+                status,
+                updated_at: now,
+                last_message_preview: None,
+                latest_turn_id: None,
+                latest_plan: None,
+                latest_diff: None,
+                last_tool: None,
+                last_error: thread_last_error.or_else(|| workspace_last_error.clone()),
+                agent: ThreadAgentParams::default(),
+                attention: ThreadAttention {
+                    last_read_seq: state.last_read_seq,
+                    last_agent_activity_seq: state.last_agent_activity_seq,
+                    ..ThreadAttention::default()
+                },
+                is_archived: persisted_workspace
+                    .archived_thread_ids
+                    .contains(&state.thread_id),
+            };
+            threads.insert(state.thread_id.clone(), ManagedThread::new(summary));
+        }
+        let summary = WorkspaceSummary {
+            id: workspace_id.clone(),
+            path: path_string.clone(),
+            status,
+            agents: vec![
+                WorkspaceAgentSummary {
+                    provider: AgentProvider::Codex,
+                    account: falcondeck_core::AccountSummary {
+                        status: falcondeck_core::AccountStatus::Unknown,
+                        label: "Codex reconnecting".to_string(),
+                    },
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    supports_plan_mode: true,
+                    supports_native_plan_mode: true,
+                    capabilities: AgentCapabilitySummary {
+                        supports_review: true,
+                    },
+                },
+                WorkspaceAgentSummary {
+                    provider: AgentProvider::Claude,
+                    account: falcondeck_core::AccountSummary {
+                        status: falcondeck_core::AccountStatus::Unknown,
+                        label: "Claude reconnecting".to_string(),
+                    },
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    supports_plan_mode: true,
+                    supports_native_plan_mode: true,
+                    capabilities: AgentCapabilitySummary {
+                        supports_review: false,
+                    },
+                },
+            ],
+            default_provider: persisted_workspace
+                .default_provider
+                .clone()
+                .unwrap_or(AgentProvider::Codex),
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            supports_plan_mode: true,
+            supports_native_plan_mode: true,
+            account: falcondeck_core::AccountSummary {
+                status: falcondeck_core::AccountStatus::Unknown,
+                label: "Reconnecting".to_string(),
+            },
+            current_thread_id,
+            connected_at: now,
+            updated_at: persisted_workspace.updated_at.unwrap_or(now),
+            last_error: workspace_last_error,
+        };
+
+        let mut workspaces = self.inner.workspaces.lock().await;
+        if let Some(existing) = workspaces
+            .values_mut()
+            .find(|workspace| workspace.summary.path == path_string)
+        {
+            existing.summary = summary.clone();
+            existing.threads = threads;
+            return Ok(existing.summary.clone());
+        }
+
+        workspaces.insert(
+            workspace_id,
+            ManagedWorkspace {
+                summary: summary.clone(),
+                codex_session: None,
+                claude_runtime: None,
+                threads,
+            },
+        );
+        Ok(summary)
+    }
+
+    async fn update_workspace_placeholder_status(
+        &self,
+        workspace_path: &str,
+        status: WorkspaceStatus,
+        last_error: Option<String>,
+    ) -> Result<(), DaemonError> {
+        let canonical_path = normalize_workspace_path(workspace_path);
+        let workspace_id = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .values_mut()
+                .find(|workspace| workspace.summary.path == canonical_path)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            workspace.summary.status = status;
+            workspace.summary.last_error = last_error.clone();
+            for thread in workspace.threads.values_mut() {
+                if thread.summary.last_error.is_none() {
+                    thread.summary.last_error = last_error.clone();
+                }
+            }
+            workspace.summary.id.clone()
+        };
+        self.emit(
+            Some(workspace_id),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
+        self.persist_local_state().await?;
+        Ok(())
+    }
+
     pub async fn health(&self) -> HealthResponse {
         let workspaces = self.inner.workspaces.lock().await.len();
         HealthResponse {
@@ -326,6 +542,57 @@ impl AppState {
             version: self.inner.daemon.version.clone(),
             workspaces,
         }
+    }
+
+    pub async fn shutdown(&self) -> Result<(), DaemonError> {
+        let snapshots = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .values()
+                .map(|workspace| {
+                    (
+                        workspace.summary.id.clone(),
+                        workspace.summary.path.clone(),
+                        workspace.codex_session.clone(),
+                        workspace.claude_runtime.clone(),
+                        workspace
+                            .threads
+                            .values()
+                            .map(|thread| {
+                                (
+                                    thread.summary.id.clone(),
+                                    matches!(thread.summary.status, ThreadStatus::Running),
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (workspace_id, _path, codex_session, claude_runtime, threads) in snapshots {
+            if let Some(runtime) = claude_runtime {
+                let _ = runtime.shutdown().await;
+            }
+            if let Some(session) = codex_session {
+                let _ = session.shutdown().await;
+            }
+            for (thread_id, was_running) in threads {
+                if !was_running {
+                    continue;
+                }
+                let _ = self
+                    .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                        thread.status = ThreadStatus::Error;
+                        thread.last_error =
+                            Some("FalconDeck was closed while this turn was running".to_string());
+                        thread.updated_at = Utc::now();
+                    })
+                    .await;
+            }
+        }
+
+        self.persist_local_state().await
     }
 
     async fn clear_remote_bridge_state(&self) {
@@ -634,46 +901,69 @@ impl AppState {
             .canonicalize()
             .map_err(|error| DaemonError::BadRequest(format!("invalid workspace path: {error}")))?;
         let path_string = path.to_string_lossy().to_string();
+        let persisted_workspace = match persisted_workspace.cloned() {
+            Some(workspace) => Some(workspace),
+            None => self
+                .inner
+                .saved_workspaces
+                .lock()
+                .await
+                .get(&path_string)
+                .cloned(),
+        };
+        let persisted_workspace_ref = persisted_workspace.as_ref();
 
-        {
+        let existing_workspace_id = {
             let mut workspaces = self.inner.workspaces.lock().await;
-            if let Some(existing) = workspaces
+            if let Some(existing_id) = workspaces
                 .values()
                 .find(|workspace| workspace.summary.path == path_string)
+                .map(|workspace| workspace.summary.id.clone())
             {
-                let existing_summary = existing.summary.clone();
-                let existing_id = existing_summary.id.clone();
-                let preferred_thread_id = persisted_workspace
-                    .and_then(|workspace| workspace.current_thread_id.as_deref())
-                    .and_then(|thread_id| {
-                        existing
-                            .threads
-                            .contains_key(thread_id)
-                            .then(|| thread_id.to_string())
-                    })
-                    .or(existing_summary.current_thread_id.clone());
-                if let Some(workspace) = workspaces.get_mut(&existing_id) {
-                    workspace.summary.current_thread_id = preferred_thread_id;
-                    if let Some(default_provider) =
-                        persisted_workspace.and_then(|workspace| workspace.default_provider.clone())
-                    {
-                        workspace.summary.default_provider = default_provider;
+                let should_upgrade_placeholder = workspaces
+                    .get(&existing_id)
+                    .map(|workspace| !workspace.has_runtime())
+                    .unwrap_or(false);
+                if should_upgrade_placeholder {
+                    Some(existing_id)
+                } else if let Some(existing) = workspaces.get(&existing_id) {
+                    let existing_summary = existing.summary.clone();
+                    let preferred_thread_id = persisted_workspace_ref
+                        .and_then(|workspace| workspace.current_thread_id.as_deref())
+                        .and_then(|thread_id| {
+                            existing
+                                .threads
+                                .contains_key(thread_id)
+                                .then(|| thread_id.to_string())
+                        })
+                        .or(existing_summary.current_thread_id.clone());
+                    if let Some(workspace) = workspaces.get_mut(&existing_id) {
+                        workspace.summary.current_thread_id = preferred_thread_id;
+                        if let Some(default_provider) = persisted_workspace_ref
+                            .and_then(|workspace| workspace.default_provider.clone())
+                        {
+                            workspace.summary.default_provider = default_provider;
+                        }
+                        if let Some(updated_at) =
+                            persisted_workspace_ref.and_then(|workspace| workspace.updated_at)
+                        {
+                            workspace.summary.updated_at = updated_at;
+                        }
+                        let summary = workspace.summary.clone();
+                        drop(workspaces);
+                        self.persist_local_state().await?;
+                        return Ok(summary);
                     }
-                    if let Some(updated_at) =
-                        persisted_workspace.and_then(|workspace| workspace.updated_at)
-                    {
-                        workspace.summary.updated_at = updated_at;
-                    }
-                    let summary = workspace.summary.clone();
-                    drop(workspaces);
-                    self.persist_local_state().await?;
-                    return Ok(summary);
+                    return Ok(existing_summary);
+                } else {
+                    None
                 }
-                return Ok(existing_summary);
+            } else {
+                None
             }
-        }
-
-        let workspace_id = format!("workspace-{}", Uuid::new_v4().simple());
+        };
+        let workspace_id = existing_workspace_id
+            .unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()));
         let CodexBootstrap {
             session: codex_session,
             account: codex_account,
@@ -706,7 +996,7 @@ impl AppState {
             }
         }));
         threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
-        let persisted_thread_states = persisted_workspace
+        let persisted_thread_states = persisted_workspace_ref
             .map(|workspace| {
                 workspace
                     .thread_states
@@ -722,6 +1012,14 @@ impl AppState {
             {
                 continue;
             }
+            let restored_status = match state.status.clone().unwrap_or(ThreadStatus::Idle) {
+                ThreadStatus::Running => ThreadStatus::Error,
+                other => other,
+            };
+            let restored_last_error = state.last_error.clone().or_else(|| {
+                matches!(state.status, Some(ThreadStatus::Running))
+                    .then(|| "FalconDeck was closed while this turn was running".to_string())
+            });
             threads.push(crate::codex::HydratedThread {
                 summary: ThreadSummary {
                     id: state.thread_id.clone(),
@@ -732,14 +1030,14 @@ impl AppState {
                         .unwrap_or_else(|| "Restored thread".to_string()),
                     provider: state.provider.clone().unwrap_or(AgentProvider::Codex),
                     native_session_id: state.native_session_id.clone(),
-                    status: ThreadStatus::Idle,
+                    status: restored_status,
                     updated_at: now,
                     last_message_preview: None,
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
                     last_tool: None,
-                    last_error: None,
+                    last_error: restored_last_error,
                     agent: ThreadAgentParams::default(),
                     attention: ThreadAttention::default(),
                     is_archived: false,
@@ -747,7 +1045,7 @@ impl AppState {
                 items: Vec::new(),
             });
         }
-        let current_thread_id = persisted_workspace
+        let current_thread_id = persisted_workspace_ref
             .and_then(|workspace| workspace.current_thread_id.as_deref())
             .and_then(|thread_id| {
                 threads
@@ -778,12 +1076,12 @@ impl AppState {
                 capabilities: claude_capabilities,
             },
         ];
-        let default_provider = persisted_workspace
+        let default_provider = persisted_workspace_ref
             .and_then(|workspace| workspace.default_provider.clone())
             .unwrap_or(AgentProvider::Codex);
         let summary = WorkspaceSummary {
             id: workspace_id.clone(),
-            path: path_string,
+            path: path_string.clone(),
             status: if agents.iter().all(|agent| {
                 matches!(
                     agent.account.status,
@@ -803,7 +1101,7 @@ impl AppState {
             account: codex_account,
             current_thread_id,
             connected_at: now,
-            updated_at: persisted_workspace
+            updated_at: persisted_workspace_ref
                 .and_then(|workspace| workspace.updated_at)
                 .unwrap_or(now),
             last_error: None,
@@ -813,12 +1111,12 @@ impl AppState {
             workspace_id.clone(),
             ManagedWorkspace {
                 summary: summary.clone(),
-                codex_session,
-                claude_runtime,
+                codex_session: Some(codex_session),
+                claude_runtime: Some(claude_runtime),
                 threads: threads
                     .into_iter()
                     .map(|mut thread| {
-                        if persisted_workspace
+                        if persisted_workspace_ref
                             .map(|pw| pw.archived_thread_ids.contains(&thread.summary.id))
                             .unwrap_or(false)
                         {
@@ -842,6 +1140,20 @@ impl AppState {
                     })
                     .collect(),
             },
+        );
+        self.inner.saved_workspaces.lock().await.insert(
+            path_string,
+            persisted_workspace_ref
+                .cloned()
+                .unwrap_or(PersistedWorkspaceState {
+                    path: summary.path.clone(),
+                    current_thread_id: summary.current_thread_id.clone(),
+                    updated_at: Some(summary.updated_at),
+                    default_provider: Some(summary.default_provider.clone()),
+                    last_error: None,
+                    archived_thread_ids: Vec::new(),
+                    thread_states: Vec::new(),
+                }),
         );
 
         self.emit(
@@ -2832,39 +3144,51 @@ impl AppState {
     }
 
     async fn persist_local_state(&self) -> Result<(), DaemonError> {
+        let saved_workspaces = self.inner.saved_workspaces.lock().await.clone();
+        let mut persisted_workspaces = HashMap::new();
+        for workspace in saved_workspaces.into_values() {
+            let mut normalized_workspace = workspace;
+            normalized_workspace.path = normalize_workspace_path(&normalized_workspace.path);
+            persisted_workspaces.insert(normalized_workspace.path.clone(), normalized_workspace);
+        }
         let workspaces = self.inner.workspaces.lock().await;
-        let mut persisted_workspaces = workspaces
-            .values()
-            .map(|workspace| {
-                let archived_thread_ids = workspace
-                    .threads
-                    .values()
-                    .filter(|thread| thread.summary.is_archived)
-                    .map(|thread| thread.summary.id.clone())
-                    .collect();
-                let mut thread_states = workspace
-                    .threads
-                    .values()
-                    .map(|thread| PersistedThreadState {
-                        thread_id: thread.summary.id.clone(),
-                        provider: Some(thread.summary.provider.clone()),
-                        native_session_id: thread.summary.native_session_id.clone(),
-                        title: Some(thread.summary.title.clone()),
-                        last_read_seq: thread.summary.attention.last_read_seq,
-                        last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
-                    })
-                    .collect::<Vec<_>>();
-                thread_states.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+        for workspace in workspaces.values() {
+            let normalized_path = normalize_workspace_path(&workspace.summary.path);
+            let archived_thread_ids = workspace
+                .threads
+                .values()
+                .filter(|thread| thread.summary.is_archived)
+                .map(|thread| thread.summary.id.clone())
+                .collect();
+            let mut thread_states = workspace
+                .threads
+                .values()
+                .map(|thread| PersistedThreadState {
+                    thread_id: thread.summary.id.clone(),
+                    provider: Some(thread.summary.provider.clone()),
+                    native_session_id: thread.summary.native_session_id.clone(),
+                    title: Some(thread.summary.title.clone()),
+                    status: Some(thread.summary.status.clone()),
+                    last_error: thread.summary.last_error.clone(),
+                    last_read_seq: thread.summary.attention.last_read_seq,
+                    last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
+                })
+                .collect::<Vec<_>>();
+            thread_states.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
+            persisted_workspaces.insert(
+                normalized_path.clone(),
                 PersistedWorkspaceState {
-                    path: workspace.summary.path.clone(),
+                    path: normalized_path,
                     current_thread_id: workspace.summary.current_thread_id.clone(),
                     updated_at: Some(workspace.summary.updated_at),
                     default_provider: Some(workspace.summary.default_provider.clone()),
+                    last_error: workspace.summary.last_error.clone(),
                     archived_thread_ids,
                     thread_states,
-                }
-            })
-            .collect::<Vec<_>>();
+                },
+            );
+        }
+        let mut persisted_workspaces = persisted_workspaces.into_values().collect::<Vec<_>>();
         persisted_workspaces.sort_by(|left, right| left.path.cmp(&right.path));
         persisted_workspaces.dedup_by(|left, right| left.path == right.path);
         drop(workspaces);
@@ -3659,8 +3983,13 @@ impl AppState {
         let workspaces = self.inner.workspaces.lock().await;
         workspaces
             .get(workspace_id)
-            .map(|workspace| Arc::clone(&workspace.codex_session))
-            .ok_or_else(|| DaemonError::NotFound(format!("workspace {workspace_id} not found")))
+            .and_then(|workspace| workspace.codex_session.as_ref())
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                DaemonError::BadRequest(format!(
+                    "workspace {workspace_id} is not currently connected to Codex"
+                ))
+            })
     }
 
     async fn claude_runtime_for(
@@ -3670,8 +3999,13 @@ impl AppState {
         let workspaces = self.inner.workspaces.lock().await;
         workspaces
             .get(workspace_id)
-            .map(|workspace| Arc::clone(&workspace.claude_runtime))
-            .ok_or_else(|| DaemonError::NotFound(format!("workspace {workspace_id} not found")))
+            .and_then(|workspace| workspace.claude_runtime.as_ref())
+            .map(Arc::clone)
+            .ok_or_else(|| {
+                DaemonError::BadRequest(format!(
+                    "workspace {workspace_id} is not currently connected to Claude"
+                ))
+            })
     }
 
     async fn thread_provider(
@@ -3969,6 +4303,12 @@ impl ManagedThread {
         }
         thread.requires_resume = true;
         thread
+    }
+}
+
+impl ManagedWorkspace {
+    fn has_runtime(&self) -> bool {
+        self.codex_session.is_some() && self.claude_runtime.is_some()
     }
 }
 
@@ -4672,6 +5012,14 @@ async fn load_persisted_app_state(path: &PathBuf) -> Result<PersistedAppState, D
     }
 }
 
+fn normalize_workspace_path(path: &str) -> String {
+    PathBuf::from(path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .to_string_lossy()
+        .to_string()
+}
+
 fn deserialize_persisted_workspaces<'de, D>(
     deserializer: D,
 ) -> Result<Vec<PersistedWorkspaceState>, D::Error>
@@ -4687,6 +5035,7 @@ where
                 current_thread_id: None,
                 updated_at: None,
                 default_provider: Some(AgentProvider::Codex),
+                last_error: None,
                 archived_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             },
@@ -4992,6 +5341,7 @@ mod tests {
     };
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::time::{Duration as TokioDuration, sleep};
 
     use super::{
         AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, codex_inputs,
@@ -5210,6 +5560,7 @@ mod tests {
                     current_thread_id: None,
                     updated_at: None,
                     default_provider: Some(AgentProvider::Codex),
+                    last_error: None,
                     archived_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
                 },
@@ -5218,6 +5569,7 @@ mod tests {
                     current_thread_id: None,
                     updated_at: None,
                     default_provider: Some(AgentProvider::Codex),
+                    last_error: None,
                     archived_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
                 },
@@ -5244,6 +5596,7 @@ mod tests {
                 current_thread_id: Some("thread-123".to_string()),
                 updated_at: None,
                 default_provider: Some(AgentProvider::Codex),
+                last_error: None,
                 archived_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             }]
@@ -5386,6 +5739,334 @@ mod tests {
         let persisted_after: PersistedAppState =
             serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
         assert!(persisted_after.remote.is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_keeps_workspace_visible_when_reconnect_fails() {
+        let temp_dir = tempdir().unwrap();
+        let workspace_path = temp_dir.path().join("project-a");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let persisted = PersistedAppState {
+            workspaces: vec![super::PersistedWorkspaceState {
+                path: workspace_path.to_string_lossy().to_string(),
+                current_thread_id: Some("thread-1".to_string()),
+                updated_at: Some(Utc::now() - Duration::minutes(5)),
+                default_provider: Some(AgentProvider::Claude),
+                last_error: Some("Previous reconnect failed".to_string()),
+                archived_thread_ids: vec!["thread-1".to_string()],
+                thread_states: vec![super::PersistedThreadState {
+                    thread_id: "thread-1".to_string(),
+                    provider: Some(AgentProvider::Claude),
+                    native_session_id: Some("native-session-1".to_string()),
+                    title: Some("Recovered thread".to_string()),
+                    status: Some(ThreadStatus::Running),
+                    last_error: None,
+                    last_read_seq: 2,
+                    last_agent_activity_seq: 7,
+                }],
+            }],
+            remote: None,
+        };
+
+        tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+            .await
+            .unwrap();
+
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "missing-codex".to_string(),
+            "missing-claude".to_string(),
+            PathBuf::from(&state_path),
+        );
+        app.restore_local_state().await.unwrap();
+
+        let initial_snapshot = app.snapshot().await;
+        assert_eq!(initial_snapshot.workspaces.len(), 1);
+        assert_eq!(initial_snapshot.threads.len(), 1);
+        assert_eq!(
+            initial_snapshot.workspaces[0].status,
+            WorkspaceStatus::Connecting
+        );
+        assert_eq!(
+            initial_snapshot.workspaces[0].last_error.as_deref(),
+            Some("Previous reconnect failed")
+        );
+
+        let final_snapshot = {
+            let mut snapshot = initial_snapshot;
+            for _ in 0..20 {
+                if matches!(snapshot.workspaces[0].status, WorkspaceStatus::Disconnected) {
+                    break;
+                }
+                sleep(TokioDuration::from_millis(50)).await;
+                snapshot = app.snapshot().await;
+            }
+            snapshot
+        };
+
+        let workspace = &final_snapshot.workspaces[0];
+        assert_eq!(workspace.status, WorkspaceStatus::Disconnected);
+        assert!(workspace.last_error.is_some());
+        assert_eq!(workspace.default_provider, AgentProvider::Claude);
+        assert_eq!(workspace.current_thread_id.as_deref(), Some("thread-1"));
+
+        let thread = &final_snapshot.threads[0];
+        assert_eq!(thread.title, "Recovered thread");
+        assert_eq!(thread.provider, AgentProvider::Claude);
+        assert_eq!(
+            thread.native_session_id.as_deref(),
+            Some("native-session-1")
+        );
+        assert_eq!(thread.status, ThreadStatus::Error);
+        assert!(thread.is_archived);
+        assert!(thread.last_error.is_some());
+
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        assert_eq!(persisted_after.workspaces.len(), 1);
+        assert!(persisted_after.workspaces[0].last_error.is_some());
+        assert_eq!(
+            persisted_after.workspaces[0].thread_states[0].status,
+            Some(ThreadStatus::Error)
+        );
+    }
+
+    #[tokio::test]
+    async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
+        let temp_dir = tempdir().unwrap();
+        let workspace_a = temp_dir.path().join("project-a");
+        let workspace_b = temp_dir.path().join("project-b");
+        std::fs::create_dir_all(&workspace_a).unwrap();
+        std::fs::create_dir_all(&workspace_b).unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            PathBuf::from(&state_path),
+        );
+
+        {
+            let mut saved = app.inner.saved_workspaces.lock().await;
+            saved.insert(
+                workspace_a.to_string_lossy().to_string(),
+                super::PersistedWorkspaceState {
+                    path: workspace_a.to_string_lossy().to_string(),
+                    current_thread_id: Some("thread-a".to_string()),
+                    updated_at: Some(Utc::now() - Duration::minutes(2)),
+                    default_provider: Some(AgentProvider::Codex),
+                    last_error: None,
+                    archived_thread_ids: Vec::new(),
+                    thread_states: vec![super::PersistedThreadState {
+                        thread_id: "thread-a".to_string(),
+                        provider: Some(AgentProvider::Codex),
+                        native_session_id: Some("native-a".to_string()),
+                        title: Some("Thread A".to_string()),
+                        status: Some(ThreadStatus::Idle),
+                        last_error: None,
+                        last_read_seq: 0,
+                        last_agent_activity_seq: 0,
+                    }],
+                },
+            );
+            saved.insert(
+                workspace_b.to_string_lossy().to_string(),
+                super::PersistedWorkspaceState {
+                    path: workspace_b.to_string_lossy().to_string(),
+                    current_thread_id: Some("thread-b".to_string()),
+                    updated_at: Some(Utc::now() - Duration::minutes(1)),
+                    default_provider: Some(AgentProvider::Claude),
+                    last_error: Some("Still disconnected".to_string()),
+                    archived_thread_ids: Vec::new(),
+                    thread_states: vec![super::PersistedThreadState {
+                        thread_id: "thread-b".to_string(),
+                        provider: Some(AgentProvider::Claude),
+                        native_session_id: Some("native-b".to_string()),
+                        title: Some("Thread B".to_string()),
+                        status: Some(ThreadStatus::Error),
+                        last_error: Some("Still disconnected".to_string()),
+                        last_read_seq: 1,
+                        last_agent_activity_seq: 3,
+                    }],
+                },
+            );
+        }
+
+        let live_workspace_id = "workspace-a".to_string();
+        let live_thread = ThreadSummary {
+            id: "thread-a".to_string(),
+            workspace_id: live_workspace_id.clone(),
+            title: "Thread A renamed".to_string(),
+            provider: AgentProvider::Codex,
+            native_session_id: Some("native-a-2".to_string()),
+            status: ThreadStatus::Idle,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention {
+                last_read_seq: 4,
+                last_agent_activity_seq: 8,
+                ..ThreadAttention::default()
+            },
+            is_archived: false,
+        };
+        let live_workspace = WorkspaceSummary {
+            id: live_workspace_id.clone(),
+            path: workspace_a.to_string_lossy().to_string(),
+            status: WorkspaceStatus::Ready,
+            agents: Vec::new(),
+            default_provider: AgentProvider::Codex,
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            supports_plan_mode: true,
+            supports_native_plan_mode: true,
+            account: falcondeck_core::AccountSummary::default(),
+            current_thread_id: Some("thread-a".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+        };
+        app.inner.workspaces.lock().await.insert(
+            live_workspace_id,
+            super::ManagedWorkspace {
+                summary: live_workspace,
+                codex_session: None,
+                claude_runtime: None,
+                threads: [(
+                    "thread-a".to_string(),
+                    super::ManagedThread::new(live_thread),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+
+        app.persist_local_state().await.unwrap();
+
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        assert_eq!(persisted_after.workspaces.len(), 2);
+
+        let restored_a = persisted_after
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                workspace.path == super::normalize_workspace_path(&workspace_a.to_string_lossy())
+            })
+            .unwrap();
+        assert_eq!(
+            restored_a.thread_states[0].title.as_deref(),
+            Some("Thread A renamed")
+        );
+        assert_eq!(
+            restored_a.thread_states[0].native_session_id.as_deref(),
+            Some("native-a-2")
+        );
+        assert_eq!(restored_a.thread_states[0].last_read_seq, 4);
+
+        let restored_b = persisted_after
+            .workspaces
+            .iter()
+            .find(|workspace| {
+                workspace.path == super::normalize_workspace_path(&workspace_b.to_string_lossy())
+            })
+            .unwrap();
+        assert_eq!(restored_b.current_thread_id.as_deref(), Some("thread-b"));
+        assert_eq!(restored_b.last_error.as_deref(), Some("Still disconnected"));
+        assert_eq!(
+            restored_b.thread_states[0].status,
+            Some(ThreadStatus::Error)
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_marks_running_threads_as_error_and_persists_them() {
+        let temp_dir = tempdir().unwrap();
+        let workspace_path = temp_dir.path().join("project-a");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            PathBuf::from(&state_path),
+        );
+
+        let workspace_id = "workspace-1".to_string();
+        let thread = ThreadSummary {
+            id: "thread-1".to_string(),
+            workspace_id: workspace_id.clone(),
+            title: "Running thread".to_string(),
+            provider: AgentProvider::Codex,
+            native_session_id: Some("native-session-1".to_string()),
+            status: ThreadStatus::Running,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention::default(),
+            is_archived: false,
+        };
+        let workspace = WorkspaceSummary {
+            id: workspace_id.clone(),
+            path: workspace_path.to_string_lossy().to_string(),
+            status: WorkspaceStatus::Busy,
+            agents: Vec::new(),
+            default_provider: AgentProvider::Codex,
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            supports_plan_mode: true,
+            supports_native_plan_mode: true,
+            account: falcondeck_core::AccountSummary::default(),
+            current_thread_id: Some("thread-1".to_string()),
+            connected_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+        };
+        app.inner.workspaces.lock().await.insert(
+            workspace_id,
+            super::ManagedWorkspace {
+                summary: workspace,
+                codex_session: None,
+                claude_runtime: None,
+                threads: [("thread-1".to_string(), super::ManagedThread::new(thread))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+
+        app.shutdown().await.unwrap();
+
+        let snapshot = app.snapshot().await;
+        assert_eq!(snapshot.threads.len(), 1);
+        assert_eq!(snapshot.threads[0].status, ThreadStatus::Error);
+        assert_eq!(
+            snapshot.threads[0].last_error.as_deref(),
+            Some("FalconDeck was closed while this turn was running")
+        );
+
+        let persisted_after: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        assert_eq!(
+            persisted_after.workspaces[0].thread_states[0].status,
+            Some(ThreadStatus::Error)
+        );
+        assert_eq!(
+            persisted_after.workspaces[0].thread_states[0]
+                .last_error
+                .as_deref(),
+            Some("FalconDeck was closed while this turn was running")
+        );
     }
 
     #[tokio::test]

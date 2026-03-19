@@ -14,20 +14,36 @@ import {
 import { detectApiBaseUrl } from '../api'
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
+const SELECTION_STORAGE_KEY = 'falcondeck.desktop.selection'
 
 function threadCacheKey(workspaceId: string, threadId: string) {
   return `${workspaceId}:${threadId}`
 }
 
 export function useDaemonConnection() {
+  const initialSelection =
+    typeof window === 'undefined'
+      ? null
+      : (() => {
+          try {
+            const raw = window.localStorage.getItem(SELECTION_STORAGE_KEY)
+            return raw ? (JSON.parse(raw) as { workspaceId: string | null; threadId: string | null }) : null
+          } catch {
+            return null
+          }
+        })()
   const [baseUrl, setBaseUrl] = useState<string | null>(null)
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting')
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<DaemonSnapshot | null>(null)
   const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null)
   const [remoteStatus, setRemoteStatus] = useState<RemoteStatusResponse | null>(null)
-  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
-  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
+    initialSelection?.workspaceId ?? null,
+  )
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(
+    initialSelection?.threadId ?? null,
+  )
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
   const threadDetailPrefetchRef = useRef(new Set<string>())
@@ -110,6 +126,20 @@ export function useDaemonConnection() {
     }
   }, [snapshot, selectedThreadId, selectedWorkspaceId])
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        SELECTION_STORAGE_KEY,
+        JSON.stringify({
+          workspaceId: selectedWorkspaceId,
+          threadId: selectedThreadId,
+        }),
+      )
+    } catch {
+      // Ignore storage failures and keep the in-memory selection authoritative.
+    }
+  }, [selectedThreadId, selectedWorkspaceId])
 
   /* eslint-disable react-hooks/set-state-in-effect */
   useLayoutEffect(() => {

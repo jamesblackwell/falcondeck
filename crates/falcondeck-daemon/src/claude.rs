@@ -164,6 +164,15 @@ impl ClaudeRuntime {
         }
         Ok(None)
     }
+
+    pub async fn shutdown(&self) -> Result<(), DaemonError> {
+        let mut active = self.active_turns.lock().await;
+        for child in active.values_mut() {
+            let _ = child.start_kill();
+        }
+        active.clear();
+        Ok(())
+    }
 }
 
 pub fn curated_models() -> Vec<ModelSummary> {

@@ -354,6 +354,7 @@ export type SyncCursor = {
   next_seq: number
   last_acknowledged_seq: number
   requires_bootstrap: boolean
+  history_truncated?: boolean
 }
 
 export type RemotePairingSession = {
@@ -471,7 +472,7 @@ export type SubmitQueuedActionRequest = {
 export type RelayServerMessage =
   | { type: 'ready'; session_id: string; role: 'daemon' | 'client'; next_seq: number }
   | { type: 'pong' }
-  | { type: 'sync'; updates: RelayUpdate[]; next_seq: number }
+  | { type: 'sync'; updates: RelayUpdate[]; next_seq: number; history_truncated?: boolean }
   | { type: 'update'; update: RelayUpdate }
   | { type: 'action-requested'; action: QueuedRemoteAction; payload: EncryptedEnvelope }
   | { type: 'action-updated'; action: QueuedRemoteAction }

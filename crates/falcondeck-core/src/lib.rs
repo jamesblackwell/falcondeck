@@ -685,6 +685,8 @@ pub struct SyncCursor {
     pub next_seq: u64,
     pub last_acknowledged_seq: u64,
     pub requires_bootstrap: bool,
+    #[serde(default)]
+    pub history_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -842,6 +844,8 @@ pub enum RelayServerMessage {
     Sync {
         updates: Vec<RelayUpdate>,
         next_seq: u64,
+        #[serde(default)]
+        history_truncated: bool,
     },
     Update {
         update: RelayUpdate,

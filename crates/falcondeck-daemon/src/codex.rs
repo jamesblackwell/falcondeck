@@ -21,6 +21,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::{Mutex, oneshot},
+    time::{Duration, timeout},
 };
 use tracing::warn;
 
@@ -209,6 +210,13 @@ impl CodexSession {
 
     pub fn workspace_path(&self) -> &str {
         &self.workspace_path
+    }
+
+    pub async fn shutdown(&self) -> Result<(), DaemonError> {
+        let mut child = self.child.lock().await;
+        let _ = child.start_kill();
+        let _ = timeout(Duration::from_secs(2), child.wait()).await;
+        Ok(())
     }
 
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value, DaemonError> {

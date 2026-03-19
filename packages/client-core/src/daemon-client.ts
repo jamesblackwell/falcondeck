@@ -15,6 +15,11 @@ import type {
   UpdateThreadPayload,
   WorkspaceSummary,
 } from './types'
+import {
+  normalizeDaemonSnapshot,
+  normalizeEventEnvelope,
+  normalizeThreadDetail,
+} from './normalization'
 
 async function parseJson<T>(response: Response): Promise<T> {
   if (!response.ok) {
@@ -47,7 +52,9 @@ export type StartThreadPayload = {
 export function createDaemonApiClient(baseUrl: string) {
   return {
     async snapshot() {
-      return parseJson<DaemonSnapshot>(await fetch(`${baseUrl}/api/snapshot`))
+      return normalizeDaemonSnapshot(
+        await parseJson<DaemonSnapshot>(await fetch(`${baseUrl}/api/snapshot`)),
+      )
     },
     async remoteStatus() {
       return parseJson<RemoteStatusResponse>(await fetch(`${baseUrl}/api/remote/status`))
@@ -87,8 +94,10 @@ export function createDaemonApiClient(baseUrl: string) {
       )
     },
     async threadDetail(workspaceId: string, threadId: string) {
-      return parseJson<ThreadDetail>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}`),
+      return normalizeThreadDetail(
+        await parseJson<ThreadDetail>(
+          await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}`),
+        ),
       )
     },
     async updateThread(payload: UpdateThreadPayload) {
@@ -164,7 +173,7 @@ export function createDaemonApiClient(baseUrl: string) {
     connectEvents(onEvent: (event: EventEnvelope) => void) {
       const socket = new WebSocket(baseUrl.replace('http', 'ws') + '/api/events')
       socket.onmessage = (message) => {
-        onEvent(JSON.parse(message.data) as EventEnvelope)
+        onEvent(normalizeEventEnvelope(JSON.parse(message.data) as EventEnvelope))
       }
       return socket
     },

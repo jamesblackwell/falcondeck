@@ -9,7 +9,7 @@ use falcondeck_core::{
     SubmitQueuedActionRequest, TrustedDevicesResponse,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, encrypt_json, generate_data_key},
 };
-use falcondeck_relay::{AppState, router};
+use falcondeck_relay::{AppState, RetentionConfig, router};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -383,7 +383,11 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
     .await;
     let sync = recv_server_message(&mut client_ws).await;
     match sync {
-        RelayServerMessage::Sync { updates, next_seq } => {
+        RelayServerMessage::Sync {
+            updates,
+            next_seq,
+            ..
+        } => {
             assert!(next_seq >= 2);
             let encrypted_updates = updates
                 .iter()
@@ -469,7 +473,7 @@ async fn expired_pairings_cannot_be_claimed() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -737,6 +741,95 @@ async fn persisted_updates_survive_restart() {
             envelope: test_envelope("persist-me"),
         }
     );
+}
+
+#[tokio::test]
+async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
+    let server = spawn_server_with_retention(RetentionConfig {
+        update_retention: Duration::days(7),
+        max_updates_per_session: 1,
+        trusted_device_retention: Duration::days(180),
+        claimed_pairing_retention: Duration::days(1),
+        completed_action_retention: Duration::days(3),
+    })
+    .await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    for marker in ["one", "two", "three"] {
+        send_client_message(
+            &mut daemon_ws,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted {
+                    envelope: test_envelope(marker),
+                },
+            },
+        )
+        .await;
+        let _ = recv_until_update(&mut daemon_ws).await;
+    }
+
+    let history = get_json::<RelayUpdatesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/updates?after_seq=1",
+            server.http_base, claim.session_id
+        ),
+        Some(&claim.client_token),
+    )
+    .await;
+
+    assert!(history.cursor.history_truncated);
+    assert_eq!(history.next_seq, 4);
+    assert_eq!(history.updates.len(), 1);
+    assert_eq!(history.updates[0].seq, 3);
+}
+
+#[tokio::test]
+async fn idle_trusted_sessions_are_pruned_after_retention_expires() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("relay-state.json");
+    let server = spawn_server_at(state_path.clone()).await;
+    let client = reqwest::Client::new();
+    let (_pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    server.task.abort();
+
+    let restarted = spawn_server_at_with_retention(
+        state_path,
+        RetentionConfig {
+            update_retention: Duration::milliseconds(5),
+            max_updates_per_session: 10_000,
+            trusted_device_retention: Duration::milliseconds(5),
+            claimed_pairing_retention: Duration::milliseconds(5),
+            completed_action_retention: Duration::milliseconds(5),
+        },
+    )
+    .await;
+
+    tokio::time::sleep(TokioDuration::from_millis(20)).await;
+
+    let response = client
+        .get(format!(
+            "{}/v1/sessions/{}/updates?after_seq=0",
+            restarted.http_base, claim.session_id
+        ))
+        .header("authorization", format!("Bearer {}", claim.client_token))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1350,10 +1443,26 @@ async fn spawn_server() -> TestServer {
 }
 
 async fn spawn_server_at(state_path: PathBuf) -> TestServer {
-    let state = AppState::load(
+    spawn_server_at_with_retention(state_path, RetentionConfig::default()).await
+}
+
+async fn spawn_server_with_retention(retention: RetentionConfig) -> TestServer {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("relay-state.json");
+    let mut server = spawn_server_at_with_retention(state_path, retention).await;
+    server.temp_dir = Some(temp_dir);
+    server
+}
+
+async fn spawn_server_at_with_retention(
+    state_path: PathBuf,
+    retention: RetentionConfig,
+) -> TestServer {
+    let state = AppState::load_with_retention(
         "test".to_string(),
         PathBuf::from(&state_path),
         Duration::seconds(300),
+        retention,
     )
     .await
     .unwrap();

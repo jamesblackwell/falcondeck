@@ -68,7 +68,7 @@ export type ClaimPairingResponse = {
 
 export type RelayServerMessage =
   | { type: 'ready'; session_id: string; role: string; next_seq: number }
-  | { type: 'sync'; updates: RelayUpdate[]; next_seq: number }
+  | { type: 'sync'; updates: RelayUpdate[]; next_seq: number; history_truncated?: boolean }
   | { type: 'update'; update: RelayUpdate }
   | { type: 'rpc-result'; request_id: string; ok: boolean; result?: unknown; error?: string | null }
   | { type: 'error'; message: string }

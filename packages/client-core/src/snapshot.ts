@@ -1,4 +1,9 @@
 import type { DaemonSnapshot, EventEnvelope, ImageInput } from './types'
+import {
+  normalizeDaemonSnapshot,
+  normalizeEventEnvelope,
+  normalizeThreadSummary,
+} from './normalization'
 
 export type SnapshotSelection = {
   workspaceId: string | null
@@ -17,9 +22,9 @@ export function applySnapshotEvent(
   snapshot: DaemonSnapshot | null,
   event: EventEnvelope,
 ): DaemonSnapshot | null {
-  const daemonEvent = event.event
+  const daemonEvent = normalizeEventEnvelope(event).event
   if (daemonEvent.type === 'snapshot') {
-    return daemonEvent.snapshot
+    return normalizeDaemonSnapshot(daemonEvent.snapshot)
   }
   if (!snapshot) return snapshot
   switch (daemonEvent.type) {
@@ -36,7 +41,7 @@ export function applySnapshotEvent(
             : workspace,
         ),
         threads: [
-          daemonEvent.thread,
+          normalizeThreadSummary(daemonEvent.thread),
           ...snapshot.threads.filter((thread) => thread.id !== daemonEvent.thread.id),
         ],
       }
@@ -44,7 +49,9 @@ export function applySnapshotEvent(
       return {
         ...snapshot,
         threads: snapshot.threads.map((thread) =>
-          thread.id === daemonEvent.thread.id ? daemonEvent.thread : thread,
+          thread.id === daemonEvent.thread.id
+            ? normalizeThreadSummary(daemonEvent.thread)
+            : thread,
         ),
       }
     case 'interactive-request':

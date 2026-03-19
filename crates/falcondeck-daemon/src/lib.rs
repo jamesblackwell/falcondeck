@@ -36,6 +36,7 @@ impl Default for DaemonConfig {
 
 pub struct EmbeddedDaemonHandle {
     pub local_addr: SocketAddr,
+    state: AppState,
     shutdown: Option<oneshot::Sender<()>>,
     join_handle: JoinHandle<Result<(), std::io::Error>>,
 }
@@ -46,6 +47,7 @@ impl EmbeddedDaemonHandle {
     }
 
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
+        let _ = self.state.shutdown().await;
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
@@ -73,7 +75,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     if let Err(error) = state.restore_local_state().await {
         tracing::warn!("failed to restore daemon local state: {error}");
     }
-    let router = api::router(state);
+    let router = api::router(state.clone());
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -88,6 +90,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
 
     Ok(EmbeddedDaemonHandle {
         local_addr,
+        state,
         shutdown: Some(shutdown_tx),
         join_handle,
     })

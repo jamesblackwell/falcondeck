@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "tauri:dev:stop": "node ./scripts/stop-dev-daemon.mjs",
     "tauri:build": "tauri build"
   },
   "dependencies": {

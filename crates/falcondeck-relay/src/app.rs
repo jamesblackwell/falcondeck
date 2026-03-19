@@ -29,6 +29,27 @@ const PEER_QUEUE_CAPACITY: usize = 256;
 const FILE_PERSIST_DEBOUNCE_MS: u64 = 150;
 const WS_TICKET_TTL_SECONDS: i64 = 30;
 
+#[derive(Debug, Clone)]
+pub struct RetentionConfig {
+    pub update_retention: Duration,
+    pub max_updates_per_session: usize,
+    pub trusted_device_retention: Duration,
+    pub claimed_pairing_retention: Duration,
+    pub completed_action_retention: Duration,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            update_retention: Duration::days(7),
+            max_updates_per_session: 10_000,
+            trusted_device_retention: Duration::days(180),
+            claimed_pairing_retention: Duration::days(1),
+            completed_action_retention: Duration::days(3),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<InnerState>,
@@ -38,6 +59,7 @@ struct InnerState {
     version: String,
     state_path: PathBuf,
     default_pairing_ttl: Duration,
+    retention: RetentionConfig,
     store: Mutex<Store>,
     persist_lock: Mutex<()>,
     postgres: Option<PostgresPersistence>,
@@ -102,6 +124,8 @@ struct SessionRecord {
     revoked_at: Option<DateTime<Utc>>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
+    #[serde(default = "default_next_seq")]
+    next_seq: u64,
     updates: Vec<RelayUpdate>,
     #[serde(default)]
     actions: HashMap<String, QueuedActionRecord>,
@@ -175,15 +199,35 @@ enum PersistMode {
     Immediate,
 }
 
+fn default_next_seq() -> u64 {
+    1
+}
+
 impl AppState {
     pub async fn load(
         version: String,
         state_path: PathBuf,
         default_pairing_ttl: Duration,
     ) -> Result<Self, RelayError> {
+        Self::load_with_retention(
+            version,
+            state_path,
+            default_pairing_ttl,
+            RetentionConfig::default(),
+        )
+        .await
+    }
+
+    pub async fn load_with_retention(
+        version: String,
+        state_path: PathBuf,
+        default_pairing_ttl: Duration,
+        retention: RetentionConfig,
+    ) -> Result<Self, RelayError> {
         let mut data = load_state(&state_path).await?;
         for session in data.sessions.values_mut() {
             session.migrate_legacy_device_fields();
+            session.ensure_next_seq();
         }
         let normalized = normalize_in_flight_actions(&mut data);
         let state = Self {
@@ -191,6 +235,7 @@ impl AppState {
                 version,
                 state_path,
                 default_pairing_ttl,
+                retention,
                 store: Mutex::new(Store {
                     data,
                     live_sessions: HashMap::new(),
@@ -201,7 +246,8 @@ impl AppState {
                 file_persist_task: Mutex::new(None),
             }),
         };
-        if normalized {
+        let pruned = state.prune_expired_state().await?;
+        if normalized || pruned {
             state.persist_current().await?;
         }
         Ok(state)
@@ -212,10 +258,26 @@ impl AppState {
         database_url: String,
         default_pairing_ttl: Duration,
     ) -> Result<Self, RelayError> {
+        Self::load_postgres_with_retention(
+            version,
+            database_url,
+            default_pairing_ttl,
+            RetentionConfig::default(),
+        )
+        .await
+    }
+
+    pub async fn load_postgres_with_retention(
+        version: String,
+        database_url: String,
+        default_pairing_ttl: Duration,
+        retention: RetentionConfig,
+    ) -> Result<Self, RelayError> {
         let client = connect_postgres(&database_url).await?;
         let mut data = load_postgres_state(&client).await?;
         for session in data.sessions.values_mut() {
             session.migrate_legacy_device_fields();
+            session.ensure_next_seq();
         }
         let normalized = normalize_in_flight_actions(&mut data);
         let state = Self {
@@ -223,6 +285,7 @@ impl AppState {
                 version,
                 state_path: PathBuf::new(),
                 default_pairing_ttl,
+                retention,
                 store: Mutex::new(Store {
                     data,
                     live_sessions: HashMap::new(),
@@ -235,13 +298,15 @@ impl AppState {
                 file_persist_task: Mutex::new(None),
             }),
         };
-        if normalized {
+        let pruned = state.prune_expired_state().await?;
+        if normalized || pruned {
             state.persist_current().await?;
         }
         Ok(state)
     }
 
     pub async fn health(&self) -> RelayHealthResponse {
+        let _ = self.prune_retained_state().await;
         let store = self.inner.store.lock().await;
         let now = Utc::now();
         let pending_pairings = store
@@ -264,6 +329,7 @@ impl AppState {
         &self,
         request: StartPairingRequest,
     ) -> Result<StartPairingResponse, RelayError> {
+        let _ = self.prune_retained_state().await?;
         let ttl_seconds = request
             .ttl_seconds
             .unwrap_or_else(|| self.inner.default_pairing_ttl.num_seconds().max(1) as u64);
@@ -326,6 +392,7 @@ impl AppState {
                     revoked_at: None,
                     created_at: now,
                     updated_at: now,
+                    next_seq: 1,
                     updates: Vec::new(),
                     actions: HashMap::new(),
                 };
@@ -371,6 +438,7 @@ impl AppState {
         &self,
         request: ClaimPairingRequest,
     ) -> Result<ClaimPairingResponse, RelayError> {
+        let _ = self.prune_retained_state().await?;
         let pairing_code = request.pairing_code.trim().to_uppercase();
         if pairing_code.is_empty() {
             return Err(RelayError::BadRequest(
@@ -548,6 +616,7 @@ impl AppState {
             .sessions
             .get(session_id)
             .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+        let history_truncated = session.history_truncated(after_seq);
 
         Ok(RelayUpdatesResponse {
             session_id: session.session_id.clone(),
@@ -563,6 +632,7 @@ impl AppState {
                 next_seq: session.next_seq(),
                 last_acknowledged_seq: after_seq,
                 requires_bootstrap: after_seq == 0,
+                history_truncated,
             },
             presence: session.machine_presence(store.live_sessions.get(session_id).is_some_and(
                 |live| {
@@ -579,6 +649,7 @@ impl AppState {
         session_id: &str,
         token: &str,
     ) -> Result<SessionAuth, RelayError> {
+        let _ = self.prune_retained_state().await?;
         let store = self.inner.store.lock().await;
         let mut session = store
             .data
@@ -873,6 +944,7 @@ impl AppState {
                     RelayServerMessage::Sync {
                         updates: response.updates,
                         next_seq: response.next_seq,
+                        history_truncated: response.cursor.history_truncated,
                     },
                 )
                 .await;
@@ -966,10 +1038,11 @@ impl AppState {
                     .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
                 update = RelayUpdate {
                     id: format!("update-{}", Uuid::new_v4().simple()),
-                    seq: session.next_seq(),
+                    seq: session.next_seq,
                     body,
                     created_at: Utc::now(),
                 };
+                session.next_seq = session.next_seq.saturating_add(1);
                 session.updated_at = update.created_at;
                 session.updates.push(update.clone());
                 session_snapshot = session.clone();
@@ -1562,6 +1635,7 @@ impl AppState {
             .sessions
             .get(session_id)
             .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+        let history_truncated = session.history_truncated(after_seq);
 
         Ok(RelayUpdatesResponse {
             session_id: session_id.to_string(),
@@ -1577,6 +1651,7 @@ impl AppState {
                 next_seq: session.next_seq(),
                 last_acknowledged_seq: after_seq,
                 requires_bootstrap: after_seq == 0,
+                history_truncated,
             },
             presence: session.machine_presence(store.live_sessions.get(session_id).is_some_and(
                 |live| {
@@ -1781,6 +1856,28 @@ impl AppState {
             persist_state(&self.inner.state_path, &snapshot).await
         }
     }
+
+    async fn prune_expired_state(&self) -> Result<bool, RelayError> {
+        let changed = {
+            let mut store = self.inner.store.lock().await;
+            let live_session_ids = store.live_sessions.keys().cloned().collect();
+            prune_state(
+                &mut store.data,
+                &live_session_ids,
+                &self.inner.retention,
+                Utc::now(),
+            )
+        };
+        Ok(changed)
+    }
+
+    async fn prune_retained_state(&self) -> Result<bool, RelayError> {
+        let changed = self.prune_expired_state().await?;
+        if changed {
+            self.persist_current().await?;
+        }
+        Ok(changed)
+    }
 }
 
 impl PairingRecord {
@@ -1796,6 +1893,20 @@ impl PairingRecord {
 }
 
 impl SessionRecord {
+    fn ensure_next_seq(&mut self) {
+        let derived = self
+            .updates
+            .last()
+            .map(|update| update.seq.saturating_add(1))
+            .unwrap_or(1);
+        if self.next_seq < derived {
+            self.next_seq = derived;
+        }
+        if self.next_seq == 0 {
+            self.next_seq = 1;
+        }
+    }
+
     fn migrate_legacy_device_fields(&mut self) {
         if !self.devices.is_empty() {
             self.clear_legacy_device_fields();
@@ -1831,10 +1942,18 @@ impl SessionRecord {
     }
 
     fn next_seq(&self) -> u64 {
+        self.next_seq.max(1)
+    }
+
+    fn oldest_retained_seq(&self) -> u64 {
         self.updates
-            .last()
-            .map(|update| update.seq + 1)
-            .unwrap_or(1)
+            .first()
+            .map(|update| update.seq)
+            .unwrap_or_else(|| self.next_seq())
+    }
+
+    fn history_truncated(&self, after_seq: u64) -> bool {
+        after_seq > 0 && after_seq.saturating_add(1) < self.oldest_retained_seq()
     }
 
     fn trusted_devices(&self) -> Vec<TrustedDevice> {
@@ -1885,6 +2004,102 @@ impl QueuedActionRecord {
     }
 }
 
+fn prune_state(
+    state: &mut PersistedState,
+    live_session_ids: &std::collections::HashSet<String>,
+    retention: &RetentionConfig,
+    now: DateTime<Utc>,
+) -> bool {
+    let mut changed = false;
+
+    for session in state.sessions.values_mut() {
+        session.ensure_next_seq();
+
+        let update_cutoff = now - retention.update_retention;
+        let before_updates = session.updates.len();
+        session
+            .updates
+            .retain(|update| update.created_at >= update_cutoff);
+        if session.updates.len() > retention.max_updates_per_session {
+            let drop_count = session.updates.len() - retention.max_updates_per_session;
+            session.updates.drain(0..drop_count);
+        }
+        if session.updates.len() != before_updates {
+            changed = true;
+        }
+
+        let action_cutoff = now - retention.completed_action_retention;
+        let before_actions = session.actions.len();
+        session.actions.retain(|_, action| {
+            let terminal = matches!(
+                action.status,
+                QueuedRemoteActionStatus::Completed | QueuedRemoteActionStatus::Failed
+            );
+            !terminal || action.updated_at >= action_cutoff
+        });
+        if session.actions.len() != before_actions {
+            changed = true;
+        }
+    }
+
+    let claimed_pairing_cutoff = now - retention.claimed_pairing_retention;
+    let before_pairings = state.pairings.len();
+    state.pairings.retain(|_, pairing| {
+        if pairing.device_id.is_none() {
+            pairing.expires_at > now
+        } else {
+            pairing.created_at >= claimed_pairing_cutoff
+        }
+    });
+    if state.pairings.len() != before_pairings {
+        changed = true;
+    }
+
+    let session_before = state.sessions.len();
+    state.sessions.retain(|session_id, session| {
+        if live_session_ids.contains(session_id) {
+            return true;
+        }
+
+        let trusted_until = session
+            .devices
+            .values()
+            .filter(|device| device.revoked_at.is_none())
+            .map(|device| device.last_seen_at.unwrap_or(device.created_at))
+            .max()
+            .map(|last_seen| last_seen + retention.trusted_device_retention);
+        let daemon_until = session
+            .daemon_last_seen_at
+            .map(|seen| seen + retention.update_retention);
+        let session_until = session.updated_at + retention.update_retention;
+        let retain_until = trusted_until
+            .into_iter()
+            .chain(daemon_until)
+            .chain(std::iter::once(session_until))
+            .max()
+            .unwrap_or(session.updated_at);
+        retain_until > now
+    });
+    if state.sessions.len() != session_before {
+        changed = true;
+    }
+
+    let valid_sessions = state
+        .sessions
+        .keys()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let pairings_before = state.pairings.len();
+    state
+        .pairings
+        .retain(|_, pairing| valid_sessions.contains(&pairing.session_id));
+    if state.pairings.len() != pairings_before {
+        changed = true;
+    }
+
+    changed
+}
+
 async fn connect_postgres(database_url: &str) -> Result<PostgresClient, RelayError> {
     let (client, connection) = tokio_postgres::connect(database_url, NoTls)
         .await
@@ -1904,14 +2119,15 @@ async fn upsert_postgres_session(
 ) -> Result<(), RelayError> {
     client
         .execute(
-            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6)
+            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (session_id) DO UPDATE SET
                pairing_id = EXCLUDED.pairing_id,
                daemon_token = EXCLUDED.daemon_token,
                daemon_last_seen_at = EXCLUDED.daemon_last_seen_at,
                created_at = EXCLUDED.created_at,
-               updated_at = EXCLUDED.updated_at",
+               updated_at = EXCLUDED.updated_at,
+               next_seq = EXCLUDED.next_seq",
             &[
                 &session.session_id,
                 &session.pairing_id,
@@ -1919,6 +2135,8 @@ async fn upsert_postgres_session(
                 &session.daemon_last_seen_at,
                 &session.created_at,
                 &session.updated_at,
+                &i64::try_from(session.next_seq)
+                    .map_err(|_| RelayError::StatePersist("next sequence overflow".to_string()))?,
             ],
         )
         .await
@@ -2070,8 +2288,11 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 daemon_token TEXT NOT NULL,
                 daemon_last_seen_at TIMESTAMPTZ NULL,
                 created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL
+                updated_at TIMESTAMPTZ NOT NULL,
+                next_seq BIGINT NOT NULL DEFAULT 1
             );
+            ALTER TABLE relay_sessions
+                ADD COLUMN IF NOT EXISTS next_seq BIGINT NOT NULL DEFAULT 1;
             CREATE TABLE IF NOT EXISTS relay_pairings (
                 pairing_id TEXT PRIMARY KEY,
                 pairing_code TEXT NOT NULL UNIQUE,
@@ -2141,7 +2362,7 @@ async fn load_postgres_state(client: &PostgresClient) -> Result<PersistedState, 
 
     for row in client
         .query(
-            "SELECT session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at FROM relay_sessions",
+            "SELECT session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq FROM relay_sessions",
             &[],
         )
         .await
@@ -2165,6 +2386,10 @@ async fn load_postgres_state(client: &PostgresClient) -> Result<PersistedState, 
                 revoked_at: None,
                 created_at: row.get("created_at"),
                 updated_at: row.get("updated_at"),
+                next_seq: row
+                    .get::<_, i64>("next_seq")
+                    .try_into()
+                    .map_err(|_| RelayError::StateLoad("invalid next sequence".to_string()))?,
                 updates: Vec::new(),
                 actions: HashMap::new(),
             },
@@ -2293,8 +2518,8 @@ async fn persist_postgres_state(
 
     for session in state.sessions.values() {
         tx.execute(
-            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
             &[
                 &session.session_id,
                 &session.pairing_id,
@@ -2302,6 +2527,8 @@ async fn persist_postgres_state(
                 &session.daemon_last_seen_at,
                 &session.created_at,
                 &session.updated_at,
+                &i64::try_from(session.next_seq)
+                    .map_err(|_| RelayError::StatePersist("next sequence overflow".to_string()))?,
             ],
         )
         .await

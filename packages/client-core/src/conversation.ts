@@ -1,4 +1,5 @@
 import type { ConversationItem, EventEnvelope, ThreadDetail } from './types'
+import { normalizeEventEnvelope, normalizeThreadDetail } from './normalization'
 
 export function sortConversationItems(items: ConversationItem[]) {
   return [...items].sort((left, right) => left.created_at.localeCompare(right.created_at))
@@ -71,20 +72,24 @@ export function upsertConversationItem(
 }
 
 export function applyEventToThreadDetail(detail: ThreadDetail | null, event: EventEnvelope) {
-  if (!detail || event.thread_id !== detail.thread.id) {
+  const normalizedEvent = normalizeEventEnvelope(event)
+
+  if (!detail || normalizedEvent.thread_id !== detail.thread.id) {
     return detail
   }
 
-  switch (event.event.type) {
+  const normalizedDetail = normalizeThreadDetail(detail)
+
+  switch (normalizedEvent.event.type) {
     case 'thread-updated':
-      return { ...detail, thread: event.event.thread }
+      return { ...normalizedDetail, thread: normalizedEvent.event.thread }
     case 'conversation-item-added':
     case 'conversation-item-updated':
       return {
-        ...detail,
-        items: upsertConversationItem(detail.items, event.event.item),
+        ...normalizedDetail,
+        items: upsertConversationItem(normalizedDetail.items, normalizedEvent.event.item),
       }
     default:
-      return detail
+      return normalizedDetail
   }
 }

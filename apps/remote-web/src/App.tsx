@@ -19,6 +19,9 @@ import {
   generateBoxKeyPair,
   identityPublicKeyToBase64,
   isPlanModeEnabled,
+  normalizeDaemonSnapshot,
+  normalizeEventEnvelope,
+  normalizeThreadDetail,
   providerForThread,
   publicKeyToBase64,
   reconcileSnapshotSelection,
@@ -93,7 +96,7 @@ function parseDaemonEvent(payload: unknown): EventEnvelope | null {
     'event' in payload &&
     (payload as { kind?: string }).kind === 'daemon-event'
   ) {
-    return (payload as { event: EventEnvelope }).event
+    return normalizeEventEnvelope((payload as { event: EventEnvelope }).event)
   }
   return null
 }
@@ -728,6 +731,15 @@ export default function App() {
               setConnectionStatus(`connected as ${payload.role}`)
               break
             case 'sync':
+              if (payload.history_truncated) {
+                lastReceivedSeqRef.current = Math.max(payload.next_seq - 1, 0)
+                setSnapshot(null)
+                setThreadDetail(null)
+                setThreadItems({})
+                schedulePersistCurrentSession({
+                  lastReceivedSeq: lastReceivedSeqRef.current,
+                }, { immediate: true })
+              }
               pendingRelayUpdatesRef.current.push(...payload.updates)
               scheduleRelayFlush()
               break
@@ -967,10 +979,14 @@ export default function App() {
     })
       .then((detail) => {
         if (cancelled) return
-        setThreadDetail(detail)
+        const normalizedDetail = normalizeThreadDetail(detail)
+        setThreadDetail(normalizedDetail)
         setThreadItems((current) => {
           const bucket = current[selectedThreadId] ?? []
-          const merged = detail.items.reduce((items, item) => upsertConversationItem(items, item), bucket)
+          const merged = normalizedDetail.items.reduce(
+            (items, item) => upsertConversationItem(items, item),
+            bucket,
+          )
           return { ...current, [selectedThreadId]: merged }
         })
         setError(null)
@@ -993,7 +1009,7 @@ export default function App() {
     void callRpc<DaemonSnapshot>('snapshot.current', {})
       .then((nextSnapshot) => {
         if (cancelled) return
-        setSnapshot((current) => current ?? nextSnapshot)
+        setSnapshot((current) => current ?? normalizeDaemonSnapshot(nextSnapshot))
         setError(null)
       })
       .catch((e) => {
