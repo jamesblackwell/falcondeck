@@ -2,10 +2,6 @@ import type { AgentProvider, CollaborationModeSummary, ModelSummary } from '@fal
 
 import { Button, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@falcondeck/ui'
 
-function formatModelLabel(label: string): string {
-  return label.replace(/\b(gpt|codex|spark|claude)\b/gi, (match) => match.toUpperCase())
-}
-
 export function ProviderSelector({
   value,
   onValueChange,
@@ -55,7 +51,7 @@ export function ModelSelector({
       <SelectContent>
         {models.map((model) => (
           <SelectItem key={model.id} value={model.id}>
-            {formatModelLabel(model.label)}
+            {model.label}
           </SelectItem>
         ))}
       </SelectContent>

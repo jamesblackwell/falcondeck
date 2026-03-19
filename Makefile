@@ -20,7 +20,7 @@ TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install desktop-prepare remote-web-prepare site-prepare dev desktop-dev frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop lint typecheck check fmt build clean
+.PHONY: help install desktop-prepare remote-web-prepare site-prepare dev desktop-dev desktop-dev-stop frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop lint typecheck check fmt build clean
 
 help:
 	@printf '%s\n' \
@@ -28,6 +28,7 @@ help:
 		'' \
 		'  make dev            Start relay, remote web, and the desktop app' \
 		'  make desktop-dev    Start the Tauri desktop app' \
+		'  make desktop-dev-stop Stop the reusable desktop dev daemon' \
 		'  make frontend-dev   Start the Vite frontend only' \
 		'  make remote-web-dev Start the remote web client on the local network' \
 		'  make site-dev       Start the marketing site locally' \
@@ -83,6 +84,7 @@ site-prepare:
 
 dev: desktop-prepare remote-web-prepare
 	@set -e; \
+		$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true; \
 		if lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 			echo "Port $(UI_PORT) is already in use. Stop the existing FalconDeck frontend or choose another UI_PORT."; \
 			exit 1; \
@@ -105,11 +107,15 @@ dev: desktop-prepare remote-web-prepare
 				wait $$relay_pid; \
 			fi; \
 		fi; \
-		trap 'if [ -n "$$remote_web_pid" ]; then kill $$remote_web_pid 2>/dev/null || true; fi; if [ -n "$$relay_pid" ]; then kill $$relay_pid 2>/dev/null || true; fi' EXIT INT TERM; \
+		trap 'if [ -n "$$remote_web_pid" ]; then kill $$remote_web_pid 2>/dev/null || true; fi; if [ -n "$$relay_pid" ]; then kill $$relay_pid 2>/dev/null || true; fi; $(NPM) run tauri:dev:stop >/dev/null 2>&1 || true' EXIT INT TERM; \
 		$(TAURI_DEV)
 
 desktop-dev: desktop-prepare
+	@$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true
 	@$(TAURI_DEV)
+
+desktop-dev-stop: desktop-prepare
+	@$(NPM) run tauri:dev:stop
 
 frontend-dev: desktop-prepare
 	$(NPM) run dev

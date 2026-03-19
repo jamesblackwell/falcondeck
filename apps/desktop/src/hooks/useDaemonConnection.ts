@@ -15,9 +15,15 @@ import { detectApiBaseUrl } from '../api'
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
 const SELECTION_STORAGE_KEY = 'falcondeck.desktop.selection'
+const DAEMON_BOOTSTRAP_RETRY_COUNT = 12
+const DAEMON_BOOTSTRAP_RETRY_DELAY_MS = 500
 
 function threadCacheKey(workspaceId: string, threadId: string) {
   return `${workspaceId}:${threadId}`
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
 export function useDaemonConnection() {
@@ -85,24 +91,48 @@ export function useDaemonConnection() {
     let cancelled = false
 
     async function bootstrap() {
-      try {
-        const nextBaseUrl = await detectApiBaseUrl()
-        if (cancelled) return
-        setBaseUrl(nextBaseUrl)
-        const nextApi = createDaemonApiClient(nextBaseUrl)
-        const [nextSnapshot, nextRemoteStatus] = await Promise.all([
-          nextApi.snapshot(),
-          nextApi.remoteStatus(),
-        ])
-        if (cancelled) return
-        setSnapshot(nextSnapshot)
-        setRemoteStatus(nextRemoteStatus)
-        setConnectionState('ready')
-        socket = nextApi.connectEvents(handleEvent)
-      } catch (error) {
-        setConnectionState('error')
-        setConnectionError(error instanceof Error ? error.message : 'Failed to connect to daemon')
+      let lastError: unknown = null
+
+      for (let attempt = 0; attempt < DAEMON_BOOTSTRAP_RETRY_COUNT; attempt += 1) {
+        try {
+          const nextBaseUrl = await detectApiBaseUrl()
+          if (cancelled) return
+          setBaseUrl(nextBaseUrl)
+          const nextApi = createDaemonApiClient(nextBaseUrl)
+          const [nextSnapshot, nextRemoteStatus] = await Promise.all([
+            nextApi.snapshot(),
+            nextApi.remoteStatus(),
+          ])
+          if (cancelled) return
+          setSnapshot(nextSnapshot)
+          setRemoteStatus(nextRemoteStatus)
+          setConnectionError(null)
+          setConnectionState('ready')
+          socket = nextApi.connectEvents(handleEvent)
+          socket.onclose = () => {
+            if (cancelled) return
+            setConnectionState('error')
+            setConnectionError('Lost connection to daemon')
+          }
+          socket.onerror = () => {
+            if (cancelled) return
+            setConnectionState('error')
+            setConnectionError('Failed to connect to daemon events')
+          }
+          return
+        } catch (error) {
+          lastError = error
+          if (attempt < DAEMON_BOOTSTRAP_RETRY_COUNT - 1) {
+            await delay(DAEMON_BOOTSTRAP_RETRY_DELAY_MS)
+          }
+        }
       }
+
+      if (cancelled) return
+      setConnectionState('error')
+      setConnectionError(
+        lastError instanceof Error ? lastError.message : 'Failed to connect to daemon',
+      )
     }
 
     void bootstrap()

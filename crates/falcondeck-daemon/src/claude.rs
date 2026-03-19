@@ -178,8 +178,28 @@ impl ClaudeRuntime {
 pub fn curated_models() -> Vec<ModelSummary> {
     vec![
         ModelSummary {
+            id: "haiku".to_string(),
+            label: "Haiku 4.5".to_string(),
+            is_default: false,
+            default_reasoning_effort: Some("medium".to_string()),
+            supported_reasoning_efforts: vec![
+                ReasoningEffortSummary {
+                    reasoning_effort: "low".to_string(),
+                    description: "Fastest responses".to_string(),
+                },
+                ReasoningEffortSummary {
+                    reasoning_effort: "medium".to_string(),
+                    description: "Balanced reasoning".to_string(),
+                },
+                ReasoningEffortSummary {
+                    reasoning_effort: "high".to_string(),
+                    description: "Deeper reasoning".to_string(),
+                },
+            ],
+        },
+        ModelSummary {
             id: "sonnet".to_string(),
-            label: "Claude Sonnet".to_string(),
+            label: "Sonnet 4.6".to_string(),
             is_default: true,
             default_reasoning_effort: Some("medium".to_string()),
             supported_reasoning_efforts: vec![
@@ -199,7 +219,7 @@ pub fn curated_models() -> Vec<ModelSummary> {
         },
         ModelSummary {
             id: "opus".to_string(),
-            label: "Claude Opus".to_string(),
+            label: "Opus 4.6".to_string(),
             is_default: false,
             default_reasoning_effort: Some("high".to_string()),
             supported_reasoning_efforts: vec![
@@ -488,6 +508,19 @@ mod tests {
         }));
         assert_eq!(account.status, AccountStatus::Ready);
         assert_eq!(account.label, "Claude ready (jamie@example.com)");
+    }
+
+    #[test]
+    fn exposes_curated_claude_models_with_versioned_labels() {
+        let models = curated_models();
+        assert_eq!(models.len(), 3);
+        assert_eq!(models[0].id, "haiku");
+        assert_eq!(models[0].label, "Haiku 4.5");
+        assert_eq!(models[1].id, "sonnet");
+        assert_eq!(models[1].label, "Sonnet 4.6");
+        assert!(models[1].is_default);
+        assert_eq!(models[2].id, "opus");
+        assert_eq!(models[2].label, "Opus 4.6");
     }
 
     #[test]

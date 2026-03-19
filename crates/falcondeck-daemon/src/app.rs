@@ -2217,17 +2217,16 @@ impl AppState {
                             }) {
                                 None
                             } else {
-                                let pairing_snapshot = {
-                                    let current_pairing =
-                                        remote.pairing.as_mut().expect("pairing checked above");
-                                    current_pairing.session_id = Some(session_id);
-                                    current_pairing.device_id = Some(device_id);
-                                    current_pairing.client_bundle = Some(client_bundle.clone());
-                                    if current_pairing.trusted_at.is_none() {
-                                        current_pairing.trusted_at = Some(Utc::now());
-                                    }
-                                    current_pairing.clone()
+                                let Some(current_pairing) = remote.pairing.as_mut() else {
+                                    return;
                                 };
+                                current_pairing.session_id = Some(session_id);
+                                current_pairing.device_id = Some(device_id);
+                                current_pairing.client_bundle = Some(client_bundle.clone());
+                                if current_pairing.trusted_at.is_none() {
+                                    current_pairing.trusted_at = Some(Utc::now());
+                                }
+                                let pairing_snapshot = current_pairing.clone();
                                 remote.last_error = None;
                                 remote.pairing_watch_task = None;
                                 remote.command_tx.clone().map(|command_tx| {
@@ -4599,62 +4598,142 @@ fn is_claude_plan_mode(mode_id: Option<&str>) -> bool {
 }
 
 fn extract_claude_text_delta(value: &Value) -> Option<String> {
+    if matches!(extract_string(value, &["type"]).as_deref(), Some("result")) {
+        return extract_string(value, &["result"]);
+    }
+
+    let event = claude_event_value(value);
+    if let Some(text) = extract_string(event, &["text", "completion"]) {
+        return Some(text);
+    }
+    if let Some(text) = event
+        .get("delta")
+        .and_then(|delta| extract_string(delta, &["text"]))
+    {
+        return Some(text);
+    }
+    if let Some(text) = value
+        .get("message")
+        .and_then(claude_message_text)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text);
+    }
     if let Some(text) = extract_string(value, &["text", "completion"]) {
         return Some(text);
     }
     value
         .get("delta")
         .and_then(|delta| extract_string(delta, &["text"]))
-        .or_else(|| {
-            value
-                .get("message")
-                .and_then(|message| extract_string(message, &["text", "content"]))
-        })
-        .or_else(|| {
-            value
-                .get("content")
-                .and_then(Value::as_array)
-                .and_then(|items| {
-                    items
-                        .iter()
-                        .find_map(|item| extract_string(item, &["text"]))
-                })
-        })
 }
 
 fn extract_claude_tool_event(value: &Value) -> Option<(String, String, String, Option<String>)> {
-    let event_type = extract_string(value, &["type", "event"])?;
-    if !(event_type.contains("tool") || value.get("tool_name").is_some()) {
+    let top_level_type = extract_string(value, &["type"]);
+    let event = claude_event_value(value);
+    let event_type =
+        extract_string(event, &["type", "event"]).or_else(|| top_level_type.clone())?;
+
+    if top_level_type.as_deref() == Some("user") {
+        let tool_result = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| extract_string(item, &["type"]).as_deref() == Some("tool_result"))
+            })?;
+        let id = extract_string(tool_result, &["tool_use_id", "toolUseId", "id"])
+            .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
+        let output = extract_string(tool_result, &["content", "text"]);
+        return Some((
+            id,
+            "Claude tool".to_string(),
+            "completed".to_string(),
+            output,
+        ));
+    }
+
+    if event_type == "content_block_start" {
+        let content_block = event.get("content_block")?;
+        if extract_string(content_block, &["type"]).as_deref() != Some("tool_use") {
+            return None;
+        }
+        let id = extract_string(content_block, &["id"])
+            .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
+        let title =
+            extract_string(content_block, &["name"]).unwrap_or_else(|| "Claude tool".to_string());
+        return Some((id, title, "running".to_string(), None));
+    }
+
+    if top_level_type.as_deref() == Some("assistant") {
+        let tool_use = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items
+                    .iter()
+                    .find(|item| extract_string(item, &["type"]).as_deref() == Some("tool_use"))
+            });
+        if let Some(tool_use) = tool_use {
+            let id = extract_string(tool_use, &["id"])
+                .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
+            let title =
+                extract_string(tool_use, &["name"]).unwrap_or_else(|| "Claude tool".to_string());
+            return Some((id, title, "running".to_string(), None));
+        }
+    }
+
+    if !(event_type.contains("tool") || event.get("tool_name").is_some()) {
         return None;
     }
-    let id = extract_string(value, &["tool_use_id", "toolUseId", "id"])
+
+    let id = extract_string(event, &["tool_use_id", "toolUseId", "id"])
         .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
-    let title = extract_string(value, &["tool_name", "toolName", "name"])
+    let title = extract_string(event, &["tool_name", "toolName", "name"])
         .unwrap_or_else(|| "Claude tool".to_string());
     let status = if event_type.contains("end") || event_type.contains("result") {
         "completed"
     } else {
         "running"
     };
-    let output = extract_string(value, &["output", "result", "text"]);
+    let output = extract_string(event, &["output", "result", "text"]);
     Some((id, title, status.to_string(), output))
 }
 
 fn extract_claude_service_message(value: &Value) -> Option<String> {
-    let event_type = extract_string(value, &["type", "event"])?;
+    let event_type = extract_string(claude_event_value(value), &["type", "event"])
+        .or_else(|| extract_string(value, &["type"]))?;
     if matches!(event_type.as_str(), "system" | "status" | "result") {
-        return extract_string(value, &["message", "status", "summary"]);
+        return extract_string(claude_event_value(value), &["message", "status", "summary"])
+            .or_else(|| extract_string(value, &["message", "status", "summary"]));
     }
     None
 }
 
 fn extract_claude_error(value: &Value) -> Option<String> {
-    extract_string(value, &["error", "message"]).filter(|_| {
-        extract_string(value, &["type", "event"])
-            .map(|event| event.contains("error"))
+    if extract_string(value, &["type"]).as_deref() == Some("result")
+        && value
+            .get("is_error")
+            .and_then(Value::as_bool)
             .unwrap_or(false)
-            || value.get("error").is_some()
-    })
+    {
+        return extract_string(value, &["result"])
+            .or_else(|| extract_string(value, &["subtype"]))
+            .or_else(|| Some("Claude turn failed".to_string()));
+    }
+
+    let event = claude_event_value(value);
+    extract_string(event, &["error", "message"])
+        .or_else(|| extract_string(value, &["error", "message"]))
+        .filter(|_| {
+            extract_string(event, &["type", "event"])
+                .or_else(|| extract_string(value, &["type"]))
+                .map(|event| event.contains("error"))
+                .unwrap_or(false)
+                || value.get("error").is_some()
+        })
 }
 
 fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> String {
@@ -4668,6 +4747,28 @@ fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> String {
         return next_chunk.to_string();
     }
     format!("{current}{next_chunk}")
+}
+
+fn claude_event_value<'a>(value: &'a Value) -> &'a Value {
+    value.get("event").unwrap_or(value)
+}
+
+fn claude_message_text(value: &Value) -> Option<String> {
+    let content = value.get("content")?.as_array()?;
+    let mut parts = Vec::new();
+    for item in content {
+        if extract_string(item, &["type"]).as_deref() != Some("text") {
+            continue;
+        }
+        if let Some(text) = extract_string(item, &["text"]) {
+            parts.push(text);
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(""))
+    }
 }
 
 fn parse_agent_provider(value: String) -> Option<AgentProvider> {
@@ -4740,7 +4841,7 @@ fn should_use_plan_mode_shim(
 
 fn collaboration_mode_payload(
     mode_id: Option<&str>,
-    model_id: Option<&str>,
+    selected_model_id: Option<&str>,
     reasoning_effort: Option<&str>,
     supports_native_plan_mode: bool,
 ) -> Value {
@@ -4753,7 +4854,10 @@ fn collaboration_mode_payload(
     };
 
     let mut settings = serde_json::Map::new();
-    if let Some(model_id) = model_id.map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(model_id) = selected_model_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         settings.insert("model".to_string(), json!(model_id));
     }
     if let Some(reasoning_effort) = reasoning_effort
@@ -5546,6 +5650,88 @@ mod tests {
     }
 
     #[test]
+    fn extracts_nested_claude_stream_text_and_result_payloads() {
+        assert_eq!(
+            super::extract_claude_text_delta(&json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": {
+                        "type": "text_delta",
+                        "text": "hi"
+                    }
+                }
+            })),
+            Some("hi".to_string())
+        );
+
+        assert_eq!(
+            super::extract_claude_text_delta(&json!({
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        { "type": "text", "text": "hello" }
+                    ]
+                }
+            })),
+            Some("hello".to_string())
+        );
+
+        assert_eq!(
+            super::extract_claude_text_delta(&json!({
+                "type": "result",
+                "subtype": "success",
+                "result": "done"
+            })),
+            Some("done".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_nested_claude_tool_use_and_result_events() {
+        assert_eq!(
+            super::extract_claude_tool_event(&json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_123",
+                        "name": "Glob"
+                    }
+                }
+            })),
+            Some((
+                "toolu_123".to_string(),
+                "Glob".to_string(),
+                "running".to_string(),
+                None
+            ))
+        );
+
+        assert_eq!(
+            super::extract_claude_tool_event(&json!({
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_123",
+                            "content": "match"
+                        }
+                    ]
+                }
+            })),
+            Some((
+                "toolu_123".to_string(),
+                "Claude tool".to_string(),
+                "completed".to_string(),
+                Some("match".to_string())
+            ))
+        );
+    }
+
+    #[test]
     fn persisted_state_reads_legacy_workspace_paths() {
         let payload = json!({
             "workspaces": ["/tmp/project-a", "/tmp/project-b"],
@@ -5655,7 +5841,7 @@ mod tests {
             device_id: Some("device-1".to_string()),
             trusted_at: Some(Utc::now()),
             client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
-            ..initial_pairing.clone()
+            ..initial_pairing
         };
         let remote = super::RemoteBridgeState {
             status: falcondeck_core::RemoteConnectionStatus::Connected,
@@ -6360,10 +6546,7 @@ fn relay_url_looks_legacy_loopback(relay_url: &str) -> bool {
         return false;
     };
 
-    matches!(
-        parsed.host_str(),
-        Some("127.0.0.1") | Some("localhost") | Some("::1")
-    )
+    matches!(parsed.host_str(), Some("127.0.0.1" | "localhost" | "::1"))
 }
 
 fn host_label() -> String {
