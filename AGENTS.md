@@ -1,59 +1,56 @@
 # FalconDeck Agent Guide
 
-## Project Shape
+## Overview
 
-FalconDeck is a monorepo. Keep related apps and shared protocol/runtime code together.
+FalconDeck is a monorepo for a local daemon-first agent control plane:
 
-Current structure:
-- `apps/desktop` — Tauri desktop shell and React UI
-- `apps/site` — public-facing website placeholder
-- `apps/remote-web` — remote browser client
-- `crates/falcondeck-core` — shared types and protocol models
-- `crates/falcondeck-daemon` — local daemon and Codex integration
-- `crates/falcondeck-relay` — public relay server
-- `ops/ansible` — deployment automation and server templates
-- `docs/` — architecture and protocol notes
+- `apps/desktop` - Tauri shell around the daemon
+- `apps/mobile` - paired mobile client
+- `apps/remote-web` - paired browser client
+- `apps/site` - public marketing site
+- `packages/client-core` - shared TS protocol, types, helpers
+- `packages/ui`, `packages/chat-ui` - shared UI primitives
+- `crates/falcondeck-core` - shared Rust protocol and types
+- `crates/falcondeck-daemon` - local daemon, agent integration, unified event stream, relay bridge
+- `crates/falcondeck-relay` - public relay with encrypted replay storage and trusted-device pairing
+- `ops/ansible` - deploy and server config
 
-## Architecture Rules
+## Core Rules
 
-- The daemon is the product. The desktop app is a shell around it.
-- Use `codex app-server` for Codex. Do not use the MCP server.
-- Claude support is phase 2 and should use the CLI subprocess path, not the Agent SDK.
-- Sessions stay in native agent storage. FalconDeck should not create its own conversation database.
-- Same-folder workflows are the default. Do not force worktrees.
-- Remote access should follow the Happy-style relay model: E2E encrypted, stateful relay, reconnect by sequence number.
+- The daemon is the product; desktop is just its shell.
+- Use `codex app-server` for Codex, not the MCP server path.
+- Keep Claude on the CLI subprocess path, not the Agent SDK.
+- Sessions and conversation history belong to the underlying agent. Do not add a FalconDeck conversation DB.
+- Default to same-folder workflows. Do not force worktrees.
+- Start shared protocol changes in `crates/falcondeck-core` and `packages/client-core`, then fan out.
 
-## Current Priorities
+## Gotchas
 
-1. Keep the existing desktop + daemon flow working.
-2. Build the relay server in `crates/falcondeck-relay`.
-3. Build the remote web client in `apps/remote-web`.
-4. Build the public site in `apps/site`.
-5. Add Claude Code after the Codex + relay path is solid.
+- The relay is stateful but not the conversation source of truth. The daemon and native agent storage are. Relay replay only smooths remote reconnects.
+- Pairings are short-lived onboarding state. Trusted devices are the long-lived relationship.
+- Relay replay may be pruned. When history is truncated, clients must recover from a fresh daemon snapshot, not assume full replay remains.
+- Relay sequence numbers must stay monotonic after pruning. Do not derive `next_seq` from the last retained update.
+- The daemon is currently localhost-first. `falcondeck-daemon` binds to `127.0.0.1` by default. Do not document direct-hosted web product behavior unless it actually exists.
+- Remote and mobile access depend on daemon RPC registration. Methods like `snapshot.current`, `thread.detail`, `turn.start`, and approval handlers are part of that contract; changing names or flow breaks clients.
+- Remote clients are clients of the daemon, not separate durable stores. Before adding remote-only persistence, check whether it belongs in the daemon or native agent storage instead.
+- Production relay storage uses Postgres. File-backed relay state still exists for local, test, and simple setups.
+- Keep secrets and real inventory out of git. `ops/ansible/inventory/example` and example vars are safe; real hosts, creds, and production inventory are not.
 
-## Implementation Notes
+## Working Guidelines
 
-- Read `docs/` before making protocol or architectural changes.
-- Prefer shared protocol changes in `crates/falcondeck-core` first, then fan out to daemon/UI/relay.
-- The frontend stack now uses shared packages plus Tailwind v4 and shadcn-style primitives:
-  - `packages/client-core` for shared TS models, grouping, conversation helpers, and API clients
-  - `packages/ui` for shared UI primitives and theme tokens
-  - `packages/chat-ui` for AI chat/conversation/composer surfaces
-- Use semantic wrappers and shared tokens rather than ad hoc utility soup.
-- Keep `AGENTS.md` concise and operational. Put deep design rationale in `docs/`.
-- Keep real deployment inventory and secrets out of git. Commit examples/templates only.
-- Do not add Electron, custom crypto, or forced account/login flows for v1.
-- You have permission to use Ansible for FalconDeck deploys and to SSH into the production relay/app server when needed for deployment, debugging, or verification.
+- Read `docs/` before changing protocol or architecture.
+- Keep `AGENTS.md` short and operational; put rationale in `docs/`.
+- Prefer semantic shared UI wrappers over ad hoc utility-heavy markup.
+- Preserve hosting defaults:
+- `connect.falcondeck.com` - relay
+- `app.falcondeck.com` - hosted remote web app
+- `falcondeck.com` - public site
+- You may use Ansible and SSH on the production relay/app host for deployment, debugging, and verification when needed.
 
-## UI and Hosting Defaults
+## Priorities
 
-- Use grouped project/workspace navigation in both desktop and remote clients.
-- Prefer AI Elements-style chat surfaces for conversation, prompt input, model selection, and code blocks.
-- `connect.falcondeck.com` is the public relay.
-- `app.falcondeck.com` is the hosted remote client.
-- `falcondeck.com` is the public marketing/site app.
-
-## Reference Implementations
-
-- CodexMonitor: UI/layout and Codex app-server patterns
-- Happy: relay, encryption, reconnect, permissions, unified event model
+1. Keep the desktop and daemon flow solid.
+2. Keep relay protocol and retention/reconnect behavior correct.
+3. Keep remote web and mobile aligned with daemon/relay contracts.
+4. Keep the public site simple and separate from product runtime concerns.
+5. Expand Claude support without regressing the Codex path.
