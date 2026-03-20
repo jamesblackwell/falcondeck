@@ -11,6 +11,7 @@ import {
   useSelectedThread,
   useSelectedWorkspace,
   useRelayStore,
+  useSessionStore,
   useUIStore,
 } from '@/store'
 import { useRelayConnection } from '@/hooks/useRelayConnection'
@@ -36,6 +37,8 @@ export default function HomeScreen() {
   const approvals = useApprovals()
   const selectedThread = useSelectedThread()
   const workspace = useSelectedWorkspace()
+  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
+  const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
   const connectionStatus = useRelayStore((s) => s.connectionStatus)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const machinePresence = useRelayStore((s) => s.machinePresence)
@@ -44,7 +47,7 @@ export default function HomeScreen() {
   const draft = useUIStore((s) => s.draft)
   const isSubmitting = useUIStore((s) => s.isSubmitting)
   const { setDraft } = useUIStore.getState()
-  const { submitTurn, respondApproval } = useSessionActions()
+  const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
   const [appState, setAppState] = useState(AppState.currentState)
 
   useEffect(() => {
@@ -53,6 +56,15 @@ export default function HomeScreen() {
       subscription.remove()
     }
   }, [])
+
+  useEffect(() => {
+    if (!selectedWorkspaceId || !selectedThreadId || !isEncrypted) {
+      useSessionStore.getState().setThreadDetail(null)
+      return
+    }
+
+    void loadThreadDetail(selectedWorkspaceId, selectedThreadId)
+  }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedWorkspaceId])
 
   useEffect(() => {
     if (appState !== 'active' || !workspace || !selectedThread || !sessionId || !isEncrypted) return
@@ -110,7 +122,12 @@ export default function HomeScreen() {
       ))}
 
       <View style={styles.listContainer}>
-        {items.length === 0 ? (
+        {!selectedThread ? (
+          <EmptyState
+            title="Start a new thread"
+            description="Pick an existing thread or use the plus button from the sidebar."
+          />
+        ) : items.length === 0 ? (
           <EmptyState title="No messages yet" description="Send a message to get started" />
         ) : (
           <FlashList

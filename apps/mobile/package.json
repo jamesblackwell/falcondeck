@@ -3,19 +3,33 @@
   "version": "0.1.0",
   "private": true,
   "main": "expo-router/entry",
+  "expo": {
+    "install": {
+      "exclude": [
+        "react",
+        "react-dom",
+        "react-native"
+      ]
+    }
+  },
   "scripts": {
     "start": "expo start",
     "ios": "expo run:ios",
     "android": "expo run:android",
+    "doctor": "npx expo-doctor",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "build:preview:ios": "eas build --profile preview --platform ios --non-interactive",
+    "build:testflight": "eas build --profile preview-testflight --platform ios --non-interactive",
+    "submit:testflight": "eas submit --profile preview-testflight --platform ios --latest --non-interactive"
   },
   "dependencies": {
     "@falcondeck/client-core": "*",
     "@react-navigation/drawer": "^7.5.0",
     "@shopify/flash-list": "2.0.2",
-    "expo": "~54.0.0",
+    "expo": "~54.0.33",
+    "expo-build-properties": "~1.0.9",
     "expo-camera": "~17.0.10",
     "expo-clipboard": "~8.0.8",
     "expo-crypto": "~15.0.8",
@@ -28,12 +42,14 @@
     "expo-secure-store": "~15.0.8",
     "expo-splash-screen": "~31.0.13",
     "expo-status-bar": "~3.0.0",
+    "expo-updates": "~29.0.16",
     "lucide-react-native": "~0.475.0",
-    "react": "19.1.0",
-    "react-dom": "19.1.0",
-    "react-native": "0.81.5",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-native": "^0.81.5",
     "react-native-gesture-handler": "~2.28.0",
-    "react-native-mmkv": "~3.2.0",
+    "react-native-mmkv": "~3.3.3",
+    "react-native-nitro-modules": "^0.35.2",
     "react-native-reanimated": "~4.1.1",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",

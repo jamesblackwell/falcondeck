@@ -136,6 +136,27 @@ describe('session-store', () => {
 
       expect(useSessionStore.getState().selectedThreadId).toBe('auto-thread')
     })
+
+    it('clears stale threadDetail when selecting a different thread', () => {
+      const { setThreadDetail, selectThread } = useSessionStore.getState()
+      setThreadDetail(threadDetail({ thread: thread({ id: 't-existing' }) }))
+
+      selectThread('w1', 't-next')
+
+      expect(useSessionStore.getState().threadDetail).toBeNull()
+    })
+
+    it('selectNewThread keeps the workspace but clears thread selection and detail', () => {
+      const { setThreadDetail, selectNewThread } = useSessionStore.getState()
+      setThreadDetail(threadDetail())
+
+      selectNewThread('workspace-1')
+
+      const state = useSessionStore.getState()
+      expect(state.selectedWorkspaceId).toBe('workspace-1')
+      expect(state.selectedThreadId).toBeNull()
+      expect(state.threadDetail).toBeNull()
+    })
   })
 
   describe('setThreadDetail', () => {
@@ -162,8 +183,28 @@ describe('session-store', () => {
       expect(items!.find((i) => i.id === 'msg-1')).toMatchObject({ kind: 'assistant_message' })
     })
 
+    it('does not replace the active thread detail with a stale response for another thread', () => {
+      const { setThreadDetail, selectThread } = useSessionStore.getState()
+      selectThread('workspace-1', 'thread-2')
+      setThreadDetail(threadDetail({ thread: thread({ id: 'thread-2' }) }))
+
+      setThreadDetail(
+        threadDetail({
+          thread: thread({ id: 'thread-1' }),
+          items: [assistantMessage('stale-msg', 'late response')],
+        }),
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.threadDetail?.thread.id).toBe('thread-2')
+      expect(state.threadItems['thread-1']).toEqual([
+        expect.objectContaining({ id: 'stale-msg', text: 'late response' }),
+      ])
+    })
+
     it('clears threadDetail when passed null', () => {
-      const { setThreadDetail } = useSessionStore.getState()
+      const { setThreadDetail, selectThread } = useSessionStore.getState()
+      selectThread('workspace-1', 'thread-1')
       setThreadDetail(threadDetail())
       expect(useSessionStore.getState().threadDetail).toBeTruthy()
 
@@ -173,6 +214,30 @@ describe('session-store', () => {
   })
 
   describe('derived selector logic', () => {
+    it('clears stale thread detail when snapshot reconciliation changes the selection', () => {
+      const snap = snapshot({
+        workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+        threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+      })
+      const { applyDaemonEvent, selectThread } = useSessionStore.getState()
+      applyDaemonEvent(snapshotEvent(snap))
+      selectThread('workspace-1', 'thread-1')
+      useSessionStore.getState().setThreadDetail(threadDetail())
+
+      applyDaemonEvent(
+        snapshotEvent(
+          snapshot({
+            workspaces: [workspace({ id: 'workspace-1', current_thread_id: null })],
+            threads: [],
+          }),
+        ),
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.selectedThreadId).toBeNull()
+      expect(state.threadDetail).toBeNull()
+    })
+
     it('buildProjectGroups groups threads by workspace from snapshot', () => {
       const snap = snapshot({
         workspaces: [workspace({ id: 'w1', path: '/tmp/alpha' })],
@@ -188,7 +253,8 @@ describe('session-store', () => {
     })
 
     it('conversation items come from threadDetail when it exists', () => {
-      const { setThreadDetail } = useSessionStore.getState()
+      const { setThreadDetail, selectThread } = useSessionStore.getState()
+      selectThread('workspace-1', 'thread-1')
 
       setThreadDetail(
         threadDetail({

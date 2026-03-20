@@ -10,7 +10,7 @@ export default function AppLayout() {
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
   const connectionStatus = useRelayStore((s) => s.connectionStatus)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
-  const { selectThread } = useSessionStore.getState()
+  const { selectThread, selectNewThread } = useSessionStore.getState()
 
   return (
     <Drawer
@@ -32,7 +32,7 @@ export default function AppLayout() {
           connectionStatus={connectionStatus}
           isEncrypted={isEncrypted}
           onSelectThread={(wId, tId) => selectThread(wId, tId)}
-          onNewThread={(wId) => useSessionStore.getState().selectWorkspace(wId)}
+          onNewThread={selectNewThread}
         />
       )}
     />

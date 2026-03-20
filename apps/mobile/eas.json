@@ -1,0 +1,42 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "env": {
+        "EAS_BUILD_PROFILE": "preview"
+      }
+    },
+    "preview-testflight": {
+      "distribution": "store",
+      "channel": "preview-testflight",
+      "autoIncrement": true,
+      "env": {
+        "EAS_BUILD_PROFILE": "preview-testflight"
+      }
+    },
+    "production": {
+      "channel": "production",
+      "autoIncrement": true,
+      "env": {
+        "EAS_BUILD_PROFILE": "production"
+      }
+    }
+  },
+  "submit": {
+    "preview-testflight": {
+      "ios": {
+        "ascAppId": "6760899257"
+      }
+    },
+    "production": {
+      "ios": {
+        "ascAppId": "6760899257"
+      }
+    }
+  }
+}

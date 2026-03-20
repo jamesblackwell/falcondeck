@@ -29,6 +29,7 @@ interface SessionActions {
   applyDaemonEvent: (event: EventEnvelope) => void
   selectThread: (workspaceId: string, threadId: string) => void
   selectWorkspace: (workspaceId: string) => void
+  selectNewThread: (workspaceId: string) => void
   setThreadDetail: (detail: ThreadDetail | null) => void
   reconcileSelection: () => void
   reset: () => void
@@ -86,11 +87,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         state.selectedWorkspaceId,
         state.selectedThreadId,
       )
+      const reconciledThreadDetail =
+        nextThreadDetail?.thread.id === nextSelection.threadId ? nextThreadDetail : null
 
       return {
         snapshot: nextSnapshot ?? state.snapshot,
         threadItems: nextThreadItems,
-        threadDetail: nextThreadDetail,
+        threadDetail: reconciledThreadDetail,
         selectedWorkspaceId: nextSelection.workspaceId,
         selectedThreadId: nextSelection.threadId,
       }
@@ -98,14 +101,29 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   selectThread: (workspaceId, threadId) =>
-    set({ selectedWorkspaceId: workspaceId, selectedThreadId: threadId }),
+    set((state) => ({
+      selectedWorkspaceId: workspaceId,
+      selectedThreadId: threadId,
+      threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
+    })),
 
   selectWorkspace: (workspaceId) => {
     const { snapshot } = get()
     const workspace = snapshot?.workspaces.find((w) => w.id === workspaceId)
     const threadId = workspace?.current_thread_id ?? null
-    set({ selectedWorkspaceId: workspaceId, selectedThreadId: threadId })
+    set((state) => ({
+      selectedWorkspaceId: workspaceId,
+      selectedThreadId: threadId,
+      threadDetail: state.threadDetail?.thread.id === threadId ? state.threadDetail : null,
+    }))
   },
+
+  selectNewThread: (workspaceId) =>
+    set({
+      selectedWorkspaceId: workspaceId,
+      selectedThreadId: null,
+      threadDetail: null,
+    }),
 
   setThreadDetail: (detail) => {
     if (!detail) {
@@ -119,8 +137,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         (items, item) => upsertConversationItem(items, item),
         existing,
       )
+      const isSelectedThread = state.selectedThreadId === threadId
       return {
-        threadDetail: detail,
+        threadDetail: isSelectedThread ? detail : state.threadDetail,
         threadItems: { ...state.threadItems, [threadId]: merged },
       }
     })
@@ -136,6 +155,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       return {
         selectedWorkspaceId: next.workspaceId,
         selectedThreadId: next.threadId,
+        threadDetail: state.threadDetail?.thread.id === next.threadId ? state.threadDetail : null,
       }
     })
   },
