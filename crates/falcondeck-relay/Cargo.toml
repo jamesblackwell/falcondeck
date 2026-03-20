@@ -3,7 +3,11 @@ name = "falcondeck-relay"
 version.workspace = true
 edition.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
+async-trait = "0.1"
 axum.workspace = true
 chrono.workspace = true
 falcondeck-core = { path = "../falcondeck-core" }

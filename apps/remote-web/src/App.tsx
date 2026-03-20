@@ -2257,7 +2257,6 @@ export default function App() {
                 )
               }
               disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
-              compact
             />
           </div>
         </div>

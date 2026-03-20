@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
@@ -14,19 +10,13 @@ use falcondeck_core::{
     TrustedDeviceStatus, TrustedDevicesResponse, crypto::verify_pairing_public_key_bundle,
 };
 use serde::{Deserialize, Serialize};
-use tokio::{
-    fs,
-    sync::{Mutex, mpsc},
-    task::JoinHandle,
-};
-use tokio_postgres::{Client as PostgresClient, NoTls};
+use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::error::RelayError;
 
 const PEER_QUEUE_CAPACITY: usize = 256;
-const FILE_PERSIST_DEBOUNCE_MS: u64 = 150;
 const WS_TICKET_TTL_SECONDS: i64 = 30;
 
 #[derive(Debug, Clone)]
@@ -57,17 +47,13 @@ pub struct AppState {
 
 struct InnerState {
     version: String,
-    state_path: PathBuf,
     default_pairing_ttl: Duration,
     retention: RetentionConfig,
-    store: Mutex<Store>,
-    persist_lock: Mutex<()>,
-    postgres: Option<PostgresPersistence>,
-    file_persist_task: Mutex<Option<JoinHandle<()>>>,
-}
-
-struct PostgresPersistence {
-    client: Mutex<PostgresClient>,
+    store: Arc<Mutex<Store>>,
+    backend: Arc<dyn crate::persistence::PersistenceBackend>,
+    /// True when the backend is file-based and needs a full-state flush
+    /// after each granular persist call.
+    needs_flush: bool,
 }
 
 struct Store {
@@ -77,69 +63,69 @@ struct Store {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct PersistedState {
+pub(crate) struct PersistedState {
     #[serde(default)]
-    pairings: HashMap<String, PairingRecord>,
+    pub(crate) pairings: HashMap<String, PairingRecord>,
     #[serde(default)]
-    sessions: HashMap<String, SessionRecord>,
+    pub(crate) sessions: HashMap<String, SessionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PairingRecord {
-    pairing_id: String,
-    pairing_code: String,
-    daemon_token: String,
-    label: Option<String>,
-    session_id: String,
+pub(crate) struct PairingRecord {
+    pub(crate) pairing_id: String,
+    pub(crate) pairing_code: String,
+    pub(crate) daemon_token: String,
+    pub(crate) label: Option<String>,
+    pub(crate) session_id: String,
     #[serde(default)]
-    device_id: Option<String>,
-    daemon_bundle: Option<PairingPublicKeyBundle>,
-    client_bundle: Option<PairingPublicKeyBundle>,
-    created_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
+    pub(crate) device_id: Option<String>,
+    pub(crate) daemon_bundle: Option<PairingPublicKeyBundle>,
+    pub(crate) client_bundle: Option<PairingPublicKeyBundle>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct SessionRecord {
-    session_id: String,
-    pairing_id: String,
-    daemon_token: String,
+pub(crate) struct SessionRecord {
+    pub(crate) session_id: String,
+    pub(crate) pairing_id: String,
+    pub(crate) daemon_token: String,
     #[serde(default)]
-    daemon_last_seen_at: Option<DateTime<Utc>>,
+    pub(crate) daemon_last_seen_at: Option<DateTime<Utc>>,
     #[serde(default)]
-    devices: HashMap<String, TrustedDeviceRecord>,
+    pub(crate) devices: HashMap<String, TrustedDeviceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    device_id: Option<String>,
+    pub(crate) device_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    device_created_at: Option<DateTime<Utc>>,
+    pub(crate) device_created_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_token: Option<String>,
+    pub(crate) client_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_label: Option<String>,
+    pub(crate) client_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_public_key: Option<String>,
+    pub(crate) client_public_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    client_last_seen_at: Option<DateTime<Utc>>,
+    pub(crate) client_last_seen_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    revoked_at: Option<DateTime<Utc>>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+    pub(crate) revoked_at: Option<DateTime<Utc>>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
     #[serde(default = "default_next_seq")]
-    next_seq: u64,
-    updates: Vec<RelayUpdate>,
+    pub(crate) next_seq: u64,
+    pub(crate) updates: Vec<RelayUpdate>,
     #[serde(default)]
-    actions: HashMap<String, QueuedActionRecord>,
+    pub(crate) actions: HashMap<String, QueuedActionRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct TrustedDeviceRecord {
-    device_id: String,
-    client_token: String,
-    label: Option<String>,
-    public_key: Option<String>,
-    created_at: DateTime<Utc>,
-    last_seen_at: Option<DateTime<Utc>>,
-    revoked_at: Option<DateTime<Utc>>,
+pub(crate) struct TrustedDeviceRecord {
+    pub(crate) device_id: String,
+    pub(crate) client_token: String,
+    pub(crate) label: Option<String>,
+    pub(crate) public_key: Option<String>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) last_seen_at: Option<DateTime<Utc>>,
+    pub(crate) revoked_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Default)]
@@ -163,20 +149,20 @@ struct WebSocketTicket {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct QueuedActionRecord {
-    action_id: String,
-    session_id: String,
-    device_id: String,
-    action_type: String,
-    idempotency_key: String,
-    payload: EncryptedEnvelope,
-    status: QueuedRemoteActionStatus,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    error: Option<String>,
-    result: Option<EncryptedEnvelope>,
+pub(crate) struct QueuedActionRecord {
+    pub(crate) action_id: String,
+    pub(crate) session_id: String,
+    pub(crate) device_id: String,
+    pub(crate) action_type: String,
+    pub(crate) idempotency_key: String,
+    pub(crate) payload: EncryptedEnvelope,
+    pub(crate) status: QueuedRemoteActionStatus,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) error: Option<String>,
+    pub(crate) result: Option<EncryptedEnvelope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    owner_peer_id: Option<String>,
+    pub(crate) owner_peer_id: Option<String>,
 }
 
 #[derive(Clone)]
@@ -224,26 +210,25 @@ impl AppState {
         default_pairing_ttl: Duration,
         retention: RetentionConfig,
     ) -> Result<Self, RelayError> {
-        let mut data = load_state(&state_path).await?;
+        let mut data = crate::persistence::load_file_state(&state_path).await?;
         for session in data.sessions.values_mut() {
             session.migrate_legacy_device_fields();
             session.ensure_next_seq();
         }
         let normalized = normalize_in_flight_actions(&mut data);
+        let backend = Arc::new(crate::persistence::FileBackend::new(state_path));
         let state = Self {
             inner: Arc::new(InnerState {
                 version,
-                state_path,
                 default_pairing_ttl,
                 retention,
-                store: Mutex::new(Store {
+                store: Arc::new(Mutex::new(Store {
                     data,
                     live_sessions: HashMap::new(),
                     ws_tickets: HashMap::new(),
-                }),
-                persist_lock: Mutex::new(()),
-                postgres: None,
-                file_persist_task: Mutex::new(None),
+                })),
+                backend,
+                needs_flush: true,
             }),
         };
         let pruned = state.prune_expired_state().await?;
@@ -273,29 +258,26 @@ impl AppState {
         default_pairing_ttl: Duration,
         retention: RetentionConfig,
     ) -> Result<Self, RelayError> {
-        let client = connect_postgres(&database_url).await?;
-        let mut data = load_postgres_state(&client).await?;
+        let pg = crate::persistence::PostgresBackend::connect(&database_url).await?;
+        let mut data = crate::persistence::load_postgres_state(&pg).await?;
         for session in data.sessions.values_mut() {
             session.migrate_legacy_device_fields();
             session.ensure_next_seq();
         }
         let normalized = normalize_in_flight_actions(&mut data);
+        let backend = Arc::new(pg);
         let state = Self {
             inner: Arc::new(InnerState {
                 version,
-                state_path: PathBuf::new(),
                 default_pairing_ttl,
                 retention,
-                store: Mutex::new(Store {
+                store: Arc::new(Mutex::new(Store {
                     data,
                     live_sessions: HashMap::new(),
                     ws_tickets: HashMap::new(),
-                }),
-                persist_lock: Mutex::new(()),
-                postgres: Some(PostgresPersistence {
-                    client: Mutex::new(client),
-                }),
-                file_persist_task: Mutex::new(None),
+                })),
+                backend,
+                needs_flush: false,
             }),
         };
         let pruned = state.prune_expired_state().await?;
@@ -471,7 +453,13 @@ impl AppState {
                     (pairing.pairing_code == pairing_code).then_some(pairing_id.clone())
                 })
                 .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
-            let (session_id, claimed_device_id, stored_client_bundle, daemon_bundle, pairing_snapshot) = {
+            let (
+                session_id,
+                claimed_device_id,
+                stored_client_bundle,
+                daemon_bundle,
+                pairing_snapshot,
+            ) = {
                 let pairing = store
                     .data
                     .pairings
@@ -499,10 +487,13 @@ impl AppState {
                     .as_ref()
                     .zip(claimed_public_key.as_ref())
                     .is_some_and(|(bundle, public_key)| &bundle.public_key == public_key)
-                    || session.devices.get(&claimed_device_id).is_some_and(|device| {
-                        device.revoked_at.is_none()
-                            && device.public_key.as_ref() == claimed_public_key.as_ref()
-                    });
+                    || session
+                        .devices
+                        .get(&claimed_device_id)
+                        .is_some_and(|device| {
+                            device.revoked_at.is_none()
+                                && device.public_key.as_ref() == claimed_public_key.as_ref()
+                        });
                 if !matches_claimed_device {
                     return Err(RelayError::Conflict(
                         "pairing has already been claimed".to_string(),
@@ -510,10 +501,8 @@ impl AppState {
                 }
 
                 let client_token = {
-                    let existing = session
-                        .devices
-                        .get_mut(&claimed_device_id)
-                        .ok_or_else(|| {
+                    let existing =
+                        session.devices.get_mut(&claimed_device_id).ok_or_else(|| {
                             RelayError::NotFound("existing trusted device not found".to_string())
                         })?;
                     existing.label = request.label.clone();
@@ -549,53 +538,58 @@ impl AppState {
                     claimed_device_id,
                 )
             } else {
-            let existing_device_id = claimed_public_key.as_ref().and_then(|public_key| {
-                session.devices.iter().find_map(|(device_id, device)| {
-                    (device.revoked_at.is_none() && device.public_key.as_ref() == Some(public_key))
+                let existing_device_id = claimed_public_key.as_ref().and_then(|public_key| {
+                    session.devices.iter().find_map(|(device_id, device)| {
+                        (device.revoked_at.is_none()
+                            && device.public_key.as_ref() == Some(public_key))
                         .then_some(device_id.clone())
-                })
-            });
-            let (device_id, client_token) = if let Some(existing_device_id) = existing_device_id {
-                let existing = session
-                    .devices
-                    .get_mut(&existing_device_id)
-                    .ok_or_else(|| {
-                        RelayError::NotFound("existing trusted device not found".to_string())
-                    })?;
-                existing.label = request.label.clone();
-                existing.last_seen_at = Some(now);
-                if existing.public_key.is_none() {
-                    existing.public_key = claimed_public_key.clone();
-                }
-                (existing_device_id, existing.client_token.clone())
-            } else {
-                let device_id = format!("device-{}", Uuid::new_v4().simple());
-                let client_token = format!("client-{}", Uuid::new_v4().simple());
-                session.devices.insert(
-                    device_id.clone(),
-                    TrustedDeviceRecord {
-                        device_id: device_id.clone(),
-                        client_token: client_token.clone(),
-                        label: request.label.clone(),
-                        public_key: claimed_public_key.clone(),
-                        created_at: now,
-                        last_seen_at: Some(now),
-                        revoked_at: None,
-                    },
-                );
-                (device_id, client_token)
-            };
-            session.updated_at = now;
-            session.clear_legacy_device_fields();
+                    })
+                });
+                let (device_id, client_token) = if let Some(existing_device_id) = existing_device_id
+                {
+                    let existing =
+                        session
+                            .devices
+                            .get_mut(&existing_device_id)
+                            .ok_or_else(|| {
+                                RelayError::NotFound(
+                                    "existing trusted device not found".to_string(),
+                                )
+                            })?;
+                    existing.label = request.label.clone();
+                    existing.last_seen_at = Some(now);
+                    if existing.public_key.is_none() {
+                        existing.public_key = claimed_public_key.clone();
+                    }
+                    (existing_device_id, existing.client_token.clone())
+                } else {
+                    let device_id = format!("device-{}", Uuid::new_v4().simple());
+                    let client_token = format!("client-{}", Uuid::new_v4().simple());
+                    session.devices.insert(
+                        device_id.clone(),
+                        TrustedDeviceRecord {
+                            device_id: device_id.clone(),
+                            client_token: client_token.clone(),
+                            label: request.label.clone(),
+                            public_key: claimed_public_key.clone(),
+                            created_at: now,
+                            last_seen_at: Some(now),
+                            revoked_at: None,
+                        },
+                    );
+                    (device_id, client_token)
+                };
+                session.updated_at = now;
+                session.clear_legacy_device_fields();
 
-            let trusted_device = session
-                .trusted_devices()
-                .into_iter()
-                .find(|device| device.device_id == device_id)
-                .ok_or_else(|| {
-                    RelayError::Conflict("trusted device was not created".to_string())
-                })?;
-            let session_snapshot = session.clone();
+                let trusted_device = session
+                    .trusted_devices()
+                    .into_iter()
+                    .find(|device| device.device_id == device_id)
+                    .ok_or_else(|| {
+                        RelayError::Conflict("trusted device was not created".to_string())
+                    })?;
+                let session_snapshot = session.clone();
                 let pairing = store
                     .data
                     .pairings
@@ -1795,18 +1789,8 @@ impl AppState {
         pairing: Option<&PairingRecord>,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        if let Some(postgres) = &self.inner.postgres {
-            let mut client = postgres.client.lock().await;
-            if let Some(session) = session {
-                upsert_postgres_session(&mut client, session).await?;
-            }
-            if let Some(pairing) = pairing {
-                upsert_postgres_pairing(&mut client, pairing).await?;
-            }
-            Ok(())
-        } else {
-            self.persist_file(mode).await
-        }
+        self.inner.backend.persist_pairing(session, pairing).await?;
+        self.schedule_flush(mode).await
     }
 
     async fn persist_device_state(
@@ -1815,18 +1799,8 @@ impl AppState {
         device_id: Option<&str>,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        if let Some(postgres) = &self.inner.postgres {
-            let mut client = postgres.client.lock().await;
-            upsert_postgres_session(&mut client, session).await?;
-            if let Some(device_id) = device_id {
-                if let Some(device) = session.devices.get(device_id) {
-                    upsert_postgres_device(&mut client, &session.session_id, device).await?;
-                }
-            }
-            Ok(())
-        } else {
-            self.persist_file(mode).await
-        }
+        self.inner.backend.persist_device(session, device_id).await?;
+        self.schedule_flush(mode).await
     }
 
     async fn persist_action_state(
@@ -1835,25 +1809,8 @@ impl AppState {
         action_ids: Option<&[&str]>,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        if let Some(postgres) = &self.inner.postgres {
-            let mut client = postgres.client.lock().await;
-            upsert_postgres_session(&mut client, session).await?;
-            let ids = if let Some(action_ids) = action_ids {
-                action_ids
-                    .iter()
-                    .filter_map(|action_id| session.actions.get(*action_id))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            } else {
-                session.actions.values().cloned().collect::<Vec<_>>()
-            };
-            for action in ids {
-                upsert_postgres_action(&mut client, &action).await?;
-            }
-            Ok(())
-        } else {
-            self.persist_file(mode).await
-        }
+        self.inner.backend.persist_action(session, action_ids).await?;
+        self.schedule_flush(mode).await
     }
 
     async fn persist_update_state(
@@ -1862,58 +1819,43 @@ impl AppState {
         update: &RelayUpdate,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        if let Some(postgres) = &self.inner.postgres {
-            let mut client = postgres.client.lock().await;
-            upsert_postgres_session(&mut client, session).await?;
-            upsert_postgres_update(&mut client, &session.session_id, update).await?;
-            Ok(())
-        } else {
-            self.persist_file(mode).await
-        }
+        self.inner.backend.persist_update(session, update).await?;
+        self.schedule_flush(mode).await
     }
 
-    async fn persist_file(&self, mode: PersistMode) -> Result<(), RelayError> {
-        if self.inner.postgres.is_some() {
+    async fn schedule_flush(&self, mode: PersistMode) -> Result<(), RelayError> {
+        if !self.inner.needs_flush {
             return Ok(());
         }
-
         match mode {
-            PersistMode::Immediate => {
-                let mut task = self.inner.file_persist_task.lock().await;
-                if let Some(handle) = task.take() {
-                    handle.abort();
-                }
-                drop(task);
-                self.persist_current().await
-            }
+            PersistMode::Immediate => self.persist_current().await,
             PersistMode::Deferred => {
-                let mut task = self.inner.file_persist_task.lock().await;
-                if let Some(handle) = task.take() {
-                    handle.abort();
-                }
-                let state = self.clone();
-                *task = Some(tokio::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_millis(FILE_PERSIST_DEBOUNCE_MS))
+                let backend = Arc::clone(&self.inner.backend);
+                let store = self.inner.store.clone();
+                if let Some(file_backend) = backend
+                    .as_any()
+                    .downcast_ref::<crate::persistence::FileBackend>()
+                {
+                    file_backend
+                        .schedule_deferred_flush(move || {
+                            Box::pin(async move {
+                                let snapshot = store.lock().await.data.clone();
+                                Ok(snapshot)
+                            })
+                        })
                         .await;
-                    let _ = state.persist_current().await;
-                }));
+                }
                 Ok(())
             }
         }
     }
 
     async fn persist_current(&self) -> Result<(), RelayError> {
-        let _persist_guard = self.inner.persist_lock.lock().await;
         let snapshot = {
             let store = self.inner.store.lock().await;
             store.data.clone()
         };
-        if let Some(postgres) = &self.inner.postgres {
-            let mut client = postgres.client.lock().await;
-            persist_postgres_state(&mut client, &snapshot).await
-        } else {
-            persist_state(&self.inner.state_path, &snapshot).await
-        }
+        self.inner.backend.flush_all(&snapshot).await
     }
 
     async fn prune_expired_state(&self) -> Result<bool, RelayError> {
@@ -2159,571 +2101,8 @@ fn prune_state(
     changed
 }
 
-async fn connect_postgres(database_url: &str) -> Result<PostgresClient, RelayError> {
-    let (client, connection) = tokio_postgres::connect(database_url, NoTls)
-        .await
-        .map_err(|error| RelayError::StateLoad(error.to_string()))?;
-    tokio::spawn(async move {
-        if let Err(error) = connection.await {
-            warn!("postgres relay connection ended: {error}");
-        }
-    });
-    init_postgres_schema(&client).await?;
-    Ok(client)
-}
+// Persistence functions moved to crate::persistence module.
 
-async fn upsert_postgres_session(
-    client: &mut PostgresClient,
-    session: &SessionRecord,
-) -> Result<(), RelayError> {
-    client
-        .execute(
-            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (session_id) DO UPDATE SET
-               pairing_id = EXCLUDED.pairing_id,
-               daemon_token = EXCLUDED.daemon_token,
-               daemon_last_seen_at = EXCLUDED.daemon_last_seen_at,
-               created_at = EXCLUDED.created_at,
-               updated_at = EXCLUDED.updated_at,
-               next_seq = EXCLUDED.next_seq",
-            &[
-                &session.session_id,
-                &session.pairing_id,
-                &session.daemon_token,
-                &session.daemon_last_seen_at,
-                &session.created_at,
-                &session.updated_at,
-                &i64::try_from(session.next_seq)
-                    .map_err(|_| RelayError::StatePersist("next sequence overflow".to_string()))?,
-            ],
-        )
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    Ok(())
-}
-
-async fn upsert_postgres_pairing(
-    client: &mut PostgresClient,
-    pairing: &PairingRecord,
-) -> Result<(), RelayError> {
-    client
-        .execute(
-            "INSERT INTO relay_pairings (pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (pairing_id) DO UPDATE SET
-               pairing_code = EXCLUDED.pairing_code,
-               daemon_token = EXCLUDED.daemon_token,
-               label = EXCLUDED.label,
-               session_id = EXCLUDED.session_id,
-               device_id = EXCLUDED.device_id,
-               daemon_bundle = EXCLUDED.daemon_bundle,
-               client_bundle = EXCLUDED.client_bundle,
-               created_at = EXCLUDED.created_at,
-               expires_at = EXCLUDED.expires_at",
-            &[
-                &pairing.pairing_id,
-                &pairing.pairing_code,
-                &pairing.daemon_token,
-                &pairing.label,
-                &pairing.session_id,
-                &pairing.device_id,
-                &encode_optional_json_field(pairing.daemon_bundle.as_ref())?,
-                &encode_optional_json_field(pairing.client_bundle.as_ref())?,
-                &pairing.created_at,
-                &pairing.expires_at,
-            ],
-        )
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    Ok(())
-}
-
-async fn upsert_postgres_device(
-    client: &mut PostgresClient,
-    session_id: &str,
-    device: &TrustedDeviceRecord,
-) -> Result<(), RelayError> {
-    client
-        .execute(
-            "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-             ON CONFLICT (session_id, device_id) DO UPDATE SET
-               client_token = EXCLUDED.client_token,
-               label = EXCLUDED.label,
-               public_key = EXCLUDED.public_key,
-               created_at = EXCLUDED.created_at,
-               last_seen_at = EXCLUDED.last_seen_at,
-               revoked_at = EXCLUDED.revoked_at",
-            &[
-                &session_id,
-                &device.device_id,
-                &device.client_token,
-                &device.label,
-                &device.public_key,
-                &device.created_at,
-                &device.last_seen_at,
-                &device.revoked_at,
-            ],
-        )
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    Ok(())
-}
-
-async fn upsert_postgres_update(
-    client: &mut PostgresClient,
-    session_id: &str,
-    update: &RelayUpdate,
-) -> Result<(), RelayError> {
-    let seq = i64::try_from(update.seq)
-        .map_err(|_| RelayError::StatePersist("update sequence overflow".to_string()))?;
-    client
-        .execute(
-            "INSERT INTO relay_updates (session_id, seq, update_id, body, created_at)
-             VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (session_id, seq) DO UPDATE SET
-               update_id = EXCLUDED.update_id,
-               body = EXCLUDED.body,
-               created_at = EXCLUDED.created_at",
-            &[
-                &session_id,
-                &seq,
-                &update.id,
-                &encode_json_field(&update.body)?,
-                &update.created_at,
-            ],
-        )
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    Ok(())
-}
-
-async fn upsert_postgres_action(
-    client: &mut PostgresClient,
-    action: &QueuedActionRecord,
-) -> Result<(), RelayError> {
-    client
-        .execute(
-            "INSERT INTO relay_actions (action_id, session_id, device_id, action_type, idempotency_key, payload, status, created_at, updated_at, error, result)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             ON CONFLICT (action_id) DO UPDATE SET
-               session_id = EXCLUDED.session_id,
-               device_id = EXCLUDED.device_id,
-               action_type = EXCLUDED.action_type,
-               idempotency_key = EXCLUDED.idempotency_key,
-               payload = EXCLUDED.payload,
-               status = EXCLUDED.status,
-               created_at = EXCLUDED.created_at,
-               updated_at = EXCLUDED.updated_at,
-               error = EXCLUDED.error,
-               result = EXCLUDED.result",
-            &[
-                &action.action_id,
-                &action.session_id,
-                &action.device_id,
-                &action.action_type,
-                &action.idempotency_key,
-                &encode_json_field(&action.payload)?,
-                &queued_action_status_to_db(&action.status),
-                &action.created_at,
-                &action.updated_at,
-                &action.error,
-                &encode_optional_json_field(action.result.as_ref())?,
-            ],
-        )
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    Ok(())
-}
-
-async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError> {
-    client
-        .batch_execute(
-            r"
-            CREATE TABLE IF NOT EXISTS relay_sessions (
-                session_id TEXT PRIMARY KEY,
-                pairing_id TEXT NOT NULL,
-                daemon_token TEXT NOT NULL,
-                daemon_last_seen_at TIMESTAMPTZ NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL,
-                next_seq BIGINT NOT NULL DEFAULT 1
-            );
-            ALTER TABLE relay_sessions
-                ADD COLUMN IF NOT EXISTS next_seq BIGINT NOT NULL DEFAULT 1;
-            CREATE TABLE IF NOT EXISTS relay_pairings (
-                pairing_id TEXT PRIMARY KEY,
-                pairing_code TEXT NOT NULL UNIQUE,
-                daemon_token TEXT NOT NULL,
-                label TEXT NULL,
-                session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
-                device_id TEXT NULL,
-                daemon_bundle JSONB NULL,
-                client_bundle JSONB NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                expires_at TIMESTAMPTZ NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS relay_devices (
-                session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
-                device_id TEXT NOT NULL,
-                client_token TEXT NOT NULL UNIQUE,
-                label TEXT NULL,
-                public_key TEXT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                last_seen_at TIMESTAMPTZ NULL,
-                revoked_at TIMESTAMPTZ NULL,
-                PRIMARY KEY (session_id, device_id)
-            );
-            CREATE TABLE IF NOT EXISTS relay_updates (
-                session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
-                seq BIGINT NOT NULL,
-                update_id TEXT NOT NULL UNIQUE,
-                body JSONB NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                PRIMARY KEY (session_id, seq)
-            );
-            CREATE TABLE IF NOT EXISTS relay_actions (
-                action_id TEXT PRIMARY KEY,
-                session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
-                device_id TEXT NOT NULL,
-                action_type TEXT NOT NULL,
-                idempotency_key TEXT NOT NULL,
-                payload JSONB NOT NULL,
-                status TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL,
-                error TEXT NULL,
-                result JSONB NULL
-            );
-            ALTER TABLE relay_actions
-                DROP CONSTRAINT IF EXISTS relay_actions_session_idempotency_key_key;
-            ALTER TABLE relay_actions
-                DROP CONSTRAINT IF EXISTS relay_actions_session_device_idempotency_key_key;
-            ALTER TABLE relay_actions
-                ADD CONSTRAINT relay_actions_session_device_idempotency_key_key
-                UNIQUE (session_id, device_id, idempotency_key);
-            CREATE INDEX IF NOT EXISTS relay_updates_session_seq_idx
-                ON relay_updates(session_id, seq);
-            CREATE INDEX IF NOT EXISTS relay_actions_session_idx
-                ON relay_actions(session_id, created_at);
-            CREATE INDEX IF NOT EXISTS relay_devices_session_idx
-                ON relay_devices(session_id, created_at);
-            ",
-        )
-        .await
-        .map_err(|error| RelayError::StateLoad(error.to_string()))?;
-    Ok(())
-}
-
-async fn load_postgres_state(client: &PostgresClient) -> Result<PersistedState, RelayError> {
-    let mut state = PersistedState::default();
-
-    for row in client
-        .query(
-            "SELECT session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq FROM relay_sessions",
-            &[],
-        )
-        .await
-        .map_err(|error| RelayError::StateLoad(error.to_string()))?
-    {
-        let session_id: String = row.get("session_id");
-        state.sessions.insert(
-            session_id.clone(),
-            SessionRecord {
-                session_id,
-                pairing_id: row.get("pairing_id"),
-                daemon_token: row.get("daemon_token"),
-                daemon_last_seen_at: row.get("daemon_last_seen_at"),
-                devices: HashMap::new(),
-                device_id: None,
-                device_created_at: None,
-                client_token: None,
-                client_label: None,
-                client_public_key: None,
-                client_last_seen_at: None,
-                revoked_at: None,
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-                next_seq: row
-                    .get::<_, i64>("next_seq")
-                    .try_into()
-                    .map_err(|_| RelayError::StateLoad("invalid next sequence".to_string()))?,
-                updates: Vec::new(),
-                actions: HashMap::new(),
-            },
-        );
-    }
-
-    for row in client
-        .query(
-            "SELECT session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at FROM relay_devices ORDER BY created_at ASC",
-            &[],
-        )
-        .await
-        .map_err(|error| RelayError::StateLoad(error.to_string()))?
-    {
-        let session_id: String = row.get("session_id");
-        if let Some(session) = state.sessions.get_mut(&session_id) {
-            let device = TrustedDeviceRecord {
-                device_id: row.get("device_id"),
-                client_token: row.get("client_token"),
-                label: row.get("label"),
-                public_key: row.get("public_key"),
-                created_at: row.get("created_at"),
-                last_seen_at: row.get("last_seen_at"),
-                revoked_at: row.get("revoked_at"),
-            };
-            session.devices.insert(device.device_id.clone(), device);
-        }
-    }
-
-    for row in client
-        .query(
-            "SELECT pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, created_at, expires_at FROM relay_pairings",
-            &[],
-        )
-        .await
-        .map_err(|error| RelayError::StateLoad(error.to_string()))?
-    {
-        let pairing = PairingRecord {
-            pairing_id: row.get("pairing_id"),
-            pairing_code: row.get("pairing_code"),
-            daemon_token: row.get("daemon_token"),
-            label: row.get("label"),
-            session_id: row.get("session_id"),
-            device_id: row.get("device_id"),
-            daemon_bundle: decode_optional_json_field(row.get("daemon_bundle"))?,
-            client_bundle: decode_optional_json_field(row.get("client_bundle"))?,
-            created_at: row.get("created_at"),
-            expires_at: row.get("expires_at"),
-        };
-        state.pairings.insert(pairing.pairing_id.clone(), pairing);
-    }
-
-    for row in client
-        .query(
-            "SELECT session_id, update_id, seq, body, created_at FROM relay_updates ORDER BY session_id ASC, seq ASC",
-            &[],
-        )
-        .await
-        .map_err(|error| RelayError::StateLoad(error.to_string()))?
-    {
-        let session_id: String = row.get("session_id");
-        if let Some(session) = state.sessions.get_mut(&session_id) {
-            session.updates.push(RelayUpdate {
-                id: row.get("update_id"),
-                seq: row
-                    .get::<_, i64>("seq")
-                    .try_into()
-                    .map_err(|_| RelayError::StateLoad("invalid update sequence".to_string()))?,
-                body: decode_json_field(row.get("body"))?,
-                created_at: row.get("created_at"),
-            });
-        }
-    }
-
-    for row in client
-        .query(
-            "SELECT session_id, action_id, device_id, action_type, idempotency_key, payload, status, created_at, updated_at, error, result FROM relay_actions",
-            &[],
-        )
-        .await
-        .map_err(|error| RelayError::StateLoad(error.to_string()))?
-    {
-        let session_id: String = row.get("session_id");
-        if let Some(session) = state.sessions.get_mut(&session_id) {
-            let action = QueuedActionRecord {
-                action_id: row.get("action_id"),
-                session_id: session_id.clone(),
-                device_id: row.get("device_id"),
-                action_type: row.get("action_type"),
-                idempotency_key: row.get("idempotency_key"),
-                payload: decode_json_field(row.get("payload"))?,
-                status: queued_action_status_from_db(&row.get::<_, String>("status"))?,
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-                error: row.get("error"),
-                result: decode_optional_json_field(row.get("result"))?,
-                owner_peer_id: None,
-            };
-            session.actions.insert(action.action_id.clone(), action);
-        }
-    }
-
-    Ok(state)
-}
-
-async fn persist_postgres_state(
-    client: &mut PostgresClient,
-    state: &PersistedState,
-) -> Result<(), RelayError> {
-    let tx = client
-        .transaction()
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-
-    tx.batch_execute(
-        r"
-        DELETE FROM relay_pairings;
-        DELETE FROM relay_actions;
-        DELETE FROM relay_updates;
-        DELETE FROM relay_devices;
-        DELETE FROM relay_sessions;
-        ",
-    )
-    .await
-    .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-
-    for session in state.sessions.values() {
-        tx.execute(
-            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-            &[
-                &session.session_id,
-                &session.pairing_id,
-                &session.daemon_token,
-                &session.daemon_last_seen_at,
-                &session.created_at,
-                &session.updated_at,
-                &i64::try_from(session.next_seq)
-                    .map_err(|_| RelayError::StatePersist("next sequence overflow".to_string()))?,
-            ],
-        )
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-
-        for device in session.devices.values() {
-            tx.execute(
-                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
-                &[
-                    &session.session_id,
-                    &device.device_id,
-                    &device.client_token,
-                    &device.label,
-                    &device.public_key,
-                    &device.created_at,
-                    &device.last_seen_at,
-                    &device.revoked_at,
-                ],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        }
-
-        for update in &session.updates {
-            let seq = i64::try_from(update.seq)
-                .map_err(|_| RelayError::StatePersist("update sequence overflow".to_string()))?;
-            tx.execute(
-                "INSERT INTO relay_updates (session_id, update_id, seq, body, created_at)
-                 VALUES ($1, $2, $3, $4, $5)",
-                &[
-                    &session.session_id,
-                    &update.id,
-                    &seq,
-                    &encode_json_field(&update.body)?,
-                    &update.created_at,
-                ],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        }
-
-        for action in session.actions.values() {
-            tx.execute(
-                "INSERT INTO relay_actions (action_id, session_id, device_id, action_type, idempotency_key, payload, status, created_at, updated_at, error, result)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
-                &[
-                    &action.action_id,
-                    &session.session_id,
-                    &action.device_id,
-                    &action.action_type,
-                    &action.idempotency_key,
-                    &encode_json_field(&action.payload)?,
-                    &queued_action_status_to_db(&action.status),
-                    &action.created_at,
-                    &action.updated_at,
-                    &action.error,
-                    &encode_optional_json_field(action.result.as_ref())?,
-                ],
-            )
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-        }
-    }
-
-    for pairing in state.pairings.values() {
-        tx.execute(
-            "INSERT INTO relay_pairings (pairing_id, pairing_code, daemon_token, label, session_id, device_id, daemon_bundle, client_bundle, created_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-            &[
-                &pairing.pairing_id,
-                &pairing.pairing_code,
-                &pairing.daemon_token,
-                &pairing.label,
-                &pairing.session_id,
-                &pairing.device_id,
-                &encode_optional_json_field(pairing.daemon_bundle.as_ref())?,
-                &encode_optional_json_field(pairing.client_bundle.as_ref())?,
-                &pairing.created_at,
-                &pairing.expires_at,
-            ],
-        )
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    }
-
-    tx.commit()
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    Ok(())
-}
-
-fn encode_json_field<T: Serialize>(value: &T) -> Result<serde_json::Value, RelayError> {
-    serde_json::to_value(value).map_err(|error| RelayError::StatePersist(error.to_string()))
-}
-
-fn encode_optional_json_field<T: Serialize>(
-    value: Option<&T>,
-) -> Result<Option<serde_json::Value>, RelayError> {
-    value.map(encode_json_field).transpose()
-}
-
-fn decode_json_field<T: for<'de> Deserialize<'de>>(
-    value: serde_json::Value,
-) -> Result<T, RelayError> {
-    serde_json::from_value(value).map_err(|error| RelayError::StateLoad(error.to_string()))
-}
-
-fn decode_optional_json_field<T: for<'de> Deserialize<'de>>(
-    value: Option<serde_json::Value>,
-) -> Result<Option<T>, RelayError> {
-    value.map(decode_json_field).transpose()
-}
-
-fn queued_action_status_to_db(status: &QueuedRemoteActionStatus) -> &'static str {
-    match status {
-        QueuedRemoteActionStatus::Queued => "queued",
-        QueuedRemoteActionStatus::Dispatched => "dispatched",
-        QueuedRemoteActionStatus::Executing => "executing",
-        QueuedRemoteActionStatus::Completed => "completed",
-        QueuedRemoteActionStatus::Failed => "failed",
-    }
-}
-
-fn queued_action_status_from_db(value: &str) -> Result<QueuedRemoteActionStatus, RelayError> {
-    match value {
-        "queued" => Ok(QueuedRemoteActionStatus::Queued),
-        "dispatched" => Ok(QueuedRemoteActionStatus::Dispatched),
-        "executing" => Ok(QueuedRemoteActionStatus::Executing),
-        "completed" => Ok(QueuedRemoteActionStatus::Completed),
-        "failed" => Ok(QueuedRemoteActionStatus::Failed),
-        other => Err(RelayError::StateLoad(format!(
-            "unknown queued action status `{other}`"
-        ))),
-    }
-}
 
 fn normalize_in_flight_actions(state: &mut PersistedState) -> bool {
     let now = Utc::now();
@@ -2753,96 +2132,6 @@ fn normalize_in_flight_actions(state: &mut PersistedState) -> bool {
         }
     }
     changed
-}
-
-async fn load_state(path: &Path) -> Result<PersistedState, RelayError> {
-    match fs::read_to_string(path).await {
-        Ok(contents) => match serde_json::from_str(&contents) {
-            Ok(state) => Ok(state),
-            Err(error) => {
-                warn!(
-                    "failed to parse persisted relay state directly: {error}; attempting legacy migration"
-                );
-                load_compatible_state(&contents)
-            }
-        },
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PersistedState::default()),
-        Err(error) => Err(RelayError::StateLoad(error.to_string())),
-    }
-}
-
-fn load_compatible_state(contents: &str) -> Result<PersistedState, RelayError> {
-    let raw: serde_json::Value =
-        serde_json::from_str(contents).map_err(|error| RelayError::StateLoad(error.to_string()))?;
-
-    let mut state = PersistedState::default();
-
-    if let Some(pairings) = raw.get("pairings").and_then(serde_json::Value::as_object) {
-        for (pairing_id, pairing_value) in pairings {
-            match serde_json::from_value::<PairingRecord>(pairing_value.clone()) {
-                Ok(pairing) => {
-                    state.pairings.insert(pairing_id.clone(), pairing);
-                }
-                Err(error) => {
-                    warn!("skipping incompatible legacy pairing record {pairing_id}: {error}");
-                }
-            }
-        }
-    }
-
-    if let Some(sessions) = raw.get("sessions").and_then(serde_json::Value::as_object) {
-        for (session_id, session_value) in sessions {
-            match serde_json::from_value::<SessionRecord>(session_value.clone()) {
-                Ok(session) => {
-                    state.sessions.insert(session_id.clone(), session);
-                }
-                Err(first_error) => {
-                    // Old updates may use a different serialization format for
-                    // RelayUpdateBody (e.g. missing the "t" tag). Clear them and
-                    // retry — clients will re-bootstrap on connect anyway.
-                    let mut patched = session_value.clone();
-                    if let Some(obj) = patched.as_object_mut() {
-                        obj.insert("updates".to_string(), serde_json::json!([]));
-                        obj.insert("actions".to_string(), serde_json::json!({}));
-                    }
-                    match serde_json::from_value::<SessionRecord>(patched) {
-                        Ok(session) => {
-                            warn!(
-                                "recovered legacy session {session_id} (cleared incompatible updates)"
-                            );
-                            state.sessions.insert(session_id.clone(), session);
-                        }
-                        Err(_) => {
-                            warn!(
-                                "skipping incompatible legacy session record {session_id}: {first_error}"
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(state)
-}
-
-async fn persist_state(path: &Path, state: &PersistedState) -> Result<(), RelayError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    }
-
-    let tmp_path = path.with_extension("tmp");
-    let json = serde_json::to_vec_pretty(state)
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    fs::write(&tmp_path, json)
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    fs::rename(&tmp_path, path)
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    Ok(())
 }
 
 fn generate_pairing_code(state: &PersistedState) -> String {

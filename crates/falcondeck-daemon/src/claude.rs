@@ -333,24 +333,47 @@ pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedClaudeThread> {
         .unwrap_or_else(|_| PathBuf::from(".claude/projects"));
 
     let mut files = Vec::new();
-    collect_session_files(&root, &mut files);
+    let workspace_root = root.join(claude_project_dir_name(workspace_path));
+    if workspace_root.is_dir() {
+        collect_workspace_session_files(&workspace_root, &mut files);
+    } else {
+        collect_session_files(&root, &mut files);
+    }
 
-    let mut threads = files
+    let mut threads_by_session = HashMap::new();
+    for thread in files
         .into_iter()
         .filter_map(|path| hydrate_thread_from_file(&path, workspace_path))
-        .collect::<Vec<_>>();
+    {
+        threads_by_session
+            .entry(thread.summary.id.clone())
+            .and_modify(|existing: &mut HydratedClaudeThread| {
+                if thread.summary.updated_at > existing.summary.updated_at {
+                    *existing = HydratedClaudeThread {
+                        summary: thread.summary.clone(),
+                        items: thread.items.clone(),
+                    };
+                }
+            })
+            .or_insert(thread);
+    }
+
+    let mut threads = threads_by_session.into_values().collect::<Vec<_>>();
     threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
     threads
 }
 
-fn collect_session_files(root: &Path, files: &mut Vec<PathBuf>) {
+fn claude_project_dir_name(workspace_path: &str) -> String {
+    workspace_path.replace(['/', '\\'], "-")
+}
+
+fn collect_workspace_session_files(root: &Path, files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            collect_session_files(&path, files);
+        if !path.is_file() {
             continue;
         }
         let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
@@ -359,6 +382,35 @@ fn collect_session_files(root: &Path, files: &mut Vec<PathBuf>) {
         if matches!(ext, "jsonl" | "json") {
             files.push(path);
         }
+    }
+}
+
+fn collect_session_files(root: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let Some(ext) = path.extension().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if matches!(ext, "jsonl" | "json") {
+                files.push(path);
+            }
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        if path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| matches!(name, "subagents" | "tool-results"))
+        {
+            continue;
+        }
+        collect_workspace_session_files(&path, files);
     }
 }
 
@@ -400,11 +452,13 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
     if cwd != workspace_path {
         return None;
     }
-    let session_id = session_id.or_else(|| {
-        path.file_stem()
-            .and_then(|value| value.to_str())
-            .map(ToOwned::to_owned)
-    })?;
+    let session_id = session_id
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(ToOwned::to_owned)
+        })
+        .filter(|value| Uuid::parse_str(value).is_ok())?;
     let now = Utc::now();
     let last_message_preview = items.iter().rev().find_map(|item| match item {
         ConversationItem::AssistantMessage { text, .. }
@@ -545,7 +599,7 @@ mod tests {
             &session_path,
             [
                 json!({
-                    "session_id": "session-1",
+                    "session_id": "11111111-1111-4111-8111-111111111111",
                     "cwd": "/tmp/project",
                     "title": "Feature work",
                     "type": "user",
@@ -554,7 +608,7 @@ mod tests {
                 })
                 .to_string(),
                 json!({
-                    "session_id": "session-1",
+                    "session_id": "11111111-1111-4111-8111-111111111111",
                     "cwd": "/tmp/project",
                     "type": "assistant",
                     "text": "world",
@@ -570,8 +624,52 @@ mod tests {
         assert_eq!(hydrated.summary.provider, AgentProvider::Claude);
         assert_eq!(
             hydrated.summary.native_session_id.as_deref(),
-            Some("session-1")
+            Some("11111111-1111-4111-8111-111111111111")
         );
         assert_eq!(hydrated.items.len(), 2);
+    }
+
+    #[test]
+    fn prefers_workspace_specific_project_dir_name() {
+        assert_eq!(
+            claude_project_dir_name("/Users/James/www/sites/lucidpic"),
+            "-Users-James-www-sites-lucidpic"
+        );
+    }
+
+    #[test]
+    fn skips_non_uuid_fallback_session_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("agent-a123.jsonl");
+        fs::write(
+            &session_path,
+            json!({
+                "cwd": "/tmp/project",
+                "type": "user",
+                "text": "hello",
+                "created_at": "2026-03-19T10:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        assert!(hydrate_thread_from_file(&session_path, "/tmp/project").is_none());
+    }
+
+    #[test]
+    fn collect_session_files_skips_subagent_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let top_level = root.join("session.jsonl");
+        let subagents = root.join("subagents");
+        fs::create_dir_all(&subagents).unwrap();
+        let nested = subagents.join("agent-a123.jsonl");
+        fs::write(&top_level, "{}").unwrap();
+        fs::write(&nested, "{}").unwrap();
+
+        let mut files = Vec::new();
+        collect_session_files(root, &mut files);
+
+        assert_eq!(files, vec![top_level]);
     }
 }
