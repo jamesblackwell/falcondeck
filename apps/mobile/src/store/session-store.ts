@@ -5,6 +5,7 @@
  * maintains the same state shape as the desktop/remote-web apps.
  */
 import { create } from 'zustand'
+import { useShallow } from 'zustand/react/shallow'
 
 import {
   applySnapshotEvent,
@@ -44,6 +45,9 @@ const initialState: SessionState = {
   threadItems: {},
   threadDetail: null,
 }
+
+const EMPTY_ITEMS: ConversationItem[] = []
+const EMPTY_APPROVALS: DaemonSnapshot['interactive_requests'] = []
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
   ...initialState,
@@ -185,18 +189,18 @@ export function useSelectedThread() {
 }
 
 export function useConversationItems() {
-  return useSessionStore((s) => {
+  return useSessionStore(useShallow((s) => {
     if (s.threadDetail) return s.threadDetail.items
-    if (s.selectedThreadId) return s.threadItems[s.selectedThreadId] ?? []
-    return []
-  })
+    if (s.selectedThreadId) return s.threadItems[s.selectedThreadId] ?? EMPTY_ITEMS
+    return EMPTY_ITEMS
+  }))
 }
 
 export function useApprovals() {
-  return useSessionStore((s) =>
+  return useSessionStore(useShallow((s) =>
     (s.snapshot?.interactive_requests ?? []).filter(
       (a) => !s.selectedThreadId || a.thread_id === s.selectedThreadId,
     ),
-  )
+  ))
 }
 /* v8 ignore stop */

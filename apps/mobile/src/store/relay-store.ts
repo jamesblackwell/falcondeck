@@ -105,6 +105,16 @@ interface RelayActions {
   _encryptJson: (value: unknown) => Promise<EncryptedEnvelope>
   _decryptJson: <T>(envelope: EncryptedEnvelope) => Promise<T>
   _sendMessage: (message: RelayClientMessage) => void
+  _callRpc: <T = unknown>(
+    method: string,
+    params: Record<string, unknown>,
+    options?: {
+      requestIdPrefix?: string
+      timeoutMs?: number
+    },
+  ) => Promise<T>
+  _handleRpcResult: (payload: Extract<RelayServerMessage, { type: 'rpc-result' }>) => Promise<boolean>
+  _failPendingRpcs: (message: string) => void
   _processBootstrap: (update: RelayUpdate) => Promise<void>
 }
 
@@ -120,6 +130,24 @@ let _lastReceivedSeq = 0
 let _pairingId: string | null = null
 let _trustedDaemonPublicKey: string | null = null
 let _trustedDaemonIdentityPublicKey: string | null = null
+let _rpcRequestCounter = 0
+
+type PendingRpc = {
+  method: string
+  timeout: ReturnType<typeof setTimeout>
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+}
+
+const _pendingRpc = new Map<string, PendingRpc>()
+
+function encryptedRpcErrorMessage(payload: unknown) {
+  if (typeof payload === 'object' && payload !== null && 'message' in payload) {
+    const message = (payload as { message?: unknown }).message
+    if (typeof message === 'string') return message
+  }
+  return 'Remote action failed'
+}
 
 // ── Store ──────────────────────────────────────────────────────────
 
@@ -280,6 +308,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   disconnect: async () => {
     _socket?.close()
     _socket = null
+    get()._failPendingRpcs('Remote session disconnected')
     _sessionCrypto = null
     _clientKeyPair = null
     _clientToken = null
@@ -359,10 +388,87 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
   _sendMessage: (message) => {
     /* v8 ignore start — requires live WebSocket, tested via E2E */
-    if (_socket?.readyState === WebSocket.OPEN) {
-      _socket.send(JSON.stringify(message))
+    if (_socket?.readyState !== WebSocket.OPEN) {
+      throw new Error('Remote connection is not ready')
     }
+    _socket.send(JSON.stringify(message))
     /* v8 ignore stop */
+  },
+
+  _callRpc: async <T = unknown>(
+    method: string,
+    params: Record<string, unknown>,
+    options?: {
+      requestIdPrefix?: string
+      timeoutMs?: number
+    },
+  ) => {
+    const requestId = `${options?.requestIdPrefix ?? 'mobile-rpc'}-${_rpcRequestCounter++}`
+    const encrypted = await get()._encryptJson(params)
+
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        _pendingRpc.delete(requestId)
+        reject(new Error(`Timed out waiting for ${method}`))
+      }, options?.timeoutMs ?? 20_000)
+
+      _pendingRpc.set(requestId, {
+        method,
+        timeout,
+        resolve: (value) => resolve(value as T),
+        reject,
+      })
+
+      try {
+        get()._sendMessage({
+          type: 'rpc-call',
+          request_id: requestId,
+          method,
+          params: encrypted,
+        })
+      } catch (error) {
+        clearTimeout(timeout)
+        _pendingRpc.delete(requestId)
+        reject(error instanceof Error ? error : new Error('Remote action failed'))
+      }
+    })
+  },
+
+  _handleRpcResult: async (payload) => {
+    const pending = _pendingRpc.get(payload.request_id)
+    if (!pending) {
+      return false
+    }
+
+    _pendingRpc.delete(payload.request_id)
+    clearTimeout(pending.timeout)
+
+    try {
+      if (payload.ok) {
+        pending.resolve(payload.result ? await get()._decryptJson(payload.result) : null)
+        return true
+      }
+
+      if (!payload.error) {
+        pending.reject(new Error('Remote action failed'))
+        return true
+      }
+
+      const decrypted = await get()._decryptJson<unknown>(payload.error)
+      pending.reject(new Error(encryptedRpcErrorMessage(decrypted)))
+      return true
+    } catch (error) {
+      pending.reject(error instanceof Error ? error : new Error(`Failed to process ${pending.method} response`))
+      return true
+    }
+  },
+
+  _failPendingRpcs: (message) => {
+    for (const [requestId, pending] of _pendingRpc.entries()) {
+      clearTimeout(pending.timeout)
+      pending.reject(new Error(message))
+      _pendingRpc.delete(requestId)
+    }
   },
 
   _processBootstrap: async (update) => {

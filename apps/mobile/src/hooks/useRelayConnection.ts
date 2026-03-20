@@ -1,11 +1,11 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 
+import { normalizeEventEnvelope, normalizeDaemonSnapshot } from '@falcondeck/client-core'
 import type {
   RelayServerMessage,
   RelayUpdate,
   EventEnvelope,
   DaemonSnapshot,
-  ThreadDetail,
   RelayWebSocketTicketResponse,
 } from '@falcondeck/client-core'
 
@@ -20,63 +20,68 @@ function parseDaemonEvent(payload: unknown): EventEnvelope | null {
     'event' in payload &&
     (payload as { kind?: string }).kind === 'daemon-event'
   ) {
-    return (payload as { event: EventEnvelope }).event
+    return normalizeEventEnvelope((payload as { event: EventEnvelope }).event)
   }
   return null
 }
 
 export function useRelayConnection() {
   const sessionId = useRelayStore((s) => s.sessionId)
+  const isEncrypted = useRelayStore((s) => s.isEncrypted)
+  const snapshot = useSessionStore((s) => s.snapshot)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const snapshotRetryAttempt = useRef(0)
   const reconnectAttempt = useRef(0)
   const pendingEncrypted = useRef<RelayUpdate[]>([])
+  const snapshotRequestInFlight = useRef(false)
   const [reconnectGeneration, setReconnectGeneration] = useState(0)
 
   const requestSnapshot = useCallback(async () => {
     const relay = useRelayStore.getState()
-    if (!relay._getSessionCrypto()) return
+    if (!relay._getSessionCrypto() || snapshotRequestInFlight.current) return
 
+    snapshotRequestInFlight.current = true
     try {
-      relay._sendMessage({
-        type: 'rpc-call',
-        request_id: `mobile-snapshot-${Date.now()}`,
-        method: 'snapshot.current',
-        params: await relay._encryptJson({}),
+      const snapshot = normalizeDaemonSnapshot(
+        await relay._callRpc<DaemonSnapshot>('snapshot.current', {}, {
+          requestIdPrefix: 'mobile-snapshot',
+        }),
+      )
+      useSessionStore.getState().applyDaemonEvent({
+        seq: 0,
+        emitted_at: new Date().toISOString(),
+        workspace_id: null,
+        thread_id: null,
+        event: { type: 'snapshot', snapshot },
       })
+      snapshotRetryAttempt.current = 0
+      if (snapshotRetryTimer.current) {
+        clearTimeout(snapshotRetryTimer.current)
+        snapshotRetryTimer.current = null
+      }
+      relay._setError(null)
     } catch (e) {
       relay._setError(e instanceof Error ? e.message : 'Failed to load snapshot')
+      if (!useSessionStore.getState().snapshot && !snapshotRetryTimer.current) {
+        const delay = Math.min(1000 * 2 ** snapshotRetryAttempt.current, 5_000)
+        snapshotRetryAttempt.current += 1
+        snapshotRetryTimer.current = setTimeout(() => {
+          snapshotRetryTimer.current = null
+          void requestSnapshot()
+        }, delay)
+      }
+    } finally {
+      snapshotRequestInFlight.current = false
     }
   }, [])
 
   const processRpcResult = useCallback(async (payload: Extract<RelayServerMessage, { type: 'rpc-result' }>) => {
     const relay = useRelayStore.getState()
-    if (!payload.ok) {
-      relay._setError('Remote action failed')
+    if (await relay._handleRpcResult(payload)) {
       return
     }
-
-    if (!payload.result) return
-
-    try {
-      if (payload.request_id.startsWith('mobile-snapshot-')) {
-        const snapshot = await relay._decryptJson<DaemonSnapshot>(payload.result)
-        useSessionStore.getState().applyDaemonEvent({
-          seq: 0,
-          emitted_at: new Date().toISOString(),
-          workspace_id: null,
-          thread_id: null,
-          event: { type: 'snapshot', snapshot },
-        })
-        return
-      }
-
-      if (payload.request_id.startsWith('mobile-detail-')) {
-        const detail = await relay._decryptJson<ThreadDetail>(payload.result)
-        useSessionStore.getState().setThreadDetail(detail)
-      }
-    } catch (e) {
-      relay._setError(e instanceof Error ? e.message : 'Failed to process relay response')
-    }
+    if (!payload.ok) relay._setError('Remote action failed')
   }, [])
 
   const processUpdate = useCallback(async (update: RelayUpdate) => {
@@ -89,6 +94,9 @@ export function useRelayConnection() {
       const queued = pendingEncrypted.current
       pendingEncrypted.current = []
       for (const u of queued) await processUpdate(u)
+      if (relay._getSessionCrypto() && !useSessionStore.getState().snapshot) {
+        void requestSnapshot()
+      }
       return
     }
 
@@ -121,7 +129,7 @@ export function useRelayConnection() {
     } catch (e) {
       relay._setError(e instanceof Error ? e.message : 'Failed to decrypt update')
     }
-  }, [])
+  }, [requestSnapshot])
 
   useEffect(() => {
     const relay = useRelayStore.getState()
@@ -141,12 +149,25 @@ export function useRelayConnection() {
     relay._setConnectionStatus('connecting')
     relay._setError(null)
     pendingEncrypted.current = []
+    snapshotRequestInFlight.current = false
+    snapshotRetryAttempt.current = 0
+    if (snapshotRetryTimer.current) {
+      clearTimeout(snapshotRetryTimer.current)
+      snapshotRetryTimer.current = null
+    }
 
     const scheduleReconnect = () => {
       if (!isCurrent) return
       relay._setConnectionStatus('disconnected')
       relay._setSocket(null)
+      relay._failPendingRpcs('Remote connection dropped')
       pendingEncrypted.current = []
+      snapshotRequestInFlight.current = false
+      snapshotRetryAttempt.current = 0
+      if (snapshotRetryTimer.current) {
+        clearTimeout(snapshotRetryTimer.current)
+        snapshotRetryTimer.current = null
+      }
 
       const delay = Math.min(1000 * 2 ** reconnectAttempt.current, 15_000)
       reconnectAttempt.current += 1
@@ -247,6 +268,13 @@ export function useRelayConnection() {
       isCurrent = false
       activeSocket?.close()
       relay._setSocket(null)
+      relay._failPendingRpcs('Remote connection closed')
+      snapshotRequestInFlight.current = false
+      snapshotRetryAttempt.current = 0
+      if (snapshotRetryTimer.current) {
+        clearTimeout(snapshotRetryTimer.current)
+        snapshotRetryTimer.current = null
+      }
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current)
         reconnectTimer.current = null
@@ -259,4 +287,18 @@ export function useRelayConnection() {
     processUpdate,
     requestSnapshot,
   ])
+
+  useEffect(() => {
+    if (!sessionId || !isEncrypted || snapshot) {
+      return
+    }
+
+    const relay = useRelayStore.getState()
+    const socket = relay._getSocket()
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return
+    }
+
+    void requestSnapshot()
+  }, [isEncrypted, requestSnapshot, sessionId, snapshot])
 }

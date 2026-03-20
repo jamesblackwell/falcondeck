@@ -140,6 +140,42 @@ describe('processUpdate routing logic', () => {
   })
 })
 
+describe('snapshot hydration timing', () => {
+  function shouldRequestSnapshotAfterBootstrap(params: {
+    hasSessionCrypto: boolean
+    hasSnapshot: boolean
+  }) {
+    return params.hasSessionCrypto && !params.hasSnapshot
+  }
+
+  it('requests a snapshot after bootstrap when encryption is ready and no snapshot exists yet', () => {
+    expect(
+      shouldRequestSnapshotAfterBootstrap({
+        hasSessionCrypto: true,
+        hasSnapshot: false,
+      }),
+    ).toBe(true)
+  })
+
+  it('does not request a duplicate snapshot when one is already present', () => {
+    expect(
+      shouldRequestSnapshotAfterBootstrap({
+        hasSessionCrypto: true,
+        hasSnapshot: true,
+      }),
+    ).toBe(false)
+  })
+
+  it('does not request a snapshot before encryption is established', () => {
+    expect(
+      shouldRequestSnapshotAfterBootstrap({
+        hasSessionCrypto: false,
+        hasSnapshot: false,
+      }),
+    ).toBe(false)
+  })
+})
+
 describe('WebSocket URL construction', () => {
   function buildWsUrl(relayUrl: string, sessionId: string, ticket: string): string {
     const url = relayUrl.trim().replace(/\/$/, '')

@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 
-import type { EncryptedEnvelope } from '@falcondeck/client-core'
+import { normalizeThreadDetail, normalizeThreadHandle } from '@falcondeck/client-core'
+import type { ThreadDetail, ThreadHandle } from '@falcondeck/client-core'
 
 import { useRelayStore, useSessionStore, useUIStore } from '@/store'
 
@@ -11,32 +12,47 @@ export function useSessionActions() {
     const ui = useUIStore.getState()
 
     const workspace = session.snapshot?.workspaces.find((w) => w.id === session.selectedWorkspaceId)
-    if (!workspace || !ui.draft.trim()) return
+    const submittedDraft = ui.draft.trim()
+    if (!workspace || !submittedDraft) return
 
     ui.setIsSubmitting(true)
 
     try {
       const threadId = session.selectedThreadId
-      if (!threadId) return
+      let activeThreadId = threadId
+      if (!activeThreadId) {
+        const handle = normalizeThreadHandle(
+          await relay._callRpc<ThreadHandle>(
+            'thread.start',
+            {
+              workspace_id: workspace.id,
+              provider: workspace.default_provider,
+              model_id: ui.selectedModel,
+              collaboration_mode_id: ui.selectedCollaborationMode,
+              approval_policy: 'on-request',
+            },
+            { requestIdPrefix: 'mobile-thread' },
+          ),
+        )
+        activeThreadId = handle.thread.id
+        useSessionStore.getState().selectThread(handle.workspace.id, handle.thread.id)
+      }
 
       const turnParams = {
         workspace_id: workspace.id,
-        thread_id: threadId,
-        inputs: [{ type: 'text', text: ui.draft }],
+        thread_id: activeThreadId,
+        inputs: [{ type: 'text', text: submittedDraft }],
         model_id: ui.selectedModel,
         reasoning_effort: ui.selectedEffort,
         collaboration_mode_id: ui.selectedCollaborationMode,
         approval_policy: 'on-request',
       }
 
-      relay._sendMessage({
-        type: 'rpc-call',
-        request_id: `mobile-${Date.now()}`,
-        method: 'turn.start',
-        params: await relay._encryptJson(turnParams),
+      await relay._callRpc('turn.start', turnParams, {
+        requestIdPrefix: 'mobile-turn',
       })
-
       ui.clearDraft()
+      relay._setError(null)
     } catch (e) {
       relay._setError(e instanceof Error ? e.message : 'Failed to send message')
     } finally {
@@ -51,16 +67,16 @@ export function useSessionActions() {
     if (!workspace) return
 
     try {
-      relay._sendMessage({
-        type: 'rpc-call',
-        request_id: `mobile-approval-${Date.now()}`,
-        method: 'approval.respond',
-        params: await relay._encryptJson({
+      await relay._callRpc(
+        'approval.respond',
+        {
           workspace_id: workspace.id,
           request_id: requestId,
           decision,
-        }),
-      })
+        },
+        { requestIdPrefix: 'mobile-approval' },
+      )
+      relay._setError(null)
     } catch (e) {
       relay._setError(e instanceof Error ? e.message : 'Approval action failed')
     }
@@ -70,15 +86,18 @@ export function useSessionActions() {
     const relay = useRelayStore.getState()
 
     try {
-      relay._sendMessage({
-        type: 'rpc-call',
-        request_id: `mobile-detail-${Date.now()}`,
-        method: 'thread.detail',
-        params: await relay._encryptJson({
+      const detail = normalizeThreadDetail(
+        await relay._callRpc<ThreadDetail>(
+          'thread.detail',
+          {
           workspace_id: workspaceId,
           thread_id: threadId,
-        }),
-      })
+          },
+          { requestIdPrefix: 'mobile-detail' },
+        ),
+      )
+      useSessionStore.getState().setThreadDetail(detail)
+      relay._setError(null)
     } catch (e) {
       relay._setError(e instanceof Error ? e.message : 'Failed to load thread')
     }

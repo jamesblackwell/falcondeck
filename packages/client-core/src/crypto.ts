@@ -1,4 +1,5 @@
 import nacl from 'tweetnacl'
+import { gcm } from '@noble/ciphers/aes.js'
 
 import type {
   EncryptedEnvelope,
@@ -17,6 +18,32 @@ const SIGNING_PUBLIC_KEY_BYTES = 32
 const SIGNATURE_BYTES = 64
 const CONTENT_VERSION = 0
 const WRAPPED_KEY_VERSION = 0
+
+function getWebCrypto() {
+  const webCrypto = globalThis.crypto
+  if (!webCrypto) {
+    throw new Error('Web Crypto is not available in this runtime')
+  }
+  return webCrypto
+}
+
+function getSubtleCrypto() {
+  const subtle = getWebCrypto().subtle
+  if (!subtle) {
+    throw new Error('Web Crypto subtle API is not available in this runtime')
+  }
+  return subtle
+}
+
+function hasSubtleCrypto() {
+  return typeof globalThis.crypto?.subtle !== 'undefined'
+}
+
+function toArrayBuffer(bytes: Uint8Array) {
+  const copied = new Uint8Array(bytes.byteLength)
+  copied.set(bytes)
+  return copied.buffer
+}
 
 export function bytesToBase64(bytes: Uint8Array) {
   let binary = ''
@@ -48,7 +75,7 @@ function concatBytes(...arrays: Uint8Array[]) {
 
 function randomBytes(length: number) {
   const bytes = new Uint8Array(length)
-  crypto.getRandomValues(bytes)
+  getWebCrypto().getRandomValues(bytes)
   return bytes
 }
 
@@ -77,8 +104,38 @@ function ensureWrappedBundle(bundle: Uint8Array) {
 }
 
 async function importAesKey(dataKey: Uint8Array) {
-  const rawKey = dataKey.buffer.slice(dataKey.byteOffset, dataKey.byteOffset + dataKey.byteLength) as ArrayBuffer
-  return crypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt'])
+  const rawKey = toArrayBuffer(dataKey)
+  return getSubtleCrypto().importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt'])
+}
+
+async function encryptAesGcm(dataKey: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array) {
+  if (hasSubtleCrypto()) {
+    const key = await importAesKey(dataKey)
+    return new Uint8Array(
+      await getSubtleCrypto().encrypt(
+        { name: 'AES-GCM', iv: toArrayBuffer(nonce) },
+        key,
+        toArrayBuffer(plaintext),
+      ),
+    )
+  }
+
+  return gcm(dataKey, nonce).encrypt(plaintext)
+}
+
+async function decryptAesGcm(dataKey: Uint8Array, nonce: Uint8Array, ciphertext: Uint8Array) {
+  if (hasSubtleCrypto()) {
+    const key = await importAesKey(dataKey)
+    return new Uint8Array(
+      await getSubtleCrypto().decrypt(
+        { name: 'AES-GCM', iv: toArrayBuffer(nonce) },
+        key,
+        toArrayBuffer(ciphertext),
+      ),
+    )
+  }
+
+  return gcm(dataKey, nonce).decrypt(ciphertext)
 }
 
 export type BoxKeyPair = ReturnType<typeof nacl.box.keyPair>
@@ -90,7 +147,7 @@ export type SessionCryptoState = {
 }
 
 export function generateBoxKeyPair() {
-  return nacl.box.keyPair()
+  return nacl.box.keyPair.fromSecretKey(randomBytes(BOX_PUBLIC_KEY_BYTES))
 }
 
 export function publicKeyToBase64(keyPair: BoxKeyPair) {
@@ -221,10 +278,9 @@ export async function encryptJson(dataKey: Uint8Array, value: unknown): Promise<
     throw new Error('Data key must be 32 bytes')
   }
   const nonce = randomBytes(AES_NONCE_BYTES)
-  const key = await importAesKey(dataKey)
   const plaintext = encoder.encode(JSON.stringify(value))
-  const ciphertext = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce }, key, plaintext)
-  const bundle = concatBytes(new Uint8Array([CONTENT_VERSION]), nonce, new Uint8Array(ciphertext))
+  const ciphertext = await encryptAesGcm(dataKey, nonce, plaintext)
+  const bundle = concatBytes(new Uint8Array([CONTENT_VERSION]), nonce, ciphertext)
   return {
     encryption_variant: 'data_key_v1',
     ciphertext: bytesToBase64(bundle),
@@ -237,8 +293,7 @@ export async function decryptJson<T>(dataKey: Uint8Array, envelope: EncryptedEnv
   ensureContentBundle(bundle)
   const nonce = bundle.slice(1, 1 + AES_NONCE_BYTES)
   const ciphertext = bundle.slice(1 + AES_NONCE_BYTES)
-  const key = await importAesKey(dataKey)
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: nonce }, key, ciphertext)
+  const plaintext = await decryptAesGcm(dataKey, nonce, ciphertext)
   return JSON.parse(decoder.decode(plaintext)) as T
 }
 

@@ -75,4 +75,29 @@ describe('crypto re-exports from client-core', () => {
     const e2 = await encryptJson(key, data)
     expect(e1.ciphertext).not.toBe(e2.ciphertext)
   })
+
+  it('falls back to pure-js AES-GCM when crypto.subtle is unavailable', async () => {
+    const key = crypto.getRandomValues(new Uint8Array(32))
+    const payload = { mobile: true, works: 'without subtle' }
+    const originalCrypto = globalThis.crypto
+
+    Object.defineProperty(globalThis, 'crypto', {
+      configurable: true,
+      value: {
+        getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto),
+        randomUUID: originalCrypto.randomUUID?.bind(originalCrypto),
+        subtle: undefined,
+      },
+    })
+
+    try {
+      const envelope = await encryptJson(key, payload)
+      await expect(decryptJson<typeof payload>(key, envelope)).resolves.toEqual(payload)
+    } finally {
+      Object.defineProperty(globalThis, 'crypto', {
+        configurable: true,
+        value: originalCrypto,
+      })
+    }
+  })
 })

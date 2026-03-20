@@ -223,10 +223,10 @@ describe('relay-store edge cases', () => {
   })
 
   describe('_sendMessage without socket', () => {
-    it('silently no-ops when no socket is set', () => {
+    it('throws a clear error when no socket is set', () => {
       expect(() => {
         useRelayStore.getState()._sendMessage({ type: 'ping' })
-      }).not.toThrow()
+      }).toThrow('Remote connection is not ready')
     })
 
     it('_getSocket returns null when not connected', () => {

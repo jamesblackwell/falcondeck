@@ -2,7 +2,7 @@
   "name": "@falcondeck/mobile",
   "version": "0.1.0",
   "private": true,
-  "main": "expo-router/entry",
+  "main": "./src/entry",
   "expo": {
     "install": {
       "exclude": [
@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@falcondeck/client-core": "*",
+    "@noble/ciphers": "^2.1.1",
     "@react-navigation/drawer": "^7.5.0",
     "@shopify/flash-list": "2.0.2",
     "expo": "~54.0.33",
@@ -44,9 +45,9 @@
     "expo-status-bar": "~3.0.0",
     "expo-updates": "~29.0.16",
     "lucide-react-native": "~0.475.0",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0",
-    "react-native": "^0.81.5",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
     "react-native-gesture-handler": "~2.28.0",
     "react-native-mmkv": "~3.3.3",
     "react-native-nitro-modules": "^0.35.2",
@@ -65,7 +66,7 @@
     "@types/react-test-renderer": "^19.1.0",
     "@vitest/coverage-v8": "^3.2.4",
     "jsdom": "^29.0.0",
-    "react-test-renderer": "^19.1.0",
+    "react-test-renderer": "19.1.0",
     "typescript": "~5.9.2",
     "vitest": "^3.2.0"
   }
