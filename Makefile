@@ -2,6 +2,7 @@ SHELL := /bin/sh
 
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 DESKTOP_DIR := $(ROOT)/apps/desktop
+MOBILE_DIR := $(ROOT)/apps/mobile
 REMOTE_WEB_DIR := $(ROOT)/apps/remote-web
 SITE_DIR := $(ROOT)/apps/site
 NPM := npm --workspace apps/desktop
@@ -17,16 +18,20 @@ RELAY_BIND_HOST ?= 0.0.0.0
 CODEX_BIN ?= codex
 TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
 TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
+MOBILE_METRO_PORT ?= 8081
+IOS_SIMULATOR ?= iPhone 16 Pro
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install desktop-prepare remote-web-prepare site-prepare dev desktop-dev desktop-dev-stop frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop lint typecheck check fmt build clean
+.PHONY: help install desktop-prepare mobile-prepare remote-web-prepare site-prepare dev mobile-dev dev-mobile desktop-dev desktop-dev-stop frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop lint typecheck check fmt build clean
 
 help:
 	@printf '%s\n' \
 		'FalconDeck dev commands' \
 		'' \
 		'  make dev            Start relay, remote web, and the desktop app' \
+		'  make mobile-dev     Open Simulator and run the FalconDeck iOS app locally' \
+		'  make dev-mobile     Alias for make mobile-dev' \
 		'  make desktop-dev    Start the Tauri desktop app' \
 		'  make desktop-dev-stop Stop the reusable desktop dev daemon' \
 		'  make frontend-dev   Start the Vite frontend only' \
@@ -34,7 +39,7 @@ help:
 		'  make site-dev       Start the marketing site locally' \
 		'  make daemon         Start the standalone daemon on 127.0.0.1:$(DAEMON_PORT)' \
 		'  make relay          Start the relay on $(RELAY_BIND_HOST):$(RELAY_PORT)' \
-		'  make install        Install desktop and remote web dependencies' \
+		'  make install        Install desktop, mobile, and web dependencies' \
 		'  make test           Run Rust and desktop tests' \
 		'  make lint           Run desktop lint checks' \
 		'  make typecheck      Run desktop TypeScript checks' \
@@ -45,10 +50,12 @@ help:
 		'' \
 		'Overrides:' \
 		'  make daemon DAEMON_PORT=5001 CODEX_BIN=/opt/homebrew/bin/codex' \
-		'  make dev RELAY_PORT=8788 UI_PORT=1421 REMOTE_WEB_PORT=4175'
+		'  make dev RELAY_PORT=8788 UI_PORT=1421 REMOTE_WEB_PORT=4175' \
+		'  make mobile-dev IOS_SIMULATOR="iPhone 16 Pro" MOBILE_METRO_PORT=8081'
 
 install:
 	@$(MAKE) desktop-prepare
+	@$(MAKE) mobile-prepare
 	@$(MAKE) remote-web-prepare
 	@$(MAKE) site-prepare
 
@@ -66,6 +73,13 @@ desktop-prepare:
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
 			(cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')"); \
+		fi
+
+mobile-prepare:
+	@set -e; \
+		if [ ! -d "$(ROOT)/node_modules" ] || [ ! -d "$(MOBILE_DIR)/node_modules" ]; then \
+			echo "Installing workspace dependencies"; \
+			$(ROOT_NPM) install; \
 		fi
 
 remote-web-prepare:
@@ -109,6 +123,44 @@ dev: desktop-prepare remote-web-prepare
 		fi; \
 		trap 'if [ -n "$$remote_web_pid" ]; then kill $$remote_web_pid 2>/dev/null || true; fi; if [ -n "$$relay_pid" ]; then kill $$relay_pid 2>/dev/null || true; fi; $(NPM) run tauri:dev:stop >/dev/null 2>&1 || true' EXIT INT TERM; \
 		$(TAURI_DEV)
+
+mobile-dev: mobile-prepare
+	@set -e; \
+		if ! command -v xcrun >/dev/null 2>&1; then \
+			echo "xcrun is required for iOS simulator development. Install Xcode and its command line tools."; \
+			exit 1; \
+		fi; \
+		if ! command -v open >/dev/null 2>&1; then \
+			echo "The Simulator launcher is only supported on macOS."; \
+			exit 1; \
+		fi; \
+		echo "Opening iOS Simulator"; \
+		open -a Simulator; \
+		booted_udid=$$(xcrun simctl list devices booted | sed -n 's/.*(\\([^)]*\\)) (Booted)/\\1/p' | head -n 1); \
+		if [ -z "$$booted_udid" ]; then \
+			echo "Booting simulator: $(IOS_SIMULATOR)"; \
+			xcrun simctl boot "$(IOS_SIMULATOR)" >/dev/null 2>&1 || true; \
+			booted_udid=$$(xcrun simctl list devices booted | sed -n 's/.*(\\([^)]*\\)) (Booted)/\\1/p' | head -n 1); \
+		fi; \
+		if [ -z "$$booted_udid" ]; then \
+			echo "No booted simulator found. Open Simulator, boot a device, then rerun make mobile-dev."; \
+			exit 1; \
+		fi; \
+		echo "Using simulator $$booted_udid"; \
+		xcrun simctl bootstatus $$booted_udid -b; \
+		metro_pid=""; \
+		if lsof -ti tcp:$(MOBILE_METRO_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+			echo "Using existing Expo dev server on port $(MOBILE_METRO_PORT)"; \
+		else \
+			echo "Starting Expo dev server on port $(MOBILE_METRO_PORT)"; \
+			cd "$(MOBILE_DIR)" && npx expo start --dev-client --port $(MOBILE_METRO_PORT) >/tmp/falcondeck-mobile-metro.log 2>&1 & \
+			metro_pid=$$!; \
+			sleep 5; \
+		fi; \
+		trap 'if [ -n "$$metro_pid" ]; then kill $$metro_pid 2>/dev/null || true; fi' EXIT INT TERM; \
+		cd "$(MOBILE_DIR)" && npx expo run:ios --device $$booted_udid --port $(MOBILE_METRO_PORT)
+
+dev-mobile: mobile-dev
 
 desktop-dev: desktop-prepare
 	@$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true
