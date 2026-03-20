@@ -2,5 +2,10 @@
   "identifier": "default",
   "description": "Default FalconDeck desktop capabilities",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:allow-open"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "dialog:allow-open",
+    "updater:default"
+  ]
 }

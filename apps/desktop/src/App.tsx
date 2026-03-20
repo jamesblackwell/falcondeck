@@ -35,6 +35,7 @@ import { RemotePairingPopover } from './components/RemotePairingPopover'
 import { InteractiveRequestBar } from './components/InteractiveRequestBar'
 import { DiffPanel } from './components/DiffPanel'
 import { SettingsView } from './components/SettingsView'
+import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
 
 function markInteractiveRequestResolved(items: ConversationItem[], requestId: string): ConversationItem[] {
@@ -70,6 +71,7 @@ function AppInner() {
     setSelectedThreadId,
     gitRefreshTrigger,
   } = useDaemonConnection()
+  const updater = useAppUpdater()
 
   const [draft, setDraft] = useState('')
   const [relayUrl] = useState(
@@ -91,6 +93,8 @@ function AppInner() {
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
   const notifiedAttentionRef = useRef(new Map<string, string>())
+  const announcedUpdateVersionRef = useRef<string | null>(null)
+  const announcedDownloadedVersionRef = useRef<string | null>(null)
 
   const selectedWorkspace = useMemo(
     () => snapshot?.workspaces.find((w) => w.id === selectedWorkspaceId) ?? null,
@@ -260,6 +264,28 @@ function AppInner() {
       toast({ variant: 'danger', title: 'Connection error', description: connectionError })
     }
   }, [connectionError, toast])
+
+  useEffect(() => {
+    if (updater.state.status !== 'available' || !updater.state.availableVersion) return
+    if (announcedUpdateVersionRef.current === updater.state.availableVersion) return
+    announcedUpdateVersionRef.current = updater.state.availableVersion
+    toast({
+      variant: 'warning',
+      title: 'Update available',
+      description: `FalconDeck ${updater.state.availableVersion} is ready to download from GitHub Releases.`,
+    })
+  }, [toast, updater.state.availableVersion, updater.state.status])
+
+  useEffect(() => {
+    if (updater.state.status !== 'downloaded' || !updater.state.availableVersion) return
+    if (announcedDownloadedVersionRef.current === updater.state.availableVersion) return
+    announcedDownloadedVersionRef.current = updater.state.availableVersion
+    toast({
+      variant: 'success',
+      title: 'Update downloaded',
+      description: 'Restart FalconDeck when you are ready to install the new desktop build.',
+    })
+  }, [toast, updater.state.availableVersion, updater.state.status])
 
   const applyThreadHandle = useCallback((handle: ThreadHandle) => {
     setSnapshot((current) =>
@@ -555,6 +581,44 @@ function AppInner() {
     setIsSettingsOpen(true)
   }, [])
 
+  const handleCheckForUpdates = useCallback(() => {
+    void updater.checkForUpdates({ manual: true }).then((result) => {
+      if (result.kind === 'upToDate') {
+        toast({
+          variant: 'success',
+          title: 'FalconDeck is up to date',
+          description: 'No newer stable desktop release is available right now.',
+        })
+      } else if (result.kind === 'unsupported') {
+        toast({
+          variant: 'default',
+          title: 'Updater unavailable',
+          description: result.message,
+        })
+      } else if (result.kind === 'error') {
+        toast({
+          variant: 'danger',
+          title: 'Update check failed',
+          description: result.message,
+        })
+      }
+    })
+  }, [toast, updater])
+
+  const handleDownloadUpdate = useCallback(() => {
+    void updater.downloadAndInstall().catch((error: unknown) => {
+      const msg = error instanceof Error ? error.message : 'Failed to download the update'
+      toast({ variant: 'danger', title: 'Update download failed', description: msg })
+    })
+  }, [toast, updater])
+
+  const handleRestartToInstallUpdate = useCallback(() => {
+    void updater.restartToInstall().catch((error: unknown) => {
+      const msg = error instanceof Error ? error.message : 'Failed to restart FalconDeck'
+      toast({ variant: 'danger', title: 'Restart failed', description: msg })
+    })
+  }, [toast, updater])
+
   const handleRevokeDevice = useCallback(
     (device: { device_id: string; label: string | null }) => {
       if (!api) return
@@ -695,10 +759,15 @@ function AppInner() {
               relayUrl={relayUrl}
               isStartingRemote={isStartingRemote}
               revokingDeviceId={revokingDeviceId}
+              updater={updater.state}
+              updaterProgressPercent={updater.progressPercent}
               onUpdatePreferences={handleUpdatePreferences}
               onStartPairing={handleStartPairingCallback}
               onRefreshRemoteStatus={handleRefreshRemoteStatus}
               onRevokeDevice={handleRevokeDevice}
+              onCheckForUpdates={handleCheckForUpdates}
+              onDownloadUpdate={handleDownloadUpdate}
+              onRestartToInstallUpdate={handleRestartToInstallUpdate}
               onClose={() => setIsSettingsOpen(false)}
             />
           ) : (

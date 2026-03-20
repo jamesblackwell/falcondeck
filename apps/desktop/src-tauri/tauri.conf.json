@@ -9,6 +9,9 @@
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist"
   },
+  "bundle": {
+    "createUpdaterArtifacts": true
+  },
   "app": {
     "windows": [
       {
@@ -24,6 +27,17 @@
     ],
     "security": {
       "csp": null
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "__FALCONDECK_UPDATER_PUBLIC_KEY__",
+      "endpoints": [
+        "https://github.com/jamesblackwell/falcondeck/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

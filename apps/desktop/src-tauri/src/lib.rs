@@ -7,9 +7,9 @@ use std::{
 };
 
 use falcondeck_core::DEFAULT_DAEMON_PORT;
-use falcondeck_daemon::{DaemonConfig, EmbeddedDaemonHandle, resolve_agent_binary, spawn_embedded};
+use falcondeck_daemon::{resolve_agent_binary, spawn_embedded, DaemonConfig, EmbeddedDaemonHandle};
 use serde::Serialize;
-use tauri::{Manager, RunEvent, async_runtime::Mutex};
+use tauri::{async_runtime::Mutex, AppHandle, Manager, RunEvent};
 
 struct DesktopState {
     daemon: Mutex<Option<EmbeddedDaemonHandle>>,
@@ -267,11 +267,31 @@ async fn ensure_daemon_running(
     Ok(DaemonConnection { base_url })
 }
 
+async fn shutdown_embedded_daemon(state: tauri::State<'_, DesktopState>) {
+    let mut daemon = state.daemon.lock().await;
+    if let Some(handle) = daemon.take() {
+        let _ = handle.shutdown().await;
+    }
+}
+
+#[tauri::command]
+async fn restart_app(app: AppHandle, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
+    if !cfg!(debug_assertions) {
+        shutdown_embedded_daemon(state).await;
+    }
+    app.restart();
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState::default())
         .setup(|app| {
+            #[cfg(desktop)]
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())
+                .map_err(|error| error.to_string())?;
+
             if cfg!(debug_assertions) {
                 return Ok(());
             }
@@ -282,7 +302,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![ensure_daemon_running])
+        .invoke_handler(tauri::generate_handler![ensure_daemon_running, restart_app])
         .build(tauri::generate_context!())
         .expect("failed to build FalconDeck desktop");
 
@@ -292,12 +312,7 @@ pub fn run() {
                 return;
             }
             let state = app_handle.state::<DesktopState>();
-            tauri::async_runtime::block_on(async move {
-                let mut daemon = state.daemon.lock().await;
-                if let Some(handle) = daemon.take() {
-                    let _ = handle.shutdown().await;
-                }
-            });
+            tauri::async_runtime::block_on(async move { shutdown_embedded_daemon(state).await });
         }
     });
 }

@@ -18,3 +18,16 @@ export async function detectApiBaseUrl() {
 
   return 'http://127.0.0.1:4123'
 }
+
+export function isTauriDesktop() {
+  return Boolean(window.__TAURI_INTERNALS__)
+}
+
+export async function restartDesktopApp() {
+  if (!isTauriDesktop()) {
+    throw new Error('Desktop restart is only available in the packaged FalconDeck app.')
+  }
+
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('restart_app')
+}

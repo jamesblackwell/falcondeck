@@ -25,6 +25,7 @@
     "@radix-ui/react-scroll-area": "^1.2.10",
     "@tauri-apps/api": "^2.8.0",
     "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.9.1",
     "clsx": "^2.1.1",
     "geist": "^1.7.0",
     "lucide-react": "^0.547.0",
@@ -37,14 +38,19 @@
     "shiki": "^4.0.2"
   },
   "optionalDependencies": {
-    "@rolldown/binding-darwin-arm64": "1.0.0-rc.9",
+    "@rolldown/binding-darwin-arm64": "^1.0.0-rc.9",
+    "@rolldown/binding-darwin-universal": "1.0.0-rc.9",
     "@rolldown/binding-darwin-x64": "1.0.0-rc.9",
-    "@rolldown/binding-linux-x64-gnu": "1.0.0-rc.9"
+    "@rolldown/binding-linux-x64-gnu": "1.0.0-rc.9",
+    "@rollup/rollup-darwin-arm64": "^4.52.4",
+    "@rollup/rollup-darwin-x64": "^4.52.4",
+    "@rollup/rollup-linux-x64-gnu": "^4.52.4"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@tailwindcss/vite": "^4.1.13",
     "@tauri-apps/cli": "^2.8.0",
+    "@tauri-apps/cli-darwin-x64": "^2.8.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.0",
     "@types/node": "^24.12.0",

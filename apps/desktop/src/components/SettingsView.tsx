@@ -22,16 +22,21 @@ import {
 } from '@falcondeck/ui'
 import {
   ArrowLeft,
+  Download,
   ExternalLink,
+  FolderSync,
   LaptopMinimal,
   LoaderCircle,
   Radio,
   RefreshCw,
+  RotateCcw,
   Settings,
   Smartphone,
   Trash2,
   Wifi,
 } from 'lucide-react'
+
+import type { AppUpdaterState } from '../hooks/useAppUpdater'
 
 type SettingsSectionId = 'general' | 'remote'
 
@@ -43,10 +48,15 @@ type SettingsViewProps = {
   relayUrl: string
   isStartingRemote: boolean
   revokingDeviceId: string | null
+  updater: AppUpdaterState
+  updaterProgressPercent: number | null
   onUpdatePreferences: (payload: UpdatePreferencesPayload) => void
   onStartPairing: () => void
   onRefreshRemoteStatus: () => void
   onRevokeDevice: (device: TrustedDevice) => void
+  onCheckForUpdates: () => void
+  onDownloadUpdate: () => void
+  onRestartToInstallUpdate: () => void
   onClose: () => void
 }
 
@@ -153,6 +163,41 @@ function deviceIcon(label: string | null) {
     : LaptopMinimal
 }
 
+function updateBadgeVariant(status: AppUpdaterState['status']) {
+  switch (status) {
+    case 'available':
+    case 'downloaded':
+      return 'warning'
+    case 'upToDate':
+      return 'success'
+    case 'error':
+      return 'danger'
+    default:
+      return 'default'
+  }
+}
+
+function updateStatusLabel(status: AppUpdaterState['status']) {
+  switch (status) {
+    case 'checking':
+      return 'Checking'
+    case 'available':
+      return 'Update available'
+    case 'downloading':
+      return 'Downloading'
+    case 'downloaded':
+      return 'Ready to restart'
+    case 'upToDate':
+      return 'Up to date'
+    case 'error':
+      return 'Needs attention'
+    case 'unsupported':
+      return 'Unavailable'
+    default:
+      return 'Idle'
+  }
+}
+
 const TOOL_DETAIL_OPTIONS: Array<{
   value: ToolDetailsMode
   label: string
@@ -216,13 +261,46 @@ function PreferenceToggle({
 function GeneralSettingsPanel({
   workspace,
   preferences,
+  updater,
+  updaterProgressPercent,
   onUpdatePreferences,
+  onCheckForUpdates,
+  onDownloadUpdate,
+  onRestartToInstallUpdate,
 }: {
   workspace?: WorkspaceSummary | null
   preferences: FalconDeckPreferences | null
+  updater: AppUpdaterState
+  updaterProgressPercent: number | null
   onUpdatePreferences: (payload: UpdatePreferencesPayload) => void
+  onCheckForUpdates: () => void
+  onDownloadUpdate: () => void
+  onRestartToInstallUpdate: () => void
 }) {
   const current = normalizePreferences(preferences)
+  const isChecking = updater.status === 'checking'
+  const isDownloading = updater.status === 'downloading'
+  const primaryAction =
+    updater.status === 'available'
+      ? {
+          label: 'Download update',
+          icon: Download,
+          onClick: onDownloadUpdate,
+          disabled: false,
+        }
+      : updater.status === 'downloaded'
+        ? {
+            label: 'Restart to install',
+            icon: RotateCcw,
+            onClick: onRestartToInstallUpdate,
+            disabled: false,
+          }
+        : {
+            label: 'Check for updates',
+            icon: isChecking ? LoaderCircle : FolderSync,
+            onClick: onCheckForUpdates,
+            disabled: isChecking || isDownloading,
+          }
 
   return (
     <div className="space-y-6">
@@ -238,6 +316,103 @@ function GeneralSettingsPanel({
           and remote surfaces stay aligned.
         </p>
       </header>
+
+      <Card>
+        <CardHeader>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              <CardTitle>App Updates</CardTitle>
+              <CardDescription>
+                FalconDeck checks GitHub Releases on launch and every 4 hours while the app stays open.
+              </CardDescription>
+            </div>
+            <Badge variant={updateBadgeVariant(updater.status)} dot>
+              {updateStatusLabel(updater.status)}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
+              <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+                Current version
+              </p>
+              <p className="mt-2 text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
+                {updater.currentVersion ?? 'Unknown'}
+              </p>
+              <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted">Channel: stable</p>
+            </div>
+            <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
+              <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+                Last checked
+              </p>
+              <p className="mt-2 text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
+                {formatRelative(updater.lastCheckedAt)}
+              </p>
+              <p className="mt-2 text-[length:var(--fd-text-xs)] text-fg-muted">
+                {updater.lastCheckedAt ? formatDateTime(updater.lastCheckedAt) : 'No checks yet'}
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                  {updater.availableVersion
+                    ? `FalconDeck ${updater.availableVersion} is ready`
+                    : updater.status === 'upToDate'
+                      ? 'You are on the latest stable release'
+                      : 'Updater status'}
+                </p>
+                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                  {updater.status === 'downloaded'
+                    ? 'The update is downloaded. Restart FalconDeck to install it cleanly with the embedded daemon.'
+                    : updater.status === 'downloading'
+                      ? `Downloading the release bundle${updaterProgressPercent !== null ? ` (${updaterProgressPercent}%)` : ''}.`
+                      : updater.status === 'available'
+                        ? 'Download the signed release and install it on restart.'
+                        : updater.errorMessage ?? 'Background checks stay quiet unless a new release is available.'}
+                </p>
+              </div>
+              <Button type="button" onClick={primaryAction.onClick} disabled={primaryAction.disabled}>
+                <primaryAction.icon className={cn('h-4 w-4', (isChecking || isDownloading) && 'animate-spin')} />
+                {primaryAction.label}
+              </Button>
+            </div>
+            {isDownloading ? (
+              <div className="mt-4 space-y-2">
+                <div className="h-2 overflow-hidden rounded-full bg-surface-3">
+                  <div
+                    className="h-full rounded-full bg-accent transition-[width]"
+                    style={{ width: `${updaterProgressPercent ?? 8}%` }}
+                  />
+                </div>
+                <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                  {updater.totalBytes
+                    ? `${Math.round(updater.downloadedBytes / 1024 / 1024)}MB of ${Math.round(updater.totalBytes / 1024 / 1024)}MB`
+                    : 'Calculating download size…'}
+                </p>
+              </div>
+            ) : null}
+            {updater.notes ? (
+              <div className="mt-4 rounded-[var(--fd-radius-lg)] bg-surface-1 px-3 py-3">
+                <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.18em] text-fg-muted">
+                  Release notes
+                </p>
+                <p className="mt-2 whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary">
+                  {updater.notes}
+                </p>
+                {updater.publishedAt ? (
+                  <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-muted">
+                    Published {formatDateTime(updater.publishedAt)}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
@@ -412,7 +587,7 @@ function RemoteAccessPanel({
   | 'onRefreshRemoteStatus'
   | 'onRevokeDevice'
 >) {
-  const devices = remoteStatus?.trusted_devices ?? []
+  const devices = useMemo(() => remoteStatus?.trusted_devices ?? [], [remoteStatus?.trusted_devices])
   const hasActivePairing = Boolean(remoteStatus?.pairing)
   const isRemovingDevice = revokingDeviceId !== null
   const activeDevices = useMemo(
@@ -692,7 +867,12 @@ export function SettingsView(props: SettingsViewProps) {
             <GeneralSettingsPanel
               workspace={props.workspace}
               preferences={props.preferences}
+              updater={props.updater}
+              updaterProgressPercent={props.updaterProgressPercent}
               onUpdatePreferences={props.onUpdatePreferences}
+              onCheckForUpdates={props.onCheckForUpdates}
+              onDownloadUpdate={props.onDownloadUpdate}
+              onRestartToInstallUpdate={props.onRestartToInstallUpdate}
             />
           ) : (
             <RemoteAccessPanel

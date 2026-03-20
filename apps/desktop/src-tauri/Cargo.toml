@@ -16,6 +16,7 @@ falcondeck-daemon = { path = "../../../crates/falcondeck-daemon" }
 serde.workspace = true
 tauri = { version = "2.8.3", features = [] }
 tauri-plugin-dialog = "2.4.0"
+tauri-plugin-updater = "2.9.1"
 tokio.workspace = true
 
 [features]
