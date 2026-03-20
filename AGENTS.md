@@ -39,6 +39,7 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 ## Working Guidelines
 
 - Read `docs/` before changing protocol or architecture.
+- Read `DESIGN.md` before changing shared UI, branding, or iconography.
 - Keep `AGENTS.md` short and operational; put rationale in `docs/`.
 - Prefer semantic shared UI wrappers over ad hoc utility-heavy markup.
 - Preserve hosting defaults:

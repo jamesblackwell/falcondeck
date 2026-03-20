@@ -7,6 +7,7 @@
     "packages/*"
   ],
   "scripts": {
+    "brand:generate": "node ./scripts/generate-brand-assets.mjs",
     "build": "npm run build --workspaces --if-present",
     "desktop:release:prepare": "node ./scripts/prepare-desktop-release.mjs --require-updater-key",
     "desktop:version:sync": "node ./scripts/prepare-desktop-release.mjs",
