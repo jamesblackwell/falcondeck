@@ -18,6 +18,7 @@ const sources = {
   markDark: resolve(brandDir, 'logomark-mark-dark.svg'),
   markLight: resolve(brandDir, 'logomark-mark-light.svg'),
 }
+const args = new Set(process.argv.slice(2))
 
 function run(command, args, cwd = repoRoot) {
   execFileSync(command, args, { cwd, stdio: 'inherit' })
@@ -122,7 +123,11 @@ function generateDesktopAssets() {
   run('npm', ['exec', 'tauri', 'icon', '--', '../../assets/brand/logomark-dark.svg', '-o', 'src-tauri/icons', '--ios-color', darkBackground], desktopDir)
 }
 
-generateMobileAssets()
-generateDesktopAssets()
-generateWebAssets(siteDir, 'FalconDeck', 'FalconDeck')
-generateWebAssets(remoteWebDir, 'FalconDeck Remote', 'FalconDeck')
+if (args.has('--desktop-only')) {
+  generateDesktopAssets()
+} else {
+  generateMobileAssets()
+  generateDesktopAssets()
+  generateWebAssets(siteDir, 'FalconDeck', 'FalconDeck')
+  generateWebAssets(remoteWebDir, 'FalconDeck Remote', 'FalconDeck')
+}

@@ -18,6 +18,9 @@ RELAY_BIND_HOST ?= 0.0.0.0
 CODEX_BIN ?= codex
 TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
 TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
+TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --bundles app --config src-tauri/tauri.local.conf.json
+DESKTOP_BUNDLE_APP := $(ROOT)/target/release/bundle/macos/FalconDeck.app
+APPLICATIONS_APP := /Applications/FalconDeck.app
 MOBILE_METRO_PORT ?= 8081
 IOS_SIMULATOR ?= iPhone 16 Pro
 
@@ -74,6 +77,11 @@ desktop-prepare:
 			$(ROOT_NPM) install; \
 			(cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')"); \
 		fi
+
+desktop-brand-assets: desktop-prepare
+	@set -e; \
+		echo "Refreshing desktop brand assets"; \
+		cd "$(ROOT)" && node ./scripts/generate-brand-assets.mjs --desktop-only
 
 mobile-prepare:
 	@set -e; \
@@ -168,6 +176,20 @@ desktop-dev: desktop-prepare
 
 desktop-dev-stop: desktop-prepare
 	@$(NPM) run tauri:dev:stop
+
+desktop-install: desktop-brand-assets
+	@set -e; \
+		echo "Building packaged FalconDeck desktop app"; \
+		rm -rf "$(DESKTOP_BUNDLE_APP)"; \
+		$(TAURI_BUILD_INSTALL); \
+		if [ ! -d "$(DESKTOP_BUNDLE_APP)" ]; then \
+			echo "Expected app bundle not found at $(DESKTOP_BUNDLE_APP)"; \
+			exit 1; \
+		fi; \
+		echo "Installing FalconDeck.app to $(APPLICATIONS_APP)"; \
+		rm -rf "$(APPLICATIONS_APP)"; \
+		ditto "$(DESKTOP_BUNDLE_APP)" "$(APPLICATIONS_APP)"; \
+		echo "Installed $(APPLICATIONS_APP)"
 
 frontend-dev: desktop-prepare
 	$(NPM) run dev
