@@ -2,7 +2,7 @@ use falcondeck_core::{
     AgentProvider, CollaborationModeSummary, SelectedSkillReference, SkillSummary, TurnInputItem,
     WorkspaceSummary,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{codex::extract_string, skills::canonical_skill_alias};
