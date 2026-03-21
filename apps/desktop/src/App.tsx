@@ -12,7 +12,6 @@ import {
   selectedSkillsFromText,
   supportsPlanMode,
   togglePlanMode,
-  workspaceAccount,
   workspaceCollaborationModes,
   workspaceModels,
   type AgentProvider,
@@ -23,74 +22,21 @@ import {
   type ThreadHandle,
   type TurnInputItem,
   type UpdatePreferencesPayload,
-  type WorkspaceSummary,
 } from '@falcondeck/client-core'
-import { Conversation, NewThreadState, PromptInput } from '@falcondeck/chat-ui'
+import { NewThreadState } from '@falcondeck/chat-ui'
 import { ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
+import { markInteractiveRequestResolved, normalizeSendError, workspaceSendBlockReason } from './app-utils'
 import { defaultModelId, defaultReasoningEffort, reasoningOptions } from './utils'
+import { DesktopConversationPane } from './components/DesktopConversationPane'
 import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
-import { SessionHeader } from './components/SessionHeader'
-import { RemotePairingPopover } from './components/RemotePairingPopover'
-import { InteractiveRequestBar } from './components/InteractiveRequestBar'
 import { DiffPanel } from './components/DiffPanel'
+import { ProjectImportOverlay } from './components/ProjectImportOverlay'
 import { SettingsView } from './components/SettingsView'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
-
-function markInteractiveRequestResolved(items: ConversationItem[], requestId: string): ConversationItem[] {
-  return items.map((item) =>
-    item.kind === 'interactive_request' && item.id === requestId
-      ? { ...item, resolved: true }
-      : item,
-  )
-}
-
-function providerLabel(provider: AgentProvider) {
-  return provider === 'claude' ? 'Claude' : 'Codex'
-}
-
-function workspaceSendBlockReason(
-  workspace: WorkspaceSummary | null | undefined,
-  provider: AgentProvider,
-) {
-  if (!workspace) return 'Select a project to get started.'
-
-  switch (workspace.status) {
-    case 'connecting':
-      return `${workspace.path.split('/').pop() ?? 'This project'} is still reconnecting. Wait a moment and try again.`
-    case 'disconnected':
-      return workspace.last_error ?? `${workspace.path.split('/').pop() ?? 'This project'} is disconnected. Reconnect it and try again.`
-    case 'error':
-      return workspace.last_error ?? `${workspace.path.split('/').pop() ?? 'This project'} is unavailable right now.`
-    case 'needs_auth':
-      return `Finish authentication for this project before using ${providerLabel(provider)}.`
-    default:
-      break
-  }
-
-  const account = workspaceAccount(workspace, provider)
-  if (account?.status === 'needs_auth') {
-    return `${providerLabel(provider)} needs authentication in this project before you can send messages.`
-  }
-
-  return null
-}
-
-function normalizeSendError(message: string, provider: AgentProvider) {
-  if (message.includes('is not currently connected to Claude')) {
-    return 'This project is not connected to Claude yet. Wait for it to reconnect or switch the new thread to Codex.'
-  }
-  if (message.includes('is not currently connected to Codex')) {
-    return 'This project is not connected to Codex yet. Wait for it to reconnect and try again.'
-  }
-  if (message.includes('workspace restore timed out')) {
-    return `This project is still reconnecting to ${providerLabel(provider)}. Wait a moment and try again.`
-  }
-  return message
-}
 
 export default function App() {
   return (
@@ -859,63 +805,53 @@ function AppInner() {
               onClose={() => setIsSettingsOpen(false)}
             />
           ) : (
-            <section className="flex h-full min-h-0 flex-col bg-surface-1">
-              <SessionHeader workspace={selectedWorkspace} thread={selectedThread}>
-                <RemotePairingPopover
-                  remoteStatus={remoteStatus}
-                  pairingLink={pairingLink}
-                  onStartPairing={handleStartPairingCallback}
-                  onRefreshStatus={handleRefreshRemoteStatus}
-                  isStartingRemote={isStartingRemote}
-                />
-              </SessionHeader>
-              <Conversation
-                threadKey={
-                  selectedThreadId
-                    ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
-                    : selectedWorkspaceId
-                }
-                items={conversationItems}
-                preferences={snapshot?.preferences ?? null}
-                emptyState={conversationEmptyState}
-                isThinking={isSending || selectedThread?.status === 'running'}
-                isLoading={isThreadDetailPending}
-              />
-              <InteractiveRequestBar
-                requests={interactiveRequests}
-                onRespond={handleInteractiveResponseCallback}
-              />
-              <PromptInput
-                value={draft}
-                onValueChange={setDraft}
-                onSubmit={handleSubmitCallback}
-                onPickImages={handlePickImages}
-                onRemoveAttachment={handleRemoveAttachment}
-                attachments={attachments}
-                skills={selectedWorkspace?.skills ?? []}
-                selectedProvider={selectedProvider}
-                onProviderChange={handleProviderChange}
-                providerLocked={Boolean(selectedThread)}
-                showProviderSelector={!selectedThread}
-                models={models}
-                selectedModelId={selectedModel}
-                onModelChange={handleModelChange}
-                reasoningOptions={currentReasoningOptions}
-                selectedEffort={selectedEffort}
-                onEffortChange={handleEffortChange}
-                collaborationModes={collaborationModes}
-                selectedCollaborationModeId={selectedCollaborationMode}
-                onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
-                showPlanModeToggle={showPlanModeToggle}
-                planModeEnabled={planModeEnabled}
-                onPlanModeChange={(enabled) =>
+            <DesktopConversationPane
+              selectedWorkspace={selectedWorkspace}
+              selectedThread={selectedThread}
+              selectedWorkspaceId={selectedWorkspaceId}
+              selectedThreadId={selectedThreadId}
+              remoteStatus={remoteStatus}
+              pairingLink={pairingLink}
+              isStartingRemote={isStartingRemote}
+              conversationItems={conversationItems}
+              preferences={snapshot?.preferences ?? null}
+              conversationEmptyState={conversationEmptyState}
+              isSending={isSending}
+              isThreadDetailPending={isThreadDetailPending}
+              interactiveRequests={interactiveRequests}
+              onStartPairing={handleStartPairingCallback}
+              onRefreshRemoteStatus={handleRefreshRemoteStatus}
+              onInteractiveResponse={handleInteractiveResponseCallback}
+              promptInputProps={{
+                value: draft,
+                onValueChange: setDraft,
+                onSubmit: handleSubmitCallback,
+                onPickImages: handlePickImages,
+                onRemoveAttachment: handleRemoveAttachment,
+                attachments,
+                skills: selectedWorkspace?.skills ?? [],
+                selectedProvider,
+                onProviderChange: handleProviderChange,
+                providerLocked: Boolean(selectedThread),
+                showProviderSelector: !selectedThread,
+                models,
+                selectedModelId: selectedModel,
+                onModelChange: handleModelChange,
+                reasoningOptions: currentReasoningOptions,
+                selectedEffort,
+                onEffortChange: handleEffortChange,
+                collaborationModes,
+                selectedCollaborationModeId: selectedCollaborationMode,
+                onCollaborationModeChange: handleCollaborationModeChange,
+                showPlanModeToggle,
+                planModeEnabled,
+                onPlanModeChange: (enabled) =>
                   handleCollaborationModeChange(
                     togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, activeProvider),
-                  )
-                }
-                disabled={isDisabled}
-              />
-            </section>
+                  ),
+                disabled: isDisabled,
+              }}
+            />
           )
         }
         rail={
@@ -924,25 +860,7 @@ function AppInner() {
             : <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
         }
       />
-      {isImportingProjectSessions ? (
-        <div className="pointer-events-auto fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-6 backdrop-blur-sm">
-          <div className="w-full max-w-md rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-6 shadow-[var(--fd-shadow-lg)]">
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 rounded-full bg-surface-3 p-2 text-accent">
-                <LoaderCircle className="h-5 w-5 animate-spin" />
-              </div>
-              <div className="space-y-1">
-                <h2 className="text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
-                  Importing existing Claude and Codex sessions
-                </h2>
-                <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
-                  This might take a moment.
-                </p>
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
+      {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
     </>
   )
 }

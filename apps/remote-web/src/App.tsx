@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
-  applyEventToThreadDetail,
-  applySnapshotEvent,
   base64ToBytes,
   bootstrapSessionCrypto,
   buildPairingPublicKeyBundle,
@@ -21,7 +19,6 @@ import {
   identityPublicKeyToBase64,
   isPlanModeEnabled,
   normalizeDaemonSnapshot,
-  normalizeEventEnvelope,
   normalizePreferences,
   normalizeThreadDetail,
   normalizeThreadHandle,
@@ -52,7 +49,6 @@ import {
   type MachinePresence,
   type PersistedRemoteSession,
   type QueuedRemoteAction,
-  type RelayClientMessage,
   type RelayServerMessage,
   type RelayWebSocketTicketResponse,
   type RelayUpdate,
@@ -65,427 +61,45 @@ import {
 import {
   Conversation,
   InteractiveRequestBar,
-  NewThreadState,
   PromptInput,
   SessionHeader,
   WorkspaceSidebar,
 } from '@falcondeck/chat-ui'
-import { Badge, Button, Input, Panel, PanelContent, PanelHeader } from '@falcondeck/ui'
+import { Badge, Button } from '@falcondeck/ui'
 
-import { LoaderCircle, Lock, PanelLeft, Settings, Smartphone, X } from 'lucide-react'
+import { LoaderCircle, PanelLeft, Settings, X } from 'lucide-react'
 
-// ── Helpers ──────────────────────────────────────────────────────────
+import { RemoteConnectionHelpCard } from './components/RemoteConnectionHelpCard'
+import { RemotePairingScreen } from './components/RemotePairingScreen'
+import { RemotePreferencesModal } from './components/RemotePreferencesModal'
+import {
+  applyDaemonEventsToSnapshot,
+  applyDaemonEventsToThreadDetail,
+  applyDaemonEventsToThreadItems,
+  clearPendingActionIds,
+  CLIENT_KEYPAIR_STORAGE_KEY,
+  collectConversationItemUpdates,
+  connectionBadgeState,
+  deriveConnectionHelpState,
+  encryptedRpcErrorMessage,
+  getDeviceLabel,
+  isAbortError,
+  loadOrCreateClientKeyPair,
+  loadPendingActionIds,
+  loadPersistedRemoteSession,
+  markInteractiveRequestResolved,
+  maskIdentifier,
+  parseDaemonEvent,
+  persistPendingActionIds,
+  persistRemoteSession,
+  reasoningOptions,
+  relayHostLabel,
+  sendRelayMessage,
+  shouldDiscardPendingAction,
+  waitForPollInterval,
+} from './lib/remoteAppUtils'
 
-function getDeviceLabel(): string {
-  const ua = navigator.userAgent
-  let browser = 'Browser'
-  if (ua.includes('Firefox/')) browser = 'Firefox'
-  else if (ua.includes('Edg/')) browser = 'Edge'
-  else if (ua.includes('OPR/') || ua.includes('Opera')) browser = 'Opera'
-  else if (ua.includes('Chrome/') && !ua.includes('Edg/')) browser = 'Chrome'
-  else if (ua.includes('Safari/') && !ua.includes('Chrome/')) browser = 'Safari'
-
-  let os = ''
-  if (ua.includes('iPhone')) os = 'iPhone'
-  else if (ua.includes('iPad')) os = 'iPad'
-  else if (ua.includes('Android')) os = 'Android'
-  else if (ua.includes('Mac OS')) os = 'macOS'
-  else if (ua.includes('Windows')) os = 'Windows'
-  else if (ua.includes('Linux')) os = 'Linux'
-
-  return os ? `${browser} on ${os}` : browser
-}
-
-function parseDaemonEvent(payload: unknown): EventEnvelope | null {
-  if (
-    typeof payload === 'object' &&
-    payload !== null &&
-    'kind' in payload &&
-    'event' in payload &&
-    (payload as { kind?: string }).kind === 'daemon-event'
-  ) {
-    return normalizeEventEnvelope((payload as { event: EventEnvelope }).event)
-  }
-  return null
-}
-
-function encryptedRpcErrorMessage(payload: unknown) {
-  if (typeof payload === 'object' && payload !== null && 'message' in payload) {
-    const message = (payload as { message?: unknown }).message
-    if (typeof message === 'string') return message
-  }
-  return 'Remote action failed'
-}
-
-function reasoningOptions(
-  snapshot: DaemonSnapshot | null,
-  workspaceId: string | null,
-  provider: AgentProvider,
-  modelId: string | null,
-) {
-  const workspace = snapshot?.workspaces.find((e) => e.id === workspaceId)
-  const model = workspaceModels(workspace, provider).find((e) => e.id === modelId)
-  const supported = model?.supported_reasoning_efforts.map((e) => e.reasoning_effort) ?? []
-  if (supported.length > 0) return supported
-  return model?.default_reasoning_effort ? [model.default_reasoning_effort] : ['medium']
-}
-
-function sendRelayMessage(socket: WebSocket, message: RelayClientMessage) {
-  socket.send(JSON.stringify(message))
-}
-
-function connectionLabel(status: string) {
-  if (status.startsWith('connected')) return 'Connected'
-  if (status === 'connecting') return 'Connecting...'
-  if (status === 'disconnected') return 'Disconnected'
-  if (status.includes('claimed')) return 'Pairing...'
-  return 'Not connected'
-}
-
-function connectionBadgeState(status: string, desktopOnline: boolean) {
-  if (status.startsWith('connected')) {
-    if (desktopOnline) return { variant: 'success' as const, label: 'Connected' }
-    return { variant: 'warning' as const, label: 'Desktop retrying' }
-  }
-
-  return {
-    variant: status === 'disconnected' ? ('danger' as const) : ('warning' as const),
-    label: connectionLabel(status),
-  }
-}
-
-function applyDaemonEventsToSnapshot(
-  current: DaemonSnapshot | null,
-  events: EventEnvelope[],
-) {
-  let next = current
-  for (const event of events) {
-    next =
-      applySnapshotEvent(next, event) ??
-      (event.event.type === 'snapshot' ? event.event.snapshot : next)
-  }
-  return next
-}
-
-function applyDaemonEventsToThreadItems(
-  current: Record<string, ConversationItem[]>,
-  updatesByThread: Map<string, ConversationItem[]>,
-) {
-  let next = current
-
-  for (const [threadId, updates] of updatesByThread) {
-    let updated = current[threadId] ?? []
-    for (const item of updates) {
-      updated = upsertConversationItem(updated, item)
-    }
-    if (next === current) {
-      next = { ...current }
-    }
-    next[threadId] = updated
-  }
-
-  return next
-}
-
-function applyDaemonEventsToThreadDetail(
-  current: ThreadDetail | null,
-  events: EventEnvelope[],
-  updatesByThread: Map<string, ConversationItem[]>,
-) {
-  let next = current
-  for (const event of events) {
-    next = applyEventToThreadDetail(next, event)
-  }
-  if (!next) return next
-
-  const threadUpdates = updatesByThread.get(next.thread.id)
-  if (!threadUpdates || threadUpdates.length === 0) {
-    return next
-  }
-
-  let items = next.items
-  for (const item of threadUpdates) {
-    items = upsertConversationItem(items, item)
-  }
-
-  return items === next.items ? next : { ...next, items }
-}
-
-function collectConversationItemUpdates(events: EventEnvelope[]) {
-  const passthroughEvents: EventEnvelope[] = []
-  const updatesByThread = new Map<string, Map<string, ConversationItem>>()
-
-  for (const event of events) {
-    if (
-      event.thread_id &&
-      (event.event.type === 'conversation-item-added' ||
-        event.event.type === 'conversation-item-updated')
-    ) {
-      let threadUpdates = updatesByThread.get(event.thread_id)
-      if (!threadUpdates) {
-        threadUpdates = new Map<string, ConversationItem>()
-        updatesByThread.set(event.thread_id, threadUpdates)
-      }
-      threadUpdates.set(
-        `${event.event.item.kind}:${event.event.item.id}`,
-        event.event.item,
-      )
-      continue
-    }
-
-    passthroughEvents.push(event)
-  }
-
-  return {
-    passthroughEvents,
-    updatesByThread: new Map(
-      [...updatesByThread.entries()].map(([threadId, items]) => [
-        threadId,
-        [...items.values()],
-      ]),
-    ),
-  }
-}
-
-function markInteractiveRequestResolved(items: ConversationItem[], requestId: string): ConversationItem[] {
-  return items.map((item) =>
-    item.kind === 'interactive_request' && item.id === requestId
-      ? { ...item, resolved: true }
-      : item,
-  )
-}
-
-// ── Session persistence ──────────────────────────────────────────────
-
-const STORAGE_KEY = 'falcondeck.remote.session.v1'
-const PENDING_ACTIONS_KEY = 'falcondeck.remote.pending-actions.v1'
-const CLIENT_KEYPAIR_STORAGE_KEY = 'falcondeck.remote.client-keypair.v1'
 const DEFAULT_RELAY_URL = DEFAULT_REMOTE_RELAY_URL
-
-function loadPersistedRemoteSession(): PersistedRemoteSession | null {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-    if (!raw) return null
-    const parsed = JSON.parse(raw) as PersistedRemoteSession
-    if (parsed.version !== REMOTE_SESSION_STORAGE_VERSION) {
-      window.localStorage.removeItem(STORAGE_KEY)
-      return null
-    }
-    return parsed
-  } catch {
-    window.localStorage.removeItem(STORAGE_KEY)
-    return null
-  }
-}
-
-function persistRemoteSession(value: PersistedRemoteSession | null) {
-  if (value) {
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        ...value,
-        version: REMOTE_SESSION_STORAGE_VERSION,
-      } satisfies PersistedRemoteSession),
-    )
-  } else {
-    window.localStorage.removeItem(STORAGE_KEY)
-  }
-}
-
-function loadOrCreateClientKeyPair() {
-  try {
-    const raw = window.localStorage.getItem(CLIENT_KEYPAIR_STORAGE_KEY)
-    if (raw) return restoreBoxKeyPair(raw)
-  } catch {
-    window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
-  }
-
-  const keyPair = generateBoxKeyPair()
-  window.localStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(keyPair))
-  return keyPair
-}
-
-function loadPendingActionIds() {
-  try {
-    const raw = window.localStorage.getItem(PENDING_ACTIONS_KEY)
-    if (!raw) return [] as string[]
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
-  } catch {
-    return []
-  }
-}
-
-function persistPendingActionIds(actionIds: string[]) {
-  if (actionIds.length === 0) {
-    window.localStorage.removeItem(PENDING_ACTIONS_KEY)
-    return
-  }
-  window.localStorage.setItem(PENDING_ACTIONS_KEY, JSON.stringify(actionIds))
-}
-
-function clearPendingActionIds() {
-  window.localStorage.removeItem(PENDING_ACTIONS_KEY)
-}
-
-function shouldDiscardPendingAction(error: unknown) {
-  if (!(error instanceof Error)) return false
-  return /failed with status 401|failed with status 404|queued action not found|invalid session token/i.test(
-    error.message,
-  )
-}
-
-function isAbortError(error: unknown) {
-  return error instanceof DOMException && error.name === 'AbortError'
-}
-
-function waitForPollInterval(ms: number, signal?: AbortSignal) {
-  if (signal?.aborted) {
-    return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
-  }
-
-  return new Promise<void>((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      signal?.removeEventListener('abort', handleAbort)
-      resolve()
-    }, ms)
-
-    const handleAbort = () => {
-      window.clearTimeout(timeout)
-      reject(new DOMException('The operation was aborted.', 'AbortError'))
-    }
-
-    signal?.addEventListener('abort', handleAbort, { once: true })
-  })
-}
-
-function relayHostLabel(relayUrl: string) {
-  try {
-    return new URL(relayUrl).host
-  } catch {
-    return relayUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
-  }
-}
-
-function maskIdentifier(value: string | null | undefined) {
-  if (!value) return 'Unavailable'
-  if (value.length <= 18) return value
-  return `${value.slice(0, 8)}...${value.slice(-6)}`
-}
-
-function isClaimedPairingError(message: string | null) {
-  return !!message && /pairing has already been claimed/i.test(message)
-}
-
-function isInvalidSavedSessionError(message: string | null) {
-  return !!message && /invalid session token|session not found|trusted device/i.test(message)
-}
-
-type ConnectionHelpState = {
-  tone: 'warning' | 'danger'
-  title: string
-  description: string
-  steps: string[]
-}
-
-function deriveConnectionHelpState({
-  connectionStatus,
-  desktopOnline,
-  error,
-  hasSessionKey,
-  isConnected,
-}: {
-  connectionStatus: string
-  desktopOnline: boolean
-  error: string | null
-  hasSessionKey: boolean
-  isConnected: boolean
-}): ConnectionHelpState | null {
-  if (isClaimedPairingError(error)) {
-    return {
-      tone: 'warning',
-      title: 'This pairing code has already been used',
-      description:
-        'That usually means this browser already claimed the code before, or another device finished the pairing first.',
-      steps: [
-        'If this is the same browser you paired earlier, reset the saved browser connection and reopen the pairing link.',
-        'If this is a different device, generate a fresh pairing code from FalconDeck on desktop.',
-        'Avoid sharing screenshots of this screen while the pairing code is active.',
-      ],
-    }
-  }
-
-  if (isInvalidSavedSessionError(error)) {
-    return {
-      tone: 'warning',
-      title: 'Saved browser pairing is no longer valid',
-      description:
-        'FalconDeck still has old local browser state, but the relay or desktop no longer accepts that trusted session.',
-      steps: [
-        'Reset the saved browser connection below.',
-        'Open a fresh pairing link or scan a new QR code from desktop.',
-        'If the desktop still shows this browser as trusted, remove it there before pairing again.',
-      ],
-    }
-  }
-
-  if (isConnected && connectionStatus.startsWith('connected') && !desktopOnline) {
-    return {
-      tone: 'warning',
-      title: 'Browser connected, desktop retrying',
-      description:
-        'Your browser is attached to the relay, but the desktop daemon is not currently online for this remote session.',
-      steps: [
-        'Keep FalconDeck open on your desktop and give it a few seconds to reconnect.',
-        'If it stays stuck, generate a fresh pairing code from desktop.',
-        'If this browser looks stale, reset the saved browser connection and pair again.',
-      ],
-    }
-  }
-
-  if (connectionStatus.includes('claimed') && !hasSessionKey) {
-    return {
-      tone: 'warning',
-      title: 'Waiting for encrypted session setup',
-      description:
-        'The browser has claimed the pairing code and is now waiting for the desktop to complete the secure handshake.',
-      steps: [
-        'Keep FalconDeck open on the desktop that created this pairing code.',
-        'If setup does not finish, create a fresh pairing code and try again.',
-      ],
-    }
-  }
-
-  if (connectionStatus === 'disconnected') {
-    return {
-      tone: 'danger',
-      title: 'Relay connection dropped',
-      description:
-        'The browser lost its live connection to the relay, so FalconDeck cannot receive updates from the desktop right now.',
-      steps: [
-        'Check that this browser can still reach the internet and the relay.',
-        'Leave the page open for a moment while FalconDeck retries.',
-        'If reconnect keeps failing, reset the saved browser connection and pair again.',
-      ],
-    }
-  }
-
-  if (error) {
-    return {
-      tone: 'danger',
-      title: 'Remote connection needs attention',
-      description: error,
-      steps: [
-        'Review the local debug details below before pairing again.',
-        'If this looks like stale browser state, reset the saved browser connection.',
-      ],
-    }
-  }
-
-  return null
-}
-
-// ── App ──────────────────────────────────────────────────────────────
 
 export default function App() {
   const params = new URLSearchParams(window.location.search)
@@ -1761,11 +1375,35 @@ export default function App() {
       return undefined
     }
     return (
-      <NewThreadState
-        workspaces={snapshot?.workspaces ?? []}
-        selectedWorkspace={selectedWorkspace}
-        onSelectWorkspace={handleNewThread}
-      />
+      <div className="flex min-h-[240px] flex-col items-center justify-center gap-4 px-6 text-center">
+        <div className="space-y-2">
+          <p className="text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
+            Start a new thread
+          </p>
+          <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
+            Pick a project below to open a fresh conversation from this browser.
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          {(snapshot?.workspaces ?? []).length > 0 ? (
+            (snapshot?.workspaces ?? []).map((workspace) => (
+              <Button
+                key={workspace.id}
+                type="button"
+                variant={workspace.id === selectedWorkspace?.id ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => handleNewThread(workspace.id)}
+              >
+                {workspace.path.split('/').pop() ?? workspace.path}
+              </Button>
+            ))
+          ) : (
+            <p className="text-[length:var(--fd-text-sm)] text-fg-faint">
+              Waiting for projects from your desktop session.
+            </p>
+          )}
+        </div>
+      </div>
     )
   }, [
     handleNewThread,
@@ -1867,123 +1505,22 @@ export default function App() {
 
   if (!isConnected) {
     return (
-      <div className="flex h-[100dvh] flex-col items-center justify-center bg-surface-0 p-6">
-        <div className="w-full max-w-md space-y-6">
-          <div className="text-center">
-            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-surface-2">
-              <Smartphone className="h-7 w-7 text-fg-tertiary" />
-            </div>
-            <h1 className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary">FalconDeck Remote</h1>
-            <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-              Connect to your desktop session
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            <Input
-              value={relayUrl}
-              onChange={(event) => setRelayUrl(event.target.value)}
-              placeholder="Relay URL"
-            />
-            <Input
-              value={pairingCode}
-              onChange={(event) => setPairingCode(event.target.value.toUpperCase())}
-              placeholder="Pairing code"
-              className="text-center font-mono tracking-widest"
-            />
-            <Button
-              type="button"
-              disabled={!relayUrl.trim() || !pairingCode.trim()}
-              onClick={() => void handleClaimPairing()}
-              className="w-full"
-            >
-              Connect
-            </Button>
-          </div>
-
-          {connectionHelp ? (
-            <div
-              className={`rounded-[var(--fd-radius-xl)] border px-4 py-4 ${
-                connectionHelp.tone === 'danger'
-                  ? 'border-danger/25 bg-danger-muted/70'
-                  : 'border-warning/25 bg-warning-muted/70'
-              }`}
-            >
-              <div className="space-y-2">
-                <div>
-                  <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
-                    {connectionHelp.title}
-                  </p>
-                  <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-secondary">
-                    {connectionHelp.description}
-                  </p>
-                </div>
-
-                <div className="space-y-1.5 text-[length:var(--fd-text-xs)] text-fg-secondary">
-                  {connectionHelp.steps.map((step) => (
-                    <p key={step}>{step}</p>
-                  ))}
-                </div>
-
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <Button type="button" variant="outline" size="sm" onClick={resetSavedRemoteConnection}>
-                    Reset saved browser connection
-                  </Button>
-                </div>
-              </div>
-
-              <Panel collapsible defaultOpen={false} className="mt-4 border-0">
-                <PanelHeader collapsible className="px-0 pb-2 pt-0 text-[length:var(--fd-text-xs)]">
-                  Local debug details
-                </PanelHeader>
-                <PanelContent collapsible className="px-0 pb-0">
-                  <div className="space-y-2 rounded-[var(--fd-radius-lg)] bg-surface-1 px-3 py-3 text-[length:var(--fd-text-xs)]">
-                    {connectionDebugRows.map(([label, value]) => (
-                      <div key={label} className="flex items-center justify-between gap-3">
-                        <span className="text-fg-muted">{label}</span>
-                        <span className="text-right font-mono text-fg-secondary">{value}</span>
-                      </div>
-                    ))}
-                    <p className="pt-1 text-fg-faint">
-                      Local-only diagnostics. Do not share active pairing codes or tokens in screenshots.
-                    </p>
-                  </div>
-                </PanelContent>
-              </Panel>
-            </div>
-          ) : null}
-
-          <div className="flex items-center justify-center gap-2 text-[length:var(--fd-text-xs)] text-fg-muted">
-            <Lock className="h-3 w-3" />
-            End-to-end encrypted
-          </div>
-        </div>
-      </div>
+      <RemotePairingScreen
+        relayUrl={relayUrl}
+        pairingCode={pairingCode}
+        connectionHelp={connectionHelp}
+        connectionDebugRows={connectionDebugRows}
+        onRelayUrlChange={setRelayUrl}
+        onPairingCodeChange={setPairingCode}
+        onConnect={() => void handleClaimPairing()}
+        onResetSavedConnection={resetSavedRemoteConnection}
+      />
     )
   }
 
   // ── Connected session ──────────────────────────────────────────────
 
   const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline)
-  const preferences = normalizePreferences(snapshot?.preferences)
-  const toolDetailOptions = [
-    { value: 'auto', label: 'Auto' },
-    { value: 'expanded', label: 'Expanded' },
-    { value: 'compact', label: 'Compact' },
-    { value: 'hide_read_only_details', label: 'Hide read-only details' },
-  ] as const
-  const preferenceToggles = [
-    {
-      key: 'group_read_only_tools' as const,
-      enabled: preferences.conversation.group_read_only_tools,
-      label: 'Group read-only tool bursts',
-    },
-    {
-      key: 'show_expand_all_controls' as const,
-      enabled: preferences.conversation.show_expand_all_controls,
-      label: 'Show expand/collapse all controls',
-    },
-  ]
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
@@ -2020,122 +1557,24 @@ export default function App() {
 
       {connectionHelp ? (
         <div className="border-b border-border-subtle bg-surface-1 px-4 py-3 md:px-5">
-          <div
-            className={`mx-auto w-full rounded-[var(--fd-radius-xl)] border px-4 py-4 ${
-              connectionHelp.tone === 'danger'
-                ? 'border-danger/25 bg-danger-muted/60'
-                : 'border-warning/25 bg-warning-muted/60'
-            }`}
-          >
-            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-              <div className="space-y-1.5">
-                <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">
-                  {connectionHelp.title}
-                </p>
-                <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
-                  {connectionHelp.description}
-                </p>
-                <div className="space-y-1 text-[length:var(--fd-text-xs)] text-fg-secondary">
-                  {connectionHelp.steps.map((step) => (
-                    <p key={step}>{step}</p>
-                  ))}
-                </div>
-              </div>
-              <div className="flex shrink-0 flex-wrap gap-2">
-                <Button type="button" variant="outline" size="sm" onClick={resetSavedRemoteConnection}>
-                  Reset saved browser connection
-                </Button>
-              </div>
-            </div>
-
-            <Panel collapsible defaultOpen={false} className="mt-4 border-0">
-              <PanelHeader collapsible className="px-0 pb-2 pt-0 text-[length:var(--fd-text-xs)]">
-                Connection debug details
-              </PanelHeader>
-              <PanelContent collapsible className="px-0 pb-0">
-                <div className="grid gap-2 rounded-[var(--fd-radius-lg)] bg-surface-0/60 px-3 py-3 text-[length:var(--fd-text-xs)] md:grid-cols-2">
-                  {connectionDebugRows.map(([label, value]) => (
-                    <div key={label} className="flex items-center justify-between gap-3">
-                      <span className="text-fg-muted">{label}</span>
-                      <span className="text-right font-mono text-fg-secondary">{value}</span>
-                    </div>
-                  ))}
-                </div>
-              </PanelContent>
-            </Panel>
+          <div className="mx-auto w-full">
+            <RemoteConnectionHelpCard
+              help={connectionHelp}
+              debugRows={connectionDebugRows}
+              onReset={resetSavedRemoteConnection}
+            />
           </div>
         </div>
       ) : null}
 
-      {showPreferences ? (
-        <div className="fixed inset-0 z-50 bg-surface-0/80 backdrop-blur-sm">
-          <button
-            type="button"
-            className="absolute inset-0 h-full w-full"
-            aria-label="Close preferences"
-            onClick={() => setShowPreferences(false)}
-          />
-          <div className="absolute inset-x-4 top-20 mx-auto w-full max-w-xl rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-2xl">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">
-                  Preferences
-                </p>
-                <h2 className="mt-1 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
-                  Conversation density
-                </h2>
-                <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-                  These settings are stored in FalconDeck&apos;s shared `falcondeck.json`.
-                </p>
-              </div>
-              <Button type="button" variant="ghost" size="icon" onClick={() => setShowPreferences(false)}>
-                <X className="h-4 w-4" />
-              </Button>
-            </div>
-
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              {toolDetailOptions.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() =>
-                    void handleUpdatePreferences({
-                      conversation: { tool_details_mode: option.value },
-                    })
-                  }
-                  className={`rounded-[var(--fd-radius-lg)] border p-3 text-left transition-colors ${
-                    preferences.conversation.tool_details_mode === option.value
-                      ? 'border-accent/50 bg-accent/10'
-                      : 'border-border-subtle bg-surface-2 hover:bg-surface-3'
-                  }`}
-                >
-                  <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">{option.label}</p>
-                </button>
-              ))}
-            </div>
-
-            <div className="mt-4 space-y-2">
-              {preferenceToggles.map((toggle) => (
-                <button
-                  key={toggle.key}
-                  type="button"
-                  onClick={() =>
-                    void handleUpdatePreferences({
-                      conversation: { [toggle.key]: !toggle.enabled } as UpdatePreferencesPayload['conversation'],
-                    })
-                  }
-                  className="flex w-full items-center justify-between rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 px-4 py-3 text-left"
-                >
-                  <span className="text-[length:var(--fd-text-sm)] text-fg-primary">{toggle.label}</span>
-                  <Badge variant={toggle.enabled ? 'success' : 'default'} dot>
-                    {toggle.enabled ? 'On' : 'Off'}
-                  </Badge>
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-      ) : null}
+      <RemotePreferencesModal
+        isOpen={showPreferences}
+        preferences={snapshot?.preferences ?? null}
+        onClose={() => setShowPreferences(false)}
+        onUpdatePreferences={(payload) => {
+          void handleUpdatePreferences(payload)
+        }}
+      />
 
       {showProjects ? (
         <div className="fixed inset-0 z-40 bg-surface-0/80 backdrop-blur-sm md:hidden">
