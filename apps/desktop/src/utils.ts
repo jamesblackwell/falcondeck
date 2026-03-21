@@ -1,6 +1,5 @@
 import {
   defaultProvider,
-  providerForThread,
   workspaceModels,
   type AgentProvider,
   type ThreadSummary,
@@ -20,11 +19,13 @@ export function resolveThreadModelId(
   thread: ThreadSummary | null,
   workspace: WorkspaceSummary | null,
   preferredModelId?: string | null,
+  provider?: AgentProvider | null,
 ) {
+  const activeProvider = thread?.provider ?? provider ?? defaultProvider(workspace)
   return (
     preferredModelId ??
     thread?.agent.model_id ??
-    defaultModelId(workspace, providerForThread(thread, workspace))
+    defaultModelId(workspace, activeProvider)
   )
 }
 
@@ -32,10 +33,11 @@ export function reasoningOptions(
   thread: ThreadSummary | null,
   workspace: WorkspaceSummary | null,
   preferredModelId?: string | null,
+  provider?: AgentProvider | null,
 ) {
-  const provider = providerForThread(thread, workspace)
-  const model = workspaceModels(workspace, provider).find(
-    (entry) => entry.id === resolveThreadModelId(thread, workspace, preferredModelId),
+  const activeProvider = thread?.provider ?? provider ?? defaultProvider(workspace)
+  const model = workspaceModels(workspace, activeProvider).find(
+    (entry) => entry.id === resolveThreadModelId(thread, workspace, preferredModelId, activeProvider),
   )
   const options = model?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
   if (options.length > 0) return options
@@ -46,10 +48,11 @@ export function defaultReasoningEffort(
   thread: ThreadSummary | null,
   workspace: WorkspaceSummary | null,
   preferredModelId?: string | null,
+  provider?: AgentProvider | null,
 ) {
-  const provider = providerForThread(thread, workspace)
-  const model = workspaceModels(workspace, provider).find(
-    (entry) => entry.id === resolveThreadModelId(thread, workspace, preferredModelId),
+  const activeProvider = thread?.provider ?? provider ?? defaultProvider(workspace)
+  const model = workspaceModels(workspace, activeProvider).find(
+    (entry) => entry.id === resolveThreadModelId(thread, workspace, preferredModelId, activeProvider),
   )
   return (
     model?.default_reasoning_effort ??

@@ -119,6 +119,57 @@ describe('desktop selection utils', () => {
     ])
   })
 
+  it('uses the selected provider models for a new thread instead of the workspace default provider', () => {
+    const selectedWorkspace = workspace({
+      default_provider: 'claude',
+      agents: [
+        {
+          provider: 'codex',
+          account: { status: 'ready', label: 'ready' },
+          models: [
+            {
+              id: 'gpt-5.4',
+              label: 'GPT-5.4',
+              is_default: true,
+              default_reasoning_effort: 'medium',
+              supported_reasoning_efforts: [
+                { reasoning_effort: 'low', description: 'Low' },
+                { reasoning_effort: 'medium', description: 'Medium' },
+                { reasoning_effort: 'high', description: 'High' },
+              ],
+            },
+          ],
+          collaboration_modes: [],
+        },
+        {
+          provider: 'claude',
+          account: { status: 'ready', label: 'ready' },
+          models: [
+            {
+              id: 'sonnet',
+              label: 'Sonnet',
+              is_default: true,
+              default_reasoning_effort: 'medium',
+              supported_reasoning_efforts: [
+                { reasoning_effort: 'medium', description: 'Medium' },
+              ],
+            },
+          ],
+          collaboration_modes: [],
+        },
+      ],
+      models: [],
+    })
+
+    expect(reasoningOptions(null, selectedWorkspace, 'gpt-5.4', 'codex')).toEqual([
+      'low',
+      'medium',
+      'high',
+    ])
+    expect(defaultReasoningEffort(null, selectedWorkspace, 'gpt-5.4', 'codex')).toBe('medium')
+    expect(resolveThreadModelId(null, selectedWorkspace, null, 'codex')).toBe('gpt-5.4')
+  })
+
   it('uses the model default reasoning effort for initial selection', () => {
     const selectedWorkspace = workspace({
       models: [

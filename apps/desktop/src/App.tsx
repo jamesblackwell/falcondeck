@@ -12,6 +12,7 @@ import {
   selectedSkillsFromText,
   supportsPlanMode,
   togglePlanMode,
+  workspaceAccount,
   workspaceCollaborationModes,
   workspaceModels,
   type AgentProvider,
@@ -22,6 +23,7 @@ import {
   type ThreadHandle,
   type TurnInputItem,
   type UpdatePreferencesPayload,
+  type WorkspaceSummary,
 } from '@falcondeck/client-core'
 import { Conversation, NewThreadState, PromptInput } from '@falcondeck/chat-ui'
 import { ToastProvider, useToast } from '@falcondeck/ui'
@@ -44,6 +46,50 @@ function markInteractiveRequestResolved(items: ConversationItem[], requestId: st
       ? { ...item, resolved: true }
       : item,
   )
+}
+
+function providerLabel(provider: AgentProvider) {
+  return provider === 'claude' ? 'Claude' : 'Codex'
+}
+
+function workspaceSendBlockReason(
+  workspace: WorkspaceSummary | null | undefined,
+  provider: AgentProvider,
+) {
+  if (!workspace) return 'Select a project to get started.'
+
+  switch (workspace.status) {
+    case 'connecting':
+      return `${workspace.path.split('/').pop() ?? 'This project'} is still reconnecting. Wait a moment and try again.`
+    case 'disconnected':
+      return workspace.last_error ?? `${workspace.path.split('/').pop() ?? 'This project'} is disconnected. Reconnect it and try again.`
+    case 'error':
+      return workspace.last_error ?? `${workspace.path.split('/').pop() ?? 'This project'} is unavailable right now.`
+    case 'needs_auth':
+      return `Finish authentication for this project before using ${providerLabel(provider)}.`
+    default:
+      break
+  }
+
+  const account = workspaceAccount(workspace, provider)
+  if (account?.status === 'needs_auth') {
+    return `${providerLabel(provider)} needs authentication in this project before you can send messages.`
+  }
+
+  return null
+}
+
+function normalizeSendError(message: string, provider: AgentProvider) {
+  if (message.includes('is not currently connected to Claude')) {
+    return 'This project is not connected to Claude yet. Wait for it to reconnect or switch the new thread to Codex.'
+  }
+  if (message.includes('is not currently connected to Codex')) {
+    return 'This project is not connected to Codex yet. Wait for it to reconnect and try again.'
+  }
+  if (message.includes('workspace restore timed out')) {
+    return `This project is still reconnecting to ${providerLabel(provider)}. Wait a moment and try again.`
+  }
+  return message
 }
 
 export default function App() {
@@ -152,25 +198,30 @@ function AppInner() {
       setSelectedModel(nextModelId)
       setSelectedEffort(
         selectedThread.agent.reasoning_effort ??
-          defaultReasoningEffort(selectedThread, selectedWorkspace, nextModelId) ??
+          defaultReasoningEffort(selectedThread, selectedWorkspace, nextModelId, nextProvider) ??
           'medium',
       )
       setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
       return
     }
     setSelectedModel(fallbackModelId)
-    setSelectedEffort(defaultReasoningEffort(null, selectedWorkspace, fallbackModelId) ?? 'medium')
+    setSelectedEffort(
+      defaultReasoningEffort(null, selectedWorkspace, fallbackModelId, nextProvider) ?? 'medium',
+    )
     setSelectedCollaborationMode(null)
   }, [selectedThread, selectedWorkspace])
 
   useEffect(() => {
     if (!selectedWorkspace) return
-    const options = reasoningOptions(selectedThread, selectedWorkspace, selectedModel)
+    const provider = selectedThread?.provider ?? selectedProvider
+    const options = reasoningOptions(selectedThread, selectedWorkspace, selectedModel, provider)
     if (options.length === 0) return
     if (!selectedEffort || !options.includes(selectedEffort)) {
-      setSelectedEffort(defaultReasoningEffort(selectedThread, selectedWorkspace, selectedModel))
+      setSelectedEffort(
+        defaultReasoningEffort(selectedThread, selectedWorkspace, selectedModel, provider),
+      )
     }
-  }, [selectedEffort, selectedModel, selectedThread, selectedWorkspace])
+  }, [selectedEffort, selectedModel, selectedProvider, selectedThread, selectedWorkspace])
 
   useEffect(() => {
     const handleFocus = () => setWindowFocused(true)
@@ -344,16 +395,24 @@ function AppInner() {
 
   const handleModelChange = useCallback(
     (modelId: string) => {
+      const provider = selectedThread?.provider ?? selectedProvider
       setSelectedModel(modelId)
-      const nextOptions = reasoningOptions(selectedThread, selectedWorkspace, modelId)
+      const nextOptions = reasoningOptions(selectedThread, selectedWorkspace, modelId, provider)
       const nextEffort =
         selectedEffort && nextOptions.includes(selectedEffort)
           ? selectedEffort
-          : defaultReasoningEffort(selectedThread, selectedWorkspace, modelId)
+          : defaultReasoningEffort(selectedThread, selectedWorkspace, modelId, provider)
       setSelectedEffort(nextEffort)
       void persistThreadSettings({ modelId, effort: nextEffort, collaborationModeId: selectedCollaborationMode })
     },
-    [persistThreadSettings, selectedCollaborationMode, selectedEffort, selectedThread, selectedWorkspace],
+    [
+      persistThreadSettings,
+      selectedCollaborationMode,
+      selectedEffort,
+      selectedProvider,
+      selectedThread,
+      selectedWorkspace,
+    ],
   )
 
   const handleEffortChange = useCallback(
@@ -378,7 +437,9 @@ function AppInner() {
       setSelectedProvider(provider)
       const fallbackModelId = defaultModelId(selectedWorkspace, provider)
       setSelectedModel(fallbackModelId)
-      setSelectedEffort(defaultReasoningEffort(null, selectedWorkspace, fallbackModelId) ?? 'medium')
+      setSelectedEffort(
+        defaultReasoningEffort(null, selectedWorkspace, fallbackModelId, provider) ?? 'medium',
+      )
       setSelectedCollaborationMode(null)
     },
     [selectedThread, selectedWorkspace],
@@ -420,6 +481,13 @@ function AppInner() {
     const submittedDraft = draft
     const submittedAttachments = attachments
     const submittedSkills = selectedSkillsFromText(submittedDraft, selectedWorkspace.skills ?? [])
+    const activeProvider = selectedThread?.provider ?? selectedProvider
+    const blockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
+    if (blockReason) {
+      setActionError(blockReason)
+      toast({ variant: 'danger', title: 'Project not ready', description: blockReason })
+      return
+    }
     setDraft('')
     setAttachments([])
     setIsSending(true)
@@ -428,7 +496,7 @@ function AppInner() {
       if (!activeThreadId) {
         const handle = await api.startThread({
           workspace_id: selectedWorkspace.id,
-          provider: selectedProvider,
+          provider: activeProvider,
           model_id: selectedModel,
           collaboration_mode_id: selectedCollaborationMode,
           approval_policy: 'on-request',
@@ -448,7 +516,7 @@ function AppInner() {
         thread_id: activeThreadId,
         inputs,
         selected_skills: submittedSkills,
-        provider: selectedThread?.provider ?? selectedProvider,
+        provider: activeProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         collaboration_mode_id: selectedCollaborationMode,
@@ -458,7 +526,8 @@ function AppInner() {
     } catch (error) {
       setDraft(submittedDraft)
       setAttachments(submittedAttachments)
-      const msg = error instanceof Error ? error.message : 'Failed to send turn'
+      const rawMessage = error instanceof Error ? error.message : 'Failed to send turn'
+      const msg = normalizeSendError(rawMessage, activeProvider)
       setActionError(msg)
       toast({ variant: 'danger', title: 'Failed to send message', description: msg })
     } finally {
@@ -538,7 +607,18 @@ function AppInner() {
   const handleSubmitCallback = useCallback(() => {
     void handleSubmit()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, selectedWorkspace, selectedThreadId, draft, attachments, selectedModel, selectedEffort, selectedCollaborationMode])
+  }, [
+    api,
+    selectedWorkspace,
+    selectedThread,
+    selectedThreadId,
+    selectedProvider,
+    draft,
+    attachments,
+    selectedModel,
+    selectedEffort,
+    selectedCollaborationMode,
+  ])
 
   const handlePickImages = useCallback(
     (files: FileList | null) => {
@@ -678,27 +758,35 @@ function AppInner() {
     () => conversationItemsForSelection(selectedWorkspaceId, selectedThreadId, threadDetail),
     [selectedThreadId, selectedWorkspaceId, threadDetail],
   )
+  const activeProvider = selectedThread?.provider ?? selectedProvider
   const currentReasoningOptions = useMemo(
-    () => reasoningOptions(selectedThread, selectedWorkspace, selectedModel),
-    [selectedThread, selectedWorkspace, selectedModel],
+    () =>
+      reasoningOptions(
+        selectedThread,
+        selectedWorkspace,
+        selectedModel,
+        activeProvider,
+      ),
+    [activeProvider, selectedModel, selectedThread, selectedWorkspace],
   )
   const models = useMemo(
-    () => workspaceModels(selectedWorkspace, selectedProvider),
-    [selectedProvider, selectedWorkspace],
+    () => workspaceModels(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
   )
   const collaborationModes = useMemo(
-    () => workspaceCollaborationModes(selectedWorkspace, selectedProvider),
-    [selectedProvider, selectedWorkspace],
+    () => workspaceCollaborationModes(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
   )
   const showPlanModeToggle = useMemo(
-    () => supportsPlanMode(selectedWorkspace, selectedProvider),
-    [selectedProvider, selectedWorkspace],
+    () => supportsPlanMode(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
   )
   const planModeEnabled = useMemo(
-    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, selectedProvider),
-    [selectedCollaborationMode, selectedProvider, selectedWorkspace],
+    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, activeProvider),
+    [activeProvider, selectedCollaborationMode, selectedWorkspace],
   )
-  const isDisabled = !selectedWorkspace || isSending
+  const sendBlockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
+  const isDisabled = !selectedWorkspace || isSending || Boolean(sendBlockReason)
   const workspaces = useMemo(() => snapshot?.workspaces ?? [], [snapshot?.workspaces])
 
   const newThreadEmptyState = useMemo(
@@ -822,7 +910,7 @@ function AppInner() {
                 planModeEnabled={planModeEnabled}
                 onPlanModeChange={(enabled) =>
                   handleCollaborationModeChange(
-                    togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, selectedProvider),
+                    togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, activeProvider),
                   )
                 }
                 disabled={isDisabled}

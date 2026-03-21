@@ -35,10 +35,10 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
-    claude::{ClaudeBootstrap, ClaudeRuntime},
+    claude::{ClaudeBootstrap, ClaudeProviderMetadata, ClaudeRuntime},
     codex::{
-        CodexBootstrap, CodexSession, extract_string, extract_thread_id, extract_thread_title,
-        parse_account, parse_thread_plan,
+        CodexBootstrap, CodexProviderMetadata, CodexSession, extract_string, extract_thread_id,
+        extract_thread_title, parse_account, parse_thread_plan,
     },
     error::DaemonError,
     skills::{
@@ -57,6 +57,8 @@ use conversation_helpers::*;
 use remote_bridge::*;
 use storage::*;
 use threads::{interactive_request_counts, refresh_thread_attention};
+
+const WORKSPACE_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Classifies errors from the remote relay connection so the retry loop can
 /// apply appropriate backoff.  Most errors (network drops, broadcast lag) are
@@ -313,6 +315,7 @@ impl AppState {
             }
         }
 
+        let mut workspaces_to_restore = Vec::new();
         for mut workspace in persisted.workspaces {
             workspace.path = normalize_workspace_path(&workspace.path);
             let restored = self
@@ -329,33 +332,38 @@ impl AppState {
                     snapshot: self.snapshot().await,
                 },
             );
+            workspaces_to_restore.push(workspace);
+        }
 
+        if !workspaces_to_restore.is_empty() {
             let app = self.clone();
             tokio::spawn(async move {
-                let result = timeout(
-                    Duration::from_secs(8),
-                    app.connect_workspace_internal(
-                        ConnectWorkspaceRequest {
-                            path: workspace.path.clone(),
-                        },
-                        Some(&workspace),
-                    ),
-                )
-                .await;
+                for workspace in workspaces_to_restore {
+                    let result = timeout(
+                        WORKSPACE_RESTORE_TIMEOUT,
+                        app.connect_workspace_internal(
+                            ConnectWorkspaceRequest {
+                                path: workspace.path.clone(),
+                            },
+                            Some(&workspace),
+                        ),
+                    )
+                    .await;
 
-                if let Err(error) = match result {
-                    Ok(Ok(_)) => Ok(()),
-                    Ok(Err(error)) => Err(error.to_string()),
-                    Err(_) => Err("workspace restore timed out".to_string()),
-                } {
-                    tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
-                    let _ = app
-                        .update_workspace_placeholder_status(
-                            &workspace.path,
-                            WorkspaceStatus::Disconnected,
-                            Some(error),
-                        )
-                        .await;
+                    if let Err(error) = match result {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => Err("workspace restore timed out".to_string()),
+                    } {
+                        tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
+                        let _ = app
+                            .update_workspace_placeholder_status(
+                                &workspace.path,
+                                WorkspaceStatus::Disconnected,
+                                Some(error),
+                            )
+                            .await;
+                    }
                 }
             });
         }
@@ -1028,7 +1036,13 @@ impl AppState {
                             workspace.summary.updated_at = updated_at;
                         }
                         let summary = workspace.summary.clone();
+                        let should_refresh_metadata = workspace.has_runtime();
                         drop(workspaces);
+                        if should_refresh_metadata {
+                            return self
+                                .refresh_connected_workspace_metadata(&existing_id)
+                                .await;
+                        }
                         self.persist_local_state().await?;
                         return Ok(summary);
                     }
@@ -1928,6 +1942,89 @@ impl AppState {
             .await
             .unwrap_or(Value::Null);
         Ok(parse_codex_provider_skills(&value))
+    }
+
+    async fn refresh_connected_workspace_metadata(
+        &self,
+        workspace_id: &str,
+    ) -> Result<WorkspaceSummary, DaemonError> {
+        let (workspace_path, codex_session, claude_runtime) = {
+            let workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            (
+                workspace.summary.path.clone(),
+                workspace.codex_session.clone(),
+                workspace.claude_runtime.clone(),
+            )
+        };
+
+        let codex_metadata = match codex_session.as_ref() {
+            Some(session) => Some(session.provider_metadata().await?),
+            None => None,
+        };
+        let claude_metadata = match claude_runtime.as_ref() {
+            Some(runtime) => Some(runtime.provider_metadata().await),
+            None => None,
+        };
+        let file_backed_skills = discover_file_backed_skills(&workspace_path);
+        let codex_provider_skills = match codex_session.as_ref() {
+            Some(session) => self
+                .load_codex_provider_skills(session)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        let merged_skills = merge_skills(
+            file_backed_skills
+                .into_iter()
+                .chain(codex_provider_skills)
+                .collect(),
+        );
+        let codex_skills = skills_for_provider(&merged_skills, AgentProvider::Codex);
+        let claude_skills = skills_for_provider(&merged_skills, AgentProvider::Claude);
+
+        let summary = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            workspace.summary.skills = merged_skills;
+
+            if let Some(metadata) = codex_metadata {
+                update_workspace_agent_summary(
+                    &mut workspace.summary.agents,
+                    AgentProvider::Codex,
+                    metadata,
+                    codex_skills,
+                );
+            }
+            if let Some(metadata) = claude_metadata {
+                update_workspace_agent_summary(
+                    &mut workspace.summary.agents,
+                    AgentProvider::Claude,
+                    metadata,
+                    claude_skills,
+                );
+            }
+
+            workspace.summary.status = if workspace.summary.agents.iter().all(|agent| {
+                matches!(
+                    agent.account.status,
+                    falcondeck_core::AccountStatus::NeedsAuth
+                )
+            }) {
+                WorkspaceStatus::NeedsAuth
+            } else {
+                WorkspaceStatus::Ready
+            };
+
+            workspace.summary.clone()
+        };
+
+        self.persist_local_state().await?;
+        Ok(summary)
     }
 
     pub async fn thread_detail(
@@ -3340,6 +3437,68 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
         crate::git::git_diff(&workspace.summary.path, path).await
     }
+}
+
+trait IntoWorkspaceAgentUpdate {
+    fn into_agent_summary(
+        self,
+        provider: AgentProvider,
+        skills: Vec<SkillSummary>,
+    ) -> WorkspaceAgentSummary;
+}
+
+impl IntoWorkspaceAgentUpdate for CodexProviderMetadata {
+    fn into_agent_summary(
+        self,
+        provider: AgentProvider,
+        skills: Vec<SkillSummary>,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            provider,
+            account: self.account,
+            models: self.models,
+            collaboration_modes: self.collaboration_modes,
+            skills,
+            supports_plan_mode: true,
+            supports_native_plan_mode: true,
+            capabilities: AgentCapabilitySummary {
+                supports_review: true,
+            },
+        }
+    }
+}
+
+impl IntoWorkspaceAgentUpdate for ClaudeProviderMetadata {
+    fn into_agent_summary(
+        self,
+        provider: AgentProvider,
+        skills: Vec<SkillSummary>,
+    ) -> WorkspaceAgentSummary {
+        WorkspaceAgentSummary {
+            provider,
+            account: self.account,
+            models: self.models,
+            collaboration_modes: self.collaboration_modes,
+            skills,
+            supports_plan_mode: true,
+            supports_native_plan_mode: true,
+            capabilities: self.capabilities,
+        }
+    }
+}
+
+fn update_workspace_agent_summary<T: IntoWorkspaceAgentUpdate>(
+    agents: &mut Vec<WorkspaceAgentSummary>,
+    provider: AgentProvider,
+    metadata: T,
+    skills: Vec<SkillSummary>,
+) {
+    let updated = metadata.into_agent_summary(provider.clone(), skills);
+    if let Some(agent) = agents.iter_mut().find(|agent| agent.provider == provider) {
+        *agent = updated;
+        return;
+    }
+    agents.push(updated);
 }
 
 impl RemotePairingState {
