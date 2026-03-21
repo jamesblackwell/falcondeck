@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { renderComponent, renderPure, cleanup, textOf } from '../../test/render'
+import { renderComponent, cleanup, textOf } from '../../test/render'
 import { ConnectionHeader } from './ConnectionHeader'
 import { SidebarView } from './SidebarView'
 import { workspace, thread } from '../../test/factories'
@@ -10,29 +10,31 @@ afterEach(cleanup)
 
 describe('ConnectionHeader component', () => {
   it('renders encrypted', () => {
-    expect(renderPure(ConnectionHeader, { connectionStatus: 'encrypted', isEncrypted: true, machinePresence: { session_id: 's1', daemon_connected: true, last_seen_at: null } })).toBeTruthy()
+    const r = renderComponent(<ConnectionHeader connectionStatus="encrypted" isEncrypted machinePresence={{ session_id: 's1', daemon_connected: true, last_seen_at: null }} />)
+    expect(textOf(r)).toContain('Connected')
   })
   it('renders disconnected', () => {
-    expect(renderPure(ConnectionHeader, { connectionStatus: 'disconnected', isEncrypted: false, machinePresence: null })).toBeTruthy()
+    const r = renderComponent(<ConnectionHeader connectionStatus="disconnected" isEncrypted={false} machinePresence={null} />)
+    expect(textOf(r)).toContain('Disconnected')
   })
   it('renders connecting', () => {
-    expect(renderPure(ConnectionHeader, { connectionStatus: 'connecting', isEncrypted: false, machinePresence: null })).toBeTruthy()
+    const r = renderComponent(<ConnectionHeader connectionStatus="connecting" isEncrypted={false} machinePresence={null} />)
+    expect(textOf(r)).toContain('Connecting...')
   })
   it('renders connected not encrypted', () => {
-    expect(renderPure(ConnectionHeader, { connectionStatus: 'connected', isEncrypted: false, machinePresence: { session_id: 's1', daemon_connected: false, last_seen_at: null } })).toBeTruthy()
+    const r = renderComponent(<ConnectionHeader connectionStatus="connected" isEncrypted={false} machinePresence={{ session_id: 's1', daemon_connected: false, last_seen_at: null }} />)
+    expect(textOf(r)).toContain('Desktop offline')
   })
   it('renders not_connected', () => {
-    expect(renderPure(ConnectionHeader, { connectionStatus: 'not_connected', isEncrypted: false, machinePresence: null })).toBeTruthy()
+    const r = renderComponent(<ConnectionHeader connectionStatus="not_connected" isEncrypted={false} machinePresence={null} />)
+    expect(textOf(r)).toContain('Not connected')
   })
 })
 
 describe('SidebarView component', () => {
   const base = {
     groups: [] as ProjectGroup[],
-    selectedWorkspaceId: null as string | null,
     selectedThreadId: null as string | null,
-    connectionStatus: 'encrypted',
-    isEncrypted: true,
     onSelectThread: vi.fn(),
     onNewThread: vi.fn(),
   }
@@ -48,13 +50,7 @@ describe('SidebarView component', () => {
   })
   it('renders selected', () => {
     const groups: ProjectGroup[] = [{ workspace: workspace({ id: 'w1' }), threads: [thread({ id: 't1', workspace_id: 'w1' })] }]
-    expect(renderComponent(<SidebarView {...base} groups={groups} selectedWorkspaceId="w1" selectedThreadId="t1" />).toJSON()).toBeTruthy()
-  })
-  it('renders disconnected', () => {
-    expect(renderComponent(<SidebarView {...base} connectionStatus="disconnected" isEncrypted={false} />).toJSON()).toBeTruthy()
-  })
-  it('renders connecting', () => {
-    expect(renderComponent(<SidebarView {...base} connectionStatus="connecting" isEncrypted={false} />).toJSON()).toBeTruthy()
+    expect(renderComponent(<SidebarView {...base} groups={groups} selectedThreadId="t1" />).toJSON()).toBeTruthy()
   })
   it('renders empty-titled thread', () => {
     const groups: ProjectGroup[] = [{ workspace: workspace({ id: 'w1' }), threads: [thread({ id: 't1', workspace_id: 'w1', title: '' })] }]

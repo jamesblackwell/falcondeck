@@ -1,16 +1,31 @@
+import { useCallback, useMemo } from 'react'
 import { Drawer } from 'expo-router/drawer'
 
+import { buildProjectGroups } from '@falcondeck/client-core'
+
 import { colors } from '@/theme/tokens'
-import { useGroups, useSessionStore, useRelayStore } from '@/store'
+import { useSessionStore } from '@/store'
 import { SidebarView } from '@/components/navigation'
 
 export default function AppLayout() {
-  const groups = useGroups()
-  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
+  const snapshot = useSessionStore((s) => s.snapshot)
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
-  const connectionStatus = useRelayStore((s) => s.connectionStatus)
-  const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const { selectThread, selectNewThread } = useSessionStore.getState()
+  const groups = useMemo(
+    () => buildProjectGroups(snapshot?.workspaces ?? [], snapshot?.threads ?? []),
+    [snapshot?.threads, snapshot?.workspaces],
+  )
+  const renderDrawerContent = useCallback(
+    () => (
+      <SidebarView
+        groups={groups}
+        selectedThreadId={selectedThreadId}
+        onSelectThread={(wId, tId) => selectThread(wId, tId)}
+        onNewThread={selectNewThread}
+      />
+    ),
+    [groups, selectNewThread, selectThread, selectedThreadId],
+  )
 
   return (
     <Drawer
@@ -24,17 +39,7 @@ export default function AppLayout() {
           backgroundColor: colors.surface[0],
         },
       }}
-      drawerContent={() => (
-        <SidebarView
-          groups={groups}
-          selectedWorkspaceId={selectedWorkspaceId}
-          selectedThreadId={selectedThreadId}
-          connectionStatus={connectionStatus}
-          isEncrypted={isEncrypted}
-          onSelectThread={(wId, tId) => selectThread(wId, tId)}
-          onNewThread={selectNewThread}
-        />
-      )}
+      drawerContent={renderDrawerContent}
     />
   )
 }

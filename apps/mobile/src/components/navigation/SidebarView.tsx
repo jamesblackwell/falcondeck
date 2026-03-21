@@ -1,32 +1,25 @@
-import { memo, useCallback } from 'react'
+import { memo } from 'react'
 import { View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { FlashList } from '@shopify/flash-list'
 import { Settings, Plus } from 'lucide-react-native'
 import { useRouter } from 'expo-router'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
 
-import { Text, Button, StatusIndicator, EmptyState } from '@/components/ui'
+import { Text, Button, EmptyState } from '@/components/ui'
 import { SessionListItem } from '@/components/chat'
 
 interface SidebarViewProps {
   groups: ProjectGroup[]
-  selectedWorkspaceId: string | null
   selectedThreadId: string | null
-  connectionStatus: string
-  isEncrypted: boolean
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread: (workspaceId: string) => void
 }
 
 export const SidebarView = memo(function SidebarView({
   groups,
-  selectedWorkspaceId,
   selectedThreadId,
-  connectionStatus,
-  isEncrypted,
   onSelectThread,
   onNewThread,
 }: SidebarViewProps) {
@@ -38,11 +31,6 @@ export const SidebarView = memo(function SidebarView({
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <StatusIndicator
-            status={isEncrypted ? 'connected' : connectionStatus === 'connecting' ? 'connecting' : 'disconnected'}
-            size="md"
-            pulse={connectionStatus === 'connecting'}
-          />
           <Text variant="heading" size="lg">
             FalconDeck
           </Text>

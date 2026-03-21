@@ -13,11 +13,29 @@ interface ConnectionHeaderProps {
 }
 
 function connectionLabel(status: string): string {
-  if (status === 'encrypted') return 'Encrypted'
-  if (status === 'connected') return 'Connected'
+  if (status === 'connected' || status === 'encrypted') return 'Connected'
   if (status === 'connecting') return 'Connecting...'
   if (status === 'disconnected') return 'Disconnected'
+  if (status === 'claiming') return 'Pairing...'
   return 'Not connected'
+}
+
+function connectionBadgeState(
+  connectionStatus: string,
+  isEncrypted: boolean,
+  desktopOnline: boolean,
+): { variant: 'success' | 'warning' | 'danger'; label: string } {
+  const relayReady = isEncrypted || connectionStatus === 'connected' || connectionStatus === 'encrypted'
+
+  if (relayReady) {
+    if (desktopOnline) return { variant: 'success', label: 'Connected' }
+    return { variant: 'warning', label: 'Desktop offline' }
+  }
+
+  return {
+    variant: connectionStatus === 'disconnected' ? 'danger' : 'warning',
+    label: connectionLabel(connectionStatus),
+  }
 }
 
 export const ConnectionHeader = memo(function ConnectionHeader({
@@ -26,17 +44,12 @@ export const ConnectionHeader = memo(function ConnectionHeader({
   machinePresence,
 }: ConnectionHeaderProps) {
   const desktopOnline = machinePresence?.daemon_connected ?? false
+  const badgeState = connectionBadgeState(connectionStatus, isEncrypted, desktopOnline)
 
   return (
     <View style={styles.container}>
-      <Badge
-        variant={isEncrypted ? 'success' : connectionStatus === 'disconnected' ? 'danger' : 'warning'}
-        dot
-      >
-        {connectionLabel(connectionStatus)}
-      </Badge>
-      <Badge variant={desktopOnline ? 'success' : 'warning'} dot>
-        {desktopOnline ? 'Desktop online' : 'Desktop offline'}
+      <Badge variant={badgeState.variant} dot>
+        {badgeState.label}
       </Badge>
     </View>
   )

@@ -5,20 +5,29 @@ import type { MachinePresence } from '@falcondeck/client-core'
 // from ConnectionHeader. These are pure functions we can test directly.
 
 function connectionLabel(status: string): string {
-  if (status === 'encrypted') return 'Encrypted'
-  if (status === 'connected') return 'Connected'
+  if (status === 'connected' || status === 'encrypted') return 'Connected'
   if (status === 'connecting') return 'Connecting...'
   if (status === 'disconnected') return 'Disconnected'
+  if (status === 'claiming') return 'Pairing...'
   return 'Not connected'
 }
 
-function connectionBadgeVariant(
+function connectionBadgeState(
   connectionStatus: string,
   isEncrypted: boolean,
-): 'success' | 'danger' | 'warning' {
-  if (isEncrypted) return 'success'
-  if (connectionStatus === 'disconnected') return 'danger'
-  return 'warning'
+  isDesktopOnline: boolean,
+): { variant: 'success' | 'danger' | 'warning'; label: string } {
+  const relayReady = isEncrypted || connectionStatus === 'connected' || connectionStatus === 'encrypted'
+
+  if (relayReady) {
+    if (isDesktopOnline) return { variant: 'success', label: 'Connected' }
+    return { variant: 'warning', label: 'Desktop offline' }
+  }
+
+  return {
+    variant: connectionStatus === 'disconnected' ? 'danger' : 'warning',
+    label: connectionLabel(connectionStatus),
+  }
 }
 
 function desktopOnline(machinePresence: MachinePresence | null): boolean {
@@ -27,8 +36,8 @@ function desktopOnline(machinePresence: MachinePresence | null): boolean {
 
 describe('ConnectionHeader logic', () => {
   describe('connectionLabel', () => {
-    it('returns "Encrypted" for encrypted status', () => {
-      expect(connectionLabel('encrypted')).toBe('Encrypted')
+    it('returns "Connected" for encrypted status', () => {
+      expect(connectionLabel('encrypted')).toBe('Connected')
     })
 
     it('returns "Connected" for connected status', () => {
@@ -43,31 +52,54 @@ describe('ConnectionHeader logic', () => {
       expect(connectionLabel('disconnected')).toBe('Disconnected')
     })
 
+    it('returns "Pairing..." for claiming status', () => {
+      expect(connectionLabel('claiming')).toBe('Pairing...')
+    })
+
     it('returns "Not connected" for unknown/not_connected status', () => {
       expect(connectionLabel('not_connected')).toBe('Not connected')
-      expect(connectionLabel('claiming')).toBe('Not connected')
       expect(connectionLabel('')).toBe('Not connected')
     })
   })
 
-  describe('connectionBadgeVariant', () => {
-    it('returns success when encrypted', () => {
-      expect(connectionBadgeVariant('encrypted', true)).toBe('success')
+  describe('connectionBadgeState', () => {
+    it('returns connected success when relay is ready and desktop is online', () => {
+      expect(connectionBadgeState('encrypted', true, true)).toEqual({
+        variant: 'success',
+        label: 'Connected',
+      })
+    })
+
+    it('returns desktop offline warning when relay is ready but desktop is offline', () => {
+      expect(connectionBadgeState('encrypted', true, false)).toEqual({
+        variant: 'warning',
+        label: 'Desktop offline',
+      })
     })
 
     it('returns danger when disconnected and not encrypted', () => {
-      expect(connectionBadgeVariant('disconnected', false)).toBe('danger')
+      expect(connectionBadgeState('disconnected', false, false)).toEqual({
+        variant: 'danger',
+        label: 'Disconnected',
+      })
     })
 
-    it('returns warning for connecting/claiming states', () => {
-      expect(connectionBadgeVariant('connecting', false)).toBe('warning')
-      expect(connectionBadgeVariant('claiming', false)).toBe('warning')
-      expect(connectionBadgeVariant('connected', false)).toBe('warning')
+    it('returns warning for connecting and claiming states', () => {
+      expect(connectionBadgeState('connecting', false, false)).toEqual({
+        variant: 'warning',
+        label: 'Connecting...',
+      })
+      expect(connectionBadgeState('claiming', false, false)).toEqual({
+        variant: 'warning',
+        label: 'Pairing...',
+      })
     })
 
-    it('returns success even if status is disconnected when encrypted is true', () => {
-      // Edge case: isEncrypted takes precedence
-      expect(connectionBadgeVariant('disconnected', true)).toBe('success')
+    it('prefers relay-ready state when encryption is already established', () => {
+      expect(connectionBadgeState('disconnected', true, true)).toEqual({
+        variant: 'success',
+        label: 'Connected',
+      })
     })
   })
 
