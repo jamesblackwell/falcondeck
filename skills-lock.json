@@ -1,6 +1,11 @@
 {
   "version": 1,
   "skills": {
+    "axe-ios-simulator": {
+      "source": "0xbigboss/claude-code",
+      "sourceType": "github",
+      "computedHash": "6d69b9ec416230e4844e37d13a295ae61a7a31db346647901633dc8dd3e4cbc1"
+    },
     "rust-best-practices": {
       "source": "apollographql/skills",
       "sourceType": "github",
