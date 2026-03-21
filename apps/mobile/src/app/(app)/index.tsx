@@ -3,29 +3,39 @@ import { AppState, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
-import { encryptJson } from '@falcondeck/client-core'
+import { encryptJson, type ConversationRenderBlock } from '@falcondeck/client-core'
+import { useShallow } from 'zustand/react/shallow'
 
 import {
-  useConversationItems,
   useApprovals,
-  useSelectedThread,
-  useSelectedWorkspace,
   useRelayStore,
   useSessionStore,
+  useSelectedThread,
+  useSelectedWorkspace,
   useUIStore,
 } from '@/store'
 import { useRelayConnection } from '@/hooks/useRelayConnection'
 import { useSessionActions } from '@/hooks/useSessionActions'
+import { useRenderBlocks } from '@/hooks/useRenderBlocks'
+import { useScrollToBottom } from '@/hooks/useScrollToBottom'
+import { useInterruptTurn } from '@/hooks/useInterruptTurn'
 import { Text, EmptyState } from '@/components/ui'
-import type { ConversationItem } from '@falcondeck/client-core'
-import { MessageBubble, ChatInput, ApprovalBanner } from '@/components/chat'
+import {
+  ChatInput,
+  ApprovalBanner,
+  MessageRouter,
+  JumpToBottomFab,
+  ThinkingIndicator,
+} from '@/components/chat'
 import { ConnectionHeader } from '@/components/navigation'
+import { getWorkspaceTitle, shouldShowThinkingIndicator } from '@/features/thread/threadScreen'
 
-const renderMessage = ({ item }: { item: ConversationItem }) => (
-  <MessageBubble item={item} />
+const renderBlock = ({ item }: { item: ConversationRenderBlock }) => (
+  <MessageRouter item={item} />
 )
-const keyExtractor = (item: ConversationItem) => item.id
-const getItemType = (item: ConversationItem) => item.kind
+const keyExtractor = (block: ConversationRenderBlock) => block.id
+const getItemType = (block: ConversationRenderBlock) =>
+  block.kind === 'tool_burst' ? 'tool_burst' : block.item.kind
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets()
@@ -33,22 +43,57 @@ export default function HomeScreen() {
   // Start relay connection
   useRelayConnection()
 
-  const items = useConversationItems()
+  const blocks = useRenderBlocks()
   const approvals = useApprovals()
   const selectedThread = useSelectedThread()
   const workspace = useSelectedWorkspace()
-  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
-  const connectionStatus = useRelayStore((s) => s.connectionStatus)
-  const isEncrypted = useRelayStore((s) => s.isEncrypted)
-  const machinePresence = useRelayStore((s) => s.machinePresence)
-  const relayUrl = useRelayStore((s) => s.relayUrl)
-  const sessionId = useRelayStore((s) => s.sessionId)
-  const draft = useUIStore((s) => s.draft)
-  const isSubmitting = useUIStore((s) => s.isSubmitting)
-  const { setDraft } = useUIStore.getState()
+  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
+  const { connectionStatus, isEncrypted, machinePresence, relayUrl, sessionId } = useRelayStore(
+    useShallow((s) => ({
+      connectionStatus: s.connectionStatus,
+      isEncrypted: s.isEncrypted,
+      machinePresence: s.machinePresence,
+      relayUrl: s.relayUrl,
+      sessionId: s.sessionId,
+    })),
+  )
+  const { draft, isSubmitting, selectedEffort, selectedModel } = useUIStore(
+    useShallow((s) => ({
+      draft: s.draft,
+      isSubmitting: s.isSubmitting,
+      selectedEffort: s.selectedEffort,
+      selectedModel: s.selectedModel,
+    })),
+  )
+  const { setDraft, setSelectedModel, setSelectedEffort } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
+  const interruptTurn = useInterruptTurn()
+  const { listRef, showJumpButton, onContentSizeChange, onScroll, resetScrollState, scrollToBottom } =
+    useScrollToBottom<ConversationRenderBlock>()
   const [appState, setAppState] = useState(AppState.currentState)
+
+  const isThreadRunning = selectedThread?.status === 'running'
+  const models = workspace?.models ?? []
+  const showThinking = shouldShowThinkingIndicator(blocks, isThreadRunning)
+
+  const handleStop = useCallback(() => {
+    void interruptTurn()
+  }, [interruptTurn])
+
+  const handleAllowApproval = useCallback(
+    (id: string) => {
+      void respondApproval(id, 'allow')
+    },
+    [respondApproval],
+  )
+
+  const handleDenyApproval = useCallback(
+    (id: string) => {
+      void respondApproval(id, 'deny')
+    },
+    [respondApproval],
+  )
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', setAppState)
@@ -65,6 +110,34 @@ export default function HomeScreen() {
 
     void loadThreadDetail(selectedWorkspaceId, selectedThreadId)
   }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedWorkspaceId])
+
+  useEffect(() => {
+    if (!selectedThreadId) {
+      resetScrollState()
+      return
+    }
+
+    resetScrollState()
+    const frame =
+      globalThis.requestAnimationFrame?.(() => {
+        scrollToBottom(false)
+      }) ?? null
+    const timeoutId =
+      frame === null
+        ? globalThis.setTimeout(() => {
+            scrollToBottom(false)
+          }, 0)
+        : null
+
+    return () => {
+      if (typeof frame === 'number' && globalThis.cancelAnimationFrame) {
+        globalThis.cancelAnimationFrame(frame)
+      }
+      if (typeof timeoutId === 'number') {
+        globalThis.clearTimeout(timeoutId)
+      }
+    }
+  }, [resetScrollState, scrollToBottom, selectedThreadId])
 
   useEffect(() => {
     if (appState !== 'active' || !workspace || !selectedThread || !sessionId || !isEncrypted) return
@@ -103,7 +176,7 @@ export default function HomeScreen() {
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
         <Text variant="label" color="primary" weight="semibold" numberOfLines={1} style={styles.headerTitle}>
-          {workspace?.path.split('/').pop() ?? 'FalconDeck'}
+          {getWorkspaceTitle(workspace?.path)}
         </Text>
         <ConnectionHeader
           connectionStatus={connectionStatus}
@@ -116,8 +189,8 @@ export default function HomeScreen() {
         <ApprovalBanner
           key={a.request_id}
           approval={a}
-          onAllow={(id) => void respondApproval(id, 'allow')}
-          onDeny={(id) => void respondApproval(id, 'deny')}
+          onAllow={handleAllowApproval}
+          onDeny={handleDenyApproval}
         />
       ))}
 
@@ -127,17 +200,24 @@ export default function HomeScreen() {
             title="Start a new thread"
             description="Pick an existing thread or use the plus button from the sidebar."
           />
-        ) : items.length === 0 ? (
+        ) : blocks.length === 0 && !isThreadRunning ? (
           <EmptyState title="No messages yet" description="Send a message to get started" />
         ) : (
           <FlashList
-            data={[...items].reverse()}
-            renderItem={renderMessage}
+            key={selectedThreadId}
+            ref={listRef}
+            data={blocks}
+            renderItem={renderBlock}
             keyExtractor={keyExtractor}
             getItemType={getItemType}
             showsVerticalScrollIndicator={false}
+            onContentSizeChange={onContentSizeChange}
+            onScroll={onScroll}
+            scrollEventThrottle={16}
+            ListFooterComponent={showThinking ? <ThinkingIndicator /> : null}
           />
         )}
+        <JumpToBottomFab visible={showJumpButton} onPress={scrollToBottom} />
       </View>
 
       <View style={{ paddingBottom: insets.bottom }}>
@@ -145,7 +225,14 @@ export default function HomeScreen() {
           value={draft}
           onChangeText={setDraft}
           onSubmit={() => void submitTurn()}
+          onStop={handleStop}
           disabled={!workspace || isSubmitting || !isEncrypted}
+          isRunning={isThreadRunning}
+          models={models}
+          selectedModel={selectedModel}
+          selectedEffort={selectedEffort}
+          onSelectModel={setSelectedModel}
+          onSelectEffort={setSelectedEffort}
         />
       </View>
     </View>

@@ -47,6 +47,7 @@ describe('SidebarView component', () => {
     const groups: ProjectGroup[] = [{ workspace: workspace({ id: 'w1', path: '/tmp/proj' }), threads: [thread({ id: 't1', workspace_id: 'w1' })] }]
     const r = renderComponent(<SidebarView {...base} groups={groups} />)
     expect(textOf(r)).toContain('proj')
+    expect(textOf(r)).toContain('Test thread')
   })
   it('renders selected', () => {
     const groups: ProjectGroup[] = [{ workspace: workspace({ id: 'w1' }), threads: [thread({ id: 't1', workspace_id: 'w1' })] }]

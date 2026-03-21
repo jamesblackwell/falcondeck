@@ -1,4 +1,7 @@
+import { createElement } from 'react'
+
 // Stub expo-router for tests
+export const Redirect = ({ href }: any) => createElement('Redirect', { href })
 export function useRouter() {
   return { push: () => {}, replace: () => {}, back: () => {} }
 }

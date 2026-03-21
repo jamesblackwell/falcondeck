@@ -1,4 +1,4 @@
-import { memo, useCallback } from 'react'
+import { memo, useCallback, useMemo } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Loader } from 'lucide-react-native'
@@ -7,66 +7,34 @@ import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
 import type { ThreadSummary } from '@falcondeck/client-core'
 
 import { Badge, Text } from '@/components/ui'
+import { formatRelativeTime } from './sessionListItem.utils'
 
 interface SessionListItemProps {
-  threadId: string
-  title: string
-  isRunning: boolean
-  updatedAt: string
-  attention: ThreadSummary['attention']
+  thread: ThreadSummary
+  workspaceId: string
   isSelected: boolean
-  onSelect: (threadId: string) => void
+  onSelectThread: (workspaceId: string, threadId: string) => void
+  nowTick?: number
 }
 
-function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime()
-  const mins = Math.floor(diff / 60_000)
-  if (mins < 1) return 'now'
-  if (mins < 60) return `${mins}m`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h`
-  const days = Math.floor(hrs / 24)
-  return `${days}d`
-}
-
-export const SessionListItem = memo(function SessionListItem({
-  threadId,
-  title,
-  isRunning,
-  updatedAt,
-  attention,
+function SessionListItemInner({
+  thread,
+  workspaceId,
   isSelected,
-  onSelect,
+  onSelectThread,
+  nowTick = 0,
 }: SessionListItemProps) {
   const { theme } = useUnistyles()
-  const presentation = deriveThreadAttentionPresentation({
-    id: threadId,
-    workspace_id: '',
-    title,
-    provider: 'codex',
-    status: isRunning ? 'running' : 'idle',
-    updated_at: updatedAt,
-    last_message_preview: null,
-    latest_turn_id: null,
-    latest_plan: null,
-    latest_diff: null,
-    last_tool: null,
-    last_error: presentationError(attention),
-    agent: {
-      model_id: null,
-      reasoning_effort: null,
-      collaboration_mode_id: null,
-      approval_policy: null,
-      service_tier: null,
-    },
-    attention,
-    is_archived: false,
-  })
+  const presentation = useMemo(() => deriveThreadAttentionPresentation(thread), [thread])
+  const updatedAtLabel = useMemo(
+    () => formatRelativeTime(thread.updated_at),
+    [nowTick, thread.updated_at],
+  )
 
   /* v8 ignore start — Pressable callback, tested via E2E */
   const handlePress = useCallback(() => {
-    onSelect(threadId)
-  }, [threadId, onSelect])
+    onSelectThread(workspaceId, thread.id)
+  }, [onSelectThread, thread.id, workspaceId])
   /* v8 ignore stop */
 
   return (
@@ -100,18 +68,18 @@ export const SessionListItem = memo(function SessionListItem({
         numberOfLines={1}
         style={styles.title}
       >
-        {title}
+        {thread.title || 'New thread'}
       </Text>
       {presentation.showBadge ? (
         <Badge variant="success">{presentation.badgeLabel ?? 'Awaiting response'}</Badge>
       ) : (
         <Text variant="caption" color="muted" size="2xs">
-          {timeAgo(updatedAt)}
+          {updatedAtLabel}
         </Text>
       )}
     </Pressable>
   )
-})
+}
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -147,6 +115,11 @@ const styles = StyleSheet.create((theme) => ({
   },
 }))
 
-function presentationError(attention: ThreadSummary['attention']) {
-  return attention.level === 'error' ? 'Attention required' : null
-}
+const areEqual = (prev: SessionListItemProps, next: SessionListItemProps) =>
+  prev.thread === next.thread &&
+  prev.workspaceId === next.workspaceId &&
+  prev.isSelected === next.isSelected &&
+  prev.nowTick === next.nowTick &&
+  prev.onSelectThread === next.onSelectThread
+
+export const SessionListItem = memo(SessionListItemInner, areEqual)

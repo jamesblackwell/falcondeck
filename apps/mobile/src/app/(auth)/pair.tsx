@@ -22,9 +22,9 @@ export default function PairScreen() {
 
   const isClaiming = connectionStatus === 'claiming'
 
-  const handleConnect = useCallback(async () => {
-    await claimPairing()
-  }, [])
+  const handleConnect = useCallback(() => {
+    void claimPairing()
+  }, [claimPairing])
 
   // Navigate away once connected
   useEffect(() => {
@@ -73,7 +73,7 @@ export default function PairScreen() {
             label="Connect"
             loading={isClaiming}
             disabled={!relayUrl.trim() || !pairingCode.trim()}
-            onPress={() => void handleConnect()}
+            onPress={handleConnect}
           />
         </View>
 

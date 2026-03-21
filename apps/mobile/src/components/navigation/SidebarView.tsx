@@ -1,7 +1,8 @@
-import { memo } from 'react'
+import { memo, useCallback, useMemo } from 'react'
 import { View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
+import { FlashList } from '@shopify/flash-list'
 import { Settings, Plus } from 'lucide-react-native'
 import { useRouter } from 'expo-router'
 
@@ -9,6 +10,7 @@ import type { ProjectGroup } from '@falcondeck/client-core'
 
 import { Text, Button, EmptyState } from '@/components/ui'
 import { SessionListItem } from '@/components/chat'
+import { buildSidebarRows, type SidebarRow } from './sidebarRows'
 
 interface SidebarViewProps {
   groups: ProjectGroup[]
@@ -26,6 +28,42 @@ export const SidebarView = memo(function SidebarView({
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
   const router = useRouter()
+  const rows = useMemo(() => buildSidebarRows(groups), [groups])
+
+  const handleOpenSettings = useCallback(() => {
+    router.push('/(app)/settings')
+  }, [router])
+
+  const renderRow = useCallback(
+    ({ item }: { item: SidebarRow }) => {
+      if (item.type === 'workspace') {
+        return (
+          <View style={styles.workspaceHeader}>
+            <Text variant="caption" color="muted" numberOfLines={1} style={styles.workspaceName}>
+              {item.workspaceName}
+            </Text>
+            <Button
+              variant="ghost"
+              size="icon"
+              onPress={() => onNewThread(item.workspaceId)}
+            >
+              <Plus size={16} color={theme.colors.fg.muted} />
+            </Button>
+          </View>
+        )
+      }
+
+      return (
+        <SessionListItem
+          thread={item.thread}
+          workspaceId={item.workspaceId}
+          isSelected={selectedThreadId === item.thread.id}
+          onSelectThread={onSelectThread}
+        />
+      )
+    },
+    [onNewThread, onSelectThread, selectedThreadId, theme.colors.fg.muted],
+  )
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -38,44 +76,24 @@ export const SidebarView = memo(function SidebarView({
         <Button
           variant="ghost"
           size="icon"
-          onPress={() => router.push('/(app)/settings')}
+          onPress={handleOpenSettings}
         >
           <Settings size={20} color={theme.colors.fg.muted} />
         </Button>
       </View>
 
       <View style={styles.list}>
-        {groups.length === 0 ? (
+        {rows.length === 0 ? (
           <EmptyState title="No projects" description="Connect from your desktop to get started" />
         ) : (
-          groups.map((group) => (
-            <View key={group.workspace.id} style={styles.workspaceSection}>
-              <View style={styles.workspaceHeader}>
-                <Text variant="caption" color="muted" numberOfLines={1} style={styles.workspaceName}>
-                  {group.workspace.path.split('/').pop()}
-                </Text>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onPress={() => onNewThread(group.workspace.id)}
-                >
-                  <Plus size={16} color={theme.colors.fg.muted} />
-                </Button>
-              </View>
-              {group.threads.map((thread) => (
-                <SessionListItem
-                  key={thread.id}
-                  threadId={thread.id}
-                  title={thread.title ?? 'New thread'}
-                  isRunning={thread.status === 'running'}
-                  updatedAt={thread.updated_at}
-                  attention={thread.attention}
-                  isSelected={selectedThreadId === thread.id}
-                  onSelect={() => onSelectThread(group.workspace.id, thread.id)}
-                />
-              ))}
-            </View>
-          ))
+          <FlashList
+            data={rows}
+            renderItem={renderRow}
+            keyExtractor={(item) => item.key}
+            getItemType={(item) => item.type}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.listContent}
+          />
         )}
       </View>
     </View>
@@ -103,10 +121,9 @@ const styles = StyleSheet.create((theme) => ({
   },
   list: {
     flex: 1,
-    paddingVertical: theme.spacing[2],
   },
-  workspaceSection: {
-    marginBottom: theme.spacing[3],
+  listContent: {
+    paddingVertical: theme.spacing[2],
   },
   workspaceHeader: {
     flexDirection: 'row',

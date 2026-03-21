@@ -129,12 +129,11 @@ describe('respondApproval', () => {
 describe('_sendMessage', () => {
   beforeEach(resetAll)
 
-  it('does nothing when socket is not open', () => {
-    // No socket set → _sendMessage should not throw
+  it('throws when socket is not open', () => {
     const relay = useRelayStore.getState()
     expect(() => {
       relay._sendMessage({ type: 'ping' })
-    }).not.toThrow()
+    }).toThrow('Remote connection is not ready')
   })
 })
 

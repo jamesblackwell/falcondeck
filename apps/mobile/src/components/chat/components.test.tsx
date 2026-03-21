@@ -1,11 +1,11 @@
 import React from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { renderComponent, renderPure, cleanup, textOf } from '../../test/render'
+import { renderComponent, cleanup, textOf } from '../../test/render'
 import { ApprovalBanner } from './ApprovalBanner'
 import { ChatInput } from './ChatInput'
 import { CodeBlock } from './CodeBlock'
 import { SessionListItem } from './SessionListItem'
-import { approval } from '../../test/factories'
+import { approval, thread } from '../../test/factories'
 
 afterEach(cleanup)
 
@@ -32,72 +32,80 @@ describe('ApprovalBanner component', () => {
 })
 
 describe('ChatInput component', () => {
+  const chatInputDefaults = {
+    onChangeText: vi.fn(),
+    onSubmit: vi.fn(),
+    onStop: vi.fn(),
+    models: [],
+    selectedModel: null,
+    selectedEffort: 'medium',
+    onSelectModel: vi.fn(),
+    onSelectEffort: vi.fn(),
+  }
+
   it('renders empty', () => {
-    const r = renderComponent(<ChatInput value="" onChangeText={vi.fn()} onSubmit={vi.fn()} />)
+    const r = renderComponent(<ChatInput value="" {...chatInputDefaults} />)
     expect(r.toJSON()).toBeTruthy()
   })
 
   it('renders with text', () => {
-    const r = renderComponent(<ChatInput value="Hello" onChangeText={vi.fn()} onSubmit={vi.fn()} />)
+    const r = renderComponent(<ChatInput value="Hello" {...chatInputDefaults} />)
     expect(r.toJSON()).toBeTruthy()
   })
 
   it('renders disabled', () => {
-    const r = renderComponent(<ChatInput value="" onChangeText={vi.fn()} onSubmit={vi.fn()} disabled />)
+    const r = renderComponent(<ChatInput value="" {...chatInputDefaults} disabled />)
     expect(r.toJSON()).toBeTruthy()
   })
 
   it('renders with custom placeholder', () => {
-    const r = renderComponent(<ChatInput value="" onChangeText={vi.fn()} onSubmit={vi.fn()} placeholder="Custom..." />)
+    const r = renderComponent(<ChatInput value="" {...chatInputDefaults} placeholder="Custom..." />)
     expect(r.toJSON()).toBeTruthy()
   })
 })
 
 describe('CodeBlock component', () => {
   it('renders with language', () => {
-    const el = renderPure(CodeBlock, { code: 'const x = 1', language: 'ts' })
-    expect(el).toBeTruthy()
+    const r = renderComponent(<CodeBlock code="const x = 1" language="ts" />)
+    expect(r.toJSON()).toBeTruthy()
+    expect(textOf(r)).toContain('Copy')
   })
 
   it('renders without language', () => {
-    const el = renderPure(CodeBlock, { code: 'plain' })
-    expect(el).toBeTruthy()
+    const r = renderComponent(<CodeBlock code="plain" />)
+    expect(r.toJSON()).toBeTruthy()
+    expect(textOf(r)).toContain('Copy')
   })
 
   it('renders empty code', () => {
-    const el = renderPure(CodeBlock, { code: '' })
-    expect(el).toBeTruthy()
+    const r = renderComponent(<CodeBlock code="" />)
+    expect(r.toJSON()).toBeTruthy()
+  })
+
+  it('renders diff with colored lines', () => {
+    const r = renderComponent(<CodeBlock code={'+added\n-removed\n context'} language="diff" />)
+    expect(r.toJSON()).toBeTruthy()
   })
 })
 
 describe('SessionListItem component', () => {
-  const attention = {
-    level: 'none' as const,
-    badge_label: null,
-    unread: false,
-    pending_approval_count: 0,
-    pending_question_count: 0,
-    last_agent_activity_seq: 0,
-    last_read_seq: 0,
-  }
-
   it('renders unselected', () => {
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Test" isRunning={false} updatedAt={new Date().toISOString()} attention={attention} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem thread={thread({ id: 't1', title: 'Test' })} workspaceId="w1" isSelected={false} onSelectThread={vi.fn()} />,
     )
     expect(textOf(r)).toContain('Test')
   })
 
   it('renders selected', () => {
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Test" isRunning={false} updatedAt={new Date().toISOString()} attention={attention} isSelected={true} onSelect={vi.fn()} />,
+      <SessionListItem thread={thread({ id: 't1', title: 'Test' })} workspaceId="w1" isSelected={true} onSelectThread={vi.fn()} />,
     )
     expect(r.toJSON()).toBeTruthy()
   })
 
   it('renders running', () => {
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Running" isRunning={true} updatedAt={new Date().toISOString()} attention={attention} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem thread={thread({ id: 't1', title: 'Running', status: 'running' })} workspaceId="w1" isSelected={false} onSelectThread={vi.fn()} />,
     )
     expect(r.toJSON()).toBeTruthy()
   })
@@ -105,7 +113,7 @@ describe('SessionListItem component', () => {
   it('renders with old date (days ago)', () => {
     const oldDate = new Date(Date.now() - 3 * 86_400_000).toISOString()
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Old" isRunning={false} updatedAt={oldDate} attention={attention} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem thread={thread({ id: 't1', title: 'Old', updated_at: oldDate })} workspaceId="w1" isSelected={false} onSelectThread={vi.fn()} />,
     )
     expect(textOf(r)).toContain('3d')
   })
@@ -113,7 +121,7 @@ describe('SessionListItem component', () => {
   it('renders with hours-ago date', () => {
     const hoursAgo = new Date(Date.now() - 5 * 3_600_000).toISOString()
     const r = renderComponent(
-      <SessionListItem threadId="t1" title="Hours" isRunning={false} updatedAt={hoursAgo} attention={attention} isSelected={false} onSelect={vi.fn()} />,
+      <SessionListItem thread={thread({ id: 't1', title: 'Hours', updated_at: hoursAgo })} workspaceId="w1" isSelected={false} onSelectThread={vi.fn()} />,
     )
     expect(textOf(r)).toContain('5h')
   })

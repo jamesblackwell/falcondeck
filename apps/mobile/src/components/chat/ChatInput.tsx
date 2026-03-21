@@ -4,20 +4,39 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Send } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
+import type { ModelSummary } from '@falcondeck/client-core'
+
+import { InputToolbar } from './InputToolbar'
+import { StopButton } from './StopButton'
+
 interface ChatInputProps {
   value: string
   onChangeText: (text: string) => void
   onSubmit: () => void
+  onStop: () => void
   disabled?: boolean
+  isRunning?: boolean
   placeholder?: string
+  models: ModelSummary[]
+  selectedModel: string | null
+  selectedEffort: string | null
+  onSelectModel: (modelId: string | null) => void
+  onSelectEffort: (effort: string | null) => void
 }
 
 export const ChatInput = memo(function ChatInput({
   value,
   onChangeText,
   onSubmit,
+  onStop,
   disabled,
+  isRunning,
   placeholder = 'Send a message...',
+  models,
+  selectedModel,
+  selectedEffort,
+  onSelectModel,
+  onSelectEffort,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
 
@@ -29,10 +48,17 @@ export const ChatInput = memo(function ChatInput({
   }, [value, disabled, onSubmit])
   /* v8 ignore stop */
 
-  const canSend = value.trim().length > 0 && !disabled
+  const canSend = value.trim().length > 0 && !disabled && !isRunning
 
   return (
     <View style={styles.container}>
+      <InputToolbar
+        models={models}
+        selectedModel={selectedModel}
+        selectedEffort={selectedEffort}
+        onSelectModel={onSelectModel}
+        onSelectEffort={onSelectEffort}
+      />
       <View style={styles.inputRow}>
         <TextInput
           style={styles.input}
@@ -45,13 +71,17 @@ export const ChatInput = memo(function ChatInput({
           maxLength={100_000}
           editable={!disabled}
         />
-        <Pressable
-          style={[styles.sendButton, canSend ? styles.sendActive : styles.sendInactive]}
-          onPress={handleSubmit}
-          disabled={!canSend}
-        >
-          <Send size={18} color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint} />
-        </Pressable>
+        {isRunning ? (
+          <StopButton onPress={onStop} />
+        ) : (
+          <Pressable
+            style={[styles.sendButton, canSend ? styles.sendActive : styles.sendInactive]}
+            onPress={handleSubmit}
+            disabled={!canSend}
+          >
+            <Send size={18} color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint} />
+          </Pressable>
+        )}
       </View>
     </View>
   )
