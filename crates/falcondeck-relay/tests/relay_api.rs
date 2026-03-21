@@ -2,14 +2,14 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use chrono::Duration;
 use falcondeck_core::{
+    crypto::{build_pairing_public_key_bundle, encrypt_json, generate_data_key, LocalBoxKeyPair},
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
     PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
     RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse,
     RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
     SubmitQueuedActionRequest, TrustedDevicesResponse,
-    crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, encrypt_json, generate_data_key},
 };
-use falcondeck_relay::{AppState, RetentionConfig, router};
+use falcondeck_relay::{router, AppState, RetentionConfig};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -17,7 +17,7 @@ use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
     task::JoinHandle,
-    time::{Duration as TokioDuration, timeout},
+    time::{timeout, Duration as TokioDuration},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -838,9 +838,9 @@ async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
     .await;
 
     assert!(history.cursor.history_truncated);
-    assert_eq!(history.next_seq, 4);
+    assert_eq!(history.next_seq, 5);
     assert_eq!(history.updates.len(), 1);
-    assert_eq!(history.updates[0].seq, 3);
+    assert_eq!(history.updates[0].seq, 4);
 }
 
 #[tokio::test]

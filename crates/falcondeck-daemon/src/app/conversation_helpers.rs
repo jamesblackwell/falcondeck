@@ -154,7 +154,7 @@ pub(super) fn normalize_generated_thread_title(output: &str) -> Option<String> {
     let candidate = candidate
         .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '`')
         .trim()
-        .trim_end_matches(|ch: char| matches!(ch, '.' | '!' | '?' | ':' | ';' | ','))
+        .trim_end_matches(['.', '!', '?', ':', ';', ','])
         .trim();
     if candidate.is_empty()
         || is_placeholder_thread_title(candidate)

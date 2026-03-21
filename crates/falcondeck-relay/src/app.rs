@@ -2,15 +2,15 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
-    ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, MachinePresence,
-    PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, QueuedRemoteAction,
-    QueuedRemoteActionStatus, RelayClientMessage, RelayHealthResponse, RelayPeerRole,
-    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
-    StartPairingResponse, SubmitQueuedActionRequest, SyncCursor, TrustedDevice,
-    TrustedDeviceStatus, TrustedDevicesResponse, crypto::verify_pairing_public_key_bundle,
+    crypto::verify_pairing_public_key_bundle, ClaimPairingRequest, ClaimPairingResponse,
+    EncryptedEnvelope, MachinePresence, PairingPublicKeyBundle, PairingStatus,
+    PairingStatusResponse, QueuedRemoteAction, QueuedRemoteActionStatus, RelayClientMessage,
+    RelayHealthResponse, RelayPeerRole, RelayServerMessage, RelayUpdate, RelayUpdateBody,
+    RelayUpdatesResponse, StartPairingRequest, StartPairingResponse, SubmitQueuedActionRequest,
+    SyncCursor, TrustedDevice, TrustedDeviceStatus, TrustedDevicesResponse,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -1597,11 +1597,13 @@ impl AppState {
             },
         )
         .await;
-        let _ = self.append_update(
-            session_id,
-            RelayUpdateBody::Presence { presence },
-            PersistMode::Deferred,
-        );
+        let _ = self
+            .append_update(
+                session_id,
+                RelayUpdateBody::Presence { presence },
+                PersistMode::Deferred,
+            )
+            .await;
     }
 
     async fn dispatch_pending_actions(&self, session_id: &str) {
@@ -1799,7 +1801,10 @@ impl AppState {
         device_id: Option<&str>,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        self.inner.backend.persist_device(session, device_id).await?;
+        self.inner
+            .backend
+            .persist_device(session, device_id)
+            .await?;
         self.schedule_flush(mode).await
     }
 
@@ -1809,7 +1814,10 @@ impl AppState {
         action_ids: Option<&[&str]>,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        self.inner.backend.persist_action(session, action_ids).await?;
+        self.inner
+            .backend
+            .persist_action(session, action_ids)
+            .await?;
         self.schedule_flush(mode).await
     }
 
@@ -2102,7 +2110,6 @@ fn prune_state(
 }
 
 // Persistence functions moved to crate::persistence module.
-
 
 fn normalize_in_flight_actions(state: &mut PersistedState) -> bool {
     let now = Utc::now();

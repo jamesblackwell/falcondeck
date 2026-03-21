@@ -2,14 +2,14 @@ use std::sync::atomic::Ordering;
 
 use chrono::Utc;
 use falcondeck_core::{
+    crypto::{decrypt_json, encrypt_json, sign_session_key_material, LocalIdentityKeyPair},
     DaemonSnapshot, EncryptedEnvelope, EventEnvelope, PairingPublicKeyBundle, RelayClientMessage,
     RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
     SendTurnRequest, SessionKeyMaterial, StartThreadRequest, UnifiedEvent,
     UpdatePreferencesRequest, UpdateThreadRequest,
-    crypto::{LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
@@ -17,8 +17,8 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::{
-    AppState, RemoteBridgeCommand, RemoteBridgeError, RemotePairingState, extract_string,
-    parse_agent_provider, parse_interactive_response_params,
+    extract_string, parse_agent_provider, parse_interactive_response_params, AppState,
+    RemoteBridgeCommand, RemoteBridgeError, RemotePairingState,
 };
 use crate::error::DaemonError;
 
@@ -406,10 +406,10 @@ impl AppState {
             let mut remote = self.inner.remote.lock().await;
             if remote.relay_url.as_deref() != Some(relay_url)
                 || remote.daemon_token.as_deref() != Some(daemon_token)
-                || !remote
+                || remote
                     .pending_pairing
                     .as_ref()
-                    .is_some_and(|pairing| pairing.pairing_id == pairing_id)
+                    .is_none_or(|pairing| pairing.pairing_id != pairing_id)
             {
                 false
             } else {

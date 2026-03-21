@@ -172,7 +172,7 @@ pub(super) fn parse_threads(
 }
 
 fn extract_thread_entries(value: &Value) -> Vec<&Value> {
-    fn walk<'a>(value: &'a Value) -> Vec<&'a Value> {
+    fn walk(value: &Value) -> Vec<&Value> {
         if let Some(array) = value.get("threads").and_then(Value::as_array) {
             return array.iter().collect();
         }

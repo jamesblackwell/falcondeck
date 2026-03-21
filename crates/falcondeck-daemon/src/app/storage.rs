@@ -1,4 +1,7 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    path::{Path, PathBuf},
+};
 
 #[cfg(test)]
 use std::collections::HashMap;
@@ -6,16 +9,17 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use falcondeck_core::{
-    AgentProvider, ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
-    UpdatePreferencesRequest, crypto::verify_pairing_public_key_bundle,
+    crypto::verify_pairing_public_key_bundle, AgentProvider,
+    ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
+    UpdatePreferencesRequest,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::fs;
 
 use super::{
-    PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, PersistedWorkspaceEntry,
-    PersistedWorkspaceState, RemoteBridgeState, encode_base64,
+    encode_base64, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
+    PersistedWorkspaceEntry, PersistedWorkspaceState, RemoteBridgeState,
 };
 use crate::codex::extract_string;
 use crate::error::DaemonError;
@@ -27,7 +31,7 @@ pub(super) fn default_state_path() -> PathBuf {
     home.join(".falcondeck").join("daemon-state.json")
 }
 
-pub(super) fn default_preferences_path(state_path: &PathBuf) -> PathBuf {
+pub(super) fn default_preferences_path(state_path: &Path) -> PathBuf {
     state_path
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
@@ -255,9 +259,7 @@ pub(super) fn persisted_remote_state(
 }
 
 pub(super) fn invalid_persisted_remote_reason(remote: &PersistedRemoteState) -> Option<String> {
-    if remote.device_id.is_none() {
-        return None;
-    }
+    remote.device_id.as_ref()?;
 
     let Some(client_bundle) = remote.client_bundle.as_ref() else {
         return if remote.client_public_key.is_some() {
@@ -399,4 +401,168 @@ pub(super) fn delete_remote_secrets_from_secure_storage(
         .unwrap()
         .remove(secure_storage_key);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use falcondeck_core::crypto::{build_pairing_public_key_bundle, LocalBoxKeyPair};
+    use serde::de::value::{SeqDeserializer, StringDeserializer};
+    use serde_json::json;
+
+    use crate::app::PersistedWorkspaceState;
+
+    #[test]
+    fn derives_preferences_path_next_to_state_file() {
+        let path = default_preferences_path(Path::new("/tmp/falcondeck/daemon-state.json"));
+        assert_eq!(path, PathBuf::from("/tmp/falcondeck/falcondeck.json"));
+    }
+
+    #[test]
+    fn deserializes_legacy_workspace_paths_with_codex_default() {
+        let entries = vec!["/tmp/project-a".to_string(), "/tmp/project-b".to_string()];
+        let deserializer = SeqDeserializer::<_, serde_json::Error>::new(
+            entries
+                .into_iter()
+                .map(StringDeserializer::<serde_json::Error>::new),
+        );
+
+        let workspaces = deserialize_persisted_workspaces(deserializer).unwrap();
+
+        assert_eq!(
+            workspaces,
+            vec![
+                PersistedWorkspaceState {
+                    path: "/tmp/project-a".to_string(),
+                    current_thread_id: None,
+                    updated_at: None,
+                    default_provider: Some(AgentProvider::Codex),
+                    last_error: None,
+                    archived_thread_ids: Vec::new(),
+                    thread_states: Vec::new(),
+                },
+                PersistedWorkspaceState {
+                    path: "/tmp/project-b".to_string(),
+                    current_thread_id: None,
+                    updated_at: None,
+                    default_provider: Some(AgentProvider::Codex),
+                    last_error: None,
+                    archived_thread_ids: Vec::new(),
+                    thread_states: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn merges_preferences_from_partial_json_payload() {
+        let preferences = merge_preferences_from_value(json!({
+            "version": 3,
+            "conversation": {
+                "tool_details_mode": "compact",
+                "group_read_only_tools": false,
+                "show_expand_all_controls": true,
+                "auto_expand": {
+                    "approvals": false,
+                    "errors": true,
+                    "first_diff": false,
+                    "failed_tests": true
+                }
+            }
+        }));
+
+        assert_eq!(preferences.version, 3);
+        assert_eq!(
+            preferences.conversation.tool_details_mode,
+            ToolDetailsMode::Compact
+        );
+        assert!(!preferences.conversation.group_read_only_tools);
+        assert!(preferences.conversation.show_expand_all_controls);
+        assert!(!preferences.conversation.auto_expand.approvals);
+        assert!(preferences.conversation.auto_expand.errors);
+        assert!(!preferences.conversation.auto_expand.first_diff);
+        assert!(preferences.conversation.auto_expand.failed_tests);
+    }
+
+    #[test]
+    fn inline_remote_secrets_take_priority_over_secure_storage() {
+        let secure_storage_key = "test-inline-secrets";
+        save_remote_secrets_to_secure_storage(
+            secure_storage_key,
+            &PersistedRemoteSecrets {
+                local_secret_key_base64: "stored-secret".to_string(),
+                data_key_base64: "stored-key".to_string(),
+            },
+        )
+        .unwrap();
+
+        let secrets = load_remote_secrets(
+            &PersistedRemoteState {
+                relay_url: "https://connect.falcondeck.com".to_string(),
+                daemon_token: "daemon-token".to_string(),
+                pairing_id: "pairing-1".to_string(),
+                pairing_code: "ABCDEFGHJKLM".to_string(),
+                session_id: Some("session-inline".to_string()),
+                device_id: Some("device-1".to_string()),
+                trusted_at: Some(Utc::now()),
+                expires_at: Utc::now() + Duration::minutes(10),
+                client_bundle: None,
+                client_public_key: None,
+                secure_storage_key: Some(secure_storage_key.to_string()),
+                local_secret_key_base64: Some("inline-secret".to_string()),
+                data_key_base64: Some("inline-key".to_string()),
+            },
+            secure_storage_key,
+        )
+        .unwrap();
+
+        assert_eq!(secrets.local_secret_key_base64, "inline-secret");
+        assert_eq!(secrets.data_key_base64, "inline-key");
+    }
+
+    #[test]
+    fn ignores_untrusted_remote_when_validating_signed_client_material() {
+        let remote = PersistedRemoteState {
+            relay_url: "https://connect.falcondeck.com".to_string(),
+            daemon_token: "daemon-token".to_string(),
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "ABCDEFGHJKLM".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: None,
+            trusted_at: None,
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: None,
+            client_public_key: None,
+            secure_storage_key: None,
+            local_secret_key_base64: None,
+            data_key_base64: None,
+        };
+
+        assert!(invalid_persisted_remote_reason(&remote).is_none());
+    }
+
+    #[test]
+    fn reports_invalid_signed_client_material_for_trusted_remote() {
+        let mut bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+        bundle.signature = "invalid-signature".to_string();
+        let remote = PersistedRemoteState {
+            relay_url: "https://connect.falcondeck.com".to_string(),
+            daemon_token: "daemon-token".to_string(),
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "ABCDEFGHJKLM".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: Some("device-1".to_string()),
+            trusted_at: Some(Utc::now()),
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: Some(bundle),
+            client_public_key: None,
+            secure_storage_key: None,
+            local_secret_key_base64: None,
+            data_key_base64: None,
+        };
+
+        let reason = invalid_persisted_remote_reason(&remote).unwrap();
+        assert!(reason.contains("invalid signed client key material"));
+    }
 }

@@ -467,7 +467,7 @@ pub fn parse_account(value: &Value) -> AccountSummary {
 }
 
 fn extract_thread_record(value: &Value) -> Option<&Value> {
-    fn walk<'a>(value: &'a Value) -> Option<&'a Value> {
+    fn walk(value: &Value) -> Option<&Value> {
         if value
             .as_object()
             .is_some_and(|record| record.contains_key("turns"))
@@ -564,11 +564,11 @@ fn hydrate_thread_summary(
         {
             Some(output.clone().unwrap_or_else(|| "Tool failed".to_string()))
         }
-        ConversationItem::Service { level, message, .. }
-            if matches!(level, falcondeck_core::ServiceLevel::Error) =>
-        {
-            Some(message.clone())
-        }
+        ConversationItem::Service {
+            level: falcondeck_core::ServiceLevel::Error,
+            message,
+            ..
+        } => Some(message.clone()),
         _ => None,
     }) {
         summary.last_error = Some(last_error);

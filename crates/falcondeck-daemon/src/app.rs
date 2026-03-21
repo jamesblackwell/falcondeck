@@ -1421,42 +1421,43 @@ impl AppState {
                         return;
                     };
 
-                    let command_to_publish =
-                        {
-                            let mut remote = self.inner.remote.lock().await;
-                            if remote.relay_url.as_deref() != Some(relay_url.as_str())
-                                || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
-                            {
-                                None
-                            } else if remote.pending_pairing.as_ref().is_none_or(
-                                |current_pairing| current_pairing.pairing_id != pairing_id,
-                            ) {
-                                None
-                            } else {
-                                let Some(current_pairing) = remote.pending_pairing.as_mut() else {
-                                    return;
-                                };
-                                current_pairing.session_id = Some(session_id);
-                                current_pairing.device_id = Some(device_id);
-                                current_pairing.client_bundle = Some(client_bundle.clone());
-                                if current_pairing.trusted_at.is_none() {
-                                    current_pairing.trusted_at = Some(Utc::now());
-                                }
-                                let pairing_snapshot = current_pairing.clone();
-                                remote.last_error = None;
-                                remote.pending_pairing = None;
-                                remote.pairing_watch_task = None;
-                                remote.command_tx.clone().map(|command_tx| {
-                                    (
-                                        command_tx,
-                                        RemoteBridgeCommand::PublishBootstrap {
-                                            pairing: pairing_snapshot,
-                                            client_bundle,
-                                        },
-                                    )
+                    let command_to_publish = {
+                        let mut remote = self.inner.remote.lock().await;
+                        if remote.relay_url.as_deref() != Some(relay_url.as_str())
+                            || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
+                            || remote
+                                .pending_pairing
+                                .as_ref()
+                                .is_none_or(|current_pairing| {
+                                    current_pairing.pairing_id != pairing_id
                                 })
+                        {
+                            None
+                        } else {
+                            let Some(current_pairing) = remote.pending_pairing.as_mut() else {
+                                return;
+                            };
+                            current_pairing.session_id = Some(session_id);
+                            current_pairing.device_id = Some(device_id);
+                            current_pairing.client_bundle = Some(client_bundle.clone());
+                            if current_pairing.trusted_at.is_none() {
+                                current_pairing.trusted_at = Some(Utc::now());
                             }
-                        };
+                            let pairing_snapshot = current_pairing.clone();
+                            remote.last_error = None;
+                            remote.pending_pairing = None;
+                            remote.pairing_watch_task = None;
+                            remote.command_tx.clone().map(|command_tx| {
+                                (
+                                    command_tx,
+                                    RemoteBridgeCommand::PublishBootstrap {
+                                        pairing: pairing_snapshot,
+                                        client_bundle,
+                                    },
+                                )
+                            })
+                        }
+                    };
 
                     if let Some((command_tx, command)) = command_to_publish {
                         let _ = command_tx.send(command);
@@ -3033,6 +3034,7 @@ tokens used\n5,767\n"
     async fn persisted_remote_state_moves_secrets_out_of_the_state_file() {
         let temp_dir = tempdir().unwrap();
         let state_path = temp_dir.path().join("daemon-state.json");
+        let relay_url = "https://connect.falcondeck.com/persist".to_string();
         let app = AppState::new_with_state_path(
             "test".to_string(),
             "codex".to_string(),
@@ -3056,7 +3058,7 @@ tokens used\n5,767\n"
         {
             let mut remote = app.inner.remote.lock().await;
             remote.status = falcondeck_core::RemoteConnectionStatus::DeviceTrusted;
-            remote.relay_url = Some("https://connect.falcondeck.com".to_string());
+            remote.relay_url = Some(relay_url.clone());
             remote.daemon_token = Some("daemon-token".to_string());
             remote.pairing = Some(pairing);
             remote.pending_pairing = None;
@@ -3086,7 +3088,8 @@ tokens used\n5,767\n"
     async fn restore_reads_remote_secrets_from_secure_storage() {
         let temp_dir = tempdir().unwrap();
         let state_path = temp_dir.path().join("daemon-state.json");
-        let secure_storage_key = "https://connect.falcondeck.com|session-1".to_string();
+        let relay_url = "https://connect.falcondeck.com/restore".to_string();
+        let secure_storage_key = format!("{relay_url}|session-1");
         super::save_remote_secrets_to_secure_storage(
             &secure_storage_key,
             &PersistedRemoteSecrets {
@@ -3098,7 +3101,7 @@ tokens used\n5,767\n"
         let persisted = PersistedAppState {
             workspaces: vec![],
             remote: Some(PersistedRemoteState {
-                relay_url: "https://connect.falcondeck.com".to_string(),
+                relay_url,
                 daemon_token: "daemon-token".to_string(),
                 pairing_id: "pairing-1".to_string(),
                 pairing_code: "ABCDEFGHJKLM".to_string(),
@@ -3133,7 +3136,7 @@ tokens used\n5,767\n"
         );
         assert_eq!(
             remote.relay_url.as_deref(),
-            Some("https://connect.falcondeck.com")
+            Some("https://connect.falcondeck.com/restore")
         );
         assert!(remote.pairing.is_some());
     }

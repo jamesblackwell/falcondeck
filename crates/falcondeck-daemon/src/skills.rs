@@ -202,7 +202,9 @@ fn scan_agents_skill_dir(
         if !is_markdown_file(&path) {
             continue;
         }
-        if let Some(skill) = parse_markdown_skill(&path, source_kind.clone(), availability.clone(), None) {
+        if let Some(skill) =
+            parse_markdown_skill(&path, source_kind.clone(), availability.clone(), None)
+        {
             results.push(skill);
         }
     }
@@ -221,7 +223,8 @@ fn scan_claude_command_dir(dir: &Path, source_kind: SkillSourceKind) -> Vec<Skil
         if path.is_dir() || !is_markdown_file(&path) {
             continue;
         }
-        let Some(skill) = parse_markdown_skill(&path, source_kind.clone(), SkillAvailability::Claude, None)
+        let Some(skill) =
+            parse_markdown_skill(&path, source_kind.clone(), SkillAvailability::Claude, None)
         else {
             continue;
         };
@@ -229,11 +232,7 @@ fn scan_claude_command_dir(dir: &Path, source_kind: SkillSourceKind) -> Vec<Skil
             provider_translations: SkillProviderTranslations {
                 codex: None,
                 claude: Some(ClaudeSkillTranslation {
-                    command_name: Some(
-                        skill.alias
-                            .trim_start_matches('/')
-                            .to_string(),
-                    ),
+                    command_name: Some(skill.alias.trim_start_matches('/').to_string()),
                     prompt_reference_path: skill.source_path.clone(),
                 }),
             },
@@ -291,7 +290,7 @@ fn parse_markdown_skill(
 
     Some(SkillSummary {
         id: alias_to_skill_id(&alias),
-        label: raw_name.replace('-', " ").replace('_', " "),
+        label: raw_name.replace(['-', '_'], " "),
         alias,
         availability,
         source_kind,
@@ -356,26 +355,61 @@ struct MarkdownMetadata {
 }
 
 fn parse_markdown_metadata(content: &str) -> MarkdownMetadata {
-    let mut lines = content.lines();
+    let lines = content.lines().collect::<Vec<_>>();
     let mut name = None;
     let mut description = None;
+    let mut body_start = 0usize;
 
-    if matches!(lines.next().map(str::trim), Some("---")) {
-        for line in lines.by_ref() {
+    if lines.first().map(|line| line.trim()) == Some("---") {
+        let mut index = 1usize;
+        while index < lines.len() {
+            let line = lines[index];
             let trimmed = line.trim();
             if trimmed == "---" {
+                body_start = index + 1;
                 break;
             }
             if let Some(value) = trimmed.strip_prefix("name:") {
                 name = Some(value.trim().trim_matches('"').to_string());
+                index += 1;
             } else if let Some(value) = trimmed.strip_prefix("description:") {
-                description = Some(value.trim().trim_matches('"').to_string());
+                let value = value.trim();
+                if matches!(value, "" | ">" | "|") {
+                    let mut parts = Vec::new();
+                    index += 1;
+                    while index < lines.len() {
+                        let next_line = lines[index];
+                        let next_trimmed = next_line.trim();
+                        if next_trimmed == "---" {
+                            body_start = index + 1;
+                            break;
+                        }
+                        if !next_trimmed.is_empty()
+                            && !next_line.starts_with(' ')
+                            && !next_line.starts_with('\t')
+                        {
+                            break;
+                        }
+                        if !next_trimmed.is_empty() {
+                            parts.push(next_trimmed.to_string());
+                        }
+                        index += 1;
+                    }
+                    if !parts.is_empty() {
+                        description = Some(parts.join(" "));
+                    }
+                } else {
+                    description = Some(value.trim_matches('"').to_string());
+                    index += 1;
+                }
+            } else {
+                index += 1;
             }
         }
     }
 
     if description.is_none() {
-        for line in content.lines() {
+        for line in &lines[body_start..] {
             let trimmed = line.trim();
             if trimmed.is_empty() || trimmed == "---" || trimmed.starts_with('#') {
                 continue;
@@ -442,6 +476,65 @@ mod tests {
                 .as_ref()
                 .and_then(|translation| translation.native_id.as_deref()),
             Some("search-web")
+        );
+    }
+
+    #[test]
+    fn parses_provider_skills_from_nested_result_payload() {
+        let skills = parse_codex_provider_skills(&serde_json::json!({
+            "result": {
+                "data": [{
+                    "id": "search-web",
+                    "displayName": "Search Web",
+                    "description": "Search the web"
+                }]
+            }
+        }));
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].alias, "/search-web");
+        assert_eq!(skills[0].label, "Search Web");
+        assert_eq!(skills[0].availability, SkillAvailability::Codex);
+        assert_eq!(skills[0].source_kind, SkillSourceKind::ProviderNative);
+    }
+
+    #[test]
+    fn markdown_metadata_uses_first_body_line_when_frontmatter_description_is_missing() {
+        let metadata = parse_markdown_metadata(
+            r#"---
+name: "Rust Docs"
+---
+
+# Header
+
+Clear description line
+key:value
+"#,
+        );
+
+        assert_eq!(metadata.name.as_deref(), Some("Rust Docs"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Clear description line")
+        );
+    }
+
+    #[test]
+    fn markdown_metadata_reads_folded_frontmatter_descriptions() {
+        let metadata = parse_markdown_metadata(
+            r#"---
+name: "Rust Docs"
+description: >
+  Guide for writing idiomatic Rust code
+  based on established best practices.
+---
+"#,
+        );
+
+        assert_eq!(metadata.name.as_deref(), Some("Rust Docs"));
+        assert_eq!(
+            metadata.description.as_deref(),
+            Some("Guide for writing idiomatic Rust code based on established best practices.")
         );
     }
 }
