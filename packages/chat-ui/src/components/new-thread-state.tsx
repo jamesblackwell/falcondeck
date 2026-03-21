@@ -28,9 +28,9 @@ export const NewThreadState = memo(function NewThreadState({
             onChange={(e) => onSelectWorkspace(e.target.value)}
             className="appearance-none rounded-[var(--fd-radius-md)] bg-transparent py-1 pl-2 pr-9 text-[length:var(--fd-text-2xl)] font-medium text-fg-muted transition-colors hover:text-fg-secondary focus:outline-none"
           >
-            {workspaces.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.path.split('/').pop()}
+            {workspaces.map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.path.split('/').pop()}
               </option>
             ))}
           </select>
