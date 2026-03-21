@@ -1,19 +1,20 @@
-/target
-/dist
-/coverage
-/node_modules
-/.turbo
-/.DS_Store
+# Build artifacts and package manager caches
+target/
+dist/
+build/
+coverage/
+node_modules/
+.pnpm-store/
+.turbo/
+.next/
+.expo/
+web-build/
+
+# Local machine and tool output
+.DS_Store
 /var
 *.tsbuildinfo
 **/.git
-/apps/desktop/node_modules
-/apps/desktop/dist
-/apps/desktop/src-tauri/target
-/apps/remote-web/node_modules
-/apps/remote-web/dist
-/apps/site/node_modules
-/apps/site/dist
 /ops/ansible/inventory/local
 /ops/ansible/group_vars/*.local.yml
 /ops/ansible/*.vault.yml
