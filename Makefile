@@ -18,15 +18,18 @@ RELAY_BIND_HOST ?= 0.0.0.0
 CODEX_BIN ?= codex
 TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
 TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
+TAURI_BUILD = cd "$(DESKTOP_DIR)" && npm exec tauri -- build
 TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --bundles app --config src-tauri/tauri.local.conf.json
 DESKTOP_BUNDLE_APP := $(ROOT)/target/release/bundle/macos/FalconDeck.app
 APPLICATIONS_APP := /Applications/FalconDeck.app
 MOBILE_METRO_PORT ?= 8081
 IOS_SIMULATOR ?= iPhone 16 Pro
+MOBILE_METRO_PID_FILE = /tmp/falcondeck-mobile-metro-$(MOBILE_METRO_PORT).pid
+MOBILE_METRO_LOG_FILE = /tmp/falcondeck-mobile-metro.log
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install desktop-prepare mobile-prepare remote-web-prepare site-prepare dev mobile-dev dev-mobile desktop-dev desktop-dev-stop frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop lint typecheck check fmt build clean
+.PHONY: help install desktop-prepare desktop-brand-assets mobile-prepare remote-web-prepare site-prepare dev mobile-dev mobile-dev-stop dev-mobile desktop-dev desktop-dev-stop desktop-install frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop lint typecheck check fmt build clean
 
 help:
 	@printf '%s\n' \
@@ -34,6 +37,7 @@ help:
 		'' \
 		'  make dev            Start relay, remote web, and the desktop app' \
 		'  make mobile-dev     Open Simulator and run the FalconDeck iOS app locally' \
+		'  make mobile-dev-stop Stop the background Expo dev server used by mobile-dev' \
 		'  make dev-mobile     Alias for make mobile-dev' \
 		'  make desktop-dev    Start the Tauri desktop app' \
 		'  make desktop-dev-stop Stop the reusable desktop dev daemon' \
@@ -43,6 +47,7 @@ help:
 		'  make daemon         Start the standalone daemon on 127.0.0.1:$(DAEMON_PORT)' \
 		'  make relay          Start the relay on $(RELAY_BIND_HOST):$(RELAY_PORT)' \
 		'  make install        Install desktop, mobile, and web dependencies' \
+		'  make desktop-install Build the packaged desktop app and install it to /Applications' \
 		'  make test           Run Rust and desktop tests' \
 		'  make lint           Run desktop lint checks' \
 		'  make typecheck      Run desktop TypeScript checks' \
@@ -144,11 +149,24 @@ mobile-dev: mobile-prepare
 		fi; \
 		echo "Opening iOS Simulator"; \
 		open -a Simulator; \
-		booted_udid=$$(xcrun simctl list devices booted | sed -n 's/.*(\\([^)]*\\)) (Booted)/\\1/p' | head -n 1); \
-		if [ -z "$$booted_udid" ]; then \
-			echo "Booting simulator: $(IOS_SIMULATOR)"; \
-			xcrun simctl boot "$(IOS_SIMULATOR)" >/dev/null 2>&1 || true; \
+		sleep 2; \
+		booted_udid=""; \
+		current_udid=$$(defaults read com.apple.iphonesimulator CurrentDeviceUDID 2>/dev/null || true); \
+		if [ -n "$$current_udid" ] && xcrun simctl list devices booted | grep -q "$$current_udid"; then \
+			booted_udid="$$current_udid"; \
+		else \
 			booted_udid=$$(xcrun simctl list devices booted | sed -n 's/.*(\\([^)]*\\)) (Booted)/\\1/p' | head -n 1); \
+		fi; \
+		if [ -z "$$booted_udid" ]; then \
+			simulator_udid=$$(xcrun simctl list devices available | sed -n 's/^[[:space:]]*$(IOS_SIMULATOR) (\\([^)]*\\)) (Available)$$/\\1/p' | head -n 1); \
+			if [ -z "$$simulator_udid" ]; then \
+				echo "Could not find an available simulator named $(IOS_SIMULATOR)."; \
+				exit 1; \
+			fi; \
+			echo "Booting simulator: $(IOS_SIMULATOR)"; \
+			xcrun simctl boot "$$simulator_udid" >/dev/null 2>&1 || true; \
+			xcrun simctl bootstatus "$$simulator_udid" -b; \
+			booted_udid="$$simulator_udid"; \
 		fi; \
 		if [ -z "$$booted_udid" ]; then \
 			echo "No booted simulator found. Open Simulator, boot a device, then rerun make mobile-dev."; \
@@ -156,17 +174,58 @@ mobile-dev: mobile-prepare
 		fi; \
 		echo "Using simulator $$booted_udid"; \
 		xcrun simctl bootstatus $$booted_udid -b; \
-		metro_pid=""; \
 		if lsof -ti tcp:$(MOBILE_METRO_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
-			echo "Using existing Expo dev server on port $(MOBILE_METRO_PORT)"; \
+			existing_metro_pid=$$(lsof -ti tcp:$(MOBILE_METRO_PORT) -sTCP:LISTEN | head -n 1); \
+			existing_metro_cmd=$$(ps -p $$existing_metro_pid -o command=); \
+			existing_metro_cwd=$$(lsof -a -p $$existing_metro_pid -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1); \
+			case "$$existing_metro_cmd|$$existing_metro_cwd" in \
+				*"$(MOBILE_DIR)"*|*"falcondeck/apps/mobile"*) \
+					echo "Using existing Expo dev server on port $(MOBILE_METRO_PORT)"; \
+					;; \
+				*) \
+					echo "Port $(MOBILE_METRO_PORT) is in use by a different process:"; \
+					echo "$$existing_metro_cmd"; \
+					echo "Stop that server or rerun with a different MOBILE_METRO_PORT."; \
+					exit 1; \
+					;; \
+			esac; \
 		else \
+			if [ -f "$(MOBILE_METRO_PID_FILE)" ]; then \
+				stale_pid=$$(cat "$(MOBILE_METRO_PID_FILE)" 2>/dev/null || true); \
+				if [ -n "$$stale_pid" ] && ! kill -0 "$$stale_pid" 2>/dev/null; then \
+					rm -f "$(MOBILE_METRO_PID_FILE)"; \
+				fi; \
+			fi; \
 			echo "Starting Expo dev server on port $(MOBILE_METRO_PORT)"; \
-			cd "$(MOBILE_DIR)" && npx expo start --dev-client --port $(MOBILE_METRO_PORT) >/tmp/falcondeck-mobile-metro.log 2>&1 & \
+			cd "$(MOBILE_DIR)" && nohup npx expo start --dev-client --port $(MOBILE_METRO_PORT) >"$(MOBILE_METRO_LOG_FILE)" 2>&1 < /dev/null & \
 			metro_pid=$$!; \
+			echo "$$metro_pid" > "$(MOBILE_METRO_PID_FILE)"; \
 			sleep 5; \
+			if ! kill -0 "$$metro_pid" 2>/dev/null; then \
+				echo "Expo dev server failed to start. Check $(MOBILE_METRO_LOG_FILE)"; \
+				exit 1; \
+			fi; \
+			echo "Expo dev server running in background (pid $$metro_pid)"; \
 		fi; \
-		trap 'if [ -n "$$metro_pid" ]; then kill $$metro_pid 2>/dev/null || true; fi' EXIT INT TERM; \
-		cd "$(MOBILE_DIR)" && npx expo run:ios --device $$booted_udid --port $(MOBILE_METRO_PORT)
+		echo "Building FalconDeck for simulator $$booted_udid"; \
+		cd "$(MOBILE_DIR)/ios" && xcodebuild -workspace FalconDeck.xcworkspace -scheme FalconDeck -configuration Debug -destination "id=$$booted_udid" -derivedDataPath .derivedData GCC_PREPROCESSOR_DEFINITIONS='$$(inherited) RCT_METRO_PORT=$(MOBILE_METRO_PORT)' build; \
+		xcrun simctl terminate $$booted_udid com.falcondeck.mobile >/dev/null 2>&1 || true; \
+		xcrun simctl install $$booted_udid "$(MOBILE_DIR)/ios/.derivedData/Build/Products/Debug-iphonesimulator/FalconDeck.app"; \
+		xcrun simctl launch $$booted_udid com.falcondeck.mobile; \
+		echo "FalconDeck launched. Metro log: $(MOBILE_METRO_LOG_FILE)"
+
+mobile-dev-stop:
+	@set -e; \
+		if [ -f "$(MOBILE_METRO_PID_FILE)" ]; then \
+			metro_pid=$$(cat "$(MOBILE_METRO_PID_FILE)" 2>/dev/null || true); \
+			if [ -n "$$metro_pid" ] && kill -0 "$$metro_pid" 2>/dev/null; then \
+				echo "Stopping Expo dev server $$metro_pid"; \
+				kill "$$metro_pid" 2>/dev/null || true; \
+			fi; \
+			rm -f "$(MOBILE_METRO_PID_FILE)"; \
+		else \
+			echo "No FalconDeck Expo dev server pid file found for port $(MOBILE_METRO_PORT)"; \
+		fi
 
 dev-mobile: mobile-dev
 
