@@ -2,13 +2,17 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
 use chrono::Utc;
 use falcondeck_core::{
+    crypto::{
+        build_pairing_public_key_bundle, generate_data_key, verify_pairing_public_key_bundle,
+        LocalBoxKeyPair,
+    },
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
     CommandResponse, ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot,
     EventEnvelope, FalconDeckPreferences, HealthResponse, InteractiveRequest,
@@ -19,17 +23,13 @@ use falcondeck_core::{
     ThreadAttention, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary, UnifiedEvent,
     UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
     WorkspaceSummary,
-    crypto::{
-        LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key,
-        verify_pairing_public_key_bundle,
-    },
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::{
     sync::mpsc,
-    sync::{Mutex, broadcast},
+    sync::{broadcast, Mutex},
     task::JoinHandle,
-    time::{Duration, sleep, timeout},
+    time::{sleep, timeout, Duration},
 };
 use tracing::debug;
 use uuid::Uuid;
@@ -37,8 +37,8 @@ use uuid::Uuid;
 use crate::{
     claude::{ClaudeBootstrap, ClaudeProviderMetadata, ClaudeRuntime},
     codex::{
-        CodexBootstrap, CodexProviderMetadata, CodexSession, extract_string, extract_thread_id,
-        extract_thread_title, parse_account, parse_thread_plan,
+        extract_string, extract_thread_id, extract_thread_title, parse_account, parse_thread_plan,
+        CodexBootstrap, CodexProviderMetadata, CodexSession,
     },
     error::DaemonError,
     skills::{
@@ -48,9 +48,11 @@ use crate::{
 
 mod agent_helpers;
 mod conversation_helpers;
+mod notifications;
 mod remote_bridge;
 mod storage;
 mod threads;
+mod workspace_ops;
 
 use agent_helpers::*;
 use conversation_helpers::*;
@@ -968,7 +970,7 @@ impl AppState {
         &self,
         request: ConnectWorkspaceRequest,
     ) -> Result<WorkspaceSummary, DaemonError> {
-        self.connect_workspace_internal(request, None).await
+        workspace_ops::connect_workspace(self, request).await
     }
 
     async fn connect_workspace_internal(
@@ -976,441 +978,14 @@ impl AppState {
         request: ConnectWorkspaceRequest,
         persisted_workspace: Option<&PersistedWorkspaceState>,
     ) -> Result<WorkspaceSummary, DaemonError> {
-        let requested_path = PathBuf::from(request.path.trim());
-        if request.path.trim().is_empty() {
-            return Err(DaemonError::BadRequest(
-                "workspace path is required".to_string(),
-            ));
-        }
-
-        let path = requested_path
-            .canonicalize()
-            .map_err(|error| DaemonError::BadRequest(format!("invalid workspace path: {error}")))?;
-        let path_string = path.to_string_lossy().to_string();
-        let persisted_workspace = match persisted_workspace.cloned() {
-            Some(workspace) => Some(workspace),
-            None => self
-                .inner
-                .saved_workspaces
-                .lock()
-                .await
-                .get(&path_string)
-                .cloned(),
-        };
-        let persisted_workspace_ref = persisted_workspace.as_ref();
-
-        let existing_workspace_id = {
-            let mut workspaces = self.inner.workspaces.lock().await;
-            if let Some(existing_id) = workspaces
-                .values()
-                .find(|workspace| workspace.summary.path == path_string)
-                .map(|workspace| workspace.summary.id.clone())
-            {
-                let should_upgrade_placeholder = workspaces
-                    .get(&existing_id)
-                    .map(|workspace| !workspace.has_runtime())
-                    .unwrap_or(false);
-                if should_upgrade_placeholder {
-                    Some(existing_id)
-                } else if let Some(existing) = workspaces.get(&existing_id) {
-                    let existing_summary = existing.summary.clone();
-                    let preferred_thread_id = persisted_workspace_ref
-                        .and_then(|workspace| workspace.current_thread_id.as_deref())
-                        .and_then(|thread_id| {
-                            existing
-                                .threads
-                                .contains_key(thread_id)
-                                .then(|| thread_id.to_string())
-                        })
-                        .or(existing_summary.current_thread_id.clone());
-                    if let Some(workspace) = workspaces.get_mut(&existing_id) {
-                        workspace.summary.current_thread_id = preferred_thread_id;
-                        if let Some(default_provider) = persisted_workspace_ref
-                            .and_then(|workspace| workspace.default_provider.clone())
-                        {
-                            workspace.summary.default_provider = default_provider;
-                        }
-                        if let Some(updated_at) =
-                            persisted_workspace_ref.and_then(|workspace| workspace.updated_at)
-                        {
-                            workspace.summary.updated_at = updated_at;
-                        }
-                        let summary = workspace.summary.clone();
-                        let should_refresh_metadata = workspace.has_runtime();
-                        drop(workspaces);
-                        if should_refresh_metadata {
-                            return self
-                                .refresh_connected_workspace_metadata(&existing_id)
-                                .await;
-                        }
-                        self.persist_local_state().await?;
-                        return Ok(summary);
-                    }
-                    return Ok(existing_summary);
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-        let workspace_id = existing_workspace_id
-            .unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()));
-        let CodexBootstrap {
-            session: codex_session,
-            account: codex_account,
-            models: codex_models,
-            collaboration_modes: codex_collaboration_modes,
-            threads: codex_threads,
-        } = CodexSession::connect(
-            workspace_id.clone(),
-            path_string.clone(),
-            self.inner.codex_bin.clone(),
-            self.clone(),
-        )
-        .await?;
-        let ClaudeBootstrap {
-            runtime: claude_runtime,
-            account: claude_account,
-            models: claude_models,
-            collaboration_modes: claude_collaboration_modes,
-            capabilities: claude_capabilities,
-            threads: claude_threads,
-        } = ClaudeRuntime::connect(path_string.clone(), self.inner.claude_bin.clone()).await?;
-        let file_backed_skills = discover_file_backed_skills(&path_string);
-        let codex_provider_skills = self
-            .load_codex_provider_skills(&codex_session)
-            .await
-            .unwrap_or_default();
-        let merged_skills = merge_skills(
-            file_backed_skills
-                .into_iter()
-                .chain(codex_provider_skills)
-                .collect(),
-        );
-        let codex_skills = skills_for_provider(&merged_skills, AgentProvider::Codex);
-        let claude_skills = skills_for_provider(&merged_skills, AgentProvider::Claude);
-
-        let now = Utc::now();
-        let mut threads = codex_threads;
-        threads.extend(claude_threads.into_iter().map(|mut thread| {
-            thread.summary.workspace_id = workspace_id.clone();
-            crate::codex::HydratedThread {
-                summary: thread.summary,
-                items: thread.items,
-            }
-        }));
-        threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
-        let persisted_thread_states = persisted_workspace_ref
-            .map(|workspace| {
-                workspace
-                    .thread_states
-                    .iter()
-                    .map(|state| (state.thread_id.clone(), state.clone()))
-                    .collect::<HashMap<_, _>>()
-            })
-            .unwrap_or_default();
-        for state in persisted_thread_states.values() {
-            if threads
-                .iter()
-                .any(|thread| thread.summary.id == state.thread_id)
-            {
-                continue;
-            }
-            let restored_status = match state.status.clone().unwrap_or(ThreadStatus::Idle) {
-                ThreadStatus::Running => ThreadStatus::Error,
-                other => other,
-            };
-            let restored_last_error = state.last_error.clone().or_else(|| {
-                matches!(state.status, Some(ThreadStatus::Running))
-                    .then(|| "FalconDeck was closed while this turn was running".to_string())
-            });
-            threads.push(crate::codex::HydratedThread {
-                summary: ThreadSummary {
-                    id: state.thread_id.clone(),
-                    workspace_id: workspace_id.clone(),
-                    title: state
-                        .title
-                        .clone()
-                        .unwrap_or_else(|| "Restored thread".to_string()),
-                    provider: state.provider.clone().unwrap_or(AgentProvider::Codex),
-                    native_session_id: state.native_session_id.clone(),
-                    status: restored_status,
-                    updated_at: now,
-                    last_message_preview: None,
-                    latest_turn_id: None,
-                    latest_plan: None,
-                    latest_diff: None,
-                    last_tool: None,
-                    last_error: restored_last_error,
-                    agent: ThreadAgentParams::default(),
-                    attention: ThreadAttention::default(),
-                    is_archived: false,
-                },
-                items: Vec::new(),
-            });
-        }
-        let current_thread_id = persisted_workspace_ref
-            .and_then(|workspace| workspace.current_thread_id.as_deref())
-            .and_then(|thread_id| {
-                threads
-                    .iter()
-                    .find(|thread| thread.summary.id == thread_id)
-                    .map(|thread| thread.summary.id.clone())
-            })
-            .or_else(|| threads.first().map(|thread| thread.summary.id.clone()));
-        let agents = vec![
-            WorkspaceAgentSummary {
-                provider: AgentProvider::Codex,
-                account: codex_account.clone(),
-                models: codex_models.clone(),
-                collaboration_modes: codex_collaboration_modes.clone(),
-                skills: codex_skills.clone(),
-                supports_plan_mode: true,
-                supports_native_plan_mode: true,
-                capabilities: AgentCapabilitySummary {
-                    supports_review: true,
-                },
-            },
-            WorkspaceAgentSummary {
-                provider: AgentProvider::Claude,
-                account: claude_account.clone(),
-                models: claude_models.clone(),
-                collaboration_modes: claude_collaboration_modes.clone(),
-                skills: claude_skills.clone(),
-                supports_plan_mode: true,
-                supports_native_plan_mode: true,
-                capabilities: claude_capabilities,
-            },
-        ];
-        let default_provider = persisted_workspace_ref
-            .and_then(|workspace| workspace.default_provider.clone())
-            .unwrap_or(AgentProvider::Codex);
-        let summary = WorkspaceSummary {
-            id: workspace_id.clone(),
-            path: path_string.clone(),
-            status: if agents.iter().all(|agent| {
-                matches!(
-                    agent.account.status,
-                    falcondeck_core::AccountStatus::NeedsAuth
-                )
-            }) {
-                WorkspaceStatus::NeedsAuth
-            } else {
-                WorkspaceStatus::Ready
-            },
-            agents,
-            skills: merged_skills,
-            default_provider: default_provider.clone(),
-            models: codex_models,
-            collaboration_modes: codex_collaboration_modes.clone(),
-            supports_plan_mode: true,
-            supports_native_plan_mode: true,
-            account: codex_account,
-            current_thread_id,
-            connected_at: now,
-            updated_at: persisted_workspace_ref
-                .and_then(|workspace| workspace.updated_at)
-                .unwrap_or(now),
-            last_error: None,
-        };
-
-        self.inner.workspaces.lock().await.insert(
-            workspace_id.clone(),
-            ManagedWorkspace {
-                summary: summary.clone(),
-                codex_session: Some(codex_session),
-                claude_runtime: Some(claude_runtime),
-                threads: threads
-                    .into_iter()
-                    .map(|mut thread| {
-                        if persisted_workspace_ref
-                            .map(|pw| pw.archived_thread_ids.contains(&thread.summary.id))
-                            .unwrap_or(false)
-                        {
-                            thread.summary.is_archived = true;
-                        }
-                        if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
-                            if let Some(provider) = state.provider.clone() {
-                                thread.summary.provider = provider;
-                            }
-                            if state.native_session_id.is_some() {
-                                thread.summary.native_session_id = state.native_session_id.clone();
-                            }
-                            thread.summary.attention.last_read_seq = state.last_read_seq;
-                            thread.summary.attention.last_agent_activity_seq =
-                                state.last_agent_activity_seq;
-                        }
-                        (thread.summary.id.clone(), {
-                            let mut managed =
-                                ManagedThread::with_items(thread.summary, thread.items);
-                            if let Some(state) = persisted_thread_states.get(&managed.summary.id) {
-                                managed.manual_title = state.manual_title;
-                                managed.ai_title_generated = state.ai_title_generated
-                                    || (!is_placeholder_thread_title(&managed.summary.title)
-                                        && !is_provisional_thread_title(&managed.summary.title));
-                            }
-                            managed
-                        })
-                    })
-                    .collect(),
-            },
-        );
-        self.inner.saved_workspaces.lock().await.insert(
-            path_string,
-            persisted_workspace_ref
-                .cloned()
-                .unwrap_or(PersistedWorkspaceState {
-                    path: summary.path.clone(),
-                    current_thread_id: summary.current_thread_id.clone(),
-                    updated_at: Some(summary.updated_at),
-                    default_provider: Some(summary.default_provider.clone()),
-                    last_error: None,
-                    archived_thread_ids: Vec::new(),
-                    thread_states: Vec::new(),
-                }),
-        );
-
-        self.emit(
-            Some(workspace_id),
-            None,
-            UnifiedEvent::Snapshot {
-                snapshot: self.snapshot().await,
-            },
-        );
-
-        self.persist_local_state().await?;
-
-        Ok(summary)
+        workspace_ops::connect_workspace_internal(self, request, persisted_workspace).await
     }
 
     pub async fn start_thread(
         &self,
         request: StartThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
-        let (provider, supports_native_plan_mode, default_model_id) = {
-            let workspaces = self.inner.workspaces.lock().await;
-            let workspace = workspaces
-                .get(&request.workspace_id)
-                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            let provider = request
-                .provider
-                .clone()
-                .unwrap_or_else(|| workspace.summary.default_provider.clone());
-            let agent = workspace
-                .summary
-                .agents
-                .iter()
-                .find(|agent| agent.provider == provider)
-                .cloned();
-            (
-                provider,
-                agent
-                    .as_ref()
-                    .map(|agent| agent.supports_native_plan_mode)
-                    .unwrap_or(workspace.summary.supports_native_plan_mode),
-                agent.and_then(|agent| {
-                    agent
-                        .models
-                        .iter()
-                        .find(|model| model.is_default)
-                        .or_else(|| agent.models.first())
-                        .map(|model| model.id.clone())
-                }),
-            )
-        };
-        let approval_policy = request
-            .approval_policy
-            .unwrap_or_else(|| "on-request".to_string());
-        let model_id = request.model_id.clone().or(default_model_id);
-        let (thread_id, title, native_session_id) = match provider {
-            AgentProvider::Codex => {
-                let session = self.session_for(&request.workspace_id).await?;
-                let workspace_path = session.workspace_path().to_string();
-                let result = session
-                    .send_request(
-                        "thread/start",
-                        json!({
-                            "cwd": workspace_path,
-                            "model": model_id,
-                            "collaborationMode": collaboration_mode_payload(
-                                request.collaboration_mode_id.as_deref(),
-                                model_id.as_deref(),
-                                None,
-                                supports_native_plan_mode,
-                            ),
-                            "approvalPolicy": approval_policy
-                        }),
-                    )
-                    .await?;
-                (
-                    extract_thread_id(&result).ok_or_else(|| {
-                        DaemonError::Rpc("thread/start did not return a thread id".to_string())
-                    })?,
-                    extract_thread_title(&result).unwrap_or_else(|| "New thread".to_string()),
-                    extract_thread_id(&result),
-                )
-            }
-            AgentProvider::Claude => (
-                format!("claude-thread-{}", Uuid::new_v4().simple()),
-                "New Claude thread".to_string(),
-                None,
-            ),
-        };
-        let now = Utc::now();
-
-        let mut workspaces = self.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .get_mut(&request.workspace_id)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        let thread = ThreadSummary {
-            id: thread_id.clone(),
-            workspace_id: request.workspace_id.clone(),
-            title,
-            provider: provider.clone(),
-            native_session_id,
-            status: ThreadStatus::Idle,
-            updated_at: now,
-            last_message_preview: None,
-            latest_turn_id: None,
-            latest_plan: None,
-            latest_diff: None,
-            last_tool: None,
-            last_error: None,
-            agent: ThreadAgentParams {
-                model_id,
-                reasoning_effort: None,
-                collaboration_mode_id: request.collaboration_mode_id,
-                approval_policy: Some(approval_policy),
-                service_tier: None,
-            },
-            attention: ThreadAttention::default(),
-            is_archived: false,
-        };
-        workspace.summary.current_thread_id = Some(thread_id.clone());
-        workspace.summary.default_provider = provider;
-        workspace.summary.updated_at = now;
-        workspace
-            .threads
-            .insert(thread_id.clone(), ManagedThread::new(thread.clone()));
-        let workspace_summary = workspace.summary.clone();
-        drop(workspaces);
-
-        let thread = self
-            .thread_summary(&request.workspace_id, &thread.id)
-            .await?;
-        self.emit(
-            Some(request.workspace_id),
-            Some(thread.id.clone()),
-            UnifiedEvent::ThreadStarted {
-                thread: thread.clone(),
-            },
-        );
-
-        Ok(ThreadHandle {
-            workspace: workspace_summary,
-            thread,
-        })
+        workspace_ops::start_thread(self, request).await
     }
 
     pub async fn archive_thread(
@@ -1418,26 +993,7 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
-        let mut workspaces = self.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .get_mut(workspace_id)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        let thread = workspace
-            .threads
-            .get_mut(thread_id)
-            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-        thread.summary.is_archived = true;
-        drop(workspaces);
-        let summary = self.thread_summary(workspace_id, thread_id).await?;
-        self.emit(
-            Some(workspace_id.to_string()),
-            Some(thread_id.to_string()),
-            UnifiedEvent::Snapshot {
-                snapshot: self.snapshot().await,
-            },
-        );
-        let _ = self.persist_local_state().await;
-        Ok(summary)
+        workspace_ops::archive_thread(self, workspace_id, thread_id).await
     }
 
     pub async fn unarchive_thread(
@@ -1445,338 +1001,28 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadSummary, DaemonError> {
-        let mut workspaces = self.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .get_mut(workspace_id)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        let thread = workspace
-            .threads
-            .get_mut(thread_id)
-            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-        thread.summary.is_archived = false;
-        drop(workspaces);
-        let summary = self.thread_summary(workspace_id, thread_id).await?;
-        self.emit(
-            Some(workspace_id.to_string()),
-            Some(thread_id.to_string()),
-            UnifiedEvent::Snapshot {
-                snapshot: self.snapshot().await,
-            },
-        );
-        let _ = self.persist_local_state().await;
-        Ok(summary)
+        workspace_ops::unarchive_thread(self, workspace_id, thread_id).await
     }
 
     pub async fn send_turn(
         &self,
         request: SendTurnRequest,
     ) -> Result<CommandResponse, DaemonError> {
-        let inputs = if request.inputs.is_empty() {
-            return Err(DaemonError::BadRequest(
-                "at least one input item is required".to_string(),
-            ));
-        } else {
-            request.inputs.clone()
-        };
-        let approval_policy = request
-            .approval_policy
-            .unwrap_or_else(|| "on-request".to_string());
-
-        let user_message = build_user_message_item(&inputs);
-        let (thread, requires_resume, use_plan_mode_shim, provider, selected_skills) = {
-            let mut workspaces = self.inner.workspaces.lock().await;
-            let workspace = workspaces
-                .get_mut(&request.workspace_id)
-                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            let now = Utc::now();
-            let provider = request
-                .provider
-                .clone()
-                .or_else(|| {
-                    workspace
-                        .threads
-                        .get(&request.thread_id)
-                        .map(|thread| thread.summary.provider.clone())
-                })
-                .unwrap_or_else(|| workspace.summary.default_provider.clone());
-            let managed = workspace
-                .threads
-                .entry(request.thread_id.clone())
-                .or_insert_with(|| {
-                    ManagedThread::new(ThreadSummary {
-                        id: request.thread_id.clone(),
-                        workspace_id: request.workspace_id.clone(),
-                        title: "Untitled thread".to_string(),
-                        provider: provider.clone(),
-                        native_session_id: None,
-                        status: ThreadStatus::Idle,
-                        updated_at: now,
-                        last_message_preview: None,
-                        latest_turn_id: None,
-                        latest_plan: None,
-                        latest_diff: None,
-                        last_tool: None,
-                        last_error: None,
-                        agent: ThreadAgentParams::default(),
-                        attention: ThreadAttention::default(),
-                        is_archived: false,
-                    })
-                });
-            managed.summary.provider = provider.clone();
-            managed.summary.status = ThreadStatus::Running;
-            managed.summary.agent.model_id = request.model_id.clone().or(managed
-                .summary
-                .agent
-                .model_id
-                .clone());
-            managed.summary.agent.reasoning_effort = request.reasoning_effort.clone().or(managed
-                .summary
-                .agent
-                .reasoning_effort
-                .clone());
-            managed.summary.agent.collaboration_mode_id = request
-                .collaboration_mode_id
-                .clone()
-                .or(managed.summary.agent.collaboration_mode_id.clone());
-            managed.summary.agent.approval_policy = Some(approval_policy.clone());
-            managed.summary.agent.service_tier = request.service_tier.clone().or(managed
-                .summary
-                .agent
-                .service_tier
-                .clone());
-            let use_plan_mode_shim = should_use_plan_mode_shim(
-                &workspace.summary,
-                &provider,
-                request.collaboration_mode_id.as_deref(),
-            );
-            let selected_skills = resolve_selected_skills(
-                &workspace.summary.skills,
-                &request.selected_skills,
-                &provider,
-            );
-            if !managed.manual_title
-                && !managed.ai_title_generated
-                && is_placeholder_thread_title(&managed.summary.title)
-            {
-                if let Some(title) = provisional_thread_title_from_inputs(&inputs) {
-                    managed.summary.title = title;
-                }
-            }
-            managed.summary.updated_at = now;
-            workspace.summary.current_thread_id = Some(managed.summary.id.clone());
-            workspace.summary.default_provider = provider.clone();
-            workspace.summary.updated_at = now;
-            (
-                managed.summary.clone(),
-                managed.requires_resume,
-                use_plan_mode_shim,
-                provider,
-                selected_skills,
-            )
-        };
-        self.push_conversation_item(
-            &request.workspace_id,
-            &request.thread_id,
-            user_message.clone(),
-            false,
-        )
-        .await?;
-        self.emit(
-            Some(request.workspace_id.clone()),
-            Some(request.thread_id.clone()),
-            UnifiedEvent::ThreadUpdated {
-                thread: thread.clone(),
-            },
-        );
-
-        let start_result: Result<(), DaemonError> = match provider {
-            AgentProvider::Codex => {
-                let session = self.session_for(&request.workspace_id).await?;
-                let workspace_path = session.workspace_path().to_string();
-                if requires_resume {
-                    session.resume_thread(&request.thread_id).await?;
-                    let mut workspaces = self.inner.workspaces.lock().await;
-                    if let Some(workspace) = workspaces.get_mut(&request.workspace_id) {
-                        if let Some(thread) = workspace.threads.get_mut(&request.thread_id) {
-                            thread.requires_resume = false;
-                        }
-                    }
-                }
-
-                session
-                    .send_request(
-                        "turn/start",
-                        json!({
-                            "threadId": request.thread_id,
-                            "input": codex_inputs_with_plan_mode_shim(&inputs, &selected_skills, use_plan_mode_shim),
-                            "cwd": workspace_path,
-                            "model": request.model_id,
-                            "effort": request.reasoning_effort,
-                            "collaborationMode": collaboration_mode_payload(
-                                request.collaboration_mode_id.as_deref(),
-                                request.model_id.as_deref(),
-                                request.reasoning_effort.as_deref(),
-                                !use_plan_mode_shim,
-                            ),
-                            "approvalPolicy": approval_policy,
-                            "serviceTier": request.service_tier
-                        }),
-                    )
-                    .await?;
-                Ok(())
-            }
-            AgentProvider::Claude => {
-                let runtime = self.claude_runtime_for(&request.workspace_id).await?;
-                let session_id = thread.native_session_id.clone();
-                let spawn = runtime
-                    .spawn_turn(
-                        &request.thread_id,
-                        session_id.as_deref(),
-                        &claude_prompt_from_inputs(&inputs, &selected_skills),
-                        thread.agent.model_id.as_deref(),
-                        thread.agent.reasoning_effort.as_deref(),
-                        is_claude_plan_mode(thread.agent.collaboration_mode_id.as_deref()),
-                    )
-                    .await?;
-                self.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
-                    thread.native_session_id = Some(spawn.session_id.clone());
-                })
-                .await?;
-                let app = self.clone();
-                let workspace_id = request.workspace_id.clone();
-                let thread_id = request.thread_id.clone();
-                tokio::spawn(async move {
-                    app.monitor_claude_turn(
-                        workspace_id,
-                        thread_id,
-                        spawn.session_id,
-                        spawn.stdout,
-                        spawn.stderr,
-                    )
-                    .await;
-                });
-                Ok(())
-            }
-        };
-
-        if let Err(error) = start_result {
-            let error_message = error.to_string();
-            let _ = self
-                .with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
-                    thread.status = ThreadStatus::Error;
-                    thread.last_error = Some(error_message.clone());
-                    thread.updated_at = Utc::now();
-                })
-                .await;
-            if let Ok(thread) = self
-                .thread_summary(&request.workspace_id, &request.thread_id)
-                .await
-            {
-                self.emit(
-                    Some(request.workspace_id.clone()),
-                    Some(request.thread_id.clone()),
-                    UnifiedEvent::ThreadUpdated { thread },
-                );
-            }
-            return Err(error);
-        }
-
-        Ok(CommandResponse {
-            ok: true,
-            message: Some("turn started".to_string()),
-        })
+        workspace_ops::send_turn(self, request).await
     }
 
     pub async fn update_thread(
         &self,
         request: UpdateThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
-        let workspace_summary = {
-            let mut workspaces = self.inner.workspaces.lock().await;
-            let workspace = workspaces
-                .get_mut(&request.workspace_id)
-                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            let thread = workspace
-                .threads
-                .get_mut(&request.thread_id)
-                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-            let now = Utc::now();
-
-            if let Some(provider) = request.provider.clone() {
-                if provider != thread.summary.provider {
-                    return Err(DaemonError::BadRequest(
-                        "threads are permanently bound to their original provider".to_string(),
-                    ));
-                }
-            }
-
-            if let Some(title) = request.title.as_deref().map(str::trim) {
-                if title.is_empty() {
-                    return Err(DaemonError::BadRequest(
-                        "thread title cannot be empty".to_string(),
-                    ));
-                }
-                thread.summary.title = title.to_string();
-                thread.manual_title = true;
-                thread.ai_title_generated = true;
-                thread.ai_title_in_flight = false;
-            }
-
-            thread.summary.agent.model_id = request.model_id.clone();
-            thread.summary.agent.reasoning_effort = request.reasoning_effort.clone();
-            thread.summary.agent.collaboration_mode_id = request.collaboration_mode_id.clone();
-            thread.summary.updated_at = now;
-            workspace.summary.current_thread_id = Some(request.thread_id.clone());
-            workspace.summary.updated_at = now;
-
-            workspace.summary.clone()
-        };
-        let thread = self
-            .thread_summary(&request.workspace_id, &request.thread_id)
-            .await?;
-
-        self.emit(
-            Some(request.workspace_id.clone()),
-            Some(request.thread_id.clone()),
-            UnifiedEvent::ThreadUpdated {
-                thread: thread.clone(),
-            },
-        );
-        let _ = self.persist_local_state().await;
-
-        Ok(ThreadHandle {
-            workspace: workspace_summary,
-            thread,
-        })
+        workspace_ops::update_thread(self, request).await
     }
 
     pub async fn start_review(
         &self,
         request: StartReviewRequest,
     ) -> Result<CommandResponse, DaemonError> {
-        let provider = self
-            .thread_provider(&request.workspace_id, &request.thread_id)
-            .await?;
-        if provider != AgentProvider::Codex {
-            return Err(DaemonError::BadRequest(
-                "code review is only available for Codex threads in this milestone".to_string(),
-            ));
-        }
-        let session = self.session_for(&request.workspace_id).await?;
-        session
-            .send_request(
-                "review/start",
-                json!({
-                    "threadId": request.thread_id,
-                    "target": request.target
-                }),
-            )
-            .await?;
-
-        Ok(CommandResponse {
-            ok: true,
-            message: Some("review started".to_string()),
-        })
+        workspace_ops::start_review(self, request).await
     }
 
     pub async fn interrupt_turn(
@@ -1784,43 +1030,7 @@ impl AppState {
         workspace_id: String,
         thread_id: String,
     ) -> Result<CommandResponse, DaemonError> {
-        let provider = self.thread_provider(&workspace_id, &thread_id).await?;
-        if provider == AgentProvider::Claude {
-            let runtime = self.claude_runtime_for(&workspace_id).await?;
-            runtime.interrupt_turn(&thread_id).await?;
-            return Ok(CommandResponse {
-                ok: true,
-                message: Some("interrupt requested".to_string()),
-            });
-        }
-
-        let session = self.session_for(&workspace_id).await?;
-        let turn_id = {
-            let workspaces = self.inner.workspaces.lock().await;
-            let workspace = workspaces
-                .get(&workspace_id)
-                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            workspace
-                .threads
-                .get(&thread_id)
-                .and_then(|thread| thread.summary.latest_turn_id.clone())
-                .ok_or_else(|| DaemonError::BadRequest("no active turn to interrupt".to_string()))?
-        };
-
-        session
-            .send_request(
-                "turn/interrupt",
-                json!({
-                    "threadId": thread_id,
-                    "turnId": turn_id,
-                }),
-            )
-            .await?;
-
-        Ok(CommandResponse {
-            ok: true,
-            message: Some("interrupt requested".to_string()),
-        })
+        workspace_ops::interrupt_turn(self, workspace_id, thread_id).await
     }
 
     pub async fn respond_to_interactive_request(
@@ -1829,202 +1039,15 @@ impl AppState {
         request_id: String,
         response: InteractiveResponsePayload,
     ) -> Result<CommandResponse, DaemonError> {
-        let pending = {
-            let requests = self.inner.interactive_requests.lock().await;
-            requests
-                .get(&(workspace_id.clone(), request_id.clone()))
-                .cloned()
-                .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?
-        };
-        if let Some(thread_id) = pending.request.thread_id.as_deref() {
-            let provider = self.thread_provider(&workspace_id, thread_id).await?;
-            if provider != AgentProvider::Codex {
-                return Err(DaemonError::BadRequest(
-                    "Claude interactive requests are not yet routable through FalconDeck"
-                        .to_string(),
-                ));
-            }
-        }
-        let session = self.session_for(&workspace_id).await?;
-
-        let result = match (&pending.request.kind, response) {
-            (
-                InteractiveRequestKind::Approval,
-                InteractiveResponsePayload::Approval { decision },
-            ) => {
-                let decision = match decision {
-                    ApprovalDecision::Allow => "allow",
-                    ApprovalDecision::Deny => "deny",
-                    ApprovalDecision::AlwaysAllow => "always_allow",
-                };
-                json!({
-                    "decision": decision,
-                    "acceptSettings": {"forSession": true}
-                })
-            }
-            (
-                InteractiveRequestKind::Question,
-                InteractiveResponsePayload::Question { answers },
-            ) => json!({
-                "answers": answers
-                    .into_iter()
-                    .map(|(question_id, question_answers)| {
-                        (question_id, json!({ "answers": question_answers }))
-                    })
-                    .collect::<serde_json::Map<String, Value>>()
-            }),
-            (InteractiveRequestKind::Approval, _) => {
-                return Err(DaemonError::BadRequest(
-                    "interactive approval requires an approval response".to_string(),
-                ));
-            }
-            (InteractiveRequestKind::Question, _) => {
-                return Err(DaemonError::BadRequest(
-                    "interactive question requires question answers".to_string(),
-                ));
-            }
-        };
-
-        session.respond_to_request(pending.raw_id, result).await?;
-
-        self.inner
-            .interactive_requests
-            .lock()
+        workspace_ops::respond_to_interactive_request(self, workspace_id, request_id, response)
             .await
-            .remove(&(workspace_id.clone(), request_id.clone()));
-
-        if let Some(thread_id) = pending.request.thread_id {
-            self.with_thread_mut(&workspace_id, &thread_id, |thread| {
-                thread.status = ThreadStatus::Running;
-            })
-            .await?;
-            self.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
-                .await?;
-        }
-
-        self.emit(
-            Some(workspace_id),
-            None,
-            UnifiedEvent::Snapshot {
-                snapshot: self.snapshot().await,
-            },
-        );
-
-        Ok(CommandResponse {
-            ok: true,
-            message: Some("response sent".to_string()),
-        })
     }
 
     pub async fn collaboration_modes(
         &self,
         workspace_id: &str,
     ) -> Result<Vec<CollaborationModeSummary>, DaemonError> {
-        let workspaces = self.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .get(workspace_id)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        Ok(workspace
-            .summary
-            .agents
-            .iter()
-            .find(|agent| agent.provider == workspace.summary.default_provider)
-            .map(|agent| agent.collaboration_modes.clone())
-            .unwrap_or_else(|| workspace.summary.collaboration_modes.clone()))
-    }
-
-    async fn load_codex_provider_skills(
-        &self,
-        session: &Arc<CodexSession>,
-    ) -> Result<Vec<SkillSummary>, DaemonError> {
-        let value = session
-            .send_request("skills/list", json!({ "limit": 200 }))
-            .await
-            .unwrap_or(Value::Null);
-        Ok(parse_codex_provider_skills(&value))
-    }
-
-    async fn refresh_connected_workspace_metadata(
-        &self,
-        workspace_id: &str,
-    ) -> Result<WorkspaceSummary, DaemonError> {
-        let (workspace_path, codex_session, claude_runtime) = {
-            let workspaces = self.inner.workspaces.lock().await;
-            let workspace = workspaces
-                .get(workspace_id)
-                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            (
-                workspace.summary.path.clone(),
-                workspace.codex_session.clone(),
-                workspace.claude_runtime.clone(),
-            )
-        };
-
-        let codex_metadata = match codex_session.as_ref() {
-            Some(session) => Some(session.provider_metadata().await?),
-            None => None,
-        };
-        let claude_metadata = match claude_runtime.as_ref() {
-            Some(runtime) => Some(runtime.provider_metadata().await),
-            None => None,
-        };
-        let file_backed_skills = discover_file_backed_skills(&workspace_path);
-        let codex_provider_skills = match codex_session.as_ref() {
-            Some(session) => self
-                .load_codex_provider_skills(session)
-                .await
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
-        let merged_skills = merge_skills(
-            file_backed_skills
-                .into_iter()
-                .chain(codex_provider_skills)
-                .collect(),
-        );
-        let codex_skills = skills_for_provider(&merged_skills, AgentProvider::Codex);
-        let claude_skills = skills_for_provider(&merged_skills, AgentProvider::Claude);
-
-        let summary = {
-            let mut workspaces = self.inner.workspaces.lock().await;
-            let workspace = workspaces
-                .get_mut(workspace_id)
-                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            workspace.summary.skills = merged_skills;
-
-            if let Some(metadata) = codex_metadata {
-                update_workspace_agent_summary(
-                    &mut workspace.summary.agents,
-                    AgentProvider::Codex,
-                    metadata,
-                    codex_skills,
-                );
-            }
-            if let Some(metadata) = claude_metadata {
-                update_workspace_agent_summary(
-                    &mut workspace.summary.agents,
-                    AgentProvider::Claude,
-                    metadata,
-                    claude_skills,
-                );
-            }
-
-            workspace.summary.status = if workspace.summary.agents.iter().all(|agent| {
-                matches!(
-                    agent.account.status,
-                    falcondeck_core::AccountStatus::NeedsAuth
-                )
-            }) {
-                WorkspaceStatus::NeedsAuth
-            } else {
-                WorkspaceStatus::Ready
-            };
-
-            workspace.summary.clone()
-        };
-
-        self.persist_local_state().await?;
-        Ok(summary)
+        workspace_ops::collaboration_modes(self, workspace_id).await
     }
 
     pub async fn thread_detail(
@@ -2032,24 +1055,7 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadDetail, DaemonError> {
-        let workspaces = self.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .get(workspace_id)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        let thread = workspace
-            .threads
-            .get(thread_id)
-            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-        let workspace_summary = workspace.summary.clone();
-        let thread_summary = thread.summary.clone();
-        let items = thread.items.clone();
-        drop(workspaces);
-
-        Ok(ThreadDetail {
-            workspace: workspace_summary,
-            thread: self.build_thread_summary_from_clone(thread_summary).await,
-            items,
-        })
+        workspace_ops::thread_detail(self, workspace_id, thread_id).await
     }
 
     pub async fn mark_thread_read(
@@ -2058,34 +1064,7 @@ impl AppState {
         thread_id: &str,
         read_seq: u64,
     ) -> Result<ThreadSummary, DaemonError> {
-        let mut changed = false;
-        {
-            let mut workspaces = self.inner.workspaces.lock().await;
-            let workspace = workspaces
-                .get_mut(workspace_id)
-                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            let thread = workspace
-                .threads
-                .get_mut(thread_id)
-                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-            if read_seq > thread.summary.attention.last_read_seq {
-                thread.summary.attention.last_read_seq = read_seq;
-                changed = true;
-            }
-        }
-
-        let thread = self.thread_summary(workspace_id, thread_id).await?;
-        if changed {
-            self.emit(
-                Some(workspace_id.to_string()),
-                Some(thread_id.to_string()),
-                UnifiedEvent::ThreadUpdated {
-                    thread: thread.clone(),
-                },
-            );
-            self.persist_local_state().await?;
-        }
-        Ok(thread)
+        workspace_ops::mark_thread_read(self, workspace_id, thread_id, read_seq).await
     }
 
     async fn run_remote_bridge(
@@ -2620,646 +1599,7 @@ impl AppState {
         method: &str,
         params: Value,
     ) -> Result<(), DaemonError> {
-        match method {
-            "thread/started" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let title = extract_thread_title(&params)
-                        .unwrap_or_else(|| "Untitled thread".to_string());
-                    let updated_at =
-                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.title = title.clone();
-                            thread.status = ThreadStatus::Idle;
-                            thread.updated_at = updated_at;
-                            if let Some(model_id) =
-                                extract_string(&params, &["model", "modelId", "model_id"])
-                            {
-                                thread.agent.model_id = Some(model_id);
-                            }
-                            if let Some(reasoning_effort) = extract_string(
-                                &params,
-                                &["effort", "reasoningEffort", "reasoning_effort"],
-                            ) {
-                                thread.agent.reasoning_effort = Some(reasoning_effort);
-                            }
-                            if let Some(approval_policy) =
-                                extract_string(&params, &["approvalPolicy", "approval_policy"])
-                            {
-                                thread.agent.approval_policy = Some(approval_policy);
-                            }
-                        })
-                        .await?;
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
-                        UnifiedEvent::ThreadStarted { thread },
-                    );
-                }
-            }
-            "thread/name/updated" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let title = extract_thread_title(&params)
-                        .unwrap_or_else(|| "Untitled thread".to_string());
-                    let updated_at =
-                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-                    self.with_managed_thread_mut(workspace_id, &thread_id, |thread| {
-                        thread.summary.title = title.clone();
-                        thread.summary.updated_at = updated_at;
-                        if !is_placeholder_thread_title(&title)
-                            && !is_provisional_thread_title(&title)
-                        {
-                            thread.ai_title_generated = true;
-                            thread.ai_title_in_flight = false;
-                        }
-                    })
-                    .await?;
-                    let thread = self.thread_summary(workspace_id, &thread_id).await?;
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                }
-            }
-            "turn/started" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let turn_id = extract_string(&params, &["turnId", "turn_id"])
-                        .unwrap_or_else(|| "turn".to_string());
-                    let updated_at =
-                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.status = ThreadStatus::Running;
-                            thread.latest_turn_id = Some(turn_id.clone());
-                            thread.last_error = None;
-                            thread.updated_at = updated_at;
-                            if let Some(model_id) =
-                                extract_string(&params, &["model", "modelId", "model_id"])
-                            {
-                                thread.agent.model_id = Some(model_id);
-                            }
-                            if let Some(reasoning_effort) = extract_string(
-                                &params,
-                                &["effort", "reasoningEffort", "reasoning_effort"],
-                            ) {
-                                thread.agent.reasoning_effort = Some(reasoning_effort);
-                            }
-                            if let Some(approval_policy) =
-                                extract_string(&params, &["approvalPolicy", "approval_policy"])
-                            {
-                                thread.agent.approval_policy = Some(approval_policy);
-                            }
-                            if let Some(service_tier) =
-                                extract_string(&params, &["serviceTier", "service_tier"])
-                            {
-                                thread.agent.service_tier = Some(service_tier);
-                            }
-                        })
-                        .await?;
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
-                        UnifiedEvent::TurnStart { turn_id },
-                    );
-                }
-            }
-            "turn/completed" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let turn_id = extract_string(&params, &["turnId", "turn_id"])
-                        .unwrap_or_else(|| "turn".to_string());
-                    let status = extract_string(&params, &["status"])
-                        .unwrap_or_else(|| "completed".to_string());
-                    let error = extract_string(&params, &["error"]).or_else(|| {
-                        extract_string(params.get("error").unwrap_or(&Value::Null), &["message"])
-                    });
-                    let updated_at =
-                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.status = if error.is_some() {
-                                ThreadStatus::Error
-                            } else {
-                                ThreadStatus::Idle
-                            };
-                            thread.last_error = error.clone();
-                            thread.updated_at = updated_at;
-                        })
-                        .await?;
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::TurnEnd {
-                            turn_id,
-                            status,
-                            error,
-                        },
-                    );
-                    self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id)
-                        .await;
-                }
-            }
-            "turn/step/started" | "turn/step/completed" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let step = extract_string(&params, &["step"]);
-                    let status = plan_step_status(method, &params);
-                    let turn_id = extract_string(&params, &["turnId", "turn_id"]);
-                    let updated_at =
-                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.updated_at = updated_at;
-                            if let Some(plan) = &mut thread.latest_plan {
-                                if let Some(s) = step.clone() {
-                                    if let Some(step_obj) =
-                                        plan.steps.iter_mut().find(|st| st.step == s)
-                                    {
-                                        if let Some(st) = status.clone() {
-                                            step_obj.status = st;
-                                        }
-                                    }
-                                }
-                            }
-                        })
-                        .await?;
-
-                    if let (Some(turn_id), Some(plan)) = (turn_id, thread.latest_plan.clone()) {
-                        self.push_conversation_item(
-                            workspace_id,
-                            &thread_id,
-                            ConversationItem::Plan {
-                                id: format!("plan-{turn_id}"),
-                                plan,
-                                created_at: updated_at,
-                            },
-                            true,
-                        )
-                        .await?;
-                    }
-
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                }
-            }
-            "turn/plan/updated" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let plan = parse_thread_plan(&params);
-                    let updated_at =
-                        notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.latest_plan = plan.clone();
-                            thread.updated_at = updated_at;
-                        })
-                        .await?;
-                    if let Some(plan) = plan {
-                        self.push_conversation_item(
-                            workspace_id,
-                            &thread_id,
-                            ConversationItem::Plan {
-                                id: format!(
-                                    "plan-{}",
-                                    extract_string(&params, &["turnId", "turn_id"])
-                                        .unwrap_or_else(|| thread_id.clone())
-                                ),
-                                plan,
-                                created_at: updated_at,
-                            },
-                            true,
-                        )
-                        .await?;
-                    }
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                }
-            }
-            "turn/diff/updated" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let diff = extract_string(&params, &["diff", "patch"]);
-                    if let Some(diff) = diff {
-                        let updated_at =
-                            notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-                        let thread = self
-                            .upsert_thread(workspace_id, &thread_id, |thread| {
-                                thread.latest_diff = Some(diff.clone());
-                                thread.updated_at = updated_at;
-                            })
-                            .await?;
-                        self.push_conversation_item(
-                            workspace_id,
-                            &thread_id,
-                            ConversationItem::Diff {
-                                id: format!(
-                                    "diff-{}",
-                                    extract_string(&params, &["turnId", "turn_id"])
-                                        .unwrap_or_else(|| thread_id.clone())
-                                ),
-                                diff,
-                                created_at: updated_at,
-                            },
-                            true,
-                        )
-                        .await?;
-                        self.emit(
-                            Some(workspace_id.to_string()),
-                            Some(thread_id),
-                            UnifiedEvent::ThreadUpdated { thread },
-                        );
-                    }
-                }
-            }
-            "item/agentMessage/delta" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let item_id = extract_string(&params, &["itemId", "item_id"])
-                        .unwrap_or_else(|| "message".to_string());
-                    let delta = extract_string(&params, &["delta"]).unwrap_or_default();
-
-                    let next = {
-                        let mut workspaces = self.inner.workspaces.lock().await;
-                        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
-                            DaemonError::NotFound("workspace not found".to_string())
-                        })?;
-                        let thread = workspace
-                            .threads
-                            .get_mut(&thread_id)
-                            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-
-                        thread.summary.last_message_preview = Some(truncate_preview(
-                            &format!(
-                                "{}{}",
-                                thread
-                                    .summary
-                                    .last_message_preview
-                                    .clone()
-                                    .unwrap_or_default(),
-                                delta
-                            ),
-                            160,
-                        ));
-                        thread.summary.updated_at = Utc::now();
-                        workspace.summary.current_thread_id = Some(thread_id.clone());
-                        workspace.summary.updated_at = Utc::now();
-
-                        let existing_index = thread.assistant_items.get(&item_id).copied();
-                        let next = match existing_index.and_then(|i| thread.items.get(i)) {
-                            Some(ConversationItem::AssistantMessage {
-                                id,
-                                text,
-                                created_at,
-                            }) => ConversationItem::AssistantMessage {
-                                id: id.clone(),
-                                text: format!("{text}{delta}"),
-                                created_at: *created_at,
-                            },
-                            _ => ConversationItem::AssistantMessage {
-                                id: item_id.clone(),
-                                text: delta.clone(),
-                                created_at: Utc::now(),
-                            },
-                        };
-
-                        if let Some(index) = existing_index {
-                            thread.items[index] = next.clone();
-                        } else {
-                            thread.items.push(next.clone());
-                            thread
-                                .assistant_items
-                                .insert(item_id.clone(), thread.items.len() - 1);
-                        }
-                        next
-                    };
-
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::Text { item_id, delta },
-                    );
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
-                        UnifiedEvent::ConversationItemUpdated { item: next },
-                    );
-                }
-            }
-            "item/reasoning/textDelta" | "item/reasoning/summaryTextDelta" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let item_id = extract_string(&params, &["itemId", "item_id"])
-                        .unwrap_or_else(|| "reasoning".to_string());
-                    let delta = extract_string(&params, &["delta"]).unwrap_or_default();
-
-                    let next = {
-                        let mut workspaces = self.inner.workspaces.lock().await;
-                        let workspace = workspaces.get_mut(workspace_id).ok_or_else(|| {
-                            DaemonError::NotFound("workspace not found".to_string())
-                        })?;
-                        let thread = workspace
-                            .threads
-                            .get_mut(&thread_id)
-                            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
-
-                        thread.summary.updated_at = Utc::now();
-                        workspace.summary.current_thread_id = Some(thread_id.clone());
-                        workspace.summary.updated_at = Utc::now();
-
-                        let existing_index = thread.reasoning_items.get(&item_id).copied();
-                        let next = match existing_index.and_then(|i| thread.items.get(i)) {
-                            Some(ConversationItem::Reasoning {
-                                id,
-                                summary,
-                                content,
-                                created_at,
-                            }) => {
-                                if method.ends_with("summaryTextDelta") {
-                                    ConversationItem::Reasoning {
-                                        id: id.clone(),
-                                        summary: Some(format!(
-                                            "{}{}",
-                                            summary.as_deref().unwrap_or_default(),
-                                            delta
-                                        )),
-                                        content: content.clone(),
-                                        created_at: *created_at,
-                                    }
-                                } else {
-                                    ConversationItem::Reasoning {
-                                        id: id.clone(),
-                                        summary: summary.clone(),
-                                        content: format!("{content}{delta}"),
-                                        created_at: *created_at,
-                                    }
-                                }
-                            }
-                            _ => ConversationItem::Reasoning {
-                                id: item_id.clone(),
-                                summary: if method.ends_with("summaryTextDelta") {
-                                    Some(delta.clone())
-                                } else {
-                                    None
-                                },
-                                content: if method.ends_with("summaryTextDelta") {
-                                    String::new()
-                                } else {
-                                    delta.clone()
-                                },
-                                created_at: Utc::now(),
-                            },
-                        };
-
-                        if let Some(index) = existing_index {
-                            thread.items[index] = next.clone();
-                        } else {
-                            thread.items.push(next.clone());
-                            thread
-                                .reasoning_items
-                                .insert(item_id.clone(), thread.items.len() - 1);
-                        }
-                        next
-                    };
-
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
-                        UnifiedEvent::ConversationItemUpdated { item: next },
-                    );
-                }
-            }
-            "item/started" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let item = params.get("item").unwrap_or(&params);
-                    let item_id =
-                        extract_string(item, &["id"]).unwrap_or_else(|| "item".to_string());
-                    let kind = extract_string(item, &["kind", "type"])
-                        .unwrap_or_else(|| "tool".to_string());
-                    if !should_surface_tool_item(&kind) {
-                        return Ok(());
-                    }
-                    let title = extract_string(item, &["title", "label", "command"])
-                        .or_else(|| {
-                            extract_string(
-                                item.get("command").unwrap_or(&Value::Null),
-                                &["command"],
-                            )
-                        })
-                        .unwrap_or_else(|| kind.clone());
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.status = ThreadStatus::Running;
-                            thread.last_tool = Some(title.clone());
-                        })
-                        .await?;
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::ToolCallStart {
-                            item_id: item_id.clone(),
-                            title: title.clone(),
-                            kind: kind.clone(),
-                        },
-                    );
-                    self.push_conversation_item(
-                        workspace_id,
-                        &thread_id,
-                        {
-                            let display =
-                                tool_display_metadata(&title, &kind, "running", None, None);
-                            ConversationItem::ToolCall {
-                                id: item_id,
-                                title,
-                                tool_kind: kind,
-                                status: "running".to_string(),
-                                output: None,
-                                exit_code: None,
-                                display,
-                                created_at: Utc::now(),
-                                completed_at: None,
-                            }
-                        },
-                        true,
-                    )
-                    .await?;
-                }
-            }
-            "item/completed" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let item = params.get("item").unwrap_or(&params);
-                    let item_id =
-                        extract_string(item, &["id"]).unwrap_or_else(|| "item".to_string());
-                    let kind = extract_string(item, &["kind", "type"])
-                        .unwrap_or_else(|| "tool".to_string());
-                    if !should_surface_tool_item(&kind) {
-                        return Ok(());
-                    }
-                    let title = extract_string(item, &["title", "label", "command"])
-                        .or_else(|| {
-                            extract_string(
-                                item.get("command").unwrap_or(&Value::Null),
-                                &["command"],
-                            )
-                        })
-                        .unwrap_or_else(|| kind.clone());
-                    let status = extract_string(item, &["status"])
-                        .unwrap_or_else(|| "completed".to_string());
-                    let exit_code = item
-                        .get("exitCode")
-                        .or_else(|| item.get("exit_code"))
-                        .and_then(Value::as_i64)
-                        .map(|value| value as i32);
-                    let thread = self
-                        .upsert_thread(workspace_id, &thread_id, |thread| {
-                            thread.last_tool = Some(title.clone());
-                        })
-                        .await?;
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.clone()),
-                        UnifiedEvent::ToolCallEnd {
-                            item_id: item_id.clone(),
-                            title: title.clone(),
-                            kind: kind.clone(),
-                            status: status.clone(),
-                            exit_code,
-                        },
-                    );
-                    let existing_output = item
-                        .get("output")
-                        .or_else(|| item.get("result"))
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    self.push_conversation_item(
-                        workspace_id,
-                        &thread_id,
-                        {
-                            let display = tool_display_metadata(
-                                &title,
-                                &kind,
-                                &status,
-                                exit_code,
-                                item.get("output")
-                                    .or_else(|| item.get("result"))
-                                    .and_then(Value::as_str),
-                            );
-                            ConversationItem::ToolCall {
-                                id: item_id.clone(),
-                                title: title.clone(),
-                                tool_kind: kind.clone(),
-                                status: status.clone(),
-                                output: existing_output,
-                                exit_code,
-                                display,
-                                created_at: Utc::now(),
-                                completed_at: Some(Utc::now()),
-                            }
-                        },
-                        true,
-                    )
-                    .await?;
-                    if kind.eq_ignore_ascii_case("fileChange")
-                        || kind.eq_ignore_ascii_case("file_change")
-                    {
-                        self.emit(
-                            Some(workspace_id.to_string()),
-                            Some(thread_id),
-                            UnifiedEvent::File {
-                                item_id: Some(item_id),
-                                path: extract_string(item, &["path"]),
-                                summary: title,
-                            },
-                        );
-                    }
-                }
-            }
-            "error" => {
-                let thread_id = extract_thread_id(&params);
-                let message =
-                    extract_string(&params, &["message"]).unwrap_or_else(|| params.to_string());
-                self.emit_service(
-                    Some(workspace_id.to_string()),
-                    thread_id,
-                    ServiceLevel::Error,
-                    message,
-                    Some(method.to_string()),
-                )?;
-            }
-            "account/updated" => {
-                let mut workspaces = self.inner.workspaces.lock().await;
-                if let Some(workspace) = workspaces.get_mut(workspace_id) {
-                    workspace.summary.account = parse_account(&params);
-                    if let Some(agent) = workspace
-                        .summary
-                        .agents
-                        .iter_mut()
-                        .find(|agent| agent.provider == AgentProvider::Codex)
-                    {
-                        agent.account = workspace.summary.account.clone();
-                    }
-                    workspace.summary.status = workspace_status_after_account_update(
-                        &workspace.summary.status,
-                        &workspace.summary.account.status,
-                    );
-                    workspace.summary.updated_at = Utc::now();
-                }
-            }
-            "model/rerouted" => {
-                if let Some(thread_id) = extract_thread_id(&params) {
-                    let rerouted_model = extract_string(
-                        &params,
-                        &[
-                            "toModel",
-                            "to_model",
-                            "model",
-                            "modelId",
-                            "model_id",
-                            "reroutedModel",
-                            "rerouted_model",
-                        ],
-                    );
-                    if let Some(model_id) = rerouted_model {
-                        let thread = self
-                            .upsert_thread(workspace_id, &thread_id, |thread| {
-                                thread.agent.model_id = Some(model_id.clone());
-                            })
-                            .await?;
-                        self.emit(
-                            Some(workspace_id.to_string()),
-                            Some(thread_id),
-                            UnifiedEvent::ThreadUpdated { thread },
-                        );
-                    }
-                }
-            }
-            _ => {
-                debug!("ignoring unsupported codex notification: {method}");
-            }
-        }
-
-        Ok(())
+        notifications::ingest_notification(self, workspace_id, method, params).await
     }
 
     pub async fn ingest_server_request(
@@ -3269,99 +1609,7 @@ impl AppState {
         method: &str,
         params: Value,
     ) -> Result<(), DaemonError> {
-        if method.ends_with("requestApproval") || method == "item/tool/requestUserInput" {
-            let request_id = normalize_request_id(&raw_id);
-            let request = if method.ends_with("requestApproval") {
-                InteractiveRequest {
-                    request_id: request_id.clone(),
-                    workspace_id: workspace_id.to_string(),
-                    thread_id: extract_thread_id(&params),
-                    method: method.to_string(),
-                    kind: InteractiveRequestKind::Approval,
-                    title: extract_string(&params, &["reason", "title"])
-                        .unwrap_or_else(|| approval_title(method)),
-                    detail: extract_string(&params, &["message", "description"]),
-                    command: extract_string(&params, &["command"]),
-                    path: extract_string(&params, &["path"]),
-                    turn_id: extract_string(&params, &["turnId", "turn_id"]),
-                    item_id: extract_string(&params, &["itemId", "item_id"]),
-                    questions: Vec::new(),
-                    created_at: Utc::now(),
-                }
-            } else {
-                let questions = parse_interactive_questions(&params);
-                InteractiveRequest {
-                    request_id: request_id.clone(),
-                    workspace_id: workspace_id.to_string(),
-                    thread_id: extract_thread_id(&params),
-                    method: method.to_string(),
-                    kind: InteractiveRequestKind::Question,
-                    title: extract_string(&params, &["title"])
-                        .unwrap_or_else(|| "Answer question".to_string()),
-                    detail: extract_string(&params, &["message", "description"]).or_else(|| {
-                        Some(format!(
-                            "{} question{} from the agent.",
-                            questions.len(),
-                            if questions.len() == 1 { "" } else { "s" }
-                        ))
-                    }),
-                    command: None,
-                    path: None,
-                    turn_id: extract_string(&params, &["turnId", "turn_id"]),
-                    item_id: extract_string(&params, &["itemId", "item_id"]),
-                    questions,
-                    created_at: Utc::now(),
-                }
-            };
-
-            self.inner.interactive_requests.lock().await.insert(
-                (workspace_id.to_string(), request_id.clone()),
-                PendingServerRequest {
-                    raw_id,
-                    request: request.clone(),
-                },
-            );
-
-            if let Some(thread_id) = request.thread_id.clone() {
-                self.with_thread_mut(workspace_id, &thread_id, |thread| {
-                    thread.status = ThreadStatus::WaitingForInput;
-                })
-                .await?;
-            }
-
-            self.emit(
-                Some(workspace_id.to_string()),
-                request.thread_id.clone(),
-                UnifiedEvent::InteractiveRequest {
-                    request: request.clone(),
-                },
-            );
-            if let Some(thread_id) = request.thread_id.clone() {
-                self.push_conversation_item(
-                    workspace_id,
-                    &thread_id,
-                    ConversationItem::InteractiveRequest {
-                        id: request_id,
-                        request,
-                        created_at: Utc::now(),
-                        resolved: false,
-                    },
-                    false,
-                )
-                .await?;
-            }
-            return Ok(());
-        }
-
-        self.emit_service(
-            Some(workspace_id.to_string()),
-            extract_thread_id(&params),
-            ServiceLevel::Warning,
-            format!("FalconDeck has not implemented interactive handling for {method} yet."),
-            Some(method.to_string()),
-        )?;
-
-        Ok(())
+        notifications::ingest_server_request(self, workspace_id, raw_id, method, params).await
     }
 
     pub fn emit_service(
@@ -3681,20 +1929,20 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
+        crypto::{build_pairing_public_key_bundle, generate_data_key, LocalBoxKeyPair},
         AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput, ThreadAgentParams,
         ThreadAttention, ThreadStatus, ThreadSummary, TurnInputItem, UpdateThreadRequest,
         WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
-        crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
     };
     use serde_json::json;
     use tempfile::tempdir;
-    use tokio::time::{Duration as TokioDuration, sleep};
+    use tokio::time::{sleep, Duration as TokioDuration};
 
     use super::{
-        AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, codex_inputs,
-        codex_inputs_with_plan_mode_shim, collaboration_mode_payload, encode_base64,
+        codex_inputs, codex_inputs_with_plan_mode_shim, collaboration_mode_payload, encode_base64,
         notification_timestamp, plan_step_status, should_surface_tool_item,
-        should_use_plan_mode_shim, workspace_status_after_account_update,
+        should_use_plan_mode_shim, workspace_status_after_account_update, AppState,
+        PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
     };
 
     #[test]
@@ -3739,12 +1987,10 @@ mod tests {
         );
         assert_eq!(payload.len(), 2);
         assert_eq!(payload[0]["type"], "text");
-        assert!(
-            payload[0]["text"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("Enter plan mode for this turn")
-        );
+        assert!(payload[0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Enter plan mode for this turn"));
         assert_eq!(payload[1]["text"], "Inspect the repo");
     }
 

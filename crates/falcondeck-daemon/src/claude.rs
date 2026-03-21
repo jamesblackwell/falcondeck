@@ -32,6 +32,13 @@ pub struct ClaudeBootstrap {
     pub threads: Vec<HydratedClaudeThread>,
 }
 
+pub struct ClaudeProviderMetadata {
+    pub account: AccountSummary,
+    pub models: Vec<ModelSummary>,
+    pub collaboration_modes: Vec<CollaborationModeSummary>,
+    pub capabilities: AgentCapabilitySummary,
+}
+
 pub struct HydratedClaudeThread {
     pub summary: ThreadSummary,
     pub items: Vec<ConversationItem>,
@@ -63,17 +70,8 @@ impl ClaudeRuntime {
 
         let account = read_auth_status(&resolved.executable).await;
         let models = curated_models();
-        let collaboration_modes = vec![CollaborationModeSummary {
-            id: "plan".to_string(),
-            label: "Plan".to_string(),
-            mode: Some("plan".to_string()),
-            model_id: None,
-            reasoning_effort: Some("medium".to_string()),
-            is_native: true,
-        }];
-        let capabilities = AgentCapabilitySummary {
-            supports_review: false,
-        };
+        let collaboration_modes = default_collaboration_modes();
+        let capabilities = default_capabilities();
         let threads = hydrate_threads(&workspace_path);
 
         Ok(ClaudeBootstrap {
@@ -186,6 +184,32 @@ impl ClaudeRuntime {
         }
         active.clear();
         Ok(())
+    }
+
+    pub async fn provider_metadata(&self) -> ClaudeProviderMetadata {
+        ClaudeProviderMetadata {
+            account: read_auth_status(&self.claude_bin).await,
+            models: curated_models(),
+            collaboration_modes: default_collaboration_modes(),
+            capabilities: default_capabilities(),
+        }
+    }
+}
+
+fn default_collaboration_modes() -> Vec<CollaborationModeSummary> {
+    vec![CollaborationModeSummary {
+        id: "plan".to_string(),
+        label: "Plan".to_string(),
+        mode: Some("plan".to_string()),
+        model_id: None,
+        reasoning_effort: Some("medium".to_string()),
+        is_native: true,
+    }]
+}
+
+fn default_capabilities() -> AgentCapabilitySummary {
+    AgentCapabilitySummary {
+        supports_review: false,
     }
 }
 

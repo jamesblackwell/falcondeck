@@ -1,12 +1,14 @@
+//! Pairing, signing, and encryption helpers shared across FalconDeck services.
+
 use aes_gcm::{
-    Aes256Gcm, Nonce,
     aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::{RngCore, rngs::OsRng};
-use serde::{Serialize, de::DeserializeOwned};
+use rand::{rngs::OsRng, RngCore};
+use serde::{de::DeserializeOwned, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -25,40 +27,53 @@ const SIGNING_PUBKEY_LEN: usize = 32;
 const SIGNATURE_LEN: usize = 64;
 
 #[derive(Debug, Error)]
+/// Errors produced while decoding keys, verifying signatures, or encrypting payloads.
 pub enum CryptoError {
+    /// The payload or key uses an encryption or identity variant this crate does not support.
     #[error("unsupported encryption variant")]
     UnsupportedVariant,
+    /// A base64-encoded input could not be decoded.
     #[error("invalid base64 payload")]
     InvalidBase64,
+    /// The supplied key material had the wrong size or shape.
     #[error("invalid key material")]
     InvalidKeyMaterial,
+    /// An encrypted envelope was truncated or otherwise malformed.
     #[error("invalid encrypted envelope")]
     InvalidEnvelope,
+    /// A signature was missing, malformed, or failed verification.
     #[error("invalid signature")]
     InvalidSignature,
+    /// Symmetric or asymmetric encryption failed.
     #[error("failed to encrypt payload")]
     EncryptFailed,
+    /// Symmetric or asymmetric decryption failed.
     #[error("failed to decrypt payload")]
     DecryptFailed,
+    /// JSON serialization failed before encryption.
     #[error("failed to serialize payload")]
     SerializeFailed,
+    /// JSON deserialization failed after decryption.
     #[error("failed to deserialize payload")]
     DeserializeFailed,
 }
 
 #[derive(Debug, Clone)]
+/// Locally generated X25519 key material used for sealed box pairing flows.
 pub struct LocalBoxKeyPair {
     secret_key: SecretKey,
     public_key_base64: String,
 }
 
 #[derive(Debug, Clone)]
+/// Locally generated Ed25519 identity key material used to sign pairing payloads.
 pub struct LocalIdentityKeyPair {
     signing_key: SigningKey,
     public_key_base64: String,
 }
 
 impl LocalIdentityKeyPair {
+    /// Derives a signing key pair from a deterministic 32-byte seed.
     pub fn from_seed(seed: &[u8; DATA_KEY_LEN]) -> Self {
         let signing_key = SigningKey::from_bytes(seed);
         let public_key_base64 = BASE64.encode(signing_key.verifying_key().as_bytes());
@@ -68,20 +83,24 @@ impl LocalIdentityKeyPair {
         }
     }
 
+    /// Reuses a box key pair's secret material as the seed for an identity key pair.
     pub fn from_box_key_pair(key_pair: &LocalBoxKeyPair) -> Self {
         Self::from_seed(&key_pair.secret_key_bytes())
     }
 
+    /// Returns the public signing key encoded as base64.
     pub fn public_key_base64(&self) -> &str {
         &self.public_key_base64
     }
 
+    /// Signs an arbitrary byte payload and returns the signature as base64.
     pub fn sign_bytes(&self, payload: &[u8]) -> String {
         BASE64.encode(self.signing_key.sign(payload).to_bytes())
     }
 }
 
 impl LocalBoxKeyPair {
+    /// Generates a fresh local box key pair.
     pub fn generate() -> Self {
         let secret_key = SecretKey::generate(&mut OsRng);
         let public_key_base64 = BASE64.encode(secret_key.public_key().as_bytes());
@@ -91,10 +110,16 @@ impl LocalBoxKeyPair {
         }
     }
 
+    /// Returns the public box key encoded as base64.
     pub fn public_key_base64(&self) -> &str {
         &self.public_key_base64
     }
 
+    /// Encrypts a shared data key for the given recipient public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError`] if the recipient key is invalid or encryption fails.
     pub fn wrap_data_key(
         &self,
         recipient_public_key_base64: &str,
@@ -123,6 +148,11 @@ impl LocalBoxKeyPair {
         })
     }
 
+    /// Decrypts a wrapped shared data key produced by [`Self::wrap_data_key`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError`] if the envelope is malformed or decryption fails.
     pub fn unwrap_data_key(
         &self,
         wrapped: &WrappedDataKey,
@@ -158,14 +188,21 @@ impl LocalBoxKeyPair {
             .map_err(|_| CryptoError::InvalidKeyMaterial)
     }
 
+    /// Returns the raw secret key bytes.
     pub fn secret_key_bytes(&self) -> [u8; DATA_KEY_LEN] {
         self.secret_key.to_bytes()
     }
 
+    /// Returns the secret key encoded as base64 for secure persistence.
     pub fn secret_key_base64(&self) -> String {
         BASE64.encode(self.secret_key.to_bytes())
     }
 
+    /// Restores a local box key pair from a base64-encoded secret key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError`] if the input is not valid base64 or key material.
     pub fn from_secret_key_base64(secret_key_base64: &str) -> Result<Self, CryptoError> {
         let bytes = BASE64
             .decode(secret_key_base64)
@@ -181,6 +218,7 @@ impl LocalBoxKeyPair {
     }
 }
 
+/// Generates a fresh random symmetric data key for encrypted relay traffic.
 pub fn generate_data_key() -> [u8; DATA_KEY_LEN] {
     let mut data_key = [0u8; DATA_KEY_LEN];
     OsRng.fill_bytes(&mut data_key);
@@ -241,6 +279,7 @@ fn session_key_material_signing_payload(material: &SessionKeyMaterial) -> Vec<u8
     .into_bytes()
 }
 
+/// Builds a signed pairing bundle from a local box key pair.
 pub fn build_pairing_public_key_bundle(key_pair: &LocalBoxKeyPair) -> PairingPublicKeyBundle {
     let identity_key_pair = LocalIdentityKeyPair::from_box_key_pair(key_pair);
     let mut bundle = PairingPublicKeyBundle {
@@ -254,6 +293,11 @@ pub fn build_pairing_public_key_bundle(key_pair: &LocalBoxKeyPair) -> PairingPub
     bundle
 }
 
+/// Verifies the signature and required fields of a pairing public key bundle.
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if the bundle is incomplete or its signature is invalid.
 pub fn verify_pairing_public_key_bundle(
     bundle: &PairingPublicKeyBundle,
 ) -> Result<(), CryptoError> {
@@ -272,6 +316,11 @@ pub fn verify_pairing_public_key_bundle(
         .map_err(|_| CryptoError::InvalidSignature)
 }
 
+/// Signs session bootstrap material with the daemon identity key.
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if the material uses an unsupported identity variant.
 pub fn sign_session_key_material(
     identity_key_pair: &LocalIdentityKeyPair,
     material: &mut SessionKeyMaterial,
@@ -284,6 +333,11 @@ pub fn sign_session_key_material(
     Ok(())
 }
 
+/// Verifies the daemon signature attached to session bootstrap material.
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if the material is incomplete or the signature is invalid.
 pub fn verify_session_key_material(material: &SessionKeyMaterial) -> Result<(), CryptoError> {
     if material.encryption_variant != EncryptionVariant::DataKeyV1
         || material.identity_variant != IdentityVariant::Ed25519V1
@@ -304,6 +358,11 @@ pub fn verify_session_key_material(material: &SessionKeyMaterial) -> Result<(), 
         .map_err(|_| CryptoError::InvalidSignature)
 }
 
+/// Encrypts an arbitrary byte slice into an [`EncryptedEnvelope`].
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if the key is invalid or encryption fails.
 pub fn encrypt_bytes(
     data_key: &[u8; DATA_KEY_LEN],
     bytes: &[u8],
@@ -328,6 +387,11 @@ pub fn encrypt_bytes(
     })
 }
 
+/// Decrypts an [`EncryptedEnvelope`] back into raw bytes.
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if the envelope is malformed or decryption fails.
 pub fn decrypt_bytes(
     data_key: &[u8; DATA_KEY_LEN],
     envelope: &EncryptedEnvelope,
@@ -354,6 +418,11 @@ pub fn decrypt_bytes(
         .map_err(|_| CryptoError::DecryptFailed)
 }
 
+/// Serializes a value as JSON and encrypts it into an [`EncryptedEnvelope`].
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if serialization or encryption fails.
 pub fn encrypt_json<T: Serialize>(
     data_key: &[u8; DATA_KEY_LEN],
     value: &T,
@@ -362,6 +431,11 @@ pub fn encrypt_json<T: Serialize>(
     encrypt_bytes(data_key, &payload)
 }
 
+/// Decrypts an [`EncryptedEnvelope`] and deserializes the contained JSON payload.
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if decryption or deserialization fails.
 pub fn decrypt_json<T: DeserializeOwned>(
     data_key: &[u8; DATA_KEY_LEN],
     envelope: &EncryptedEnvelope,

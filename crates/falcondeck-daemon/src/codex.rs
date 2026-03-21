@@ -5,8 +5,8 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
 };
 
@@ -16,12 +16,12 @@ use falcondeck_core::{
     ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams, ThreadAttention,
     ThreadPlan, ThreadStatus, ThreadSummary, ToolCallDisplay,
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{Mutex, oneshot},
-    time::{Duration, timeout},
+    sync::{oneshot, Mutex},
+    time::{timeout, Duration},
 };
 use tracing::warn;
 
@@ -29,12 +29,24 @@ use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
 use crate::skills::canonical_skill_alias;
 use crate::{app::AppState, error::DaemonError};
 
+mod session_file;
+mod thread_list;
+
+use session_file::hydrate_thread_items_from_session_file;
+use thread_list::{parse_collaboration_modes, parse_models, parse_threads};
+
 pub struct CodexBootstrap {
     pub session: Arc<CodexSession>,
     pub account: AccountSummary,
     pub models: Vec<ModelSummary>,
     pub collaboration_modes: Vec<CollaborationModeSummary>,
     pub threads: Vec<HydratedThread>,
+}
+
+pub struct CodexProviderMetadata {
+    pub account: AccountSummary,
+    pub models: Vec<ModelSummary>,
+    pub collaboration_modes: Vec<CollaborationModeSummary>,
 }
 
 struct ParsedThreadRecord {
@@ -222,6 +234,21 @@ impl CodexSession {
 
     pub fn workspace_path(&self) -> &str {
         &self.workspace_path
+    }
+
+    pub async fn provider_metadata(&self) -> Result<CodexProviderMetadata, DaemonError> {
+        let account_value = self.send_request("account/read", json!({})).await?;
+        let models_value = self.send_request("model/list", json!({})).await?;
+        let collaboration_modes_value = self
+            .send_request("collaborationMode/list", json!({}))
+            .await
+            .unwrap_or(Value::Null);
+
+        Ok(CodexProviderMetadata {
+            account: parse_account(&account_value),
+            models: parse_models(&models_value),
+            collaboration_modes: parse_collaboration_modes(&collaboration_modes_value),
+        })
     }
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
@@ -439,204 +466,6 @@ pub fn parse_account(value: &Value) -> AccountSummary {
     }
 }
 
-fn parse_models(value: &Value) -> Vec<ModelSummary> {
-    let models = value
-        .get("result")
-        .and_then(Value::as_object)
-        .and_then(|result| result.get("data"))
-        .and_then(Value::as_array)
-        .or_else(|| value.get("data").and_then(Value::as_array))
-        .or_else(|| value.get("models").and_then(Value::as_array))
-        .or_else(|| value.as_array());
-
-    models
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let id = entry
-                .get("id")
-                .or_else(|| entry.get("model"))
-                .or_else(|| entry.get("slug"))
-                .and_then(Value::as_str)?;
-            let label = entry
-                .get("displayName")
-                .or_else(|| entry.get("display_name"))
-                .or_else(|| entry.get("title"))
-                .or_else(|| entry.get("label"))
-                .or_else(|| entry.get("name"))
-                .and_then(Value::as_str)
-                .unwrap_or(id);
-            Some(ModelSummary {
-                id: id.to_string(),
-                label: label.to_string(),
-                is_default: entry
-                    .get("isDefault")
-                    .or_else(|| entry.get("is_default"))
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                default_reasoning_effort: extract_string(
-                    entry,
-                    &["defaultReasoningEffort", "default_reasoning_effort"],
-                ),
-                supported_reasoning_efforts: parse_reasoning_efforts(entry),
-            })
-        })
-        .collect()
-}
-
-fn parse_reasoning_efforts(value: &Value) -> Vec<ReasoningEffortSummary> {
-    value
-        .get("supportedReasoningEfforts")
-        .or_else(|| value.get("supported_reasoning_efforts"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let reasoning_effort = extract_string(entry, &["reasoningEffort", "reasoning_effort"])?;
-            Some(ReasoningEffortSummary {
-                reasoning_effort,
-                description: extract_string(entry, &["description"]).unwrap_or_default(),
-            })
-        })
-        .collect()
-}
-
-fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
-    value
-        .get("result")
-        .and_then(Value::as_object)
-        .and_then(|result| result.get("data"))
-        .and_then(Value::as_array)
-        .or_else(|| value.get("data").and_then(Value::as_array))
-        .or_else(|| value.get("modes").and_then(Value::as_array))
-        .or_else(|| value.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let settings = entry.get("settings");
-            let id = extract_string(entry, &["id", "mode", "name"])?;
-            Some(CollaborationModeSummary {
-                id: id.clone(),
-                label: extract_string(entry, &["label", "name"]).unwrap_or(id),
-                mode: extract_string(entry, &["mode"]),
-                model_id: extract_string(entry, &["model", "modelId", "model_id"]).or_else(|| {
-                    settings.and_then(|settings| {
-                        extract_string(settings, &["model", "modelId", "model_id"])
-                    })
-                }),
-                reasoning_effort: extract_string(entry, &["reasoningEffort", "reasoning_effort"])
-                    .or_else(|| {
-                        settings.and_then(|settings| {
-                            extract_string(settings, &["reasoningEffort", "reasoning_effort"])
-                        })
-                    }),
-                is_native: true,
-            })
-        })
-        .collect()
-}
-
-fn parse_threads(
-    workspace_id: &str,
-    workspace_path: &str,
-    value: &Value,
-) -> Vec<ParsedThreadRecord> {
-    let entries = extract_thread_entries(value);
-    let now = Utc::now();
-
-    entries
-        .into_iter()
-        .filter(|entry| {
-            extract_string(entry, &["cwd"])
-                .map(|cwd| cwd == workspace_path)
-                .unwrap_or(true)
-        })
-        .filter_map(|entry| {
-            let id = extract_thread_id(entry)?;
-            let preview = extract_string(entry, &["preview"]);
-            Some(ParsedThreadRecord {
-                summary: ThreadSummary {
-                    id,
-                    workspace_id: workspace_id.to_string(),
-                    title: extract_thread_title(entry)
-                        .or(preview.clone())
-                        .map(|title| truncate_preview(&title))
-                        .unwrap_or_else(|| "Untitled thread".to_string()),
-                    provider: AgentProvider::Codex,
-                    native_session_id: None,
-                    status: ThreadStatus::Idle,
-                    updated_at: extract_datetime_or_timestamp(
-                        entry,
-                        &[
-                            "updatedAt",
-                            "updated_at",
-                            "lastUpdatedAt",
-                            "last_updated_at",
-                            "completedAt",
-                            "completed_at",
-                            "startedAt",
-                            "started_at",
-                        ],
-                    )
-                    .unwrap_or(now),
-                    last_message_preview: preview.map(|value| truncate_preview(&value)),
-                    latest_turn_id: None,
-                    latest_plan: None,
-                    latest_diff: None,
-                    last_tool: None,
-                    last_error: None,
-                    agent: ThreadAgentParams {
-                        model_id: extract_string(entry, &["model", "modelId", "model_id"]),
-                        reasoning_effort: extract_string(
-                            entry,
-                            &["effort", "reasoningEffort", "reasoning_effort"],
-                        ),
-                        collaboration_mode_id: extract_string(
-                            entry,
-                            &["collaborationModeId", "collaboration_mode_id"],
-                        ),
-                        approval_policy: extract_string(
-                            entry,
-                            &["approvalPolicy", "approval_policy"],
-                        ),
-                        service_tier: extract_string(entry, &["serviceTier", "service_tier"]),
-                    },
-                    attention: ThreadAttention::default(),
-                    is_archived: false,
-                },
-                session_path: extract_string(entry, &["path"]),
-            })
-        })
-        .collect()
-}
-
-fn extract_thread_entries(value: &Value) -> Vec<&Value> {
-    fn walk<'a>(value: &'a Value) -> Vec<&'a Value> {
-        if let Some(array) = value.get("threads").and_then(Value::as_array) {
-            return array.iter().collect();
-        }
-        if let Some(array) = value.get("data").and_then(Value::as_array) {
-            return array.iter().collect();
-        }
-        if let Some(array) = value.as_array() {
-            return array.iter().collect();
-        }
-        if let Some(object) = value.as_object() {
-            for key in ["result", "items", "results"] {
-                if let Some(nested) = object.get(key) {
-                    let found = walk(nested);
-                    if !found.is_empty() {
-                        return found;
-                    }
-                }
-            }
-        }
-        Vec::new()
-    }
-
-    walk(value)
-}
-
 fn extract_thread_record(value: &Value) -> Option<&Value> {
     fn walk<'a>(value: &'a Value) -> Option<&'a Value> {
         if value
@@ -703,202 +532,6 @@ fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
 
 fn extract_thread_session_path(value: &Value) -> Option<String> {
     extract_thread_record(value).and_then(|thread| extract_string(thread, &["path"]))
-}
-
-fn hydrate_thread_items_from_session_file(
-    session_path: &str,
-    workspace_path: &str,
-) -> Vec<ConversationItem> {
-    let file = match File::open(session_path) {
-        Ok(file) => file,
-        Err(_) => return Vec::new(),
-    };
-    let mut items = Vec::new();
-    let mut matches_workspace = false;
-
-    for line in StdBufReader::new(file).lines().map_while(Result::ok) {
-        if line.len() > 512_000 {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let entry_type = value
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-
-        if matches!(entry_type, "session_meta" | "turn_context") {
-            if let Some(cwd) = extract_cwd(&value) {
-                matches_workspace = cwd == workspace_path;
-                if !matches_workspace {
-                    return Vec::new();
-                }
-            }
-        }
-
-        if !matches_workspace {
-            continue;
-        }
-
-        if let Some(item) = build_session_hydrated_item_from_entry(&value) {
-            items.push(item);
-        }
-    }
-
-    let mut conversation_items = items
-        .iter()
-        .filter(|item| should_keep_session_hydrated_item(item, &items))
-        .cloned()
-        .map(|item| item.item)
-        .collect::<Vec<_>>();
-    conversation_items.sort_by_key(conversation_item_created_at);
-    conversation_items
-}
-
-#[derive(Clone)]
-enum SessionHydratedItemKind {
-    UserMessage,
-    AssistantMessageFromEvent,
-    AssistantMessageFromResponse,
-    Other,
-}
-
-#[derive(Clone)]
-struct SessionHydratedItem {
-    kind: SessionHydratedItemKind,
-    item: ConversationItem,
-}
-
-fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydratedItem> {
-    let created_at =
-        extract_datetime_or_timestamp(value, &["timestamp", "createdAt", "created_at"])
-            .unwrap_or_else(Utc::now);
-    let entry_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let payload = value.get("payload")?;
-
-    match entry_type {
-        "event_msg" => match payload.get("type").and_then(Value::as_str)? {
-            "user_message" => Some(SessionHydratedItem {
-                kind: SessionHydratedItemKind::UserMessage,
-                item: ConversationItem::UserMessage {
-                    id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                        format!("session-user-{}", created_at.timestamp_millis())
-                    }),
-                    text: extract_string(payload, &["message"]).unwrap_or_default(),
-                    attachments: session_entry_attachments(payload),
-                    created_at,
-                },
-            }),
-            "agent_message" => Some(SessionHydratedItem {
-                kind: SessionHydratedItemKind::AssistantMessageFromEvent,
-                item: ConversationItem::AssistantMessage {
-                    id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                        format!("session-agent-{}", created_at.timestamp_millis())
-                    }),
-                    text: extract_string(payload, &["message"]).unwrap_or_default(),
-                    created_at,
-                },
-            }),
-            _ => None,
-        },
-        "response_item" => match payload.get("type").and_then(Value::as_str)? {
-            "message" => {
-                let role = extract_string(payload, &["role"]).unwrap_or_default();
-                let text = response_item_message_text(payload);
-                if text.is_empty() {
-                    return None;
-                }
-                match role.as_str() {
-                    "assistant" => Some(SessionHydratedItem {
-                        kind: SessionHydratedItemKind::AssistantMessageFromResponse,
-                        item: ConversationItem::AssistantMessage {
-                            id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                                format!("response-assistant-{}", created_at.timestamp_millis())
-                            }),
-                            text,
-                            created_at,
-                        },
-                    }),
-                    // Codex session files can include internal user-side response items
-                    // like environment context. The explicit user_message entry is the
-                    // one we want to show in the conversation.
-                    "user" => None,
-                    _ => None,
-                }
-            }
-            "reasoning" => Some(SessionHydratedItem {
-                kind: SessionHydratedItemKind::Other,
-                item: ConversationItem::Reasoning {
-                    id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                        format!("response-reasoning-{}", created_at.timestamp_millis())
-                    }),
-                    summary: payload
-                        .get("summary")
-                        .and_then(Value::as_array)
-                        .map(|parts| {
-                            parts
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(str::trim)
-                                .filter(|part| !part.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        })
-                        .filter(|summary| !summary.is_empty()),
-                    content: payload
-                        .get("content")
-                        .and_then(|content| thread_item_text(Some(content)))
-                        .unwrap_or_default(),
-                    created_at,
-                },
-            }),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn should_keep_session_hydrated_item(
-    candidate: &SessionHydratedItem,
-    all_items: &[SessionHydratedItem],
-) -> bool {
-    match candidate.kind {
-        SessionHydratedItemKind::AssistantMessageFromEvent => {
-            let ConversationItem::AssistantMessage {
-                text: candidate_text,
-                created_at: candidate_created_at,
-                ..
-            } = &candidate.item
-            else {
-                return true;
-            };
-
-            !all_items.iter().any(|existing| {
-                matches!(
-                    existing.kind,
-                    SessionHydratedItemKind::AssistantMessageFromResponse
-                ) && matches!(&existing.item, ConversationItem::AssistantMessage {
-                    text,
-                    created_at,
-                    ..
-                } if normalized_session_message(text) == normalized_session_message(candidate_text)
-                    && created_at
-                        .signed_duration_since(*candidate_created_at)
-                        .num_seconds()
-                        .abs()
-                        <= 5)
-            })
-        }
-        _ => true,
-    }
-}
-
-fn normalized_session_message(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn hydrate_thread_summary(
