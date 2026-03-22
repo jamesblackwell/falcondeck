@@ -112,7 +112,7 @@ export const InputToolbar = memo(function InputToolbar({
                     variant="caption"
                     color={active ? 'primary' : 'muted'}
                     size="2xs"
-                    weight={active ? 'semibold' : 'regular'}
+                    weight={active ? 'semibold' : 'normal'}
                   >
                     {p.label}
                   </Text>

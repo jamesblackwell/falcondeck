@@ -5,6 +5,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { EventEnvelope, RelayUpdate, MachinePresence } from '@falcondeck/client-core'
+import { isInvalidSavedSessionError } from './useRelayConnection'
 
 // Re-implement parseDaemonEvent to test in isolation
 // (it's a module-private function in useRelayConnection.ts)
@@ -212,5 +213,21 @@ describe('WebSocket URL construction', () => {
   it('passes through non-http URLs unchanged', () => {
     const url = buildWsUrl('wss://already-ws.test', 's1', 't1')
     expect(url).toBe('wss://already-ws.test/v1/updates/ws?session_id=s1&ticket=t1')
+  })
+})
+
+describe('invalid saved session detection', () => {
+  it('detects relay responses that mean the saved session is dead', () => {
+    expect(isInvalidSavedSessionError('invalid session token')).toBe(true)
+    expect(isInvalidSavedSessionError('session not found')).toBe(true)
+    expect(isInvalidSavedSessionError('trusted device revoked')).toBe(true)
+    expect(isInvalidSavedSessionError('Failed with status 401')).toBe(true)
+    expect(isInvalidSavedSessionError('Failed with status 404')).toBe(true)
+  })
+
+  it('ignores transient connection failures', () => {
+    expect(isInvalidSavedSessionError('Network error')).toBe(false)
+    expect(isInvalidSavedSessionError('Failed with status 500')).toBe(false)
+    expect(isInvalidSavedSessionError(null)).toBe(false)
   })
 })

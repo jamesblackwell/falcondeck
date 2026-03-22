@@ -25,6 +25,12 @@ function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   return null
 }
 
+export function isInvalidSavedSessionError(message: string | null) {
+  return !!message && /invalid session token|session not found|trusted device|failed with status 401|failed with status 404/i.test(
+    message,
+  )
+}
+
 export function useRelayConnection() {
   const sessionId = useRelayStore((s) => s.sessionId)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
@@ -139,6 +145,7 @@ export function useRelayConnection() {
     if (!clientToken) return
 
     let isCurrent = true
+    let shouldReconnect = true
     let activeSocket: WebSocket | null = null
     const relayUrl = relay.relayUrl.trim().replace(/\/$/, '')
     const wsUrl = relayUrl.startsWith('https://')
@@ -147,6 +154,7 @@ export function useRelayConnection() {
         ? `ws://${relayUrl.slice('http://'.length)}`
         : relayUrl
     relay._setConnectionStatus('connecting')
+    relay._setMachinePresence(null)
     relay._setError(null)
     pendingEncrypted.current = []
     snapshotRequestInFlight.current = false
@@ -157,8 +165,9 @@ export function useRelayConnection() {
     }
 
     const scheduleReconnect = () => {
-      if (!isCurrent) return
+      if (!isCurrent || !shouldReconnect || !useRelayStore.getState().sessionId) return
       relay._setConnectionStatus('disconnected')
+      relay._setMachinePresence(null)
       relay._setSocket(null)
       relay._failPendingRpcs('Remote connection dropped')
       pendingEncrypted.current = []
@@ -175,6 +184,13 @@ export function useRelayConnection() {
         reconnectTimer.current = null
         setReconnectGeneration((value) => value + 1)
       }, delay)
+    }
+
+    const resetInvalidSavedSession = async (message: string) => {
+      if (!shouldReconnect) return
+      shouldReconnect = false
+      await relay.disconnect()
+      useRelayStore.getState()._setError(message)
     }
 
     void fetch(`${relayUrl}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`, {
@@ -200,6 +216,7 @@ export function useRelayConnection() {
         relay._setSocket(socket)
 
         socket.onopen = () => {
+          if (!isCurrent) return
           reconnectAttempt.current = 0
           relay._setConnectionStatus('connected')
           relay._sendMessage({ type: 'sync', after_seq: relay._getLastReceivedSeq() })
@@ -250,6 +267,9 @@ export function useRelayConnection() {
               break
             case 'error':
               relay._setError(payload.message)
+              if (isInvalidSavedSessionError(payload.message)) {
+                void resetInvalidSavedSession(payload.message)
+              }
               break
           }
         }
@@ -260,12 +280,18 @@ export function useRelayConnection() {
       })
       .catch((error) => {
         if (!isCurrent) return
-        relay._setError(error instanceof Error ? error.message : 'Failed to connect to relay')
+        const message = error instanceof Error ? error.message : 'Failed to connect to relay'
+        relay._setError(message)
+        if (isInvalidSavedSessionError(message)) {
+          void resetInvalidSavedSession(message)
+          return
+        }
         scheduleReconnect()
       })
 
     return () => {
       isCurrent = false
+      shouldReconnect = false
       activeSocket?.close()
       relay._setSocket(null)
       relay._failPendingRpcs('Remote connection closed')

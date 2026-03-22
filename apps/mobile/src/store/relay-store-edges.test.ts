@@ -11,6 +11,7 @@ import {
   bytesToBase64,
 } from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
+import { useSessionStore } from './session-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 import { setJson, getJson } from '@/storage/mmkv'
@@ -32,6 +33,7 @@ function resetStore() {
     isConnected: false,
     isEncrypted: false,
   })
+  useSessionStore.getState().reset()
   resetSecureStore()
   resetMMKV()
 }
@@ -118,7 +120,7 @@ describe('relay-store edge cases', () => {
       expect(result).toBe(false)
     })
 
-    it('restores encrypted state when dataKey is persisted', async () => {
+    it('restores saved crypto without marking the session encrypted yet', async () => {
       const kp = generateBoxKeyPair()
       const secretB64 = secretKeyToBase64(kp)
       const dataKey = crypto.getRandomValues(new Uint8Array(32))
@@ -142,7 +144,10 @@ describe('relay-store edge cases', () => {
 
       const result = await useRelayStore.getState().restoreSession()
       expect(result).toBe(true)
-      expect(useRelayStore.getState().isEncrypted).toBe(true)
+      const state = useRelayStore.getState()
+      expect(state.connectionStatus).toBe('connecting')
+      expect(state.isEncrypted).toBe(false)
+      expect(state._getSessionCrypto()).not.toBeNull()
     })
   })
 
@@ -235,22 +240,34 @@ describe('relay-store edge cases', () => {
   })
 
   describe('_setSessionCrypto', () => {
-    it('sets isEncrypted when crypto is set', () => {
+    it('does not mark the session encrypted before the transport is encrypted', () => {
       useRelayStore.getState()._setSessionCrypto({
         dataKey: new Uint8Array(32),
         material: null,
       })
+      expect(useRelayStore.getState().isEncrypted).toBe(false)
+    })
+
+    it('marks the session encrypted only when crypto and encrypted status are both present', () => {
+      const store = useRelayStore.getState()
+      store._setSessionCrypto({
+        dataKey: new Uint8Array(32),
+        material: null,
+      })
+      store._setConnectionStatus('encrypted')
       expect(useRelayStore.getState().isEncrypted).toBe(true)
     })
 
     it('clears isEncrypted when crypto is null', () => {
-      useRelayStore.getState()._setSessionCrypto({
+      const store = useRelayStore.getState()
+      store._setSessionCrypto({
         dataKey: new Uint8Array(32),
         material: null,
       })
+      store._setConnectionStatus('encrypted')
       expect(useRelayStore.getState().isEncrypted).toBe(true)
 
-      useRelayStore.getState()._setSessionCrypto(null)
+      store._setSessionCrypto(null)
       expect(useRelayStore.getState().isEncrypted).toBe(false)
     })
   })
@@ -336,6 +353,13 @@ describe('relay-store edge cases', () => {
 
   describe('disconnect cleanup', () => {
     it('clears all state including machine presence', async () => {
+      useSessionStore.setState({
+        snapshot: {} as any,
+        selectedWorkspaceId: 'workspace-1',
+        selectedThreadId: 'thread-1',
+        threadItems: { 'thread-1': [] },
+        threadDetail: null,
+      })
       useRelayStore.setState({
         sessionId: 'session-1',
         deviceId: 'device-1',
@@ -358,6 +382,8 @@ describe('relay-store edge cases', () => {
       expect(state.connectionStatus).toBe('not_connected')
       expect(state.isConnected).toBe(false)
       expect(state.isEncrypted).toBe(false)
+      expect(useSessionStore.getState().snapshot).toBeNull()
+      expect(useSessionStore.getState().threadItems).toEqual({})
     })
   })
 })

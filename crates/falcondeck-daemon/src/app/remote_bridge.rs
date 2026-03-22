@@ -2,14 +2,14 @@ use std::sync::atomic::Ordering;
 
 use chrono::Utc;
 use falcondeck_core::{
-    crypto::{decrypt_json, encrypt_json, sign_session_key_material, LocalIdentityKeyPair},
     DaemonSnapshot, EncryptedEnvelope, EventEnvelope, PairingPublicKeyBundle, RelayClientMessage,
     RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
     SendTurnRequest, SessionKeyMaterial, StartThreadRequest, UnifiedEvent,
     UpdatePreferencesRequest, UpdateThreadRequest,
+    crypto::{LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{
     sync::{broadcast, mpsc},
     time::Duration,
@@ -17,8 +17,8 @@ use tokio::{
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::{
-    extract_string, parse_agent_provider, parse_interactive_response_params, AppState,
-    RemoteBridgeCommand, RemoteBridgeError, RemotePairingState,
+    AppState, RemoteBridgeCommand, RemoteBridgeError, RemotePairingState, extract_string,
+    parse_agent_provider, parse_interactive_response_params, relay_request_error,
 };
 use crate::error::DaemonError;
 
@@ -34,7 +34,7 @@ impl AppState {
         daemon_token: String,
         session_id: String,
         pairing: RemotePairingState,
-        client_bundle: PairingPublicKeyBundle,
+        client_bundle: Option<PairingPublicKeyBundle>,
         command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
     ) -> Result<(), RemoteBridgeError> {
         let ws_ticket = self
@@ -94,8 +94,14 @@ impl AppState {
             },
         )
         .await?;
-        self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle)
-            .await?;
+        if let Some(client_bundle) = client_bundle.as_ref() {
+            self.publish_session_bootstrap(&mut writer, &pairing, client_bundle)
+                .await?;
+        } else {
+            tracing::warn!(
+                "skipping bootstrap for restored trusted session {session_id}; client must already have the persisted data key"
+            );
+        }
         self.publish_remote_snapshot(&mut writer, &pairing.data_key, snapshot)
             .await?;
 
@@ -199,7 +205,7 @@ impl AppState {
         session_id: &str,
         daemon_token: &str,
     ) -> Result<falcondeck_core::TrustedDevicesResponse, DaemonError> {
-        reqwest::Client::new()
+        let response = reqwest::Client::new()
             .get(format!(
                 "{}/v1/sessions/{}/devices",
                 relay_url.trim_end_matches('/'),
@@ -210,11 +216,15 @@ impl AppState {
             .await
             .map_err(|error| {
                 DaemonError::Rpc(format!("failed to fetch relay remote status: {error}"))
-            })?
-            .error_for_status()
-            .map_err(|error| {
-                DaemonError::Rpc(format!("relay remote status request failed: {error}"))
-            })?
+            })?;
+        let response = if response.status().is_success() {
+            response
+        } else {
+            return Err(DaemonError::Rpc(
+                relay_request_error(response, "relay remote status request").await,
+            ));
+        };
+        response
             .json::<falcondeck_core::TrustedDevicesResponse>()
             .await
             .map_err(|error| {
@@ -228,7 +238,7 @@ impl AppState {
         session_id: &str,
         daemon_token: &str,
     ) -> Result<RelayWebSocketTicketResponse, DaemonError> {
-        reqwest::Client::new()
+        let response = reqwest::Client::new()
             .post(format!(
                 "{}/v1/sessions/{}/ws-ticket",
                 relay_url.trim_end_matches('/'),
@@ -239,11 +249,15 @@ impl AppState {
             .await
             .map_err(|error| {
                 DaemonError::Rpc(format!("failed to fetch relay websocket ticket: {error}"))
-            })?
-            .error_for_status()
-            .map_err(|error| {
-                DaemonError::Rpc(format!("relay websocket ticket request failed: {error}"))
-            })?
+            })?;
+        let response = if response.status().is_success() {
+            response
+        } else {
+            return Err(DaemonError::Rpc(
+                relay_request_error(response, "relay websocket ticket request").await,
+            ));
+        };
+        response
             .json::<RelayWebSocketTicketResponse>()
             .await
             .map_err(|error| {

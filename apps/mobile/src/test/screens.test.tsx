@@ -3,6 +3,8 @@ import { act } from 'react-test-renderer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { routerMock, useRelayStore } = vi.hoisted(() => {
+  ;(globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false
+
   const relayState = {
     relayUrl: '',
     pairingCode: '',
@@ -46,6 +48,11 @@ vi.mock('expo-router', () => {
     Drawer: ({ children }: any) => children,
   }
 })
+
+vi.mock('expo-camera', () => ({
+  CameraView: () => null,
+  useCameraPermissions: () => [{ granted: true }, vi.fn().mockResolvedValue({ granted: true })],
+}))
 
 vi.mock('@/store', () => ({ useRelayStore }))
 vi.mock('@/store/relay-store', () => ({ useRelayStore }))
@@ -103,7 +110,7 @@ describe('mobile app screens', () => {
 
     const renderer = renderComponent(<PairScreen />)
 
-    expect(textOf(renderer)).toContain('FalconDeck Remote')
+    expect(textOf(renderer)).toContain('Connect to your desktop agent')
     expect(textOf(renderer)).toContain('Bad pairing code')
     expect(routerMock.replace).toHaveBeenCalledWith('/(app)')
   })
@@ -121,11 +128,13 @@ describe('mobile app screens', () => {
     const renderer = renderComponent(<SettingsScreen />)
     expect(textOf(renderer)).toContain('Settings')
     expect(textOf(renderer)).toContain('https://relay.test')
-    expect(textOf(renderer)).toContain('E2E Active')
+    expect(textOf(renderer)).toContain('Relay session encrypted')
 
-    const pressables = renderer.root.findAllByType('Pressable' as any)
+    const disconnectButton = renderer.root.find(
+      (node) => node.props.label === 'Disconnect' && typeof node.props.onPress === 'function',
+    )
     await act(async () => {
-      await pressables[0]!.props.onPress()
+      await disconnectButton.props.onPress()
     })
 
     expect(disconnect).toHaveBeenCalledTimes(1)

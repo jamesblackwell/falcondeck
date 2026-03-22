@@ -48,6 +48,7 @@ import {
   loadClientToken,
   clearSecureSession,
 } from '@/storage/secure'
+import { useSessionStore } from './session-store'
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -189,8 +190,13 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         _clientKeyPair = null
         const payload = (await response.json().catch(() => null)) as { error?: string } | null
         set({
+          sessionId: null,
+          deviceId: null,
           connectionStatus: 'not_connected',
+          machinePresence: null,
           error: payload?.error ?? `Failed with status ${response.status}`,
+          isConnected: false,
+          isEncrypted: false,
         })
         return
       }
@@ -242,8 +248,13 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       })
     } catch (e) {
       set({
+        sessionId: null,
+        deviceId: null,
         connectionStatus: 'not_connected',
+        machinePresence: null,
         error: e instanceof Error ? e.message : 'Failed to claim pairing',
+        isConnected: false,
+        isEncrypted: false,
       })
     }
   },
@@ -252,6 +263,23 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     const persisted = getJson<PersistedRelay>('relay.session')
     if (!persisted) return false
     if (persisted.version !== REMOTE_SESSION_STORAGE_VERSION) {
+      _socket = null
+      _sessionCrypto = null
+      _clientKeyPair = null
+      _clientToken = null
+      _lastReceivedSeq = 0
+      _pairingId = null
+      _trustedDaemonPublicKey = null
+      _trustedDaemonIdentityPublicKey = null
+      set({
+        sessionId: null,
+        deviceId: null,
+        connectionStatus: 'not_connected',
+        machinePresence: null,
+        error: null,
+        isConnected: false,
+        isEncrypted: false,
+      })
       removeKey('relay.session')
       await clearSecureSession()
       return false
@@ -264,9 +292,23 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     ])
 
     if (!secretKey || !clientToken) {
+      _socket = null
+      _sessionCrypto = null
+      _clientKeyPair = null
+      _clientToken = null
+      _lastReceivedSeq = 0
       _pairingId = null
       _trustedDaemonPublicKey = null
       _trustedDaemonIdentityPublicKey = null
+      set({
+        sessionId: null,
+        deviceId: null,
+        connectionStatus: 'not_connected',
+        machinePresence: null,
+        error: null,
+        isConnected: false,
+        isEncrypted: false,
+      })
       removeKey('relay.session')
       await clearSecureSession()
       return false
@@ -280,9 +322,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       _trustedDaemonPublicKey = persisted.daemonPublicKey
       _trustedDaemonIdentityPublicKey = persisted.daemonIdentityPublicKey
 
-      if (dataKey) {
-        _sessionCrypto = { dataKey: base64ToBytes(dataKey), material: null }
-      }
+      _sessionCrypto = dataKey
+        ? { dataKey: base64ToBytes(dataKey), material: null }
+        : null
 
       set({
         relayUrl: persisted.relayUrl,
@@ -290,15 +332,31 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         sessionId: persisted.sessionId,
         deviceId: persisted.deviceId,
         connectionStatus: 'connecting',
+        machinePresence: null,
+        error: null,
         isConnected: true,
-        isEncrypted: !!dataKey,
+        isEncrypted: false,
       })
 
       return true
     } catch {
+      _socket = null
+      _sessionCrypto = null
+      _clientKeyPair = null
+      _clientToken = null
+      _lastReceivedSeq = 0
       _pairingId = null
       _trustedDaemonPublicKey = null
       _trustedDaemonIdentityPublicKey = null
+      set({
+        sessionId: null,
+        deviceId: null,
+        connectionStatus: 'not_connected',
+        machinePresence: null,
+        error: null,
+        isConnected: false,
+        isEncrypted: false,
+      })
       removeKey('relay.session')
       await clearSecureSession()
       return false
@@ -306,7 +364,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   },
 
   disconnect: async () => {
-    _socket?.close()
+    const socket = _socket
     _socket = null
     get()._failPendingRpcs('Remote session disconnected')
     _sessionCrypto = null
@@ -316,9 +374,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     _pairingId = null
     _trustedDaemonPublicKey = null
     _trustedDaemonIdentityPublicKey = null
-
-    removeKey('relay.session')
-    await clearSecureSession()
+    useSessionStore.getState().reset()
 
     set({
       sessionId: null,
@@ -329,13 +385,17 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       isConnected: false,
       isEncrypted: false,
     })
+
+    socket?.close()
+    removeKey('relay.session')
+    await clearSecureSession()
   },
 
   // Internal accessors
   _setConnectionStatus: (status) => {
     set({
       connectionStatus: status,
-      isEncrypted: status === 'encrypted',
+      isEncrypted: status === 'encrypted' && !!_sessionCrypto,
     })
   },
   _setMachinePresence: (presence) => set({ machinePresence: presence }),
@@ -345,7 +405,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _getSessionCrypto: () => _sessionCrypto,
   _setSessionCrypto: (crypto) => {
     _sessionCrypto = crypto
-    set({ isEncrypted: !!crypto })
+    set((state) => ({
+      isEncrypted: state.connectionStatus === 'encrypted' && !!crypto,
+    }))
   },
   _getKeyPair: () => _clientKeyPair,
   _getLastReceivedSeq: () => _lastReceivedSeq,
@@ -492,8 +554,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         expectedClientPublicKey,
         expectedClientIdentityPublicKey,
       })
-      _sessionCrypto = bootstrapSessionCrypto(kp, update.body.material)
-      set({ isEncrypted: true, connectionStatus: 'encrypted' })
+      get()._setSessionCrypto(bootstrapSessionCrypto(kp, update.body.material))
+      get()._setConnectionStatus('encrypted')
       get()._persistSession()
     } catch (e) {
       await get().disconnect()

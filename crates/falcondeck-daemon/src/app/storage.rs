@@ -9,17 +9,16 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use falcondeck_core::{
-    crypto::verify_pairing_public_key_bundle, AgentProvider,
-    ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
-    UpdatePreferencesRequest,
+    AgentProvider, ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
+    UpdatePreferencesRequest, crypto::verify_pairing_public_key_bundle,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::fs;
 
 use super::{
-    encode_base64, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
-    PersistedWorkspaceEntry, PersistedWorkspaceState, RemoteBridgeState,
+    PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, PersistedWorkspaceEntry,
+    PersistedWorkspaceState, RemoteBridgeState, encode_base64,
 };
 use crate::codex::extract_string;
 use crate::error::DaemonError;
@@ -213,7 +212,8 @@ pub(super) fn parse_tool_details_mode(value: &str) -> ToolDetailsMode {
         "expanded" => ToolDetailsMode::Expanded,
         "compact" => ToolDetailsMode::Compact,
         "hide_read_only_details" => ToolDetailsMode::HideReadOnlyDetails,
-        _ => ToolDetailsMode::Auto,
+        "auto" => ToolDetailsMode::Auto,
+        _ => ToolDetailsMode::Compact,
     }
 }
 
@@ -265,7 +265,7 @@ pub(super) fn invalid_persisted_remote_reason(remote: &PersistedRemoteState) -> 
         return if remote.client_public_key.is_some() {
             Some("trusted remote only has legacy unsigned client key material".to_string())
         } else {
-            Some("trusted remote is missing signed client key material".to_string())
+            None
         };
     };
 
@@ -407,7 +407,7 @@ pub(super) fn delete_remote_secrets_from_secure_storage(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use falcondeck_core::crypto::{build_pairing_public_key_bundle, LocalBoxKeyPair};
+    use falcondeck_core::crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle};
     use serde::de::value::{SeqDeserializer, StringDeserializer};
     use serde_json::json;
 
@@ -564,5 +564,26 @@ mod tests {
 
         let reason = invalid_persisted_remote_reason(&remote).unwrap();
         assert!(reason.contains("invalid signed client key material"));
+    }
+
+    #[test]
+    fn allows_trusted_remote_without_signed_client_material_when_not_legacy() {
+        let remote = PersistedRemoteState {
+            relay_url: "https://connect.falcondeck.com".to_string(),
+            daemon_token: "daemon-token".to_string(),
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "ABCDEFGHJKLM".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: Some("device-1".to_string()),
+            trusted_at: Some(Utc::now()),
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: None,
+            client_public_key: None,
+            secure_storage_key: None,
+            local_secret_key_base64: None,
+            data_key_base64: None,
+        };
+
+        assert!(invalid_persisted_remote_reason(&remote).is_none());
     }
 }

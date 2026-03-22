@@ -11,7 +11,7 @@ export function enterDemoMode() {
   useRelayStore.setState({
     sessionId: 'demo-session',
     deviceId: 'demo-device',
-    connectionStatus: 'connected',
+    connectionStatus: 'encrypted',
     isConnected: true,
     isEncrypted: true,
     machinePresence: {

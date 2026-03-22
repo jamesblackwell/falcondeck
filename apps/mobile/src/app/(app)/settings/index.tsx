@@ -7,6 +7,29 @@ import { ChevronLeft } from 'lucide-react-native'
 import { useRelayStore } from '@/store'
 import { Text, Button, Card, CardContent } from '@/components/ui'
 
+function connectionSummary(
+  connectionStatus: string,
+  isEncrypted: boolean,
+  desktopOnline: boolean,
+  hasSession: boolean,
+) {
+  if (connectionStatus === 'encrypted' && isEncrypted) {
+    return desktopOnline ? 'Connected' : 'Desktop offline'
+  }
+  if (connectionStatus === 'connected') return 'Securing session...'
+  if (connectionStatus === 'connecting') return hasSession ? 'Connecting...' : 'Not connected'
+  if (connectionStatus === 'disconnected') return hasSession ? 'Waiting to reconnect' : 'Disconnected'
+  if (connectionStatus === 'claiming') return 'Pairing...'
+  return 'Not connected'
+}
+
+function encryptionSummary(connectionStatus: string, isEncrypted: boolean, hasSession: boolean) {
+  if (connectionStatus === 'encrypted' && isEncrypted) return 'Relay session encrypted'
+  if (connectionStatus === 'connected') return 'Establishing encrypted session'
+  if (hasSession) return 'Waiting for encrypted relay session'
+  return 'Not established'
+}
+
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets()
   const router = useRouter()
@@ -16,7 +39,13 @@ export default function SettingsScreen() {
   const sessionId = useRelayStore((s) => s.sessionId)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const connectionStatus = useRelayStore((s) => s.connectionStatus)
+  const machinePresence = useRelayStore((s) => s.machinePresence)
   const { disconnect } = useRelayStore.getState()
+  const desktopOnline = machinePresence?.daemon_connected ?? false
+  const statusLabel = connectionSummary(connectionStatus, isEncrypted, desktopOnline, !!sessionId)
+  const encryptionLabel = encryptionSummary(connectionStatus, isEncrypted, !!sessionId)
+  const statusColor = isEncrypted && desktopOnline ? 'success' : sessionId ? 'warning' : 'muted'
+  const encryptionColor = isEncrypted ? 'success' : 'muted'
 
   const handleDisconnect = async () => {
     await disconnect()
@@ -53,14 +82,14 @@ export default function SettingsScreen() {
           </View>
           <View style={styles.row}>
             <Text variant="label" color="muted">Status</Text>
-            <Text variant="body" color={isEncrypted ? 'success' : 'warning'}>
-              {connectionStatus}
+            <Text variant="body" color={statusColor}>
+              {statusLabel}
             </Text>
           </View>
           <View style={styles.row}>
             <Text variant="label" color="muted">Encryption</Text>
-            <Text variant="body" color={isEncrypted ? 'success' : 'muted'}>
-              {isEncrypted ? 'E2E Active' : 'Not established'}
+            <Text variant="body" color={encryptionColor}>
+              {encryptionLabel}
             </Text>
           </View>
         </CardContent>

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { buildPairingPublicKeyBundle, generateBoxKeyPair } from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
+import { useSessionStore } from './session-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
@@ -20,6 +21,7 @@ function resetStore() {
     isConnected: false,
     isEncrypted: false,
   })
+  useSessionStore.getState().reset()
   resetSecureStore()
   resetMMKV()
 }
@@ -192,12 +194,18 @@ describe('relay-store', () => {
   })
 
   describe('internal helpers', () => {
-    it('_setConnectionStatus updates both status and isEncrypted', () => {
-      const { _setConnectionStatus } = useRelayStore.getState()
+    it('_setConnectionStatus only marks encryption active when crypto is available', () => {
+      const { _setConnectionStatus, _setSessionCrypto } = useRelayStore.getState()
 
       _setConnectionStatus('encrypted')
-      expect(useRelayStore.getState().isEncrypted).toBe(true)
+      expect(useRelayStore.getState().isEncrypted).toBe(false)
       expect(useRelayStore.getState().connectionStatus).toBe('encrypted')
+
+      _setSessionCrypto({
+        dataKey: new Uint8Array(32),
+        material: null,
+      })
+      expect(useRelayStore.getState().isEncrypted).toBe(true)
 
       _setConnectionStatus('connected')
       expect(useRelayStore.getState().isEncrypted).toBe(false)

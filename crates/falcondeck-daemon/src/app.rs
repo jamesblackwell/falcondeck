@@ -2,17 +2,13 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
 use chrono::Utc;
 use falcondeck_core::{
-    crypto::{
-        build_pairing_public_key_bundle, generate_data_key, verify_pairing_public_key_bundle,
-        LocalBoxKeyPair,
-    },
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
     CommandResponse, ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot,
     EventEnvelope, FalconDeckPreferences, HealthResponse, InteractiveRequest,
@@ -23,13 +19,17 @@ use falcondeck_core::{
     ThreadAttention, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary, UnifiedEvent,
     UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
     WorkspaceSummary,
+    crypto::{
+        LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key,
+        verify_pairing_public_key_bundle,
+    },
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{
     sync::mpsc,
-    sync::{broadcast, Mutex},
+    sync::{Mutex, broadcast},
     task::JoinHandle,
-    time::{sleep, timeout, Duration},
+    time::{Duration, sleep, timeout},
 };
 use tracing::debug;
 use uuid::Uuid;
@@ -37,8 +37,8 @@ use uuid::Uuid;
 use crate::{
     claude::{ClaudeBootstrap, ClaudeProviderMetadata, ClaudeRuntime},
     codex::{
-        extract_string, extract_thread_id, extract_thread_title, parse_account, parse_thread_plan,
-        CodexBootstrap, CodexProviderMetadata, CodexSession,
+        CodexBootstrap, CodexProviderMetadata, CodexSession, extract_string, extract_thread_id,
+        extract_thread_title, parse_account, parse_thread_plan,
     },
     error::DaemonError,
     skills::{
@@ -90,6 +90,44 @@ impl From<String> for RemoteBridgeError {
     fn from(s: String) -> Self {
         Self::Transient(s)
     }
+}
+
+fn relay_error_detail_from_body(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .or_else(|| Some(trimmed.to_string()))
+}
+
+async fn relay_request_error(response: reqwest::Response, context: &str) -> String {
+    let status = response.status();
+    let detail = match response.text().await {
+        Ok(body) => relay_error_detail_from_body(&body),
+        Err(_) => None,
+    };
+
+    match detail {
+        Some(detail) => format!("{context} failed with status {status}: {detail}"),
+        None => format!("{context} failed with status {status}"),
+    }
+}
+
+fn should_clear_persisted_remote_for_bridge_error(error_msg: &str) -> bool {
+    error_msg.contains("session not found")
+}
+
+fn is_remote_bridge_auth_error(error_msg: &str) -> bool {
+    error_msg.contains("invalid daemon token") || error_msg.contains("invalid session token")
 }
 
 #[derive(Clone)]
@@ -749,7 +787,7 @@ impl AppState {
                     None,
                 )
             };
-        let pairing = client
+        let response = client
             .post(format!("{relay_url}/v1/pairings"))
             .json(&StartPairingRequest {
                 label: Some(host_label()),
@@ -760,9 +798,15 @@ impl AppState {
             })
             .send()
             .await
-            .map_err(|error| DaemonError::Rpc(format!("failed to contact relay: {error}")))?
-            .error_for_status()
-            .map_err(|error| DaemonError::Rpc(format!("relay pairing request failed: {error}")))?
+            .map_err(|error| DaemonError::Rpc(format!("failed to contact relay: {error}")))?;
+        let response = if response.status().is_success() {
+            response
+        } else {
+            return Err(DaemonError::Rpc(
+                relay_request_error(response, "relay pairing request").await,
+            ));
+        };
+        let pairing = response
             .json::<StartPairingResponse>()
             .await
             .map_err(|error| {
@@ -867,7 +911,7 @@ impl AppState {
                 (relay_url, session_id, daemon_token)
             };
 
-        reqwest::Client::new()
+        let response = reqwest::Client::new()
             .delete(format!(
                 "{}/v1/sessions/{}/devices/{}",
                 relay_url.trim_end_matches('/'),
@@ -877,11 +921,14 @@ impl AppState {
             .bearer_auth(&daemon_token)
             .send()
             .await
-            .map_err(|error| DaemonError::Rpc(format!("failed to revoke remote device: {error}")))?
-            .error_for_status()
             .map_err(|error| {
-                DaemonError::Rpc(format!("remote device revoke request failed: {error}"))
+                DaemonError::Rpc(format!("failed to revoke remote device: {error}"))
             })?;
+        if !response.status().is_success() {
+            return Err(DaemonError::Rpc(
+                relay_request_error(response, "remote device revoke request").await,
+            ));
+        }
 
         Ok(self.remote_status().await)
     }
@@ -1102,20 +1149,22 @@ impl AppState {
                     let should_clear_pairing = remote.pairing.as_ref().is_some_and(|pairing| {
                         pairing.device_id.is_none() && pairing.expires_at <= Utc::now()
                     });
-                    let revoked = error_msg.contains("invalid session token")
-                        || error_msg.contains("session not found")
-                        || error_msg.contains("trusted device");
+                    let should_reset_persisted_remote =
+                        should_clear_persisted_remote_for_bridge_error(&error_msg);
+                    let auth_error = is_remote_bridge_auth_error(&error_msg);
                     remote.status = if should_clear_pairing {
                         RemoteConnectionStatus::Inactive
-                    } else if revoked {
+                    } else if should_reset_persisted_remote {
                         RemoteConnectionStatus::Revoked
+                    } else if auth_error {
+                        RemoteConnectionStatus::Error
                     } else if !is_transient && backoff_seconds >= 8 {
                         RemoteConnectionStatus::Offline
                     } else {
                         RemoteConnectionStatus::Degraded
                     };
                     remote.last_error = Some(error_msg);
-                    if should_clear_pairing || revoked {
+                    if should_clear_pairing || should_reset_persisted_remote {
                         if let (Some(current_relay_url), Some(current_pairing)) =
                             (remote.relay_url.as_ref(), remote.pairing.as_ref())
                         {
@@ -1133,7 +1182,7 @@ impl AppState {
                     }
                     drop(remote);
                     let _ = self.persist_local_state().await;
-                    if should_clear_pairing || revoked {
+                    if should_clear_pairing || should_reset_persisted_remote {
                         break;
                     }
                     if is_transient {
@@ -1155,23 +1204,30 @@ impl AppState {
         pairing: RemotePairingState,
         command_rx: &mut mpsc::UnboundedReceiver<RemoteBridgeCommand>,
     ) -> Result<(), RemoteBridgeError> {
-        // If we already have a trusted device with session + client key material,
-        // skip polling the pairing endpoint entirely — the pairing may have expired
-        // but the session is still valid.
-        let (session_id, device_id, client_bundle) = if let (
-            Some(session_id),
-            Some(device_id),
-            Some(client_bundle),
-        ) = (
-            pairing.session_id.clone(),
-            pairing.device_id.clone(),
-            pairing.client_bundle.clone(),
-        ) {
-            verify_pairing_public_key_bundle(&client_bundle).map_err(|error| {
-                RemoteBridgeError::Persistent(format!(
-                    "trusted client bundle is not signed; please pair the remote device again: {error}"
-                ))
-            })?;
+        // If we already have a trusted device with a session, skip polling the
+        // pairing endpoint entirely. Older trusted sessions may not have a
+        // persisted signed client bundle, but they can still resume by relying
+        // on the previously stored data key.
+        let (session_id, device_id, client_bundle) = if let (Some(session_id), Some(device_id)) =
+            (pairing.session_id.clone(), pairing.device_id.clone())
+        {
+            let client_bundle = match pairing.client_bundle.clone() {
+                Some(client_bundle) => {
+                    verify_pairing_public_key_bundle(&client_bundle).map_err(|error| {
+                            RemoteBridgeError::Persistent(format!(
+                                "trusted client bundle is not signed; please pair the remote device again: {error}"
+                            ))
+                        })?;
+                    Some(client_bundle)
+                }
+                None => {
+                    tracing::warn!(
+                        "trusted remote restored without client bootstrap material; relying on persisted client data key"
+                    );
+                    None
+                }
+            };
+
             tracing::info!(
                 "trusted device already present, skipping pairing poll (session={session_id}, device={device_id})"
             );
@@ -1185,9 +1241,15 @@ impl AppState {
                     .bearer_auth(&daemon_token)
                     .send()
                     .await
-                    .map_err(|error| format!("failed to poll relay pairing: {error}"))?
-                    .error_for_status()
-                    .map_err(|error| format!("relay pairing status failed: {error}"))?
+                    .map_err(|error| format!("failed to poll relay pairing: {error}"))?;
+                let response = if response.status().is_success() {
+                    response
+                } else {
+                    return Err(RemoteBridgeError::Transient(
+                        relay_request_error(response, "relay pairing status").await,
+                    ));
+                };
+                let response = response
                     .json::<PairingStatusResponse>()
                     .await
                     .map_err(|error| format!("failed to parse relay pairing status: {error}"))?;
@@ -1226,7 +1288,7 @@ impl AppState {
                             "relay pairing completed without client key material".to_string(),
                         )
                     })?;
-                    break (session_id, device_id, client_bundle);
+                    break (session_id, device_id, Some(client_bundle));
                 }
 
                 {
@@ -1243,7 +1305,7 @@ impl AppState {
             remote.status = RemoteConnectionStatus::DeviceTrusted;
             if let Some(current_pairing) = remote.pairing.as_mut() {
                 current_pairing.device_id = Some(device_id.clone());
-                current_pairing.client_bundle = Some(client_bundle.clone());
+                current_pairing.client_bundle = client_bundle.clone();
                 if current_pairing.trusted_at.is_none() {
                     current_pairing.trusted_at = Some(Utc::now());
                 }
@@ -1289,8 +1351,22 @@ impl AppState {
                 .send()
                 .await
             {
-                Ok(response) => match response.error_for_status() {
-                    Ok(response) => match response.json::<PairingStatusResponse>().await {
+                Ok(response) => {
+                    let response = if response.status().is_success() {
+                        response
+                    } else {
+                        self.set_pairing_watch_error(
+                            &relay_url,
+                            &daemon_token,
+                            &pairing_id,
+                            relay_request_error(response, "relay pairing status").await,
+                        )
+                        .await;
+                        sleep(Duration::from_secs(2)).await;
+                        continue;
+                    };
+
+                    match response.json::<PairingStatusResponse>().await {
                         Ok(payload) => payload,
                         Err(error) => {
                             self.set_pairing_watch_error(
@@ -1303,19 +1379,8 @@ impl AppState {
                             sleep(Duration::from_secs(2)).await;
                             continue;
                         }
-                    },
-                    Err(error) => {
-                        self.set_pairing_watch_error(
-                            &relay_url,
-                            &daemon_token,
-                            &pairing_id,
-                            format!("relay pairing status failed: {error}"),
-                        )
-                        .await;
-                        sleep(Duration::from_secs(2)).await;
-                        continue;
                     }
-                },
+                }
                 Err(error) => {
                     self.set_pairing_watch_error(
                         &relay_url,
@@ -1930,20 +1995,20 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        crypto::{build_pairing_public_key_bundle, generate_data_key, LocalBoxKeyPair},
         AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput, ThreadAgentParams,
         ThreadAttention, ThreadStatus, ThreadSummary, TurnInputItem, UpdateThreadRequest,
         WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
+        crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
     };
     use serde_json::json;
     use tempfile::tempdir;
-    use tokio::time::{sleep, Duration as TokioDuration};
+    use tokio::time::{Duration as TokioDuration, sleep};
 
     use super::{
-        codex_inputs, codex_inputs_with_plan_mode_shim, collaboration_mode_payload, encode_base64,
+        AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, codex_inputs,
+        codex_inputs_with_plan_mode_shim, collaboration_mode_payload, encode_base64,
         notification_timestamp, plan_step_status, should_surface_tool_item,
-        should_use_plan_mode_shim, workspace_status_after_account_update, AppState,
-        PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
+        should_use_plan_mode_shim, workspace_status_after_account_update,
     };
 
     #[test]
@@ -1988,10 +2053,12 @@ mod tests {
         );
         assert_eq!(payload.len(), 2);
         assert_eq!(payload[0]["type"], "text");
-        assert!(payload[0]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Enter plan mode for this turn"));
+        assert!(
+            payload[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Enter plan mode for this turn")
+        );
         assert_eq!(payload[1]["text"], "Inspect the repo");
     }
 
@@ -3139,5 +3206,84 @@ tokens used\n5,767\n"
             Some("https://connect.falcondeck.com/restore")
         );
         assert!(remote.pairing.is_some());
+    }
+
+    #[tokio::test]
+    async fn restore_keeps_trusted_remote_without_client_bundle() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let relay_url = "https://connect.falcondeck.com/restore-legacy".to_string();
+        let secure_storage_key = format!("{relay_url}|session-1");
+        super::save_remote_secrets_to_secure_storage(
+            &secure_storage_key,
+            &PersistedRemoteSecrets {
+                local_secret_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                data_key_base64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            },
+        )
+        .unwrap();
+        let persisted = PersistedAppState {
+            workspaces: vec![],
+            remote: Some(PersistedRemoteState {
+                relay_url,
+                daemon_token: "daemon-token".to_string(),
+                pairing_id: "pairing-1".to_string(),
+                pairing_code: "ABCDEFGHJKLM".to_string(),
+                session_id: Some("session-1".to_string()),
+                device_id: Some("device-1".to_string()),
+                trusted_at: Some(Utc::now()),
+                expires_at: Utc::now() + Duration::minutes(10),
+                client_bundle: None,
+                client_public_key: None,
+                secure_storage_key: Some(secure_storage_key),
+                local_secret_key_base64: None,
+                data_key_base64: None,
+            }),
+        };
+
+        tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+            .await
+            .unwrap();
+
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            PathBuf::from(&state_path),
+        );
+        app.restore_local_state().await.unwrap();
+
+        let remote = app.inner.remote.lock().await;
+        assert_eq!(
+            remote.status,
+            falcondeck_core::RemoteConnectionStatus::DeviceTrusted
+        );
+        assert_eq!(
+            remote.relay_url.as_deref(),
+            Some("https://connect.falcondeck.com/restore-legacy")
+        );
+        assert_eq!(
+            remote
+                .pairing
+                .as_ref()
+                .and_then(|pairing| pairing.client_bundle.as_ref()),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_session_token_does_not_force_pairing_reset() {
+        assert!(!super::should_clear_persisted_remote_for_bridge_error(
+            "relay websocket ticket request failed with status 401 Unauthorized: invalid session token"
+        ));
+        assert!(super::is_remote_bridge_auth_error("invalid session token"));
+    }
+
+    #[test]
+    fn session_not_found_still_forces_pairing_reset() {
+        assert!(super::should_clear_persisted_remote_for_bridge_error(
+            "relay websocket ticket request failed with status 404 Not Found: session not found"
+        ));
+        assert!(!super::is_remote_bridge_auth_error("session not found"));
     }
 }
