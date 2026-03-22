@@ -8,6 +8,8 @@ export const ScrollView = 'ScrollView'
 export const KeyboardAvoidingView = 'KeyboardAvoidingView'
 export const ActivityIndicator = 'ActivityIndicator'
 export const Switch = 'Switch'
+export const Modal = 'Modal'
+export const FlatList = 'FlatList'
 export const AppState = {
   currentState: 'active',
   addEventListener: () => ({ remove: () => {} }),

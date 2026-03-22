@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AppState, View } from 'react-native'
+import { AppState, KeyboardAvoidingView, Platform, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
@@ -173,7 +173,11 @@ export default function HomeScreen() {
   }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace])
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <KeyboardAvoidingView
+      style={[styles.container, { paddingTop: insets.top }]}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={0}
+    >
       <View style={styles.header}>
         <Text variant="label" color="primary" weight="semibold" numberOfLines={1} style={styles.headerTitle}>
           {getWorkspaceTitle(workspace?.path)}
@@ -235,7 +239,7 @@ export default function HomeScreen() {
           onSelectEffort={setSelectedEffort}
         />
       </View>
-    </View>
+    </KeyboardAvoidingView>
   )
 }
 

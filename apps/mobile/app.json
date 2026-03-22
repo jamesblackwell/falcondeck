@@ -1,6 +1,30 @@
 {
   "expo": {
     "name": "FalconDeck",
-    "slug": "falcondeck-mobile"
+    "slug": "falcondeck-mobile",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/14208bcf-41e5-478e-b88c-386745568d6a"
+    },
+    "android": {
+      "package": "com.falcondeck.mobile",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#09090b"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "com.falcondeck.mobile",
+      "supportsTablet": true,
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    }
   }
 }

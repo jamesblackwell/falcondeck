@@ -9,6 +9,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   orientation: 'default',
   userInterfaceStyle: 'dark',
   newArchEnabled: true,
+  runtimeVersion: {
+    policy: 'appVersion',
+  },
   icon: './assets/icon.png',
   splash: {
     image: './assets/splash.png',
@@ -47,11 +50,15 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         cameraPermission: 'Allow FalconDeck to use your camera to scan QR codes for pairing.',
       },
     ],
+    './plugins/withLibz',
   ],
   experiments: {
     typedRoutes: true,
   },
   extra: {
     relayUrl: process.env.FALCONDECK_RELAY_URL ?? 'https://connect.falcondeck.com',
+    eas: {
+      projectId: '14208bcf-41e5-478e-b88c-386745568d6a',
+    },
   },
 })

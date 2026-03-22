@@ -7,6 +7,10 @@
     "preview": {
       "distribution": "internal",
       "channel": "preview",
+      "developmentClient": true,
+      "ios": {
+        "image": "latest"
+      },
       "env": {
         "EAS_BUILD_PROFILE": "preview"
       }
@@ -15,6 +19,9 @@
       "distribution": "store",
       "channel": "preview-testflight",
       "autoIncrement": true,
+      "ios": {
+        "image": "latest"
+      },
       "env": {
         "EAS_BUILD_PROFILE": "preview-testflight"
       }
@@ -22,6 +29,9 @@
     "production": {
       "channel": "production",
       "autoIncrement": true,
+      "ios": {
+        "image": "latest"
+      },
       "env": {
         "EAS_BUILD_PROFILE": "production"
       }

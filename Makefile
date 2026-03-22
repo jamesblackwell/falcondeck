@@ -29,7 +29,7 @@ MOBILE_METRO_LOG_FILE = /tmp/falcondeck-mobile-metro.log
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install desktop-prepare desktop-brand-assets mobile-prepare remote-web-prepare site-prepare dev mobile-dev mobile-dev-stop dev-mobile desktop-dev desktop-dev-stop desktop-install frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop lint typecheck check fmt build clean
+.PHONY: help install desktop-prepare desktop-brand-assets mobile-prepare remote-web-prepare site-prepare dev mobile-dev mobile-dev-stop dev-mobile mobile-build mobile-deploy mobile-test desktop-dev desktop-dev-stop desktop-install frontend-dev remote-web-dev site-dev daemon relay test test-rust test-desktop test-mobile lint typecheck check fmt build clean
 
 help:
 	@printf '%s\n' \
@@ -46,6 +46,9 @@ help:
 		'  make site-dev       Start the marketing site locally' \
 		'  make daemon         Start the standalone daemon on 127.0.0.1:$(DAEMON_PORT)' \
 		'  make relay          Start the relay on $(RELAY_BIND_HOST):$(RELAY_PORT)' \
+		'  make mobile-build   Build the iOS app via EAS (cloud, ad-hoc distribution)' \
+		'  make mobile-deploy  Push an OTA JS update to the preview channel' \
+		'  make mobile-test    Run mobile unit tests' \
 		'  make install        Install desktop, mobile, and web dependencies' \
 		'  make desktop-install Build the packaged desktop app and install it to /Applications' \
 		'  make test           Run Rust and desktop tests' \
@@ -228,6 +231,19 @@ mobile-dev-stop:
 		fi
 
 dev-mobile: mobile-dev
+
+mobile-build: mobile-prepare
+	@echo "Building iOS preview via EAS (ad-hoc, installable via link)"
+	cd "$(MOBILE_DIR)" && eas build --profile preview --platform ios
+
+mobile-deploy: mobile-prepare
+	@echo "Pushing OTA update to preview-testflight channel"
+	cd "$(MOBILE_DIR)" && eas update --branch preview-testflight --message "$(or $(MSG),mobile update)"
+
+mobile-test: mobile-prepare
+	cd "$(MOBILE_DIR)" && npx vitest run
+
+test-mobile: mobile-test
 
 desktop-dev: desktop-prepare
 	@$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true

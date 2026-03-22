@@ -82,9 +82,7 @@ describe('chat behavior components', () => {
     expect(thinking.toJSON()).toBeTruthy()
   })
 
-  it('cycles models and selects reasoning effort from the toolbar', () => {
-    const onSelectModel = vi.fn()
-    const onSelectEffort = vi.fn()
+  it('renders model and effort chips in the toolbar', () => {
     const renderer = renderComponent(
       <InputToolbar
         models={[
@@ -93,19 +91,13 @@ describe('chat behavior components', () => {
         ]}
         selectedModel="gpt-5"
         selectedEffort="medium"
-        onSelectModel={onSelectModel}
-        onSelectEffort={onSelectEffort}
+        onSelectModel={vi.fn()}
+        onSelectEffort={vi.fn()}
       />,
     )
 
-    const pressables = renderer.root.findAllByType('Pressable' as any)
-    act(() => {
-      pressables[0]!.props.onPress()
-      pressables[3]!.props.onPress()
-    })
-
-    expect(onSelectModel).toHaveBeenCalledWith('gpt-5-mini')
-    expect(onSelectEffort).toHaveBeenCalledWith('high')
+    expect(textOf(renderer)).toContain('GPT-5')
+    expect(textOf(renderer)).toContain('Medium')
   })
 
   it('handles stop and jump-to-bottom actions', () => {

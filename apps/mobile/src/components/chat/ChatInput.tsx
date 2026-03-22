@@ -31,7 +31,7 @@ export const ChatInput = memo(function ChatInput({
   onStop,
   disabled,
   isRunning,
-  placeholder = 'Send a message...',
+  placeholder = 'Ask your agent...',
   models,
   selectedModel,
   selectedEffort,
@@ -40,26 +40,17 @@ export const ChatInput = memo(function ChatInput({
 }: ChatInputProps) {
   const { theme } = useUnistyles()
 
-  /* v8 ignore start — Pressable callback with haptics, tested via E2E */
   const handleSubmit = useCallback(() => {
     if (!value.trim() || disabled) return
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
     onSubmit()
   }, [value, disabled, onSubmit])
-  /* v8 ignore stop */
 
   const canSend = value.trim().length > 0 && !disabled && !isRunning
 
   return (
     <View style={styles.container}>
-      <InputToolbar
-        models={models}
-        selectedModel={selectedModel}
-        selectedEffort={selectedEffort}
-        onSelectModel={onSelectModel}
-        onSelectEffort={onSelectEffort}
-      />
-      <View style={styles.inputRow}>
+      <View style={styles.composer}>
         <TextInput
           style={styles.input}
           value={value}
@@ -71,17 +62,26 @@ export const ChatInput = memo(function ChatInput({
           maxLength={100_000}
           editable={!disabled}
         />
-        {isRunning ? (
-          <StopButton onPress={onStop} />
-        ) : (
-          <Pressable
-            style={[styles.sendButton, canSend ? styles.sendActive : styles.sendInactive]}
-            onPress={handleSubmit}
-            disabled={!canSend}
-          >
-            <Send size={18} color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint} />
-          </Pressable>
-        )}
+        <View style={styles.footer}>
+          <InputToolbar
+            models={models}
+            selectedModel={selectedModel}
+            selectedEffort={selectedEffort}
+            onSelectModel={onSelectModel}
+            onSelectEffort={onSelectEffort}
+          />
+          {isRunning ? (
+            <StopButton onPress={onStop} />
+          ) : (
+            <Pressable
+              style={[styles.sendButton, canSend ? styles.sendActive : styles.sendInactive]}
+              onPress={handleSubmit}
+              disabled={!canSend}
+            >
+              <Send size={16} color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint} />
+            </Pressable>
+          )}
+        </View>
       </View>
     </View>
   )
@@ -95,30 +95,34 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[2],
   },
-  inputRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: theme.spacing[2],
+  composer: {
     backgroundColor: theme.colors.surface[2],
     borderRadius: theme.radius.xl,
     borderCurve: 'continuous',
     borderWidth: 1,
     borderColor: theme.colors.border.default,
-    paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[2],
+    overflow: 'hidden',
   },
   input: {
-    flex: 1,
     fontSize: theme.fontSize.base,
     fontFamily: theme.fontFamily.sans,
     color: theme.colors.fg.primary,
-    maxHeight: 120,
-    paddingTop: 0,
-    paddingBottom: 0,
+    minHeight: 44,
+    maxHeight: 140,
+    paddingHorizontal: theme.spacing[4],
+    paddingTop: theme.spacing[3],
+    paddingBottom: theme.spacing[2],
+  },
+  footer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: theme.spacing[2],
+    paddingBottom: theme.spacing[2],
   },
   sendButton: {
-    width: 36,
-    height: 36,
+    width: 32,
+    height: 32,
     borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
