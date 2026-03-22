@@ -122,12 +122,19 @@ async fn relay_request_error(response: reqwest::Response, context: &str) -> Stri
     }
 }
 
-fn should_clear_persisted_remote_for_bridge_error(error_msg: &str) -> bool {
-    error_msg.contains("session not found")
+fn should_clear_persisted_remote_for_bridge_error(
+    error_msg: &str,
+    has_trusted_device: bool,
+) -> bool {
+    !has_trusted_device && is_remote_bridge_missing_session_error(error_msg)
 }
 
 fn is_remote_bridge_auth_error(error_msg: &str) -> bool {
     error_msg.contains("invalid daemon token") || error_msg.contains("invalid session token")
+}
+
+fn is_remote_bridge_missing_session_error(error_msg: &str) -> bool {
+    error_msg.contains("session not found")
 }
 
 #[derive(Clone)]
@@ -1146,17 +1153,26 @@ impl AppState {
                     let is_transient = error.is_transient();
 
                     let mut remote = self.inner.remote.lock().await;
+                    let has_trusted_device = remote
+                        .pairing
+                        .as_ref()
+                        .is_some_and(|pairing| pairing.device_id.is_some());
                     let should_clear_pairing = remote.pairing.as_ref().is_some_and(|pairing| {
                         pairing.device_id.is_none() && pairing.expires_at <= Utc::now()
                     });
-                    let should_reset_persisted_remote =
-                        should_clear_persisted_remote_for_bridge_error(&error_msg);
+                    let should_reset_persisted_remote = should_clear_persisted_remote_for_bridge_error(
+                        &error_msg,
+                        has_trusted_device,
+                    );
                     let auth_error = is_remote_bridge_auth_error(&error_msg);
                     remote.status = if should_clear_pairing {
                         RemoteConnectionStatus::Inactive
                     } else if should_reset_persisted_remote {
                         RemoteConnectionStatus::Revoked
-                    } else if auth_error {
+                    } else if auth_error
+                        || (has_trusted_device
+                            && is_remote_bridge_missing_session_error(&error_msg))
+                    {
                         RemoteConnectionStatus::Error
                     } else if !is_transient && backoff_seconds >= 8 {
                         RemoteConnectionStatus::Offline
@@ -3290,16 +3306,26 @@ tokens used\n5,767\n"
     #[test]
     fn invalid_session_token_does_not_force_pairing_reset() {
         assert!(!super::should_clear_persisted_remote_for_bridge_error(
-            "relay websocket ticket request failed with status 401 Unauthorized: invalid session token"
+            "relay websocket ticket request failed with status 401 Unauthorized: invalid session token",
+            false,
         ));
         assert!(super::is_remote_bridge_auth_error("invalid session token"));
     }
 
     #[test]
-    fn session_not_found_still_forces_pairing_reset() {
+    fn session_not_found_forces_reset_for_untrusted_pairings() {
         assert!(super::should_clear_persisted_remote_for_bridge_error(
-            "relay websocket ticket request failed with status 404 Not Found: session not found"
+            "relay websocket ticket request failed with status 404 Not Found: session not found",
+            false,
         ));
         assert!(!super::is_remote_bridge_auth_error("session not found"));
+    }
+
+    #[test]
+    fn session_not_found_does_not_force_reset_for_trusted_pairings() {
+        assert!(!super::should_clear_persisted_remote_for_bridge_error(
+            "relay websocket ticket request failed with status 404 Not Found: session not found",
+            true,
+        ));
     }
 }

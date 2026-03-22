@@ -142,6 +142,10 @@ type PendingRpc = {
 
 const _pendingRpc = new Map<string, PendingRpc>()
 
+function hasLiveRelayConnection(status: ConnectionStatus) {
+  return status === 'connected' || status === 'encrypted'
+}
+
 function encryptedRpcErrorMessage(payload: unknown) {
   if (typeof payload === 'object' && payload !== null && 'message' in payload) {
     const message = (payload as { message?: unknown }).message
@@ -241,7 +245,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         sessionId: claim.session_id,
         deviceId: claim.device_id,
         connectionStatus: 'connecting',
-        isConnected: true,
+        isConnected: false,
         isEncrypted: false,
         machinePresence: null,
         error: null,
@@ -334,7 +338,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         connectionStatus: 'connecting',
         machinePresence: null,
         error: null,
-        isConnected: true,
+        isConnected: false,
         isEncrypted: false,
       })
 
@@ -395,6 +399,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   _setConnectionStatus: (status) => {
     set({
       connectionStatus: status,
+      isConnected: hasLiveRelayConnection(status),
       isEncrypted: status === 'encrypted' && !!_sessionCrypto,
     })
   },

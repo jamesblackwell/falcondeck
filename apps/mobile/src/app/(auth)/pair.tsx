@@ -19,9 +19,9 @@ export default function PairScreen() {
 
   const relayUrl = useRelayStore((s) => s.relayUrl)
   const pairingCode = useRelayStore((s) => s.pairingCode)
+  const sessionId = useRelayStore((s) => s.sessionId)
   const connectionStatus = useRelayStore((s) => s.connectionStatus)
   const error = useRelayStore((s) => s.error)
-  const isConnected = useRelayStore((s) => s.isConnected)
   const { setRelayUrl, setPairingCode, claimPairing, _setError } = useRelayStore.getState()
 
   const [showScanner, setShowScanner] = useState(false)
@@ -71,10 +71,10 @@ export default function PairScreen() {
   )
 
   useEffect(() => {
-    if (isConnected) {
+    if (sessionId) {
       router.replace('/(app)')
     }
-  }, [isConnected, router])
+  }, [router, sessionId])
 
   if (showScanner) {
     return (

@@ -103,9 +103,9 @@ describe('mobile app screens', () => {
     useRelayStore.setState({
       relayUrl: 'https://relay.test',
       pairingCode: 'PAIRME',
+      sessionId: 'session-1',
       connectionStatus: 'claiming',
       error: 'Bad pairing code',
-      isConnected: true,
     })
 
     const renderer = renderComponent(<PairScreen />)

@@ -264,6 +264,10 @@ desktop-install: desktop-brand-assets
 		echo "Installing FalconDeck.app to $(APPLICATIONS_APP)"; \
 		rm -rf "$(APPLICATIONS_APP)"; \
 		ditto "$(DESKTOP_BUNDLE_APP)" "$(APPLICATIONS_APP)"; \
+		if command -v codesign >/dev/null 2>&1; then \
+			echo "Ad-hoc signing FalconDeck.app for stable local macOS identity"; \
+			codesign --force --deep --sign - "$(APPLICATIONS_APP)"; \
+		fi; \
 		echo "Installed $(APPLICATIONS_APP)"
 
 frontend-dev: desktop-prepare

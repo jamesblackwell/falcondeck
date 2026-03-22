@@ -96,7 +96,7 @@ describe('relay-store edge cases', () => {
       expect(state.sessionId).toBe('session-1')
       expect(state.deviceId).toBe('device-1')
       expect(state.connectionStatus).toBe('connecting')
-      expect(state.isConnected).toBe(true)
+      expect(state.isConnected).toBe(false)
     })
 
     it('returns false when secret key is corrupt (catch branch)', async () => {

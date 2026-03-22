@@ -131,7 +131,7 @@ describe('relay-store', () => {
       expect(state.connectionStatus).toBe('connecting')
       expect(state.sessionId).toBe('session-abc')
       expect(state.deviceId).toBe('device-xyz')
-      expect(state.isConnected).toBe(true)
+      expect(state.isConnected).toBe(false)
     })
 
     it('clears stale encrypted state when claiming a fresh pairing', async () => {
@@ -199,6 +199,7 @@ describe('relay-store', () => {
 
       _setConnectionStatus('encrypted')
       expect(useRelayStore.getState().isEncrypted).toBe(false)
+      expect(useRelayStore.getState().isConnected).toBe(true)
       expect(useRelayStore.getState().connectionStatus).toBe('encrypted')
 
       _setSessionCrypto({
@@ -208,7 +209,11 @@ describe('relay-store', () => {
       expect(useRelayStore.getState().isEncrypted).toBe(true)
 
       _setConnectionStatus('connected')
+      expect(useRelayStore.getState().isConnected).toBe(true)
       expect(useRelayStore.getState().isEncrypted).toBe(false)
+
+      _setConnectionStatus('connecting')
+      expect(useRelayStore.getState().isConnected).toBe(false)
     })
 
     it('_setMachinePresence updates presence', () => {

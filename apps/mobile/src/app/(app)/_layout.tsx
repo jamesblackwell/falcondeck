@@ -14,7 +14,6 @@ export default function AppLayout() {
   const sessionId = useRelayStore((s) => s.sessionId)
   const snapshot = useSessionStore((s) => s.snapshot)
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
-  const { selectThread, selectNewThread } = useSessionStore.getState()
   useRelayConnection()
   const groups = useMemo(
     () => buildProjectGroups(snapshot?.workspaces ?? [], snapshot?.threads ?? []),
@@ -23,18 +22,18 @@ export default function AppLayout() {
 
   const handleSelectThread = useCallback(
     (wId: string, tId: string) => {
-      selectThread(wId, tId)
+      useSessionStore.getState().selectThread(wId, tId)
       router.navigate('/(app)')
     },
-    [selectThread, router],
+    [router],
   )
 
   const handleNewThread = useCallback(
     (wId: string) => {
-      selectNewThread(wId)
+      useSessionStore.getState().selectNewThread(wId)
       router.navigate('/(app)')
     },
-    [selectNewThread, router],
+    [router],
   )
 
   const renderDrawerContent = useCallback(
