@@ -1,5 +1,5 @@
 import { memo } from 'react'
-import { View } from 'react-native'
+import { Pressable } from 'react-native'
 import { StyleSheet } from 'react-native-unistyles'
 
 import type { MachinePresence } from '@falcondeck/client-core'
@@ -10,10 +10,12 @@ interface ConnectionHeaderProps {
   connectionStatus: string
   isEncrypted: boolean
   machinePresence: MachinePresence | null
+  onPress?: () => void
 }
 
 function connectionLabel(status: string): string {
-  if (status === 'connected' || status === 'encrypted') return 'Connected'
+  if (status === 'encrypted') return 'Connected'
+  if (status === 'connected') return 'Securing session...'
   if (status === 'connecting') return 'Connecting...'
   if (status === 'disconnected') return 'Disconnected'
   if (status === 'claiming') return 'Pairing...'
@@ -25,7 +27,7 @@ function connectionBadgeState(
   isEncrypted: boolean,
   desktopOnline: boolean,
 ): { variant: 'success' | 'warning' | 'danger'; label: string } {
-  const relayReady = isEncrypted || connectionStatus === 'connected' || connectionStatus === 'encrypted'
+  const relayReady = connectionStatus === 'encrypted' && isEncrypted
 
   if (relayReady) {
     if (desktopOnline) return { variant: 'success', label: 'Connected' }
@@ -42,16 +44,17 @@ export const ConnectionHeader = memo(function ConnectionHeader({
   connectionStatus,
   isEncrypted,
   machinePresence,
+  onPress,
 }: ConnectionHeaderProps) {
   const desktopOnline = machinePresence?.daemon_connected ?? false
   const badgeState = connectionBadgeState(connectionStatus, isEncrypted, desktopOnline)
 
   return (
-    <View style={styles.container}>
+    <Pressable style={styles.container} onPress={onPress} hitSlop={8}>
       <Badge variant={badgeState.variant} dot>
         {badgeState.label}
       </Badge>
-    </View>
+    </Pressable>
   )
 })
 

@@ -5,7 +5,8 @@ import type { MachinePresence } from '@falcondeck/client-core'
 // from ConnectionHeader. These are pure functions we can test directly.
 
 function connectionLabel(status: string): string {
-  if (status === 'connected' || status === 'encrypted') return 'Connected'
+  if (status === 'encrypted') return 'Connected'
+  if (status === 'connected') return 'Securing session...'
   if (status === 'connecting') return 'Connecting...'
   if (status === 'disconnected') return 'Disconnected'
   if (status === 'claiming') return 'Pairing...'
@@ -17,7 +18,7 @@ function connectionBadgeState(
   isEncrypted: boolean,
   isDesktopOnline: boolean,
 ): { variant: 'success' | 'danger' | 'warning'; label: string } {
-  const relayReady = isEncrypted || connectionStatus === 'connected' || connectionStatus === 'encrypted'
+  const relayReady = connectionStatus === 'encrypted' && isEncrypted
 
   if (relayReady) {
     if (isDesktopOnline) return { variant: 'success', label: 'Connected' }
@@ -40,8 +41,8 @@ describe('ConnectionHeader logic', () => {
       expect(connectionLabel('encrypted')).toBe('Connected')
     })
 
-    it('returns "Connected" for connected status', () => {
-      expect(connectionLabel('connected')).toBe('Connected')
+    it('returns "Securing session..." for connected status', () => {
+      expect(connectionLabel('connected')).toBe('Securing session...')
     })
 
     it('returns "Connecting..." for connecting status', () => {
@@ -95,10 +96,10 @@ describe('ConnectionHeader logic', () => {
       })
     })
 
-    it('prefers relay-ready state when encryption is already established', () => {
-      expect(connectionBadgeState('disconnected', true, true)).toEqual({
-        variant: 'success',
-        label: 'Connected',
+    it('keeps disconnected state when the transport is no longer encrypted', () => {
+      expect(connectionBadgeState('disconnected', false, true)).toEqual({
+        variant: 'danger',
+        label: 'Disconnected',
       })
     })
   })

@@ -23,7 +23,7 @@ describe('ConnectionHeader component', () => {
   })
   it('renders connected not encrypted', () => {
     const r = renderComponent(<ConnectionHeader connectionStatus="connected" isEncrypted={false} machinePresence={{ session_id: 's1', daemon_connected: false, last_seen_at: null }} />)
-    expect(textOf(r)).toContain('Desktop offline')
+    expect(textOf(r)).toContain('Securing session...')
   })
   it('renders not_connected', () => {
     const r = renderComponent(<ConnectionHeader connectionStatus="not_connected" isEncrypted={false} machinePresence={null} />)

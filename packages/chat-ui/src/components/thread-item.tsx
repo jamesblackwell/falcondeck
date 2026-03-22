@@ -59,9 +59,7 @@ export const ThreadItem = memo(
               <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-color-warning-muted)]" />
             ) : attention.showUnreadDot ? (
               <span className="h-2.5 w-2.5 rounded-full bg-info" />
-            ) : (
-              <span className="h-3 w-3 rounded-full border border-fg-faint" />
-            )}
+            ) : null}
           </span>
           <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] text-fg-primary">
             {thread.title}

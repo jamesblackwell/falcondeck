@@ -1,9 +1,9 @@
-import { memo, useCallback, useMemo } from 'react'
-import { View } from 'react-native'
+import { memo, useCallback, useMemo, useState } from 'react'
+import { Pressable, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
-import { Settings, SquarePen } from 'lucide-react-native'
+import { ChevronDown, ChevronRight, Settings, SquarePen } from 'lucide-react-native'
 import { useRouter } from 'expo-router'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
@@ -28,20 +28,61 @@ export const SidebarView = memo(function SidebarView({
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
   const router = useRouter()
-  const rows = useMemo(() => buildSidebarRows(groups), [groups])
+
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set())
+  const [expandedThreadLists, setExpandedThreadLists] = useState<Set<string>>(() => new Set())
+
+  const rows = useMemo(
+    () => buildSidebarRows(groups, collapsedWorkspaces, expandedThreadLists, selectedThreadId),
+    [groups, collapsedWorkspaces, expandedThreadLists, selectedThreadId],
+  )
 
   const handleOpenSettings = useCallback(() => {
     router.push('/(app)/settings')
   }, [router])
 
+  const toggleWorkspaceCollapse = useCallback((workspaceId: string) => {
+    setCollapsedWorkspaces((prev) => {
+      const next = new Set(prev)
+      if (next.has(workspaceId)) {
+        next.delete(workspaceId)
+      } else {
+        next.add(workspaceId)
+      }
+      return next
+    })
+  }, [])
+
+  const toggleThreadListExpanded = useCallback((workspaceId: string) => {
+    setExpandedThreadLists((prev) => {
+      const next = new Set(prev)
+      if (next.has(workspaceId)) {
+        next.delete(workspaceId)
+      } else {
+        next.add(workspaceId)
+      }
+      return next
+    })
+  }, [])
+
   const renderRow = useCallback(
     ({ item }: { item: SidebarRow }) => {
       if (item.type === 'workspace') {
         return (
-          <View style={styles.workspaceHeader}>
-            <Text variant="caption" color="muted" numberOfLines={1} style={styles.workspaceName}>
-              {item.workspaceName}
-            </Text>
+          <Pressable
+            style={styles.workspaceHeader}
+            onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
+          >
+            <View style={styles.workspaceLeft}>
+              {item.isOpen ? (
+                <ChevronDown size={14} color={theme.colors.fg.muted} />
+              ) : (
+                <ChevronRight size={14} color={theme.colors.fg.muted} />
+              )}
+              <Text variant="label" color="secondary" size="sm" weight="medium" numberOfLines={1} style={styles.workspaceName}>
+                {item.workspaceName}
+              </Text>
+            </View>
             <Button
               variant="ghost"
               size="icon"
@@ -49,7 +90,25 @@ export const SidebarView = memo(function SidebarView({
             >
               <SquarePen size={14} color={theme.colors.fg.muted} />
             </Button>
-          </View>
+          </Pressable>
+        )
+      }
+
+      if (item.type === 'overflow') {
+        return (
+          <Pressable
+            style={styles.overflowRow}
+            onPress={() => toggleThreadListExpanded(item.workspaceId)}
+          >
+            <ChevronDown
+              size={12}
+              color={theme.colors.fg.muted}
+              style={item.isExpanded ? styles.chevronFlipped : undefined}
+            />
+            <Text variant="caption" color="muted" size="xs">
+              {item.isExpanded ? 'Show less' : `${item.hiddenCount} older threads`}
+            </Text>
+          </Pressable>
         )
       }
 
@@ -62,7 +121,7 @@ export const SidebarView = memo(function SidebarView({
         />
       )
     },
-    [onNewThread, onSelectThread, selectedThreadId, theme.colors.fg.muted],
+    [onNewThread, onSelectThread, selectedThreadId, theme.colors.fg.muted, toggleWorkspaceCollapse, toggleThreadListExpanded],
   )
 
   return (
@@ -123,16 +182,34 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
   },
   listContent: {
-    paddingVertical: theme.spacing[2],
+    paddingVertical: theme.spacing[3],
   },
   workspaceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[1],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[1.5],
+    marginTop: theme.spacing[2],
+  },
+  workspaceLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[2],
   },
   workspaceName: {
     flex: 1,
+  },
+  overflowRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[1.5],
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[1.5],
+    marginLeft: theme.spacing[3],
+  },
+  chevronFlipped: {
+    transform: [{ rotate: '180deg' }],
   },
 }))

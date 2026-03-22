@@ -51,16 +51,7 @@ function SessionListItemInner({
           <View style={[styles.dot, { backgroundColor: theme.colors.warning.default }]} />
         ) : presentation.showUnreadDot ? (
           <View style={[styles.dot, { backgroundColor: theme.colors.info.default }]} />
-        ) : (
-          <View
-            style={[
-              styles.ring,
-              {
-                borderColor: theme.colors.fg.faint,
-              },
-            ]}
-          />
-        )}
+        ) : null}
       </View>
       <Text
         variant="label"
@@ -85,7 +76,9 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: theme.spacing[3],
+    marginLeft: theme.spacing[2],
+    paddingLeft: theme.spacing[2],
+    paddingRight: theme.spacing[3],
     paddingVertical: theme.spacing[2],
     borderRadius: theme.radius.md,
     borderCurve: 'continuous',
@@ -106,12 +99,6 @@ const styles = StyleSheet.create((theme) => ({
     width: 10,
     height: 10,
     borderRadius: 999,
-  },
-  ring: {
-    width: 12,
-    height: 12,
-    borderRadius: 999,
-    borderWidth: 1,
   },
 }))
 

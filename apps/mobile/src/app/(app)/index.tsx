@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AppState, KeyboardAvoidingView, Platform, View } from 'react-native'
+import { AppState, KeyboardAvoidingView, Platform, Pressable, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { StyleSheet } from 'react-native-unistyles'
+import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
+import { ChevronLeft } from 'lucide-react-native'
+import { DrawerActions } from '@react-navigation/native'
+import { useNavigation, useRouter } from 'expo-router'
 import {
   defaultProvider,
   encryptJson,
@@ -20,7 +23,6 @@ import {
   useSelectedWorkspace,
   useUIStore,
 } from '@/store'
-import { useRelayConnection } from '@/hooks/useRelayConnection'
 import { useSessionActions } from '@/hooks/useSessionActions'
 import { useRenderBlocks } from '@/hooks/useRenderBlocks'
 import { useScrollToBottom } from '@/hooks/useScrollToBottom'
@@ -45,9 +47,9 @@ const getItemType = (block: ConversationRenderBlock) =>
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets()
-
-  // Start relay connection
-  useRelayConnection()
+  const { theme } = useUnistyles()
+  const navigation = useNavigation()
+  const router = useRouter()
 
   const blocks = useRenderBlocks()
   const approvals = useApprovals()
@@ -134,6 +136,14 @@ export default function HomeScreen() {
     },
     [selectedThread, setSelectedProvider, setSelectedModel, setSelectedEffort],
   )
+
+  const handleOpenDrawer = useCallback(() => {
+    navigation.dispatch(DrawerActions.openDrawer())
+  }, [navigation])
+
+  const handleOpenSettings = useCallback(() => {
+    router.push('/(app)/settings')
+  }, [router])
 
   const handleStop = useCallback(() => {
     void interruptTurn()
@@ -237,13 +247,17 @@ export default function HomeScreen() {
       keyboardVerticalOffset={0}
     >
       <View style={styles.header}>
-        <Text variant="label" color="primary" weight="semibold" numberOfLines={1} style={styles.headerTitle}>
-          {getWorkspaceTitle(workspace?.path)}
-        </Text>
+        <Pressable style={styles.headerLeft} onPress={handleOpenDrawer}>
+          <ChevronLeft size={18} color={theme.colors.fg.muted} />
+          <Text variant="label" color="primary" weight="semibold" numberOfLines={1} style={styles.headerTitle}>
+            {getWorkspaceTitle(workspace?.path)}
+          </Text>
+        </Pressable>
         <ConnectionHeader
           connectionStatus={connectionStatus}
           isEncrypted={isEncrypted}
           machinePresence={machinePresence}
+          onPress={handleOpenSettings}
         />
       </View>
 
@@ -258,10 +272,14 @@ export default function HomeScreen() {
 
       <View style={styles.listContainer}>
         {!selectedThread ? (
-          <EmptyState
-            title="Start a new thread"
-            description="Pick an existing thread or use the plus button from the sidebar."
-          />
+          <View style={styles.newThreadState}>
+            <Text size="2xl" color="primary" weight="semibold">
+              Let's build
+            </Text>
+            <Text size="2xl" color="muted" weight="medium">
+              {workspace?.path.split('/').pop() ?? 'Select a project'}
+            </Text>
+          </View>
         ) : blocks.length === 0 && !isThreadRunning ? (
           <EmptyState title="No messages yet" description="Send a message to get started" />
         ) : (
@@ -319,12 +337,24 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border.subtle,
   },
+  headerLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[1],
+    marginRight: theme.spacing[3],
+  },
   headerTitle: {
     flex: 1,
-    marginRight: theme.spacing[3],
   },
   listContainer: {
     flex: 1,
     minHeight: 2,
+  },
+  newThreadState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.spacing[2],
   },
 }))
