@@ -39,8 +39,12 @@ describe('ChatInput component', () => {
     models: [],
     selectedModel: null,
     selectedEffort: 'medium',
+    effortOptions: ['low', 'medium', 'high'],
+    selectedProvider: 'codex' as const,
+    showProviderSelector: false,
     onSelectModel: vi.fn(),
     onSelectEffort: vi.fn(),
+    onSelectProvider: vi.fn(),
   }
 
   it('renders empty', () => {

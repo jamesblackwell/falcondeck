@@ -1,7 +1,8 @@
-import { View, ScrollView } from 'react-native'
+import { View, ScrollView, Pressable } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { StyleSheet } from 'react-native-unistyles'
+import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { useRouter } from 'expo-router'
+import { ChevronLeft } from 'lucide-react-native'
 
 import { useRelayStore } from '@/store'
 import { Text, Button, Card, CardContent } from '@/components/ui'
@@ -9,6 +10,7 @@ import { Text, Button, Card, CardContent } from '@/components/ui'
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets()
   const router = useRouter()
+  const { theme } = useUnistyles()
 
   const relayUrl = useRelayStore((s) => s.relayUrl)
   const sessionId = useRelayStore((s) => s.sessionId)
@@ -26,9 +28,14 @@ export default function SettingsScreen() {
       style={styles.container}
       contentContainerStyle={[styles.content, { paddingTop: insets.top + 16 }]}
     >
-      <Text variant="heading" size="2xl" weight="bold">
-        Settings
-      </Text>
+      <View style={styles.titleRow}>
+        <Pressable onPress={() => router.back()} hitSlop={12}>
+          <ChevronLeft size={24} color={theme.colors.fg.primary} />
+        </Pressable>
+        <Text variant="heading" size="2xl" weight="bold">
+          Settings
+        </Text>
+      </View>
 
       <Card variant="flat" style={styles.card}>
         <CardContent>
@@ -82,6 +89,11 @@ const styles = StyleSheet.create((theme) => ({
   content: {
     padding: theme.spacing[4],
     gap: theme.spacing[4],
+  },
+  titleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[2],
   },
   card: {
     gap: 0,

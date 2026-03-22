@@ -3,7 +3,7 @@ import { View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
-import { Settings, Plus } from 'lucide-react-native'
+import { Settings, SquarePen } from 'lucide-react-native'
 import { useRouter } from 'expo-router'
 
 import type { ProjectGroup } from '@falcondeck/client-core'
@@ -47,7 +47,7 @@ export const SidebarView = memo(function SidebarView({
               size="icon"
               onPress={() => onNewThread(item.workspaceId)}
             >
-              <Plus size={16} color={theme.colors.fg.muted} />
+              <SquarePen size={14} color={theme.colors.fg.muted} />
             </Button>
           </View>
         )

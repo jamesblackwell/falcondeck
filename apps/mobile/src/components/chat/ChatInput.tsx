@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Send } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
-import type { ModelSummary } from '@falcondeck/client-core'
+import type { AgentProvider, ModelSummary } from '@falcondeck/client-core'
 
 import { InputToolbar } from './InputToolbar'
 import { StopButton } from './StopButton'
@@ -20,8 +20,12 @@ interface ChatInputProps {
   models: ModelSummary[]
   selectedModel: string | null
   selectedEffort: string | null
+  effortOptions: string[]
+  selectedProvider: AgentProvider
+  showProviderSelector: boolean
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
+  onSelectProvider: (provider: AgentProvider) => void
 }
 
 export const ChatInput = memo(function ChatInput({
@@ -35,8 +39,12 @@ export const ChatInput = memo(function ChatInput({
   models,
   selectedModel,
   selectedEffort,
+  effortOptions,
+  selectedProvider,
+  showProviderSelector,
   onSelectModel,
   onSelectEffort,
+  onSelectProvider,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
 
@@ -67,8 +75,12 @@ export const ChatInput = memo(function ChatInput({
             models={models}
             selectedModel={selectedModel}
             selectedEffort={selectedEffort}
+            effortOptions={effortOptions}
+            selectedProvider={selectedProvider}
+            showProviderSelector={showProviderSelector}
             onSelectModel={onSelectModel}
             onSelectEffort={onSelectEffort}
+            onSelectProvider={onSelectProvider}
           />
           {isRunning ? (
             <StopButton onPress={onStop} />

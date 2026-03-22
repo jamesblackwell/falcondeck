@@ -1082,6 +1082,11 @@ pub enum UnifiedEvent {
         /// Updated thread summary.
         thread: ThreadSummary,
     },
+    /// Workspace metadata update event.
+    WorkspaceUpdated {
+        /// Updated workspace summary.
+        workspace: WorkspaceSummary,
+    },
     /// Global preference update event.
     PreferencesUpdated {
         /// Updated global preferences payload.

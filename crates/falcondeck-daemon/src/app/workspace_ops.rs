@@ -304,7 +304,7 @@ pub(super) async fn connect_workspace_internal(
     );
 
     app.emit(
-        Some(workspace_id),
+        Some(workspace_id.clone()),
         None,
         UnifiedEvent::Snapshot {
             snapshot: app.snapshot().await,
@@ -312,6 +312,33 @@ pub(super) async fn connect_workspace_internal(
     );
 
     app.persist_local_state().await?;
+
+    {
+        let app = app.clone();
+        let workspace_id = workspace_id;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            interval.tick().await; // skip immediate tick
+            loop {
+                interval.tick().await;
+                // Stop if workspace was removed
+                let exists = app.inner.workspaces.lock().await.contains_key(&workspace_id);
+                if !exists {
+                    break;
+                }
+                match refresh_connected_workspace_metadata(&app, &workspace_id).await {
+                    Ok(summary) => {
+                        app.emit(
+                            Some(workspace_id.clone()),
+                            None,
+                            UnifiedEvent::WorkspaceUpdated { workspace: summary },
+                        );
+                    }
+                    Err(_) => {}
+                }
+            }
+        });
+    }
 
     Ok(summary)
 }

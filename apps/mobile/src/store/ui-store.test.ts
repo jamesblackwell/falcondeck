@@ -7,6 +7,7 @@ describe('ui-store', () => {
     // Reset to initial state
     useUIStore.setState({
       draft: '',
+      selectedProvider: null,
       selectedModel: null,
       selectedEffort: 'medium',
       selectedCollaborationMode: null,
@@ -56,5 +57,13 @@ describe('ui-store', () => {
 
   it('defaults reasoning effort to medium', () => {
     expect(useUIStore.getState().selectedEffort).toBe('medium')
+  })
+
+  it('sets selected provider', () => {
+    useUIStore.getState().setSelectedProvider('claude')
+    expect(useUIStore.getState().selectedProvider).toBe('claude')
+
+    useUIStore.getState().setSelectedProvider(null)
+    expect(useUIStore.getState().selectedProvider).toBeNull()
   })
 })

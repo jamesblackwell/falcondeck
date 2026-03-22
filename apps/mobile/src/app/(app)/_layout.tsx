@@ -1,5 +1,6 @@
 import { useCallback, useMemo } from 'react'
 import { Drawer } from 'expo-router/drawer'
+import { useRouter } from 'expo-router'
 
 import { buildProjectGroups } from '@falcondeck/client-core'
 
@@ -8,6 +9,7 @@ import { useSessionStore } from '@/store'
 import { SidebarView } from '@/components/navigation'
 
 export default function AppLayout() {
+  const router = useRouter()
   const snapshot = useSessionStore((s) => s.snapshot)
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
   const { selectThread, selectNewThread } = useSessionStore.getState()
@@ -15,16 +17,33 @@ export default function AppLayout() {
     () => buildProjectGroups(snapshot?.workspaces ?? [], snapshot?.threads ?? []),
     [snapshot?.threads, snapshot?.workspaces],
   )
+
+  const handleSelectThread = useCallback(
+    (wId: string, tId: string) => {
+      selectThread(wId, tId)
+      router.navigate('/(app)')
+    },
+    [selectThread, router],
+  )
+
+  const handleNewThread = useCallback(
+    (wId: string) => {
+      selectNewThread(wId)
+      router.navigate('/(app)')
+    },
+    [selectNewThread, router],
+  )
+
   const renderDrawerContent = useCallback(
     () => (
       <SidebarView
         groups={groups}
         selectedThreadId={selectedThreadId}
-        onSelectThread={(wId, tId) => selectThread(wId, tId)}
-        onNewThread={selectNewThread}
+        onSelectThread={handleSelectThread}
+        onNewThread={handleNewThread}
       />
     ),
-    [groups, selectNewThread, selectThread, selectedThreadId],
+    [groups, handleSelectThread, handleNewThread, selectedThreadId],
   )
 
   return (

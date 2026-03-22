@@ -1,9 +1,15 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AppState, KeyboardAvoidingView, Platform, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
-import { encryptJson, type ConversationRenderBlock } from '@falcondeck/client-core'
+import {
+  defaultProvider,
+  encryptJson,
+  workspaceModels,
+  type AgentProvider,
+  type ConversationRenderBlock,
+} from '@falcondeck/client-core'
 import { useShallow } from 'zustand/react/shallow'
 
 import {
@@ -58,24 +64,76 @@ export default function HomeScreen() {
       sessionId: s.sessionId,
     })),
   )
-  const { draft, isSubmitting, selectedEffort, selectedModel } = useUIStore(
+  const { draft, isSubmitting, selectedEffort, selectedModel, selectedProvider } = useUIStore(
     useShallow((s) => ({
       draft: s.draft,
       isSubmitting: s.isSubmitting,
       selectedEffort: s.selectedEffort,
       selectedModel: s.selectedModel,
+      selectedProvider: s.selectedProvider,
     })),
   )
-  const { setDraft, setSelectedModel, setSelectedEffort } = useUIStore.getState()
+  const { setDraft, setSelectedModel, setSelectedEffort, setSelectedProvider } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
   const interruptTurn = useInterruptTurn()
   const { listRef, showJumpButton, onContentSizeChange, onScroll, resetScrollState, scrollToBottom } =
     useScrollToBottom<ConversationRenderBlock>()
   const [appState, setAppState] = useState(AppState.currentState)
 
+  // Compute active provider: thread's provider if running, otherwise UI selection or workspace default
+  const activeProvider: AgentProvider = selectedThread
+    ? selectedThread.provider
+    : (selectedProvider ?? defaultProvider(workspace))
+
+  // Filter models by active provider (matches desktop behavior)
+  const models = useMemo(
+    () => workspaceModels(workspace, activeProvider),
+    [activeProvider, workspace],
+  )
+
+  // Compute effort options from the selected model's supported_reasoning_efforts
+  const resolvedModel = useMemo(() => {
+    if (selectedModel) return models.find((m) => m.id === selectedModel) ?? null
+    return models.find((m) => m.is_default) ?? models[0] ?? null
+  }, [models, selectedModel])
+
+  const effortOptions = useMemo(() => {
+    const supported = resolvedModel?.supported_reasoning_efforts.map((e) => e.reasoning_effort) ?? []
+    if (supported.length > 0) return supported
+    return resolvedModel?.default_reasoning_effort ? [resolvedModel.default_reasoning_effort] : ['medium']
+  }, [resolvedModel])
+
   const isThreadRunning = selectedThread?.status === 'running'
-  const models = workspace?.models ?? []
   const showThinking = shouldShowThinkingIndicator(blocks, isThreadRunning)
+
+  // Sync provider/model when thread or workspace changes
+  useEffect(() => {
+    if (!workspace) return
+    if (selectedThread) {
+      // Thread has a locked provider — sync UI to match
+      setSelectedProvider(selectedThread.provider)
+    }
+  }, [selectedThread, workspace, setSelectedProvider])
+
+  // Reset effort when it's no longer valid for the current model
+  useEffect(() => {
+    if (effortOptions.length === 0) return
+    if (!selectedEffort || !effortOptions.includes(selectedEffort)) {
+      const fallback = resolvedModel?.default_reasoning_effort ?? effortOptions[0] ?? 'medium'
+      setSelectedEffort(fallback)
+    }
+  }, [effortOptions, resolvedModel, selectedEffort, setSelectedEffort])
+
+  const handleProviderChange = useCallback(
+    (provider: AgentProvider) => {
+      if (selectedThread) return // locked
+      setSelectedProvider(provider)
+      // Reset model and effort for the new provider
+      setSelectedModel(null)
+      setSelectedEffort(null)
+    },
+    [selectedThread, setSelectedProvider, setSelectedModel, setSelectedEffort],
+  )
 
   const handleStop = useCallback(() => {
     void interruptTurn()
@@ -235,8 +293,12 @@ export default function HomeScreen() {
           models={models}
           selectedModel={selectedModel}
           selectedEffort={selectedEffort}
+          effortOptions={effortOptions}
+          selectedProvider={activeProvider}
+          showProviderSelector={!selectedThread}
           onSelectModel={setSelectedModel}
           onSelectEffort={setSelectedEffort}
+          onSelectProvider={handleProviderChange}
         />
       </View>
     </KeyboardAvoidingView>

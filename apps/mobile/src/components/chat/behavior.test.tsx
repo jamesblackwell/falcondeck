@@ -91,13 +91,19 @@ describe('chat behavior components', () => {
         ]}
         selectedModel="gpt-5"
         selectedEffort="medium"
+        effortOptions={['low', 'medium', 'high']}
+        selectedProvider="codex"
+        showProviderSelector
         onSelectModel={vi.fn()}
         onSelectEffort={vi.fn()}
+        onSelectProvider={vi.fn()}
       />,
     )
 
     expect(textOf(renderer)).toContain('GPT-5')
     expect(textOf(renderer)).toContain('Medium')
+    expect(textOf(renderer)).toContain('Codex')
+    expect(textOf(renderer)).toContain('Claude')
   })
 
   it('handles stop and jump-to-bottom actions', () => {

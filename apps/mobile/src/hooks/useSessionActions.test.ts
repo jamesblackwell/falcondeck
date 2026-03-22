@@ -29,6 +29,7 @@ function resetAll() {
   })
   useUIStore.setState({
     draft: '',
+    selectedProvider: null,
     selectedModel: null,
     selectedEffort: 'medium',
     selectedCollaborationMode: null,
