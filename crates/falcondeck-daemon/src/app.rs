@@ -2005,10 +2005,10 @@ mod tests {
     use tokio::time::{Duration as TokioDuration, sleep};
 
     use super::{
-        AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, codex_inputs,
-        codex_inputs_with_plan_mode_shim, collaboration_mode_payload, encode_base64,
-        notification_timestamp, plan_step_status, should_surface_tool_item,
-        should_use_plan_mode_shim, workspace_status_after_account_update,
+        AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
+        claude_prompt_from_inputs, codex_inputs, codex_inputs_with_plan_mode_shim,
+        collaboration_mode_payload, encode_base64, notification_timestamp, plan_step_status,
+        should_surface_tool_item, should_use_plan_mode_shim, workspace_status_after_account_update,
     };
 
     #[test]
@@ -2144,6 +2144,22 @@ mod tests {
                 "path": "/tmp/diagram.png"
             })]
         );
+    }
+
+    #[test]
+    fn claude_prompt_does_not_inline_data_url_images() {
+        let prompt = claude_prompt_from_inputs(
+            &[TurnInputItem::Image(ImageInput {
+                id: "img-1".to_string(),
+                name: Some("diagram.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: "data:image/png;base64,aGVsbG8=".to_string(),
+                local_path: None,
+            })],
+            &[],
+        );
+
+        assert_eq!(prompt, "[image attachment: diagram.png]");
     }
 
     #[test]

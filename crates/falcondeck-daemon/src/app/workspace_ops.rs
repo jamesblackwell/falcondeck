@@ -1,3 +1,9 @@
+use std::path::Path;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use falcondeck_core::{ImageInput, TurnInputItem};
+use uuid::Uuid;
+
 use super::*;
 
 pub(super) async fn connect_workspace(
@@ -315,26 +321,29 @@ pub(super) async fn connect_workspace_internal(
 
     {
         let app = app.clone();
-        let workspace_id = workspace_id;
+        let workspace_id = workspace_id.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(300));
             interval.tick().await; // skip immediate tick
             loop {
                 interval.tick().await;
                 // Stop if workspace was removed
-                let exists = app.inner.workspaces.lock().await.contains_key(&workspace_id);
+                let exists = app
+                    .inner
+                    .workspaces
+                    .lock()
+                    .await
+                    .contains_key(&workspace_id);
                 if !exists {
                     break;
                 }
-                match refresh_connected_workspace_metadata(&app, &workspace_id).await {
-                    Ok(summary) => {
-                        app.emit(
-                            Some(workspace_id.clone()),
-                            None,
-                            UnifiedEvent::WorkspaceUpdated { workspace: summary },
-                        );
-                    }
-                    Err(_) => {}
+                if let Ok(summary) = refresh_connected_workspace_metadata(&app, &workspace_id).await
+                {
+                    app.emit(
+                        Some(workspace_id.clone()),
+                        None,
+                        UnifiedEvent::WorkspaceUpdated { workspace: summary },
+                    );
                 }
             }
         });
@@ -526,6 +535,237 @@ pub(super) async fn unarchive_thread(
     Ok(summary)
 }
 
+async fn normalize_turn_inputs(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    inputs: &[TurnInputItem],
+) -> Result<Vec<TurnInputItem>, DaemonError> {
+    let mut normalized = Vec::with_capacity(inputs.len());
+
+    for input in inputs {
+        match input {
+            TurnInputItem::Text { .. } => normalized.push(input.clone()),
+            TurnInputItem::Image(image) => normalized.push(TurnInputItem::Image(
+                normalize_image_input(app, workspace_id, thread_id, image).await?,
+            )),
+        }
+    }
+
+    Ok(normalized)
+}
+
+async fn normalize_image_input(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    image: &ImageInput,
+) -> Result<ImageInput, DaemonError> {
+    let image_url = image.url.trim();
+
+    if let Some(local_path) = image
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let mut normalized = image.clone();
+        normalized.url = compact_image_reference_url(image, local_path);
+        return Ok(normalized);
+    }
+
+    if image_url.starts_with("data:") {
+        let local_path =
+            persist_inline_image_attachment(app, workspace_id, thread_id, image).await?;
+        let mut normalized = image.clone();
+        normalized.url = local_path.clone();
+        normalized.local_path = Some(local_path);
+        return Ok(normalized);
+    }
+
+    if Path::new(image_url).is_absolute() {
+        let mut normalized = image.clone();
+        normalized.local_path = Some(image_url.to_string());
+        normalized.url = image_url.to_string();
+        return Ok(normalized);
+    }
+
+    Ok(image.clone())
+}
+
+async fn persist_inline_image_attachment(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    image: &ImageInput,
+) -> Result<String, DaemonError> {
+    let parsed = parse_image_data_url(&image.url)?;
+    let extension = image_file_extension(
+        image.name.as_deref(),
+        image.mime_type.as_deref(),
+        &parsed.media_type,
+    );
+    let attachments_root = app
+        .inner
+        .state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("attachments")
+        .join(sanitized_attachment_path_segment(workspace_id, "workspace"))
+        .join(sanitized_attachment_path_segment(thread_id, "thread"));
+    tokio::fs::create_dir_all(&attachments_root).await?;
+
+    let file_path = attachments_root.join(format!(
+        "{}.{}",
+        sanitized_attachment_file_stem(&image.id),
+        extension
+    ));
+    tokio::fs::write(&file_path, parsed.bytes).await?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+struct ParsedImageDataUrl {
+    media_type: String,
+    bytes: Vec<u8>,
+}
+
+fn parse_image_data_url(url: &str) -> Result<ParsedImageDataUrl, DaemonError> {
+    let value = url
+        .trim()
+        .strip_prefix("data:")
+        .ok_or_else(|| DaemonError::BadRequest("invalid image attachment data URL".to_string()))?;
+    let (metadata, encoded) = value.split_once(',').ok_or_else(|| {
+        DaemonError::BadRequest("invalid image attachment data URL payload".to_string())
+    })?;
+
+    let mut parts = metadata.split(';');
+    let media_type = parts.next().unwrap_or_default().trim().to_string();
+    if media_type.is_empty() || !media_type.starts_with("image/") {
+        return Err(DaemonError::BadRequest(
+            "image attachments must use an image/* data URL".to_string(),
+        ));
+    }
+    if !parts.any(|part| part.eq_ignore_ascii_case("base64")) {
+        return Err(DaemonError::BadRequest(
+            "image attachments must use base64 data URLs".to_string(),
+        ));
+    }
+
+    let bytes = BASE64.decode(encoded).map_err(|error| {
+        DaemonError::BadRequest(format!("invalid image attachment base64 payload: {error}"))
+    })?;
+
+    Ok(ParsedImageDataUrl { media_type, bytes })
+}
+
+fn image_file_extension(
+    name: Option<&str>,
+    mime_type: Option<&str>,
+    data_url_media_type: &str,
+) -> String {
+    if let Some(extension) = mime_type_to_image_extension(data_url_media_type) {
+        return extension.to_string();
+    }
+
+    if let Some(extension) = mime_type.and_then(mime_type_to_image_extension) {
+        return extension.to_string();
+    }
+
+    if let Some(extension) = name
+        .and_then(|value| Path::new(value).extension())
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "webp"
+                    | "bmp"
+                    | "tif"
+                    | "tiff"
+                    | "svg"
+                    | "heic"
+                    | "heif"
+            )
+        })
+    {
+        return extension;
+    }
+
+    "img".to_string()
+}
+
+fn sanitized_attachment_file_stem(id: &str) -> String {
+    sanitized_attachment_identifier(id, "image")
+}
+
+fn compact_image_reference_url(image: &ImageInput, local_path: &str) -> String {
+    let image_url = image.url.trim();
+    if image_url.starts_with("data:")
+        || image_url.starts_with("blob:")
+        || image_url.starts_with("file:")
+        || image_url.is_empty()
+    {
+        local_path.to_string()
+    } else {
+        image_url.to_string()
+    }
+}
+
+fn sanitized_attachment_path_segment(value: &str, prefix: &str) -> String {
+    sanitized_attachment_identifier(value, prefix)
+}
+
+fn sanitized_attachment_identifier(value: &str, prefix: &str) -> String {
+    let trimmed = value.trim();
+    let sanitized = trimmed
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
+        .take(32)
+        .collect::<String>();
+
+    if !trimmed.is_empty() && sanitized == trimmed && trimmed.len() <= 32 {
+        return sanitized;
+    }
+
+    let base = if sanitized.is_empty() {
+        prefix.to_string()
+    } else {
+        sanitized
+    };
+    format!("{base}-{:016x}", stable_attachment_identifier_hash(trimmed))
+}
+
+fn mime_type_to_image_extension(mime_type: &str) -> Option<&'static str> {
+    match mime_type {
+        "image/png" => Some("png"),
+        "image/jpeg" => Some("jpg"),
+        "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/bmp" => Some("bmp"),
+        "image/tif" => Some("tif"),
+        "image/tiff" => Some("tiff"),
+        "image/svg+xml" => Some("svg"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
+        _ => None,
+    }
+}
+
+fn stable_attachment_identifier_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
@@ -537,6 +777,14 @@ pub(super) async fn send_turn(
     } else {
         request.inputs.clone()
     };
+    {
+        let workspaces = app.inner.workspaces.lock().await;
+        if !workspaces.contains_key(&request.workspace_id) {
+            return Err(DaemonError::NotFound("workspace not found".to_string()));
+        }
+    }
+    let inputs =
+        normalize_turn_inputs(app, &request.workspace_id, &request.thread_id, &inputs).await?;
     let approval_policy = request
         .approval_policy
         .unwrap_or_else(|| "on-request".to_string());
@@ -1139,4 +1387,122 @@ pub(super) async fn mark_thread_read(
         app.persist_local_state().await?;
     }
     Ok(thread)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn materializes_data_url_images_into_durable_local_files() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path(
+            "0.1.0".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            state_path,
+        );
+        let inputs = vec![TurnInputItem::Image(ImageInput {
+            id: "img-1".to_string(),
+            name: Some("diagram.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: "data:image/png;base64,aGVsbG8=".to_string(),
+            local_path: None,
+        })];
+
+        let normalized = normalize_turn_inputs(&app, "workspace-1", "thread-1", &inputs)
+            .await
+            .unwrap();
+
+        let TurnInputItem::Image(image) = &normalized[0] else {
+            panic!("expected image input");
+        };
+        let local_path = image
+            .local_path
+            .as_deref()
+            .expect("expected normalized local path");
+        assert!(local_path.ends_with("img-1.png"));
+        assert_eq!(image.url, local_path);
+        assert_eq!(tokio::fs::read(local_path).await.unwrap(), b"hello");
+    }
+
+    #[test]
+    fn parses_image_data_urls_strictly() {
+        let parsed =
+            parse_image_data_url("data:image/webp;base64,aGVsbG8=").expect("valid data url");
+        assert_eq!(parsed.media_type, "image/webp");
+        assert_eq!(parsed.bytes, b"hello");
+        assert!(parse_image_data_url("data:text/plain;base64,aGVsbG8=").is_err());
+        assert!(parse_image_data_url("data:image/png,hello").is_err());
+    }
+
+    #[test]
+    fn derives_attachment_extension_from_validated_image_media_type() {
+        assert_eq!(
+            image_file_extension(Some("diagram.txt"), Some("image/png"), "image/png",),
+            "png"
+        );
+        assert_eq!(
+            image_file_extension(Some("diagram.jpeg"), Some("image/webp"), "image/webp",),
+            "webp"
+        );
+    }
+
+    #[tokio::test]
+    async fn compacts_inline_preview_urls_when_local_file_exists() {
+        let image = ImageInput {
+            id: "img-1".to_string(),
+            name: Some("diagram.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: "data:image/png;base64,aGVsbG8=".to_string(),
+            local_path: Some("/tmp/diagram.png".to_string()),
+        };
+
+        let normalized = normalize_image_input(
+            &AppState::new_with_state_path(
+                "0.1.0".to_string(),
+                "codex".to_string(),
+                "claude".to_string(),
+                Path::new("/tmp/falcondeck-daemon-state.json").to_path_buf(),
+            ),
+            "workspace-1",
+            "thread-1",
+            &image,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(normalized.url, "/tmp/diagram.png");
+        assert_eq!(normalized.local_path.as_deref(), Some("/tmp/diagram.png"));
+    }
+
+    #[tokio::test]
+    async fn keeps_materialized_attachments_within_daemon_state_root() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path(
+            "0.1.0".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            state_path,
+        );
+        let image = ImageInput {
+            id: "../../image".to_string(),
+            name: Some("diagram.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: "data:image/png;base64,aGVsbG8=".to_string(),
+            local_path: None,
+        };
+
+        let local_path =
+            persist_inline_image_attachment(&app, "../../workspace", "../../thread", &image)
+                .await
+                .unwrap();
+
+        assert!(Path::new(&local_path).starts_with(temp_dir.path().join("attachments")));
+        assert!(!local_path.contains("../"));
+    }
 }

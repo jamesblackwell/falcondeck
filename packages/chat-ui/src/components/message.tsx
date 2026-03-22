@@ -9,6 +9,7 @@ import { cn } from '@falcondeck/ui'
 
 import { CodeBlock } from './code-block'
 import { InteractiveRequestCard } from './interactive-request-card'
+import { attachmentLabel, canRenderAttachmentImage } from './attachment-preview'
 
 const remarkPlugins = [remarkGfm]
 
@@ -81,12 +82,22 @@ function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_m
       {item.attachments.length > 0 ? (
         <div className="mt-3 flex flex-wrap gap-2">
           {item.attachments.map((attachment) => (
-            <img
-              key={attachment.id}
-              src={attachment.url}
-              alt={attachment.name ?? 'attachment'}
-              className="h-16 w-16 rounded-[var(--fd-radius-md)] border border-border-default object-cover"
-            />
+            canRenderAttachmentImage(attachment.url) ? (
+              <img
+                key={attachment.id}
+                src={attachment.url}
+                alt={attachment.name ?? 'attachment'}
+                className="h-16 w-16 rounded-[var(--fd-radius-md)] border border-border-default object-cover"
+              />
+            ) : (
+              <div
+                key={attachment.id}
+                className="inline-flex max-w-48 items-center rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-3 py-2 text-[length:var(--fd-text-xs)] text-fg-secondary"
+                title={attachment.local_path ?? attachment.url}
+              >
+                {attachmentLabel(attachment)}
+              </div>
+            )
           ))}
         </div>
       ) : null}

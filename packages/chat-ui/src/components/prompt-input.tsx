@@ -13,6 +13,7 @@ import { activeSlashQuery, canonicalSkillAlias, providerSupportsSkill } from '@f
 import { Button } from '@falcondeck/ui'
 
 import { ModelSelector, ProviderSelector, ReasoningSelector } from './model-selector'
+import { attachmentLabel, canRenderAttachmentImage } from './attachment-preview'
 
 export type PromptInputProps = {
   value: string
@@ -208,11 +209,20 @@ export const PromptInput = memo(function PromptInput({
           <div className="flex flex-wrap gap-2 border-b border-border-subtle px-4 py-3">
             {attachments.map((attachment) => (
               <div key={attachment.id} className="relative">
-                <img
-                  src={attachment.url}
-                  alt={attachment.name ?? 'attachment'}
-                  className="h-14 w-14 rounded-[var(--fd-radius-md)] border border-border-default object-cover"
-                />
+                {canRenderAttachmentImage(attachment.url) ? (
+                  <img
+                    src={attachment.url}
+                    alt={attachment.name ?? 'attachment'}
+                    className="h-14 w-14 rounded-[var(--fd-radius-md)] border border-border-default object-cover"
+                  />
+                ) : (
+                  <div
+                    className="flex h-14 w-28 items-center rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2 text-[length:var(--fd-text-xs)] text-fg-secondary"
+                    title={attachment.local_path ?? attachment.url}
+                  >
+                    <span className="truncate">{attachmentLabel(attachment)}</span>
+                  </div>
+                )}
                 {onRemoveAttachment ? (
                   <button
                     type="button"

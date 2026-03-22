@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 axum.workspace = true
+base64 = "0.22.1"
 chrono.workspace = true
 falcondeck-core = { path = "../falcondeck-core" }
 futures-util.workspace = true

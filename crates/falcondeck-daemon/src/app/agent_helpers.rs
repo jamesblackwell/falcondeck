@@ -1,8 +1,8 @@
 use falcondeck_core::{
-    AgentProvider, CollaborationModeSummary, SelectedSkillReference, SkillSummary, TurnInputItem,
-    WorkspaceSummary,
+    AgentProvider, CollaborationModeSummary, ImageInput, SelectedSkillReference, SkillSummary,
+    TurnInputItem, WorkspaceSummary,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{codex::extract_string, skills::canonical_skill_alias};
@@ -186,14 +186,46 @@ pub(super) fn claude_prompt_from_inputs(
         .iter()
         .map(|input| match input {
             TurnInputItem::Text { text, .. } => translate_claude_text_input(text, selected_skills),
-            TurnInputItem::Image(image) => image
-                .local_path
-                .as_ref()
-                .map(|path| format!("[image attachment: {path}]"))
-                .unwrap_or_else(|| format!("[image attachment: {}]", image.url)),
+            TurnInputItem::Image(image) => claude_image_reference(image),
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+fn claude_image_reference(image: &ImageInput) -> String {
+    if let Some(local_path) = image
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        return format!("[image attachment: {local_path}]");
+    }
+
+    if let Some(name) = image
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("[image attachment: {name}]");
+    }
+
+    if let Some(mime_type) = image
+        .mime_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return format!("[image attachment: {mime_type}]");
+    }
+
+    let url = image.url.trim();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return format!("[image attachment: {url}]");
+    }
+
+    "[image attachment]".to_string()
 }
 
 fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSkill]) -> String {
