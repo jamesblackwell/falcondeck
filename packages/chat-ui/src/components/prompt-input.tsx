@@ -325,8 +325,18 @@ export const PromptInput = memo(function PromptInput({
                   disabled={disabled || providerLocked}
                 />
               ) : null}
-              <ModelSelector value={selectedModelId} models={models} onValueChange={onModelChange} />
-              <ReasoningSelector value={selectedEffort} options={reasoningOptions} onValueChange={onEffortChange} />
+              <ModelSelector
+                value={selectedModelId}
+                models={models}
+                onValueChange={onModelChange}
+                disabled={disabled || models.length === 0}
+              />
+              <ReasoningSelector
+                value={selectedEffort}
+                options={reasoningOptions}
+                onValueChange={onEffortChange}
+                disabled={disabled || reasoningOptions.length === 0}
+              />
             </>
           ) : null}
 

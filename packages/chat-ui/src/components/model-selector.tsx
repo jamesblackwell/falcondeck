@@ -38,14 +38,16 @@ export function ModelSelector({
   value,
   models,
   onValueChange,
+  disabled = false,
 }: {
   value: string | null
   models: ModelSummary[]
   onValueChange: (value: string) => void
+  disabled?: boolean
 }) {
   return (
-    <Select value={value ?? undefined} onValueChange={onValueChange}>
-      <SelectTrigger>
+    <Select value={value ?? undefined} onValueChange={onValueChange} disabled={disabled}>
+      <SelectTrigger disabled={disabled}>
         <SelectValue placeholder="Model" />
       </SelectTrigger>
       <SelectContent>
@@ -63,14 +65,16 @@ export function ReasoningSelector({
   value,
   options,
   onValueChange,
+  disabled = false,
 }: {
   value: string | null
   options: string[]
   onValueChange: (value: string) => void
+  disabled?: boolean
 }) {
   return (
-    <Select value={value ?? undefined} onValueChange={onValueChange}>
-      <SelectTrigger>
+    <Select value={value ?? undefined} onValueChange={onValueChange} disabled={disabled}>
+      <SelectTrigger disabled={disabled}>
         <SelectValue placeholder="Effort" />
       </SelectTrigger>
       <SelectContent>
@@ -88,14 +92,16 @@ export function CollaborationModeSelector({
   value,
   modes,
   onValueChange,
+  disabled = false,
 }: {
   value: string | null
   modes: CollaborationModeSummary[]
   onValueChange: (value: string) => void
+  disabled?: boolean
 }) {
   return (
-    <Select value={value ?? undefined} onValueChange={onValueChange}>
-      <SelectTrigger>
+    <Select value={value ?? undefined} onValueChange={onValueChange} disabled={disabled}>
+      <SelectTrigger disabled={disabled}>
         <SelectValue placeholder="Mode" />
       </SelectTrigger>
       <SelectContent>
