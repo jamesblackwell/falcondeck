@@ -1,3 +1,4 @@
+import React from 'react'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -6,6 +7,16 @@ import { ToastProvider } from '@falcondeck/ui'
 
 import { openExternalUrl } from '../api'
 import { RemotePairingPopover } from './RemotePairingPopover'
+
+type MockButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  children?: React.ReactNode
+}
+
+type MockCopyButtonProps = {
+  text: string
+  className?: string
+  label?: string
+}
 
 vi.mock('../api', () => ({
   openExternalUrl: vi.fn(),
@@ -16,10 +27,10 @@ vi.mock('@falcondeck/ui', async () => {
 
   return {
     ...actual,
-    Button: ({ children, ...props }: any) => (
+    Button: ({ children, ...props }: MockButtonProps) => (
       <button {...props}>{children}</button>
     ),
-    CopyButton: ({ text, className, label = 'Copy' }: any) => (
+    CopyButton: ({ text, className, label = 'Copy' }: MockCopyButtonProps) => (
       <button type="button" className={className} data-copy-text={text}>
         {label}
       </button>

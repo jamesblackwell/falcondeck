@@ -1,3 +1,4 @@
+import * as React from 'react'
 import { memo, useState } from 'react'
 import { ChevronDown, ChevronRight, FolderClosed, SquarePen } from 'lucide-react'
 

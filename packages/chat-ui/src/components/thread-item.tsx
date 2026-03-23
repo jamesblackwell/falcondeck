@@ -1,15 +1,24 @@
+import * as React from 'react'
 import { memo, useMemo } from 'react'
 import { Archive, LoaderCircle } from 'lucide-react'
 
 import { deriveThreadAttentionPresentation, type ThreadSummary } from '@falcondeck/client-core'
 import { Badge, cn } from '@falcondeck/ui'
 
+export type ThreadItemArchiveHandler = (workspaceId: string, threadId: string) => Promise<void> | void
+
 export type ThreadItemProps = {
   thread: ThreadSummary
   workspaceId: string
   isSelected: boolean
   onSelect: (workspaceId: string, threadId: string) => void
-  onArchive?: (workspaceId: string, threadId: string) => void
+  onArchive?: ThreadItemArchiveHandler
+  onOpenContextMenu?: (args: {
+    workspaceId: string
+    thread: ThreadSummary
+    x: number
+    y: number
+  }) => void
   nowTick?: number
 }
 
@@ -31,6 +40,7 @@ export const ThreadItem = memo(
     isSelected,
     onSelect,
     onArchive,
+    onOpenContextMenu,
     nowTick = 0,
   }: ThreadItemProps) {
     const attention = deriveThreadAttentionPresentation(thread)
@@ -44,6 +54,16 @@ export const ThreadItem = memo(
             ? 'bg-accent-dim'
             : 'hover:bg-surface-3 active:bg-surface-4',
         )}
+        onContextMenu={(event: React.MouseEvent<HTMLDivElement>) => {
+          if (!onOpenContextMenu) return
+          event.preventDefault()
+          onOpenContextMenu({
+            workspaceId,
+            thread,
+            x: event.clientX,
+            y: event.clientY,
+          })
+        }}
       >
         <button
           type="button"
@@ -79,7 +99,7 @@ export const ThreadItem = memo(
             type="button"
             onClick={(e) => {
               e.stopPropagation()
-              onArchive(workspaceId, thread.id)
+              void Promise.resolve(onArchive(workspaceId, thread.id)).catch(() => {})
             }}
             title="Archive thread"
             className="hidden shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:text-fg-secondary group-hover:block"
@@ -96,5 +116,6 @@ export const ThreadItem = memo(
     prev.isSelected === next.isSelected &&
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&
-    prev.onArchive === next.onArchive,
+    prev.onArchive === next.onArchive &&
+    prev.onOpenContextMenu === next.onOpenContextMenu,
 )

@@ -866,19 +866,44 @@ function AppInner() {
   )
 
   const handleArchiveThread = useCallback(
-    (workspaceId: string, threadId: string) => {
-      if (!api) return
-      void api.archiveThread(workspaceId, threadId).then(() => {
+    async (workspaceId: string, threadId: string) => {
+      if (!api) throw new Error('FalconDeck is still connecting')
+      try {
+        await api.archiveThread(workspaceId, threadId)
         if (selectedThreadId === threadId) {
           setSelectedThreadId(null)
         }
-        return api.snapshot().then(setSnapshot)
-      }).catch((error: unknown) => {
+        const nextSnapshot = await api.snapshot()
+        setSnapshot(nextSnapshot)
+        setActionError(null)
+      } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : 'Failed to archive thread'
+        setActionError(msg)
         toast({ variant: 'danger', title: 'Failed to archive thread', description: msg })
-      })
+      }
     },
-    [api, selectedThreadId, setSelectedThreadId, setSnapshot, toast],
+    [api, selectedThreadId, setActionError, setSelectedThreadId, setSnapshot, toast],
+  )
+
+  const handleRenameThread = useCallback(
+    async (workspaceId: string, threadId: string, title: string) => {
+      if (!api) throw new Error('FalconDeck is still connecting')
+      try {
+        const handle = await api.updateThread({
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          title,
+        })
+        applyThreadHandle(handle)
+        setActionError(null)
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Failed to rename thread'
+        setActionError(msg)
+        toast({ variant: 'danger', title: 'Failed to rename thread', description: msg })
+        throw error instanceof Error ? error : new Error(msg)
+      }
+    },
+    [api, applyThreadHandle, setActionError, toast],
   )
 
   // Memoized derived values
@@ -964,6 +989,7 @@ function AppInner() {
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
             onArchiveThread={handleArchiveThread}
+            onRenameThread={handleRenameThread}
             onAddProject={handleAddProject}
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
