@@ -31,3 +31,16 @@ export async function restartDesktopApp() {
   const { invoke } = await import('@tauri-apps/api/core')
   await invoke('restart_app')
 }
+
+export async function openExternalUrl(url: string) {
+  if (isTauriDesktop()) {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('open_external_url', { url })
+    return
+  }
+
+  const opened = window.open(url, '_blank', 'noopener,noreferrer')
+  if (!opened) {
+    throw new Error('FalconDeck could not hand this link off to your browser.')
+  }
+}

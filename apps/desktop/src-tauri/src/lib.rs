@@ -282,6 +282,15 @@ async fn restart_app(app: AppHandle, state: tauri::State<'_, DesktopState>) -> R
     app.restart();
 }
 
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") && !url.starts_with("http://") {
+        return Err("FalconDeck can only open http or https links.".to_string());
+    }
+
+    open::that_detached(url).map_err(|error| error.to_string())
+}
+
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -302,7 +311,11 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![ensure_daemon_running, restart_app])
+        .invoke_handler(tauri::generate_handler![
+            ensure_daemon_running,
+            restart_app,
+            open_external_url
+        ])
         .build(tauri::generate_context!())
         .expect("failed to build FalconDeck desktop");
 

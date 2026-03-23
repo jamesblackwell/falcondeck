@@ -12,17 +12,37 @@ import { QRCodeSVG } from 'qrcode.react'
 import * as Popover from '@radix-ui/react-popover'
 
 import type { RemoteStatusResponse } from '@falcondeck/client-core'
-import { Button, CopyButton, StatusIndicator } from '@falcondeck/ui'
+import { Button, CopyButton, StatusIndicator, useToast } from '@falcondeck/ui'
+
+import { openExternalUrl } from '../api'
 
 /* ------------------------------------------------------------------ */
 /*  Pairing QR card — shown when a pairing session is active          */
 /* ------------------------------------------------------------------ */
 
 function PairingCard({ link, code }: { link: string; code: string }) {
+  const { toast } = useToast()
+
+  async function handleOpenLink() {
+    try {
+      await openExternalUrl(link)
+    } catch (error) {
+      toast({
+        variant: 'danger',
+        title: 'Failed to open link',
+        description:
+          error instanceof Error
+            ? error.message
+            : 'FalconDeck could not hand this link off to your browser.',
+      })
+    }
+  }
+
   return (
     <div className="space-y-4">
       <p className="text-center text-[length:var(--fd-text-sm)] text-fg-secondary">
-        Scan the QR code or copy a secure link to connect.
+        Scan this QR code with the FalconDeck mobile app, or copy a secure link to connect another
+        device.
       </p>
 
       <div className="flex justify-center rounded-[var(--fd-radius-lg)] bg-surface-0 p-5">
@@ -33,17 +53,18 @@ function PairingCard({ link, code }: { link: string; code: string }) {
         <CopyButton
           text={link}
           variant="labeled"
+          label="Copy Link"
+          copiedLabel="Link Copied"
           className="h-9 justify-center rounded-[var(--fd-radius-lg)] bg-accent px-3 text-surface-0 hover:bg-accent-strong hover:text-surface-0"
         />
-        <a
-          href={link}
-          target="_blank"
-          rel="noopener noreferrer"
+        <button
+          type="button"
+          onClick={() => void handleOpenLink()}
           className="inline-flex h-9 items-center justify-center gap-2 rounded-[var(--fd-radius-lg)] bg-surface-3 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-4"
         >
           <Copy className="h-3.5 w-3.5" />
           Open link
-        </a>
+        </button>
       </div>
 
       <div className="rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 px-3 py-3">

@@ -7,9 +7,17 @@ export type CopyButtonProps = {
   text: string
   className?: string
   variant?: 'icon' | 'labeled'
+  label?: string
+  copiedLabel?: string
 }
 
-export const CopyButton = memo(function CopyButton({ text, className, variant = 'icon' }: CopyButtonProps) {
+export const CopyButton = memo(function CopyButton({
+  text,
+  className,
+  variant = 'icon',
+  label = 'Copy',
+  copiedLabel = 'Copied',
+}: CopyButtonProps) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = useCallback(() => {
@@ -29,7 +37,7 @@ export const CopyButton = memo(function CopyButton({ text, className, variant = 
         )}
       >
         {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
-        {copied ? 'Copied' : 'Copy'}
+        {copied ? copiedLabel : label}
       </button>
     )
   }
