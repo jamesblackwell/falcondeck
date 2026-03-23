@@ -126,6 +126,8 @@ export type RemotePairingPopoverProps = {
   onStartPairing: () => void
   onRefreshStatus: () => void
   isStartingRemote: boolean
+  remoteControlsDisabled: boolean
+  remoteControlsUnavailableReason: string | null
 }
 
 export function RemotePairingPopover({
@@ -134,6 +136,8 @@ export function RemotePairingPopover({
   onStartPairing,
   onRefreshStatus: _onRefreshStatus,
   isStartingRemote,
+  remoteControlsDisabled,
+  remoteControlsUnavailableReason,
 }: RemotePairingPopoverProps) {
   const status = remoteStatus?.status
   const isConnected = status === 'connected'
@@ -184,11 +188,16 @@ export function RemotePairingPopover({
                 <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
                   Connect another device to use FalconDeck remotely.
                 </p>
+                {remoteControlsDisabled && remoteControlsUnavailableReason ? (
+                  <div className="rounded-[var(--fd-radius-md)] border border-warning/25 bg-warning-muted px-3 py-2 text-[length:var(--fd-text-xs)] text-warning">
+                    {remoteControlsUnavailableReason}
+                  </div>
+                ) : null}
                 <Button
                   type="button"
                   size="sm"
                   onClick={onStartPairing}
-                  disabled={isStartingRemote}
+                  disabled={isStartingRemote || remoteControlsDisabled}
                   className="w-full"
                 >
                   {isStartingRemote ? (
@@ -243,7 +252,7 @@ export function RemotePairingPopover({
               <button
                 type="button"
                 onClick={onStartPairing}
-                disabled={isStartingRemote}
+                disabled={isStartingRemote || remoteControlsDisabled}
                 className="flex w-full items-center justify-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-secondary"
               >
                 {isStartingRemote ? (

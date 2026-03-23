@@ -305,7 +305,10 @@ export function useDaemonConnection() {
   useEffect(() => {
     if (!api || !remoteStatus || remoteStatus.status === 'inactive') return
     const interval = window.setInterval(() => {
-      void api.remoteStatus().then(setRemoteStatus).catch(() => {})
+      void api.remoteStatus().then(setRemoteStatus).catch((error) => {
+        const message = error instanceof Error ? error.message : 'Failed to refresh remote status'
+        setRemoteStatus((current) => current ? { ...current, last_error: message } : current)
+      })
     }, 2000)
     return () => window.clearInterval(interval)
   }, [api, remoteStatus])

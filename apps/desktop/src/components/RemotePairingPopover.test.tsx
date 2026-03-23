@@ -68,6 +68,8 @@ function renderPopover() {
         onStartPairing={() => {}}
         onRefreshStatus={() => {}}
         isStartingRemote={false}
+        remoteControlsDisabled={false}
+        remoteControlsUnavailableReason={null}
       />
     </ToastProvider>,
   )
@@ -100,5 +102,26 @@ describe('RemotePairingPopover', () => {
 
     expect(await screen.findByText('Failed to open link')).toBeInTheDocument()
     expect(await screen.findByText('Browser launch failed')).toBeInTheDocument()
+  })
+
+  it('explains when pairing controls are unavailable', async () => {
+    render(
+      <ToastProvider>
+        <RemotePairingPopover
+          remoteStatus={null}
+          pairingLink={null}
+          onStartPairing={() => {}}
+          onRefreshStatus={() => {}}
+          isStartingRemote={false}
+          remoteControlsDisabled
+          remoteControlsUnavailableReason="FalconDeck is still connecting to the local daemon."
+        />
+      </ToastProvider>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /inactive/i }))
+
+    expect(await screen.findByText('FalconDeck is still connecting to the local daemon.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /start pairing/i })).toBeDisabled()
   })
 })

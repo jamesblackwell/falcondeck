@@ -193,6 +193,8 @@ function AppInner() {
   )
   const remoteWebUrl = import.meta.env.VITE_FALCONDECK_REMOTE_WEB_URL ?? 'https://app.falcondeck.com'
   const defaultRelayUrl = 'https://connect.falcondeck.com'
+  const remoteControlsUnavailableReason = connectionError ?? 'FalconDeck is still connecting to the local daemon.'
+  const remoteControlsDisabled = !api
   const pairingLink =
     remoteStatus?.pairing && remoteStatus.relay_url
       ? (() => {
@@ -670,7 +672,15 @@ function AppInner() {
   }
 
   async function handleStartRemotePairing() {
-    if (!api) return
+    if (!api) {
+      setActionError(remoteControlsUnavailableReason)
+      toast({
+        variant: 'danger',
+        title: 'FalconDeck is not ready yet',
+        description: remoteControlsUnavailableReason,
+      })
+      return
+    }
     setIsStartingRemote(true)
     try {
       const nextStatus = await api.startRemotePairing(relayUrl)
@@ -771,9 +781,25 @@ function AppInner() {
   }, [api, relayUrl])
 
   const handleRefreshRemoteStatus = useCallback(() => {
-    if (!api) return
-    void api.remoteStatus().then(setRemoteStatus).catch(() => {})
-  }, [api, setRemoteStatus])
+    if (!api) {
+      setActionError(remoteControlsUnavailableReason)
+      toast({
+        variant: 'danger',
+        title: 'FalconDeck is not ready yet',
+        description: remoteControlsUnavailableReason,
+      })
+      return
+    }
+
+    void api.remoteStatus().then((nextStatus) => {
+      setRemoteStatus(nextStatus)
+      setActionError(null)
+    }).catch((error) => {
+      const msg = error instanceof Error ? error.message : 'Failed to refresh remote status'
+      setActionError(msg)
+      toast({ variant: 'danger', title: 'Failed to refresh remote status', description: msg })
+    })
+  }, [api, remoteControlsUnavailableReason, setRemoteStatus, toast])
 
   const handleUpdatePreferences = useCallback(
     async (payload: UpdatePreferencesPayload) => {
@@ -1006,6 +1032,8 @@ function AppInner() {
               pairingLink={pairingLink}
               relayUrl={relayUrl}
               isStartingRemote={isStartingRemote}
+              remoteControlsDisabled={remoteControlsDisabled}
+              remoteControlsUnavailableReason={remoteControlsUnavailableReason}
               revokingDeviceId={revokingDeviceId}
               updater={updater.state}
               updaterProgressPercent={updater.progressPercent}
@@ -1027,6 +1055,8 @@ function AppInner() {
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}
               isStartingRemote={isStartingRemote}
+              remoteControlsDisabled={remoteControlsDisabled}
+              remoteControlsUnavailableReason={remoteControlsUnavailableReason}
               conversationItems={conversationItems}
               preferences={snapshot?.preferences ?? null}
               conversationEmptyState={conversationEmptyState}

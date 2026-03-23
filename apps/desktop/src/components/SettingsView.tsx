@@ -21,6 +21,8 @@ export type SettingsViewProps = {
   pairingLink: string | null
   relayUrl: string
   isStartingRemote: boolean
+  remoteControlsDisabled: boolean
+  remoteControlsUnavailableReason: string | null
   revokingDeviceId: string | null
   updater: AppUpdaterState
   updaterProgressPercent: number | null
@@ -64,6 +66,8 @@ export function SettingsView(props: SettingsViewProps) {
               pairingLink={props.pairingLink}
               relayUrl={props.relayUrl}
               isStartingRemote={props.isStartingRemote}
+              remoteControlsDisabled={props.remoteControlsDisabled}
+              remoteControlsUnavailableReason={props.remoteControlsUnavailableReason}
               revokingDeviceId={props.revokingDeviceId}
               onStartPairing={props.onStartPairing}
               onRefreshRemoteStatus={props.onRefreshRemoteStatus}

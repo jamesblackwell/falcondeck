@@ -23,6 +23,8 @@ type DesktopConversationPaneProps = {
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
   isStartingRemote: boolean
+  remoteControlsDisabled: boolean
+  remoteControlsUnavailableReason: string | null
   conversationItems: ConversationItem[]
   preferences: FalconDeckPreferences | null
   conversationEmptyState: ReactNode
@@ -46,6 +48,8 @@ export function DesktopConversationPane({
   remoteStatus,
   pairingLink,
   isStartingRemote,
+  remoteControlsDisabled,
+  remoteControlsUnavailableReason,
   conversationItems,
   preferences,
   conversationEmptyState,
@@ -66,6 +70,8 @@ export function DesktopConversationPane({
           onStartPairing={onStartPairing}
           onRefreshStatus={onRefreshRemoteStatus}
           isStartingRemote={isStartingRemote}
+          remoteControlsDisabled={remoteControlsDisabled}
+          remoteControlsUnavailableReason={remoteControlsUnavailableReason}
         />
       </SessionHeader>
       <Conversation

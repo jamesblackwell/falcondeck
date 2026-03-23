@@ -14,6 +14,8 @@ type RemoteAccessPanelProps = Pick<
   | 'pairingLink'
   | 'relayUrl'
   | 'isStartingRemote'
+  | 'remoteControlsDisabled'
+  | 'remoteControlsUnavailableReason'
   | 'revokingDeviceId'
   | 'onStartPairing'
   | 'onRefreshRemoteStatus'
@@ -85,6 +87,8 @@ export function RemoteAccessPanel({
   pairingLink,
   relayUrl,
   isStartingRemote,
+  remoteControlsDisabled,
+  remoteControlsUnavailableReason,
   revokingDeviceId,
   onStartPairing,
   onRefreshRemoteStatus,
@@ -126,8 +130,17 @@ export function RemoteAccessPanel({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {remoteControlsDisabled && remoteControlsUnavailableReason ? (
+            <div className="rounded-[var(--fd-radius-lg)] border border-warning/25 bg-warning-muted px-3 py-2 text-[length:var(--fd-text-sm)] text-warning">
+              {remoteControlsUnavailableReason}
+            </div>
+          ) : null}
           <div className="flex flex-wrap items-center gap-3">
-            <Button type="button" onClick={onStartPairing} disabled={isStartingRemote}>
+            <Button
+              type="button"
+              onClick={onStartPairing}
+              disabled={isStartingRemote || remoteControlsDisabled}
+            >
               {isStartingRemote ? (
                 <LoaderCircle className="h-4 w-4 animate-spin" />
               ) : (
@@ -135,7 +148,13 @@ export function RemoteAccessPanel({
               )}
               {remoteStatus?.pairing ? 'Generate New Pairing Code' : 'Start Pairing'}
             </Button>
-            <Button type="button" variant="ghost" size="sm" onClick={onRefreshRemoteStatus}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={onRefreshRemoteStatus}
+              disabled={remoteControlsDisabled}
+            >
               <RefreshCw className="h-3.5 w-3.5" />
               Refresh status
             </Button>

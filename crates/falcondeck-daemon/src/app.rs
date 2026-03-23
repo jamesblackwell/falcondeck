@@ -714,7 +714,8 @@ impl AppState {
 
     pub async fn remote_status(&self) -> RemoteStatusResponse {
         let snapshot = {
-            let remote = self.inner.remote.lock().await;
+            let mut remote = self.inner.remote.lock().await;
+            reconcile_remote_runtime_state(&mut remote);
             (
                 build_remote_status_response(&remote),
                 remote.relay_url.clone(),
@@ -748,9 +749,12 @@ impl AppState {
     ) -> Result<RemoteStatusResponse, DaemonError> {
         let relay_url = normalize_relay_url(&request.relay_url)?;
         let existing_remote = {
-            let remote = self.inner.remote.lock().await;
+            let mut remote = self.inner.remote.lock().await;
+            reconcile_remote_runtime_state(&mut remote);
+            let has_live_task = has_live_remote_task(&remote);
             let should_reuse_pending = remote.relay_url.as_deref() == Some(relay_url.as_str())
                 && status_pairing(&remote).is_some_and(|pairing| pairing.expires_at > Utc::now())
+                && has_live_task
                 && (matches!(remote.status, RemoteConnectionStatus::PairingPending)
                     || remote.pending_pairing.is_some());
             if should_reuse_pending {
@@ -848,6 +852,7 @@ impl AppState {
 
         let response = {
             let mut remote = self.inner.remote.lock().await;
+            reconcile_remote_runtime_state(&mut remote);
             let additional_pairing = remote.task.is_some();
             if !additional_pairing {
                 if let Some(task) = remote.task.take() {
@@ -997,7 +1002,9 @@ impl AppState {
             .map(|thread| thread.id.clone())
             .collect::<std::collections::HashSet<_>>();
 
-        snapshot.threads.retain(|thread| visible_thread_ids.contains(&thread.id));
+        snapshot
+            .threads
+            .retain(|thread| visible_thread_ids.contains(&thread.id));
         snapshot.workspaces.iter_mut().for_each(|workspace| {
             if workspace
                 .current_thread_id
@@ -1209,10 +1216,11 @@ impl AppState {
                     let should_clear_pairing = remote.pairing.as_ref().is_some_and(|pairing| {
                         pairing.device_id.is_none() && pairing.expires_at <= Utc::now()
                     });
-                    let should_reset_persisted_remote = should_clear_persisted_remote_for_bridge_error(
-                        &error_msg,
-                        has_trusted_device,
-                    );
+                    let should_reset_persisted_remote =
+                        should_clear_persisted_remote_for_bridge_error(
+                            &error_msg,
+                            has_trusted_device,
+                        );
                     let auth_error = is_remote_bridge_auth_error(&error_msg);
                     remote.status = if should_clear_pairing {
                         RemoteConnectionStatus::Inactive
@@ -1551,7 +1559,7 @@ impl AppState {
                         return;
                     };
 
-                    let command_to_publish = {
+                    let (command_to_publish, should_persist) = {
                         let mut remote = self.inner.remote.lock().await;
                         if remote.relay_url.as_deref() != Some(relay_url.as_str())
                             || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
@@ -1562,7 +1570,7 @@ impl AppState {
                                     current_pairing.pairing_id != pairing_id
                                 })
                         {
-                            None
+                            (None, false)
                         } else {
                             let Some(current_pairing) = remote.pending_pairing.as_mut() else {
                                 return;
@@ -1574,23 +1582,42 @@ impl AppState {
                                 current_pairing.trusted_at = Some(Utc::now());
                             }
                             let pairing_snapshot = current_pairing.clone();
-                            remote.last_error = None;
                             remote.pending_pairing = None;
                             remote.pairing_watch_task = None;
-                            remote.command_tx.clone().map(|command_tx| {
+                            if let Some(command_tx) = remote.command_tx.clone() {
+                                remote.last_error = None;
                                 (
-                                    command_tx,
-                                    RemoteBridgeCommand::PublishBootstrap {
-                                        pairing: pairing_snapshot,
-                                        client_bundle,
-                                    },
+                                    Some((
+                                        command_tx,
+                                        RemoteBridgeCommand::PublishBootstrap {
+                                            pairing: pairing_snapshot,
+                                            client_bundle,
+                                        },
+                                    )),
+                                    true,
                                 )
-                            })
+                            } else {
+                                remote.last_error = Some(
+                                    "Additional remote pairing finished after the desktop relay bridge stopped. Generate a fresh pairing code.".to_string(),
+                                );
+                                remote.status = if remote
+                                    .pairing
+                                    .as_ref()
+                                    .is_some_and(|pairing| pairing.device_id.is_some())
+                                {
+                                    RemoteConnectionStatus::Offline
+                                } else {
+                                    RemoteConnectionStatus::Inactive
+                                };
+                                (None, true)
+                            }
                         }
                     };
 
                     if let Some((command_tx, command)) = command_to_publish {
                         let _ = command_tx.send(command);
+                    }
+                    if should_persist {
                         let _ = self.persist_local_state().await;
                     }
                     return;
@@ -1892,6 +1919,7 @@ impl RemotePairingState {
 }
 
 fn build_remote_status_response(remote: &RemoteBridgeState) -> RemoteStatusResponse {
+    let status = effective_remote_status(remote);
     let trusted_devices = remote
         .pairing
         .as_ref()
@@ -1904,13 +1932,13 @@ fn build_remote_status_response(remote: &RemoteBridgeState) -> RemoteStatusRespo
                     device_id: device_id.clone(),
                     session_id: pairing.session_id.clone().unwrap_or_default(),
                     label: Some("FalconDeck Remote".to_string()),
-                    status: if matches!(remote.status, RemoteConnectionStatus::Revoked) {
+                    status: if matches!(&status, RemoteConnectionStatus::Revoked) {
                         falcondeck_core::TrustedDeviceStatus::Revoked
                     } else {
                         falcondeck_core::TrustedDeviceStatus::Active
                     },
                     created_at: trusted_at,
-                    last_seen_at: matches!(remote.status, RemoteConnectionStatus::Connected)
+                    last_seen_at: matches!(&status, RemoteConnectionStatus::Connected)
                         .then(Utc::now),
                     revoked_at: None,
                 })
@@ -1923,16 +1951,15 @@ fn build_remote_status_response(remote: &RemoteBridgeState) -> RemoteStatusRespo
             .as_ref()
             .map(|session_id| falcondeck_core::MachinePresence {
                 session_id: session_id.clone(),
-                daemon_connected: matches!(remote.status, RemoteConnectionStatus::Connected),
-                last_seen_at: matches!(remote.status, RemoteConnectionStatus::Connected)
-                    .then(Utc::now),
+                daemon_connected: matches!(&status, RemoteConnectionStatus::Connected),
+                last_seen_at: matches!(&status, RemoteConnectionStatus::Connected).then(Utc::now),
             })
     });
 
     RemoteStatusResponse {
-        status: remote.status.clone(),
+        status,
         relay_url: remote.relay_url.clone(),
-        pairing: status_pairing(remote).map(|pairing| pairing.to_response()),
+        pairing: response_pairing(remote).map(|pairing| pairing.to_response()),
         trusted_devices,
         presence,
         last_error: remote.last_error.clone(),
@@ -1941,6 +1968,99 @@ fn build_remote_status_response(remote: &RemoteBridgeState) -> RemoteStatusRespo
 
 fn status_pairing(remote: &RemoteBridgeState) -> Option<&RemotePairingState> {
     remote.pending_pairing.as_ref().or(remote.pairing.as_ref())
+}
+
+fn prune_finished_remote_tasks(remote: &mut RemoteBridgeState) {
+    if remote.task.as_ref().is_some_and(|task| task.is_finished()) {
+        remote.task = None;
+        remote.command_tx = None;
+    }
+    if remote
+        .pairing_watch_task
+        .as_ref()
+        .is_some_and(|task| task.is_finished())
+    {
+        remote.pairing_watch_task = None;
+    }
+}
+
+fn clear_unserviceable_pending_pairing(remote: &mut RemoteBridgeState) {
+    if remote.pending_pairing.is_none() {
+        return;
+    }
+
+    if let Some(task) = remote.pairing_watch_task.take() {
+        task.abort();
+    }
+    remote.pending_pairing = None;
+    remote.last_error.get_or_insert_with(|| {
+        "Additional remote pairing was cancelled because the desktop relay bridge stopped. Generate a fresh pairing code.".to_string()
+    });
+}
+
+fn reconcile_remote_runtime_state(remote: &mut RemoteBridgeState) {
+    prune_finished_remote_tasks(remote);
+
+    if remote.task.is_none() && remote.pending_pairing.is_some() {
+        clear_unserviceable_pending_pairing(remote);
+    }
+
+    if remote.pairing_watch_task.is_none() && remote.pending_pairing.is_some() {
+        clear_unserviceable_pending_pairing(remote);
+    }
+
+    if remote.task.is_none() {
+        remote.command_tx = None;
+        if !matches!(
+            remote.status,
+            RemoteConnectionStatus::Inactive
+                | RemoteConnectionStatus::Revoked
+                | RemoteConnectionStatus::Error
+        ) {
+            remote.status = if remote
+                .pairing
+                .as_ref()
+                .is_some_and(|pairing| pairing.device_id.is_some())
+            {
+                RemoteConnectionStatus::Offline
+            } else {
+                RemoteConnectionStatus::Inactive
+            };
+        }
+    }
+}
+
+fn has_live_remote_task(remote: &RemoteBridgeState) -> bool {
+    remote.task.is_some()
+}
+
+fn effective_remote_status(remote: &RemoteBridgeState) -> RemoteConnectionStatus {
+    if has_live_remote_task(remote)
+        || matches!(
+            remote.status,
+            RemoteConnectionStatus::Inactive
+                | RemoteConnectionStatus::Revoked
+                | RemoteConnectionStatus::Error
+        )
+    {
+        return remote.status.clone();
+    }
+
+    if remote
+        .pairing
+        .as_ref()
+        .is_some_and(|pairing| pairing.device_id.is_some())
+    {
+        RemoteConnectionStatus::Offline
+    } else {
+        RemoteConnectionStatus::Inactive
+    }
+}
+
+fn response_pairing(remote: &RemoteBridgeState) -> Option<&RemotePairingState> {
+    has_live_remote_task(remote)
+        .then(|| status_pairing(remote))
+        .flatten()
 }
 
 fn current_pairing_for_remote_attempt(
@@ -2060,14 +2180,15 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput,
-        InteractiveRequest, InteractiveRequestKind, SnapshotRequest, ThreadAgentParams,
-        ThreadAttention, ThreadStatus, ThreadSummary, TurnInputItem, UpdateThreadRequest,
-        WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
+        AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput, InteractiveRequest,
+        InteractiveRequestKind, SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus,
+        ThreadSummary, TurnInputItem, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
+        WorkspaceSummary,
         crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
     };
     use serde_json::json;
     use tempfile::tempdir;
+    use tokio::sync::mpsc;
     use tokio::time::{Duration as TokioDuration, sleep};
 
     use super::{
@@ -2685,6 +2806,183 @@ tokens used\n5,767\n"
         assert_eq!(pairing.pairing_id, active_pairing.pairing_id);
         assert_eq!(pairing.device_id, active_pairing.device_id);
         assert!(pairing.client_bundle.is_some());
+    }
+
+    #[tokio::test]
+    async fn finished_remote_tasks_are_pruned_before_pairing_logic() {
+        let finished_task = tokio::spawn(async {});
+        let finished_watch_task = tokio::spawn(async {});
+        tokio::task::yield_now().await;
+
+        assert!(finished_task.is_finished());
+        assert!(finished_watch_task.is_finished());
+
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let mut remote = super::RemoteBridgeState {
+            status: falcondeck_core::RemoteConnectionStatus::Inactive,
+            relay_url: Some("https://connect.falcondeck.com".to_string()),
+            pairing: None,
+            pending_pairing: None,
+            daemon_token: Some("daemon-token".to_string()),
+            last_error: None,
+            task: Some(finished_task),
+            pairing_watch_task: Some(finished_watch_task),
+            command_tx: Some(command_tx),
+        };
+
+        super::prune_finished_remote_tasks(&mut remote);
+
+        assert!(remote.task.is_none());
+        assert!(remote.pairing_watch_task.is_none());
+        assert!(remote.command_tx.is_none());
+        assert!(!super::has_live_remote_task(&remote));
+    }
+
+    #[tokio::test]
+    async fn reconcile_remote_runtime_state_clears_orphaned_additional_pairing() {
+        let finished_task = tokio::spawn(async {});
+        let running_watch_task = tokio::spawn(async {
+            sleep(TokioDuration::from_secs(30)).await;
+        });
+        tokio::task::yield_now().await;
+
+        assert!(finished_task.is_finished());
+        assert!(!running_watch_task.is_finished());
+
+        let active_pairing = super::RemotePairingState {
+            pairing_id: "pairing-active".to_string(),
+            pairing_code: "ACTIVECODE12".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: Some("device-1".to_string()),
+            trusted_at: Some(Utc::now()),
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let pending_pairing = super::RemotePairingState {
+            pairing_id: "pairing-pending".to_string(),
+            pairing_code: "PENDINGCODE1".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: None,
+            trusted_at: None,
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: None,
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let (command_tx, _command_rx) = mpsc::unbounded_channel();
+        let mut remote = super::RemoteBridgeState {
+            status: falcondeck_core::RemoteConnectionStatus::Connected,
+            relay_url: Some("https://connect.falcondeck.com".to_string()),
+            pairing: Some(active_pairing),
+            pending_pairing: Some(pending_pairing),
+            daemon_token: Some("daemon-token".to_string()),
+            last_error: None,
+            task: Some(finished_task),
+            pairing_watch_task: Some(running_watch_task),
+            command_tx: Some(command_tx),
+        };
+
+        super::reconcile_remote_runtime_state(&mut remote);
+
+        assert!(matches!(
+            remote.status,
+            falcondeck_core::RemoteConnectionStatus::Offline
+        ));
+        assert!(remote.task.is_none());
+        assert!(remote.pairing_watch_task.is_none());
+        assert!(remote.pending_pairing.is_none());
+        assert!(remote.command_tx.is_none());
+        assert_eq!(
+            remote.last_error.as_deref(),
+            Some(
+                "Additional remote pairing was cancelled because the desktop relay bridge stopped. Generate a fresh pairing code."
+            )
+        );
+    }
+
+    #[test]
+    fn remote_status_response_hides_stale_unclaimed_pairing_without_a_live_bridge() {
+        let pairing = super::RemotePairingState {
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "ABCDEFGHJKLM".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: None,
+            trusted_at: None,
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: None,
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let remote = super::RemoteBridgeState {
+            status: falcondeck_core::RemoteConnectionStatus::PairingPending,
+            relay_url: Some("https://connect.falcondeck.com".to_string()),
+            pairing: Some(pairing),
+            pending_pairing: None,
+            daemon_token: Some("daemon-token".to_string()),
+            last_error: None,
+            task: None,
+            pairing_watch_task: None,
+            command_tx: None,
+        };
+
+        let response = super::build_remote_status_response(&remote);
+
+        assert_eq!(
+            response.status,
+            falcondeck_core::RemoteConnectionStatus::Inactive
+        );
+        assert!(response.pairing.is_none());
+        assert!(response.presence.is_some());
+        assert_eq!(
+            response
+                .presence
+                .as_ref()
+                .map(|presence| presence.daemon_connected),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn remote_status_response_hides_stale_trusted_pairing_without_a_live_bridge() {
+        let pairing = super::RemotePairingState {
+            pairing_id: "pairing-1".to_string(),
+            pairing_code: "ABCDEFGHJKLM".to_string(),
+            session_id: Some("session-1".to_string()),
+            device_id: Some("device-1".to_string()),
+            trusted_at: Some(Utc::now()),
+            expires_at: Utc::now() + Duration::minutes(10),
+            client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
+            local_key_pair: LocalBoxKeyPair::generate(),
+            data_key: generate_data_key(),
+        };
+        let remote = super::RemoteBridgeState {
+            status: falcondeck_core::RemoteConnectionStatus::Connected,
+            relay_url: Some("https://connect.falcondeck.com".to_string()),
+            pairing: Some(pairing),
+            pending_pairing: None,
+            daemon_token: Some("daemon-token".to_string()),
+            last_error: None,
+            task: None,
+            pairing_watch_task: None,
+            command_tx: None,
+        };
+
+        let response = super::build_remote_status_response(&remote);
+
+        assert_eq!(
+            response.status,
+            falcondeck_core::RemoteConnectionStatus::Offline
+        );
+        assert!(response.pairing.is_none());
+        assert_eq!(
+            response
+                .presence
+                .as_ref()
+                .map(|presence| presence.daemon_connected),
+            Some(false)
+        );
     }
 
     #[tokio::test]
