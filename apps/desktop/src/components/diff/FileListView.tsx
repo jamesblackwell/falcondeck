@@ -39,7 +39,7 @@ export type FileListViewProps = {
   isLoading: boolean
   error: string | null
   onRefresh: () => void
-  onSelectFile: (path: string) => void
+  onSelectFile: (entry: GitStatusEntry) => void
 }
 
 export const FileListView = memo(function FileListView({
@@ -87,7 +87,7 @@ export const FileListView = memo(function FileListView({
               <button
                 key={entry.path}
                 type="button"
-                onClick={() => onSelectFile(entry.path)}
+                onClick={() => onSelectFile(entry)}
                 className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-surface-2"
               >
                 <StatusIcon status={entry.status} />

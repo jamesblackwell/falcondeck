@@ -1923,6 +1923,8 @@ pub struct GitStatusResponse {
 pub struct GitDiffResponse {
     /// Unified diff text.
     pub diff: String,
+    /// Full file contents when no unified diff is available.
+    pub content: Option<String>,
 }
 
 #[cfg(test)]

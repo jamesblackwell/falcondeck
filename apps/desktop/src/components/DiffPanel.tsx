@@ -1,6 +1,6 @@
 import { memo, useState } from 'react'
 
-import type { createDaemonApiClient } from '@falcondeck/client-core'
+import type { createDaemonApiClient, GitFileStatus } from '@falcondeck/client-core'
 
 import { useGitStatus } from '../hooks/useGitStatus'
 import { useGitDiff } from '../hooks/useGitDiff'
@@ -17,11 +17,19 @@ export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrig
   const [selection, setSelection] = useState<{
     workspaceId: string
     filePath: string
+    status: GitFileStatus
   } | null>(null)
   const selectedFile =
     selection && selection.workspaceId === workspaceId ? selection.filePath : null
+  const selectedStatus =
+    selection && selection.workspaceId === workspaceId ? selection.status : null
   const { status, isLoading, error, refresh } = useGitStatus(api, workspaceId, refreshTrigger)
-  const { diff, isLoading: isDiffLoading, error: diffError } = useGitDiff(api, workspaceId, selectedFile)
+  const { diff, content, isLoading: isDiffLoading, error: diffError } = useGitDiff(
+    api,
+    workspaceId,
+    selectedFile,
+    selectedStatus,
+  )
 
   if (selectedFile) {
     return (
@@ -29,6 +37,7 @@ export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrig
         <DiffView
           filePath={selectedFile}
           diff={diff}
+          content={content}
           isLoading={isDiffLoading}
           error={diffError}
           onBack={() => setSelection(null)}
@@ -45,8 +54,8 @@ export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrig
         isLoading={isLoading}
         error={error}
         onRefresh={() => void refresh()}
-        onSelectFile={(filePath) =>
-          setSelection(workspaceId ? { workspaceId, filePath } : null)
+        onSelectFile={(entry) =>
+          setSelection(workspaceId ? { workspaceId, filePath: entry.path, status: entry.status } : null)
         }
       />
     </div>

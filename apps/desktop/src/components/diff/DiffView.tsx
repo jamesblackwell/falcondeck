@@ -58,9 +58,39 @@ function HighlightedDiffLine({
   )
 }
 
+function HighlightedFileLine({
+  lineNumber,
+  tokens,
+  text,
+}: {
+  lineNumber: number
+  tokens: ThemedToken[] | null
+  text: string
+}) {
+  return (
+    <div className="flex">
+      <span className="sticky left-0 z-10 w-12 shrink-0 select-none bg-surface-1 pr-2 text-right text-fg-faint">
+        {lineNumber}
+      </span>
+      <span className="whitespace-pre">
+        {tokens ? (
+          tokens.map((token, ti) => (
+            <span key={ti} style={{ color: token.color }}>
+              {token.content}
+            </span>
+          ))
+        ) : (
+          text
+        )}
+      </span>
+    </div>
+  )
+}
+
 export type DiffViewProps = {
   filePath: string
   diff: string | null
+  content: string | null
   isLoading: boolean
   error: string | null
   onBack: () => void
@@ -69,6 +99,7 @@ export type DiffViewProps = {
 export const DiffView = memo(function DiffView({
   filePath,
   diff,
+  content,
   isLoading,
   error,
   onBack,
@@ -103,7 +134,16 @@ export const DiffView = memo(function DiffView({
     return { codeLines: lines, lineIndexMap: indexMap }
   }, [parsed])
 
-  const shikiTokens = useShikiTokens(codeLines, filePath)
+  const fileLines = useMemo(() => {
+    if (content === null) return [] as string[]
+    return content.replace(/\r\n/g, '\n').split('\n')
+  }, [content])
+
+  const displayLines = parsed && parsed !== 'too-large' ? codeLines : fileLines
+  const isDisplayTooLarge =
+    parsed === 'too-large' || (parsed === null && content !== null && content.length > 200_000)
+
+  const shikiTokens = useShikiTokens(displayLines, filePath)
 
   const tokenMap = useMemo(() => {
     if (!shikiTokens) return null
@@ -134,9 +174,9 @@ export const DiffView = memo(function DiffView({
           </div>
         ) : error ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-danger">{error}</div>
-        ) : parsed === 'too-large' ? (
+        ) : isDisplayTooLarge ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
-            Diff too large to display
+            File too large to display
           </div>
         ) : parsed && parsed.length > 0 ? (
           <div className="font-mono text-[length:var(--fd-text-2xs)] leading-5">
@@ -162,6 +202,17 @@ export const DiffView = memo(function DiffView({
                 )),
               )
             })()}
+          </div>
+        ) : content !== null ? (
+          <div className="font-mono text-[length:var(--fd-text-2xs)] leading-5">
+            {fileLines.map((line, index) => (
+              <HighlightedFileLine
+                key={index}
+                lineNumber={index + 1}
+                text={line}
+                tokens={shikiTokens?.[index] ?? null}
+              />
+            ))}
           </div>
         ) : (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">

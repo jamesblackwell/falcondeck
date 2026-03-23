@@ -355,6 +355,7 @@ async fn git_status(
 #[derive(serde::Deserialize)]
 struct GitDiffQuery {
     path: Option<String>,
+    status: Option<falcondeck_core::GitFileStatus>,
 }
 
 async fn git_diff(
@@ -363,7 +364,9 @@ async fn git_diff(
     axum::extract::Query(query): axum::extract::Query<GitDiffQuery>,
 ) -> Result<Json<falcondeck_core::GitDiffResponse>, DaemonError> {
     Ok(Json(
-        state.git_diff(&workspace_id, query.path.as_deref()).await?,
+        state
+            .git_diff(&workspace_id, query.path.as_deref(), query.status.as_ref())
+            .await?,
     ))
 }
 

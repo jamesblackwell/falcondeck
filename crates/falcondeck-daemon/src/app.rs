@@ -1047,12 +1047,13 @@ impl AppState {
         &self,
         workspace_id: &str,
         path: Option<&str>,
+        status: Option<&falcondeck_core::GitFileStatus>,
     ) -> Result<falcondeck_core::GitDiffResponse, DaemonError> {
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        crate::git::git_diff(&workspace.summary.path, path).await
+        crate::git::git_diff(&workspace.summary.path, path, status).await
     }
 }
 

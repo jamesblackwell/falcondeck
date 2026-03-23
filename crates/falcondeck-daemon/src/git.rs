@@ -1,4 +1,6 @@
 use falcondeck_core::{GitDiffResponse, GitFileStatus, GitStatusEntry, GitStatusResponse};
+use std::path::Path;
+use tokio::fs;
 use tokio::process::Command;
 
 use crate::error::DaemonError;
@@ -27,7 +29,7 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
 
     // Get file status
     let status_output = Command::new("git")
-        .args(["status", "--porcelain=v1"])
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
         .current_dir(workspace_path)
         .output()
         .await
@@ -142,6 +144,7 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
 pub async fn git_diff(
     workspace_path: &str,
     path: Option<&str>,
+    status: Option<&GitFileStatus>,
 ) -> Result<GitDiffResponse, DaemonError> {
     let mut args = vec!["diff"];
     if let Some(p) = path {
@@ -161,5 +164,102 @@ pub async fn git_diff(
     }
 
     let diff = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(GitDiffResponse { diff })
+    let content = if diff.is_empty() && matches!(status, Some(GitFileStatus::Untracked)) {
+        load_untracked_file_content(workspace_path, path).await?
+    } else {
+        None
+    };
+    Ok(GitDiffResponse { diff, content })
+}
+
+async fn load_untracked_file_content(
+    workspace_path: &str,
+    path: Option<&str>,
+) -> Result<Option<String>, DaemonError> {
+    let Some(relative_path) = path else {
+        return Ok(None);
+    };
+
+    let full_path = Path::new(workspace_path).join(relative_path);
+    let metadata = match fs::metadata(&full_path).await {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+    if !metadata.is_file() {
+        return Ok(None);
+    }
+
+    let bytes = fs::read(&full_path)
+        .await
+        .map_err(|e| DaemonError::Rpc(format!("failed to read untracked file: {e}")))?;
+    Ok(String::from_utf8(bytes).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use tokio::fs;
+
+    async fn run_git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn git_status_lists_untracked_files_individually() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+
+        run_git(repo, &["init"]).await;
+        fs::create_dir_all(repo.join("content/posts"))
+            .await
+            .unwrap();
+        fs::write(repo.join("content/posts/new.md"), "# Hello\n")
+            .await
+            .unwrap();
+
+        let status = git_status(repo.to_str().unwrap()).await.unwrap();
+        assert!(status.entries.iter().any(|entry| {
+            entry.path == "content/posts/new.md" && entry.status == GitFileStatus::Untracked
+        }));
+        assert!(
+            !status
+                .entries
+                .iter()
+                .any(|entry| entry.path == "content/posts/")
+        );
+    }
+
+    #[tokio::test]
+    async fn git_diff_returns_content_for_untracked_file() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+
+        run_git(repo, &["init"]).await;
+        fs::write(repo.join("draft.md"), "line one\nline two\n")
+            .await
+            .unwrap();
+
+        let diff = git_diff(
+            repo.to_str().unwrap(),
+            Some("draft.md"),
+            Some(&GitFileStatus::Untracked),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(diff.diff, "");
+        assert_eq!(diff.content.as_deref(), Some("line one\nline two\n"));
+    }
 }

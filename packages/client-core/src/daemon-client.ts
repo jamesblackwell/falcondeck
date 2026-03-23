@@ -4,6 +4,7 @@ import type {
   DaemonSnapshot,
   EventEnvelope,
   GitDiffResponse,
+  GitFileStatus,
   GitStatusResponse,
   InteractiveResponsePayload,
   MarkThreadReadPayload,
@@ -207,8 +208,11 @@ export function createDaemonApiClient(baseUrl: string) {
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/status`),
       )
     },
-    async gitDiff(workspaceId: string, path?: string) {
-      const params = path ? `?path=${encodeURIComponent(path)}` : ''
+    async gitDiff(workspaceId: string, path?: string, status?: GitFileStatus | null) {
+      const query = new URLSearchParams()
+      if (path) query.set('path', path)
+      if (status) query.set('status', status)
+      const params = query.toString() ? `?${query.toString()}` : ''
       return parseJson<GitDiffResponse>(
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/diff${params}`),
       )

@@ -437,6 +437,7 @@ export type GitStatusResponse = {
 
 export type GitDiffResponse = {
   diff: string
+  content: string | null
 }
 
 export type RemoteConnectionStatus =
