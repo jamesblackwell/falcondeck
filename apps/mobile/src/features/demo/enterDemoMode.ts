@@ -38,5 +38,9 @@ export function enterDemoMode() {
     workspace: demoSnapshot.workspaces[0]!,
     thread: demoSnapshot.threads[0]!,
     items: demoConversationItems,
+    has_older: false,
+    oldest_item_id: demoConversationItems[0]?.id ?? null,
+    newest_item_id: demoConversationItems.at(-1)?.id ?? null,
+    is_partial: false,
   })
 }

@@ -48,6 +48,7 @@ import {
   loadClientToken,
   clearSecureSession,
 } from '@/storage/secure'
+import { clearMobileSessionCache } from '@/storage/mobile-session-cache'
 import { useSessionStore } from './session-store'
 
 // ── Types ──────────────────────────────────────────────────────────
@@ -285,6 +286,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         isEncrypted: false,
       })
       removeKey('relay.session')
+      clearMobileSessionCache()
       await clearSecureSession()
       return false
     }
@@ -314,6 +316,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         isEncrypted: false,
       })
       removeKey('relay.session')
+      clearMobileSessionCache()
       await clearSecureSession()
       return false
     }
@@ -362,6 +365,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         isEncrypted: false,
       })
       removeKey('relay.session')
+      clearMobileSessionCache()
       await clearSecureSession()
       return false
     }
@@ -392,6 +396,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
     socket?.close()
     removeKey('relay.session')
+    clearMobileSessionCache()
     await clearSecureSession()
   },
 

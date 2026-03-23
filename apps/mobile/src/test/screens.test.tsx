@@ -1,6 +1,8 @@
 import React from 'react'
 import { act } from 'react-test-renderer'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const originalConsoleError = console.error
 
 const { routerMock, useRelayStore } = vi.hoisted(() => {
   ;(globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false
@@ -63,6 +65,26 @@ import IndexScreen from '@/app/index'
 import PairScreen from '@/app/(auth)/pair'
 import SettingsScreen from '@/app/(app)/settings/index'
 
+beforeAll(() => {
+  ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+  vi.spyOn(console, 'error').mockImplementation((message, ...args) => {
+    if (
+      typeof message === 'string' &&
+      (
+        message.includes('react-test-renderer is deprecated') ||
+        message.includes('The current testing environment is not configured to support act')
+      )
+    ) {
+      return
+    }
+    originalConsoleError(message, ...args)
+  })
+})
+
+afterAll(() => {
+  vi.restoreAllMocks()
+})
+
 afterEach(() => {
   cleanup()
   routerMock.push.mockReset()
@@ -104,14 +126,29 @@ describe('mobile app screens', () => {
       relayUrl: 'https://relay.test',
       pairingCode: 'PAIRME',
       sessionId: 'session-1',
-      connectionStatus: 'claiming',
+      connectionStatus: 'connected',
       error: 'Bad pairing code',
     })
 
     const renderer = renderComponent(<PairScreen />)
 
     expect(textOf(renderer)).toContain('Connect to your desktop agent')
+    expect(textOf(renderer)).toContain('Waiting for desktop...')
     expect(textOf(renderer)).toContain('Bad pairing code')
+    expect(routerMock.replace).not.toHaveBeenCalled()
+  })
+
+  it('navigates to the app once the session is encrypted', () => {
+    useRelayStore.setState({
+      relayUrl: 'https://relay.test',
+      pairingCode: 'PAIRME',
+      sessionId: 'session-1',
+      connectionStatus: 'encrypted',
+      isEncrypted: true,
+    })
+
+    renderComponent(<PairScreen />)
+
     expect(routerMock.replace).toHaveBeenCalledWith('/(app)')
   })
 

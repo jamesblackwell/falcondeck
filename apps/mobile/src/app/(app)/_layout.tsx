@@ -5,7 +5,6 @@ import { Redirect, useRouter } from 'expo-router'
 import { buildProjectGroups } from '@falcondeck/client-core'
 
 import { colors } from '@/theme/tokens'
-import { useRelayConnection } from '@/hooks/useRelayConnection'
 import { useRelayStore, useSessionStore, useUIStore } from '@/store'
 import { SidebarView } from '@/components/navigation'
 
@@ -14,7 +13,6 @@ export default function AppLayout() {
   const sessionId = useRelayStore((s) => s.sessionId)
   const snapshot = useSessionStore((s) => s.snapshot)
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
-  useRelayConnection()
   const groups = useMemo(
     () => buildProjectGroups(snapshot?.workspaces ?? [], snapshot?.threads ?? []),
     [snapshot?.threads, snapshot?.workspaces],

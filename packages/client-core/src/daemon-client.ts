@@ -8,9 +8,11 @@ import type {
   InteractiveResponsePayload,
   MarkThreadReadPayload,
   RemoteStatusResponse,
+  SnapshotRequest,
   SelectedSkillReference,
   FalconDeckPreferences,
   ThreadDetail,
+  ThreadDetailRequest,
   ThreadHandle,
   ThreadSummary,
   TurnInputItem,
@@ -58,9 +60,14 @@ export type StartThreadPayload = {
 
 export function createDaemonApiClient(baseUrl: string) {
   return {
-    async snapshot() {
+    async snapshot(request: SnapshotRequest = {}) {
+      const params = new URLSearchParams()
+      if (request.include_archived_threads != null) {
+        params.set('include_archived_threads', String(request.include_archived_threads))
+      }
+      const suffix = params.size > 0 ? `?${params.toString()}` : ''
       return normalizeDaemonSnapshot(
-        await parseJson<DaemonSnapshot>(await fetch(`${baseUrl}/api/snapshot`)),
+        await parseJson<DaemonSnapshot>(await fetch(`${baseUrl}/api/snapshot${suffix}`)),
       )
     },
     async preferences() {
@@ -116,10 +123,19 @@ export function createDaemonApiClient(baseUrl: string) {
         })),
       )
     },
-    async threadDetail(workspaceId: string, threadId: string) {
+    async threadDetail(
+      workspaceId: string,
+      threadId: string,
+      request: Omit<ThreadDetailRequest, 'workspace_id' | 'thread_id'> = {},
+    ) {
+      const params = new URLSearchParams()
+      if (request.mode) params.set('mode', request.mode)
+      if (request.limit != null) params.set('limit', String(request.limit))
+      if (request.before_item_id) params.set('before_item_id', request.before_item_id)
+      const suffix = params.size > 0 ? `?${params.toString()}` : ''
       return normalizeThreadDetail(
         await parseJson<ThreadDetail>(
-          await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}`),
+          await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}${suffix}`),
         ),
       )
     },

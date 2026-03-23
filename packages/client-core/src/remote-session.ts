@@ -1,5 +1,11 @@
+import type {
+  ConversationItem,
+  DaemonSnapshot,
+} from './types'
+
 export const DEFAULT_REMOTE_RELAY_URL = 'https://connect.falcondeck.com'
 export const REMOTE_SESSION_STORAGE_VERSION = 2
+export const MOBILE_SESSION_CACHE_VERSION = 1
 
 export type PersistedRemoteSession = {
   version: typeof REMOTE_SESSION_STORAGE_VERSION
@@ -14,6 +20,25 @@ export type PersistedRemoteSession = {
   daemonIdentityPublicKey?: string | null
   dataKey?: string | null
   lastReceivedSeq?: number
+}
+
+export type CachedThreadHistory = {
+  thread_id: string
+  items: ConversationItem[]
+  has_older: boolean
+  oldest_item_id: string | null
+  newest_item_id: string | null
+  is_partial: boolean
+  updated_at: string
+}
+
+export type MobileSessionCache = {
+  version: typeof MOBILE_SESSION_CACHE_VERSION
+  snapshot: DaemonSnapshot
+  selectedWorkspaceId: string | null
+  selectedThreadId: string | null
+  recentThreadIds: string[]
+  threadHistories: Record<string, CachedThreadHistory>
 }
 
 export function shouldReusePersistedRemoteSession(

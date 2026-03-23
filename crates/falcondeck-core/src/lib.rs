@@ -246,6 +246,14 @@ pub struct ConnectWorkspaceRequest {
     pub path: String,
 }
 
+/// Optional filters applied when materializing a daemon snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SnapshotRequest {
+    /// Whether archived threads should be included in the snapshot thread list.
+    #[serde(default = "default_true")]
+    pub include_archived_threads: bool,
+}
+
 /// Request payload used to start a new thread in a workspace.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StartThreadRequest {
@@ -287,6 +295,37 @@ pub struct UpdateThreadRequest {
 pub struct MarkThreadReadRequest {
     /// Highest event sequence observed by the client.
     pub read_seq: u64,
+}
+
+/// Fetch mode used by thread-detail requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadDetailMode {
+    /// Return the full thread history.
+    #[default]
+    Full,
+    /// Return the newest page of thread history.
+    Tail,
+    /// Return a page of items that appear before a given item id.
+    Before,
+}
+
+/// Request payload used to load a thread detail window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadDetailRequest {
+    /// Workspace identifier that owns the thread.
+    pub workspace_id: String,
+    /// Thread identifier being loaded.
+    pub thread_id: String,
+    /// History fetch mode for the request.
+    #[serde(default)]
+    pub mode: ThreadDetailMode,
+    /// Optional page size override for paged history modes.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Optional item id that bounds a `before` history page.
+    #[serde(default)]
+    pub before_item_id: Option<String>,
 }
 
 /// Image attachment metadata used in turn inputs and conversation history.
@@ -970,6 +1009,18 @@ pub struct ThreadDetail {
     pub thread: ThreadSummary,
     /// Ordered conversation items for the thread.
     pub items: Vec<ConversationItem>,
+    /// Whether older items exist before the returned window.
+    #[serde(default)]
+    pub has_older: bool,
+    /// Oldest item id present in the returned window, if any.
+    #[serde(default)]
+    pub oldest_item_id: Option<String>,
+    /// Newest item id present in the returned window, if any.
+    #[serde(default)]
+    pub newest_item_id: Option<String>,
+    /// Whether the response contains only a partial history window.
+    #[serde(default)]
+    pub is_partial: bool,
 }
 
 /// Sequenced event emitted by the daemon event stream.

@@ -1,5 +1,5 @@
-import { useEffect, useCallback, useState } from 'react'
-import { View, KeyboardAvoidingView, Platform, Pressable } from 'react-native'
+import { useEffect, useCallback, useRef, useState } from 'react'
+import { View, KeyboardAvoidingView, Platform, Pressable, ActivityIndicator } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Lock, ChevronDown, ChevronUp } from 'lucide-react-native'
@@ -12,6 +12,16 @@ import { DEMO_PAIRING_CODE } from '@/features/demo/demoData'
 import { enterDemoMode } from '@/features/demo/enterDemoMode'
 import { Text, Button, Input } from '@/components/ui'
 
+function connectionLabel(status: string, desktopOnline: boolean) {
+  if (status === 'claiming') return 'Claiming pairing...'
+  if (status === 'connecting') return 'Connecting to relay...'
+  if (status === 'connected') {
+    return desktopOnline ? 'Securing session...' : 'Waiting for desktop...'
+  }
+  if (status === 'disconnected') return 'Reconnecting...'
+  return 'Connecting...'
+}
+
 export default function PairScreen() {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
@@ -21,25 +31,32 @@ export default function PairScreen() {
   const pairingCode = useRelayStore((s) => s.pairingCode)
   const sessionId = useRelayStore((s) => s.sessionId)
   const connectionStatus = useRelayStore((s) => s.connectionStatus)
+  const isEncrypted = useRelayStore((s) => s.isEncrypted)
+  const machinePresence = useRelayStore((s) => s.machinePresence)
   const error = useRelayStore((s) => s.error)
-  const { setRelayUrl, setPairingCode, claimPairing, _setError } = useRelayStore.getState()
+  const { setRelayUrl, setPairingCode, claimPairing, disconnect, _setError } = useRelayStore.getState()
 
   const [showScanner, setShowScanner] = useState(false)
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [permission, requestPermission] = useCameraPermissions()
+  const hasHandledScanRef = useRef(false)
 
   const isClaiming = connectionStatus === 'claiming'
+  const isSecuringSession = !!sessionId && !isEncrypted
+  const desktopOnline = machinePresence?.daemon_connected ?? false
 
   const handleConnect = useCallback(() => {
+    if (isSecuringSession) return
     if (pairingCode.trim().toUpperCase() === DEMO_PAIRING_CODE) {
       enterDemoMode()
       router.replace('/(app)')
       return
     }
     void claimPairing()
-  }, [claimPairing, pairingCode, router])
+  }, [claimPairing, isSecuringSession, pairingCode, router])
 
   const handleScanPress = useCallback(async () => {
+    hasHandledScanRef.current = false
     if (!permission?.granted) {
       const result = await requestPermission()
       if (!result.granted) return
@@ -49,6 +66,10 @@ export default function PairScreen() {
 
   const handleBarCodeScanned = useCallback(
     ({ data }: { data: string }) => {
+      if (hasHandledScanRef.current || isSecuringSession) {
+        return
+      }
+      hasHandledScanRef.current = true
       const parsed = parsePairingQr(data)
       if (!parsed) {
         _setError('Invalid QR code')
@@ -67,14 +88,26 @@ export default function PairScreen() {
       setShowScanner(false)
       void claimPairing()
     },
-    [setRelayUrl, setPairingCode, claimPairing, _setError, router],
+    [setRelayUrl, setPairingCode, claimPairing, _setError, isSecuringSession, router],
   )
 
   useEffect(() => {
-    if (sessionId) {
+    if (sessionId && isEncrypted) {
       router.replace('/(app)')
     }
-  }, [router, sessionId])
+  }, [isEncrypted, router, sessionId])
+
+  useEffect(() => {
+    if (!showScanner) {
+      hasHandledScanRef.current = false
+    }
+  }, [showScanner])
+
+  const handleStartOver = useCallback(() => {
+    setShowScanner(false)
+    hasHandledScanRef.current = false
+    void disconnect()
+  }, [disconnect])
 
   if (showScanner) {
     return (
@@ -121,48 +154,75 @@ export default function PairScreen() {
           </View>
 
           <View style={styles.form}>
-            <Button
-              variant="default"
-              size="lg"
-              label="Scan QR Code"
-              onPress={handleScanPress}
-            />
+            {isSecuringSession ? (
+              <View style={styles.connectingState}>
+                <ActivityIndicator size="small" color={theme.colors.fg.muted} />
+                <Text variant="label" color="primary" weight="semibold" style={styles.connectingTitle}>
+                  {connectionLabel(connectionStatus, desktopOnline)}
+                </Text>
+                <Text variant="caption" color="muted" style={styles.connectingBody}>
+                  {desktopOnline
+                    ? 'Your desktop is finishing the encrypted handshake for this device.'
+                    : 'Keep FalconDeck open on your desktop while it finishes pairing.'}
+                </Text>
+                {error ? (
+                  <Text variant="caption" color="danger" style={styles.error}>
+                    {error}
+                  </Text>
+                ) : null}
+                <Button
+                  variant="danger"
+                  label="Start Over"
+                  onPress={handleStartOver}
+                />
+              </View>
+            ) : (
+              <>
+                <Button
+                  variant="default"
+                  size="lg"
+                  label="Scan QR Code"
+                  onPress={handleScanPress}
+                  disabled={isClaiming}
+                />
 
-            <View style={styles.divider}>
-              <View style={styles.dividerLine} />
-              <Text variant="caption" color="muted" size="2xs">
-                OR ENTER CODE
-              </Text>
-              <View style={styles.dividerLine} />
-            </View>
+                <View style={styles.divider}>
+                  <View style={styles.dividerLine} />
+                  <Text variant="caption" color="muted" size="2xs">
+                    OR ENTER CODE
+                  </Text>
+                  <View style={styles.dividerLine} />
+                </View>
 
-            <Input
-              value={pairingCode}
-              onChangeText={setPairingCode}
-              placeholder="Pairing code"
-              autoCapitalize="characters"
-              autoCorrect={false}
-              style={styles.codeInput}
-            />
+                <Input
+                  value={pairingCode}
+                  onChangeText={setPairingCode}
+                  placeholder="Pairing code"
+                  autoCapitalize="characters"
+                  autoCorrect={false}
+                  style={styles.codeInput}
+                />
 
-            <Button
-              variant="secondary"
-              label="Connect"
-              loading={isClaiming}
-              disabled={!relayUrl.trim() || !pairingCode.trim()}
-              onPress={handleConnect}
-            />
+                <Button
+                  variant="secondary"
+                  label="Connect"
+                  loading={isClaiming}
+                  disabled={!relayUrl.trim() || !pairingCode.trim()}
+                  onPress={handleConnect}
+                />
 
-            {error ? (
-              <Text variant="caption" color="danger" style={styles.error}>
-                {error}
-              </Text>
-            ) : null}
+                {error ? (
+                  <Text variant="caption" color="danger" style={styles.error}>
+                    {error}
+                  </Text>
+                ) : null}
+              </>
+            )}
           </View>
         </View>
 
         <View style={styles.bottom}>
-          {showAdvanced ? (
+          {!isSecuringSession && showAdvanced ? (
             <View style={styles.advancedPanel}>
               <Input
                 value={relayUrl}
@@ -178,6 +238,7 @@ export default function PairScreen() {
           <Pressable
             style={styles.advancedToggle}
             onPress={() => setShowAdvanced(!showAdvanced)}
+            disabled={isSecuringSession}
           >
             <Text variant="caption" color="muted" size="2xs">
               Advanced
@@ -225,6 +286,18 @@ const styles = StyleSheet.create((theme) => ({
     width: '100%',
     maxWidth: 320,
     gap: theme.spacing[3],
+  },
+  connectingState: {
+    alignItems: 'center',
+    gap: theme.spacing[3],
+    paddingVertical: theme.spacing[4],
+  },
+  connectingTitle: {
+    textAlign: 'center',
+  },
+  connectingBody: {
+    textAlign: 'center',
+    lineHeight: 20,
   },
   codeInput: {
     textAlign: 'center',

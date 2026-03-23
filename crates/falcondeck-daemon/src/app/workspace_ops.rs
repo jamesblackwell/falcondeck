@@ -1,7 +1,10 @@
 use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use falcondeck_core::{ImageInput, TurnInputItem};
+use falcondeck_core::{
+    ConversationItem, ImageInput, ThreadDetail, ThreadDetailMode, ThreadDetailRequest,
+    TurnInputItem,
+};
 use uuid::Uuid;
 
 use super::*;
@@ -1330,27 +1333,97 @@ pub(super) async fn refresh_connected_workspace_metadata(
 
 pub(super) async fn thread_detail(
     app: &AppState,
-    workspace_id: &str,
-    thread_id: &str,
+    request: &ThreadDetailRequest,
 ) -> Result<ThreadDetail, DaemonError> {
     let workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
-        .get(workspace_id)
+        .get(&request.workspace_id)
         .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
     let thread = workspace
         .threads
-        .get(thread_id)
+        .get(&request.thread_id)
         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
     let workspace_summary = workspace.summary.clone();
     let thread_summary = thread.summary.clone();
-    let items = thread.items.clone();
+    let detail = thread_detail_window(&thread.items, request)?;
     drop(workspaces);
 
     Ok(ThreadDetail {
         workspace: workspace_summary,
         thread: app.build_thread_summary_from_clone(thread_summary).await,
-        items,
+        items: detail.items,
+        has_older: detail.has_older,
+        oldest_item_id: detail.oldest_item_id,
+        newest_item_id: detail.newest_item_id,
+        is_partial: detail.is_partial,
     })
+}
+
+struct ThreadDetailWindow {
+    items: Vec<ConversationItem>,
+    has_older: bool,
+    oldest_item_id: Option<String>,
+    newest_item_id: Option<String>,
+    is_partial: bool,
+}
+
+fn thread_detail_window(
+    items: &[ConversationItem],
+    request: &ThreadDetailRequest,
+) -> Result<ThreadDetailWindow, DaemonError> {
+    const DEFAULT_TAIL_LIMIT: usize = 150;
+    const DEFAULT_BEFORE_LIMIT: usize = 100;
+    const MAX_PAGE_SIZE: usize = 500;
+
+    let clamp_limit = |limit: Option<usize>, default_limit| {
+        limit.unwrap_or(default_limit).clamp(1, MAX_PAGE_SIZE)
+    };
+    let build_window =
+        |window: Vec<ConversationItem>, has_older: bool, is_partial: bool| ThreadDetailWindow {
+            oldest_item_id: window.first().map(|item| conversation_item_id(item).to_string()),
+            newest_item_id: window.last().map(|item| conversation_item_id(item).to_string()),
+            items: window,
+            has_older,
+            is_partial,
+        };
+
+    match request.mode {
+        ThreadDetailMode::Full => Ok(build_window(items.to_vec(), false, false)),
+        ThreadDetailMode::Tail => {
+            let limit = clamp_limit(request.limit, DEFAULT_TAIL_LIMIT);
+            let start = items.len().saturating_sub(limit);
+            let window = items[start..].to_vec();
+            Ok(build_window(window, start > 0, start > 0))
+        }
+        ThreadDetailMode::Before => {
+            let before_item_id = request.before_item_id.as_ref().ok_or_else(|| {
+                DaemonError::BadRequest("before_item_id is required for before mode".to_string())
+            })?;
+            let before_index = items
+                .iter()
+                .position(|item| conversation_item_id(item) == before_item_id)
+                .ok_or_else(|| {
+                    DaemonError::BadRequest("before_item_id was not found in the thread".to_string())
+                })?;
+            let limit = clamp_limit(request.limit, DEFAULT_BEFORE_LIMIT);
+            let start = before_index.saturating_sub(limit);
+            let window = items[start..before_index].to_vec();
+            Ok(build_window(window, start > 0, true))
+        }
+    }
+}
+
+fn conversation_item_id(item: &ConversationItem) -> &str {
+    match item {
+        ConversationItem::UserMessage { id, .. }
+        | ConversationItem::AssistantMessage { id, .. }
+        | ConversationItem::Reasoning { id, .. }
+        | ConversationItem::ToolCall { id, .. }
+        | ConversationItem::Plan { id, .. }
+        | ConversationItem::Diff { id, .. }
+        | ConversationItem::Service { id, .. }
+        | ConversationItem::InteractiveRequest { id, .. } => id,
+    }
 }
 
 pub(super) async fn mark_thread_read(
@@ -1391,9 +1464,18 @@ pub(super) async fn mark_thread_read(
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use tempfile::tempdir;
 
     use super::*;
+
+    fn assistant_message(id: &str) -> ConversationItem {
+        ConversationItem::AssistantMessage {
+            id: id.to_string(),
+            text: format!("message {id}"),
+            created_at: Utc::now(),
+        }
+    }
 
     #[tokio::test]
     async fn materializes_data_url_images_into_durable_local_files() {
@@ -1504,5 +1586,76 @@ mod tests {
 
         assert!(Path::new(&local_path).starts_with(temp_dir.path().join("attachments")));
         assert!(!local_path.contains("../"));
+    }
+
+    #[test]
+    fn thread_detail_window_returns_tail_metadata_for_mobile_pages() {
+        let items = vec![
+            assistant_message("msg-1"),
+            assistant_message("msg-2"),
+            assistant_message("msg-3"),
+            assistant_message("msg-4"),
+        ];
+
+        let detail = thread_detail_window(
+            &items,
+            &ThreadDetailRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                mode: ThreadDetailMode::Tail,
+                limit: Some(2),
+                before_item_id: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            detail
+                .items
+                .iter()
+                .map(conversation_item_id)
+                .collect::<Vec<_>>(),
+            vec!["msg-3", "msg-4"]
+        );
+        assert!(detail.has_older);
+        assert_eq!(detail.oldest_item_id.as_deref(), Some("msg-3"));
+        assert_eq!(detail.newest_item_id.as_deref(), Some("msg-4"));
+        assert!(detail.is_partial);
+    }
+
+    #[test]
+    fn thread_detail_window_returns_previous_page_and_metadata() {
+        let items = vec![
+            assistant_message("msg-1"),
+            assistant_message("msg-2"),
+            assistant_message("msg-3"),
+            assistant_message("msg-4"),
+            assistant_message("msg-5"),
+        ];
+
+        let detail = thread_detail_window(
+            &items,
+            &ThreadDetailRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                mode: ThreadDetailMode::Before,
+                limit: Some(2),
+                before_item_id: Some("msg-4".to_string()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            detail
+                .items
+                .iter()
+                .map(conversation_item_id)
+                .collect::<Vec<_>>(),
+            vec!["msg-2", "msg-3"]
+        );
+        assert!(detail.has_older);
+        assert_eq!(detail.oldest_item_id.as_deref(), Some("msg-2"));
+        assert_eq!(detail.newest_item_id.as_deref(), Some("msg-3"));
+        assert!(detail.is_partial);
     }
 }

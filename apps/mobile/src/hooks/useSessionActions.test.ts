@@ -1,18 +1,22 @@
-/**
- * Tests for useSessionActions hook logic.
- * Tests the guard conditions, store interactions, and error handling
- * by setting up stores and calling the action functions.
- */
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import React from 'react'
+import TestRenderer, { act } from 'react-test-renderer'
 
 import { useRelayStore } from '@/store/relay-store'
 import { useSessionStore } from '@/store/session-store'
 import { useUIStore } from '@/store/ui-store'
-import { snapshot, workspace, thread } from '../test/factories'
+import { useSessionActions } from './useSessionActions'
+import {
+  assistantMessage,
+  snapshot,
+  snapshotEvent,
+  thread,
+  threadDetail,
+  workspace,
+} from '../test/factories'
 
-// Since useSessionActions is a hook, we can't call it directly.
-// Instead, we test the same logic by exercising the stores directly,
-// which is what the hook's callbacks do under the hood.
+type RelayStoreState = ReturnType<typeof useRelayStore.getState>
+const originalConsoleError = console.error
 
 function resetAll() {
   useSessionStore.getState().reset()
@@ -35,6 +39,65 @@ function resetAll() {
     selectedCollaborationMode: null,
     isSubmitting: false,
   })
+}
+
+beforeAll(() => {
+  ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
+  vi.spyOn(console, 'error').mockImplementation((message, ...args) => {
+    if (
+      typeof message === 'string' &&
+      (
+        message.includes('react-test-renderer is deprecated') ||
+        message.includes('The current testing environment is not configured to support act')
+      )
+    ) {
+      return
+    }
+    originalConsoleError(message, ...args)
+  })
+})
+
+afterAll(() => {
+  vi.restoreAllMocks()
+})
+
+function mountSessionActions() {
+  let actions: ReturnType<typeof useSessionActions> | null = null
+  let renderer: TestRenderer.ReactTestRenderer | null = null
+
+  function Harness() {
+    actions = useSessionActions()
+    return null
+  }
+
+  act(() => {
+    renderer = TestRenderer.create(React.createElement(Harness))
+  })
+
+  return {
+    getActions() {
+      if (!actions) {
+        throw new Error('Session actions hook did not mount')
+      }
+      return actions
+    },
+    unmount() {
+      if (!renderer) return
+      act(() => {
+        renderer?.unmount()
+      })
+    },
+  }
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((innerResolve, innerReject) => {
+    resolve = innerResolve
+    reject = innerReject
+  })
+  return { promise, resolve, reject }
 }
 
 describe('submitTurn guards', () => {
@@ -159,5 +222,153 @@ describe('isSubmitting state management', () => {
 
     useUIStore.getState().clearDraft()
     expect(useUIStore.getState().draft).toBe('')
+  })
+})
+
+describe('loadThreadDetail', () => {
+  beforeEach(resetAll)
+
+  it('requests the newest tail window for the selected thread', async () => {
+    useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+      workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+      threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+    })))
+    useSessionStore.getState().selectThread('workspace-1', 'thread-1')
+
+    const rpc = vi.fn().mockResolvedValue(threadDetail({
+      items: [assistantMessage('msg-1', 'hello')],
+      has_older: false,
+      oldest_item_id: 'msg-1',
+      newest_item_id: 'msg-1',
+      is_partial: true,
+    }))
+    const setError = vi.fn()
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState['_callRpc'],
+      _setError: setError as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>)
+
+    const harness = mountSessionActions()
+    try {
+      await act(async () => {
+        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1')
+      })
+    } finally {
+      harness.unmount()
+    }
+
+    expect(rpc).toHaveBeenCalledWith(
+      'thread.detail',
+      {
+        workspace_id: 'workspace-1',
+        thread_id: 'thread-1',
+        mode: 'tail',
+        limit: 150,
+      },
+      { requestIdPrefix: 'mobile-detail' },
+    )
+    expect(useSessionStore.getState().threadDetail?.items.map((item) => item.id)).toEqual(['msg-1'])
+    expect(setError).toHaveBeenCalledWith(null)
+  })
+
+  it('requests older history from the current cached oldest item and prepends it', async () => {
+    useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+      workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+      threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+    })))
+    useSessionStore.getState().selectThread('workspace-1', 'thread-1')
+    useSessionStore.getState().setThreadDetail(threadDetail({
+      items: [
+        assistantMessage('msg-2', 'second'),
+        assistantMessage('msg-3', 'third'),
+      ],
+      has_older: true,
+      oldest_item_id: 'msg-2',
+      newest_item_id: 'msg-3',
+      is_partial: true,
+    }))
+
+    const rpc = vi.fn().mockResolvedValue(threadDetail({
+      items: [
+        assistantMessage('msg-0', 'zero'),
+        assistantMessage('msg-1', 'one'),
+      ],
+      has_older: false,
+      oldest_item_id: 'msg-0',
+      newest_item_id: 'msg-1',
+      is_partial: true,
+    }))
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState['_callRpc'],
+      _setError: vi.fn() as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>)
+
+    const harness = mountSessionActions()
+    try {
+      await act(async () => {
+        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1', { older: true })
+      })
+    } finally {
+      harness.unmount()
+    }
+
+    expect(rpc).toHaveBeenCalledWith(
+      'thread.detail',
+      {
+        workspace_id: 'workspace-1',
+        thread_id: 'thread-1',
+        mode: 'before',
+        before_item_id: 'msg-2',
+        limit: 100,
+      },
+      { requestIdPrefix: 'mobile-detail-older' },
+    )
+    expect(useSessionStore.getState().threadItems['thread-1']?.map((item) => item.id)).toEqual([
+      'msg-0',
+      'msg-1',
+      'msg-2',
+      'msg-3',
+    ])
+  })
+
+  it('ignores stale detail responses after the user switches threads', async () => {
+    useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+      workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+      threads: [
+        thread({ id: 'thread-1', workspace_id: 'workspace-1' }),
+        thread({ id: 'thread-2', workspace_id: 'workspace-1' }),
+      ],
+    })))
+    useSessionStore.getState().selectThread('workspace-1', 'thread-1')
+
+    const deferred = createDeferred<ReturnType<typeof threadDetail>>()
+    const rpc = vi.fn().mockReturnValue(deferred.promise)
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState['_callRpc'],
+      _setError: vi.fn() as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>)
+
+    const harness = mountSessionActions()
+    try {
+      const loadPromise = act(async () => {
+        const pending = harness.getActions().loadThreadDetail('workspace-1', 'thread-1')
+        useSessionStore.getState().selectThread('workspace-1', 'thread-2')
+        deferred.resolve(threadDetail({
+          items: [assistantMessage('msg-late', 'late')],
+          has_older: false,
+          oldest_item_id: 'msg-late',
+          newest_item_id: 'msg-late',
+          is_partial: true,
+        }))
+        await pending
+      })
+      await loadPromise
+    } finally {
+      harness.unmount()
+    }
+
+    expect(useSessionStore.getState().selectedThreadId).toBe('thread-2')
+    expect(useSessionStore.getState().threadDetail).toBeNull()
+    expect(useSessionStore.getState().threadItems['thread-1']).toBeUndefined()
   })
 })

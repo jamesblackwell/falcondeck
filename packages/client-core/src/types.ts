@@ -321,6 +321,10 @@ export type ThreadDetail = {
   workspace: WorkspaceSummary
   thread: ThreadSummary
   items: ConversationItem[]
+  has_older: boolean
+  oldest_item_id: string | null
+  newest_item_id: string | null
+  is_partial: boolean
 }
 
 export type DaemonSnapshot = {
@@ -332,6 +336,20 @@ export type DaemonSnapshot = {
   threads: ThreadSummary[]
   interactive_requests: InteractiveRequest[]
   preferences: FalconDeckPreferences
+}
+
+export type SnapshotRequest = {
+  include_archived_threads?: boolean | null
+}
+
+export type ThreadDetailMode = 'full' | 'tail' | 'before'
+
+export type ThreadDetailRequest = {
+  workspace_id: string
+  thread_id: string
+  mode?: ThreadDetailMode | null
+  limit?: number | null
+  before_item_id?: string | null
 }
 
 export type EventEnvelope = {

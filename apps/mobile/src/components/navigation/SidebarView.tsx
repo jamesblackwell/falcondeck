@@ -372,7 +372,7 @@ const styles = StyleSheet.create((theme) => ({
     marginBottom: theme.spacing[2],
   },
   dangerRow: {
-    backgroundColor: theme.colors.danger.subtle,
+    backgroundColor: theme.colors.danger.muted,
   },
   renameInput: {
     marginTop: theme.spacing[2],

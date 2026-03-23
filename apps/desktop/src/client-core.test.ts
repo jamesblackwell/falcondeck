@@ -210,6 +210,10 @@ describe('client-core conversation helpers', () => {
       workspace: workspace(),
       thread: thread(),
       items: [assistantMessage('a', '2026-03-15T10:00:00Z', 'hello')],
+      has_older: false,
+      oldest_item_id: 'a',
+      newest_item_id: 'a',
+      is_partial: false,
     }
     const updatedThread = thread({ status: 'running', last_message_preview: 'working' })
     const event: EventEnvelope = {
@@ -283,6 +287,10 @@ describe('client-core conversation helpers', () => {
       workspace: workspace(),
       thread: thread(),
       items: [],
+      has_older: false,
+      oldest_item_id: null,
+      newest_item_id: null,
+      is_partial: false,
     }
     expect(applyEventToThreadDetail(detail, event)?.workspace.updated_at).toBe(
       '2026-03-15T10:10:00Z',
@@ -294,6 +302,10 @@ describe('client-core conversation helpers', () => {
       workspace: workspace(),
       thread: thread(),
       items: [assistantMessage('a', '2026-03-15T10:00:00Z', 'hello')],
+      has_older: false,
+      oldest_item_id: 'a',
+      newest_item_id: 'a',
+      is_partial: false,
     }
 
     expect(conversationItemsForSelection('workspace-1', null, detail)).toEqual([])
@@ -304,6 +316,10 @@ describe('client-core conversation helpers', () => {
       workspace: workspace(),
       thread: thread(),
       items: [assistantMessage('a', '2026-03-15T10:00:00Z', 'stale')],
+      has_older: false,
+      oldest_item_id: 'a',
+      newest_item_id: 'a',
+      is_partial: false,
     }
     const fallback = [assistantMessage('b', '2026-03-15T10:01:00Z', 'fresh')]
 

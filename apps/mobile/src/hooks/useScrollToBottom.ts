@@ -8,6 +8,7 @@ export function useScrollToBottom<T>() {
   const listRef = useRef<FlashListRef<T>>(null)
   const [showJumpButton, setShowJumpButton] = useState(false)
   const showJumpButtonRef = useRef(false)
+  const pauseAutoScrollRef = useRef(false)
 
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent
@@ -30,10 +31,26 @@ export function useScrollToBottom<T>() {
     setShowJumpButton(false)
   }, [])
 
+  const pauseAutoScrollOnce = useCallback(() => {
+    pauseAutoScrollRef.current = true
+  }, [])
+
   const onContentSizeChange = useCallback(() => {
+    if (pauseAutoScrollRef.current) {
+      pauseAutoScrollRef.current = false
+      return
+    }
     if (showJumpButtonRef.current) return
     listRef.current?.scrollToEnd({ animated: false })
   }, [])
 
-  return { listRef, showJumpButton, onContentSizeChange, onScroll, resetScrollState, scrollToBottom }
+  return {
+    listRef,
+    showJumpButton,
+    onContentSizeChange,
+    onScroll,
+    pauseAutoScrollOnce,
+    resetScrollState,
+    scrollToBottom,
+  }
 }

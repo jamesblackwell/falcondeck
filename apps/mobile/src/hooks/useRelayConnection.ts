@@ -1,16 +1,16 @@
-import { useEffect, useRef, useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { normalizeEventEnvelope, normalizeDaemonSnapshot } from '@falcondeck/client-core'
 import type {
+  DaemonSnapshot,
+  EventEnvelope,
+  MachinePresence,
   RelayServerMessage,
   RelayUpdate,
-  EventEnvelope,
-  DaemonSnapshot,
   RelayWebSocketTicketResponse,
 } from '@falcondeck/client-core'
 
-import { useRelayStore } from '@/store'
-import { useSessionStore } from '@/store'
+import { useRelayStore, useSessionStore } from '@/store'
 
 function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
@@ -40,6 +40,10 @@ export function useRelayConnection() {
   const snapshotRetryAttempt = useRef(0)
   const reconnectAttempt = useRef(0)
   const pendingEncrypted = useRef<RelayUpdate[]>([])
+  const pendingRelayUpdates = useRef<RelayUpdate[]>([])
+  const relayFlushFrame = useRef<number | null>(null)
+  const relayFlushTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const relayFlushInProgress = useRef(false)
   const snapshotRequestInFlight = useRef(false)
   const [reconnectGeneration, setReconnectGeneration] = useState(0)
 
@@ -49,18 +53,22 @@ export function useRelayConnection() {
 
     snapshotRequestInFlight.current = true
     try {
-      const snapshot = normalizeDaemonSnapshot(
-        await relay._callRpc<DaemonSnapshot>('snapshot.current', {}, {
-          requestIdPrefix: 'mobile-snapshot',
-        }),
+      const nextSnapshot = normalizeDaemonSnapshot(
+        await relay._callRpc<DaemonSnapshot>(
+          'snapshot.current',
+          { include_archived_threads: false },
+          { requestIdPrefix: 'mobile-snapshot' },
+        ),
       )
-      useSessionStore.getState().applyDaemonEvent({
-        seq: 0,
-        emitted_at: new Date().toISOString(),
-        workspace_id: null,
-        thread_id: null,
-        event: { type: 'snapshot', snapshot },
-      })
+      useSessionStore.getState().applyDaemonEvents([
+        {
+          seq: 0,
+          emitted_at: new Date().toISOString(),
+          workspace_id: null,
+          thread_id: null,
+          event: { type: 'snapshot', snapshot: nextSnapshot },
+        },
+      ])
       snapshotRetryAttempt.current = 0
       if (snapshotRetryTimer.current) {
         clearTimeout(snapshotRetryTimer.current)
@@ -90,52 +98,118 @@ export function useRelayConnection() {
     if (!payload.ok) relay._setError('Remote action failed')
   }, [])
 
-  const processUpdate = useCallback(async (update: RelayUpdate) => {
-    const relay = useRelayStore.getState()
-    relay._setLastReceivedSeq(update.seq)
+  const flushRelayUpdates = useCallback(async () => {
+    if (relayFlushInProgress.current) return
 
-    if (update.body.t === 'session-bootstrap') {
-      await relay._processBootstrap(update)
-      // Process any queued encrypted updates
-      const queued = pendingEncrypted.current
-      pendingEncrypted.current = []
-      for (const u of queued) await processUpdate(u)
-      if (relay._getSessionCrypto() && !useSessionStore.getState().snapshot) {
-        void requestSnapshot()
-      }
-      return
-    }
-
-    if (update.body.t === 'presence') {
-      relay._setMachinePresence(update.body.presence)
-      relay._persistSession()
-      return
-    }
-
-    if (update.body.t === 'action-status') {
-      relay._persistSession()
-      return
-    }
-
-    if (update.body.t !== 'encrypted') return
-
-    const sc = relay._getSessionCrypto()
-    if (!sc) {
-      pendingEncrypted.current.push(update)
-      return
-    }
+    relayFlushInProgress.current = true
 
     try {
-      const decrypted = await relay._decryptJson(update.body.envelope)
-      const event = parseDaemonEvent(decrypted)
-      if (event) {
-        useSessionStore.getState().applyDaemonEvent(event)
+      while (pendingRelayUpdates.current.length > 0) {
+        const relay = useRelayStore.getState()
+        const batch = pendingRelayUpdates.current.splice(0)
+        const daemonEvents: EventEnvelope[] = []
+        let nextPresence: MachinePresence | null | undefined = undefined
+        let shouldPersistCursor = false
+
+        for (let index = 0; index < batch.length; index += 1) {
+          const update = batch[index]
+          relay._setLastReceivedSeq(update.seq)
+
+          if (update.body.t === 'session-bootstrap') {
+            await relay._processBootstrap(update)
+            shouldPersistCursor = true
+            if (pendingEncrypted.current.length > 0) {
+              batch.splice(index + 1, 0, ...pendingEncrypted.current)
+              pendingEncrypted.current = []
+            }
+            continue
+          }
+
+          if (update.body.t === 'presence') {
+            nextPresence = update.body.presence
+            shouldPersistCursor = true
+            continue
+          }
+
+          if (update.body.t === 'action-status') {
+            shouldPersistCursor = true
+            continue
+          }
+
+          if (update.body.t !== 'encrypted') {
+            continue
+          }
+
+          const sessionCrypto = relay._getSessionCrypto()
+          if (!sessionCrypto) {
+            pendingEncrypted.current.push(update)
+            continue
+          }
+
+          try {
+            const decrypted = await relay._decryptJson(update.body.envelope)
+            const event = parseDaemonEvent(decrypted)
+            if (event) {
+              daemonEvents.push(event)
+              shouldPersistCursor = true
+            }
+          } catch (e) {
+            relay._setError(e instanceof Error ? e.message : 'Failed to decrypt update')
+          }
+        }
+
+        if (nextPresence !== undefined) {
+          relay._setMachinePresence(nextPresence)
+        }
+
+        if (daemonEvents.length > 0) {
+          useSessionStore.getState().applyDaemonEvents(daemonEvents)
+        }
+
+        if (shouldPersistCursor) {
+          relay._persistSession()
+        }
+
+        if (relay._getSessionCrypto() && !useSessionStore.getState().snapshot) {
+          void requestSnapshot()
+        }
       }
-      relay._persistSession()
-    } catch (e) {
-      relay._setError(e instanceof Error ? e.message : 'Failed to decrypt update')
+    } finally {
+      relayFlushInProgress.current = false
+      if (pendingRelayUpdates.current.length > 0 && relayFlushFrame.current === null && relayFlushTimeout.current === null) {
+        if (globalThis.requestAnimationFrame) {
+          relayFlushFrame.current = globalThis.requestAnimationFrame(() => {
+            relayFlushFrame.current = null
+            void flushRelayUpdates()
+          })
+        } else {
+          relayFlushTimeout.current = globalThis.setTimeout(() => {
+            relayFlushTimeout.current = null
+            void flushRelayUpdates()
+          }, 0)
+        }
+      }
     }
   }, [requestSnapshot])
+
+  const scheduleRelayFlush = useCallback(() => {
+    if (relayFlushFrame.current !== null || relayFlushTimeout.current !== null) {
+      return
+    }
+
+    if (globalThis.requestAnimationFrame) {
+      relayFlushFrame.current = globalThis.requestAnimationFrame(() => {
+        relayFlushFrame.current = null
+        void flushRelayUpdates()
+      })
+      return
+    }
+
+    relayFlushTimeout.current = globalThis.setTimeout(() => {
+      relayFlushTimeout.current = null
+      void flushRelayUpdates()
+    }, 0)
+  }, [flushRelayUpdates])
 
   useEffect(() => {
     const relay = useRelayStore.getState()
@@ -153,15 +227,25 @@ export function useRelayConnection() {
       : relayUrl.startsWith('http://')
         ? `ws://${relayUrl.slice('http://'.length)}`
         : relayUrl
+
     relay._setConnectionStatus('connecting')
     relay._setMachinePresence(null)
     relay._setError(null)
     pendingEncrypted.current = []
+    pendingRelayUpdates.current = []
     snapshotRequestInFlight.current = false
     snapshotRetryAttempt.current = 0
     if (snapshotRetryTimer.current) {
       clearTimeout(snapshotRetryTimer.current)
       snapshotRetryTimer.current = null
+    }
+    if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
+      globalThis.cancelAnimationFrame(relayFlushFrame.current)
+      relayFlushFrame.current = null
+    }
+    if (relayFlushTimeout.current !== null) {
+      clearTimeout(relayFlushTimeout.current)
+      relayFlushTimeout.current = null
     }
 
     const scheduleReconnect = () => {
@@ -171,11 +255,20 @@ export function useRelayConnection() {
       relay._setSocket(null)
       relay._failPendingRpcs('Remote connection dropped')
       pendingEncrypted.current = []
+      pendingRelayUpdates.current = []
       snapshotRequestInFlight.current = false
       snapshotRetryAttempt.current = 0
       if (snapshotRetryTimer.current) {
         clearTimeout(snapshotRetryTimer.current)
         snapshotRetryTimer.current = null
+      }
+      if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
+        globalThis.cancelAnimationFrame(relayFlushFrame.current)
+        relayFlushFrame.current = null
+      }
+      if (relayFlushTimeout.current !== null) {
+        clearTimeout(relayFlushTimeout.current)
+        relayFlushTimeout.current = null
       }
 
       const delay = Math.min(1000 * 2 ** reconnectAttempt.current, 15_000)
@@ -212,7 +305,6 @@ export function useRelayConnection() {
           `${wsUrl}/v1/updates/ws?session_id=${encodeURIComponent(sessionId)}&ticket=${encodeURIComponent(ticket.ticket)}`,
         )
         activeSocket = socket
-
         relay._setSocket(socket)
 
         socket.onopen = () => {
@@ -231,6 +323,7 @@ export function useRelayConnection() {
             socket.close()
             return
           }
+
           switch (payload.type) {
             case 'ready':
               if (relay._getSessionCrypto()) {
@@ -244,20 +337,18 @@ export function useRelayConnection() {
               if (payload.history_truncated) {
                 relay._setLastReceivedSeq(Math.max(payload.next_seq - 1, 0))
                 relay._persistSession()
-                useSessionStore.setState((state) => ({
-                  ...state,
-                  snapshot: null,
-                  threadDetail: null,
-                  threadItems: {},
-                }))
+                useSessionStore.getState().reset()
                 if (relay._getSessionCrypto()) {
                   void requestSnapshot()
                 }
+                break
               }
-              for (const u of payload.updates) void processUpdate(u)
+              pendingRelayUpdates.current.push(...payload.updates)
+              scheduleRelayFlush()
               break
             case 'update':
-              void processUpdate(payload.update)
+              pendingRelayUpdates.current.push(payload.update)
+              scheduleRelayFlush()
               break
             case 'rpc-result':
               void processRpcResult(payload)
@@ -295,6 +386,8 @@ export function useRelayConnection() {
       activeSocket?.close()
       relay._setSocket(null)
       relay._failPendingRpcs('Remote connection closed')
+      pendingEncrypted.current = []
+      pendingRelayUpdates.current = []
       snapshotRequestInFlight.current = false
       snapshotRetryAttempt.current = 0
       if (snapshotRetryTimer.current) {
@@ -305,13 +398,21 @@ export function useRelayConnection() {
         clearTimeout(reconnectTimer.current)
         reconnectTimer.current = null
       }
+      if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
+        globalThis.cancelAnimationFrame(relayFlushFrame.current)
+        relayFlushFrame.current = null
+      }
+      if (relayFlushTimeout.current !== null) {
+        clearTimeout(relayFlushTimeout.current)
+        relayFlushTimeout.current = null
+      }
     }
   }, [
     sessionId,
     reconnectGeneration,
     processRpcResult,
-    processUpdate,
     requestSnapshot,
+    scheduleRelayFlush,
   ])
 
   useEffect(() => {

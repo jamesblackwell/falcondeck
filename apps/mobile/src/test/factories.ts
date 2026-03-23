@@ -152,6 +152,10 @@ export function threadDetail(overrides: Partial<ThreadDetail> = {}): ThreadDetai
     workspace: workspace(),
     thread: thread(),
     items: [],
+    has_older: false,
+    oldest_item_id: null,
+    newest_item_id: null,
+    is_partial: false,
     ...overrides,
   }
 }

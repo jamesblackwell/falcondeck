@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     extract::{
-        Path, State,
+        Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
@@ -13,8 +13,9 @@ use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest,
-    MarkThreadReadRequest, SendTurnRequest, StartRemotePairingRequest, StartReviewRequest,
-    StartThreadRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
+    MarkThreadReadRequest, SendTurnRequest, SnapshotRequest, StartRemotePairingRequest,
+    StartReviewRequest, StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
+    UpdatePreferencesRequest, UpdateThreadRequest,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -91,8 +92,11 @@ async fn health(State(state): State<AppState>) -> Json<falcondeck_core::HealthRe
     Json(state.health().await)
 }
 
-async fn snapshot(State(state): State<AppState>) -> Json<falcondeck_core::DaemonSnapshot> {
-    Json(state.snapshot().await)
+async fn snapshot(
+    State(state): State<AppState>,
+    Query(request): Query<SnapshotRequest>,
+) -> Json<falcondeck_core::DaemonSnapshot> {
+    Json(state.snapshot_with_request(&request).await)
 }
 
 async fn preferences(
@@ -154,8 +158,29 @@ async fn start_thread(
 async fn thread_detail(
     State(state): State<AppState>,
     Path((workspace_id, thread_id)): Path<(String, String)>,
+    Query(query): Query<ThreadDetailQuery>,
 ) -> Result<Json<falcondeck_core::ThreadDetail>, DaemonError> {
-    Ok(Json(state.thread_detail(&workspace_id, &thread_id).await?))
+    Ok(Json(
+        state
+            .thread_detail_with_request(&ThreadDetailRequest {
+                workspace_id,
+                thread_id,
+                mode: query.mode,
+                limit: query.limit,
+                before_item_id: query.before_item_id,
+            })
+            .await?,
+    ))
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct ThreadDetailQuery {
+    #[serde(default)]
+    mode: ThreadDetailMode,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    before_item_id: Option<String>,
 }
 
 async fn update_thread(

@@ -4,8 +4,8 @@ use chrono::Utc;
 use falcondeck_core::{
     DaemonSnapshot, EncryptedEnvelope, EventEnvelope, PairingPublicKeyBundle, RelayClientMessage,
     RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
-    SendTurnRequest, SessionKeyMaterial, StartThreadRequest, UnifiedEvent,
-    UpdatePreferencesRequest, UpdateThreadRequest,
+    SendTurnRequest, SessionKeyMaterial, SnapshotRequest, StartThreadRequest, ThreadDetailMode,
+    ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
     crypto::{LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -462,8 +462,17 @@ impl AppState {
             extract_string(&params, keys).ok_or_else(|| "invalid remote rpc payload".to_string())
         };
         let rpc_result = match method.as_str() {
-            "snapshot.current" => serde_json::to_value(self.snapshot().await)
-                .map_err(|error| format!("failed to serialize snapshot: {error}")),
+            "snapshot.current" => {
+                let request = SnapshotRequest {
+                    include_archived_threads: params
+                        .get("includeArchivedThreads")
+                        .or_else(|| params.get("include_archived_threads"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true),
+                };
+                serde_json::to_value(self.snapshot_with_request(&request).await)
+                    .map_err(|error| format!("failed to serialize snapshot: {error}"))
+            }
             "preferences.read" => serde_json::to_value(self.preferences().await)
                 .map_err(|error| format!("failed to serialize preferences: {error}")),
             "thread.start" => {
@@ -486,9 +495,21 @@ impl AppState {
                     .map_err(|error| error.to_string())
             }
             "thread.detail" => {
-                let workspace_id = required(&["workspaceId", "workspace_id"])?;
-                let thread_id = required(&["threadId", "thread_id"])?;
-                self.thread_detail(&workspace_id, &thread_id)
+                let request = ThreadDetailRequest {
+                    workspace_id: required(&["workspaceId", "workspace_id"])?,
+                    thread_id: required(&["threadId", "thread_id"])?,
+                    mode: params
+                        .get("mode")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value::<ThreadDetailMode>(value).ok())
+                        .unwrap_or(ThreadDetailMode::Full),
+                    limit: params
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .and_then(|value| (value <= usize::MAX as u64).then_some(value as usize)),
+                    before_item_id: extract_string(&params, &["beforeItemId", "before_item_id"]),
+                };
+                self.thread_detail_with_request(&request)
                     .await
                     .and_then(|detail| serde_json::to_value(detail).map_err(DaemonError::from))
                     .map_err(|error| error.to_string())

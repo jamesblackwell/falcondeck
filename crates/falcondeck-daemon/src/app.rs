@@ -14,11 +14,11 @@ use falcondeck_core::{
     EventEnvelope, FalconDeckPreferences, HealthResponse, InteractiveRequest,
     InteractiveRequestKind, InteractiveResponsePayload, PairingPublicKeyBundle,
     PairingStatusResponse, RemoteConnectionStatus, RemotePairingSession, RemoteStatusResponse,
-    SendTurnRequest, ServiceLevel, SkillSummary, StartPairingRequest, StartPairingResponse,
-    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, ThreadAgentParams,
-    ThreadAttention, ThreadDetail, ThreadHandle, ThreadStatus, ThreadSummary, UnifiedEvent,
-    UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
-    WorkspaceSummary,
+    SendTurnRequest, ServiceLevel, SkillSummary, SnapshotRequest, StartPairingRequest,
+    StartPairingResponse, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
+    ThreadAgentParams, ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle,
+    ThreadStatus, ThreadSummary, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
+    WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
     crypto::{
         LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key,
         verify_pairing_public_key_bundle,
@@ -984,6 +984,38 @@ impl AppState {
         }
     }
 
+    pub async fn snapshot_with_request(&self, request: &SnapshotRequest) -> DaemonSnapshot {
+        let mut snapshot = self.snapshot().await;
+        if request.include_archived_threads {
+            return snapshot;
+        }
+
+        let visible_thread_ids = snapshot
+            .threads
+            .iter()
+            .filter(|thread| !thread.is_archived)
+            .map(|thread| thread.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        snapshot.threads.retain(|thread| visible_thread_ids.contains(&thread.id));
+        snapshot.workspaces.iter_mut().for_each(|workspace| {
+            if workspace
+                .current_thread_id
+                .as_ref()
+                .is_some_and(|thread_id| !visible_thread_ids.contains(thread_id))
+            {
+                workspace.current_thread_id = None;
+            }
+        });
+        snapshot.interactive_requests.retain(|request| {
+            request
+                .thread_id
+                .as_ref()
+                .is_none_or(|thread_id| visible_thread_ids.contains(thread_id))
+        });
+        snapshot
+    }
+
     pub async fn preferences(&self) -> FalconDeckPreferences {
         self.inner.preferences.lock().await.clone()
     }
@@ -1109,7 +1141,24 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
     ) -> Result<ThreadDetail, DaemonError> {
-        workspace_ops::thread_detail(self, workspace_id, thread_id).await
+        workspace_ops::thread_detail(
+            self,
+            &ThreadDetailRequest {
+                workspace_id: workspace_id.to_string(),
+                thread_id: thread_id.to_string(),
+                mode: falcondeck_core::ThreadDetailMode::Full,
+                limit: None,
+                before_item_id: None,
+            },
+        )
+        .await
+    }
+
+    pub async fn thread_detail_with_request(
+        &self,
+        request: &ThreadDetailRequest,
+    ) -> Result<ThreadDetail, DaemonError> {
+        workspace_ops::thread_detail(self, request).await
     }
 
     pub async fn mark_thread_read(
@@ -2011,7 +2060,8 @@ mod tests {
 
     use chrono::{Duration, Utc};
     use falcondeck_core::{
-        AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput, ThreadAgentParams,
+        AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput,
+        InteractiveRequest, InteractiveRequestKind, SnapshotRequest, ThreadAgentParams,
         ThreadAttention, ThreadStatus, ThreadSummary, TurnInputItem, UpdateThreadRequest,
         WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
         crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
@@ -3327,5 +3377,163 @@ tokens used\n5,767\n"
             "relay websocket ticket request failed with status 404 Not Found: session not found",
             true,
         ));
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
+        let temp_dir = tempdir().unwrap();
+        let workspace_path = temp_dir.path().join("project-a");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            PathBuf::from(&state_path),
+        );
+
+        let workspace_id = "workspace-1".to_string();
+        let active_thread = ThreadSummary {
+            id: "thread-active".to_string(),
+            workspace_id: workspace_id.clone(),
+            title: "Active thread".to_string(),
+            provider: AgentProvider::Codex,
+            native_session_id: None,
+            status: ThreadStatus::Idle,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention::default(),
+            is_archived: false,
+        };
+        let archived_thread = ThreadSummary {
+            id: "thread-archived".to_string(),
+            workspace_id: workspace_id.clone(),
+            title: "Archived thread".to_string(),
+            provider: AgentProvider::Codex,
+            native_session_id: None,
+            status: ThreadStatus::Idle,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention::default(),
+            is_archived: true,
+        };
+
+        app.inner.workspaces.lock().await.insert(
+            workspace_id.clone(),
+            super::ManagedWorkspace {
+                summary: WorkspaceSummary {
+                    id: workspace_id.clone(),
+                    path: workspace_path.to_string_lossy().to_string(),
+                    status: WorkspaceStatus::Ready,
+                    agents: Vec::new(),
+                    skills: Vec::new(),
+                    default_provider: AgentProvider::Codex,
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    supports_plan_mode: true,
+                    supports_native_plan_mode: true,
+                    account: falcondeck_core::AccountSummary::default(),
+                    current_thread_id: Some("thread-archived".to_string()),
+                    connected_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_error: None,
+                },
+                codex_session: None,
+                claude_runtime: None,
+                threads: [
+                    (
+                        active_thread.id.clone(),
+                        super::ManagedThread::new(active_thread.clone()),
+                    ),
+                    (
+                        archived_thread.id.clone(),
+                        super::ManagedThread::new(archived_thread),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
+
+        let active_request = InteractiveRequest {
+            request_id: "request-active".to_string(),
+            workspace_id: workspace_id.clone(),
+            thread_id: Some(active_thread.id.clone()),
+            method: "approval.respond".to_string(),
+            kind: InteractiveRequestKind::Approval,
+            title: "Allow active".to_string(),
+            detail: None,
+            command: None,
+            path: None,
+            turn_id: None,
+            item_id: None,
+            questions: Vec::new(),
+            created_at: Utc::now(),
+        };
+        let archived_request = InteractiveRequest {
+            request_id: "request-archived".to_string(),
+            workspace_id: workspace_id.clone(),
+            thread_id: Some("thread-archived".to_string()),
+            method: "approval.respond".to_string(),
+            kind: InteractiveRequestKind::Approval,
+            title: "Allow archived".to_string(),
+            detail: None,
+            command: None,
+            path: None,
+            turn_id: None,
+            item_id: None,
+            questions: Vec::new(),
+            created_at: Utc::now(),
+        };
+        app.inner.interactive_requests.lock().await.insert(
+            (workspace_id.clone(), active_request.request_id.clone()),
+            super::PendingServerRequest {
+                raw_id: json!("raw-active"),
+                request: active_request,
+            },
+        );
+        app.inner.interactive_requests.lock().await.insert(
+            (workspace_id.clone(), archived_request.request_id.clone()),
+            super::PendingServerRequest {
+                raw_id: json!("raw-archived"),
+                request: archived_request,
+            },
+        );
+
+        let snapshot = app
+            .snapshot_with_request(&SnapshotRequest {
+                include_archived_threads: false,
+            })
+            .await;
+
+        assert_eq!(
+            snapshot
+                .threads
+                .iter()
+                .map(|thread| thread.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thread-active"]
+        );
+        assert_eq!(snapshot.workspaces[0].current_thread_id, None);
+        assert_eq!(
+            snapshot
+                .interactive_requests
+                .iter()
+                .map(|request| request.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["request-active"]
+        );
     }
 }

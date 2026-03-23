@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 
-import { buildProjectGroups } from '@falcondeck/client-core'
+import { MOBILE_SESSION_CACHE_VERSION, buildProjectGroups } from '@falcondeck/client-core'
 import { useSessionStore } from './session-store'
 import {
   workspace,
@@ -129,6 +129,7 @@ describe('session-store', () => {
     it('selectWorkspace falls back to workspace.current_thread_id', () => {
       const snap = snapshot({
         workspaces: [workspace({ id: 'w1', current_thread_id: 'auto-thread' })],
+        threads: [thread({ id: 'auto-thread', workspace_id: 'w1' })],
       })
       const { applyDaemonEvent, selectWorkspace } = useSessionStore.getState()
       applyDaemonEvent(snapshotEvent(snap))
@@ -210,6 +211,148 @@ describe('session-store', () => {
 
       setThreadDetail(null)
       expect(useSessionStore.getState().threadDetail).toBeNull()
+    })
+
+    it('prepends older pages without dropping the cached tail window', () => {
+      const { selectThread, setThreadDetail } = useSessionStore.getState()
+      selectThread('workspace-1', 'thread-1')
+
+      setThreadDetail(threadDetail({
+        items: [
+          assistantMessage('msg-2', 'second'),
+          assistantMessage('msg-3', 'third'),
+        ],
+        has_older: true,
+        oldest_item_id: 'msg-2',
+        newest_item_id: 'msg-3',
+        is_partial: true,
+      }))
+
+      setThreadDetail(
+        threadDetail({
+          items: [
+            userMessage('msg-0', 'first'),
+            assistantMessage('msg-1', 'one'),
+          ],
+          has_older: false,
+          oldest_item_id: 'msg-0',
+          newest_item_id: 'msg-1',
+          is_partial: true,
+        }),
+        { mergeMode: 'prepend' },
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.threadDetail?.items.map((item) => item.id)).toEqual([
+        'msg-0',
+        'msg-1',
+        'msg-2',
+        'msg-3',
+      ])
+      expect(state.threadHistory['thread-1']).toMatchObject({
+        hasOlder: false,
+        oldestItemId: 'msg-0',
+        newestItemId: 'msg-3',
+        isPartial: true,
+      })
+    })
+  })
+
+  describe('mobile cache', () => {
+    it('filters archived threads and archived approvals from snapshot state', () => {
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({
+          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+          threads: [
+            thread({ id: 'thread-1', workspace_id: 'workspace-1', is_archived: false }),
+            thread({ id: 'thread-archived', workspace_id: 'workspace-1', is_archived: true }),
+          ],
+          interactive_requests: [
+            approval({ request_id: 'approval-active', thread_id: 'thread-1' }),
+            approval({ request_id: 'approval-archived', thread_id: 'thread-archived' }),
+          ],
+        })),
+      )
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['thread-1'])
+      expect(state.snapshot?.interactive_requests.map((entry) => entry.request_id)).toEqual([
+        'approval-active',
+      ])
+    })
+
+    it('hydrates cached snapshot selection and cached thread history', () => {
+      const { applyDaemonEvent, exportCache, selectThread, setThreadDetail } = useSessionStore.getState()
+      applyDaemonEvent(snapshotEvent(snapshot({
+        workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+        threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+      })))
+      selectThread('workspace-1', 'thread-1')
+      setThreadDetail(threadDetail({
+        items: [
+          userMessage('msg-0', 'hello'),
+          assistantMessage('msg-1', 'world'),
+        ],
+        has_older: true,
+        oldest_item_id: 'msg-0',
+        newest_item_id: 'msg-1',
+        is_partial: true,
+      }))
+
+      const cache = exportCache()
+      expect(cache).toBeTruthy()
+
+      useSessionStore.getState().reset()
+      useSessionStore.getState().hydrateCache(cache!)
+
+      const state = useSessionStore.getState()
+      expect(state.selectedWorkspaceId).toBe('workspace-1')
+      expect(state.selectedThreadId).toBe('thread-1')
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['thread-1'])
+      expect(state.threadItems['thread-1']?.map((item) => item.id)).toEqual(['msg-0', 'msg-1'])
+      expect(state.threadHistory['thread-1']).toMatchObject({
+        hasOlder: true,
+        oldestItemId: 'msg-0',
+        newestItemId: 'msg-1',
+        isPartial: true,
+      })
+    })
+
+    it('drops cached thread histories for threads outside the active snapshot', () => {
+      useSessionStore.getState().hydrateCache({
+        version: MOBILE_SESSION_CACHE_VERSION,
+        snapshot: snapshot({
+          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+        }),
+        selectedWorkspaceId: 'workspace-1',
+        selectedThreadId: 'thread-1',
+        recentThreadIds: ['thread-1', 'thread-archived'],
+        threadHistories: {
+          'thread-1': {
+            thread_id: 'thread-1',
+            items: [assistantMessage('msg-1', 'hello')],
+            has_older: false,
+            oldest_item_id: 'msg-1',
+            newest_item_id: 'msg-1',
+            is_partial: true,
+            updated_at: '2026-03-16T10:00:00Z',
+          },
+          'thread-archived': {
+            thread_id: 'thread-archived',
+            items: [assistantMessage('msg-hidden', 'hidden')],
+            has_older: false,
+            oldest_item_id: 'msg-hidden',
+            newest_item_id: 'msg-hidden',
+            is_partial: true,
+            updated_at: '2026-03-16T10:00:00Z',
+          },
+        },
+      })
+
+      const state = useSessionStore.getState()
+      expect(Object.keys(state.threadItems)).toEqual(['thread-1'])
+      expect(Object.keys(state.threadHistory)).toEqual(['thread-1'])
     })
   })
 

@@ -4,6 +4,7 @@ export {
   useGroups,
   useSelectedWorkspace,
   useSelectedThread,
+  useSelectedThreadHistory,
   useConversationItems,
   useApprovals,
 } from './session-store'

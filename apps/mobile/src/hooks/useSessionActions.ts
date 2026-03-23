@@ -1,11 +1,16 @@
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 
 import { normalizeThreadDetail, normalizeThreadHandle } from '@falcondeck/client-core'
 import type { ThreadDetail, ThreadHandle } from '@falcondeck/client-core'
 
 import { useRelayStore, useSessionStore, useUIStore } from '@/store'
 
+const THREAD_TAIL_LIMIT = 150
+const THREAD_OLDER_PAGE_LIMIT = 100
+
 export function useSessionActions() {
+  const detailRequestVersion = useRef(0)
+
   const submitTurn = useCallback(async () => {
     const relay = useRelayStore.getState()
     const session = useSessionStore.getState()
@@ -16,8 +21,6 @@ export function useSessionActions() {
     if (!workspace || !submittedDraft) return
 
     ui.setIsSubmitting(true)
-    // Clear draft immediately so the input feels responsive — text is already
-    // captured in submittedDraft above.
     ui.clearDraft()
 
     try {
@@ -41,23 +44,22 @@ export function useSessionActions() {
         useSessionStore.getState().selectThread(handle.workspace.id, handle.thread.id)
       }
 
-      const turnParams = {
-        workspace_id: workspace.id,
-        thread_id: activeThreadId,
-        inputs: [{ type: 'text', text: submittedDraft }],
-        provider: ui.selectedProvider ?? workspace.default_provider,
-        model_id: ui.selectedModel,
-        reasoning_effort: ui.selectedEffort,
-        collaboration_mode_id: ui.selectedCollaborationMode,
-        approval_policy: 'on-request',
-      }
-
-      await relay._callRpc('turn.start', turnParams, {
-        requestIdPrefix: 'mobile-turn',
-      })
+      await relay._callRpc(
+        'turn.start',
+        {
+          workspace_id: workspace.id,
+          thread_id: activeThreadId,
+          inputs: [{ type: 'text', text: submittedDraft }],
+          provider: ui.selectedProvider ?? workspace.default_provider,
+          model_id: ui.selectedModel,
+          reasoning_effort: ui.selectedEffort,
+          collaboration_mode_id: ui.selectedCollaborationMode,
+          approval_policy: 'on-request',
+        },
+        { requestIdPrefix: 'mobile-turn' },
+      )
       relay._setError(null)
     } catch (e) {
-      // Restore draft on failure so the user doesn't lose their message
       ui.setDraft(submittedDraft)
       relay._setError(e instanceof Error ? e.message : 'Failed to send message')
     } finally {
@@ -87,24 +89,74 @@ export function useSessionActions() {
     }
   }, [])
 
-  const loadThreadDetail = useCallback(async (workspaceId: string, threadId: string) => {
+  const loadThreadDetail = useCallback(async (
+    workspaceId: string,
+    threadId: string,
+    options?: { older?: boolean },
+  ) => {
     const relay = useRelayStore.getState()
+    const session = useSessionStore.getState()
+    const history = session.threadHistory[threadId]
+    const requestVersion = options?.older ? detailRequestVersion.current : detailRequestVersion.current + 1
+    if (!options?.older) {
+      detailRequestVersion.current = requestVersion
+    }
+
+    if (options?.older && !history?.oldestItemId) {
+      return null
+    }
 
     try {
       const detail = normalizeThreadDetail(
         await relay._callRpc<ThreadDetail>(
           'thread.detail',
+          options?.older
+            ? {
+                workspace_id: workspaceId,
+                thread_id: threadId,
+                mode: 'before',
+                before_item_id: history?.oldestItemId ?? null,
+                limit: THREAD_OLDER_PAGE_LIMIT,
+              }
+            : {
+                workspace_id: workspaceId,
+                thread_id: threadId,
+                mode: 'tail',
+                limit: THREAD_TAIL_LIMIT,
+              },
           {
-          workspace_id: workspaceId,
-          thread_id: threadId,
+            requestIdPrefix: options?.older ? 'mobile-detail-older' : 'mobile-detail',
           },
-          { requestIdPrefix: 'mobile-detail' },
         ),
       )
-      useSessionStore.getState().setThreadDetail(detail)
+
+      const activeSession = useSessionStore.getState()
+      const isStale =
+        (!options?.older && requestVersion !== detailRequestVersion.current) ||
+        activeSession.selectedThreadId !== threadId ||
+        activeSession.selectedWorkspaceId !== workspaceId
+
+      if (isStale) {
+        return null
+      }
+
+      useSessionStore.getState().setThreadDetail(detail, {
+        mergeMode: options?.older ? 'prepend' : 'refresh',
+      })
       relay._setError(null)
+      return detail
     } catch (e) {
+      const activeSession = useSessionStore.getState()
+      const isStale =
+        (!options?.older && requestVersion !== detailRequestVersion.current) ||
+        activeSession.selectedThreadId !== threadId ||
+        activeSession.selectedWorkspaceId !== workspaceId
+      if (isStale) {
+        return null
+      }
+
       relay._setError(e instanceof Error ? e.message : 'Failed to load thread')
+      return null
     }
   }, [])
 

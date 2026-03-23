@@ -7,19 +7,28 @@ import { Slot } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import * as SplashScreen from 'expo-splash-screen'
 
-import { useRelayStore } from '@/store'
+import { useRelayConnection } from '@/hooks/useRelayConnection'
+import { clearMobileSessionCache, loadMobileSessionCache } from '@/storage/mobile-session-cache'
+import { useRelayStore, useSessionStore } from '@/store'
 
 SplashScreen.preventAutoHideAsync()
 
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false)
+  useRelayConnection()
 
   useEffect(() => {
     async function restore() {
       try {
         const restored = await useRelayStore.getState().restoreSession()
-        if (!restored) {
-          // No saved session — will show pairing screen
+        if (restored) {
+          const cachedSession = loadMobileSessionCache()
+          if (cachedSession) {
+            useSessionStore.getState().hydrateCache(cachedSession)
+          }
+        } else {
+          useSessionStore.getState().reset()
+          clearMobileSessionCache()
         }
       } finally {
         setIsReady(true)

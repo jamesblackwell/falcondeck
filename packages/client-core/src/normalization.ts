@@ -226,17 +226,28 @@ export function normalizeWorkspaceSummary(
 
 export function normalizeThreadDetail(value: ThreadDetail | unknown): ThreadDetail {
   const detail = (value ?? {}) as Partial<ThreadDetail>
+  const items = (detail.items ?? []).map((item) =>
+    item.kind === 'tool_call'
+      ? {
+          ...item,
+          display: normalizeToolCallDisplay((item as { display?: unknown }).display),
+        }
+      : item,
+  )
   return {
     workspace: normalizeWorkspaceSummary(detail.workspace),
     thread: normalizeThreadSummary(detail.thread),
-    items: (detail.items ?? []).map((item) =>
-      item.kind === 'tool_call'
-        ? {
-            ...item,
-            display: normalizeToolCallDisplay((item as { display?: unknown }).display),
-          }
-        : item,
-    ),
+    items,
+    has_older: detail.has_older ?? false,
+    oldest_item_id:
+      detail.oldest_item_id ??
+      items[0]?.id ??
+      null,
+    newest_item_id:
+      detail.newest_item_id ??
+      items.at(-1)?.id ??
+      null,
+    is_partial: detail.is_partial ?? false,
   }
 }
 

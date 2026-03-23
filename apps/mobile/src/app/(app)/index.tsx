@@ -20,6 +20,7 @@ import {
   useRelayStore,
   useSessionStore,
   useSelectedThread,
+  useSelectedThreadHistory,
   useSelectedWorkspace,
   useUIStore,
 } from '@/store'
@@ -27,7 +28,7 @@ import { useSessionActions } from '@/hooks/useSessionActions'
 import { useRenderBlocks } from '@/hooks/useRenderBlocks'
 import { useScrollToBottom } from '@/hooks/useScrollToBottom'
 import { useInterruptTurn } from '@/hooks/useInterruptTurn'
-import { Text, EmptyState } from '@/components/ui'
+import { Button, Text, EmptyState } from '@/components/ui'
 import {
   ChatInput,
   ApprovalBanner,
@@ -54,9 +55,13 @@ export default function HomeScreen() {
   const blocks = useRenderBlocks()
   const approvals = useApprovals()
   const selectedThread = useSelectedThread()
+  const selectedThreadHistory = useSelectedThreadHistory()
   const workspace = useSelectedWorkspace()
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
+  const selectedThreadItemCount = useSessionStore((s) =>
+    s.selectedThreadId ? (s.threadItems[s.selectedThreadId]?.length ?? 0) : 0,
+  )
   const snapshot = useSessionStore((s) => s.snapshot)
   const { connectionStatus, isEncrypted, machinePresence, relayUrl, sessionId } = useRelayStore(
     useShallow((s) => ({
@@ -79,9 +84,11 @@ export default function HomeScreen() {
   const { setDraft, setSelectedModel, setSelectedEffort, setSelectedProvider } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
   const interruptTurn = useInterruptTurn()
-  const { listRef, showJumpButton, onContentSizeChange, onScroll, resetScrollState, scrollToBottom } =
+  const { listRef, showJumpButton, onContentSizeChange, onScroll, pauseAutoScrollOnce, resetScrollState, scrollToBottom } =
     useScrollToBottom<ConversationRenderBlock>()
   const [appState, setAppState] = useState(AppState.currentState)
+  const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<string | null>(null)
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false)
 
   // Compute active provider: thread's provider if running, otherwise UI selection or workspace default
   const activeProvider: AgentProvider = selectedThread
@@ -108,6 +115,7 @@ export default function HomeScreen() {
 
   const isThreadRunning = selectedThread?.status === 'running'
   const showThinking = shouldShowThinkingIndicator(blocks, isThreadRunning)
+  const isSelectedThreadLoading = !!selectedThreadId && detailLoadingThreadId === selectedThreadId
 
   // True during initial sync: session exists but snapshot hasn't loaded yet
   const isSyncing = !!sessionId && !snapshot
@@ -167,6 +175,25 @@ export default function HomeScreen() {
     [respondApproval],
   )
 
+  const handleLoadOlder = useCallback(() => {
+    if (!selectedWorkspaceId || !selectedThreadId || isLoadingOlder || !selectedThreadHistory.hasOlder) {
+      return
+    }
+
+    pauseAutoScrollOnce()
+    setIsLoadingOlder(true)
+    void loadThreadDetail(selectedWorkspaceId, selectedThreadId, { older: true }).finally(() => {
+      setIsLoadingOlder(false)
+    })
+  }, [
+    isLoadingOlder,
+    loadThreadDetail,
+    pauseAutoScrollOnce,
+    selectedThreadHistory.hasOlder,
+    selectedThreadId,
+    selectedWorkspaceId,
+  ])
+
   useEffect(() => {
     const subscription = AppState.addEventListener('change', setAppState)
     return () => {
@@ -176,12 +203,27 @@ export default function HomeScreen() {
 
   useEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId || !isEncrypted) {
+      setDetailLoadingThreadId(null)
+      setIsLoadingOlder(false)
       useSessionStore.getState().setThreadDetail(null)
       return
     }
 
-    void loadThreadDetail(selectedWorkspaceId, selectedThreadId)
-  }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedWorkspaceId])
+    let cancelled = false
+    setIsLoadingOlder(false)
+    if (selectedThreadItemCount === 0) {
+      setDetailLoadingThreadId(selectedThreadId)
+    }
+
+    void loadThreadDetail(selectedWorkspaceId, selectedThreadId).finally(() => {
+      if (cancelled) return
+      setDetailLoadingThreadId((current) => (current === selectedThreadId ? null : current))
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedThreadItemCount, selectedWorkspaceId])
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -291,6 +333,13 @@ export default function HomeScreen() {
               {workspace?.path.split('/').pop() ?? 'Select a project'}
             </Text>
           </View>
+        ) : blocks.length === 0 && isSelectedThreadLoading ? (
+          <View style={styles.syncState}>
+            <ActivityIndicator size="small" color={theme.colors.fg.muted} />
+            <Text variant="caption" color="muted">
+              Loading thread...
+            </Text>
+          </View>
         ) : blocks.length === 0 && !isThreadRunning ? (
           <EmptyState title="No messages yet" description="Send a message to get started" />
         ) : (
@@ -305,6 +354,19 @@ export default function HomeScreen() {
             onContentSizeChange={onContentSizeChange}
             onScroll={onScroll}
             scrollEventThrottle={16}
+            ListHeaderComponent={
+              selectedThreadHistory.hasOlder ? (
+                <View style={styles.loadOlderContainer}>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    label={isLoadingOlder ? 'Loading older messages...' : 'Load older messages'}
+                    onPress={handleLoadOlder}
+                    loading={isLoadingOlder}
+                  />
+                </View>
+              ) : null
+            }
             ListFooterComponent={showThinking ? <ThinkingIndicator /> : null}
           />
         )}
@@ -373,5 +435,10 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     justifyContent: 'center',
     gap: theme.spacing[2],
+  },
+  loadOlderContainer: {
+    alignItems: 'center',
+    paddingTop: theme.spacing[3],
+    paddingBottom: theme.spacing[1],
   },
 }))
