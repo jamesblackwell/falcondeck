@@ -1322,13 +1322,29 @@ export default function App() {
     [selectedThread, selectedWorkspace, snapshot],
   )
 
+  const activeProvider = useMemo(
+    () => (selectedThread ? selectedThread.provider : selectedProvider),
+    [selectedProvider, selectedThread],
+  )
+  const currentReasoningOptions = useMemo(
+    () => reasoningOptions(snapshot, selectedWorkspace?.id ?? null, activeProvider, selectedModel),
+    [activeProvider, selectedModel, selectedWorkspace?.id, snapshot],
+  )
+  const models = useMemo(
+    () => workspaceModels(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
+  )
+  const collaborationModes = useMemo(
+    () => workspaceCollaborationModes(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
+  )
   const showPlanModeToggle = useMemo(
-    () => supportsPlanMode(selectedWorkspace, selectedProvider),
-    [selectedProvider, selectedWorkspace],
+    () => supportsPlanMode(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
   )
   const planModeEnabled = useMemo(
-    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, selectedProvider),
-    [selectedCollaborationMode, selectedProvider, selectedWorkspace],
+    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, activeProvider),
+    [activeProvider, selectedCollaborationMode, selectedWorkspace],
   )
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
     setThreadDetail(null)
@@ -1676,23 +1692,24 @@ export default function App() {
               onRemoveAttachment={handleRemoveAttachment}
               attachments={attachments}
               skills={selectedWorkspace?.skills ?? []}
-              selectedProvider={selectedProvider}
+              selectedProvider={activeProvider}
               onProviderChange={handleProviderChange}
               providerLocked={Boolean(selectedThread)}
-              models={workspaceModels(selectedWorkspace, selectedProvider)}
+              showProviderSelector={!selectedThread}
+              models={models}
               selectedModelId={selectedModel}
               onModelChange={handleModelChange}
-              reasoningOptions={reasoningOptions(snapshot, selectedWorkspaceId, selectedProvider, selectedModel)}
+              reasoningOptions={currentReasoningOptions}
               selectedEffort={selectedEffort}
               onEffortChange={handleEffortChange}
-              collaborationModes={workspaceCollaborationModes(selectedWorkspace, selectedProvider)}
+              collaborationModes={collaborationModes}
               selectedCollaborationModeId={selectedCollaborationMode}
               onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
               showPlanModeToggle={showPlanModeToggle}
               planModeEnabled={planModeEnabled}
               onPlanModeChange={(enabled) =>
                 handleCollaborationModeChange(
-                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, selectedProvider),
+                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, activeProvider),
                 )
               }
               disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}

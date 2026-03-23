@@ -369,6 +369,7 @@ impl AppState {
     ) {
         let assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
         let mut assistant_text = String::new();
+        let mut tool_identity = HashMap::<String, (String, String)>::new();
         let mut turn_error: Option<String> = None;
         let mut saw_agent_output = false;
         let stderr_task = stderr.map(|stderr| {
@@ -413,28 +414,45 @@ impl AppState {
                             let _ = self
                                 .push_conversation_item(&workspace_id, &thread_id, item, true)
                                 .await;
-                        } else if let Some((tool_id, title, status, output)) =
-                            extract_claude_tool_event(&value)
-                        {
+                        } else if let Some(tool_event) = extract_claude_tool_event(&value) {
                             saw_agent_output = true;
-                            let completed_at = if status == "running" {
+                            let known_identity = tool_identity.get(&tool_event.id).cloned();
+                            let title = tool_event
+                                .title
+                                .or_else(|| known_identity.as_ref().map(|(title, _)| title.clone()))
+                                .unwrap_or_else(|| "Claude tool".to_string());
+                            let tool_kind = tool_event
+                                .tool_kind
+                                .or_else(|| {
+                                    known_identity
+                                        .as_ref()
+                                        .map(|(_, tool_kind)| tool_kind.clone())
+                                })
+                                .unwrap_or_else(|| title.clone());
+                            if tool_event.status == "running" {
+                                tool_identity.insert(
+                                    tool_event.id.clone(),
+                                    (title.clone(), tool_kind.clone()),
+                                );
+                            }
+                            let completed_at = if tool_event.status == "running" {
                                 None
                             } else {
                                 Some(Utc::now())
                             };
                             let item = ConversationItem::ToolCall {
-                                id: tool_id,
+                                id: tool_event.id,
                                 title: title.clone(),
-                                tool_kind: "claude_tool".to_string(),
-                                status: status.clone(),
-                                output: output.clone(),
+                                tool_kind: tool_kind.clone(),
+                                status: tool_event.status.clone(),
+                                output: tool_event.output.clone(),
                                 exit_code: None,
                                 display: tool_display_metadata(
                                     &title,
-                                    "claude_tool",
-                                    &status,
+                                    &tool_kind,
+                                    &tool_event.status,
                                     None,
-                                    output.as_deref(),
+                                    tool_event.output.as_deref(),
                                 ),
                                 created_at: Utc::now(),
                                 completed_at,

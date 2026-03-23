@@ -1,3 +1,4 @@
+import React from 'react'
 import type { AgentProvider, CollaborationModeSummary, ModelSummary } from '@falcondeck/client-core'
 
 import { Button, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@falcondeck/ui'

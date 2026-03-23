@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
@@ -7,10 +7,16 @@ import { ChevronLeft } from 'lucide-react-native'
 import { DrawerActions } from '@react-navigation/native'
 import { useNavigation, useRouter } from 'expo-router'
 import {
+  defaultCollaborationModeId,
   defaultProvider,
   encryptJson,
+  isPlanModeEnabled,
+  providerForThread,
+  supportsPlanMode,
+  togglePlanMode,
   workspaceModels,
   type AgentProvider,
+  type ConversationPresentation,
   type ConversationRenderBlock,
 } from '@falcondeck/client-core'
 import { useShallow } from 'zustand/react/shallow'
@@ -25,18 +31,19 @@ import {
   useUIStore,
 } from '@/store'
 import { useSessionActions } from '@/hooks/useSessionActions'
-import { useRenderBlocks } from '@/hooks/useRenderBlocks'
+import { useConversationPresentation } from '@/hooks/useRenderBlocks'
 import { useScrollToBottom } from '@/hooks/useScrollToBottom'
-import { useInterruptTurn } from '@/hooks/useInterruptTurn'
 import { Button, Text, EmptyState } from '@/components/ui'
 import {
   ChatInput,
   ApprovalBanner,
+  LiveActivityLane,
   MessageRouter,
   JumpToBottomFab,
   ThinkingIndicator,
 } from '@/components/chat'
 import { ConnectionHeader } from '@/components/navigation'
+import { pickImageInputsFromLibrary } from '@/features/thread/imageInputs'
 import { getWorkspaceTitle, shouldShowThinkingIndicator } from '@/features/thread/threadScreen'
 
 const renderBlock = ({ item }: { item: ConversationRenderBlock }) => (
@@ -44,7 +51,7 @@ const renderBlock = ({ item }: { item: ConversationRenderBlock }) => (
 )
 const keyExtractor = (block: ConversationRenderBlock) => block.id
 const getItemType = (block: ConversationRenderBlock) =>
-  block.kind === 'tool_burst' ? 'tool_burst' : block.item.kind
+  block.kind === 'tool_summary' ? 'tool_summary' : block.item.kind
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets()
@@ -52,7 +59,9 @@ export default function HomeScreen() {
   const navigation = useNavigation()
   const router = useRouter()
 
-  const blocks = useRenderBlocks()
+  const presentation: ConversationPresentation = useConversationPresentation()
+  const blocks = presentation.history_blocks
+  const liveActivityGroups = presentation.live_activity_groups
   const approvals = useApprovals()
   const selectedThread = useSelectedThread()
   const selectedThreadHistory = useSelectedThreadHistory()
@@ -72,23 +81,33 @@ export default function HomeScreen() {
       sessionId: s.sessionId,
     })),
   )
-  const { draft, isSubmitting, selectedEffort, selectedModel, selectedProvider } = useUIStore(
+  const { attachments, draft, isSubmitting, selectedCollaborationMode, selectedEffort, selectedModel, selectedProvider } = useUIStore(
     useShallow((s) => ({
+      attachments: s.attachments,
       draft: s.draft,
       isSubmitting: s.isSubmitting,
+      selectedCollaborationMode: s.selectedCollaborationMode,
       selectedEffort: s.selectedEffort,
       selectedModel: s.selectedModel,
       selectedProvider: s.selectedProvider,
     })),
   )
-  const { setDraft, setSelectedModel, setSelectedEffort, setSelectedProvider } = useUIStore.getState()
+  const {
+    addAttachments,
+    setDraft,
+    setSelectedModel,
+    setSelectedEffort,
+    setSelectedProvider,
+    setSelectedCollaborationMode,
+    removeAttachment,
+  } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
-  const interruptTurn = useInterruptTurn()
   const { listRef, showJumpButton, onContentSizeChange, onScroll, pauseAutoScrollOnce, resetScrollState, scrollToBottom } =
     useScrollToBottom<ConversationRenderBlock>()
   const [appState, setAppState] = useState(AppState.currentState)
   const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<string | null>(null)
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
+  const selectionSeedRef = useRef<string | null>(null)
 
   // Compute active provider: thread's provider if running, otherwise UI selection or workspace default
   const activeProvider: AgentProvider = selectedThread
@@ -112,22 +131,81 @@ export default function HomeScreen() {
     if (supported.length > 0) return supported
     return resolvedModel?.default_reasoning_effort ? [resolvedModel.default_reasoning_effort] : ['medium']
   }, [resolvedModel])
+  const showPlanModeToggle = useMemo(
+    () => supportsPlanMode(workspace, activeProvider),
+    [activeProvider, workspace],
+  )
+  const planModeEnabled = useMemo(
+    () => isPlanModeEnabled(selectedCollaborationMode, workspace, activeProvider),
+    [activeProvider, selectedCollaborationMode, workspace],
+  )
 
   const isThreadRunning = selectedThread?.status === 'running'
-  const showThinking = shouldShowThinkingIndicator(blocks, isThreadRunning)
+  const showThinking = shouldShowThinkingIndicator(presentation, isThreadRunning)
   const isSelectedThreadLoading = !!selectedThreadId && detailLoadingThreadId === selectedThreadId
 
   // True during initial sync: session exists but snapshot hasn't loaded yet
   const isSyncing = !!sessionId && !snapshot
 
-  // Sync provider/model when thread or workspace changes
+  // Seed provider/model/effort/mode from the current workspace selection.
   useEffect(() => {
-    if (!workspace) return
-    if (selectedThread) {
-      // Thread has a locked provider — sync UI to match
-      setSelectedProvider(selectedThread.provider)
+    if (!workspace) {
+      selectionSeedRef.current = null
+      setSelectedProvider(null)
+      setSelectedModel(null)
+      setSelectedEffort('medium')
+      setSelectedCollaborationMode(null)
+      return
     }
-  }, [selectedThread, workspace, setSelectedProvider])
+
+    const seedKey = `${workspace.id}:${selectedThread?.id ?? 'workspace'}`
+    if (selectionSeedRef.current === seedKey) return
+    selectionSeedRef.current = seedKey
+
+    const nextProvider = providerForThread(selectedThread, workspace)
+    setSelectedProvider(nextProvider)
+    const providerModels = workspaceModels(workspace, nextProvider)
+    const fallbackModel =
+      providerModels.find((model) => model.is_default)?.id ?? providerModels[0]?.id ?? null
+
+    if (selectedThread) {
+      const nextModel = selectedThread.agent.model_id ?? fallbackModel
+      const nextModelSummary = nextModel
+        ? providerModels.find((model) => model.id === nextModel) ?? null
+        : null
+      const supportedEfforts =
+        nextModelSummary?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
+      setSelectedModel(nextModel)
+      setSelectedEffort(
+        selectedThread.agent.reasoning_effort ??
+          nextModelSummary?.default_reasoning_effort ??
+          supportedEfforts[0] ??
+          'medium',
+      )
+      setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
+      return
+    }
+
+    const fallbackModelSummary = fallbackModel
+      ? providerModels.find((model) => model.id === fallbackModel) ?? null
+      : null
+    const supportedEfforts =
+      fallbackModelSummary?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
+    setSelectedModel(fallbackModel)
+    setSelectedEffort(
+      fallbackModelSummary?.default_reasoning_effort ??
+        supportedEfforts[0] ??
+        'medium',
+    )
+    setSelectedCollaborationMode(null)
+  }, [
+    selectedThread,
+    setSelectedCollaborationMode,
+    setSelectedEffort,
+    setSelectedModel,
+    setSelectedProvider,
+    workspace,
+  ])
 
   // Reset effort when it's no longer valid for the current model
   useEffect(() => {
@@ -145,8 +223,9 @@ export default function HomeScreen() {
       // Reset model and effort for the new provider
       setSelectedModel(null)
       setSelectedEffort(null)
+      setSelectedCollaborationMode(null)
     },
-    [selectedThread, setSelectedProvider, setSelectedModel, setSelectedEffort],
+    [selectedThread, setSelectedCollaborationMode, setSelectedProvider, setSelectedModel, setSelectedEffort],
   )
 
   const handleOpenDrawer = useCallback(() => {
@@ -156,10 +235,6 @@ export default function HomeScreen() {
   const handleOpenSettings = useCallback(() => {
     router.push('/(app)/settings')
   }, [router])
-
-  const handleStop = useCallback(() => {
-    void interruptTurn()
-  }, [interruptTurn])
 
   const handleAllowApproval = useCallback(
     (id: string) => {
@@ -193,6 +268,20 @@ export default function HomeScreen() {
     selectedThreadId,
     selectedWorkspaceId,
   ])
+
+  const handlePickImages = useCallback(() => {
+    void pickImageInputsFromLibrary()
+      .then((pickedAttachments) => {
+        if (pickedAttachments.length === 0) return
+        addAttachments(pickedAttachments)
+        useRelayStore.getState()._setError(null)
+      })
+      .catch((error) => {
+        useRelayStore.getState()._setError(
+          error instanceof Error ? error.message : 'Failed to pick images',
+        )
+      })
+  }, [addAttachments])
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', setAppState)
@@ -340,7 +429,7 @@ export default function HomeScreen() {
               Loading thread...
             </Text>
           </View>
-        ) : blocks.length === 0 && !isThreadRunning ? (
+        ) : blocks.length === 0 && liveActivityGroups.length === 0 && !isThreadRunning ? (
           <EmptyState title="No messages yet" description="Send a message to get started" />
         ) : (
           <FlashList
@@ -373,23 +462,34 @@ export default function HomeScreen() {
         <JumpToBottomFab visible={showJumpButton} onPress={scrollToBottom} />
       </View>
 
+      <LiveActivityLane groups={liveActivityGroups} />
+
       <View style={{ paddingBottom: insets.bottom }}>
         <ChatInput
           value={draft}
           onChangeText={setDraft}
           onSubmit={() => void submitTurn()}
-          onStop={handleStop}
+          onPickImages={handlePickImages}
+          onRemoveAttachment={removeAttachment}
           disabled={!workspace || isSubmitting || !isEncrypted}
-          isRunning={isThreadRunning}
+          attachments={attachments}
+          skills={workspace?.skills ?? []}
           models={models}
           selectedModel={selectedModel}
           selectedEffort={selectedEffort}
           effortOptions={effortOptions}
           selectedProvider={activeProvider}
           showProviderSelector={!selectedThread}
+          showPlanModeToggle={showPlanModeToggle}
+          planModeEnabled={planModeEnabled}
           onSelectModel={setSelectedModel}
           onSelectEffort={setSelectedEffort}
           onSelectProvider={handleProviderChange}
+          onTogglePlanMode={(enabled) =>
+            setSelectedCollaborationMode(
+              togglePlanMode(enabled, workspace, selectedCollaborationMode, activeProvider),
+            )
+          }
         />
       </View>
     </KeyboardAvoidingView>

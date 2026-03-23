@@ -3,6 +3,7 @@ import type {
   EventEnvelope,
   FalconDeckPreferences,
   ThreadDetail,
+  ToolActivityKind,
   ToolDetailsMode,
 } from './types'
 import { normalizeEventEnvelope, normalizePreferences, normalizeThreadDetail } from './normalization'
@@ -110,15 +111,21 @@ export function applyEventToThreadDetail(detail: ThreadDetail | null, event: Eve
   }
 }
 
-export type ToolBurstSummary = {
+export type ToolActivityFamily = 'explore' | 'command'
+
+export type ToolActivitySummary = {
+  family: ToolActivityFamily
   count: number
   started_at: string
   completed_at: string | null
+  title: string
+  subtitle: string | null
   labels: string[]
+  counts: Partial<Record<ToolActivityKind, number>>
   summary_hint: string | null
 }
 
-export type ConversationRenderBlock =
+export type ConversationHistoryBlock =
   | {
       kind: 'item'
       id: string
@@ -127,16 +134,52 @@ export type ConversationRenderBlock =
       suppress_read_only_detail: boolean
     }
   | {
-      kind: 'tool_burst'
+      kind: 'tool_summary'
       id: string
       items: Extract<ConversationItem, { kind: 'tool_call' }>[]
-      summary: ToolBurstSummary
+      summary: ToolActivitySummary
       default_open: boolean
       suppress_read_only_detail: boolean
     }
 
+export type ConversationRenderBlock = ConversationHistoryBlock
+
+export type ConversationLiveActivityGroup = {
+  kind: 'live_activity_group'
+  id: string
+  items: Extract<ConversationItem, { kind: 'tool_call' }>[]
+  summary: ToolActivitySummary
+}
+
+export type ConversationPresentation = {
+  live_activity_groups: ConversationLiveActivityGroup[]
+  history_blocks: ConversationHistoryBlock[]
+}
+
 function isToolCall(item: ConversationItem): item is Extract<ConversationItem, { kind: 'tool_call' }> {
   return item.kind === 'tool_call'
+}
+
+function isRunningToolStatus(status: string) {
+  return status === 'running' || status === 'in_progress'
+}
+
+function toolActivityFamily(
+  item: Extract<ConversationItem, { kind: 'tool_call' }>,
+): ToolActivityFamily | null {
+  switch (item.display.activity_kind) {
+    case 'command':
+      return 'command'
+    case 'read':
+    case 'search':
+    case 'list':
+    case 'web_search':
+    case 'image_view':
+    case 'context':
+      return 'explore'
+    default:
+      return null
+  }
 }
 
 function isHighSignalTool(
@@ -165,17 +208,15 @@ function isHighSignalTool(
   return false
 }
 
-function isGroupableReadOnlyTool(
-  item: ConversationItem,
+function isSummarizableTool(
+  item: Extract<ConversationItem, { kind: 'tool_call' }>,
   preferences: FalconDeckPreferences,
-): item is Extract<ConversationItem, { kind: 'tool_call' }> {
+): boolean {
   return (
     preferences.conversation.group_read_only_tools &&
-    isToolCall(item) &&
-    item.display.is_read_only &&
-    !item.display.has_side_effect &&
+    item.display.history_mode === 'summary' &&
     !item.display.is_error &&
-    (item.display.artifact_kind === 'none' || item.display.artifact_kind === 'command_output')
+    toolActivityFamily(item) !== null
   )
 }
 
@@ -192,60 +233,157 @@ function shouldSuppressReadOnlyDetail(
   )
 }
 
-function buildToolBurstSummary(
+function incrementCount(
+  counts: Partial<Record<ToolActivityKind, number>>,
+  key: ToolActivityKind,
+) {
+  counts[key] = (counts[key] ?? 0) + 1
+}
+
+function countLabel(kind: ToolActivityKind, count: number) {
+  switch (kind) {
+    case 'read':
+      return `${count} file${count === 1 ? '' : 's'}`
+    case 'search':
+      return `${count} search${count === 1 ? '' : 'es'}`
+    case 'list':
+      return `${count} list${count === 1 ? '' : 's'}`
+    case 'web_search':
+      return `${count} web search${count === 1 ? '' : 'es'}`
+    case 'image_view':
+      return `${count} image${count === 1 ? '' : 's'}`
+    case 'context':
+      return `${count} context step${count === 1 ? '' : 's'}`
+    case 'command':
+      return `${count} command${count === 1 ? '' : 's'}`
+    default:
+      return `${count} tool${count === 1 ? '' : 's'}`
+  }
+}
+
+function orderedCountLabels(
+  counts: Partial<Record<ToolActivityKind, number>>,
+  family: ToolActivityFamily,
+) {
+  const order: ToolActivityKind[] =
+    family === 'command'
+      ? ['command']
+      : ['read', 'search', 'list', 'web_search', 'image_view', 'context']
+
+  return order
+    .map((kind) => {
+      const count = counts[kind]
+      return typeof count === 'number' && count > 0 ? countLabel(kind, count) : null
+    })
+    .filter((label): label is string => Boolean(label))
+}
+
+function buildToolActivitySummary(
   items: Extract<ConversationItem, { kind: 'tool_call' }>[],
-): ToolBurstSummary {
+  family: ToolActivityFamily,
+  tense: 'live' | 'history',
+): ToolActivitySummary {
   const labels: string[] = []
+  const counts: Partial<Record<ToolActivityKind, number>> = {}
   for (const item of items) {
+    incrementCount(counts, item.display.activity_kind)
     const label = item.display.summary_hint ?? item.title
     if (!labels.includes(label)) labels.push(label)
     if (labels.length >= 2) break
   }
+  const countLabels = orderedCountLabels(counts, family)
+  const title =
+    tense === 'live'
+      ? family === 'command'
+        ? `Running ${countLabels[0] ?? countLabel('command', items.length)}`
+        : `Exploring ${countLabels[0] ?? `${items.length} item${items.length === 1 ? '' : 's'}`}`
+      : family === 'command'
+        ? `Ran ${countLabels.join(', ') || countLabel('command', items.length)}`
+        : `Explored ${countLabels.join(', ') || `${items.length} item${items.length === 1 ? '' : 's'}`}`
 
   return {
+    family,
     count: items.length,
     started_at: items[0]?.created_at ?? new Date(0).toISOString(),
     completed_at: items[items.length - 1]?.completed_at ?? null,
+    title,
+    subtitle: labels.join(' · ') || null,
     labels,
+    counts,
     summary_hint: items.find((item) => item.display.summary_hint)?.display.summary_hint ?? null,
   }
 }
 
-export function deriveConversationRenderBlocks(
+export function deriveConversationPresentation(
   items: ConversationItem[],
   preferencesInput: FalconDeckPreferences | null | undefined,
-): ConversationRenderBlock[] {
+): ConversationPresentation {
   const preferences = normalizePreferences(preferencesInput)
-  const blocks: ConversationRenderBlock[] = []
+  const historyBlocks: ConversationHistoryBlock[] = []
+  const liveActivityGroups: ConversationLiveActivityGroup[] = []
   const seenDiff = { value: false }
   const mode = preferences.conversation.tool_details_mode
+  let summaryBuffer: Extract<ConversationItem, { kind: 'tool_call' }>[] = []
+  let summaryFamily: ToolActivityFamily | null = null
+  let liveBuffer: Extract<ConversationItem, { kind: 'tool_call' }>[] = []
+  let liveFamily: ToolActivityFamily | null = null
+
+  const suppressReadOnlyDetail = mode === 'hide_read_only_details' || mode === 'compact'
+
+  const flushSummaryBuffer = () => {
+    if (summaryBuffer.length === 0 || !summaryFamily) return
+    historyBlocks.push({
+      kind: 'tool_summary',
+      id: `tool-summary:${summaryBuffer[0]!.id}:${summaryBuffer.length}`,
+      items: summaryBuffer,
+      summary: buildToolActivitySummary(summaryBuffer, summaryFamily, 'history'),
+      default_open: mode === 'expanded',
+      suppress_read_only_detail: suppressReadOnlyDetail,
+    })
+    summaryBuffer = []
+    summaryFamily = null
+  }
+
+  const flushLiveBuffer = () => {
+    if (liveBuffer.length === 0 || !liveFamily) return
+    liveActivityGroups.push({
+      kind: 'live_activity_group',
+      id: `live-activity:${liveBuffer[0]!.id}:${liveBuffer.length}`,
+      items: liveBuffer,
+      summary: buildToolActivitySummary(liveBuffer, liveFamily, 'live'),
+    })
+    liveBuffer = []
+    liveFamily = null
+  }
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index]
 
-    if (isGroupableReadOnlyTool(item, preferences)) {
-      const burstItems: Extract<ConversationItem, { kind: 'tool_call' }>[] = [item]
-      let nextIndex = index + 1
-      while (nextIndex < items.length) {
-        const nextItem = items[nextIndex]
-        if (!nextItem || !isGroupableReadOnlyTool(nextItem, preferences)) {
-          break
+    if (isToolCall(item) && isSummarizableTool(item, preferences)) {
+      const family = toolActivityFamily(item)
+      if (family) {
+        if (isRunningToolStatus(item.status)) {
+          flushSummaryBuffer()
+          if (liveFamily && liveFamily !== family) {
+            flushLiveBuffer()
+          }
+          liveFamily = family
+          liveBuffer.push(item)
+          continue
         }
-        burstItems.push(nextItem)
-        nextIndex += 1
-      }
 
-      blocks.push({
-        kind: 'tool_burst',
-        id: `tool-burst:${burstItems[0]!.id}:${burstItems.length}`,
-        items: burstItems,
-        summary: buildToolBurstSummary(burstItems),
-        default_open: mode === 'expanded',
-        suppress_read_only_detail: mode === 'hide_read_only_details' || mode === 'compact',
-      })
-      index = nextIndex - 1
-      continue
+        flushLiveBuffer()
+        if (summaryFamily && summaryFamily !== family) {
+          flushSummaryBuffer()
+        }
+        summaryFamily = family
+        summaryBuffer.push(item)
+        continue
+      }
     }
+
+    flushSummaryBuffer()
+    flushLiveBuffer()
 
     let defaultOpen = false
     if (isToolCall(item)) {
@@ -254,16 +392,29 @@ export function deriveConversationRenderBlocks(
       defaultOpen = !seenDiff.value && preferences.conversation.auto_expand.first_diff
       seenDiff.value = true
     }
-    const suppressReadOnlyDetail = shouldSuppressReadOnlyDetail(item, mode)
+    const itemSuppressReadOnlyDetail = shouldSuppressReadOnlyDetail(item, mode)
 
-    blocks.push({
+    historyBlocks.push({
       kind: 'item',
       id: `${item.kind}:${item.id}`,
       item,
       default_open: defaultOpen,
-      suppress_read_only_detail: suppressReadOnlyDetail,
+      suppress_read_only_detail: itemSuppressReadOnlyDetail,
     })
   }
 
-  return blocks
+  flushSummaryBuffer()
+  flushLiveBuffer()
+
+  return {
+    live_activity_groups: liveActivityGroups,
+    history_blocks: historyBlocks,
+  }
+}
+
+export function deriveConversationRenderBlocks(
+  items: ConversationItem[],
+  preferencesInput: FalconDeckPreferences | null | undefined,
+): ConversationRenderBlock[] {
+  return deriveConversationPresentation(items, preferencesInput).history_blocks
 }

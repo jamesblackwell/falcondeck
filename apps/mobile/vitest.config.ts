@@ -11,6 +11,8 @@ export default defineConfig({
       'react-native-mmkv': path.resolve(__dirname, 'src/test/__mocks__/react-native-mmkv.ts'),
       'expo-secure-store': path.resolve(__dirname, 'src/test/__mocks__/expo-secure-store.ts'),
       'expo-haptics': path.resolve(__dirname, 'src/test/__mocks__/expo-haptics.ts'),
+      'expo-image': path.resolve(__dirname, 'src/test/__mocks__/expo-image.ts'),
+      'expo-image-picker': path.resolve(__dirname, 'src/test/__mocks__/expo-image-picker.ts'),
       'react-native-unistyles': path.resolve(__dirname, 'src/test/__mocks__/react-native-unistyles.ts'),
       'react-native-reanimated': path.resolve(__dirname, 'src/test/__mocks__/react-native-reanimated.ts'),
       'expo-router': path.resolve(__dirname, 'src/test/__mocks__/expo-router.ts'),

@@ -11,16 +11,24 @@ import { useCollapsible } from './useCollapsible'
 
 type ToolCall = Extract<ConversationItem, { kind: 'tool_call' }>
 
+function toolCallLabel(title: string) {
+  const shellMatch = /['"](.+?)['"]/.exec(title)
+  if (shellMatch) return shellMatch[1]
+  return title
+}
+
 interface ToolCallBlockProps {
   item: ToolCall
   defaultOpen: boolean
   suppressDetail: boolean
+  variant?: 'card' | 'row'
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({
   item,
   defaultOpen,
   suppressDetail,
+  variant = 'card',
 }: ToolCallBlockProps) {
   const { theme } = useUnistyles()
   const { bodyStyle, chevronStyle, isOpen, onContentLayout, toggle } = useCollapsible(defaultOpen)
@@ -36,12 +44,23 @@ export const ToolCallBlock = memo(function ToolCallBlock({
 
   const hasContent = item.output && !suppressDetail
 
+  if (variant === 'row') {
+    return (
+      <View style={styles.rowHeader}>
+        <StatusIcon size={14} color={statusColor} />
+        <Text variant="mono" color="tertiary" size="xs" style={styles.title} numberOfLines={1}>
+          {toolCallLabel(item.title)}
+        </Text>
+      </View>
+    )
+  }
+
   return (
     <View style={styles.container}>
       <Pressable style={styles.header} onPress={hasContent ? toggle : undefined}>
         <StatusIcon size={14} color={statusColor} />
         <Text variant="mono" color="tertiary" size="xs" style={styles.title} numberOfLines={1}>
-          {item.title}
+          {toolCallLabel(item.title)}
         </Text>
         {hasContent ? (
           <Animated.View style={chevronStyle}>
@@ -76,6 +95,13 @@ const styles = StyleSheet.create((theme) => ({
     overflow: 'hidden',
   },
   header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+  },
+  rowHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[2],

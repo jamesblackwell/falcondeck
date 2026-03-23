@@ -47,7 +47,7 @@ use crate::{
 };
 
 mod agent_helpers;
-mod conversation_helpers;
+pub(crate) mod conversation_helpers;
 mod notifications;
 mod remote_bridge;
 mod storage;
@@ -2182,8 +2182,8 @@ mod tests {
     use falcondeck_core::{
         AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput, InteractiveRequest,
         InteractiveRequestKind, SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus,
-        ThreadSummary, TurnInputItem, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
-        WorkspaceSummary,
+        ThreadSummary, ToolActivityKind, ToolHistoryMode, TurnInputItem, UpdateThreadRequest,
+        WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
         crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
     };
     use serde_json::json;
@@ -2195,7 +2195,8 @@ mod tests {
         AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
         claude_prompt_from_inputs, codex_inputs, codex_inputs_with_plan_mode_shim,
         collaboration_mode_payload, encode_base64, notification_timestamp, plan_step_status,
-        should_surface_tool_item, should_use_plan_mode_shim, workspace_status_after_account_update,
+        conversation_helpers::tool_display_metadata, should_surface_tool_item,
+        should_use_plan_mode_shim, workspace_status_after_account_update,
     };
 
     #[test]
@@ -2467,12 +2468,13 @@ mod tests {
                     }
                 }
             })),
-            Some((
-                "toolu_123".to_string(),
-                "Glob".to_string(),
-                "running".to_string(),
-                None
-            ))
+            Some(super::ClaudeToolEvent {
+                id: "toolu_123".to_string(),
+                title: Some("Glob".to_string()),
+                tool_kind: Some("Glob".to_string()),
+                status: "running".to_string(),
+                output: None
+            })
         );
 
         assert_eq!(
@@ -2488,13 +2490,21 @@ mod tests {
                     ]
                 }
             })),
-            Some((
-                "toolu_123".to_string(),
-                "Claude tool".to_string(),
-                "completed".to_string(),
-                Some("match".to_string())
-            ))
+            Some(super::ClaudeToolEvent {
+                id: "toolu_123".to_string(),
+                title: None,
+                tool_kind: None,
+                status: "completed".to_string(),
+                output: Some("match".to_string())
+            })
         );
+    }
+
+    #[test]
+    fn derives_summary_mode_for_low_signal_explore_tools() {
+        let display = tool_display_metadata("rg -n tool_call src", "commandExecution", "completed", Some(0), Some("match"));
+        assert_eq!(display.activity_kind, ToolActivityKind::Search);
+        assert_eq!(display.history_mode, ToolHistoryMode::Summary);
     }
 
     #[test]

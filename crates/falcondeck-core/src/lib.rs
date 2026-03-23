@@ -178,6 +178,12 @@ pub struct ToolCallDisplay {
     /// Artifact classification used by clients to decide prominence.
     #[serde(default)]
     pub artifact_kind: ToolArtifactKind,
+    /// Normalized activity kind for grouping live and historical tool activity.
+    #[serde(default)]
+    pub activity_kind: ToolActivityKind,
+    /// Whether this tool should stay inline in history or collapse into summaries.
+    #[serde(default)]
+    pub history_mode: ToolHistoryMode,
     /// Optional short summary hint for grouped tool-burst headers.
     #[serde(default)]
     pub summary_hint: Option<String>,
@@ -190,6 +196,8 @@ impl Default for ToolCallDisplay {
             has_side_effect: false,
             is_error: false,
             artifact_kind: ToolArtifactKind::None,
+            activity_kind: ToolActivityKind::Other,
+            history_mode: ToolHistoryMode::Full,
             summary_hint: None,
         }
     }
@@ -210,6 +218,48 @@ pub enum ToolArtifactKind {
     CommandOutput,
     /// Approval or permission-related tool call.
     ApprovalRelated,
+}
+
+/// Normalized activity kind associated with a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolActivityKind {
+    /// Read or inspect a file or resource.
+    Read,
+    /// Search within a workspace or index.
+    Search,
+    /// List files, directories, or entries.
+    List,
+    /// Run a general command.
+    Command,
+    /// Edit or write source material.
+    Edit,
+    /// Run tests or verifications.
+    Test,
+    /// Approval or permission related action.
+    Approval,
+    /// Produce or inspect a diff.
+    Diff,
+    /// Search the web.
+    WebSearch,
+    /// View an image.
+    ImageView,
+    /// Context or compaction related action.
+    Context,
+    /// Fallback when no better semantic classification exists.
+    #[default]
+    Other,
+}
+
+/// History treatment associated with a tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolHistoryMode {
+    /// Collapse low-signal tools into a compact summary block.
+    Summary,
+    /// Keep the tool inline as a full history item.
+    #[default]
+    Full,
 }
 
 /// Full daemon snapshot returned to newly connected clients.

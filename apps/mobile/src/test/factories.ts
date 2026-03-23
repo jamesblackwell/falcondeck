@@ -117,6 +117,8 @@ export function toolCall(id: string, title: string, status = 'completed', create
       has_side_effect: true,
       is_error: false,
       artifact_kind: 'none',
+      activity_kind: 'command',
+      history_mode: 'full',
       summary_hint: null,
     },
     created_at,

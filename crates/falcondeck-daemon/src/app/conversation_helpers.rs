@@ -1,7 +1,8 @@
 use chrono::Utc;
 use falcondeck_core::{
     ApprovalDecision, ConversationItem, InteractiveQuestion, InteractiveQuestionOption,
-    InteractiveResponsePayload, ToolArtifactKind, ToolCallDisplay, TurnInputItem,
+    InteractiveResponsePayload, ToolActivityKind, ToolArtifactKind, ToolCallDisplay,
+    ToolHistoryMode, TurnInputItem,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -396,7 +397,7 @@ pub(super) fn should_surface_tool_item(kind: &str) -> bool {
     )
 }
 
-pub(super) fn tool_display_metadata(
+pub(crate) fn tool_display_metadata(
     title: &str,
     kind: &str,
     status: &str,
@@ -406,43 +407,34 @@ pub(super) fn tool_display_metadata(
     let normalized_title = title.to_ascii_lowercase();
     let normalized_kind = kind.to_ascii_lowercase();
     let normalized_output = output.unwrap_or_default().to_ascii_lowercase();
+    let activity_kind =
+        classify_tool_activity_kind(&normalized_title, &normalized_kind, &normalized_output);
 
-    let is_read_only = normalized_kind.contains("read")
-        || normalized_kind.contains("search")
-        || normalized_kind.contains("list")
-        || normalized_kind.contains("grep")
-        || normalized_kind.contains("inspect")
-        || normalized_title.starts_with("cat ")
-        || normalized_title.starts_with("sed ")
+    let is_read_only = matches!(
+        activity_kind,
+        ToolActivityKind::Read
+            | ToolActivityKind::Search
+            | ToolActivityKind::List
+            | ToolActivityKind::WebSearch
+            | ToolActivityKind::ImageView
+            | ToolActivityKind::Context
+    ) || normalized_title.starts_with("git status")
+        || normalized_title.starts_with("pwd")
         || normalized_title.starts_with("ls ")
         || normalized_title.starts_with("find ")
-        || normalized_title.starts_with("rg ")
-        || normalized_title.starts_with("git diff")
-        || normalized_title.starts_with("git status")
-        || normalized_title.starts_with("pwd");
+        || normalized_title.starts_with("rg ");
 
-    let artifact_kind =
-        if normalized_kind.contains("filechange") || normalized_kind.contains("file_change") {
-            ToolArtifactKind::Diff
-        } else if normalized_title.contains("test")
-            || normalized_kind.contains("test")
-            || normalized_output.contains("test failed")
-            || normalized_output.contains("failing")
-        {
-            ToolArtifactKind::Test
-        } else if normalized_title.contains("approval")
-            || normalized_kind.contains("approval")
-            || normalized_title.contains("permission")
-        {
-            ToolArtifactKind::ApprovalRelated
-        } else if output
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-        {
-            ToolArtifactKind::CommandOutput
-        } else {
-            ToolArtifactKind::None
-        };
+    let artifact_kind = if matches!(activity_kind, ToolActivityKind::Diff) {
+        ToolArtifactKind::Diff
+    } else if matches!(activity_kind, ToolActivityKind::Test) {
+        ToolArtifactKind::Test
+    } else if matches!(activity_kind, ToolActivityKind::Approval) {
+        ToolArtifactKind::ApprovalRelated
+    } else if output.map(|value| !value.trim().is_empty()).unwrap_or(false) {
+        ToolArtifactKind::CommandOutput
+    } else {
+        ToolArtifactKind::None
+    };
 
     let is_error = status.eq_ignore_ascii_case("failed")
         || status.eq_ignore_ascii_case("error")
@@ -457,18 +449,111 @@ pub(super) fn tool_display_metadata(
         || normalized_title.contains("curl ")
         || normalized_title.contains("wget ")
         || is_error;
-    let summary_hint = summarize_tool_title(title);
+    let history_mode = if is_error
+        || has_side_effect
+        || !matches!(
+            activity_kind,
+            ToolActivityKind::Read
+                | ToolActivityKind::Search
+                | ToolActivityKind::List
+                | ToolActivityKind::Command
+                | ToolActivityKind::WebSearch
+                | ToolActivityKind::ImageView
+                | ToolActivityKind::Context
+        )
+    {
+        ToolHistoryMode::Full
+    } else {
+        ToolHistoryMode::Summary
+    };
+    let summary_hint = summarize_tool_title(title, activity_kind.clone());
 
     ToolCallDisplay {
         is_read_only,
         has_side_effect,
         is_error,
         artifact_kind,
+        activity_kind,
+        history_mode,
         summary_hint,
     }
 }
 
-fn summarize_tool_title(title: &str) -> Option<String> {
+fn classify_tool_activity_kind(
+    normalized_title: &str,
+    normalized_kind: &str,
+    normalized_output: &str,
+) -> ToolActivityKind {
+    if normalized_kind.contains("approval")
+        || normalized_title.contains("approval")
+        || normalized_title.contains("permission")
+    {
+        ToolActivityKind::Approval
+    } else if normalized_kind.contains("filechange")
+        || normalized_kind.contains("file_change")
+        || normalized_kind.contains("diff")
+        || normalized_title.contains("apply_patch")
+        || normalized_title.starts_with("git diff")
+    {
+        ToolActivityKind::Diff
+    } else if normalized_title.contains("test")
+        || normalized_kind.contains("test")
+        || normalized_output.contains("test failed")
+        || normalized_output.contains("failing")
+    {
+        ToolActivityKind::Test
+    } else if normalized_kind.contains("websearch")
+        || normalized_kind.contains("web_search")
+        || normalized_title.starts_with("web search")
+    {
+        ToolActivityKind::WebSearch
+    } else if normalized_kind.contains("imageview")
+        || normalized_kind.contains("image_view")
+        || normalized_title.starts_with("image view")
+    {
+        ToolActivityKind::ImageView
+    } else if normalized_kind.contains("contextcompact")
+        || normalized_kind.contains("context_compaction")
+        || normalized_kind.contains("compaction")
+        || normalized_title.contains("context compaction")
+    {
+        ToolActivityKind::Context
+    } else if normalized_kind.contains("edit")
+        || normalized_kind.contains("write")
+        || normalized_kind.contains("patch")
+        || normalized_title.starts_with("edit ")
+    {
+        ToolActivityKind::Edit
+    } else if normalized_kind.contains("read")
+        || normalized_kind.contains("inspect")
+        || normalized_title.starts_with("cat ")
+        || normalized_title.starts_with("sed -n ")
+        || normalized_title.starts_with("read ")
+    {
+        ToolActivityKind::Read
+    } else if normalized_kind.contains("list")
+        || normalized_title.starts_with("ls ")
+        || normalized_title.starts_with("find ")
+    {
+        ToolActivityKind::List
+    } else if normalized_kind.contains("search")
+        || normalized_kind.contains("grep")
+        || normalized_title.starts_with("rg ")
+    {
+        ToolActivityKind::Search
+    } else if normalized_kind.contains("command")
+        || normalized_title.starts_with("bash:")
+        || normalized_title.starts_with("/bin/")
+        || normalized_title.starts_with("git ")
+        || normalized_title.starts_with("pwd")
+    {
+        ToolActivityKind::Command
+    } else {
+        ToolActivityKind::Other
+    }
+}
+
+fn summarize_tool_title(title: &str, activity_kind: ToolActivityKind) -> Option<String> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return None;
@@ -485,5 +570,27 @@ fn summarize_tool_title(title: &str) -> Option<String> {
     if trimmed.starts_with("ls ") {
         return Some("List files".to_string());
     }
-    None
+    if trimmed.starts_with("find ") {
+        return Some("List files".to_string());
+    }
+    if trimmed.starts_with("git status") {
+        return Some("Check git status".to_string());
+    }
+    if trimmed.starts_with("pwd") {
+        return Some("Show working directory".to_string());
+    }
+
+    match activity_kind {
+        ToolActivityKind::Read => Some("Read file".to_string()),
+        ToolActivityKind::Search => Some("Search workspace".to_string()),
+        ToolActivityKind::List => Some("List files".to_string()),
+        ToolActivityKind::WebSearch => Some("Search web".to_string()),
+        ToolActivityKind::ImageView => Some("View image".to_string()),
+        ToolActivityKind::Context => Some("Compact context".to_string()),
+        ToolActivityKind::Diff => Some("Update files".to_string()),
+        ToolActivityKind::Edit => Some("Edit files".to_string()),
+        ToolActivityKind::Test => Some("Run tests".to_string()),
+        ToolActivityKind::Approval => Some("Request approval".to_string()),
+        ToolActivityKind::Command | ToolActivityKind::Other => None,
+    }
 }

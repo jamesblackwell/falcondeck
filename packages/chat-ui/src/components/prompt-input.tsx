@@ -1,5 +1,5 @@
 import { ImagePlus, Map, Send, X } from 'lucide-react'
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 
 import type {
   ActiveSlashQuery,
@@ -42,6 +42,9 @@ export type PromptInputProps = {
   disabled?: boolean
   compact?: boolean
 }
+
+const PROMPT_INPUT_MIN_HEIGHT = 52
+const PROMPT_INPUT_MAX_HEIGHT = 200
 
 export const PromptInput = memo(function PromptInput({
   value,
@@ -96,6 +99,16 @@ export const PromptInput = memo(function PromptInput({
   useEffect(() => {
     setActiveSkillIndex(0)
   }, [slashQuery?.query])
+
+  const syncTextareaHeight = useCallback((element: HTMLTextAreaElement | null) => {
+    if (!element) return
+    element.style.height = 'auto'
+    element.style.height = `${Math.min(element.scrollHeight, PROMPT_INPUT_MAX_HEIGHT)}px`
+  }, [])
+
+  useLayoutEffect(() => {
+    syncTextareaHeight(textareaRef.current)
+  }, [syncTextareaHeight, value])
 
   const activeSkill =
     filteredSkills.length > 0
@@ -173,14 +186,9 @@ export const PromptInput = memo(function PromptInput({
       const nextValue = event.target.value
       onValueChange(nextValue)
       updateSlashQuery(nextValue, event.target.selectionStart)
-      requestAnimationFrame(() => {
-        const el = textareaRef.current
-        if (!el) return
-        el.style.height = 'auto'
-        el.style.height = `${Math.min(el.scrollHeight, 200)}px`
-      })
+      syncTextareaHeight(event.target)
     },
-    [onValueChange, updateSlashQuery],
+    [onValueChange, syncTextareaHeight, updateSlashQuery],
   )
 
   const insertSkillAlias = useCallback(
@@ -250,7 +258,7 @@ export const PromptInput = memo(function PromptInput({
           onPaste={handlePaste}
           placeholder={disabled ? 'Add a project to get started...' : 'Ask your coding agent anything...'}
           className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[16px] leading-relaxed text-fg-primary placeholder:text-fg-secondary focus:outline-none md:text-[length:var(--fd-text-base)]"
-          style={{ minHeight: '52px', maxHeight: '200px' }}
+          style={{ minHeight: `${PROMPT_INPUT_MIN_HEIGHT}px`, maxHeight: `${PROMPT_INPUT_MAX_HEIGHT}px` }}
           rows={1}
         />
 

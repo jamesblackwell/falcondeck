@@ -33,6 +33,7 @@ function resetAll() {
   })
   useUIStore.setState({
     draft: '',
+    attachments: [],
     selectedProvider: null,
     selectedModel: null,
     selectedEffort: 'medium',
@@ -156,6 +157,146 @@ describe('submitTurn guards', () => {
     expect(ws!.id).toBe('w1')
     expect(session.selectedThreadId).toBe('t1')
     expect(ui.draft.trim()).toBe('Hello world')
+  })
+
+  it('allows attachments without draft text', async () => {
+    useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+      workspaces: [workspace({ id: 'w1', current_thread_id: 't1' })],
+      threads: [thread({ id: 't1', workspace_id: 'w1' })],
+    })))
+    useSessionStore.getState().selectThread('w1', 't1')
+    useUIStore.getState().setAttachments([
+      {
+        type: 'image',
+        id: 'img-1',
+        name: 'diagram.png',
+        mime_type: 'image/png',
+        url: 'data:image/png;base64,abc',
+      },
+    ])
+
+    const rpc = vi.fn().mockResolvedValue(undefined)
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState['_callRpc'],
+      _setError: vi.fn() as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>)
+
+    const harness = mountSessionActions()
+    try {
+      await act(async () => {
+        await harness.getActions().submitTurn()
+      })
+    } finally {
+      harness.unmount()
+    }
+
+    expect(rpc).toHaveBeenCalledWith(
+      'turn.start',
+      expect.objectContaining({
+        inputs: [
+          {
+            type: 'image',
+            id: 'img-1',
+            name: 'diagram.png',
+            mime_type: 'image/png',
+            url: 'data:image/png;base64,abc',
+          },
+        ],
+      }),
+      { requestIdPrefix: 'mobile-turn' },
+    )
+  })
+
+  it('submits selected skills and restores attachments on failure', async () => {
+    useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+      workspaces: [
+        workspace({
+          id: 'w1',
+          current_thread_id: 't1',
+          skills: [
+            {
+              id: 'skill-1',
+              label: 'Lint',
+              alias: '/lint',
+              availability: 'both',
+              source_kind: 'project_file',
+              description: 'Run lint fixes',
+            },
+          ],
+        }),
+      ],
+      threads: [thread({ id: 't1', workspace_id: 'w1' })],
+    })))
+    useSessionStore.getState().selectThread('w1', 't1')
+    useUIStore.setState({
+      draft: 'Please use /lint on this file',
+      attachments: [
+        {
+          type: 'image',
+          id: 'img-1',
+          name: 'error.png',
+          mime_type: 'image/png',
+          url: 'data:image/png;base64,abc',
+        },
+      ],
+      selectedProvider: 'codex',
+      selectedModel: 'gpt-5',
+      selectedEffort: 'high',
+      selectedCollaborationMode: 'plan',
+      isSubmitting: false,
+    })
+
+    const rpc = vi.fn().mockRejectedValue(new Error('nope'))
+    const setError = vi.fn()
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState['_callRpc'],
+      _setError: setError as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>)
+
+    const harness = mountSessionActions()
+    try {
+      await act(async () => {
+        await harness.getActions().submitTurn()
+      })
+    } finally {
+      harness.unmount()
+    }
+
+    expect(rpc).toHaveBeenCalledWith(
+      'turn.start',
+      {
+        workspace_id: 'w1',
+        thread_id: 't1',
+        inputs: [
+          { type: 'text', text: 'Please use /lint on this file' },
+          {
+            type: 'image',
+            id: 'img-1',
+            name: 'error.png',
+            mime_type: 'image/png',
+            url: 'data:image/png;base64,abc',
+          },
+        ],
+        selected_skills: [{ skill_id: 'skill-1', alias: '/lint' }],
+        provider: 'codex',
+        model_id: 'gpt-5',
+        reasoning_effort: 'high',
+        collaboration_mode_id: 'plan',
+        approval_policy: 'on-request',
+      },
+      { requestIdPrefix: 'mobile-turn' },
+    )
+    expect(useUIStore.getState().draft).toBe('Please use /lint on this file')
+    expect(useUIStore.getState().attachments).toEqual([
+      {
+        type: 'image',
+        id: 'img-1',
+        name: 'error.png',
+        mime_type: 'image/png',
+        url: 'data:image/png;base64,abc',
+      },
+    ])
+    expect(setError).toHaveBeenCalledWith('nope')
   })
 })
 

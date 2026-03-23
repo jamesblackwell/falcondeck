@@ -1,7 +1,7 @@
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { View, Pressable, Modal } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ChevronDown, Check } from 'lucide-react-native'
+import { ChevronDown, Check, Map } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import type { AgentProvider, ModelSummary } from '@falcondeck/client-core'
@@ -15,9 +15,13 @@ interface InputToolbarProps {
   effortOptions: string[]
   selectedProvider: AgentProvider
   showProviderSelector: boolean
+  disabled?: boolean
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
+  showPlanModeToggle?: boolean
+  planModeEnabled?: boolean
+  onTogglePlanMode?: (enabled: boolean) => void
 }
 
 function capitalize(s: string) {
@@ -43,17 +47,29 @@ export const InputToolbar = memo(function InputToolbar({
   effortOptions,
   selectedProvider,
   showProviderSelector,
+  disabled = false,
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
+  showPlanModeToggle = false,
+  planModeEnabled = false,
+  onTogglePlanMode,
 }: InputToolbarProps) {
   const { theme } = useUnistyles()
   const [sheet, setSheet] = useState<SheetConfig>(null)
+
+  useEffect(() => {
+    if (disabled) {
+      setSheet(null)
+    }
+  }, [disabled])
 
   const currentModel = selectedModel ? models.find((m) => m.id === selectedModel) : null
   const modelDisplayLabel = currentModel?.label ?? 'Default'
 
   const openModelSheet = useCallback(() => {
+    if (disabled) return
+
     const items = [
       { value: '__default__', label: 'Default' },
       ...models.map((m) => ({ value: m.id, label: m.label })),
@@ -68,7 +84,7 @@ export const InputToolbar = memo(function InputToolbar({
         setSheet(null)
       },
     })
-  }, [models, selectedModel, onSelectModel])
+  }, [disabled, models, selectedModel, onSelectModel])
 
   const effortItems = useMemo(
     () => effortOptions.map((e) => ({ value: e, label: capitalize(e) })),
@@ -76,6 +92,8 @@ export const InputToolbar = memo(function InputToolbar({
   )
 
   const openEffortSheet = useCallback(() => {
+    if (disabled) return
+
     setSheet({
       title: 'Reasoning Effort',
       items: effortItems,
@@ -86,7 +104,7 @@ export const InputToolbar = memo(function InputToolbar({
         setSheet(null)
       },
     })
-  }, [effortItems, selectedEffort, onSelectEffort])
+  }, [disabled, effortItems, selectedEffort, onSelectEffort])
 
   const currentEffortLabel = capitalize(selectedEffort ?? 'medium')
 
@@ -94,13 +112,14 @@ export const InputToolbar = memo(function InputToolbar({
     <>
       <View style={styles.container}>
         {showProviderSelector ? (
-          <View style={styles.providerToggle}>
+          <View style={[styles.providerToggle, disabled && styles.controlDisabled]}>
             {PROVIDERS.map((p) => {
               const active = p.value === selectedProvider
               return (
                 <Pressable
                   key={p.value}
                   style={[styles.providerSegment, active && styles.providerSegmentActive]}
+                  disabled={disabled}
                   onPress={() => {
                     if (!active) {
                       void Haptics.selectionAsync()
@@ -123,7 +142,11 @@ export const InputToolbar = memo(function InputToolbar({
         ) : null}
 
         {models.length > 0 ? (
-          <Pressable style={styles.chip} onPress={openModelSheet}>
+          <Pressable
+            style={[styles.chip, disabled && styles.controlDisabled]}
+            onPress={openModelSheet}
+            disabled={disabled}
+          >
             <Text variant="caption" color="secondary" size="2xs" numberOfLines={1}>
               {modelDisplayLabel}
             </Text>
@@ -131,12 +154,44 @@ export const InputToolbar = memo(function InputToolbar({
           </Pressable>
         ) : null}
 
-        <Pressable style={styles.chip} onPress={openEffortSheet}>
+        <Pressable
+          style={[styles.chip, disabled && styles.controlDisabled]}
+          onPress={openEffortSheet}
+          disabled={disabled}
+        >
           <Text variant="caption" color="secondary" size="2xs">
             {currentEffortLabel}
           </Text>
           <ChevronDown size={10} color={theme.colors.fg.muted} />
         </Pressable>
+
+        {showPlanModeToggle ? (
+          <Pressable
+            style={[
+              styles.chip,
+              planModeEnabled && styles.planChipActive,
+              disabled && styles.controlDisabled,
+            ]}
+            disabled={disabled}
+            onPress={() => {
+              void Haptics.selectionAsync()
+              onTogglePlanMode?.(!planModeEnabled)
+            }}
+          >
+            <Map
+              size={10}
+              color={planModeEnabled ? theme.colors.surface[0] : theme.colors.fg.muted}
+            />
+            <Text
+              variant="caption"
+              size="2xs"
+              color={planModeEnabled ? 'primary' : 'secondary'}
+              style={planModeEnabled ? styles.planChipTextActive : undefined}
+            >
+              Plan
+            </Text>
+          </Pressable>
+        ) : null}
       </View>
 
       {sheet ? (
@@ -173,6 +228,8 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 1,
+    flexWrap: 'wrap',
     gap: theme.spacing[2],
   },
   providerToggle: {
@@ -199,6 +256,15 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[1],
     backgroundColor: theme.colors.surface[3],
     borderRadius: theme.radius.full,
+  },
+  planChipActive: {
+    backgroundColor: theme.colors.accent.default,
+  },
+  planChipTextActive: {
+    color: theme.colors.surface[0],
+  },
+  controlDisabled: {
+    opacity: 0.55,
   },
   backdrop: {
     flex: 1,

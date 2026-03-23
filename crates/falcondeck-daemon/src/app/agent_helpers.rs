@@ -346,7 +346,7 @@ pub(super) fn extract_claude_text_delta(value: &Value) -> Option<String> {
 
 pub(super) fn extract_claude_tool_event(
     value: &Value,
-) -> Option<(String, String, String, Option<String>)> {
+) -> Option<ClaudeToolEvent> {
     let top_level_type = extract_string(value, &["type"]);
     let event = claude_event_value(value);
     let event_type =
@@ -365,12 +365,13 @@ pub(super) fn extract_claude_tool_event(
         let id = extract_string(tool_result, &["tool_use_id", "toolUseId", "id"])
             .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
         let output = extract_string(tool_result, &["content", "text"]);
-        return Some((
+        return Some(ClaudeToolEvent {
             id,
-            "Claude tool".to_string(),
-            "completed".to_string(),
+            title: None,
+            tool_kind: None,
+            status: "completed".to_string(),
             output,
-        ));
+        });
     }
 
     if event_type == "content_block_start" {
@@ -382,7 +383,13 @@ pub(super) fn extract_claude_tool_event(
             .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
         let title =
             extract_string(content_block, &["name"]).unwrap_or_else(|| "Claude tool".to_string());
-        return Some((id, title, "running".to_string(), None));
+        return Some(ClaudeToolEvent {
+            id,
+            tool_kind: Some(title.clone()),
+            title: Some(title),
+            status: "running".to_string(),
+            output: None,
+        });
     }
 
     if top_level_type.as_deref() == Some("assistant") {
@@ -400,7 +407,13 @@ pub(super) fn extract_claude_tool_event(
                 .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
             let title =
                 extract_string(tool_use, &["name"]).unwrap_or_else(|| "Claude tool".to_string());
-            return Some((id, title, "running".to_string(), None));
+            return Some(ClaudeToolEvent {
+                id,
+                tool_kind: Some(title.clone()),
+                title: Some(title),
+                status: "running".to_string(),
+                output: None,
+            });
         }
     }
 
@@ -418,7 +431,22 @@ pub(super) fn extract_claude_tool_event(
         "running"
     };
     let output = extract_string(event, &["output", "result", "text"]);
-    Some((id, title, status.to_string(), output))
+    Some(ClaudeToolEvent {
+        id,
+        tool_kind: Some(title.clone()),
+        title: Some(title),
+        status: status.to_string(),
+        output,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ClaudeToolEvent {
+    pub id: String,
+    pub title: Option<String>,
+    pub tool_kind: Option<String>,
+    pub status: String,
+    pub output: Option<String>,
 }
 
 pub(super) fn extract_claude_service_message(value: &Value) -> Option<String> {

@@ -1,6 +1,6 @@
 import { useCallback, useRef } from 'react'
 
-import { normalizeThreadDetail, normalizeThreadHandle } from '@falcondeck/client-core'
+import { normalizeThreadDetail, normalizeThreadHandle, selectedSkillsFromText } from '@falcondeck/client-core'
 import type { ThreadDetail, ThreadHandle } from '@falcondeck/client-core'
 
 import { useRelayStore, useSessionStore, useUIStore } from '@/store'
@@ -17,11 +17,14 @@ export function useSessionActions() {
     const ui = useUIStore.getState()
 
     const workspace = session.snapshot?.workspaces.find((w) => w.id === session.selectedWorkspaceId)
-    const submittedDraft = ui.draft.trim()
-    if (!workspace || !submittedDraft) return
+    const submittedDraft = ui.draft
+    const submittedAttachments = ui.attachments
+    if (!workspace || (!submittedDraft.trim() && submittedAttachments.length === 0)) return
+    const submittedSkills = selectedSkillsFromText(submittedDraft, workspace.skills ?? [])
 
     ui.setIsSubmitting(true)
     ui.clearDraft()
+    ui.clearAttachments()
 
     try {
       const threadId = session.selectedThreadId
@@ -49,7 +52,11 @@ export function useSessionActions() {
         {
           workspace_id: workspace.id,
           thread_id: activeThreadId,
-          inputs: [{ type: 'text', text: submittedDraft }],
+          inputs: [
+            ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft }] : []),
+            ...submittedAttachments,
+          ],
+          selected_skills: submittedSkills,
           provider: ui.selectedProvider ?? workspace.default_provider,
           model_id: ui.selectedModel,
           reasoning_effort: ui.selectedEffort,
@@ -61,6 +68,7 @@ export function useSessionActions() {
       relay._setError(null)
     } catch (e) {
       ui.setDraft(submittedDraft)
+      ui.setAttachments(submittedAttachments)
       relay._setError(e instanceof Error ? e.message : 'Failed to send message')
     } finally {
       ui.setIsSubmitting(false)

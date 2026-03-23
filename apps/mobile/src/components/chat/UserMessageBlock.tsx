@@ -4,6 +4,7 @@ import { StyleSheet } from 'react-native-unistyles'
 
 import type { ConversationItem } from '@falcondeck/client-core'
 
+import { AttachmentPreviewList } from './AttachmentPreviewList'
 import { MarkdownRenderer } from './MarkdownRenderer'
 
 type UserMessage = Extract<ConversationItem, { kind: 'user_message' }>
@@ -16,6 +17,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({ item }: UserMes
   return (
     <View style={styles.row}>
       <View style={styles.bubble}>
+        <AttachmentPreviewList attachments={item.attachments} />
         <MarkdownRenderer text={item.text} />
       </View>
     </View>
@@ -33,6 +35,7 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface[3],
     borderRadius: theme.radius.xl,
     borderCurve: 'continuous',
+    gap: theme.spacing[3],
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[3],
   },

@@ -7,6 +7,7 @@ describe('ui-store', () => {
     // Reset to initial state
     useUIStore.setState({
       draft: '',
+      attachments: [],
       selectedProvider: null,
       selectedModel: null,
       selectedEffort: 'medium',
@@ -23,6 +24,24 @@ describe('ui-store', () => {
 
     clearDraft()
     expect(useUIStore.getState().draft).toBe('')
+  })
+
+  it('adds, sets, removes, and clears attachments', () => {
+    const first = { type: 'image', id: 'img-1', name: 'one.png', mime_type: 'image/png', url: 'data:image/png;base64,one' } as const
+    const second = { type: 'image', id: 'img-2', name: 'two.png', mime_type: 'image/png', url: 'data:image/png;base64,two' } as const
+    const { addAttachments, clearAttachments, removeAttachment, setAttachments } = useUIStore.getState()
+
+    addAttachments([first])
+    expect(useUIStore.getState().attachments).toEqual([first])
+
+    setAttachments([first, second])
+    expect(useUIStore.getState().attachments).toEqual([first, second])
+
+    removeAttachment('img-1')
+    expect(useUIStore.getState().attachments).toEqual([second])
+
+    clearAttachments()
+    expect(useUIStore.getState().attachments).toEqual([])
   })
 
   it('sets selected model', () => {

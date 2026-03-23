@@ -38,11 +38,11 @@ import { DiffBlock } from './DiffBlock'
 import { InputToolbar } from './InputToolbar'
 import { InteractiveRequestBlock } from './InteractiveRequestBlock'
 import { JumpToBottomFab } from './JumpToBottomFab'
+import { LiveActivityLane } from './LiveActivityLane'
 import { MarkdownRenderer } from './MarkdownRenderer'
 import { MessageRouter } from './MessageRouter'
 import { PlanBlock } from './PlanBlock'
 import { ServiceBlock } from './ServiceBlock'
-import { StopButton } from './StopButton'
 import { ThinkingIndicator } from './ThinkingIndicator'
 import { ToolBurstBlock } from './ToolBurstBlock'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -63,12 +63,31 @@ describe('chat behavior components', () => {
       <AssistantMessageBlock item={{ kind: 'assistant_message', id: 'a1', text: 'Assistant text', created_at: '2026-03-16T10:00:00Z' }} />,
     )
     const user = renderComponent(
-      <UserMessageBlock item={{ kind: 'user_message', id: 'u1', text: 'User text', attachments: [], created_at: '2026-03-16T10:00:00Z' }} />,
+      <UserMessageBlock
+        item={{
+          kind: 'user_message',
+          id: 'u1',
+          text: 'User text',
+          attachments: [{
+            type: 'image',
+            id: 'img-1',
+            name: 'evidence.png',
+            mime_type: 'image/png',
+            url: 'data:image/png;base64,abc',
+          }],
+          created_at: '2026-03-16T10:00:00Z',
+        }}
+      />,
+    )
+    const userWithoutAttachment = renderComponent(
+      <UserMessageBlock item={{ kind: 'user_message', id: 'u2', text: 'Second user text', attachments: [], created_at: '2026-03-16T10:00:00Z' }} />,
     )
     const markdown = renderComponent(<MarkdownRenderer text="Plain markdown text" />)
 
     expect(textOf(assistant)).toContain('Assistant text')
     expect(textOf(user)).toContain('User text')
+    expect(textOf(user)).toContain('evidence.png')
+    expect(textOf(userWithoutAttachment)).toContain('Second user text')
     expect(textOf(markdown)).toContain('Plain markdown text')
   })
 
@@ -106,18 +125,66 @@ describe('chat behavior components', () => {
     expect(textOf(renderer)).toContain('Claude')
   })
 
-  it('handles stop and jump-to-bottom actions', () => {
-    const onStop = vi.fn()
+  it('renders and toggles the plan mode chip', () => {
+    const onTogglePlanMode = vi.fn()
+    const renderer = renderComponent(
+      <InputToolbar
+        models={[]}
+        selectedModel={null}
+        selectedEffort="medium"
+        effortOptions={['medium']}
+        selectedProvider="codex"
+        showProviderSelector={false}
+        showPlanModeToggle
+        planModeEnabled={false}
+        onSelectModel={vi.fn()}
+        onSelectEffort={vi.fn()}
+        onSelectProvider={vi.fn()}
+        onTogglePlanMode={onTogglePlanMode}
+      />,
+    )
+
+    expect(textOf(renderer)).toContain('Plan')
+
+    const buttons = renderer.root.findAllByType('Pressable' as any)
+    act(() => {
+      buttons[buttons.length - 1]!.props.onPress()
+    })
+
+    expect(onTogglePlanMode).toHaveBeenCalledWith(true)
+  })
+
+  it('disables toolbar controls when the composer is disabled', () => {
+    const renderer = renderComponent(
+      <InputToolbar
+        models={[{ id: 'gpt-5', label: 'GPT-5', is_default: true } as any]}
+        selectedModel="gpt-5"
+        selectedEffort="medium"
+        effortOptions={['medium']}
+        selectedProvider="codex"
+        showProviderSelector
+        showPlanModeToggle
+        disabled
+        onSelectModel={vi.fn()}
+        onSelectEffort={vi.fn()}
+        onSelectProvider={vi.fn()}
+        onTogglePlanMode={vi.fn()}
+      />,
+    )
+
+    const buttons = renderer.root.findAllByType('Pressable' as any)
+    expect(buttons.length).toBeGreaterThan(0)
+    expect(buttons.every((button) => button.props.disabled === true)).toBe(true)
+  })
+
+  it('handles jump-to-bottom actions', () => {
     const onJump = vi.fn()
-    const stop = renderComponent(<StopButton onPress={onStop} />)
     const jump = renderComponent(<JumpToBottomFab visible onPress={onJump} />)
 
     act(() => {
-      stop.root.findByType('Pressable' as any).props.onPress()
       jump.root.findByType('Pressable' as any).props.onPress()
     })
 
-    expect(onStop).toHaveBeenCalledTimes(1)
     expect(onJump).toHaveBeenCalledTimes(1)
   })
 
@@ -137,6 +204,8 @@ describe('chat behavior components', () => {
             has_side_effect: false,
             is_error: false,
             artifact_kind: 'none',
+            activity_kind: 'read',
+            history_mode: 'full',
             summary_hint: null,
           },
           created_at: '2026-03-16T10:00:00Z',
@@ -162,6 +231,8 @@ describe('chat behavior components', () => {
               has_side_effect: false,
               is_error: false,
               artifact_kind: 'none',
+              activity_kind: 'search',
+              history_mode: 'summary',
               summary_hint: null,
             },
             created_at: '2026-03-16T10:00:00Z',
@@ -169,8 +240,12 @@ describe('chat behavior components', () => {
           } as any,
         ]}
         summary={{
+          family: 'explore',
           count: 2,
+          title: '2 read-only tools',
+          subtitle: null,
           labels: ['read', 'grep'],
+          counts: { read: 1, search: 1 },
           started_at: '2026-03-16T10:00:00Z',
           completed_at: '2026-03-16T10:00:01Z',
           summary_hint: null,
@@ -201,12 +276,56 @@ describe('chat behavior components', () => {
         } as any}
       />,
     )
+    const liveLane = renderComponent(
+      <LiveActivityLane
+        groups={[
+          {
+            kind: 'live_activity_group',
+            id: 'live-1',
+            items: [
+              {
+                kind: 'tool_call',
+                id: 'tool-live-1',
+                title: 'Search repo',
+                tool_kind: 'grep',
+                status: 'running',
+                output: null,
+                exit_code: null,
+                display: {
+                  is_read_only: true,
+                  has_side_effect: false,
+                  is_error: false,
+                  artifact_kind: 'none',
+                  activity_kind: 'search',
+                  history_mode: 'summary',
+                  summary_hint: 'Search workspace',
+                },
+                created_at: '2026-03-16T10:00:00Z',
+                completed_at: null,
+              } as any,
+            ],
+            summary: {
+              family: 'explore',
+              count: 1,
+              title: 'Exploring 1 search',
+              subtitle: 'Search workspace',
+              labels: ['Search workspace'],
+              counts: { search: 1 },
+              started_at: '2026-03-16T10:00:00Z',
+              completed_at: null,
+              summary_hint: 'Search workspace',
+            },
+          },
+        ]}
+      />,
+    )
 
     expect(textOf(tool)).toContain('Read file')
     expect(textOf(burst)).toContain('2 read-only tools')
     expect(textOf(diff)).toContain('Diff')
     expect(textOf(plan)).toContain('Plan explanation')
     expect(textOf(plan)).toContain('Refactor list')
+    expect(textOf(liveLane)).toContain('Exploring 1 search')
   })
 
   it('renders interactive requests and forwards approval responses from the router', () => {
@@ -299,13 +418,17 @@ describe('chat behavior components', () => {
         <MessageRouter
           item={{
             id: 'burst-router',
-            kind: 'tool_burst',
+            kind: 'tool_summary',
             default_open: false,
             suppress_read_only_detail: false,
             items: [],
             summary: {
+              family: 'explore',
               count: 1,
+              title: '1 read-only tool',
+              subtitle: null,
               labels: ['read'],
+              counts: { read: 1 },
               started_at: '2026-03-16T10:00:00Z',
               completed_at: '2026-03-16T10:00:01Z',
               summary_hint: null,

@@ -2,10 +2,10 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { ChevronDown, LoaderCircle, MessageSquare } from 'lucide-react'
 
 import type { ConversationItem, FalconDeckPreferences } from '@falcondeck/client-core'
-import { deriveConversationRenderBlocks, normalizePreferences } from '@falcondeck/client-core'
+import { deriveConversationPresentation, normalizePreferences } from '@falcondeck/client-core'
 import { EmptyState } from '@falcondeck/ui'
 
-import { MessageCard, ToolBurstCard } from './message'
+import { LiveActivityLane, MessageCard, ToolSummaryCard } from './message'
 
 const AUTO_SCROLL_THRESHOLD = 40
 const JUMP_THRESHOLD = 200
@@ -52,12 +52,15 @@ export const Conversation = memo(function Conversation({
     [items],
   )
   const normalizedPreferences = useMemo(() => normalizePreferences(preferences), [preferences])
-  const renderBlocks = useMemo(
-    () => deriveConversationRenderBlocks(renderableItems, normalizedPreferences),
+  const presentation = useMemo(
+    () => deriveConversationPresentation(renderableItems, normalizedPreferences),
     [normalizedPreferences, renderableItems],
   )
+  const renderBlocks = presentation.history_blocks
+  const liveActivityGroups = presentation.live_activity_groups
   const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
-  const showEmptyState = renderBlocks.length === 0 && !hasHiddenOnlyItems
+  const showEmptyState =
+    renderBlocks.length === 0 && liveActivityGroups.length === 0 && !hasHiddenOnlyItems
 
   useEffect(() => {
     if (!threadKey) return
@@ -205,15 +208,16 @@ export const Conversation = memo(function Conversation({
   }, [scrollToBottom])
 
   return (
-    <div className="relative min-h-0 flex-1">
-      <div
-        ref={scrollRef}
-        data-selectable
-        className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
-        onScroll={handleScroll}
-      >
-        <div ref={contentRef} className="mx-auto flex min-h-full max-w-3xl flex-col gap-3 px-5 py-4">
-          {showEmptyState || (renderBlocks.length === 0 && isThinking) ? (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          data-selectable
+          className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
+          onScroll={handleScroll}
+        >
+          <div ref={contentRef} className="mx-auto flex min-h-full max-w-3xl flex-col gap-3 px-5 py-4">
+            {showEmptyState || (renderBlocks.length === 0 && isThinking && liveActivityGroups.length === 0) ? (
             <div className="flex min-h-full flex-1 flex-col gap-3">
               {showEmptyState
                 ? emptyState ?? (
@@ -224,7 +228,7 @@ export const Conversation = memo(function Conversation({
                     />
                   )
                 : null}
-              {isThinking ? (
+              {isThinking && liveActivityGroups.length === 0 ? (
                 <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
                   <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
                   Thinking…
@@ -233,7 +237,7 @@ export const Conversation = memo(function Conversation({
             </div>
           ) : null}
 
-          {renderBlocks.length > 0 && normalizedPreferences.conversation.show_expand_all_controls ? (
+            {renderBlocks.length > 0 && normalizedPreferences.conversation.show_expand_all_controls ? (
             <div className="flex items-center justify-end gap-2 px-1">
               <button
                 type="button"
@@ -252,7 +256,7 @@ export const Conversation = memo(function Conversation({
             </div>
           ) : null}
 
-          {renderBlocks.map((block) => (
+            {renderBlocks.map((block) => (
             <div key={block.id} className="min-w-0">
               {block.kind === 'item' ? (
                 <MessageCard
@@ -262,7 +266,7 @@ export const Conversation = memo(function Conversation({
                   suppressReadOnlyDetail={block.suppress_read_only_detail}
                 />
               ) : (
-                <ToolBurstCard
+                <ToolSummaryCard
                   items={block.items}
                   summary={block.summary}
                   defaultOpen={block.default_open}
@@ -273,26 +277,29 @@ export const Conversation = memo(function Conversation({
             </div>
           ))}
 
-          {renderBlocks.length > 0 && isThinking ? (
+            {renderBlocks.length > 0 && isThinking && liveActivityGroups.length === 0 ? (
             <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
               <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
               Thinking…
             </div>
           ) : null}
+          </div>
         </div>
+
+        {showJump ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-3">
+            <button
+              type="button"
+              onClick={jumpToBottom}
+              className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-border-default bg-surface-2 text-fg-muted shadow-md transition-colors hover:bg-surface-3 hover:text-fg-primary"
+            >
+              <ChevronDown className="h-4 w-4" />
+            </button>
+          </div>
+        ) : null}
       </div>
 
-      {showJump ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-3">
-          <button
-            type="button"
-            onClick={jumpToBottom}
-            className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-border-default bg-surface-2 text-fg-muted shadow-md transition-colors hover:bg-surface-3 hover:text-fg-primary"
-          >
-            <ChevronDown className="h-4 w-4" />
-          </button>
-        </div>
-      ) : null}
+      <LiveActivityLane groups={liveActivityGroups} />
     </div>
   )
 })

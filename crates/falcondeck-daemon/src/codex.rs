@@ -14,7 +14,7 @@ use chrono::Utc;
 use falcondeck_core::{
     AccountStatus, AccountSummary, AgentProvider, CollaborationModeSummary, ConversationItem,
     ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams, ThreadAttention,
-    ThreadPlan, ThreadStatus, ThreadSummary, ToolCallDisplay,
+    ThreadPlan, ThreadStatus, ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -27,7 +27,10 @@ use tracing::warn;
 
 use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
 use crate::skills::canonical_skill_alias;
-use crate::{app::AppState, error::DaemonError};
+use crate::{
+    app::{AppState, conversation_helpers::tool_display_metadata},
+    error::DaemonError,
+};
 
 mod session_file;
 mod thread_list;
@@ -646,19 +649,27 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
         }),
         "commandExecution" | "fileChange" | "webSearch" | "imageView" | "contextCompaction" => {
             let output = extract_string(item, &["output", "stdout", "result", "detail", "query"]);
+            let status = extract_string(item, &["status"]).unwrap_or_else(|| "completed".to_string());
+            let exit_code = item
+                .get("exitCode")
+                .or_else(|| item.get("exit_code"))
+                .and_then(Value::as_i64)
+                .map(|value| value as i32);
+            let title = restored_tool_title(item, &item_type);
             Some(ConversationItem::ToolCall {
                 id,
-                title: thread_tool_title(&item_type),
+                title: title.clone(),
                 tool_kind: item_type.clone(),
-                status: extract_string(item, &["status"])
-                    .unwrap_or_else(|| "completed".to_string()),
-                output,
-                exit_code: item
-                    .get("exitCode")
-                    .or_else(|| item.get("exit_code"))
-                    .and_then(Value::as_i64)
-                    .map(|value| value as i32),
-                display: ToolCallDisplay::default(),
+                status: status.clone(),
+                output: output.clone(),
+                exit_code,
+                display: tool_display_metadata(
+                    &title,
+                    &item_type,
+                    &status,
+                    exit_code,
+                    output.as_deref(),
+                ),
                 created_at,
                 completed_at: extract_datetime_or_timestamp(item, &["completedAt", "completed_at"]),
             })
@@ -838,6 +849,37 @@ fn thread_tool_title(item_type: &str) -> String {
     .to_string()
 }
 
+fn restored_tool_title(item: &Value, item_type: &str) -> String {
+    if let Some(title) = extract_string(item, &["title", "label", "command"]) {
+        return title;
+    }
+
+    if let Some(command) = item
+        .get("command")
+        .and_then(|command| extract_string(command, &["command", "title", "label"]))
+    {
+        return command;
+    }
+
+    match item_type {
+        "webSearch" => extract_string(item, &["query"])
+            .or_else(|| {
+                item.get("payload")
+                    .and_then(|payload| extract_string(payload, &["query"]))
+            })
+            .map(|query| format!("Web search: {}", truncate_preview(&query)))
+            .unwrap_or_else(|| thread_tool_title(item_type)),
+        "imageView" => extract_string(item, &["path", "url", "source"])
+            .or_else(|| {
+                item.get("payload")
+                    .and_then(|payload| extract_string(payload, &["path", "url", "source"]))
+            })
+            .map(|source| format!("Image view: {}", truncate_preview(&source)))
+            .unwrap_or_else(|| thread_tool_title(item_type)),
+        _ => thread_tool_title(item_type),
+    }
+}
+
 fn truncate_preview(text: &str) -> String {
     const MAX_PREVIEW_CHARS: usize = 96;
     let trimmed = text.trim();
@@ -912,6 +954,7 @@ pub fn parse_thread_plan(value: &Value) -> Option<ThreadPlan> {
 mod tests {
     use super::*;
     use std::io::Write;
+    use falcondeck_core::ToolHistoryMode;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -1279,6 +1322,7 @@ mod tests {
                                 {
                                     "id": "tool-1",
                                     "type": "commandExecution",
+                                    "command": "git status --short",
                                     "status": "completed",
                                     "output": "ok",
                                     "createdAt": "2026-03-16T10:00:02Z",
@@ -1320,9 +1364,10 @@ mod tests {
             other => panic!("expected reasoning item, got {other:?}"),
         }
         match &items[2] {
-            ConversationItem::ToolCall { title, output, .. } => {
-                assert_eq!(title, "Command execution");
+            ConversationItem::ToolCall { title, output, display, .. } => {
+                assert_eq!(title, "git status --short");
                 assert_eq!(output.as_deref(), Some("ok"));
+                assert_eq!(display.history_mode, ToolHistoryMode::Summary);
             }
             other => panic!("expected tool item, got {other:?}"),
         }
@@ -1368,12 +1413,18 @@ mod tests {
                 },
                 ConversationItem::ToolCall {
                     id: "tool-1".to_string(),
-                    title: "Command execution".to_string(),
+                    title: "git status --short".to_string(),
                     tool_kind: "commandExecution".to_string(),
                     status: "completed".to_string(),
                     output: Some("done".to_string()),
                     exit_code: Some(0),
-                    display: ToolCallDisplay::default(),
+                    display: tool_display_metadata(
+                        "git status --short",
+                        "commandExecution",
+                        "completed",
+                        Some(0),
+                        Some("done"),
+                    ),
                     created_at: Utc::now(),
                     completed_at: Some(Utc::now()),
                 },
@@ -1387,7 +1438,7 @@ mod tests {
 
         assert_eq!(summary.status, ThreadStatus::Idle);
         assert_eq!(summary.latest_turn_id.as_deref(), Some("turn-1"));
-        assert_eq!(summary.last_tool.as_deref(), Some("Command execution"));
+        assert_eq!(summary.last_tool.as_deref(), Some("git status --short"));
         assert_eq!(
             summary.last_message_preview.as_deref(),
             Some("Here are the recent changes in this project.")

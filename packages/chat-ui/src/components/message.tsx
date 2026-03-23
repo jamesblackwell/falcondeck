@@ -4,7 +4,11 @@ import remarkGfm from 'remark-gfm'
 import { ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 
-import type { ConversationItem, ToolBurstSummary } from '@falcondeck/client-core'
+import type {
+  ConversationItem,
+  ConversationLiveActivityGroup,
+  ToolActivitySummary,
+} from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
 import { CodeBlock } from './code-block'
@@ -126,6 +130,39 @@ function toolCallLabel(title: string) {
 
 type ExpansionMode = 'default' | 'expanded' | 'collapsed'
 
+function ToolStatusIcon({
+  item,
+  className = 'h-3.5 w-3.5 shrink-0',
+}: {
+  item: Extract<ConversationItem, { kind: 'tool_call' }>
+  className?: string
+}) {
+  const isCompleted = item.status === 'completed' || item.status === 'success'
+  const isRunning = item.status === 'running' || item.status === 'in_progress'
+  if (isRunning) {
+    return <Loader2 className={cn(className, 'animate-spin text-accent')} />
+  }
+  if (isCompleted) {
+    return <CheckCircle2 className={cn(className, 'text-fg-muted')} />
+  }
+  return <Circle className={cn(className, 'text-fg-faint')} />
+}
+
+function ToolCallCompactRow({
+  item,
+}: {
+  item: Extract<ConversationItem, { kind: 'tool_call' }>
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-muted">
+      <ToolStatusIcon item={item} className="h-3.5 w-3.5 shrink-0" />
+      <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
+        {toolCallLabel(item.title)}
+      </span>
+    </div>
+  )
+}
+
 function useExpansionState(defaultOpen: boolean, expansionMode: ExpansionMode, seed: string) {
   const [open, setOpen] = useState(defaultOpen)
 
@@ -156,7 +193,6 @@ function ToolCallMessage({
   suppressReadOnlyDetail?: boolean
 }) {
   const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, item.id)
-  const isCompleted = item.status === 'completed'
   const hasOutput = Boolean(item.output)
   const detailAvailable = hasOutput && !suppressReadOnlyDetail
 
@@ -169,11 +205,7 @@ function ToolCallMessage({
           aria-label={`Toggle ${item.title}`}
           className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2"
         >
-          {isCompleted ? (
-            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-          ) : (
-            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-          )}
+          <ToolStatusIcon item={item} />
           <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
             {toolCallLabel(item.title)}
           </span>
@@ -271,22 +303,20 @@ function DiffMessage({
   )
 }
 
-function ToolBurstMessage({
+function ToolSummaryMessage({
   summary,
   items,
   defaultOpen = false,
   expansionMode = 'default',
   suppressReadOnlyDetail = false,
 }: {
-  summary: ToolBurstSummary
+  summary: ToolActivitySummary
   items: Extract<ConversationItem, { kind: 'tool_call' }>[]
   defaultOpen?: boolean
   expansionMode?: ExpansionMode
   suppressReadOnlyDetail?: boolean
 }) {
-  const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, items[0]?.id ?? 'tool-burst')
-  const header = `${summary.count} read-only tools`
-  const subtitle = summary.labels.slice(0, 2).join(' · ')
+  const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, items[0]?.id ?? 'tool-summary')
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
@@ -299,10 +329,10 @@ function ToolBurstMessage({
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
-              {header}
+              {summary.title}
             </p>
             <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
-              {subtitle || summary.summary_hint || 'Grouped workspace inspection'}
+              {summary.subtitle || summary.summary_hint || 'Grouped tool activity'}
             </p>
           </div>
           <ChevronRight
@@ -383,12 +413,51 @@ export const MessageCard = memo(function MessageCard({
   }
 })
 
-export const ToolBurstCard = memo(function ToolBurstCard(props: {
-  summary: ToolBurstSummary
+export const ToolSummaryCard = memo(function ToolSummaryCard(props: {
+  summary: ToolActivitySummary
   items: Extract<ConversationItem, { kind: 'tool_call' }>[]
   defaultOpen?: boolean
   expansionMode?: ExpansionMode
   suppressReadOnlyDetail?: boolean
 }) {
-  return <ToolBurstMessage {...props} />
+  return <ToolSummaryMessage {...props} />
+})
+
+export const LiveActivityLane = memo(function LiveActivityLane({
+  groups,
+}: {
+  groups: ConversationLiveActivityGroup[]
+}) {
+  if (groups.length === 0) return null
+
+  return (
+    <div className="shrink-0 border-t border-border-subtle bg-surface-1/95">
+      <div className="mx-auto max-w-3xl px-5 py-3">
+        <div className="max-h-[184px] space-y-3 overflow-y-auto pr-1">
+          {groups.map((group) => (
+            <div
+              key={group.id}
+              className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1"
+            >
+              <div className="border-b border-border-subtle px-3 py-2">
+                <p className="truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
+                  {group.summary.title}
+                </p>
+                {group.summary.subtitle ? (
+                  <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                    {group.summary.subtitle}
+                  </p>
+                ) : null}
+              </div>
+              <div className="space-y-1 p-2">
+                {group.items.map((item) => (
+                  <ToolCallCompactRow key={item.id} item={item} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 })

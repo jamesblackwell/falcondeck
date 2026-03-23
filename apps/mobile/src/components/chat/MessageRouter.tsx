@@ -29,7 +29,7 @@ export const MessageRouter = memo(function MessageRouter({ item: block }: Messag
     [respondApproval],
   )
 
-  if (block.kind === 'tool_burst') {
+  if (block.kind === 'tool_summary') {
     return (
       <ToolBurstBlock
         items={block.items}

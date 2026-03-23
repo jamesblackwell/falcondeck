@@ -6,6 +6,9 @@
 import type {
   ConversationItem,
   DaemonSnapshot,
+  ToolActivityKind,
+  ToolArtifactKind,
+  ToolCallDisplay,
   ThreadAgentParams,
   ThreadAttention,
   ThreadSummary,
@@ -114,9 +117,28 @@ export const demoSnapshot: DaemonSnapshot = {
   },
 }
 
-const readOnly = { is_read_only: true, has_side_effect: false, is_error: false, artifact_kind: 'none' as const, summary_hint: null }
-const sideEffect = (artifact: 'none' | 'command_output' | 'diff' = 'none') =>
-  ({ is_read_only: false, has_side_effect: true, is_error: false, artifact_kind: artifact, summary_hint: null })
+const readOnly: ToolCallDisplay = {
+  is_read_only: true,
+  has_side_effect: false,
+  is_error: false,
+  artifact_kind: 'none' as const,
+  activity_kind: 'read' as const,
+  history_mode: 'summary' as const,
+  summary_hint: null,
+}
+const sideEffect = (
+  artifact: ToolArtifactKind = 'none',
+  activityKind: ToolActivityKind = artifact === 'diff' ? 'edit' : 'command',
+): ToolCallDisplay =>
+  ({
+    is_read_only: false,
+    has_side_effect: true,
+    is_error: false,
+    artifact_kind: artifact,
+    activity_kind: activityKind,
+    history_mode: 'full' as const,
+    summary_hint: null,
+  })
 
 export const demoConversationItems: ConversationItem[] = [
   { kind: 'user_message', id: 'msg-1', text: 'Add JWT authentication to the Express API. Use bcrypt for password hashing and store refresh tokens in the database.', attachments: [], created_at: ago(10) },

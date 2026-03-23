@@ -1,4 +1,5 @@
 import React from 'react'
+import { act } from 'react-test-renderer'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { renderComponent, cleanup, textOf } from '../../test/render'
 import { ApprovalBanner } from './ApprovalBanner'
@@ -8,6 +9,13 @@ import { SessionListItem } from './SessionListItem'
 import { approval, thread } from '../../test/factories'
 
 afterEach(cleanup)
+
+function flattenStyle(style: unknown): Record<string, unknown> {
+  if (Array.isArray(style)) {
+    return Object.assign({}, ...style)
+  }
+  return (style as Record<string, unknown>) ?? {}
+}
 
 describe('ApprovalBanner component', () => {
   it('renders with all fields', () => {
@@ -35,7 +43,10 @@ describe('ChatInput component', () => {
   const chatInputDefaults = {
     onChangeText: vi.fn(),
     onSubmit: vi.fn(),
-    onStop: vi.fn(),
+    onPickImages: vi.fn(),
+    onRemoveAttachment: vi.fn(),
+    attachments: [],
+    skills: [],
     models: [],
     selectedModel: null,
     selectedEffort: 'medium',
@@ -65,6 +76,95 @@ describe('ChatInput component', () => {
   it('renders with custom placeholder', () => {
     const r = renderComponent(<ChatInput value="" {...chatInputDefaults} placeholder="Custom..." />)
     expect(r.toJSON()).toBeTruthy()
+  })
+
+  it('submits while the thread is running', () => {
+    const onSubmit = vi.fn()
+    const r = renderComponent(<ChatInput value="Steer the agent" {...chatInputDefaults} onSubmit={onSubmit} />)
+    const buttons = r.root.findAllByType('Pressable' as any)
+    const sendButton = buttons[buttons.length - 1]
+
+    act(() => {
+      sendButton?.props.onPress()
+    })
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it('submits attachments without text', () => {
+    const onSubmit = vi.fn()
+    const r = renderComponent(
+      <ChatInput
+        value=""
+        {...chatInputDefaults}
+        attachments={[
+          {
+            type: 'image',
+            id: 'img-1',
+            name: 'diagram.png',
+            mime_type: 'image/png',
+            url: 'data:image/png;base64,abc',
+          },
+        ]}
+        onSubmit={onSubmit}
+      />,
+    )
+    const buttons = r.root.findAllByType('Pressable' as any)
+    const sendButton = buttons[buttons.length - 1]
+
+    expect(textOf(r)).toContain('diagram.png')
+
+    act(() => {
+      sendButton?.props.onPress()
+    })
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows slash skill suggestions', () => {
+    const r = renderComponent(
+      <ChatInput
+        value="/lin"
+        {...chatInputDefaults}
+        skills={[
+          {
+            id: 'skill-1',
+            label: 'Lint',
+            alias: '/lint',
+            availability: 'both',
+            source_kind: 'project_file',
+            description: 'Run lint fixes',
+          },
+        ]}
+      />,
+    )
+
+    expect(textOf(r)).toContain('/lint')
+    expect(textOf(r)).toContain('Run lint fixes')
+  })
+
+  it('resets multiline height after the draft clears', () => {
+    const r = renderComponent(<ChatInput value={'Line one\nLine two'} {...chatInputDefaults} />)
+    const input = r.root.findByType('TextInput' as any)
+
+    act(() => {
+      input.props.onContentSizeChange({
+        nativeEvent: {
+          contentSize: {
+            height: 96,
+            width: 240,
+          },
+        },
+      })
+    })
+
+    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(96)
+
+    act(() => {
+      r.update(<ChatInput value="" {...chatInputDefaults} />)
+    })
+
+    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(44)
   })
 })
 

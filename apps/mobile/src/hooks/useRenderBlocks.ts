@@ -1,25 +1,27 @@
 import { useMemo } from 'react'
 
 import {
-  deriveConversationRenderBlocks,
+  deriveConversationPresentation,
+  type ConversationPresentation,
   type ConversationRenderBlock,
 } from '@falcondeck/client-core'
 
 import { useConversationItems, useSessionStore } from '@/store'
 
-export function useRenderBlocks(): ConversationRenderBlock[] {
+export function useConversationPresentation(): ConversationPresentation {
   const items = useConversationItems()
   const preferences = useSessionStore((s) => s.snapshot?.preferences ?? null)
 
   return useMemo(() => {
-    const blocks = deriveConversationRenderBlocks(items, preferences)
-    // Filter out reasoning items and unresolved interactive requests
-    const filtered = blocks.filter((block) => {
-      if (block.kind === 'tool_burst') return true
-      if (block.item.kind === 'reasoning') return false
-      if (block.item.kind === 'interactive_request' && !block.item.resolved) return false
+    const filteredItems = items.filter((item) => {
+      if (item.kind === 'reasoning') return false
+      if (item.kind === 'interactive_request' && !item.resolved) return false
       return true
     })
-    return filtered
+    return deriveConversationPresentation(filteredItems, preferences)
   }, [items, preferences])
+}
+
+export function useRenderBlocks(): ConversationRenderBlock[] {
+  return useConversationPresentation().history_blocks
 }

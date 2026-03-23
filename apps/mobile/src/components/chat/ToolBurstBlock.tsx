@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import Animated from 'react-native-reanimated'
 import { ChevronRight, Layers } from 'lucide-react-native'
 
-import type { ConversationItem, ToolBurstSummary } from '@falcondeck/client-core'
+import type { ConversationItem, ToolActivitySummary } from '@falcondeck/client-core'
 
 import { Text } from '@/components/ui'
 import { ToolCallBlock } from './ToolCallBlock'
@@ -14,12 +14,12 @@ type ToolCall = Extract<ConversationItem, { kind: 'tool_call' }>
 
 interface ToolBurstBlockProps {
   items: ToolCall[]
-  summary: ToolBurstSummary
+  summary: ToolActivitySummary
   defaultOpen: boolean
   suppressDetail: boolean
 }
 
-export const ToolBurstBlock = memo(function ToolBurstBlock({
+export const ToolSummaryBlock = memo(function ToolSummaryBlock({
   items,
   summary,
   defaultOpen,
@@ -28,20 +28,17 @@ export const ToolBurstBlock = memo(function ToolBurstBlock({
   const { theme } = useUnistyles()
   const { bodyStyle, chevronStyle, onContentLayout, toggle } = useCollapsible(defaultOpen)
 
-  const label = summary.labels.slice(0, 2).join(', ')
-  const summaryText = `${summary.count} read-only tool${summary.count === 1 ? '' : 's'}`
-
   return (
     <View style={styles.container}>
       <Pressable style={styles.header} onPress={toggle}>
         <Layers size={14} color={theme.colors.fg.muted} />
         <View style={styles.headerText}>
           <Text variant="caption" color="secondary">
-            {summaryText}
+            {summary.title}
           </Text>
-          {label ? (
+          {summary.subtitle ? (
             <Text variant="caption" color="muted" size="2xs" numberOfLines={1}>
-              {label}
+              {summary.subtitle}
             </Text>
           ) : null}
         </View>
@@ -96,3 +93,5 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
   },
 }))
+
+export const ToolBurstBlock = ToolSummaryBlock

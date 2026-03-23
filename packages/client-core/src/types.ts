@@ -125,12 +125,28 @@ export type UpdatePreferencesPayload = {
 }
 
 export type ToolArtifactKind = 'none' | 'diff' | 'test' | 'command_output' | 'approval_related'
+export type ToolActivityKind =
+  | 'read'
+  | 'search'
+  | 'list'
+  | 'command'
+  | 'edit'
+  | 'test'
+  | 'approval'
+  | 'diff'
+  | 'web_search'
+  | 'image_view'
+  | 'context'
+  | 'other'
+export type ToolHistoryMode = 'summary' | 'full'
 
 export type ToolCallDisplay = {
   is_read_only: boolean
   has_side_effect: boolean
   is_error: boolean
   artifact_kind: ToolArtifactKind
+  activity_kind: ToolActivityKind
+  history_mode: ToolHistoryMode
   summary_hint: string | null
 }
 

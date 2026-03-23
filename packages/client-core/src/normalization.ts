@@ -38,6 +38,8 @@ const DEFAULT_TOOL_CALL_DISPLAY: ToolCallDisplay = {
   has_side_effect: false,
   is_error: false,
   artifact_kind: 'none',
+  activity_kind: 'other',
+  history_mode: 'full',
   summary_hint: null,
 }
 
@@ -335,12 +337,29 @@ export function normalizeToolCallDisplay(value: unknown): ToolCallDisplay {
     display.artifact_kind === 'approval_related'
       ? display.artifact_kind
       : 'none'
+  const activityKind =
+    display.activity_kind === 'read' ||
+    display.activity_kind === 'search' ||
+    display.activity_kind === 'list' ||
+    display.activity_kind === 'command' ||
+    display.activity_kind === 'edit' ||
+    display.activity_kind === 'test' ||
+    display.activity_kind === 'approval' ||
+    display.activity_kind === 'diff' ||
+    display.activity_kind === 'web_search' ||
+    display.activity_kind === 'image_view' ||
+    display.activity_kind === 'context'
+      ? display.activity_kind
+      : 'other'
+  const historyMode = display.history_mode === 'summary' ? 'summary' : 'full'
 
   return {
     is_read_only: display.is_read_only ?? false,
     has_side_effect: display.has_side_effect ?? false,
     is_error: display.is_error ?? false,
     artifact_kind: artifactKind,
+    activity_kind: activityKind,
+    history_mode: historyMode,
     summary_hint:
       typeof display.summary_hint === 'string' && display.summary_hint.trim().length > 0
         ? display.summary_hint

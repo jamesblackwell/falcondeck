@@ -9,13 +9,13 @@ import {
   UserMessageBlock,
   AssistantMessageBlock,
   ServiceBlock,
+  LiveActivityLane,
   ToolCallBlock,
   ToolBurstBlock,
   PlanBlock,
   DiffBlock,
   InteractiveRequestBlock,
   InputToolbar,
-  StopButton,
   JumpToBottomFab,
   ThinkingIndicator,
 } from './index'
@@ -30,13 +30,13 @@ describe('chat barrel exports', () => {
   it('exports UserMessageBlock', () => { expect(UserMessageBlock).toBeDefined() })
   it('exports AssistantMessageBlock', () => { expect(AssistantMessageBlock).toBeDefined() })
   it('exports ServiceBlock', () => { expect(ServiceBlock).toBeDefined() })
+  it('exports LiveActivityLane', () => { expect(LiveActivityLane).toBeDefined() })
   it('exports ToolCallBlock', () => { expect(ToolCallBlock).toBeDefined() })
   it('exports ToolBurstBlock', () => { expect(ToolBurstBlock).toBeDefined() })
   it('exports PlanBlock', () => { expect(PlanBlock).toBeDefined() })
   it('exports DiffBlock', () => { expect(DiffBlock).toBeDefined() })
   it('exports InteractiveRequestBlock', () => { expect(InteractiveRequestBlock).toBeDefined() })
   it('exports InputToolbar', () => { expect(InputToolbar).toBeDefined() })
-  it('exports StopButton', () => { expect(StopButton).toBeDefined() })
   it('exports JumpToBottomFab', () => { expect(JumpToBottomFab).toBeDefined() })
   it('exports ThinkingIndicator', () => { expect(ThinkingIndicator).toBeDefined() })
 })
