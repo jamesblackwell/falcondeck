@@ -23,7 +23,10 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/snapshot", get(snapshot))
-        .route("/api/preferences", get(preferences).patch(update_preferences))
+        .route(
+            "/api/preferences",
+            get(preferences).patch(update_preferences),
+        )
         .route("/api/remote/status", get(remote_status))
         .route("/api/remote/pairing", post(start_remote_pairing))
         .route(
@@ -92,7 +95,9 @@ async fn snapshot(State(state): State<AppState>) -> Json<falcondeck_core::Daemon
     Json(state.snapshot().await)
 }
 
-async fn preferences(State(state): State<AppState>) -> Json<falcondeck_core::FalconDeckPreferences> {
+async fn preferences(
+    State(state): State<AppState>,
+) -> Json<falcondeck_core::FalconDeckPreferences> {
     Json(state.preferences().await)
 }
 

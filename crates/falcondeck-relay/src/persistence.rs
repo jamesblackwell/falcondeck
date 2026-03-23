@@ -10,8 +10,7 @@ use crate::error::RelayError;
 use falcondeck_core::RelayUpdate;
 
 use super::app::{
-    PersistedState, PairingRecord, QueuedActionRecord, SessionRecord,
-    TrustedDeviceRecord,
+    PairingRecord, PersistedState, QueuedActionRecord, SessionRecord, TrustedDeviceRecord,
 };
 
 const FILE_PERSIST_DEBOUNCE_MS: u64 = 150;

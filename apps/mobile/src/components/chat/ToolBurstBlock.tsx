@@ -36,7 +36,7 @@ export const ToolBurstBlock = memo(function ToolBurstBlock({
       <Pressable style={styles.header} onPress={toggle}>
         <Layers size={14} color={theme.colors.fg.muted} />
         <View style={styles.headerText}>
-          <Text variant="label" color="secondary" size="xs">
+          <Text variant="caption" color="secondary">
             {summaryText}
           </Text>
           {label ? (

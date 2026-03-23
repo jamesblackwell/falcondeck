@@ -2,15 +2,15 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
-    crypto::verify_pairing_public_key_bundle, ClaimPairingRequest, ClaimPairingResponse,
-    EncryptedEnvelope, MachinePresence, PairingPublicKeyBundle, PairingStatus,
-    PairingStatusResponse, QueuedRemoteAction, QueuedRemoteActionStatus, RelayClientMessage,
-    RelayHealthResponse, RelayPeerRole, RelayServerMessage, RelayUpdate, RelayUpdateBody,
-    RelayUpdatesResponse, StartPairingRequest, StartPairingResponse, SubmitQueuedActionRequest,
-    SyncCursor, TrustedDevice, TrustedDeviceStatus, TrustedDevicesResponse,
+    ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, MachinePresence,
+    PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, QueuedRemoteAction,
+    QueuedRemoteActionStatus, RelayClientMessage, RelayHealthResponse, RelayPeerRole,
+    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
+    StartPairingResponse, SubmitQueuedActionRequest, SyncCursor, TrustedDevice,
+    TrustedDeviceStatus, TrustedDevicesResponse, crypto::verify_pairing_public_key_bundle,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::warn;
 use uuid::Uuid;
 

@@ -360,6 +360,7 @@ export type EventEnvelope = {
     | { type: 'interactive-request'; request: InteractiveRequest }
     | { type: 'thread-started'; thread: ThreadSummary }
     | { type: 'thread-updated'; thread: ThreadSummary }
+    | { type: 'workspace-updated'; workspace: WorkspaceSummary }
     | { type: 'preferences-updated'; preferences: FalconDeckPreferences }
     | { type: 'conversation-item-added'; item: ConversationItem }
     | { type: 'conversation-item-updated'; item: ConversationItem }

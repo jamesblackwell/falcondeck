@@ -591,6 +591,14 @@ impl AppState {
                     })
                     .map_err(|error| error.to_string())
             }
+            "thread.archive" => {
+                let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                let thread_id = required(&["threadId", "thread_id"])?;
+                self.archive_thread(&workspace_id, &thread_id)
+                    .await
+                    .and_then(|summary| serde_json::to_value(summary).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
             _ => Err(format!("unsupported remote rpc method `{method}`")),
         };
 

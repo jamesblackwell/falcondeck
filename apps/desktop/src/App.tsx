@@ -28,7 +28,12 @@ import { ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
 import { markInteractiveRequestResolved, normalizeSendError, workspaceSendBlockReason } from './app-utils'
-import { defaultModelId, defaultReasoningEffort, reasoningOptions } from './utils'
+import {
+  defaultReasoningEffort,
+  reasoningOptions,
+  resolveReasoningEffort,
+  resolveThreadModelId,
+} from './utils'
 import { DesktopConversationPane } from './components/DesktopConversationPane'
 import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
@@ -37,6 +42,83 @@ import { ProjectImportOverlay } from './components/ProjectImportOverlay'
 import { SettingsView } from './components/SettingsView'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
+
+const COMPOSER_SELECTIONS_STORAGE_KEY = 'falcondeck.desktop.composer-selections.v1'
+
+type PersistedComposerSelection = {
+  modelId: string | null
+  effort: string | null
+}
+
+type PersistedComposerSelections = Record<
+  string,
+  Partial<Record<AgentProvider, PersistedComposerSelection>>
+>
+
+function readPersistedComposerSelections(): PersistedComposerSelections {
+  if (typeof window === 'undefined') {
+    return {}
+  }
+
+  try {
+    const raw = window.localStorage.getItem(COMPOSER_SELECTIONS_STORAGE_KEY)
+    if (!raw) {
+      return {}
+    }
+    const parsed = JSON.parse(raw) as Record<string, Record<string, PersistedComposerSelection>>
+    const next: PersistedComposerSelections = {}
+
+    for (const [workspacePath, selections] of Object.entries(parsed)) {
+      if (!selections || typeof selections !== 'object') {
+        continue
+      }
+      const workspaceSelections: Partial<Record<AgentProvider, PersistedComposerSelection>> = {}
+      for (const provider of ['codex', 'claude'] as const) {
+        const selection = selections[provider]
+        if (!selection || typeof selection !== 'object') {
+          continue
+        }
+        workspaceSelections[provider] = {
+          modelId: typeof selection.modelId === 'string' ? selection.modelId : null,
+          effort: typeof selection.effort === 'string' ? selection.effort : null,
+        }
+      }
+      if (Object.keys(workspaceSelections).length > 0) {
+        next[workspacePath] = workspaceSelections
+      }
+    }
+
+    return next
+  } catch {
+    return {}
+  }
+}
+
+function writePersistedComposerSelections(selections: PersistedComposerSelections) {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  try {
+    window.localStorage.setItem(
+      COMPOSER_SELECTIONS_STORAGE_KEY,
+      JSON.stringify(selections),
+    )
+  } catch {
+    // Ignore storage failures and keep the in-memory selection authoritative.
+  }
+}
+
+function selectionForWorkspace(
+  selections: PersistedComposerSelections,
+  workspacePath: string | null | undefined,
+  provider: AgentProvider,
+) {
+  if (!workspacePath) {
+    return null
+  }
+  return selections[workspacePath]?.[provider] ?? null
+}
 
 export default function App() {
   return (
@@ -74,6 +156,8 @@ function AppInner() {
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
   const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
+  const [persistedComposerSelections, setPersistedComposerSelections] =
+    useState<PersistedComposerSelections>(() => readPersistedComposerSelections())
   const [isAddingProject, setIsAddingProject] = useState(false)
   const [isImportingProjectSessions, setIsImportingProjectSessions] = useState(false)
   const [isStartingRemote, setIsStartingRemote] = useState(false)
@@ -122,6 +206,27 @@ function AppInner() {
         })()
       : null
 
+  const rememberComposerSelection = useCallback(
+    (provider: AgentProvider, selection: PersistedComposerSelection) => {
+      if (!selectedWorkspace) {
+        return
+      }
+
+      setPersistedComposerSelections((current) => {
+        const next = {
+          ...current,
+          [selectedWorkspace.path]: {
+            ...(current[selectedWorkspace.path] ?? {}),
+            [provider]: selection,
+          },
+        }
+        writePersistedComposerSelections(next)
+        return next
+      })
+    },
+    [selectedWorkspace],
+  )
+
   // Sync model/effort/mode selections from thread/workspace
   useEffect(() => {
     if (!selectedWorkspace) {
@@ -137,25 +242,63 @@ function AppInner() {
     selectionSeedRef.current = seedKey
 
     const nextProvider = providerForThread(selectedThread, selectedWorkspace)
+    const preferredSelection = selectionForWorkspace(
+      persistedComposerSelections,
+      selectedWorkspace.path,
+      nextProvider,
+    )
+    const nextModelId = resolveThreadModelId(
+      selectedThread,
+      selectedWorkspace,
+      preferredSelection?.modelId,
+      nextProvider,
+    )
     setSelectedProvider(nextProvider)
-    const fallbackModelId = defaultModelId(selectedWorkspace, nextProvider)
-    if (selectedThread) {
-      const nextModelId = selectedThread.agent.model_id ?? fallbackModelId
-      setSelectedModel(nextModelId)
-      setSelectedEffort(
-        selectedThread.agent.reasoning_effort ??
-          defaultReasoningEffort(selectedThread, selectedWorkspace, nextModelId, nextProvider) ??
-          'medium',
-      )
-      setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
+    setSelectedModel(nextModelId)
+    setSelectedEffort(
+      resolveReasoningEffort(
+        selectedThread,
+        selectedWorkspace,
+        nextModelId,
+        preferredSelection?.effort,
+        nextProvider,
+      ) ?? 'medium',
+    )
+    setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
+  }, [persistedComposerSelections, selectedThread, selectedWorkspace])
+
+  useEffect(() => {
+    if (!selectedWorkspace) return
+    const provider = selectedThread?.provider ?? selectedProvider
+    const models = workspaceModels(selectedWorkspace, provider)
+    if (models.length === 0) {
+      if (selectedModel !== null) {
+        setSelectedModel(null)
+      }
       return
     }
-    setSelectedModel(fallbackModelId)
-    setSelectedEffort(
-      defaultReasoningEffort(null, selectedWorkspace, fallbackModelId, nextProvider) ?? 'medium',
-    )
-    setSelectedCollaborationMode(null)
-  }, [selectedThread, selectedWorkspace])
+    if (!selectedModel || !models.some((model) => model.id === selectedModel)) {
+      const preferredSelection = selectionForWorkspace(
+        persistedComposerSelections,
+        selectedWorkspace.path,
+        provider,
+      )
+      setSelectedModel(
+        resolveThreadModelId(
+          selectedThread,
+          selectedWorkspace,
+          preferredSelection?.modelId,
+          provider,
+        ),
+      )
+    }
+  }, [
+    persistedComposerSelections,
+    selectedModel,
+    selectedProvider,
+    selectedThread,
+    selectedWorkspace,
+  ])
 
   useEffect(() => {
     if (!selectedWorkspace) return
@@ -163,11 +306,29 @@ function AppInner() {
     const options = reasoningOptions(selectedThread, selectedWorkspace, selectedModel, provider)
     if (options.length === 0) return
     if (!selectedEffort || !options.includes(selectedEffort)) {
+      const preferredSelection = selectionForWorkspace(
+        persistedComposerSelections,
+        selectedWorkspace.path,
+        provider,
+      )
       setSelectedEffort(
-        defaultReasoningEffort(selectedThread, selectedWorkspace, selectedModel, provider),
+        resolveReasoningEffort(
+          selectedThread,
+          selectedWorkspace,
+          selectedModel,
+          preferredSelection?.effort,
+          provider,
+        ),
       )
     }
-  }, [selectedEffort, selectedModel, selectedProvider, selectedThread, selectedWorkspace])
+  }, [
+    persistedComposerSelections,
+    selectedEffort,
+    selectedModel,
+    selectedProvider,
+    selectedThread,
+    selectedWorkspace,
+  ])
 
   useEffect(() => {
     const handleFocus = () => setWindowFocused(true)
@@ -349,10 +510,12 @@ function AppInner() {
           ? selectedEffort
           : defaultReasoningEffort(selectedThread, selectedWorkspace, modelId, provider)
       setSelectedEffort(nextEffort)
+      rememberComposerSelection(provider, { modelId, effort: nextEffort })
       void persistThreadSettings({ modelId, effort: nextEffort, collaborationModeId: selectedCollaborationMode })
     },
     [
       persistThreadSettings,
+      rememberComposerSelection,
       selectedCollaborationMode,
       selectedEffort,
       selectedProvider,
@@ -363,10 +526,19 @@ function AppInner() {
 
   const handleEffortChange = useCallback(
     (effort: string) => {
+      const provider = selectedThread?.provider ?? selectedProvider
       setSelectedEffort(effort)
+      rememberComposerSelection(provider, { modelId: selectedModel, effort })
       void persistThreadSettings({ modelId: selectedModel, effort, collaborationModeId: selectedCollaborationMode })
     },
-    [persistThreadSettings, selectedCollaborationMode, selectedModel],
+    [
+      persistThreadSettings,
+      rememberComposerSelection,
+      selectedCollaborationMode,
+      selectedModel,
+      selectedProvider,
+      selectedThread,
+    ],
   )
 
   const handleCollaborationModeChange = useCallback(
@@ -380,15 +552,31 @@ function AppInner() {
   const handleProviderChange = useCallback(
     (provider: AgentProvider) => {
       if (selectedThread) return
+      const preferredSelection = selectionForWorkspace(
+        persistedComposerSelections,
+        selectedWorkspace?.path,
+        provider,
+      )
       setSelectedProvider(provider)
-      const fallbackModelId = defaultModelId(selectedWorkspace, provider)
+      const fallbackModelId = resolveThreadModelId(
+        null,
+        selectedWorkspace,
+        preferredSelection?.modelId,
+        provider,
+      )
       setSelectedModel(fallbackModelId)
       setSelectedEffort(
-        defaultReasoningEffort(null, selectedWorkspace, fallbackModelId, provider) ?? 'medium',
+        resolveReasoningEffort(
+          null,
+          selectedWorkspace,
+          fallbackModelId,
+          preferredSelection?.effort,
+          provider,
+        ) ?? 'medium',
       )
       setSelectedCollaborationMode(null)
     },
-    [selectedThread, selectedWorkspace],
+    [persistedComposerSelections, selectedThread, selectedWorkspace],
   )
 
   const handleAddProject = useCallback(async () => {

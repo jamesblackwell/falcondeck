@@ -3,6 +3,7 @@ import nacl from 'tweetnacl'
 
 import {
   applyEventToThreadDetail,
+  applySnapshotEvent,
   bootstrapSessionCrypto,
   buildProjectGroups,
   bytesToBase64,
@@ -243,6 +244,49 @@ describe('client-core conversation helpers', () => {
       thread_id: 'thread-2',
     }
     expect(applyEventToThreadDetail(detail, otherThreadEvent)).toBe(detail)
+  })
+
+  it('applies workspace metadata updates to both snapshots and active thread detail', () => {
+    const updatedWorkspace = workspace({
+      updated_at: '2026-03-15T10:10:00Z',
+      models: [
+        {
+          id: 'gpt-5.4',
+          label: 'GPT-5.4',
+          is_default: true,
+          default_reasoning_effort: 'medium',
+          supported_reasoning_efforts: [],
+        },
+      ],
+    })
+    const event: EventEnvelope = {
+      seq: 4,
+      emitted_at: '2026-03-15T10:10:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: null,
+      event: {
+        type: 'workspace-updated',
+        workspace: updatedWorkspace,
+      },
+    }
+
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace()],
+      threads: [thread()],
+      interactive_requests: [],
+      preferences: normalizePreferences(null),
+    }
+    expect(applySnapshotEvent(snapshot, event)?.workspaces[0]?.models[0]?.id).toBe('gpt-5.4')
+
+    const detail: ThreadDetail = {
+      workspace: workspace(),
+      thread: thread(),
+      items: [],
+    }
+    expect(applyEventToThreadDetail(detail, event)?.workspace.updated_at).toBe(
+      '2026-03-15T10:10:00Z',
+    )
   })
 
   it('returns no conversation items for a new thread composer', () => {

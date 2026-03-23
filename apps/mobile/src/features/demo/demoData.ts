@@ -106,7 +106,7 @@ export const demoSnapshot: DaemonSnapshot = {
   preferences: {
     version: 1,
     conversation: {
-      tool_details_mode: 'auto',
+      tool_details_mode: 'compact',
       auto_expand: { approvals: true, errors: true, first_diff: true, failed_tests: true },
       group_read_only_tools: true,
       show_expand_all_controls: true,

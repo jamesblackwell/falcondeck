@@ -9,7 +9,13 @@ import {
   type WorkspaceSummary,
 } from '@falcondeck/client-core'
 
-import { defaultModelId, defaultReasoningEffort, reasoningOptions, resolveThreadModelId } from './utils'
+import {
+  defaultModelId,
+  defaultReasoningEffort,
+  reasoningOptions,
+  resolveReasoningEffort,
+  resolveThreadModelId,
+} from './utils'
 
 function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary {
   return {
@@ -244,6 +250,53 @@ describe('desktop selection utils', () => {
 
     expect(resolveThreadModelId(selectedThread, selectedWorkspace)).toBe('gpt-5.3-codex-spark')
     expect(defaultReasoningEffort(selectedThread, selectedWorkspace)).toBe('high')
+  })
+
+  it('falls back to the provider default when a preferred model is stale', () => {
+    const selectedWorkspace = workspace({
+      models: [
+        {
+          id: 'gpt-5.4',
+          label: 'GPT-5.4',
+          is_default: true,
+          default_reasoning_effort: 'medium',
+          supported_reasoning_efforts: [{ reasoning_effort: 'medium', description: 'Medium' }],
+        },
+      ],
+    })
+
+    expect(resolveThreadModelId(null, selectedWorkspace, 'gpt-5.1-codex-max')).toBe('gpt-5.4')
+  })
+
+  it('prefers a valid remembered effort over thread and model defaults', () => {
+    const selectedWorkspace = workspace({
+      models: [
+        {
+          id: 'gpt-5.4',
+          label: 'GPT-5.4',
+          is_default: true,
+          default_reasoning_effort: 'medium',
+          supported_reasoning_efforts: [
+            { reasoning_effort: 'low', description: 'Low' },
+            { reasoning_effort: 'medium', description: 'Medium' },
+            { reasoning_effort: 'high', description: 'High' },
+          ],
+        },
+      ],
+    })
+    const selectedThread = thread({
+      agent: {
+        model_id: 'gpt-5.4',
+        reasoning_effort: 'medium',
+        collaboration_mode_id: null,
+        approval_policy: null,
+        service_tier: null,
+      },
+    })
+
+    expect(
+      resolveReasoningEffort(selectedThread, selectedWorkspace, 'gpt-5.4', 'high'),
+    ).toBe('high')
   })
 
   it('does not auto-enable plan mode for a new thread', () => {

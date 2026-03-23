@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -66,6 +66,59 @@ function renderPaddedOnSolid(source, target, iconSize, canvasSize, backgroundCol
   ])
 }
 
+/**
+ * Generate a macOS .icns with the falcon mark inside a rounded rectangle
+ * on a transparent background.  macOS does not auto-apply the squircle mask
+ * to .icns files (unlike iOS), so we bake the shape into the icon itself.
+ */
+function generateMacOSIcns(markSource, output, bgColor) {
+  const tmp = resolve(repoRoot, '.tmp-macicon')
+  const iconsetDir = resolve(tmp, 'icon.iconset')
+  ensureDir(iconsetDir)
+
+  // macOS iconset spec: each base size plus its @2x variant
+  const specs = [
+    { name: 'icon_16x16.png', size: 16 },
+    { name: 'icon_16x16@2x.png', size: 32 },
+    { name: 'icon_32x32.png', size: 32 },
+    { name: 'icon_32x32@2x.png', size: 64 },
+    { name: 'icon_128x128.png', size: 128 },
+    { name: 'icon_128x128@2x.png', size: 256 },
+    { name: 'icon_256x256.png', size: 256 },
+    { name: 'icon_256x256@2x.png', size: 512 },
+    { name: 'icon_512x512.png', size: 512 },
+    { name: 'icon_512x512@2x.png', size: 1024 },
+  ]
+
+  // Pre-rasterize the SVG mark to a large PNG first — ImageMagick's SVG
+  // renderer struggles with complex paths inside multi-step composite commands.
+  const markPng = resolve(tmp, 'mark.png')
+  run('magick', ['-background', 'none', '-density', '144', markSource, '-resize', '1024x1024', `png32:${markPng}`])
+
+  for (const { name, size } of specs) {
+    // Apple's macOS icon corner radius is ~22.37% of the icon width
+    const radius = Math.round(size * 0.2237)
+    const markSize = Math.round(size * 0.62)
+    const target = resolve(iconsetDir, name)
+
+    run('magick', [
+      // Transparent canvas with dark rounded-rect background
+      '(', '-size', `${size}x${size}`, 'xc:none',
+      '-fill', bgColor,
+      '-draw', `roundrectangle 0,0 ${size - 1},${size - 1} ${radius},${radius}`,
+      ')',
+      // White falcon mark, resized and centered
+      '(', markPng, '-resize', `${markSize}x${markSize}`, ')',
+      '-gravity', 'center', '-composite',
+      `png32:${target}`,
+    ])
+  }
+
+  // Pack into .icns using Apple's built-in tool
+  run('iconutil', ['-c', 'icns', '-o', output, iconsetDir])
+  rmSync(tmp, { recursive: true, force: true })
+}
+
 function writeWebManifest(target, name, shortName) {
   const manifest = {
     name,
@@ -121,6 +174,10 @@ function generateDesktopAssets() {
 
   ensureDir(iconsDir)
   run('npm', ['exec', 'tauri', 'icon', '--', '../../assets/brand/logomark-dark.svg', '-o', 'src-tauri/icons', '--ios-color', darkBackground], desktopDir)
+
+  // Override the .icns with a properly shaped macOS icon (rounded corners on transparent bg).
+  // Tauri generates a full-bleed square which renders with hard corners on macOS.
+  generateMacOSIcns(sources.markLight, resolve(iconsDir, 'icon.icns'), darkBackground)
 }
 
 if (args.has('--desktop-only')) {

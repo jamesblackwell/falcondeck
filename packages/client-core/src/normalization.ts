@@ -42,7 +42,7 @@ const DEFAULT_TOOL_CALL_DISPLAY: ToolCallDisplay = {
 }
 
 const DEFAULT_CONVERSATION_PREFERENCES: ConversationPreferences = {
-  tool_details_mode: 'auto',
+  tool_details_mode: 'compact',
   auto_expand: {
     approvals: true,
     errors: true,
@@ -288,6 +288,16 @@ export function normalizeEventEnvelope(value: EventEnvelope | unknown): EventEnv
     }
   }
 
+  if (event?.type === 'workspace-updated') {
+    return {
+      ...(envelope as EventEnvelope),
+      event: {
+        ...event,
+        workspace: normalizeWorkspaceSummary(event.workspace),
+      },
+    }
+  }
+
   if (event?.type === 'preferences-updated') {
     return {
       ...(envelope as EventEnvelope),
@@ -345,11 +355,12 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
   >
 
   const toolDetailsMode =
+    conversation.tool_details_mode === 'auto' ||
     conversation.tool_details_mode === 'expanded' ||
     conversation.tool_details_mode === 'compact' ||
     conversation.tool_details_mode === 'hide_read_only_details'
       ? conversation.tool_details_mode
-      : 'auto'
+      : 'compact'
 
   return {
     version: typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : 1,

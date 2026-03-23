@@ -25,7 +25,7 @@ export const DiffBlock = memo(function DiffBlock({ item, defaultOpen }: DiffBloc
     <View style={styles.container}>
       <Pressable style={styles.header} onPress={toggle}>
         <GitBranch size={14} color={theme.colors.fg.muted} />
-        <Text variant="label" color="secondary" size="xs" style={styles.title}>
+        <Text variant="caption" color="secondary" style={styles.title}>
           Diff
         </Text>
         <Animated.View style={chevronStyle}>

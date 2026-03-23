@@ -2,14 +2,14 @@ use std::{net::SocketAddr, path::PathBuf};
 
 use chrono::Duration;
 use falcondeck_core::{
-    crypto::{build_pairing_public_key_bundle, encrypt_json, generate_data_key, LocalBoxKeyPair},
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
     PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
     RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse,
     RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
     SubmitQueuedActionRequest, TrustedDevicesResponse,
+    crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, encrypt_json, generate_data_key},
 };
-use falcondeck_relay::{router, AppState, RetentionConfig};
+use falcondeck_relay::{AppState, RetentionConfig, router};
 use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
@@ -17,7 +17,7 @@ use tempfile::TempDir;
 use tokio::{
     net::TcpListener,
     task::JoinHandle,
-    time::{timeout, Duration as TokioDuration},
+    time::{Duration as TokioDuration, timeout},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 

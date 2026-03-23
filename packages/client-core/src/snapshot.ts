@@ -14,6 +14,20 @@ export type ReconcileSnapshotSelectionOptions = {
   preserveEmptyThreadSelection?: boolean
 }
 
+function upsertWorkspace(
+  workspaces: DaemonSnapshot['workspaces'],
+  nextWorkspace: DaemonSnapshot['workspaces'][number],
+) {
+  const existing = workspaces.findIndex((workspace) => workspace.id === nextWorkspace.id)
+  if (existing === -1) {
+    return [nextWorkspace, ...workspaces]
+  }
+
+  return workspaces.map((workspace) =>
+    workspace.id === nextWorkspace.id ? nextWorkspace : workspace,
+  )
+}
+
 /**
  * Applies a daemon event to the current snapshot state.
  * Shared by both desktop and remote-web apps.
@@ -53,6 +67,11 @@ export function applySnapshotEvent(
             ? normalizeThreadSummary(daemonEvent.thread)
             : thread,
         ),
+      }
+    case 'workspace-updated':
+      return {
+        ...snapshot,
+        workspaces: upsertWorkspace(snapshot.workspaces, daemonEvent.workspace),
       }
     case 'interactive-request':
       return {

@@ -6,7 +6,7 @@ import { buildProjectGroups } from '@falcondeck/client-core'
 
 import { colors } from '@/theme/tokens'
 import { useRelayConnection } from '@/hooks/useRelayConnection'
-import { useRelayStore, useSessionStore } from '@/store'
+import { useRelayStore, useSessionStore, useUIStore } from '@/store'
 import { SidebarView } from '@/components/navigation'
 
 export default function AppLayout() {
@@ -31,6 +31,12 @@ export default function AppLayout() {
   const handleNewThread = useCallback(
     (wId: string) => {
       useSessionStore.getState().selectNewThread(wId)
+      // Reset provider/model/effort so the new thread uses workspace defaults
+      // instead of inheriting from the previously viewed thread
+      const ui = useUIStore.getState()
+      ui.setSelectedProvider(null)
+      ui.setSelectedModel(null)
+      ui.setSelectedEffort(null)
       router.navigate('/(app)')
     },
     [router],

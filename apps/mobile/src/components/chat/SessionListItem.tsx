@@ -14,6 +14,7 @@ interface SessionListItemProps {
   workspaceId: string
   isSelected: boolean
   onSelectThread: (workspaceId: string, threadId: string) => void
+  onOpenThreadOptions?: (workspaceId: string, thread: ThreadSummary) => void
   nowTick?: number
 }
 
@@ -22,6 +23,7 @@ function SessionListItemInner({
   workspaceId,
   isSelected,
   onSelectThread,
+  onOpenThreadOptions,
   nowTick = 0,
 }: SessionListItemProps) {
   const { theme } = useUnistyles()
@@ -35,12 +37,17 @@ function SessionListItemInner({
   const handlePress = useCallback(() => {
     onSelectThread(workspaceId, thread.id)
   }, [onSelectThread, thread.id, workspaceId])
+
+  const handleLongPress = useCallback(() => {
+    onOpenThreadOptions?.(workspaceId, thread)
+  }, [onOpenThreadOptions, thread, workspaceId])
   /* v8 ignore stop */
 
   return (
     <Pressable
       style={[styles.container, isSelected ? styles.selected : undefined]}
       onPress={handlePress}
+      onLongPress={handleLongPress}
     >
       <View style={styles.indicatorSlot}>
         {presentation.showSpinner ? (
@@ -107,6 +114,7 @@ const areEqual = (prev: SessionListItemProps, next: SessionListItemProps) =>
   prev.workspaceId === next.workspaceId &&
   prev.isSelected === next.isSelected &&
   prev.nowTick === next.nowTick &&
-  prev.onSelectThread === next.onSelectThread
+  prev.onSelectThread === next.onSelectThread &&
+  prev.onOpenThreadOptions === next.onOpenThreadOptions
 
 export const SessionListItem = memo(SessionListItemInner, areEqual)

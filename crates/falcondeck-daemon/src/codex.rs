@@ -5,8 +5,8 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -16,12 +16,12 @@ use falcondeck_core::{
     ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams, ThreadAttention,
     ThreadPlan, ThreadStatus, ThreadSummary, ToolCallDisplay,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
-    sync::{oneshot, Mutex},
-    time::{timeout, Duration},
+    sync::{Mutex, oneshot},
+    time::{Duration, timeout},
 };
 use tracing::warn;
 

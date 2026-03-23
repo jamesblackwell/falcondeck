@@ -81,7 +81,7 @@ export function preferences(overrides: Partial<FalconDeckPreferences> = {}): Fal
   return {
     version: 1,
     conversation: {
-      tool_details_mode: 'auto',
+      tool_details_mode: 'compact',
       auto_expand: {
         approvals: true,
         errors: true,

@@ -70,7 +70,7 @@ pub struct ConversationPreferences {
 impl Default for ConversationPreferences {
     fn default() -> Self {
         Self {
-            tool_details_mode: ToolDetailsMode::Auto,
+            tool_details_mode: ToolDetailsMode::Compact,
             auto_expand: ConversationAutoExpandPreferences::default(),
             group_read_only_tools: true,
             show_expand_all_controls: true,
@@ -111,11 +111,11 @@ impl Default for ConversationAutoExpandPreferences {
 #[serde(rename_all = "snake_case")]
 pub enum ToolDetailsMode {
     /// Group low-signal read-only tool chatter and expand only important artifacts.
-    #[default]
     Auto,
     /// Prefer expanded tool details with minimal collapsing.
     Expanded,
-    /// Prefer compact grouped tool details.
+    /// Prefer compact grouped tool details; suppress read-only output by default.
+    #[default]
     Compact,
     /// Hide raw read-only tool detail bodies while keeping summary rows visible.
     HideReadOnlyDetails,

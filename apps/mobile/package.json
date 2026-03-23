@@ -4,9 +4,9 @@
   "private": true,
   "main": "./src/entry",
   "scripts": {
-    "start": "expo start",
-    "ios": "expo run:ios",
-    "android": "expo run:android",
+    "start": "REACT_NATIVE_PACKAGER_HOSTNAME=$(ipconfig getifaddr en0 2>/dev/null || echo localhost) expo start --port 8488",
+    "ios": "expo run:ios --port 8488",
+    "android": "expo run:android --port 8488",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"

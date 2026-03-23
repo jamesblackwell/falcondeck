@@ -1,14 +1,14 @@
 //! Pairing, signing, and encryption helpers shared across FalconDeck services.
 
 use aes_gcm::{
-    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
 };
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use rand::{rngs::OsRng, RngCore};
-use serde::{de::DeserializeOwned, Serialize};
+use rand::{RngCore, rngs::OsRng};
+use serde::{Serialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use crate::{

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AppState, KeyboardAvoidingView, Platform, Pressable, View } from 'react-native'
+import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
@@ -57,6 +57,7 @@ export default function HomeScreen() {
   const workspace = useSelectedWorkspace()
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
+  const snapshot = useSessionStore((s) => s.snapshot)
   const { connectionStatus, isEncrypted, machinePresence, relayUrl, sessionId } = useRelayStore(
     useShallow((s) => ({
       connectionStatus: s.connectionStatus,
@@ -107,6 +108,9 @@ export default function HomeScreen() {
 
   const isThreadRunning = selectedThread?.status === 'running'
   const showThinking = shouldShowThinkingIndicator(blocks, isThreadRunning)
+
+  // True during initial sync: session exists but snapshot hasn't loaded yet
+  const isSyncing = !!sessionId && !snapshot
 
   // Sync provider/model when thread or workspace changes
   useEffect(() => {
@@ -271,12 +275,19 @@ export default function HomeScreen() {
       ))}
 
       <View style={styles.listContainer}>
-        {!selectedThread ? (
+        {isSyncing ? (
+          <View style={styles.syncState}>
+            <ActivityIndicator size="small" color={theme.colors.fg.muted} />
+            <Text variant="caption" color="muted">
+              {connectionStatus === 'encrypted' ? 'Syncing...' : connectionStatus === 'connected' ? 'Securing session...' : 'Connecting...'}
+            </Text>
+          </View>
+        ) : !selectedThread ? (
           <View style={styles.newThreadState}>
-            <Text size="2xl" color="primary" weight="semibold">
+            <Text variant="heading" color="primary">
               Let's build
             </Text>
-            <Text size="2xl" color="muted" weight="medium">
+            <Text variant="body" size="lg" color="muted">
               {workspace?.path.split('/').pop() ?? 'Select a project'}
             </Text>
           </View>
@@ -350,6 +361,12 @@ const styles = StyleSheet.create((theme) => ({
   listContainer: {
     flex: 1,
     minHeight: 2,
+  },
+  syncState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: theme.spacing[3],
   },
   newThreadState: {
     flex: 1,

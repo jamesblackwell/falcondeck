@@ -112,7 +112,7 @@ export default function PairScreen() {
       <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
         <View style={styles.content}>
           <View style={styles.hero}>
-            <Text variant="heading" size="2xl" weight="bold">
+            <Text variant="heading">
               FalconDeck
             </Text>
             <Text variant="body" color="tertiary" style={styles.subtitle}>

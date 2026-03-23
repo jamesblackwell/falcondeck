@@ -79,12 +79,22 @@ export function upsertConversationItem(
 
 export function applyEventToThreadDetail(detail: ThreadDetail | null, event: EventEnvelope) {
   const normalizedEvent = normalizeEventEnvelope(event)
-
-  if (!detail || normalizedEvent.thread_id !== detail.thread.id) {
+  if (!detail) {
     return detail
   }
 
   const normalizedDetail = normalizeThreadDetail(detail)
+
+  if (
+    normalizedEvent.event.type === 'workspace-updated' &&
+    normalizedEvent.workspace_id === normalizedDetail.workspace.id
+  ) {
+    return { ...normalizedDetail, workspace: normalizedEvent.event.workspace }
+  }
+
+  if (normalizedEvent.thread_id !== normalizedDetail.thread.id) {
+    return detail
+  }
 
   switch (normalizedEvent.event.type) {
     case 'thread-updated':
@@ -165,7 +175,7 @@ function isGroupableReadOnlyTool(
     item.display.is_read_only &&
     !item.display.has_side_effect &&
     !item.display.is_error &&
-    item.display.artifact_kind === 'none'
+    (item.display.artifact_kind === 'none' || item.display.artifact_kind === 'command_output')
   )
 }
 
@@ -174,7 +184,7 @@ function shouldSuppressReadOnlyDetail(
   mode: ToolDetailsMode,
 ) {
   return (
-    mode === 'hide_read_only_details' &&
+    (mode === 'hide_read_only_details' || mode === 'compact') &&
     isToolCall(item) &&
     item.display.is_read_only &&
     !item.display.has_side_effect &&
@@ -231,7 +241,7 @@ export function deriveConversationRenderBlocks(
         items: burstItems,
         summary: buildToolBurstSummary(burstItems),
         default_open: mode === 'expanded',
-        suppress_read_only_detail: mode === 'hide_read_only_details',
+        suppress_read_only_detail: mode === 'hide_read_only_details' || mode === 'compact',
       })
       index = nextIndex - 1
       continue

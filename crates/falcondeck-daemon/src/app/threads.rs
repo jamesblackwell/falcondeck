@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     process::Stdio,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 
 use chrono::Utc;
@@ -14,11 +14,12 @@ use tokio::{
     fs,
     io::AsyncBufReadExt,
     process::Command,
-    time::{timeout, Duration},
+    time::{Duration, timeout},
 };
 use uuid::Uuid;
 
 use super::{
+    AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
     agent_helpers::{
         extract_claude_error, extract_claude_service_message, extract_claude_text_delta,
         extract_claude_tool_event, merge_claude_assistant_text,
@@ -27,7 +28,6 @@ use super::{
         build_ai_thread_title_prompt, is_placeholder_thread_title, is_provisional_thread_title,
         normalize_generated_thread_title, should_generate_ai_thread_title, tool_display_metadata,
     },
-    AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
 };
 use crate::{
     agent_binary::resolve_agent_binary, claude::ClaudeRuntime, codex::CodexSession,

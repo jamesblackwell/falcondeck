@@ -61,7 +61,7 @@ export default function SettingsScreen() {
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <ChevronLeft size={24} color={theme.colors.fg.primary} />
         </Pressable>
-        <Text variant="heading" size="2xl" weight="bold">
+        <Text variant="heading">
           Settings
         </Text>
       </View>
