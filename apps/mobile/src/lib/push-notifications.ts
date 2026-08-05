@@ -22,6 +22,7 @@ import { getJson, setJson, removeKey } from '@/storage/mmkv'
 import { useSessionStore } from '@/store/session-store'
 
 const PUSH_REGISTRATION_KEY = 'push.lastRegistration'
+const PUSH_ENABLED_KEY = 'push.enabled'
 
 interface PersistedPushRegistration {
   sessionId: string
@@ -35,6 +36,19 @@ export interface PushNotificationData {
   workspaceId?: string | null
   threadId?: string | null
   kind?: string
+}
+
+/**
+ * User preference for agent-attention pushes. Defaults to enabled so paired
+ * devices get alerts without any setup.
+ */
+export function isPushEnabled(): boolean {
+  return getJson<boolean>(PUSH_ENABLED_KEY) ?? true
+}
+
+/** Persist the push-notification preference. */
+export function setPushEnabled(enabled: boolean): void {
+  setJson(PUSH_ENABLED_KEY, enabled)
 }
 
 function pushTokenUrl(relayUrl: string, sessionId: string, deviceId: string) {
@@ -129,8 +143,9 @@ export async function getPushTokenSafely(): Promise<string | null> {
 
 /**
  * Register this device's Expo push token with the relay. Fire-and-forget safe:
- * never throws, and re-POSTs only when the token, session, or device changed
- * since the last successful registration.
+ * never throws, no-ops while the user has push notifications disabled, and
+ * re-POSTs only when the token, session, or device changed since the last
+ * successful registration.
  */
 export async function registerPushToken(
   relayUrl: string,
@@ -139,6 +154,8 @@ export async function registerPushToken(
   clientToken: string,
 ): Promise<void> {
   try {
+    if (!isPushEnabled()) return
+
     const token = await getPushTokenSafely()
     if (!token) return
 

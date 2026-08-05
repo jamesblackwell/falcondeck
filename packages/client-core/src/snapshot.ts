@@ -130,7 +130,10 @@ export function reconcileSnapshotSelection(
   if (!workspaceId) {
     workspaceId =
       [...snapshot.workspaces]
-        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0]?.id ??
+        // Plain code-unit comparison (descending): updated_at is ISO-8601.
+        .sort((left, right) =>
+          right.updated_at < left.updated_at ? -1 : right.updated_at > left.updated_at ? 1 : 0,
+        )[0]?.id ??
       snapshot.threads[0]?.workspace_id ??
       snapshot.workspaces[0]?.id ??
       null

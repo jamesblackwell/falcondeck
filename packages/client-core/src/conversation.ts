@@ -9,7 +9,11 @@ import type {
 import { normalizeEventEnvelope, normalizePreferences, normalizeThreadDetail } from './normalization'
 
 export function sortConversationItems(items: ConversationItem[]) {
-  return [...items].sort((left, right) => left.created_at.localeCompare(right.created_at))
+  // Plain code-unit comparison: created_at is ISO-8601, so lexicographic order
+  // is chronological order and ICU collation is unnecessary on this hot path.
+  return [...items].sort((left, right) =>
+    left.created_at < right.created_at ? -1 : left.created_at > right.created_at ? 1 : 0,
+  )
 }
 
 export function conversationItemsForSelection(
@@ -86,35 +90,40 @@ export function upsertConversationItem(
 }
 
 export function applyEventToThreadDetail(detail: ThreadDetail | null, event: EventEnvelope) {
-  const normalizedEvent = normalizeEventEnvelope(event)
   if (!detail) {
     return detail
   }
 
-  const normalizedDetail = normalizeThreadDetail(detail)
+  // Only normalize (and reallocate) the detail on branches that actually
+  // mutate it. Events this function does not handle — including per-token
+  // `text` deltas — must return the original reference unchanged so callers
+  // can skip re-rendering.
+  const normalizedEvent = normalizeEventEnvelope(event)
 
   if (
     normalizedEvent.event.type === 'workspace-updated' &&
-    normalizedEvent.workspace_id === normalizedDetail.workspace.id
+    normalizedEvent.workspace_id === detail.workspace.id
   ) {
-    return { ...normalizedDetail, workspace: normalizedEvent.event.workspace }
+    return { ...normalizeThreadDetail(detail), workspace: normalizedEvent.event.workspace }
   }
 
-  if (normalizedEvent.thread_id !== normalizedDetail.thread.id) {
+  if (normalizedEvent.thread_id !== detail.thread.id) {
     return detail
   }
 
   switch (normalizedEvent.event.type) {
     case 'thread-updated':
-      return { ...normalizedDetail, thread: normalizedEvent.event.thread }
+      return { ...normalizeThreadDetail(detail), thread: normalizedEvent.event.thread }
     case 'conversation-item-added':
-    case 'conversation-item-updated':
+    case 'conversation-item-updated': {
+      const normalizedDetail = normalizeThreadDetail(detail)
       return {
         ...normalizedDetail,
         items: upsertConversationItem(normalizedDetail.items, normalizedEvent.event.item),
       }
+    }
     default:
-      return normalizedDetail
+      return detail
   }
 }
 

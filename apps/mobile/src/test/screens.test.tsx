@@ -12,6 +12,7 @@ const { routerMock, useRelayStore } = vi.hoisted(() => {
     pairingCode: '',
     sessionId: null as string | null,
     deviceId: null as string | null,
+    clientToken: null as string | null,
     connectionStatus: 'not_connected',
     machinePresence: null,
     error: null as string | null,
@@ -19,6 +20,7 @@ const { routerMock, useRelayStore } = vi.hoisted(() => {
     isEncrypted: false,
     claimPairing: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
+    _getClientToken: () => relayState.clientToken,
   }
 
   const store = Object.assign(
@@ -61,6 +63,7 @@ vi.mock('@/store/relay-store', () => ({ useRelayStore }))
 
 import { cleanup, renderComponent, textOf } from '@/test/render'
 
+import { isPushEnabled, setPushEnabled } from '@/lib/push-notifications'
 import IndexScreen from '@/app/index'
 import PairScreen from '@/app/(auth)/pair'
 import SettingsScreen from '@/app/(app)/settings/index'
@@ -102,6 +105,7 @@ describe('mobile app screens', () => {
       pairingCode: '',
       sessionId: null,
       deviceId: null,
+      clientToken: null,
       connectionStatus: 'not_connected',
       machinePresence: null,
       error: null,
@@ -176,5 +180,60 @@ describe('mobile app screens', () => {
 
     expect(disconnect).toHaveBeenCalledTimes(1)
     expect(routerMock.replace).toHaveBeenCalledWith('/(auth)/pair')
+  })
+
+  it('toggles push notifications and syncs the relay registration', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true }),
+    })
+    globalThis.fetch = fetchMock as unknown as typeof fetch
+    setPushEnabled(true)
+
+    useRelayStore.setState({
+      relayUrl: 'https://relay.test',
+      sessionId: 'session-1',
+      deviceId: 'device-1',
+      clientToken: 'client-token-1',
+      connectionStatus: 'encrypted',
+      isEncrypted: true,
+    })
+
+    const renderer = renderComponent(<SettingsScreen />)
+    expect(textOf(renderer)).toContain('Push notifications')
+
+    const toggle = renderer.root.findByType('Switch' as any)
+    expect(toggle.props.value).toBe(true)
+
+    await act(async () => {
+      toggle.props.onValueChange(false)
+    })
+
+    expect(isPushEnabled()).toBe(false)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://relay.test/v1/sessions/session-1/devices/device-1/push-token',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ authorization: 'Bearer client-token-1' }),
+        body: JSON.stringify({ push_token: null }),
+      }),
+    )
+
+    await act(async () => {
+      toggle.props.onValueChange(true)
+      // Registration awaits the push token before POSTing; drain the async
+      // chain so the fetch assertion below observes the call.
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+
+    expect(isPushEnabled()).toBe(true)
+    // Re-enabling triggers an immediate re-registration on the usable session.
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      'https://relay.test/v1/sessions/session-1/devices/device-1/push-token',
+      expect.objectContaining({
+        body: JSON.stringify({ push_token: 'ExponentPushToken[test]' }),
+      }),
+    )
   })
 })

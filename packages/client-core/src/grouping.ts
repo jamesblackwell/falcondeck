@@ -17,12 +17,14 @@ export function buildProjectGroups(
     threadsByWorkspace.set(thread.workspace_id, bucket)
   }
 
+  // Plain code-unit comparisons: paths only need a stable order and
+  // updated_at is ISO-8601, so ICU collation is unnecessary on these paths.
   return [...workspaces]
-    .sort((left, right) => left.path.localeCompare(right.path))
+    .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
     .map((workspace) => ({
       workspace,
       threads: (threadsByWorkspace.get(workspace.id) ?? []).sort((left, right) =>
-        right.updated_at.localeCompare(left.updated_at),
+        right.updated_at < left.updated_at ? -1 : right.updated_at > left.updated_at ? 1 : 0,
       ),
     }))
 }

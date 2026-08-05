@@ -191,6 +191,53 @@ describe('relay-store', () => {
       expect(state.isConnected).toBe(false)
       expect(state.isEncrypted).toBe(false)
     })
+
+    it('clears the relay push token before dropping the client token', async () => {
+      const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
+      setRelayUrl('https://relay.test')
+      setPairingCode('GOOD-CODE')
+
+      globalThis.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          pairing_id: 'pairing-1',
+          session_id: 'session-abc',
+          device_id: 'device-xyz',
+          client_token: 'token-123',
+          trusted_device: {
+            device_id: 'device-xyz',
+            session_id: 'session-abc',
+            label: 'FalconDeck iPhone',
+            status: 'active',
+            created_at: '2026-03-16T10:00:00Z',
+            last_seen_at: '2026-03-16T10:00:00Z',
+            revoked_at: null,
+          },
+          daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
+        }),
+      })
+      await claimPairing()
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true }),
+      })
+      globalThis.fetch = fetchMock
+
+      await useRelayStore.getState().disconnect()
+
+      // The best-effort push-token clear must fire while the client token is
+      // still available, i.e. it carries the token disconnect is about to drop.
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://relay.test/v1/sessions/session-abc/devices/device-xyz/push-token',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ authorization: 'Bearer token-123' }),
+          body: JSON.stringify({ push_token: null }),
+        }),
+      )
+    })
   })
 
   describe('internal helpers', () => {

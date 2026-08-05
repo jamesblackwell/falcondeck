@@ -11,7 +11,7 @@ import type {
   RelayWebSocketTicketResponse,
 } from '@falcondeck/client-core'
 
-import { registerPushToken } from '@/lib/push-notifications'
+import { isPushEnabled, registerPushToken } from '@/lib/push-notifications'
 import { useRelayStore, useSessionStore } from '@/store'
 
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
@@ -529,9 +529,12 @@ export function useRelayConnection() {
 
   // Once the session is usable (encrypted), register this device's push token
   // with the relay so it can alert us when an agent needs attention while the
-  // app is disconnected. Fire-and-forget: registerPushToken never throws and
-  // dedupes re-registration internally.
+  // app is disconnected. Skipped entirely while the user has push
+  // notifications turned off — the settings toggle re-registers on re-enable.
+  // Fire-and-forget: registerPushToken never throws and dedupes
+  // re-registration internally.
   useEffect(() => {
+    if (!isPushEnabled()) return
     if (!isEncrypted || !sessionId || !deviceId) return
     const relay = useRelayStore.getState()
     const clientToken = relay._getClientToken()

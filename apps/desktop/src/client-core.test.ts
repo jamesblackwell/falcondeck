@@ -277,6 +277,38 @@ describe('client-core conversation helpers', () => {
     expect(applyEventToThreadDetail(detail, otherThreadEvent)).toBe(detail)
   })
 
+  it('returns the original detail reference for event types it does not handle', () => {
+    const detail: ThreadDetail = {
+      workspace: workspace(),
+      thread: thread(),
+      items: [assistantMessage('a', '2026-03-15T10:00:00Z', 'hello')],
+      has_older: false,
+      oldest_item_id: 'a',
+      newest_item_id: 'a',
+      is_partial: false,
+    }
+
+    // Per-token streaming deltas target the matching thread but are not
+    // applied here; they must not allocate a new ThreadDetail.
+    const textDelta: EventEnvelope = {
+      seq: 7,
+      emitted_at: '2026-03-15T10:07:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: { type: 'text', item_id: 'item-1', delta: 'tok' },
+    }
+    expect(applyEventToThreadDetail(detail, textDelta)).toBe(detail)
+
+    const turnStart: EventEnvelope = {
+      seq: 8,
+      emitted_at: '2026-03-15T10:08:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: { type: 'turn-start', turn_id: 'turn-1' },
+    }
+    expect(applyEventToThreadDetail(detail, turnStart)).toBe(detail)
+  })
+
   it('applies workspace metadata updates to both snapshots and active thread detail', () => {
     const updatedWorkspace = workspace({
       updated_at: '2026-03-15T10:10:00Z',

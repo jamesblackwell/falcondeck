@@ -25,8 +25,10 @@ import {
   ensureAndroidNotificationChannel,
   getPushTokenSafely,
   handleNotificationTapData,
+  isPushEnabled,
   processInitialNotificationResponse,
   registerPushToken,
+  setPushEnabled,
 } from './push-notifications'
 
 const RELAY_URL = 'https://relay.test'
@@ -209,6 +211,54 @@ describe('push-notifications', () => {
       __setPushTokenError(new Error('No projectId — running in Expo Go'))
       await expect(getPushTokenSafely()).resolves.toBeNull()
       expect(warnSpy).toHaveBeenCalled()
+    })
+  })
+
+  describe('push preference', () => {
+    it('defaults to enabled when nothing is stored', () => {
+      expect(isPushEnabled()).toBe(true)
+    })
+
+    it('persists the preference across reads', () => {
+      setPushEnabled(false)
+      expect(isPushEnabled()).toBe(false)
+
+      setPushEnabled(true)
+      expect(isPushEnabled()).toBe(true)
+    })
+
+    it('registerPushToken is a no-op while push is disabled', async () => {
+      const fetchMock = mockFetchOk()
+      setPushEnabled(false)
+
+      await registerPushToken(RELAY_URL, SESSION_ID, DEVICE_ID, CLIENT_TOKEN)
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(getJson('push.lastRegistration')).toBeNull()
+    })
+
+    it('registers again once the preference is re-enabled', async () => {
+      const fetchMock = mockFetchOk()
+
+      setPushEnabled(false)
+      await registerPushToken(RELAY_URL, SESSION_ID, DEVICE_ID, CLIENT_TOKEN)
+      expect(fetchMock).not.toHaveBeenCalled()
+
+      setPushEnabled(true)
+      await registerPushToken(RELAY_URL, SESSION_ID, DEVICE_ID, CLIENT_TOKEN)
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(getJson('push.lastRegistration')).not.toBeNull()
+    })
+
+    it('clearPushToken still clears the relay token while push is disabled', async () => {
+      const fetchMock = mockFetchOk()
+
+      await registerPushToken(RELAY_URL, SESSION_ID, DEVICE_ID, CLIENT_TOKEN)
+      setPushEnabled(false)
+      await clearPushToken(RELAY_URL, SESSION_ID, DEVICE_ID, CLIENT_TOKEN)
+
+      expect(getJson('push.lastRegistration')).toBeNull()
+      expect(JSON.parse(fetchMock.mock.calls[1][1].body as string)).toEqual({ push_token: null })
     })
   })
 

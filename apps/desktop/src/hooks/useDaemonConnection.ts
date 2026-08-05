@@ -69,19 +69,28 @@ export function useDaemonConnection() {
           next,
         )
       }
-      return next
-    })
 
-    if (event.workspace_id && event.thread_id) {
-      const cacheKey = threadCacheKey(event.workspace_id, event.thread_id)
-      const cached = threadDetailCacheRef.current.get(cacheKey)
-      if (cached) {
-        const next = applyEventToThreadDetail(cached, event)
-        if (next) {
-          threadDetailCacheRef.current.set(cacheKey, next)
+      // Keep cached details for threads OTHER than the currently loaded one in
+      // sync so switching threads renders fresh data from memory. The loaded
+      // detail's cache entry was already written above from `next` — applying
+      // the same event to it a second time would just burn allocations.
+      if (event.workspace_id && event.thread_id) {
+        const cacheKey = threadCacheKey(event.workspace_id, event.thread_id)
+        const isLoadedDetail =
+          next !== null && threadCacheKey(next.workspace.id, next.thread.id) === cacheKey
+        if (!isLoadedDetail) {
+          const cached = threadDetailCacheRef.current.get(cacheKey)
+          if (cached) {
+            const updated = applyEventToThreadDetail(cached, event)
+            if (updated && updated !== cached) {
+              threadDetailCacheRef.current.set(cacheKey, updated)
+            }
+          }
         }
       }
-    }
+
+      return next
+    })
 
     if (event.event.type === 'turn-end') {
       setGitRefreshTrigger((c) => c + 1)

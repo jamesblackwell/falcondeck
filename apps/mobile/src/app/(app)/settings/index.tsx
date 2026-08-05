@@ -1,9 +1,11 @@
-import { View, ScrollView, Pressable } from 'react-native'
+import { useState } from 'react'
+import { View, ScrollView, Pressable, Switch } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { useRouter } from 'expo-router'
 import { ChevronLeft } from 'lucide-react-native'
 
+import { clearPushToken, isPushEnabled, registerPushToken, setPushEnabled } from '@/lib/push-notifications'
 import { useRelayStore } from '@/store'
 import { Text, Button, Card, CardContent } from '@/components/ui'
 
@@ -52,6 +54,29 @@ export default function SettingsScreen() {
     router.replace('/(auth)/pair')
   }
 
+  const [pushEnabled, setPushEnabledState] = useState(isPushEnabled)
+
+  const handlePushToggle = (enabled: boolean) => {
+    setPushEnabledState(enabled)
+    setPushEnabled(enabled)
+
+    // Sync the relay registration right away when the session is usable.
+    // Both calls are fire-and-forget safe and never throw.
+    const relay = useRelayStore.getState()
+    const clientToken = relay._getClientToken()
+    if (!relay.sessionId || !relay.deviceId || !clientToken) return
+
+    if (enabled) {
+      if (relay.isEncrypted) {
+        void registerPushToken(relay.relayUrl, relay.sessionId, relay.deviceId, clientToken)
+      }
+    } else {
+      // Clears the relay-side token and the local last-registration marker so
+      // a later re-enable re-registers from scratch.
+      void clearPushToken(relay.relayUrl, relay.sessionId, relay.deviceId, clientToken)
+    }
+  }
+
   return (
     <ScrollView
       style={styles.container}
@@ -92,6 +117,23 @@ export default function SettingsScreen() {
               {encryptionLabel}
             </Text>
           </View>
+        </CardContent>
+      </Card>
+
+      <Card variant="flat" style={styles.card}>
+        <CardContent>
+          <View style={styles.row}>
+            <Text variant="label" color="muted">Push notifications</Text>
+            <Switch
+              value={pushEnabled}
+              onValueChange={handlePushToggle}
+              trackColor={{ false: theme.colors.surface[3], true: theme.colors.accent.default }}
+              thumbColor={theme.colors.white}
+            />
+          </View>
+          <Text variant="caption" color="faint" style={styles.rowCaption}>
+            Get alerted when an agent needs attention while you are away.
+          </Text>
         </CardContent>
       </Card>
 
@@ -139,6 +181,9 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
     textAlign: 'right',
     marginLeft: theme.spacing[4],
+  },
+  rowCaption: {
+    paddingVertical: theme.spacing[2],
   },
   disconnect: {
     marginTop: theme.spacing[4],

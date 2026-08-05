@@ -38,6 +38,7 @@ import {
   type RelayUpdate,
 } from '@falcondeck/client-core'
 
+import { clearPushToken } from '@/lib/push-notifications'
 import { getJson, setJson, removeKey } from '@/storage/mmkv'
 import {
   persistClientSecretKey,
@@ -372,6 +373,14 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   },
 
   disconnect: async () => {
+    // Best-effort: ask the relay to stop pushing to this device while we still
+    // hold the client token the call needs. Fire-and-forget — clearPushToken
+    // never throws, and unpairing must not block on the network.
+    const { relayUrl, sessionId, deviceId } = get()
+    if (sessionId && deviceId && _clientToken) {
+      void clearPushToken(relayUrl, sessionId, deviceId, _clientToken)
+    }
+
     const socket = _socket
     _socket = null
     get()._failPendingRpcs('Remote session disconnected')
