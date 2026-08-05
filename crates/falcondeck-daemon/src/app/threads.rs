@@ -552,6 +552,20 @@ impl AppState {
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
+        // A user-requested interrupt is not attention-worthy; a finished or
+        // failed turn is. The relay only pushes to disconnected devices.
+        if !was_interrupted {
+            self.notify_remote_attention(
+                if turn_error.is_some() {
+                    "turn-error"
+                } else {
+                    "turn-complete"
+                },
+                &workspace_id,
+                Some(thread_id.clone()),
+            )
+            .await;
+        }
         if turn_error.is_none() && saw_agent_output {
             self.maybe_schedule_ai_thread_title(workspace_id, thread_id)
                 .await;

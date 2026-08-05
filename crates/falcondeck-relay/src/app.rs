@@ -1800,6 +1800,8 @@ impl AppState {
         let (title, body) = match kind.as_str() {
             "approval" => ("FalconDeck", "An agent is waiting for your approval"),
             "question" => ("FalconDeck", "An agent asked you a question"),
+            "turn-complete" => ("FalconDeck", "An agent finished its turn"),
+            "turn-error" => ("FalconDeck", "An agent turn failed"),
             _ => ("FalconDeck", "An agent needs your attention"),
         };
         let messages = recipients

@@ -143,9 +143,22 @@ pub(super) async fn ingest_notification(
                     UnifiedEvent::TurnEnd {
                         turn_id,
                         status,
-                        error,
+                        error: error.clone(),
                     },
                 );
+                // A finished turn means the agent is waiting on the user;
+                // let disconnected devices know. The relay only pushes to
+                // devices without a live connection and dedupes per thread.
+                app.notify_remote_attention(
+                    if error.is_some() {
+                        "turn-error"
+                    } else {
+                        "turn-complete"
+                    },
+                    workspace_id,
+                    Some(thread_id.clone()),
+                )
+                .await;
                 app.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id)
                     .await;
             }
