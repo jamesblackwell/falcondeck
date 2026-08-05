@@ -21,7 +21,9 @@ import {
   selectedSkillsFromText,
   activeSlashQuery,
   shouldReusePersistedRemoteSession,
+  signPairingClaimChallenge,
   upsertConversationItem,
+  verifyPairingClaimChallenge,
   type ConversationItem,
   type EventEnvelope,
   type PersistedRemoteSession,
@@ -516,6 +518,76 @@ describe('client-core relay crypto helpers', () => {
     expect(() => bootstrapSessionCrypto(clientKeyPair, material)).toThrow(
       'Encrypted session bootstrap is not addressed to this client',
     )
+  })
+})
+
+describe('client-core pairing claim challenge signing', () => {
+  it('signs the Rust-compatible payload string and round-trips verification', () => {
+    const keyPair = generateBoxKeyPair()
+    const identityKeyPair = deriveIdentityKeyPair(keyPair)
+    const pairingCode = 'PAIRCODE1234'
+    const challenge = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)))
+
+    const signature = signPairingClaimChallenge(keyPair, pairingCode, challenge)
+
+    // The signature must cover the exact payload byte string the Rust relay
+    // verifies: `falcondeck-pairing-claim-v1\n{pairing_code}\n{challenge}`.
+    const payload = new Uint8Array(
+      new TextEncoder().encode(`falcondeck-pairing-claim-v1\n${pairingCode}\n${challenge}`),
+    )
+    expect(
+      nacl.sign.detached.verify(
+        payload,
+        new Uint8Array([...atob(signature)].map((char) => char.charCodeAt(0))),
+        identityKeyPair.publicKey,
+      ),
+    ).toBe(true)
+
+    expect(() =>
+      verifyPairingClaimChallenge(
+        identityPublicKeyToBase64(identityKeyPair),
+        pairingCode,
+        challenge,
+        signature,
+      ),
+    ).not.toThrow()
+  })
+
+  it('rejects a signature made by a different identity key', () => {
+    const keyPair = generateBoxKeyPair()
+    const otherKeyPair = generateBoxKeyPair()
+    const pairingCode = 'PAIRCODE1234'
+    const challenge = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)))
+
+    const signature = signPairingClaimChallenge(otherKeyPair, pairingCode, challenge)
+
+    expect(() =>
+      verifyPairingClaimChallenge(
+        identityPublicKeyToBase64(deriveIdentityKeyPair(keyPair)),
+        pairingCode,
+        challenge,
+        signature,
+      ),
+    ).toThrow('Pairing claim challenge signature verification failed')
+  })
+
+  it('rejects a signature over a different pairing code or challenge', () => {
+    const keyPair = generateBoxKeyPair()
+    const identityPublicKey = identityPublicKeyToBase64(deriveIdentityKeyPair(keyPair))
+    const challenge = bytesToBase64(crypto.getRandomValues(new Uint8Array(32)))
+    const signature = signPairingClaimChallenge(keyPair, 'PAIRCODE1234', challenge)
+
+    expect(() =>
+      verifyPairingClaimChallenge(identityPublicKey, 'OTHERCODE999', challenge, signature),
+    ).toThrow('Pairing claim challenge signature verification failed')
+    expect(() =>
+      verifyPairingClaimChallenge(
+        identityPublicKey,
+        'PAIRCODE1234',
+        bytesToBase64(crypto.getRandomValues(new Uint8Array(32))),
+        signature,
+      ),
+    ).toThrow('Pairing claim challenge signature verification failed')
   })
 })
 

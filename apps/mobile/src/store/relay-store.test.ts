@@ -6,6 +6,20 @@ import { useSessionStore } from './session-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 
+/// Claims are now a two-step challenge → claim flow; mock both relay
+/// endpoints so claimPairing can complete.
+function mockPairingFetch(claim: Record<string, unknown>) {
+  return vi.fn().mockImplementation(async (url: string) => {
+    if (typeof url === 'string' && url.endsWith('/v1/pairings/challenge')) {
+      return {
+        ok: true,
+        json: async () => ({ pairing_id: 'pairing-1', challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+      }
+    }
+    return { ok: true, json: async () => claim }
+  })
+}
+
 function resetStore() {
   // Reset internal refs by disconnecting
   const state = useRelayStore.getState()
@@ -105,24 +119,21 @@ describe('relay-store', () => {
       setRelayUrl('https://relay.test')
       setPairingCode('GOOD-CODE')
 
-      globalThis.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          pairing_id: 'pairing-1',
-          session_id: 'session-abc',
+      globalThis.fetch = mockPairingFetch({
+        pairing_id: 'pairing-1',
+        session_id: 'session-abc',
+        device_id: 'device-xyz',
+        client_token: 'token-123',
+        trusted_device: {
           device_id: 'device-xyz',
-          client_token: 'token-123',
-          trusted_device: {
-            device_id: 'device-xyz',
-            session_id: 'session-abc',
-            label: 'FalconDeck iPhone',
-            status: 'active',
-            created_at: '2026-03-16T10:00:00Z',
-            last_seen_at: '2026-03-16T10:00:00Z',
-            revoked_at: null,
-          },
-          daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
-        }),
+          session_id: 'session-abc',
+          label: 'FalconDeck iPhone',
+          status: 'active',
+          created_at: '2026-03-16T10:00:00Z',
+          last_seen_at: '2026-03-16T10:00:00Z',
+          revoked_at: null,
+        },
+        daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
       })
 
       await claimPairing()
@@ -144,24 +155,21 @@ describe('relay-store', () => {
         material: null,
       })
 
-      globalThis.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          pairing_id: 'pairing-1',
-          session_id: 'session-abc',
+      globalThis.fetch = mockPairingFetch({
+        pairing_id: 'pairing-1',
+        session_id: 'session-abc',
+        device_id: 'device-xyz',
+        client_token: 'token-123',
+        trusted_device: {
           device_id: 'device-xyz',
-          client_token: 'token-123',
-          trusted_device: {
-            device_id: 'device-xyz',
-            session_id: 'session-abc',
-            label: 'FalconDeck iPhone',
-            status: 'active',
-            created_at: '2026-03-16T10:00:00Z',
-            last_seen_at: '2026-03-16T10:00:00Z',
-            revoked_at: null,
-          },
-          daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
-        }),
+          session_id: 'session-abc',
+          label: 'FalconDeck iPhone',
+          status: 'active',
+          created_at: '2026-03-16T10:00:00Z',
+          last_seen_at: '2026-03-16T10:00:00Z',
+          revoked_at: null,
+        },
+        daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
       })
 
       await claimPairing()
@@ -197,24 +205,21 @@ describe('relay-store', () => {
       setRelayUrl('https://relay.test')
       setPairingCode('GOOD-CODE')
 
-      globalThis.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          pairing_id: 'pairing-1',
-          session_id: 'session-abc',
+      globalThis.fetch = mockPairingFetch({
+        pairing_id: 'pairing-1',
+        session_id: 'session-abc',
+        device_id: 'device-xyz',
+        client_token: 'token-123',
+        trusted_device: {
           device_id: 'device-xyz',
-          client_token: 'token-123',
-          trusted_device: {
-            device_id: 'device-xyz',
-            session_id: 'session-abc',
-            label: 'FalconDeck iPhone',
-            status: 'active',
-            created_at: '2026-03-16T10:00:00Z',
-            last_seen_at: '2026-03-16T10:00:00Z',
-            revoked_at: null,
-          },
-          daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
-        }),
+          session_id: 'session-abc',
+          label: 'FalconDeck iPhone',
+          status: 'active',
+          created_at: '2026-03-16T10:00:00Z',
+          last_seen_at: '2026-03-16T10:00:00Z',
+          revoked_at: null,
+        },
+        daemon_bundle: buildPairingPublicKeyBundle(generateBoxKeyPair()),
       })
       await claimPairing()
 

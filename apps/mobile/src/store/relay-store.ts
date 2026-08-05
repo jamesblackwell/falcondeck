@@ -19,6 +19,7 @@ import {
   identityPublicKeyToBase64,
   deriveIdentityKeyPair,
   secretKeyToBase64,
+  signPairingClaimChallenge,
   bootstrapSessionCrypto,
   encryptJson,
   decryptJson,
@@ -27,7 +28,10 @@ import {
   verifyPairingPublicKeyBundle,
   verifySessionKeyMaterial,
   REMOTE_SESSION_STORAGE_VERSION,
+  type ClaimPairingRequest,
   type ClaimPairingResponse,
+  type PairingChallengeRequest,
+  type PairingChallengeResponse,
   type BoxKeyPair,
   type SessionCryptoState,
   type EncryptedEnvelope,
@@ -182,15 +186,49 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     const keyPair = generateBoxKeyPair()
 
     try {
-      const clientBundle = buildPairingPublicKeyBundle(keyPair)
-      const response = await fetch(`${relayUrl.replace(/\/$/, '')}/v1/pairings/claim`, {
+      const relayBase = relayUrl.replace(/\/$/, '')
+      // The relay normalizes pairing codes to uppercase; sign the exact
+      // string the relay verifies against.
+      const normalizedPairingCode = pairingCode.trim().toUpperCase()
+
+      // Claims are challenge-bound: fetch a single-use challenge and prove
+      // possession of the identity secret key by signing it.
+      const challengeResponse = await fetch(`${relayBase}/v1/pairings/challenge`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
-          pairing_code: pairingCode.trim(),
+          pairing_code: normalizedPairingCode,
+        } satisfies PairingChallengeRequest),
+      })
+      if (!challengeResponse.ok) {
+        _clientKeyPair = null
+        const payload = (await challengeResponse.json().catch(() => null)) as { error?: string } | null
+        set({
+          sessionId: null,
+          deviceId: null,
+          connectionStatus: 'not_connected',
+          machinePresence: null,
+          error: payload?.error ?? `Failed with status ${challengeResponse.status}`,
+          isConnected: false,
+          isEncrypted: false,
+        })
+        return
+      }
+      const challenge = (await challengeResponse.json()) as PairingChallengeResponse
+      if (!challenge.challenge) {
+        throw new Error('Relay challenge response is missing a challenge')
+      }
+
+      const clientBundle = buildPairingPublicKeyBundle(keyPair)
+      const response = await fetch(`${relayBase}/v1/pairings/claim`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          pairing_code: normalizedPairingCode,
           label: Device.deviceName ?? `FalconDeck ${Platform.OS === 'ios' ? 'iPhone' : 'Android'}`,
           client_bundle: clientBundle,
-        }),
+          challenge_signature: signPairingClaimChallenge(keyPair, normalizedPairingCode, challenge.challenge),
+        } satisfies ClaimPairingRequest),
       })
 
       if (!response.ok) {

@@ -3,11 +3,14 @@ use std::{net::SocketAddr, path::PathBuf};
 use chrono::Duration;
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
-    PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, RelayClientMessage,
-    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse,
-    RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
+    PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle, PairingStatus,
+    PairingStatusResponse, RelayClientMessage, RelayServerMessage, RelayUpdate, RelayUpdateBody,
+    RelayUpdatesResponse, RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
     SubmitQueuedActionRequest, TrustedDevicesResponse,
-    crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, encrypt_json, generate_data_key},
+    crypto::{
+        LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle, encrypt_json,
+        generate_data_key, sign_pairing_claim_challenge,
+    },
 };
 use falcondeck_relay::{AppState, RetentionConfig, router};
 use futures_util::{SinkExt, StreamExt};
@@ -56,15 +59,12 @@ async fn pairing_flow_and_history_round_trip() {
     assert_eq!(pending.status, PairingStatus::Pending);
     assert_eq!(pending.label.as_deref(), Some("James Mac"));
 
-    let claim = post_json::<_, ClaimPairingResponse>(
+    let claim = claim_with_challenge(
         &client,
-        &format!("{}/v1/pairings/claim", server.http_base),
-        &ClaimPairingRequest {
-            pairing_code: pairing.pairing_code.clone(),
-            label: Some("Phone".to_string()),
-            client_bundle: Some(test_bundle()),
-        },
-        None,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("Phone"),
+        &LocalBoxKeyPair::generate(),
     )
     .await;
 
@@ -118,15 +118,12 @@ async fn additional_pairings_attach_new_devices_to_the_same_session() {
     assert_eq!(second_pairing.session_id, pairing.session_id);
     assert_eq!(second_pairing.daemon_token, pairing.daemon_token);
 
-    let second_claim = post_json::<_, ClaimPairingResponse>(
+    let second_claim = claim_with_challenge(
         &client,
-        &format!("{}/v1/pairings/claim", server.http_base),
-        &ClaimPairingRequest {
-            pairing_code: second_pairing.pairing_code,
-            label: Some("tablet".to_string()),
-            client_bundle: Some(test_bundle()),
-        },
-        None,
+        &server.http_base,
+        &second_pairing.pairing_code,
+        Some("tablet"),
+        &LocalBoxKeyPair::generate(),
     )
     .await;
 
@@ -157,7 +154,7 @@ async fn additional_pairings_attach_new_devices_to_the_same_session() {
 async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
-    let client_bundle = test_bundle();
+    let client_key_pair = LocalBoxKeyPair::generate();
 
     let first_pairing = post_json::<_, StartPairingResponse>(
         &client,
@@ -173,15 +170,12 @@ async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
     )
     .await;
 
-    let first_claim = post_json::<_, ClaimPairingResponse>(
+    let first_claim = claim_with_challenge(
         &client,
-        &format!("{}/v1/pairings/claim", server.http_base),
-        &ClaimPairingRequest {
-            pairing_code: first_pairing.pairing_code.clone(),
-            label: Some("Safari on iPhone".to_string()),
-            client_bundle: Some(client_bundle.clone()),
-        },
-        None,
+        &server.http_base,
+        &first_pairing.pairing_code,
+        Some("Safari on iPhone"),
+        &client_key_pair,
     )
     .await;
 
@@ -199,15 +193,12 @@ async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
     )
     .await;
 
-    let second_claim = post_json::<_, ClaimPairingResponse>(
+    let second_claim = claim_with_challenge(
         &client,
-        &format!("{}/v1/pairings/claim", server.http_base),
-        &ClaimPairingRequest {
-            pairing_code: second_pairing.pairing_code.clone(),
-            label: Some("Safari on iPhone".to_string()),
-            client_bundle: Some(client_bundle),
-        },
-        None,
+        &server.http_base,
+        &second_pairing.pairing_code,
+        Some("Safari on iPhone"),
+        &client_key_pair,
     )
     .await;
 
@@ -232,7 +223,7 @@ async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
 async fn reclaiming_the_same_pairing_code_with_the_same_client_key_is_idempotent() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
-    let client_bundle = test_bundle();
+    let client_key_pair = LocalBoxKeyPair::generate();
 
     let pairing = post_json::<_, StartPairingResponse>(
         &client,
@@ -248,27 +239,21 @@ async fn reclaiming_the_same_pairing_code_with_the_same_client_key_is_idempotent
     )
     .await;
 
-    let first_claim = post_json::<_, ClaimPairingResponse>(
+    let first_claim = claim_with_challenge(
         &client,
-        &format!("{}/v1/pairings/claim", server.http_base),
-        &ClaimPairingRequest {
-            pairing_code: pairing.pairing_code.clone(),
-            label: Some("Safari on iPhone".to_string()),
-            client_bundle: Some(client_bundle.clone()),
-        },
-        None,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("Safari on iPhone"),
+        &client_key_pair,
     )
     .await;
 
-    let second_claim = post_json::<_, ClaimPairingResponse>(
+    let second_claim = claim_with_challenge(
         &client,
-        &format!("{}/v1/pairings/claim", server.http_base),
-        &ClaimPairingRequest {
-            pairing_code: pairing.pairing_code.clone(),
-            label: Some("Safari on iPhone".to_string()),
-            client_bundle: Some(client_bundle),
-        },
-        None,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("Safari on iPhone"),
+        &client_key_pair,
     )
     .await;
 
@@ -509,18 +494,246 @@ async fn expired_pairings_cannot_be_claimed() {
 
     tokio::time::sleep(TokioDuration::from_millis(1100)).await;
 
+    let challenge_response = client
+        .post(format!("{}/v1/pairings/challenge", server.http_base))
+        .json(&PairingChallengeRequest {
+            pairing_code: pairing.pairing_code.clone(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(challenge_response.status(), StatusCode::NOT_FOUND);
+
+    let key_pair = LocalBoxKeyPair::generate();
     let response = client
         .post(format!("{}/v1/pairings/claim", server.http_base))
-        .json(&ClaimPairingRequest {
-            pairing_code: pairing.pairing_code,
-            label: None,
-            client_bundle: Some(test_bundle()),
-        })
+        .json(&signed_claim_request(
+            &pairing.pairing_code,
+            "expired-challenge",
+            None,
+            &key_pair,
+        ))
         .send()
         .await
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn claims_without_a_challenge_are_rejected() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: None,
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    // A valid bundle and a well-formed signature are not enough: no
+    // challenge was ever issued for this pairing.
+    let key_pair = LocalBoxKeyPair::generate();
+    let response = client
+        .post(format!("{}/v1/pairings/claim", server.http_base))
+        .json(&signed_claim_request(
+            &pairing.pairing_code,
+            "made-up-challenge",
+            Some("attacker"),
+            &key_pair,
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let payload = response.json::<serde_json::Value>().await.unwrap();
+    assert!(
+        payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("challenge missing or expired"),
+        "unexpected error payload: {payload:?}"
+    );
+}
+
+#[tokio::test]
+async fn claims_signed_by_a_different_identity_key_are_rejected() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: None,
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    // A stolen (valid, self-signed) bundle without its secret key: the
+    // attacker can only sign the challenge with a different identity key.
+    let stolen_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+    let attacker_identity =
+        LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
+    let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let response = client
+        .post(format!("{}/v1/pairings/claim", server.http_base))
+        .json(&ClaimPairingRequest {
+            pairing_code: pairing.pairing_code.clone(),
+            label: Some("attacker".to_string()),
+            client_bundle: Some(stolen_bundle),
+            challenge_signature: sign_pairing_claim_challenge(
+                &attacker_identity,
+                &pairing.pairing_code,
+                &challenge.challenge,
+            ),
+        })
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn pairing_claim_challenges_are_single_use() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+
+    let pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: None,
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+
+    let key_pair = LocalBoxKeyPair::generate();
+    let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let request = signed_claim_request(
+        &pairing.pairing_code,
+        &challenge.challenge,
+        Some("phone"),
+        &key_pair,
+    );
+
+    let first = client
+        .post(format!("{}/v1/pairings/claim", server.http_base))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Replaying the identical signed claim must fail: the challenge was
+    // consumed by the first claim.
+    let replay = client
+        .post(format!("{}/v1/pairings/claim", server.http_base))
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn stolen_client_bundle_cannot_reattach_as_an_existing_trusted_device() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let victim_key_pair = LocalBoxKeyPair::generate();
+
+    let pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+    let victim_claim = claim_with_challenge(
+        &client,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("victim phone"),
+        &victim_key_pair,
+    )
+    .await;
+
+    // The relay stores the victim's bundle on the pairing record. An
+    // attacker who obtains that stored bundle (relay DB read, backup leak)
+    // must not be able to re-claim the pairing and mint the victim device's
+    // client token, because they cannot sign the fresh challenge with the
+    // victim's identity secret key.
+    let stolen_bundle = build_pairing_public_key_bundle(&victim_key_pair);
+    let attacker_identity =
+        LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
+    let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let response = client
+        .post(format!("{}/v1/pairings/claim", server.http_base))
+        .json(&ClaimPairingRequest {
+            pairing_code: pairing.pairing_code.clone(),
+            label: Some("attacker".to_string()),
+            client_bundle: Some(stolen_bundle),
+            challenge_signature: sign_pairing_claim_challenge(
+                &attacker_identity,
+                &pairing.pairing_code,
+                &challenge.challenge,
+            ),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+    // The victim's trusted device is untouched and remains the only one.
+    let devices = get_json::<TrustedDevicesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/devices",
+            server.http_base, victim_claim.session_id
+        ),
+        Some(&pairing.daemon_token),
+    )
+    .await;
+    assert_eq!(devices.devices.len(), 1);
+    assert_eq!(devices.devices[0].device_id, victim_claim.device_id);
+
+    // The legitimate holder of the identity secret key can still re-claim.
+    let reclaim = claim_with_challenge(
+        &client,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("victim phone"),
+        &victim_key_pair,
+    )
+    .await;
+    assert_eq!(reclaim.device_id, victim_claim.device_id);
+    assert_eq!(reclaim.client_token, victim_claim.client_token);
 }
 
 #[tokio::test]
@@ -1402,15 +1615,12 @@ async fn queued_action_idempotency_is_scoped_per_device() {
         None,
     )
     .await;
-    let second_claim = post_json::<_, ClaimPairingResponse>(
+    let second_claim = claim_with_challenge(
         &client,
-        &format!("{}/v1/pairings/claim", server.http_base),
-        &ClaimPairingRequest {
-            pairing_code: second_pairing.pairing_code,
-            label: Some("tablet".to_string()),
-            client_bundle: Some(test_bundle()),
-        },
-        None,
+        &server.http_base,
+        &second_pairing.pairing_code,
+        Some("tablet"),
+        &LocalBoxKeyPair::generate(),
     )
     .await;
 
@@ -1634,19 +1844,68 @@ async fn create_claimed_session(
     )
     .await;
 
-    let claim = post_json::<_, ClaimPairingResponse>(
+    let claim = claim_with_challenge(
         client,
-        &format!("{http_base}/v1/pairings/claim"),
-        &ClaimPairingRequest {
-            pairing_code: pairing.pairing_code.clone(),
-            label: Some("remote-web".to_string()),
-            client_bundle: Some(test_bundle()),
-        },
-        None,
+        http_base,
+        &pairing.pairing_code,
+        Some("remote-web"),
+        &LocalBoxKeyPair::generate(),
     )
     .await;
 
     (pairing, claim)
+}
+
+/// Requests a fresh single-use challenge for the pairing code.
+async fn request_challenge(
+    client: &reqwest::Client,
+    http_base: &str,
+    pairing_code: &str,
+) -> PairingChallengeResponse {
+    post_json::<_, PairingChallengeResponse>(
+        client,
+        &format!("{http_base}/v1/pairings/challenge"),
+        &PairingChallengeRequest {
+            pairing_code: pairing_code.to_string(),
+        },
+        None,
+    )
+    .await
+}
+
+/// Builds a claim request whose challenge signature proves possession of the
+/// key pair's identity secret key, mirroring what real clients do.
+fn signed_claim_request(
+    pairing_code: &str,
+    challenge: &str,
+    label: Option<&str>,
+    key_pair: &LocalBoxKeyPair,
+) -> ClaimPairingRequest {
+    let identity = LocalIdentityKeyPair::from_box_key_pair(key_pair);
+    ClaimPairingRequest {
+        pairing_code: pairing_code.to_string(),
+        label: label.map(str::to_string),
+        client_bundle: Some(build_pairing_public_key_bundle(key_pair)),
+        challenge_signature: sign_pairing_claim_challenge(&identity, pairing_code, challenge),
+    }
+}
+
+/// Full challenge → sign → claim flow with the given client key pair.
+async fn claim_with_challenge(
+    client: &reqwest::Client,
+    http_base: &str,
+    pairing_code: &str,
+    label: Option<&str>,
+    key_pair: &LocalBoxKeyPair,
+) -> ClaimPairingResponse {
+    let challenge = request_challenge(client, http_base, pairing_code).await;
+    post_json::<_, ClaimPairingResponse>(
+        client,
+        &format!("{http_base}/v1/pairings/claim"),
+        &signed_claim_request(pairing_code, &challenge.challenge, label, key_pair),
+        None,
+    )
+    .await
 }
 
 async fn post_json<T, R>(client: &reqwest::Client, url: &str, body: &T, bearer: Option<&str>) -> R

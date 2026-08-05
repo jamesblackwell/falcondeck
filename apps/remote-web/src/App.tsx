@@ -31,6 +31,7 @@ import {
   selectedSkillsFromText,
   secretKeyToBase64,
   shouldReusePersistedRemoteSession,
+  signPairingClaimChallenge,
   REMOTE_SESSION_STORAGE_VERSION,
   supportsPlanMode,
   togglePlanMode,
@@ -40,6 +41,7 @@ import {
   workspaceCollaborationModes,
   workspaceModels,
   type AgentProvider,
+  type ClaimPairingRequest,
   type ClaimPairingResponse,
   type ConversationItem,
   type DaemonSnapshot,
@@ -48,6 +50,8 @@ import {
   type ImageInput,
   type InteractiveResponsePayload,
   type MachinePresence,
+  type PairingChallengeRequest,
+  type PairingChallengeResponse,
   type PersistedRemoteSession,
   type QueuedRemoteAction,
   type RelayServerMessage,
@@ -1020,14 +1024,40 @@ export default function App() {
     suppressReconnectRef.current = false
     abortPendingActionPolls()
     const keyPair = clientKeyPairRef.current ?? generateBoxKeyPair()
-    const response = await fetch(`${relayUrl.replace(/\/$/, '')}/v1/pairings/claim`, {
+    const relayBase = relayUrl.replace(/\/$/, '')
+    // The relay normalizes pairing codes to uppercase; sign the exact string
+    // the relay verifies against.
+    const normalizedPairingCode = pairingCode.trim().toUpperCase()
+
+    // Claims are challenge-bound: fetch a single-use challenge and prove
+    // possession of the identity secret key by signing it.
+    const challengeResponse = await fetch(`${relayBase}/v1/pairings/challenge`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
-        pairing_code: pairingCode.trim(),
+        pairing_code: normalizedPairingCode,
+      } satisfies PairingChallengeRequest),
+    })
+    if (!challengeResponse.ok) {
+      const payload = (await challengeResponse.json().catch(() => null)) as { error?: string } | null
+      setError(payload?.error ?? `Failed with status ${challengeResponse.status}`)
+      return
+    }
+    const challenge = (await challengeResponse.json()) as PairingChallengeResponse
+    if (!challenge.challenge) {
+      setError('Relay challenge response is missing a challenge')
+      return
+    }
+
+    const response = await fetch(`${relayBase}/v1/pairings/claim`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        pairing_code: normalizedPairingCode,
         label: getDeviceLabel(),
         client_bundle: buildPairingPublicKeyBundle(keyPair),
-      }),
+        challenge_signature: signPairingClaimChallenge(keyPair, normalizedPairingCode, challenge.challenge),
+      } satisfies ClaimPairingRequest),
     })
     if (!response.ok) {
       const payload = (await response.json().catch(() => null)) as { error?: string } | null

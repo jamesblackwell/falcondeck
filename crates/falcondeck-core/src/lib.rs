@@ -1393,6 +1393,22 @@ pub struct StartPairingResponse {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Request payload used by a client to obtain a pairing claim challenge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingChallengeRequest {
+    /// Pairing code entered by the user.
+    pub pairing_code: String,
+}
+
+/// Response containing a relay-issued single-use pairing claim challenge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PairingChallengeResponse {
+    /// Pairing identifier the challenge is bound to.
+    pub pairing_id: String,
+    /// Base64-encoded random challenge the claimer must sign.
+    pub challenge: String,
+}
+
 /// Request payload used by a client to claim a pairing code.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ClaimPairingRequest {
@@ -1402,6 +1418,9 @@ pub struct ClaimPairingRequest {
     pub label: Option<String>,
     /// Optional client public key bundle.
     pub client_bundle: Option<PairingPublicKeyBundle>,
+    /// Base64-encoded Ed25519 signature over the relay-issued claim
+    /// challenge, proving possession of the bundle's identity secret key.
+    pub challenge_signature: String,
 }
 
 /// Response returned after a client claims a pairing.

@@ -3,9 +3,12 @@ use std::path::PathBuf;
 use chrono::Duration;
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, DaemonSnapshot, HealthResponse,
-    PairingPublicKeyBundle, RelayUpdateBody, RelayUpdatesResponse, RemoteStatusResponse,
-    StartRemotePairingRequest, WorkspaceStatus,
-    crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle},
+    PairingChallengeRequest, PairingChallengeResponse, RelayUpdateBody, RelayUpdatesResponse,
+    RemoteStatusResponse, StartRemotePairingRequest, WorkspaceStatus,
+    crypto::{
+        LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle,
+        sign_pairing_claim_challenge,
+    },
 };
 use falcondeck_daemon::{DaemonConfig, spawn_embedded};
 use falcondeck_relay::{AppState as RelayState, router as relay_router};
@@ -147,19 +150,14 @@ async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
         .unwrap();
 
     let pairing = remote.pairing.unwrap();
-    let claim = client
-        .post(format!("{relay_base}/v1/pairings/claim"))
-        .json(&ClaimPairingRequest {
-            pairing_code: pairing.pairing_code.clone(),
-            label: Some("remote-web-test".to_string()),
-            client_bundle: Some(test_bundle()),
-        })
-        .send()
-        .await
-        .unwrap()
-        .json::<ClaimPairingResponse>()
-        .await
-        .unwrap();
+    let claim = claim_pairing_with_challenge(
+        &client,
+        &relay_base,
+        &pairing.pairing_code,
+        "remote-web-test",
+        &LocalBoxKeyPair::generate(),
+    )
+    .await;
 
     let mut connected = false;
     for _ in 0..20 {
@@ -239,19 +237,14 @@ async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstra
         .await
         .unwrap();
     let first_pairing = first_remote.pairing.unwrap();
-    let first_claim = client
-        .post(format!("{relay_base}/v1/pairings/claim"))
-        .json(&ClaimPairingRequest {
-            pairing_code: first_pairing.pairing_code.clone(),
-            label: Some("phone".to_string()),
-            client_bundle: Some(test_bundle()),
-        })
-        .send()
-        .await
-        .unwrap()
-        .json::<ClaimPairingResponse>()
-        .await
-        .unwrap();
+    let first_claim = claim_pairing_with_challenge(
+        &client,
+        &relay_base,
+        &first_pairing.pairing_code,
+        "phone",
+        &LocalBoxKeyPair::generate(),
+    )
+    .await;
 
     wait_for_connected(&client, &daemon.base_url()).await;
 
@@ -272,21 +265,16 @@ async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstra
         Some(first_claim.session_id.as_str())
     );
 
-    let second_bundle = test_bundle();
-    let second_client_public_key = second_bundle.public_key.clone();
-    let second_claim = client
-        .post(format!("{relay_base}/v1/pairings/claim"))
-        .json(&ClaimPairingRequest {
-            pairing_code: second_pairing.pairing_code.clone(),
-            label: Some("tablet".to_string()),
-            client_bundle: Some(second_bundle),
-        })
-        .send()
-        .await
-        .unwrap()
-        .json::<ClaimPairingResponse>()
-        .await
-        .unwrap();
+    let second_key_pair = LocalBoxKeyPair::generate();
+    let second_client_public_key = second_key_pair.public_key_base64().to_string();
+    let second_claim = claim_pairing_with_challenge(
+        &client,
+        &relay_base,
+        &second_pairing.pairing_code,
+        "tablet",
+        &second_key_pair,
+    )
+    .await;
 
     assert_eq!(second_claim.session_id, first_claim.session_id);
     assert_ne!(second_claim.device_id, first_claim.device_id);
@@ -338,19 +326,14 @@ async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral
         .await
         .unwrap();
     let pairing = remote.pairing.unwrap();
-    let claim = client
-        .post(format!("{relay_base}/v1/pairings/claim"))
-        .json(&ClaimPairingRequest {
-            pairing_code: pairing.pairing_code.clone(),
-            label: Some("keyless-client-test".to_string()),
-            client_bundle: Some(test_bundle()),
-        })
-        .send()
-        .await
-        .unwrap()
-        .json::<ClaimPairingResponse>()
-        .await
-        .unwrap();
+    let claim = claim_pairing_with_challenge(
+        &client,
+        &relay_base,
+        &pairing.pairing_code,
+        "keyless-client-test",
+        &LocalBoxKeyPair::generate(),
+    )
+    .await;
 
     wait_for_connected(&client, &daemon.base_url()).await;
 
@@ -420,9 +403,45 @@ async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral
     daemon.shutdown().await.unwrap();
 }
 
-fn test_bundle() -> PairingPublicKeyBundle {
-    let key_pair = LocalBoxKeyPair::generate();
-    build_pairing_public_key_bundle(&key_pair)
+/// Relay claims are challenge-bound: request a single-use challenge, sign it
+/// with the client identity secret key, then claim with the signature.
+async fn claim_pairing_with_challenge(
+    client: &reqwest::Client,
+    relay_base: &str,
+    pairing_code: &str,
+    label: &str,
+    key_pair: &LocalBoxKeyPair,
+) -> ClaimPairingResponse {
+    let challenge = client
+        .post(format!("{relay_base}/v1/pairings/challenge"))
+        .json(&PairingChallengeRequest {
+            pairing_code: pairing_code.to_string(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<PairingChallengeResponse>()
+        .await
+        .unwrap();
+    let identity = LocalIdentityKeyPair::from_box_key_pair(key_pair);
+    client
+        .post(format!("{relay_base}/v1/pairings/claim"))
+        .json(&ClaimPairingRequest {
+            pairing_code: pairing_code.to_string(),
+            label: Some(label.to_string()),
+            client_bundle: Some(build_pairing_public_key_bundle(key_pair)),
+            challenge_signature: sign_pairing_claim_challenge(
+                &identity,
+                pairing_code,
+                &challenge.challenge,
+            ),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<ClaimPairingResponse>()
+        .await
+        .unwrap()
 }
 
 async fn wait_for_connected(

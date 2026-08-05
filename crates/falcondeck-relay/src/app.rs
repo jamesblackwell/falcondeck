@@ -3,11 +3,15 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, MachinePresence,
-    PairingPublicKeyBundle, PairingStatus, PairingStatusResponse, QueuedRemoteAction,
-    QueuedRemoteActionStatus, RelayClientMessage, RelayHealthResponse, RelayPeerRole,
-    RelayServerMessage, RelayUpdate, RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest,
-    StartPairingResponse, SubmitQueuedActionRequest, SyncCursor, TrustedDevice,
-    TrustedDeviceStatus, TrustedDevicesResponse, crypto::verify_pairing_public_key_bundle,
+    PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle, PairingStatus,
+    PairingStatusResponse, QueuedRemoteAction, QueuedRemoteActionStatus, RelayClientMessage,
+    RelayHealthResponse, RelayPeerRole, RelayServerMessage, RelayUpdate, RelayUpdateBody,
+    RelayUpdatesResponse, StartPairingRequest, StartPairingResponse, SubmitQueuedActionRequest,
+    SyncCursor, TrustedDevice, TrustedDeviceStatus, TrustedDevicesResponse,
+    crypto::{
+        generate_pairing_challenge, verify_pairing_claim_challenge,
+        verify_pairing_public_key_bundle,
+    },
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
@@ -18,6 +22,9 @@ use crate::error::RelayError;
 
 const PEER_QUEUE_CAPACITY: usize = 256;
 const WS_TICKET_TTL_SECONDS: i64 = 30;
+/// How long a claim challenge stays valid; challenges are single-use and a
+/// new challenge request replaces any outstanding one for the pairing.
+const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
 const PENDING_RPC_TTL_SECONDS: i64 = 30;
 /// Default Expo Push API endpoint; override (or disable with an empty value)
 /// via `FALCONDECK_RELAY_EXPO_PUSH_URL`.
@@ -77,9 +84,19 @@ struct Store {
     data: PersistedState,
     live_sessions: HashMap<String, LiveSession>,
     ws_tickets: HashMap<String, WebSocketTicket>,
+    /// Outstanding single-use claim challenges keyed by pairing id.
+    /// Challenges are short-lived and deliberately in-memory only: a relay
+    /// restart simply forces the client to request a fresh challenge.
+    pairing_challenges: HashMap<String, PairingChallenge>,
     /// Last push-notification time per (session, thread-or-kind), so bursts
     /// of attention events collapse into one push per window.
     push_dedupe: HashMap<(String, String), DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+struct PairingChallenge {
+    challenge: String,
+    expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -294,6 +311,7 @@ impl AppState {
                     data,
                     live_sessions: HashMap::new(),
                     ws_tickets: HashMap::new(),
+                    pairing_challenges: HashMap::new(),
                     push_dedupe: HashMap::new(),
                 })),
                 backend,
@@ -345,6 +363,7 @@ impl AppState {
                     data,
                     live_sessions: HashMap::new(),
                     ws_tickets: HashMap::new(),
+                    pairing_challenges: HashMap::new(),
                     push_dedupe: HashMap::new(),
                 })),
                 backend,
@@ -496,6 +515,54 @@ impl AppState {
         })
     }
 
+    /// Issues a single-use challenge that a client must sign with its
+    /// identity secret key before `claim_pairing` accepts the claim. The
+    /// pairing code is the capability here, exactly as for the claim itself.
+    pub async fn create_pairing_challenge(
+        &self,
+        request: PairingChallengeRequest,
+    ) -> Result<PairingChallengeResponse, RelayError> {
+        let _ = self.prune_retained_state().await?;
+        let pairing_code = request.pairing_code.trim().to_uppercase();
+        if pairing_code.is_empty() {
+            return Err(RelayError::BadRequest(
+                "pairing_code is required".to_string(),
+            ));
+        }
+
+        let now = Utc::now();
+        let mut store = self.inner.store.lock().await;
+        store
+            .pairing_challenges
+            .retain(|_, challenge| challenge.expires_at > now);
+        let (pairing_id, expires_at) = store
+            .data
+            .pairings
+            .values()
+            .find(|pairing| constant_time_eq(&pairing.pairing_code, &pairing_code))
+            .map(|pairing| (pairing.pairing_id.clone(), pairing.expires_at))
+            .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
+        if expires_at <= now {
+            return Err(RelayError::Conflict("pairing has expired".to_string()));
+        }
+
+        let challenge = generate_pairing_challenge();
+        // Inserting replaces any outstanding challenge for the pairing, so
+        // at most one challenge is valid at a time.
+        store.pairing_challenges.insert(
+            pairing_id.clone(),
+            PairingChallenge {
+                challenge: challenge.clone(),
+                expires_at: now + Duration::seconds(PAIRING_CHALLENGE_TTL_SECONDS),
+            },
+        );
+
+        Ok(PairingChallengeResponse {
+            pairing_id,
+            challenge,
+        })
+    }
+
     pub async fn claim_pairing(
         &self,
         request: ClaimPairingRequest,
@@ -507,16 +574,11 @@ impl AppState {
                 "pairing_code is required".to_string(),
             ));
         }
-        if request.client_bundle.is_none() {
+        let Some(client_bundle) = request.client_bundle.as_ref() else {
             return Err(RelayError::BadRequest(
                 "client_bundle with a public key is required".to_string(),
             ));
-        }
-        if let Some(bundle) = request.client_bundle.as_ref() {
-            verify_pairing_public_key_bundle(bundle).map_err(|_| {
-                RelayError::BadRequest("client_bundle signature is invalid".to_string())
-            })?;
-        }
+        };
 
         let now = Utc::now();
         let claimed_public_key = request
@@ -530,7 +592,8 @@ impl AppState {
                 .pairings
                 .iter()
                 .find_map(|(pairing_id, pairing)| {
-                    (pairing.pairing_code == pairing_code).then_some(pairing_id.clone())
+                    constant_time_eq(&pairing.pairing_code, &pairing_code)
+                        .then_some(pairing_id.clone())
                 })
                 .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
             let (
@@ -556,6 +619,35 @@ impl AppState {
                     pairing.clone(),
                 )
             };
+
+            // Take the outstanding challenge for this pairing. Removing it up
+            // front makes every challenge single-use even when the claim
+            // fails further down.
+            let challenge = store
+                .pairing_challenges
+                .remove(&pairing_id)
+                .filter(|challenge| challenge.expires_at > now)
+                .ok_or_else(|| {
+                    RelayError::BadRequest(
+                        "pairing challenge missing or expired; request a new challenge"
+                            .to_string(),
+                    )
+                })?;
+            verify_pairing_public_key_bundle(client_bundle).map_err(|_| {
+                RelayError::BadRequest("client_bundle signature is invalid".to_string())
+            })?;
+            // Proof of possession: the claimer must have signed the relay's
+            // challenge with the secret half of the bundle's identity key, so
+            // a stolen bundle alone can neither claim nor re-attach.
+            verify_pairing_claim_challenge(
+                &client_bundle.identity_public_key,
+                &pairing_code,
+                &challenge.challenge,
+                &request.challenge_signature,
+            )
+            .map_err(|_| {
+                RelayError::Unauthorized("pairing challenge signature is invalid".to_string())
+            })?;
 
             let session = store
                 .data

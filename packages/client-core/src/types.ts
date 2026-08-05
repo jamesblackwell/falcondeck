@@ -497,6 +497,22 @@ export type RemoteStatusResponse = {
   last_error: string | null
 }
 
+export type PairingChallengeRequest = {
+  pairing_code: string
+}
+
+export type PairingChallengeResponse = {
+  pairing_id: string
+  challenge: string
+}
+
+export type ClaimPairingRequest = {
+  pairing_code: string
+  label?: string | null
+  client_bundle?: PairingPublicKeyBundle | null
+  challenge_signature: string
+}
+
 export type ClaimPairingResponse = {
   pairing_id: string
   session_id: string

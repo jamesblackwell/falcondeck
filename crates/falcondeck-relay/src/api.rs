@@ -13,8 +13,8 @@ use serde::Deserialize;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ClaimPairingRequest, RelayClientMessage, RelayServerMessage, RelayUpdatesQuery,
-    StartPairingRequest, SubmitQueuedActionRequest,
+    ClaimPairingRequest, PairingChallengeRequest, RelayClientMessage, RelayServerMessage,
+    RelayUpdatesQuery, StartPairingRequest, SubmitQueuedActionRequest,
 };
 
 use crate::{
@@ -27,6 +27,7 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/v1/health", get(health))
         .route("/v1/pairings", post(start_pairing))
+        .route("/v1/pairings/challenge", post(pairing_challenge))
         .route("/v1/pairings/claim", post(claim_pairing))
         .route("/v1/pairings/{pairing_id}", get(pairing_status))
         .route("/v1/sessions/{session_id}/updates", get(session_updates))
@@ -75,6 +76,13 @@ async fn start_pairing(
     Json(request): Json<StartPairingRequest>,
 ) -> Result<Json<falcondeck_core::StartPairingResponse>, RelayError> {
     Ok(Json(state.start_pairing(request).await?))
+}
+
+async fn pairing_challenge(
+    State(state): State<AppState>,
+    Json(request): Json<PairingChallengeRequest>,
+) -> Result<Json<falcondeck_core::PairingChallengeResponse>, RelayError> {
+    Ok(Json(state.create_pairing_challenge(request).await?))
 }
 
 async fn claim_pairing(

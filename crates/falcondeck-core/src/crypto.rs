@@ -279,6 +279,10 @@ fn session_key_material_signing_payload(material: &SessionKeyMaterial) -> Vec<u8
     .into_bytes()
 }
 
+fn pairing_claim_challenge_signing_payload(pairing_code: &str, challenge: &str) -> Vec<u8> {
+    format!("falcondeck-pairing-claim-v1\n{pairing_code}\n{challenge}").into_bytes()
+}
+
 /// Builds a signed pairing bundle from a local box key pair.
 pub fn build_pairing_public_key_bundle(key_pair: &LocalBoxKeyPair) -> PairingPublicKeyBundle {
     let identity_key_pair = LocalIdentityKeyPair::from_box_key_pair(key_pair);
@@ -313,6 +317,50 @@ pub fn verify_pairing_public_key_bundle(
     let signature = decode_signature(&bundle.signature)?;
     public_key
         .verify(&pairing_bundle_signing_payload(bundle), &signature)
+        .map_err(|_| CryptoError::InvalidSignature)
+}
+
+/// Generates a random base64-encoded 32-byte pairing claim challenge.
+pub fn generate_pairing_challenge() -> String {
+    let mut challenge = [0u8; DATA_KEY_LEN];
+    OsRng.fill_bytes(&mut challenge);
+    BASE64.encode(challenge)
+}
+
+/// Signs a relay-issued pairing claim challenge with the claimer's identity
+/// key, binding the claim to both the pairing code and the challenge.
+pub fn sign_pairing_claim_challenge(
+    identity_key_pair: &LocalIdentityKeyPair,
+    pairing_code: &str,
+    challenge: &str,
+) -> String {
+    identity_key_pair.sign_bytes(&pairing_claim_challenge_signing_payload(pairing_code, challenge))
+}
+
+/// Verifies a pairing claim challenge signature against the claimer's
+/// identity public key.
+///
+/// # Errors
+///
+/// Returns [`CryptoError`] if the key, signature, or payload binding is
+/// invalid.
+pub fn verify_pairing_claim_challenge(
+    identity_public_key_base64: &str,
+    pairing_code: &str,
+    challenge: &str,
+    signature_base64: &str,
+) -> Result<(), CryptoError> {
+    if identity_public_key_base64.is_empty() || challenge.is_empty() || signature_base64.is_empty()
+    {
+        return Err(CryptoError::InvalidSignature);
+    }
+    let public_key = decode_signing_public_key(identity_public_key_base64)?;
+    let signature = decode_signature(signature_base64)?;
+    public_key
+        .verify(
+            &pairing_claim_challenge_signing_payload(pairing_code, challenge),
+            &signature,
+        )
         .map_err(|_| CryptoError::InvalidSignature)
 }
 
@@ -522,6 +570,83 @@ mod tests {
         let mut bundle = build_pairing_public_key_bundle(&key_pair);
         bundle.public_key = LocalBoxKeyPair::generate().public_key_base64().to_string();
         assert!(verify_pairing_public_key_bundle(&bundle).is_err());
+    }
+
+    #[test]
+    fn pairing_claim_challenge_round_trip() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let bundle = build_pairing_public_key_bundle(&key_pair);
+        let identity = LocalIdentityKeyPair::from_box_key_pair(&key_pair);
+        let challenge = generate_pairing_challenge();
+        let signature = sign_pairing_claim_challenge(&identity, "PAIRCODE1234", &challenge);
+        verify_pairing_claim_challenge(
+            &bundle.identity_public_key,
+            "PAIRCODE1234",
+            &challenge,
+            &signature,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn tampered_pairing_claim_challenge_signature_is_rejected() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let bundle = build_pairing_public_key_bundle(&key_pair);
+        let identity = LocalIdentityKeyPair::from_box_key_pair(&key_pair);
+        let challenge = generate_pairing_challenge();
+        let signature = sign_pairing_claim_challenge(&identity, "PAIRCODE1234", &challenge);
+
+        let mut raw = BASE64.decode(&signature).unwrap();
+        raw[0] ^= 0x01;
+        let tampered = BASE64.encode(raw);
+        assert!(
+            verify_pairing_claim_challenge(
+                &bundle.identity_public_key,
+                "PAIRCODE1234",
+                &challenge,
+                &tampered,
+            )
+            .is_err()
+        );
+
+        // Signature over a different challenge or code must not verify.
+        assert!(
+            verify_pairing_claim_challenge(
+                &bundle.identity_public_key,
+                "PAIRCODE1234",
+                &generate_pairing_challenge(),
+                &signature,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_pairing_claim_challenge(
+                &bundle.identity_public_key,
+                "OTHERCODE999",
+                &challenge,
+                &signature,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pairing_claim_challenge_signed_by_the_wrong_key_is_rejected() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let bundle = build_pairing_public_key_bundle(&key_pair);
+        let other_identity =
+            LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
+        let challenge = generate_pairing_challenge();
+        let signature = sign_pairing_claim_challenge(&other_identity, "PAIRCODE1234", &challenge);
+        assert!(
+            verify_pairing_claim_challenge(
+                &bundle.identity_public_key,
+                "PAIRCODE1234",
+                &challenge,
+                &signature,
+            )
+            .is_err()
+        );
     }
 
     #[test]

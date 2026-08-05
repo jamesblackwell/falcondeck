@@ -201,6 +201,46 @@ export function buildPairingPublicKeyBundle(keyPair: BoxKeyPair): PairingPublicK
   return bundle
 }
 
+function pairingClaimChallengeSigningPayload(pairingCode: string, challenge: string) {
+  // Copy into a same-realm Uint8Array: some runtimes (jsdom) hand back
+  // cross-realm arrays from TextEncoder that fail tweetnacl's type checks.
+  return new Uint8Array(encoder.encode(`falcondeck-pairing-claim-v1\n${pairingCode}\n${challenge}`))
+}
+
+/**
+ * Signs a relay-issued pairing claim challenge with the identity key derived
+ * from the local box key pair, proving possession of the bundle's identity
+ * secret key. The payload string must match the Rust implementation exactly:
+ * `falcondeck-pairing-claim-v1\n{pairing_code}\n{challenge}`.
+ */
+export function signPairingClaimChallenge(keyPair: BoxKeyPair, pairingCode: string, challenge: string) {
+  const identityKeyPair = deriveIdentityKeyPair(keyPair)
+  return bytesToBase64(
+    nacl.sign.detached(pairingClaimChallengeSigningPayload(pairingCode, challenge), identityKeyPair.secretKey),
+  )
+}
+
+export function verifyPairingClaimChallenge(
+  identityPublicKeyBase64: string,
+  pairingCode: string,
+  challenge: string,
+  signatureBase64: string,
+) {
+  if (!identityPublicKeyBase64 || !challenge || !signatureBase64) {
+    throw new Error('Pairing claim challenge signature is missing or invalid')
+  }
+  const publicKey = base64ToBytes(identityPublicKeyBase64)
+  const signature = base64ToBytes(signatureBase64)
+  if (publicKey.length !== SIGNING_PUBLIC_KEY_BYTES || signature.length !== SIGNATURE_BYTES) {
+    throw new Error('Pairing claim challenge signature is malformed')
+  }
+  if (
+    !nacl.sign.detached.verify(pairingClaimChallengeSigningPayload(pairingCode, challenge), signature, publicKey)
+  ) {
+    throw new Error('Pairing claim challenge signature verification failed')
+  }
+}
+
 export function verifyPairingPublicKeyBundle(bundle: PairingPublicKeyBundle) {
   if (
     bundle.encryption_variant !== 'data_key_v1' ||

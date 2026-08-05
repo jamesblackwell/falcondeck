@@ -9,6 +9,7 @@ import {
   generateBoxKeyPair,
   secretKeyToBase64,
   bytesToBase64,
+  verifyPairingClaimChallenge,
 } from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
 import { useSessionStore } from './session-store'
@@ -20,6 +21,21 @@ import {
   persistDataKey,
   persistClientToken,
 } from '@/storage/secure'
+
+const TEST_CHALLENGE = 'dGVzdC1jaGFsbGVuZ2U='
+
+/// Claims are a two-step challenge → claim flow; serve both relay endpoints.
+function mockPairingFetch(claim: Record<string, unknown>) {
+  return vi.fn().mockImplementation(async (url: string) => {
+    if (typeof url === 'string' && url.endsWith('/v1/pairings/challenge')) {
+      return {
+        ok: true,
+        json: async () => ({ pairing_id: 'pairing-1', challenge: TEST_CHALLENGE }),
+      }
+    }
+    return { ok: true, json: async () => claim }
+  })
+}
 
 function resetStore() {
   useRelayStore.setState({
@@ -156,24 +172,21 @@ describe('relay-store edge cases', () => {
       const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
       useRelayStore.getState().setRelayUrl('https://relay.test')
       useRelayStore.getState().setPairingCode('ABCD')
-      globalThis.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        json: async () => ({
-          pairing_id: 'pairing-1',
-          session_id: 'session-xyz',
+      globalThis.fetch = mockPairingFetch({
+        pairing_id: 'pairing-1',
+        session_id: 'session-xyz',
+        device_id: 'device-123',
+        client_token: 'token-xyz',
+        trusted_device: {
           device_id: 'device-123',
-          client_token: 'token-xyz',
-          trusted_device: {
-            device_id: 'device-123',
-            session_id: 'session-xyz',
-            label: 'FalconDeck iPhone',
-            status: 'active',
-            created_at: '2026-03-16T10:00:00Z',
-            last_seen_at: '2026-03-16T10:00:00Z',
-            revoked_at: null,
-          },
-          daemon_bundle: daemonBundle,
-        }),
+          session_id: 'session-xyz',
+          label: 'FalconDeck iPhone',
+          status: 'active',
+          created_at: '2026-03-16T10:00:00Z',
+          last_seen_at: '2026-03-16T10:00:00Z',
+          revoked_at: null,
+        },
+        daemon_bundle: daemonBundle,
       })
 
       await useRelayStore.getState().claimPairing()
@@ -278,10 +291,18 @@ describe('relay-store edge cases', () => {
       setRelayUrl('https://relay.test')
       setPairingCode('TEST-CODE')
 
+      let capturedChallengeBody: any = null
       let capturedBody: any = null
+      const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
       globalThis.fetch = vi.fn().mockImplementation(async (url: string, opts: any) => {
+        if (typeof url === 'string' && url.endsWith('/v1/pairings/challenge')) {
+          capturedChallengeBody = JSON.parse(opts.body)
+          return {
+            ok: true,
+            json: async () => ({ pairing_id: 'pairing-1', challenge: TEST_CHALLENGE }),
+          }
+        }
         capturedBody = JSON.parse(opts.body)
-        const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
         return {
           ok: true,
           json: async () => ({
@@ -305,6 +326,9 @@ describe('relay-store edge cases', () => {
 
       await claimPairing()
 
+      expect(capturedChallengeBody).toBeTruthy()
+      expect(capturedChallengeBody.pairing_code).toBe('TEST-CODE')
+
       expect(capturedBody).toBeTruthy()
       expect(capturedBody.pairing_code).toBe('TEST-CODE')
       expect(capturedBody.label).toBe('FalconDeck iPhone')
@@ -314,17 +338,34 @@ describe('relay-store edge cases', () => {
       expect(typeof capturedBody.client_bundle.public_key).toBe('string')
       expect(typeof capturedBody.client_bundle.signature).toBe('string')
       expect(capturedBody.client_bundle.public_key.length).toBeGreaterThan(0)
+      // The claim proves possession of the identity secret key: the
+      // challenge signature must verify against the bundle's identity key.
+      expect(typeof capturedBody.challenge_signature).toBe('string')
+      expect(() =>
+        verifyPairingClaimChallenge(
+          capturedBody.client_bundle.identity_public_key,
+          'TEST-CODE',
+          TEST_CHALLENGE,
+          capturedBody.challenge_signature,
+        ),
+      ).not.toThrow()
     })
 
-    it('POSTs to the correct endpoint', async () => {
+    it('POSTs the challenge then the claim to the correct endpoints', async () => {
       const { setRelayUrl, setPairingCode, claimPairing } = useRelayStore.getState()
       setRelayUrl('https://relay.test/')
       setPairingCode('CODE')
 
-      let capturedUrl: string = ''
+      const capturedUrls: string[] = []
+      const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
       globalThis.fetch = vi.fn().mockImplementation(async (url: string) => {
-        capturedUrl = url
-        const daemonBundle = buildPairingPublicKeyBundle(generateBoxKeyPair())
+        capturedUrls.push(url)
+        if (typeof url === 'string' && url.endsWith('/v1/pairings/challenge')) {
+          return {
+            ok: true,
+            json: async () => ({ pairing_id: 'pairing-1', challenge: TEST_CHALLENGE }),
+          }
+        }
         return {
           ok: true,
           json: async () => ({
@@ -347,7 +388,10 @@ describe('relay-store edge cases', () => {
       })
 
       await claimPairing()
-      expect(capturedUrl).toBe('https://relay.test/v1/pairings/claim')
+      expect(capturedUrls).toEqual([
+        'https://relay.test/v1/pairings/challenge',
+        'https://relay.test/v1/pairings/claim',
+      ])
     })
   })
 
