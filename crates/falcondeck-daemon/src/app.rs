@@ -2455,6 +2455,30 @@ mod tests {
     }
 
     #[test]
+    fn error_results_are_not_treated_as_assistant_text() {
+        assert_eq!(
+            super::extract_claude_text_delta(&json!({
+                "type": "result",
+                "subtype": "error_during_execution",
+                "is_error": true,
+                "result": "Something broke"
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn merging_claude_text_ignores_repeated_final_result_echo() {
+        // Deltas accumulate two messages; the final `result` event repeats the
+        // last message and must not be appended a second time.
+        let merged = super::merge_claude_assistant_text("First part.Second part.", "Second part.");
+        assert_eq!(merged, "First part.Second part.");
+        // Genuinely new text still appends.
+        let appended = super::merge_claude_assistant_text("First part.", "Second part.");
+        assert_eq!(appended, "First part.Second part.");
+    }
+
+    #[test]
     fn extracts_nested_claude_tool_use_and_result_events() {
         assert_eq!(
             super::extract_claude_tool_event(&json!({

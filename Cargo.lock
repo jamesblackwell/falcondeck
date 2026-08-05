@@ -1076,6 +1076,7 @@ dependencies = [
  "falcondeck-relay",
  "futures-util",
  "keyring",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",

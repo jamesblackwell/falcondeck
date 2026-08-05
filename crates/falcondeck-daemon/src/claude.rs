@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -46,14 +46,37 @@ pub struct HydratedClaudeThread {
 
 pub struct ClaudeTurnSpawn {
     pub session_id: String,
+    /// Identifies this specific turn process; `finish_turn` uses it so a
+    /// stale monitor task can never reap a newer turn on the same thread.
+    pub generation: u64,
     pub stdout: Option<ChildStdout>,
     pub stderr: Option<ChildStderr>,
 }
 
+pub struct ClaudeTurnFinish {
+    pub status: Option<std::process::ExitStatus>,
+    pub interrupted: bool,
+    /// True when this turn was already superseded or reaped elsewhere; the
+    /// caller must not finalize thread state based on it.
+    pub stale: bool,
+}
+
+struct ActiveTurn {
+    generation: u64,
+    child: Child,
+}
+
+/// How long to wait for the CLI to exit cleanly after SIGTERM before
+/// escalating to SIGKILL. Claude Code runs SessionEnd hooks and flushes
+/// session state on SIGTERM; SIGKILL risks losing that state.
+const INTERRUPT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+
 pub struct ClaudeRuntime {
     workspace_path: String,
     claude_bin: String,
-    active_turns: Mutex<HashMap<String, Child>>,
+    active_turns: Mutex<HashMap<String, ActiveTurn>>,
+    interrupted_turns: Mutex<HashSet<String>>,
+    next_turn_generation: std::sync::atomic::AtomicU64,
 }
 
 impl ClaudeRuntime {
@@ -66,6 +89,8 @@ impl ClaudeRuntime {
             workspace_path: workspace_path.clone(),
             claude_bin: resolved.executable.clone(),
             active_turns: Mutex::new(HashMap::new()),
+            interrupted_turns: Mutex::new(HashSet::new()),
+            next_turn_generation: std::sync::atomic::AtomicU64::new(1),
         });
 
         let account = read_auth_status(&resolved.executable).await;
@@ -95,6 +120,21 @@ impl ClaudeRuntime {
         let next_session_id = session_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        // A thread maps to one Claude session; two concurrent CLI processes
+        // resuming the same session corrupt its transcript. Stop any previous
+        // turn for this thread before spawning a replacement.
+        let previous = self.active_turns.lock().await.remove(thread_id);
+        if let Some(mut turn) = previous {
+            let _ = request_graceful_stop(&mut turn.child);
+            if tokio::time::timeout(INTERRUPT_GRACE, turn.child.wait())
+                .await
+                .is_err()
+            {
+                let _ = turn.child.start_kill();
+                let _ = turn.child.wait().await;
+            }
+        }
+
         let resolved = resolve_agent_binary("claude", &self.claude_bin);
         let mut command = Command::new(&resolved.executable);
         command
@@ -107,7 +147,8 @@ impl ClaudeRuntime {
             .current_dir(PathBuf::from(&self.workspace_path))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
 
         if let Some(existing_session_id) = session_id {
             command.arg("--resume").arg(existing_session_id);
@@ -141,22 +182,64 @@ impl ClaudeRuntime {
             })?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let generation = self
+            .next_turn_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.interrupted_turns.lock().await.remove(thread_id);
         self.active_turns
             .lock()
             .await
-            .insert(thread_id.to_string(), child);
+            .insert(thread_id.to_string(), ActiveTurn { generation, child });
 
         Ok(ClaudeTurnSpawn {
             session_id: next_session_id,
+            generation,
             stdout,
             stderr,
         })
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str) -> Result<(), DaemonError> {
+        let signalled = {
+            let mut active = self.active_turns.lock().await;
+            match active.get_mut(thread_id) {
+                Some(turn) => request_graceful_stop(&mut turn.child).map_err(|error| {
+                    DaemonError::Process(format!("failed to interrupt claude turn: {error}"))
+                })?,
+                None => return Ok(()),
+            }
+        };
+        self.interrupted_turns
+            .lock()
+            .await
+            .insert(thread_id.to_string());
+
+        if signalled {
+            // SIGTERM lets the CLI abort the turn, run SessionEnd hooks, and
+            // flush session state. Escalate only if it does not exit in time.
+            let deadline = tokio::time::Instant::now() + INTERRUPT_GRACE;
+            loop {
+                {
+                    let mut active = self.active_turns.lock().await;
+                    match active.get_mut(thread_id) {
+                        Some(turn) => {
+                            if turn.child.try_wait().ok().flatten().is_some() {
+                                return Ok(());
+                            }
+                        }
+                        None => return Ok(()),
+                    }
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            }
+        }
+
         let mut active = self.active_turns.lock().await;
-        if let Some(child) = active.get_mut(thread_id) {
-            child.start_kill().map_err(|error| {
+        if let Some(turn) = active.get_mut(thread_id) {
+            turn.child.start_kill().map_err(|error| {
                 DaemonError::Process(format!("failed to interrupt claude turn: {error}"))
             })?;
         }
@@ -166,21 +249,54 @@ impl ClaudeRuntime {
     pub async fn finish_turn(
         &self,
         thread_id: &str,
-    ) -> Result<Option<std::process::ExitStatus>, DaemonError> {
-        let mut active = self.active_turns.lock().await;
-        if let Some(mut child) = active.remove(thread_id) {
+        generation: u64,
+    ) -> Result<ClaudeTurnFinish, DaemonError> {
+        let child = {
+            let mut active = self.active_turns.lock().await;
+            match active.get(thread_id) {
+                Some(turn) if turn.generation == generation => active
+                    .remove(thread_id)
+                    .map(|turn| turn.child),
+                // Missing or newer entry: this turn was superseded (or the
+                // runtime shut down); the caller must not touch thread state.
+                _ => {
+                    return Ok(ClaudeTurnFinish {
+                        status: None,
+                        interrupted: false,
+                        stale: true,
+                    });
+                }
+            }
+        };
+        let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
+        if let Some(mut child) = child {
             let status = child.wait().await.map_err(|error| {
                 DaemonError::Process(format!("failed to wait for claude turn: {error}"))
             })?;
-            return Ok(Some(status));
+            return Ok(ClaudeTurnFinish {
+                status: Some(status),
+                interrupted,
+                stale: false,
+            });
         }
-        Ok(None)
+        Ok(ClaudeTurnFinish {
+            status: None,
+            interrupted,
+            stale: false,
+        })
     }
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
         let mut active = self.active_turns.lock().await;
-        for child in active.values_mut() {
-            let _ = child.start_kill();
+        for turn in active.values_mut() {
+            let _ = request_graceful_stop(&mut turn.child);
+        }
+        // Give the CLI a moment to flush session state before hard-killing.
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        for turn in active.values_mut() {
+            if turn.child.try_wait().ok().flatten().is_none() {
+                let _ = turn.child.start_kill();
+            }
         }
         active.clear();
         Ok(())
@@ -193,6 +309,33 @@ impl ClaudeRuntime {
             collaboration_modes: default_collaboration_modes(),
             capabilities: default_capabilities(),
         }
+    }
+}
+
+/// Ask a running `claude` process to stop gracefully. Returns `Ok(true)` when
+/// a termination signal was delivered (unix), `Ok(false)` when the caller
+/// should fall back to a hard kill immediately (non-unix or no pid).
+fn request_graceful_stop(child: &mut Child) -> std::io::Result<bool> {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            if result == 0 {
+                return Ok(true);
+            }
+            // The process may already have exited; treat ESRCH as success.
+            let errno = std::io::Error::last_os_error();
+            if errno.raw_os_error() == Some(libc::ESRCH) {
+                return Ok(true);
+            }
+            return Err(errno);
+        }
+        Ok(true)
+    }
+    #[cfg(not(unix))]
+    {
+        child.start_kill()?;
+        Ok(false)
     }
 }
 
@@ -283,11 +426,27 @@ pub fn curated_models() -> Vec<ModelSummary> {
 }
 
 pub async fn read_auth_status(claude_bin: &str) -> AccountSummary {
-    let output = Command::new(claude_bin)
-        .arg("auth")
-        .arg("status")
-        .output()
-        .await;
+    // `claude auth status` can hang on network checks; never let it block
+    // workspace connect or the periodic metadata refresh.
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        Command::new(claude_bin)
+            .arg("auth")
+            .arg("status")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(_) => {
+            return AccountSummary {
+                status: AccountStatus::Unknown,
+                label: "Claude auth status check timed out".to_string(),
+            };
+        }
+    };
     match output {
         Ok(output) if output.status.success() => {
             if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {

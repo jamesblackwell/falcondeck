@@ -6,7 +6,7 @@ use std::{
     process::Stdio,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -62,6 +62,13 @@ pub struct HydratedThread {
     pub items: Vec<ConversationItem>,
 }
 
+/// Upper bound for control-plane requests (initialize, account/model/thread
+/// listing, resume). These are bounded operations; a missing response means the
+/// app-server is wedged and callers must not hang forever. Turn-scoped
+/// requests (`turn/start`, `turn/interrupt`, ...) are not timed out here —
+/// they are protected by the disconnect drain in `read_stdout` instead.
+const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 pub struct CodexSession {
     workspace_id: String,
     workspace_path: String,
@@ -69,6 +76,7 @@ pub struct CodexSession {
     child: Mutex<Child>,
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, DaemonError>>>>,
+    closed: AtomicBool,
     state: AppState,
 }
 
@@ -120,6 +128,7 @@ impl CodexSession {
             child: Mutex::new(child),
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
             state: state.clone(),
         });
 
@@ -152,7 +161,7 @@ impl CodexSession {
         }
 
         session
-            .send_request(
+            .send_control_request(
                 "initialize",
                 json!({
                     "clientInfo": {
@@ -168,17 +177,17 @@ impl CodexSession {
             .await?;
         session.send_notification("initialized", json!({})).await?;
 
-        let account_value = session.send_request("account/read", json!({})).await?;
+        let account_value = session.send_control_request("account/read", json!({})).await?;
         let account = parse_account(&account_value);
-        let models_value = session.send_request("model/list", json!({})).await?;
+        let models_value = session.send_control_request("model/list", json!({})).await?;
         let models = parse_models(&models_value);
         let collaboration_modes_value = session
-            .send_request("collaborationMode/list", json!({}))
+            .send_control_request("collaborationMode/list", json!({}))
             .await
             .unwrap_or(Value::Null);
         let collaboration_modes = parse_collaboration_modes(&collaboration_modes_value);
         let threads_value = session
-            .send_request(
+            .send_control_request(
                 "thread/list",
                 json!({
                     "limit": 100,
@@ -240,10 +249,10 @@ impl CodexSession {
     }
 
     pub async fn provider_metadata(&self) -> Result<CodexProviderMetadata, DaemonError> {
-        let account_value = self.send_request("account/read", json!({})).await?;
-        let models_value = self.send_request("model/list", json!({})).await?;
+        let account_value = self.send_control_request("account/read", json!({})).await?;
+        let models_value = self.send_control_request("model/list", json!({})).await?;
         let collaboration_modes_value = self
-            .send_request("collaborationMode/list", json!({}))
+            .send_control_request("collaborationMode/list", json!({}))
             .await
             .unwrap_or(Value::Null);
 
@@ -255,13 +264,33 @@ impl CodexSession {
     }
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
+        self.closed.store(true, Ordering::Release);
+        {
+            let pending = std::mem::take(&mut *self.pending.lock().await);
+            for (_, tx) in pending {
+                let _ = tx.send(Err(DaemonError::Rpc(
+                    "codex app-server is shutting down".to_string(),
+                )));
+            }
+        }
         let mut child = self.child.lock().await;
         let _ = child.start_kill();
         let _ = timeout(Duration::from_secs(2), child.wait()).await;
         Ok(())
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    fn disconnected_error(&self) -> DaemonError {
+        DaemonError::Rpc("codex app-server is no longer running for this workspace".to_string())
+    }
+
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
+        if self.is_closed() {
+            return Err(self.disconnected_error());
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let payload = json!({
             "jsonrpc": "2.0",
@@ -274,18 +303,53 @@ impl CodexSession {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
 
-        {
+        let write_result = {
             let mut stdin = self.stdin.lock().await;
-            stdin.write_all(&line).await?;
-            stdin.write_all(b"\n").await?;
-            stdin.flush().await?;
+            async {
+                stdin.write_all(&line).await?;
+                stdin.write_all(b"\n").await?;
+                stdin.flush().await
+            }
+            .await
+        };
+        if let Err(error) = write_result {
+            self.pending.lock().await.remove(&id);
+            return Err(DaemonError::Rpc(format!(
+                "failed to send codex request {method}: {error}"
+            )));
         }
 
-        rx.await
-            .map_err(|_| DaemonError::Rpc(format!("rpc channel closed for method {method}")))?
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.pending.lock().await.remove(&id);
+                Err(DaemonError::Rpc(format!(
+                    "codex app-server disconnected before responding to {method}"
+                )))
+            }
+        }
+    }
+
+    /// Bounded variant of `send_request` for control-plane calls that must not
+    /// wait forever on a wedged app-server.
+    pub async fn send_control_request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, DaemonError> {
+        match timeout(CONTROL_REQUEST_TIMEOUT, self.send_request(method, params)).await {
+            Ok(result) => result,
+            Err(_) => Err(DaemonError::Rpc(format!(
+                "codex app-server did not respond to {method} within {}s",
+                CONTROL_REQUEST_TIMEOUT.as_secs()
+            ))),
+        }
     }
 
     pub async fn send_notification(&self, method: &str, params: Value) -> Result<(), DaemonError> {
+        if self.is_closed() {
+            return Err(self.disconnected_error());
+        }
         let payload = json!({
             "jsonrpc": "2.0",
             "method": method,
@@ -300,12 +364,12 @@ impl CodexSession {
     }
 
     pub async fn read_thread(&self, thread_id: &str) -> Result<Value, DaemonError> {
-        self.send_request("thread/read", json!({ "threadId": thread_id }))
+        self.send_control_request("thread/read", json!({ "threadId": thread_id }))
             .await
     }
 
     pub async fn resume_thread(&self, thread_id: &str) -> Result<Value, DaemonError> {
-        self.send_request("thread/resume", json!({ "threadId": thread_id }))
+        self.send_control_request("thread/resume", json!({ "threadId": thread_id }))
             .await
     }
 
@@ -319,6 +383,32 @@ impl CodexSession {
             "id": raw_id,
             "result": result
         });
+        self.write_raw_message(payload).await
+    }
+
+    /// Reply to a server-initiated request with a JSON-RPC error. Leaving a
+    /// server request unanswered stalls the app-server turn indefinitely, so
+    /// unsupported methods must still get an error response.
+    pub async fn respond_to_request_with_error(
+        &self,
+        raw_id: Value,
+        message: &str,
+    ) -> Result<(), DaemonError> {
+        let payload = json!({
+            "jsonrpc": "2.0",
+            "id": raw_id,
+            "error": {
+                "code": -32601,
+                "message": message
+            }
+        });
+        self.write_raw_message(payload).await
+    }
+
+    async fn write_raw_message(&self, payload: Value) -> Result<(), DaemonError> {
+        if self.is_closed() {
+            return Err(self.disconnected_error());
+        }
         let line = serde_json::to_vec(&payload)?;
         let mut stdin = self.stdin.lock().await;
         stdin.write_all(&line).await?;
@@ -417,6 +507,17 @@ impl CodexSession {
                     break;
                 }
             }
+        }
+
+        // The app-server is gone. Mark the session closed so new requests fail
+        // fast, then fail every in-flight request — otherwise their callers
+        // would wait on the response channel forever.
+        self.closed.store(true, Ordering::Release);
+        let pending = std::mem::take(&mut *self.pending.lock().await);
+        for (_, tx) in pending {
+            let _ = tx.send(Err(DaemonError::Rpc(
+                "codex app-server disconnected before responding".to_string(),
+            )));
         }
 
         let _ = self.child.lock().await.wait().await;

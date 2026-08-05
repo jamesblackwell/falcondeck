@@ -731,5 +731,18 @@ pub(super) async fn ingest_server_request(
         Some(method.to_string()),
     )?;
 
+    // A server-initiated request that never gets a response stalls the
+    // app-server turn indefinitely, so decline unsupported methods explicitly.
+    if let Ok(session) = app.session_for(workspace_id).await
+        && let Err(error) = session
+            .respond_to_request_with_error(
+                raw_id,
+                &format!("FalconDeck does not support the {method} request"),
+            )
+            .await
+    {
+        tracing::warn!("failed to decline unsupported server request {method}: {error}");
+    }
+
     Ok(())
 }

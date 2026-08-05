@@ -316,6 +316,15 @@ pub(super) fn is_claude_plan_mode(mode_id: Option<&str>) -> bool {
 
 pub(super) fn extract_claude_text_delta(value: &Value) -> Option<String> {
     if matches!(extract_string(value, &["type"]).as_deref(), Some("result")) {
+        // Error results are surfaced via `extract_claude_error`; folding them
+        // into the assistant message would render the failure as agent prose.
+        if value
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            return None;
+        }
         return extract_string(value, &["result"]);
     }
 
@@ -492,6 +501,12 @@ pub(super) fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> St
     }
     if next_chunk.starts_with(current) {
         return next_chunk.to_string();
+    }
+    // The stream repeats full message text after deltas (complete `assistant`
+    // messages, then the final `result`). If the accumulated text already ends
+    // with this chunk it is an echo, not new output.
+    if current.ends_with(next_chunk) {
+        return current.to_string();
     }
     format!("{current}{next_chunk}")
 }

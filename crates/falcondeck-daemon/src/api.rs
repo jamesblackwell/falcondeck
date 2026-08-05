@@ -305,6 +305,10 @@ async fn events(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl Int
 }
 
 async fn event_socket(mut socket: WebSocket, state: AppState) {
+    // Subscribe before taking the snapshot so no event emitted in between is
+    // lost. Events that are already reflected in the snapshot may be
+    // re-delivered afterwards, which clients apply as idempotent upserts.
+    let mut receiver = state.subscribe();
     let snapshot = state.snapshot().await;
     let initial_event = falcondeck_core::EventEnvelope {
         seq: 0,
@@ -325,7 +329,6 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
         return;
     }
 
-    let mut receiver = state.subscribe();
     loop {
         tokio::select! {
             event_result = receiver.recv() => {

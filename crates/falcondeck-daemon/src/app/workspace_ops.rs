@@ -99,19 +99,55 @@ pub(super) async fn connect_workspace_internal(
     };
     let workspace_id =
         existing_workspace_id.unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()));
-    let CodexBootstrap {
-        session: codex_session,
-        account: codex_account,
-        models: codex_models,
-        collaboration_modes: codex_collaboration_modes,
-        threads: codex_threads,
-    } = CodexSession::connect(
-        workspace_id.clone(),
-        path_string.clone(),
-        app.inner.codex_bin.clone(),
-        app.clone(),
-    )
-    .await?;
+    // A failure to bootstrap one provider must not brick the workspace for the
+    // other: keep the workspace usable and report the broken provider through
+    // its agent summary instead.
+    let (codex_session, codex_account, codex_models, codex_collaboration_modes, codex_threads) =
+        match CodexSession::connect(
+            workspace_id.clone(),
+            path_string.clone(),
+            app.inner.codex_bin.clone(),
+            app.clone(),
+        )
+        .await
+        {
+            Ok(CodexBootstrap {
+                session,
+                account,
+                models,
+                collaboration_modes,
+                threads,
+            }) => (Some(session), account, models, collaboration_modes, threads),
+            Err(error) => {
+                // Degrading to a Claude-only workspace is only useful when
+                // Claude is actually installed; with no working provider at
+                // all, surface the connect failure as before.
+                let claude_resolved =
+                    crate::agent_binary::resolve_agent_binary("claude", &app.inner.claude_bin);
+                if !Path::new(&claude_resolved.executable).is_file() {
+                    return Err(error);
+                }
+                let message = error.to_string();
+                tracing::warn!("codex bootstrap failed for {path_string}: {message}");
+                let _ = app.emit_service(
+                    Some(workspace_id.clone()),
+                    None,
+                    falcondeck_core::ServiceLevel::Warning,
+                    message,
+                    Some("codex-bootstrap".to_string()),
+                );
+                (
+                    None,
+                    falcondeck_core::AccountSummary {
+                        status: falcondeck_core::AccountStatus::Unknown,
+                        label: "Codex unavailable".to_string(),
+                    },
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )
+            }
+        };
     let ClaudeBootstrap {
         runtime: claude_runtime,
         account: claude_account,
@@ -121,9 +157,12 @@ pub(super) async fn connect_workspace_internal(
         threads: claude_threads,
     } = ClaudeRuntime::connect(path_string.clone(), app.inner.claude_bin.clone()).await?;
     let file_backed_skills = discover_file_backed_skills(&path_string);
-    let codex_provider_skills = load_codex_provider_skills(app, &codex_session)
-        .await
-        .unwrap_or_default();
+    let codex_provider_skills = match codex_session.as_ref() {
+        Some(session) => load_codex_provider_skills(app, session)
+            .await
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     let merged_skills = merge_skills(
         file_backed_skills
             .into_iter()
@@ -261,7 +300,7 @@ pub(super) async fn connect_workspace_internal(
         workspace_id.clone(),
         ManagedWorkspace {
             summary: summary.clone(),
-            codex_session: Some(codex_session),
+            codex_session,
             claude_runtime: Some(claude_runtime),
             threads: threads
                 .into_iter()
@@ -960,6 +999,7 @@ pub(super) async fn send_turn(
                     workspace_id,
                     thread_id,
                     spawn.session_id,
+                    spawn.generation,
                     spawn.stdout,
                     spawn.stderr,
                 )

@@ -48,6 +48,12 @@ impl AppState {
         let (mut writer, mut reader) = socket.split();
 
         let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+        // Detect silently-dead connections: outbound sends can keep buffering
+        // long after the peer is gone, so track inbound traffic (pongs count)
+        // and force a reconnect when the relay goes quiet for several
+        // heartbeat intervals.
+        const INBOUND_IDLE_TIMEOUT: Duration = Duration::from_secs(50);
+        let mut last_inbound = tokio::time::Instant::now();
         let mut events = self.subscribe();
         let fence_seq = self.inner.sequence.load(Ordering::Relaxed);
         let snapshot = self.snapshot().await;
@@ -160,6 +166,11 @@ impl AppState {
                     }
                 }
                 _ = heartbeat.tick() => {
+                    if last_inbound.elapsed() > INBOUND_IDLE_TIMEOUT {
+                        return Err(RemoteBridgeError::Transient(
+                            "relay websocket went quiet; reconnecting".to_string(),
+                        ));
+                    }
                     send_relay_message(&mut writer, &RelayClientMessage::Ping).await?;
                 }
                 command = command_rx.recv() => {
@@ -174,8 +185,17 @@ impl AppState {
                 message = reader.next() => {
                     match message {
                         Some(Ok(Message::Text(text))) => {
-                            let parsed = serde_json::from_str::<RelayServerMessage>(&text)
-                                .map_err(|error| format!("invalid relay message: {error}"))?;
+                            last_inbound = tokio::time::Instant::now();
+                            // An unknown or malformed message (e.g. from a
+                            // newer relay) must not tear down the bridge —
+                            // skip it and keep the connection alive.
+                            let parsed = match serde_json::from_str::<RelayServerMessage>(&text) {
+                                Ok(parsed) => parsed,
+                                Err(error) => {
+                                    tracing::warn!("ignoring unrecognized relay message: {error}");
+                                    continue;
+                                }
+                            };
                             match parsed {
                                 RelayServerMessage::RpcRequest { request_id, method, params } => {
                                     self.handle_remote_rpc(&mut writer, &pairing.data_key, request_id, method, params).await?;
@@ -188,6 +208,9 @@ impl AppState {
                         }
                         Some(Ok(Message::Close(_))) | None => {
                             return Err("relay websocket disconnected".to_string().into());
+                        }
+                        Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                            last_inbound = tokio::time::Instant::now();
                         }
                         Some(Ok(_)) => {}
                         Some(Err(error)) => {

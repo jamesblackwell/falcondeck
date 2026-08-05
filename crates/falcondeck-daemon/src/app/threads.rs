@@ -300,8 +300,8 @@ impl AppState {
                 .arg("haiku")
                 .arg("--output-format")
                 .arg("text")
-                .arg("--tools")
-                .arg("")
+                .arg("--max-turns")
+                .arg("1")
                 .arg("--no-session-persistence")
                 .current_dir(&input.workspace_path)
                 .stdin(Stdio::null())
@@ -364,6 +364,7 @@ impl AppState {
         workspace_id: String,
         thread_id: String,
         _session_id: String,
+        turn_generation: u64,
         stdout: Option<tokio::process::ChildStdout>,
         stderr: Option<tokio::process::ChildStderr>,
     ) {
@@ -490,23 +491,47 @@ impl AppState {
             let _ = stderr_task.await;
         }
 
+        let mut was_interrupted = false;
         if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await {
-            match runtime.finish_turn(&thread_id).await {
-                Ok(Some(status)) if !status.success() && turn_error.is_none() => {
-                    turn_error = Some(match status.code() {
-                        Some(code) => format!("Claude turn failed with exit code {code}"),
-                        None => "Claude turn failed".to_string(),
-                    });
+            match runtime.finish_turn(&thread_id, turn_generation).await {
+                Ok(finish) if finish.stale => {
+                    // A newer turn owns this thread now; leave its state alone.
+                    return;
                 }
-                Ok(Some(status))
-                    if status.success() && !saw_agent_output && turn_error.is_none() =>
-                {
-                    turn_error = Some(
-                        "Claude turn completed without emitting any assistant output".to_string(),
-                    );
+                Ok(finish) if finish.interrupted => {
+                    // A user-requested stop is a clean outcome, not an error —
+                    // the CLI exits non-zero after SIGTERM/SIGKILL.
+                    was_interrupted = true;
+                    turn_error = None;
                 }
-                Ok(_) | Err(_) => {}
+                Ok(finish) => match finish.status {
+                    Some(status) if !status.success() && turn_error.is_none() => {
+                        turn_error = Some(match status.code() {
+                            Some(code) => format!("Claude turn failed with exit code {code}"),
+                            None => "Claude turn failed".to_string(),
+                        });
+                    }
+                    Some(status)
+                        if status.success() && !saw_agent_output && turn_error.is_none() =>
+                    {
+                        turn_error = Some(
+                            "Claude turn completed without emitting any assistant output"
+                                .to_string(),
+                        );
+                    }
+                    _ => {}
+                },
+                Err(_) => {}
             }
+        }
+        if was_interrupted {
+            let _ = self.emit_service(
+                Some(workspace_id.clone()),
+                Some(thread_id.clone()),
+                ServiceLevel::Info,
+                "Turn interrupted".to_string(),
+                Some("claude-interrupt".to_string()),
+            );
         }
         let final_error = turn_error.clone();
         let _ = self
@@ -706,7 +731,9 @@ impl ManagedThread {
 
 impl ManagedWorkspace {
     pub(super) fn has_runtime(&self) -> bool {
-        self.codex_session.is_some() && self.claude_runtime.is_some()
+        // A workspace is live if at least one provider runtime is attached;
+        // requiring both would treat a Claude-only workspace as a placeholder.
+        self.codex_session.is_some() || self.claude_runtime.is_some()
     }
 }
 
