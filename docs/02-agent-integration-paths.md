@@ -166,6 +166,15 @@ Happy Engineering uses this path and experiences patchier Codex integration comp
 | Per-turn startup cost | Small (process spawn) | None (persistent) |
 | Mobile handoff | Built-in `--remote-control` | Via daemon (CodexMonitor) |
 
+## Why Not "ACP"?
+
+Two unrelated protocols share the ACP acronym; neither is used here, deliberately:
+
+1. **Agent Communication Protocol** (IBM/BeeAI, agentcommunicationprotocol.dev) — REST-based *agent-to-agent* communication. Wrong layer for FalconDeck (we are a client controlling agents, not agents delegating to each other), and it was merged into the Linux Foundation's A2A protocol in August 2025, so it no longer exists as a standalone standard.
+2. **Agent Client Protocol** (Zed, agentclientprotocol.com) — JSON-RPC for UIs embedding coding agents. This *is* our domain, but adopting it today loses more than it gains: the official Claude adapter (`claude-code-acp`) is built on the Agent SDK, which requires API-key auth instead of the user's claude.ai subscription (see "Not Recommended: Claude Agent SDK" above), and Codex has no official ACP support, so we would trade OpenAI's first-party app-server surface for a community shim.
+
+The native surfaces documented in this file (Codex app-server JSON-RPC, Claude CLI with stream-json) are each vendor's recommended embedding path. Revisit if Anthropic ships subscription-auth ACP support or Codex adopts ACP officially.
+
 ## Future Considerations
 
 1. Anthropic may ship a `claude app-server` equivalent. The official Claude Code desktop app likely uses something structured internally.
