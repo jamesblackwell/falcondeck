@@ -188,6 +188,33 @@ describe('client-core conversation helpers', () => {
     spy.mockRestore()
   })
 
+  it('updates an earlier item with a tied timestamp without duplicating it', () => {
+    const items = [
+      assistantMessage('a', '2026-03-15T10:00:00Z', 'first'),
+      assistantMessage('b', '2026-03-15T10:00:00Z', 'second'),
+    ]
+
+    const updated = upsertConversationItem(
+      items,
+      assistantMessage('a', '2026-03-15T10:00:00Z', 'edited'),
+    )
+
+    expect(updated).toHaveLength(2)
+    expect(updated.map((item) => item.id)).toEqual(['a', 'b'])
+    expect(updated[0]).toMatchObject({ id: 'a', text: 'edited' })
+  })
+
+  it('appends a new item with a tied timestamp exactly once', () => {
+    const items = [assistantMessage('a', '2026-03-15T10:00:00Z', 'first')]
+
+    const updated = upsertConversationItem(
+      items,
+      assistantMessage('b', '2026-03-15T10:00:00Z', 'second'),
+    )
+
+    expect(updated.map((item) => item.id)).toEqual(['a', 'b'])
+  })
+
   it('updates the streaming tail item without scanning the full array', () => {
     const spy = vi.spyOn(Array.prototype, 'findIndex')
     const items = [
@@ -295,6 +322,46 @@ describe('client-core conversation helpers', () => {
     expect(applyEventToThreadDetail(detail, event)?.workspace.updated_at).toBe(
       '2026-03-15T10:10:00Z',
     )
+  })
+
+  it('inserts a missing thread on thread-updated instead of dropping the event', () => {
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace()],
+      threads: [thread()],
+      interactive_requests: [],
+      preferences: normalizePreferences(null),
+    }
+    const missedThread = thread({
+      id: 'thread-2',
+      title: 'Missed thread',
+      updated_at: '2026-03-15T11:00:00Z',
+    })
+    const event: EventEnvelope = {
+      seq: 5,
+      emitted_at: '2026-03-15T11:00:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-2',
+      event: {
+        type: 'thread-updated',
+        thread: missedThread,
+      },
+    }
+
+    const next = applySnapshotEvent(snapshot, event)
+    expect(next?.threads.map((entry) => entry.id)).toEqual(['thread-2', 'thread-1'])
+
+    const updateEvent: EventEnvelope = {
+      ...event,
+      seq: 6,
+      event: {
+        type: 'thread-updated',
+        thread: thread({ id: 'thread-2', title: 'Renamed', updated_at: '2026-03-15T11:05:00Z' }),
+      },
+    }
+    const renamed = applySnapshotEvent(next, updateEvent)
+    expect(renamed?.threads).toHaveLength(2)
+    expect(renamed?.threads.find((entry) => entry.id === 'thread-2')?.title).toBe('Renamed')
   })
 
   it('returns no conversation items for a new thread composer', () => {

@@ -17,6 +17,8 @@ type ConnectionState = 'connecting' | 'ready' | 'error'
 const SELECTION_STORAGE_KEY = 'falcondeck.desktop.selection'
 const DAEMON_BOOTSTRAP_RETRY_COUNT = 12
 const DAEMON_BOOTSTRAP_RETRY_DELAY_MS = 500
+const DAEMON_RECONNECT_BASE_DELAY_MS = 500
+const DAEMON_RECONNECT_MAX_DELAY_MS = 10_000
 
 function threadCacheKey(workspaceId: string, threadId: string) {
   return `${workspaceId}:${threadId}`
@@ -53,6 +55,7 @@ export function useDaemonConnection() {
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
   const threadDetailPrefetchRef = useRef(new Set<string>())
+  const reconnectAttemptRef = useRef(0)
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
 
@@ -88,9 +91,36 @@ export function useDaemonConnection() {
   // Bootstrap daemon connection
   useEffect(() => {
     let socket: WebSocket | null = null
+    let reconnectTimer: number | null = null
     let cancelled = false
 
-    async function bootstrap() {
+    const teardownSocket = () => {
+      if (!socket) return
+      // Null out handlers before closing so onerror/onclose cannot double-fire
+      // and schedule overlapping reconnects.
+      socket.onopen = null
+      socket.onmessage = null
+      socket.onerror = null
+      socket.onclose = null
+      socket.close()
+      socket = null
+    }
+
+    const scheduleReconnect = () => {
+      if (cancelled || reconnectTimer !== null) return
+      const base = Math.min(
+        DAEMON_RECONNECT_BASE_DELAY_MS * 2 ** reconnectAttemptRef.current,
+        DAEMON_RECONNECT_MAX_DELAY_MS,
+      )
+      reconnectAttemptRef.current += 1
+      const jitteredDelay = Math.round(base * (0.8 + Math.random() * 0.4))
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null
+        void connect()
+      }, jitteredDelay)
+    }
+
+    async function connect() {
       let lastError: unknown = null
 
       for (let attempt = 0; attempt < DAEMON_BOOTSTRAP_RETRY_COUNT; attempt += 1) {
@@ -109,15 +139,23 @@ export function useDaemonConnection() {
           setConnectionError(null)
           setConnectionState('ready')
           socket = nextApi.connectEvents(handleEvent)
+          socket.onopen = () => {
+            if (cancelled) return
+            reconnectAttemptRef.current = 0
+          }
           socket.onclose = () => {
             if (cancelled) return
+            teardownSocket()
             setConnectionState('error')
             setConnectionError('Lost connection to daemon')
+            scheduleReconnect()
           }
           socket.onerror = () => {
             if (cancelled) return
+            teardownSocket()
             setConnectionState('error')
             setConnectionError('Failed to connect to daemon events')
+            scheduleReconnect()
           }
           return
         } catch (error) {
@@ -133,12 +171,17 @@ export function useDaemonConnection() {
       setConnectionError(
         lastError instanceof Error ? lastError.message : 'Failed to connect to daemon',
       )
+      scheduleReconnect()
     }
 
-    void bootstrap()
+    void connect()
     return () => {
       cancelled = true
-      socket?.close()
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer)
+        reconnectTimer = null
+      }
+      teardownSocket()
     }
   }, [handleEvent])
 

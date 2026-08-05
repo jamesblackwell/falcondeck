@@ -59,7 +59,7 @@ interface SessionActions {
     options?: { mergeMode?: ThreadDetailMergeMode },
   ) => void
   reconcileSelection: () => void
-  reset: () => void
+  reset: (options?: { preserveCache?: boolean }) => void
 }
 
 type SessionStore = SessionState & SessionActions
@@ -439,9 +439,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     persistStateCache(get())
   },
 
-  reset: () => {
+  reset: (options) => {
     set(initialState)
-    clearMobileSessionCache()
+    // A relay history truncation only needs derived state rebuilt; wiping the
+    // offline cache would blank the UI until the next snapshot arrives.
+    if (!options?.preserveCache) {
+      clearMobileSessionCache()
+    }
   },
 }))
 

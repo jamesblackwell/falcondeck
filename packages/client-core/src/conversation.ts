@@ -57,7 +57,14 @@ export function upsertConversationItem(
     return sortConversationItems(clone)
   }
 
-  if (next.created_at >= last.created_at) {
+  // Provider timestamps are often second-precision, so an update to an
+  // earlier item can tie the tail's created_at; only take the append fast
+  // path when the item cannot already exist earlier in the list.
+  if (
+    next.created_at > last.created_at ||
+    (next.created_at === last.created_at &&
+      !items.some((item) => item.id === next.id && item.kind === next.kind))
+  ) {
     return [...items, next]
   }
 

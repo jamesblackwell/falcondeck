@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  applySnapshotEvent,
   base64ToBytes,
   bootstrapSessionCrypto,
   buildPairingPublicKeyBundle,
@@ -84,6 +85,7 @@ import {
   encryptedRpcErrorMessage,
   getDeviceLabel,
   isAbortError,
+  isInvalidSavedSessionError,
   loadOrCreateClientKeyPair,
   loadPendingActionIds,
   loadPersistedRemoteSession,
@@ -100,6 +102,12 @@ import {
 } from './lib/remoteAppUtils'
 
 const DEFAULT_RELAY_URL = DEFAULT_REMOTE_RELAY_URL
+// The relay disconnects peers silent for 45s; the daemon pings every 15s.
+const RELAY_PING_INTERVAL_MS = 15_000
+// Only treat a connection as healthy (and reset backoff) after it stays open this long.
+const RELAY_BACKOFF_RESET_MS = 10_000
+const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
+const MAX_PENDING_SNAPSHOT_EVENTS = 1_000
 
 export default function App() {
   const params = new URLSearchParams(window.location.search)
@@ -148,6 +156,7 @@ export default function App() {
   const trustedDaemonPublicKeyRef = useRef<string | null>(persistedSession?.daemonPublicKey ?? null)
   const trustedDaemonIdentityPublicKeyRef = useRef<string | null>(persistedSession?.daemonIdentityPublicKey ?? null)
   const pendingEncryptedUpdatesRef = useRef<RelayUpdate[]>([])
+  const pendingSnapshotEventsRef = useRef<EventEnvelope[]>([])
   const lastReceivedSeqRef = useRef(persistedSession?.lastReceivedSeq ?? 0)
   const pendingSessionPersistRef = useRef<Partial<PersistedRemoteSession> | null>(null)
   const sessionPersistTimerRef = useRef<number | null>(null)
@@ -225,6 +234,7 @@ export default function App() {
     trustedDaemonPublicKeyRef.current = null
     trustedDaemonIdentityPublicKeyRef.current = null
     pendingEncryptedUpdatesRef.current = []
+    pendingSnapshotEventsRef.current = []
     pendingSessionPersistRef.current = null
     pendingRelayUpdatesRef.current = []
     lastReceivedSeqRef.current = 0
@@ -499,6 +509,8 @@ export default function App() {
     }
     let isCurrent = true
     let socket: WebSocket | null = null
+    let pingInterval: number | null = null
+    let backoffResetTimer: number | null = null
     socketRef.current = null
     pendingEncryptedUpdatesRef.current = []
     pendingRelayUpdatesRef.current = []
@@ -506,7 +518,19 @@ export default function App() {
     setMachinePresence(null)
     setError(null)
 
+    const clearSocketTimers = () => {
+      if (pingInterval !== null) {
+        window.clearInterval(pingInterval)
+        pingInterval = null
+      }
+      if (backoffResetTimer !== null) {
+        window.clearTimeout(backoffResetTimer)
+        backoffResetTimer = null
+      }
+    }
+
     const scheduleReconnect = () => {
+      clearSocketTimers()
       if (!isCurrent) return
       if (suppressReconnectRef.current) return
       setConnectionStatus('disconnected')
@@ -523,13 +547,19 @@ export default function App() {
         relayFlushFrameRef.current = null
       }
       if (sessionId && clientToken) {
-        const delay = Math.min(1000 * 2 ** reconnectAttemptRef.current, 10_000)
+        const base = Math.min(1000 * 2 ** reconnectAttemptRef.current, 10_000)
         reconnectAttemptRef.current += 1
+        const delay = Math.round(base * (0.8 + Math.random() * 0.4))
         reconnectTimerRef.current = window.setTimeout(() => {
           reconnectTimerRef.current = null
           setConnectionGeneration((value) => value + 1)
         }, delay)
       }
+    }
+
+    const abandonInvalidSavedSession = (message: string) => {
+      resetSavedRemoteConnection()
+      setError(message)
     }
 
     void fetch(`${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`, {
@@ -554,9 +584,21 @@ export default function App() {
 
         socket.onopen = () => {
           if (!isCurrent || !socket) return
-          reconnectAttemptRef.current = 0
+          const openSocket = socket
+          // The relay drops peers that stay silent for 45s.
+          pingInterval = window.setInterval(() => {
+            if (openSocket.readyState === WebSocket.OPEN) {
+              sendRelayMessage(openSocket, { type: 'ping' })
+            }
+          }, RELAY_PING_INTERVAL_MS)
+          // Resetting backoff immediately would defeat it when the relay
+          // closes the socket right after the handshake.
+          backoffResetTimer = window.setTimeout(() => {
+            backoffResetTimer = null
+            reconnectAttemptRef.current = 0
+          }, RELAY_BACKOFF_RESET_MS)
           setConnectionStatus('connected')
-          sendRelayMessage(socket, { type: 'sync', after_seq: lastReceivedSeqRef.current })
+          sendRelayMessage(openSocket, { type: 'sync', after_seq: lastReceivedSeqRef.current })
         }
 
         socket.onmessage = (message) => {
@@ -576,7 +618,8 @@ export default function App() {
               break
             case 'sync':
               if (payload.history_truncated) {
-                lastReceivedSeqRef.current = Math.max(payload.next_seq - 1, 0)
+                // The cursor must never move backwards after a relay restore.
+                lastReceivedSeqRef.current = Math.max(lastReceivedSeqRef.current, payload.next_seq - 1, 0)
                 setSnapshot(null)
                 setThreadDetail(null)
                 setThreadItems({})
@@ -605,6 +648,9 @@ export default function App() {
               break
             case 'error':
               setError(payload.message)
+              if (isInvalidSavedSessionError(payload.message)) {
+                abandonInvalidSavedSession(payload.message)
+              }
               break
           }
         }
@@ -615,15 +661,29 @@ export default function App() {
       })
       .catch((error) => {
         if (!isCurrent) return
-        setError(error instanceof Error ? error.message : 'Failed to connect to relay')
+        const message = error instanceof Error ? error.message : 'Failed to connect to relay'
+        setError(message)
+        if (isInvalidSavedSessionError(message)) {
+          abandonInvalidSavedSession(message)
+          return
+        }
         scheduleReconnect()
       })
 
     return () => {
       isCurrent = false
+      clearSocketTimers()
       socket?.close()
     }
-  }, [clientToken, connectionGeneration, failCurrentConnection, relayUrl, relayWsUrl, sessionId])
+  }, [
+    clientToken,
+    connectionGeneration,
+    failCurrentConnection,
+    relayUrl,
+    relayWsUrl,
+    resetSavedRemoteConnection,
+    sessionId,
+  ])
 
   async function resolvePendingRpc(
     requestId: string,
@@ -650,6 +710,18 @@ export default function App() {
     }
   }
 
+  const bufferPendingSnapshotEvents = useCallback((events: EventEnvelope[]) => {
+    const buffer = pendingSnapshotEventsRef.current
+    for (const event of events) {
+      if (buffer.some((buffered) => buffered.seq === event.seq)) continue
+      if (buffer.length >= MAX_PENDING_SNAPSHOT_EVENTS) {
+        console.warn('Dropping oldest buffered daemon event; snapshot is taking too long')
+        buffer.shift()
+      }
+      buffer.push(event)
+    }
+  }, [])
+
   const flushRelayUpdates = useCallback(async () => {
     if (relayFlushInProgressRef.current) {
       return
@@ -664,19 +736,29 @@ export default function App() {
         let nextPresence: MachinePresence | null | undefined
         let shouldPersistCursor = false
 
+        // The cursor may only advance for updates that were actually consumed;
+        // otherwise a parked or failed update can never be replayed by a later
+        // sync. While updates are parked the cursor must stay before them.
+        const advanceCursor = (seq: number) => {
+          if (pendingEncryptedUpdatesRef.current.length > 0) return
+          lastReceivedSeqRef.current = Math.max(lastReceivedSeqRef.current, seq)
+          shouldPersistCursor = true
+        }
+
         for (let index = 0; index < batch.length; index += 1) {
           const update = batch[index]
-          lastReceivedSeqRef.current = Math.max(lastReceivedSeqRef.current, update.seq)
 
           if (update.body.t === 'session-bootstrap') {
             const kp = clientKeyPairRef.current
             if (!kp) {
               setError('Missing local pairing key material')
+              advanceCursor(update.seq)
               continue
             }
             const expectedClientPublicKey = publicKeyToBase64(kp)
             const expectedClientIdentityPublicKey = identityPublicKeyToBase64(deriveIdentityKeyPair(kp))
             if (update.body.material.client_public_key !== expectedClientPublicKey) {
+              advanceCursor(update.seq)
               continue
             }
             try {
@@ -695,6 +777,11 @@ export default function App() {
                 setPairingId(update.body.material.pairing_id)
               }
               setConnectionStatus('connected as client (encrypted)')
+              if (pendingEncryptedUpdatesRef.current.length > 0) {
+                batch.splice(index + 1, 0, ...pendingEncryptedUpdatesRef.current)
+                pendingEncryptedUpdatesRef.current = []
+              }
+              advanceCursor(update.seq)
               schedulePersistCurrentSession(
                 {
                   pairingId: update.body.material.pairing_id,
@@ -705,12 +792,6 @@ export default function App() {
                 },
                 { immediate: true },
               )
-              shouldPersistCursor = true
-
-              if (pendingEncryptedUpdatesRef.current.length > 0) {
-                batch.splice(index + 1, 0, ...pendingEncryptedUpdatesRef.current)
-                pendingEncryptedUpdatesRef.current = []
-              }
             } catch (e) {
               failCurrentConnection(
                 e instanceof Error
@@ -723,17 +804,21 @@ export default function App() {
 
           if (update.body.t === 'presence') {
             nextPresence = update.body.presence
-            shouldPersistCursor = true
+            advanceCursor(update.seq)
             continue
           }
 
           if (update.body.t === 'action-status') {
-            shouldPersistCursor = true
+            advanceCursor(update.seq)
             continue
           }
 
           const sc = sessionCryptoRef.current
           if (!sc) {
+            if (pendingEncryptedUpdatesRef.current.length >= MAX_PENDING_ENCRYPTED_UPDATES) {
+              console.warn('Dropping oldest parked encrypted relay update; buffer is full')
+              pendingEncryptedUpdatesRef.current.shift()
+            }
             pendingEncryptedUpdatesRef.current.push(update)
             continue
           }
@@ -742,13 +827,14 @@ export default function App() {
           try {
             decrypted = await decryptJson(sc.dataKey, update.body.envelope)
           } catch (e) {
+            // Leave the cursor behind this update so a later sync replays it.
             setError(e instanceof Error ? e.message : 'Failed to decrypt relay update')
             continue
           }
 
+          advanceCursor(update.seq)
           const event = parseDaemonEvent(decrypted)
           if (event) {
-            shouldPersistCursor = true
             if (event.event.type !== 'text') {
               daemonEvents.push(event)
             }
@@ -768,9 +854,17 @@ export default function App() {
         if (daemonEvents.length > 0) {
           const { passthroughEvents, updatesByThread } =
             collectConversationItemUpdates(daemonEvents)
-          setSnapshot((current) =>
-            applyDaemonEventsToSnapshot(current, passthroughEvents),
-          )
+          setSnapshot((current) => {
+            // While snapshot.current is in flight the snapshot is null and
+            // events cannot be applied; park them (dedup makes this safe if
+            // React re-runs the updater) and replay once the RPC resolves. A
+            // full snapshot event can still seed from null directly.
+            if (!current && !passthroughEvents.some((event) => event.event.type === 'snapshot')) {
+              bufferPendingSnapshotEvents(passthroughEvents)
+              return current
+            }
+            return applyDaemonEventsToSnapshot(current, passthroughEvents)
+          })
           if (updatesByThread.size > 0) {
             setThreadItems((current) =>
               applyDaemonEventsToThreadItems(current, updatesByThread),
@@ -797,7 +891,7 @@ export default function App() {
         })
       }
     }
-  }, [failCurrentConnection, pairingId, schedulePersistCurrentSession, sessionId])
+  }, [bufferPendingSnapshotEvents, failCurrentConnection, pairingId, schedulePersistCurrentSession, sessionId])
 
   const scheduleRelayFlush = useCallback(() => {
     if (relayFlushFrameRef.current !== null) {
@@ -853,7 +947,18 @@ export default function App() {
     void callRpc<DaemonSnapshot>('snapshot.current', {})
       .then((nextSnapshot) => {
         if (cancelled) return
-        setSnapshot((current) => current ?? normalizeDaemonSnapshot(nextSnapshot))
+        // Replay events buffered while the RPC was in flight so they are not
+        // lost to the older snapshot the RPC returned.
+        const buffered = pendingSnapshotEventsRef.current
+        pendingSnapshotEventsRef.current = []
+        setSnapshot((current) => {
+          if (current) return current
+          let next: DaemonSnapshot | null = normalizeDaemonSnapshot(nextSnapshot)
+          for (const event of buffered) {
+            next = applySnapshotEvent(next, event)
+          }
+          return next
+        })
         setError(null)
       })
       .catch((e) => {
@@ -901,6 +1006,7 @@ export default function App() {
     window.localStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(keyPair))
     sessionCryptoRef.current = null
     pendingEncryptedUpdatesRef.current = []
+    pendingSnapshotEventsRef.current = []
     pendingRelayUpdatesRef.current = []
     if (relayFlushFrameRef.current !== null) {
       window.cancelAnimationFrame(relayFlushFrameRef.current)

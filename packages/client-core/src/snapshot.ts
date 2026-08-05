@@ -28,6 +28,20 @@ function upsertWorkspace(
   )
 }
 
+function upsertThread(
+  threads: DaemonSnapshot['threads'],
+  nextThread: DaemonSnapshot['threads'][number],
+) {
+  const existing = threads.findIndex((thread) => thread.id === nextThread.id)
+  if (existing === -1) {
+    // Snapshots list threads newest-first, so a thread whose thread-started
+    // event was missed still becomes visible at the top.
+    return [nextThread, ...threads]
+  }
+
+  return threads.map((thread) => (thread.id === nextThread.id ? nextThread : thread))
+}
+
 /**
  * Applies a daemon event to the current snapshot state.
  * Shared by both desktop and remote-web apps.
@@ -62,11 +76,7 @@ export function applySnapshotEvent(
     case 'thread-updated':
       return {
         ...snapshot,
-        threads: snapshot.threads.map((thread) =>
-          thread.id === daemonEvent.thread.id
-            ? normalizeThreadSummary(daemonEvent.thread)
-            : thread,
-        ),
+        threads: upsertThread(snapshot.threads, normalizeThreadSummary(daemonEvent.thread)),
       }
     case 'workspace-updated':
       return {

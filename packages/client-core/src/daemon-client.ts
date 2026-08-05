@@ -65,7 +65,9 @@ export function createDaemonApiClient(baseUrl: string) {
       if (request.include_archived_threads != null) {
         params.set('include_archived_threads', String(request.include_archived_threads))
       }
-      const suffix = params.size > 0 ? `?${params.toString()}` : ''
+      // URLSearchParams.size is missing in some RN polyfills.
+      const query = params.toString()
+      const suffix = query ? `?${query}` : ''
       return normalizeDaemonSnapshot(
         await parseJson<DaemonSnapshot>(await fetch(`${baseUrl}/api/snapshot${suffix}`)),
       )
@@ -132,7 +134,9 @@ export function createDaemonApiClient(baseUrl: string) {
       if (request.mode) params.set('mode', request.mode)
       if (request.limit != null) params.set('limit', String(request.limit))
       if (request.before_item_id) params.set('before_item_id', request.before_item_id)
-      const suffix = params.size > 0 ? `?${params.toString()}` : ''
+      // URLSearchParams.size is missing in some RN polyfills.
+      const query = params.toString()
+      const suffix = query ? `?${query}` : ''
       return normalizeThreadDetail(
         await parseJson<ThreadDetail>(
           await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}${suffix}`),
@@ -212,7 +216,15 @@ export function createDaemonApiClient(baseUrl: string) {
     connectEvents(onEvent: (event: EventEnvelope) => void) {
       const socket = new WebSocket(baseUrl.replace('http', 'ws') + '/api/events')
       socket.onmessage = (message) => {
-        onEvent(normalizeEventEnvelope(JSON.parse(message.data) as EventEnvelope))
+        let event: EventEnvelope
+        try {
+          event = normalizeEventEnvelope(JSON.parse(message.data) as EventEnvelope)
+        } catch {
+          // A malformed frame must not throw inside onmessage and kill the stream.
+          console.warn('Ignoring malformed daemon event frame')
+          return
+        }
+        onEvent(event)
       }
       return socket
     },

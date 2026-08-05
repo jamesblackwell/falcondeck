@@ -12,6 +12,12 @@ import type {
 
 import { useRelayStore, useSessionStore } from '@/store'
 
+// The relay disconnects peers silent for 45s; the daemon pings every 15s.
+const RELAY_PING_INTERVAL_MS = 15_000
+// Only treat a connection as healthy (and reset backoff) after it stays open this long.
+const RELAY_BACKOFF_RESET_MS = 10_000
+const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
+
 function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
     typeof payload === 'object' &&
@@ -45,6 +51,7 @@ export function useRelayConnection() {
   const relayFlushTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
   const relayFlushInProgress = useRef(false)
   const snapshotRequestInFlight = useRef(false)
+  const snapshotAfterCrypto = useRef(false)
   const [reconnectGeneration, setReconnectGeneration] = useState(0)
 
   const requestSnapshot = useCallback(async () => {
@@ -52,7 +59,9 @@ export function useRelayConnection() {
     if (!relay._getSessionCrypto() || snapshotRequestInFlight.current) return
 
     snapshotRequestInFlight.current = true
+    let shouldRefetch = false
     try {
+      const cursorAtRequest = relay._getLastReceivedSeq()
       const nextSnapshot = normalizeDaemonSnapshot(
         await relay._callRpc<DaemonSnapshot>(
           'snapshot.current',
@@ -60,6 +69,12 @@ export function useRelayConnection() {
           { requestIdPrefix: 'mobile-snapshot' },
         ),
       )
+      if (useRelayStore.getState()._getLastReceivedSeq() > cursorAtRequest) {
+        // Incremental events landed while the RPC was in flight; applying this
+        // response could clobber them, so fetch a fresh snapshot instead.
+        shouldRefetch = true
+        return
+      }
       useSessionStore.getState().applyDaemonEvents([
         {
           seq: 0,
@@ -87,6 +102,9 @@ export function useRelayConnection() {
       }
     } finally {
       snapshotRequestInFlight.current = false
+      if (shouldRefetch) {
+        void requestSnapshot()
+      }
     }
   }, [])
 
@@ -111,49 +129,67 @@ export function useRelayConnection() {
         let nextPresence: MachinePresence | null | undefined = undefined
         let shouldPersistCursor = false
 
+        // The cursor may only advance for updates that were actually consumed;
+        // otherwise a parked or failed update can never be replayed by a later
+        // sync. While updates are parked the cursor must stay before them.
+        const advanceCursor = (seq: number) => {
+          if (pendingEncrypted.current.length > 0) return
+          relay._setLastReceivedSeq(seq)
+          shouldPersistCursor = true
+        }
+
         for (let index = 0; index < batch.length; index += 1) {
           const update = batch[index]
-          relay._setLastReceivedSeq(update.seq)
 
           if (update.body.t === 'session-bootstrap') {
             await relay._processBootstrap(update)
-            shouldPersistCursor = true
             if (pendingEncrypted.current.length > 0) {
               batch.splice(index + 1, 0, ...pendingEncrypted.current)
               pendingEncrypted.current = []
+            }
+            advanceCursor(update.seq)
+            if (snapshotAfterCrypto.current && relay._getSessionCrypto()) {
+              snapshotAfterCrypto.current = false
+              void requestSnapshot()
             }
             continue
           }
 
           if (update.body.t === 'presence') {
             nextPresence = update.body.presence
-            shouldPersistCursor = true
+            advanceCursor(update.seq)
             continue
           }
 
           if (update.body.t === 'action-status') {
-            shouldPersistCursor = true
+            advanceCursor(update.seq)
             continue
           }
 
           if (update.body.t !== 'encrypted') {
+            advanceCursor(update.seq)
             continue
           }
 
           const sessionCrypto = relay._getSessionCrypto()
           if (!sessionCrypto) {
+            if (pendingEncrypted.current.length >= MAX_PENDING_ENCRYPTED_UPDATES) {
+              console.warn('Dropping oldest parked encrypted relay update; buffer is full')
+              pendingEncrypted.current.shift()
+            }
             pendingEncrypted.current.push(update)
             continue
           }
 
           try {
             const decrypted = await relay._decryptJson(update.body.envelope)
+            advanceCursor(update.seq)
             const event = parseDaemonEvent(decrypted)
             if (event) {
               daemonEvents.push(event)
-              shouldPersistCursor = true
             }
           } catch (e) {
+            // Leave the cursor behind this update so a later sync replays it.
             relay._setError(e instanceof Error ? e.message : 'Failed to decrypt update')
           }
         }
@@ -221,6 +257,8 @@ export function useRelayConnection() {
     let isCurrent = true
     let shouldReconnect = true
     let activeSocket: WebSocket | null = null
+    let pingInterval: ReturnType<typeof setInterval> | null = null
+    let backoffResetTimer: ReturnType<typeof setTimeout> | null = null
     const relayUrl = relay.relayUrl.trim().replace(/\/$/, '')
     const wsUrl = relayUrl.startsWith('https://')
       ? `wss://${relayUrl.slice('https://'.length)}`
@@ -248,7 +286,19 @@ export function useRelayConnection() {
       relayFlushTimeout.current = null
     }
 
+    const clearSocketTimers = () => {
+      if (pingInterval !== null) {
+        clearInterval(pingInterval)
+        pingInterval = null
+      }
+      if (backoffResetTimer !== null) {
+        clearTimeout(backoffResetTimer)
+        backoffResetTimer = null
+      }
+    }
+
     const scheduleReconnect = () => {
+      clearSocketTimers()
       if (!isCurrent || !shouldReconnect || !useRelayStore.getState().sessionId) return
       relay._setConnectionStatus('disconnected')
       relay._setMachinePresence(null)
@@ -271,8 +321,9 @@ export function useRelayConnection() {
         relayFlushTimeout.current = null
       }
 
-      const delay = Math.min(1000 * 2 ** reconnectAttempt.current, 15_000)
+      const base = Math.min(1000 * 2 ** reconnectAttempt.current, 15_000)
       reconnectAttempt.current += 1
+      const delay = Math.round(base * (0.8 + Math.random() * 0.4))
       reconnectTimer.current = setTimeout(() => {
         reconnectTimer.current = null
         setReconnectGeneration((value) => value + 1)
@@ -309,7 +360,18 @@ export function useRelayConnection() {
 
         socket.onopen = () => {
           if (!isCurrent) return
-          reconnectAttempt.current = 0
+          // The relay drops peers that stay silent for 45s.
+          pingInterval = setInterval(() => {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(JSON.stringify({ type: 'ping' }))
+            }
+          }, RELAY_PING_INTERVAL_MS)
+          // Resetting backoff immediately would defeat it when the relay
+          // closes the socket right after the handshake.
+          backoffResetTimer = setTimeout(() => {
+            backoffResetTimer = null
+            reconnectAttempt.current = 0
+          }, RELAY_BACKOFF_RESET_MS)
           relay._setConnectionStatus('connected')
           relay._sendMessage({ type: 'sync', after_seq: relay._getLastReceivedSeq() })
         }
@@ -335,13 +397,17 @@ export function useRelayConnection() {
               break
             case 'sync':
               if (payload.history_truncated) {
-                relay._setLastReceivedSeq(Math.max(payload.next_seq - 1, 0))
-                relay._persistSession()
-                useSessionStore.getState().reset()
+                // Updates were lost server-side; recover derived state from a
+                // fresh snapshot, but keep the offline cache so the UI does
+                // not go blank if the app restarts before it arrives. The
+                // cursor is left to the normal flush so retained updates are
+                // still processed.
+                useSessionStore.getState().reset({ preserveCache: true })
                 if (relay._getSessionCrypto()) {
                   void requestSnapshot()
+                } else {
+                  snapshotAfterCrypto.current = true
                 }
-                break
               }
               pendingRelayUpdates.current.push(...payload.updates)
               scheduleRelayFlush()
@@ -383,6 +449,7 @@ export function useRelayConnection() {
     return () => {
       isCurrent = false
       shouldReconnect = false
+      clearSocketTimers()
       activeSocket?.close()
       relay._setSocket(null)
       relay._failPendingRpcs('Remote connection closed')

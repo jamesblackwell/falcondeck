@@ -68,9 +68,6 @@ export default function HomeScreen() {
   const workspace = useSelectedWorkspace()
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
-  const selectedThreadItemCount = useSessionStore((s) =>
-    s.selectedThreadId ? (s.threadItems[s.selectedThreadId]?.length ?? 0) : 0,
-  )
   const snapshot = useSessionStore((s) => s.snapshot)
   const { connectionStatus, isEncrypted, machinePresence, relayUrl, sessionId } = useRelayStore(
     useShallow((s) => ({
@@ -108,6 +105,8 @@ export default function HomeScreen() {
   const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<string | null>(null)
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
+  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const lastSentReadSeqRef = useRef<{ threadId: string; readSeq: number } | null>(null)
 
   // Compute active provider: thread's provider if running, otherwise UI selection or workspace default
   const activeProvider: AgentProvider = selectedThread
@@ -300,7 +299,9 @@ export default function HomeScreen() {
 
     let cancelled = false
     setIsLoadingOlder(false)
-    if (selectedThreadItemCount === 0) {
+    // Read the item count imperatively: subscribing to it would refire this
+    // effect (and a full thread.detail RPC) for every streamed item.
+    if ((useSessionStore.getState().threadItems[selectedThreadId]?.length ?? 0) === 0) {
       setDetailLoadingThreadId(selectedThreadId)
     }
 
@@ -312,7 +313,7 @@ export default function HomeScreen() {
     return () => {
       cancelled = true
     }
-  }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedThreadItemCount, selectedWorkspaceId])
+  }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedWorkspaceId])
 
   useEffect(() => {
     if (!selectedThreadId) {
@@ -348,32 +349,55 @@ export default function HomeScreen() {
     const readSeq = selectedThread.attention.last_agent_activity_seq
     if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return
 
-    const relay = useRelayStore.getState()
-    const clientToken = relay._getClientToken()
-    const sessionCrypto = relay._getSessionCrypto()
-    if (!clientToken || !sessionCrypto) return
+    // Streamed events refire this effect long before the summary reflects the
+    // send, so suppress duplicates locally and debounce the action itself.
+    const lastSent = lastSentReadSeqRef.current
+    if (lastSent && lastSent.threadId === selectedThread.id && lastSent.readSeq >= readSeq) return
 
-    void encryptJson(sessionCrypto.dataKey, {
-      workspace_id: workspace.id,
-      thread_id: selectedThread.id,
-      read_seq: readSeq,
-    })
-      .then((payload) =>
-        fetch(`${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}/actions`, {
-          method: 'POST',
-          headers: {
-            authorization: `Bearer ${clientToken}`,
-            'content-type': 'application/json',
-          },
-          body: JSON.stringify({
-            idempotency_key: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
-            action_type: 'thread.mark_read',
-            payload,
+    const workspaceId = workspace.id
+    const threadId = selectedThread.id
+
+    if (markReadTimerRef.current) {
+      clearTimeout(markReadTimerRef.current)
+    }
+    markReadTimerRef.current = setTimeout(() => {
+      markReadTimerRef.current = null
+      const relay = useRelayStore.getState()
+      const clientToken = relay._getClientToken()
+      const sessionCrypto = relay._getSessionCrypto()
+      if (!clientToken || !sessionCrypto) return
+
+      lastSentReadSeqRef.current = { threadId, readSeq }
+      void encryptJson(sessionCrypto.dataKey, {
+        workspace_id: workspaceId,
+        thread_id: threadId,
+        read_seq: readSeq,
+      })
+        .then((payload) =>
+          fetch(`${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}/actions`, {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${clientToken}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              idempotency_key: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
+              action_type: 'thread.mark_read',
+              payload,
+            }),
           }),
-        }),
-      )
-      .catch(() => {})
+        )
+        .catch(() => {})
+    }, 1_000)
   }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace])
+
+  useEffect(() => {
+    return () => {
+      if (markReadTimerRef.current) {
+        clearTimeout(markReadTimerRef.current)
+      }
+    }
+  }, [])
 
   return (
     <KeyboardAvoidingView
