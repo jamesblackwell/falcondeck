@@ -317,6 +317,109 @@ async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstra
     daemon.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral_channel() {
+    use futures_util::SinkExt;
+
+    let relay_dir = tempfile::tempdir().unwrap();
+    let relay_base = spawn_relay(&relay_dir).await;
+    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let remote = client
+        .post(format!("{}/api/remote/pairing", daemon.base_url()))
+        .json(&StartRemotePairingRequest {
+            relay_url: relay_base.clone(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<RemoteStatusResponse>()
+        .await
+        .unwrap();
+    let pairing = remote.pairing.unwrap();
+    let claim = client
+        .post(format!("{relay_base}/v1/pairings/claim"))
+        .json(&ClaimPairingRequest {
+            pairing_code: pairing.pairing_code.clone(),
+            label: Some("keyless-client-test".to_string()),
+            client_bundle: Some(test_bundle()),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<ClaimPairingResponse>()
+        .await
+        .unwrap();
+
+    wait_for_connected(&client, &daemon.base_url()).await;
+
+    // Simulate a trusted device that still holds its client token and local
+    // key pair but lost the session data key: connect a plain client
+    // websocket and ask for a fresh bootstrap over the ephemeral channel.
+    let ticket = client
+        .post(format!(
+            "{relay_base}/v1/sessions/{}/ws-ticket",
+            claim.session_id
+        ))
+        .bearer_auth(&claim.client_token)
+        .send()
+        .await
+        .unwrap()
+        .json::<falcondeck_core::RelayWebSocketTicketResponse>()
+        .await
+        .unwrap();
+    let ws_base = relay_base.replace("http://", "ws://");
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "{ws_base}/v1/updates/ws?session_id={}&ticket={}",
+        claim.session_id, ticket.ticket
+    ))
+    .await
+    .unwrap();
+
+    let recovery_key_pair = LocalBoxKeyPair::generate();
+    let recovery_bundle = build_pairing_public_key_bundle(&recovery_key_pair);
+    let recovery_public_key = recovery_bundle.public_key.clone();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::to_string(&serde_json::json!({
+                "type": "ephemeral",
+                "body": {
+                    "kind": "request-bootstrap",
+                    "device_id": claim.device_id,
+                    "client_bundle": recovery_bundle,
+                },
+            }))
+            .unwrap()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+    // The daemon must answer with a durable SessionBootstrap wrapped to the
+    // requester's public key, delivered through the normal replay path.
+    let updates = wait_for_device_bootstrap(
+        &client,
+        &relay_base,
+        &claim.session_id,
+        &claim.client_token,
+        &recovery_public_key,
+    )
+    .await;
+    assert!(
+        updates.updates.iter().any(|update| {
+            matches!(
+                &update.body,
+                RelayUpdateBody::SessionBootstrap { material }
+                    if material.client_public_key == recovery_public_key
+            )
+        }),
+        "keyless client should receive bootstrap material for its requested bundle"
+    );
+
+    daemon.shutdown().await.unwrap();
+}
+
 fn test_bundle() -> PairingPublicKeyBundle {
     let key_pair = LocalBoxKeyPair::generate();
     build_pairing_public_key_bundle(&key_pair)

@@ -1,4 +1,4 @@
-use std::sync::atomic::Ordering;
+use std::{collections::HashMap, sync::atomic::Ordering};
 
 use chrono::Utc;
 use falcondeck_core::{
@@ -6,7 +6,10 @@ use falcondeck_core::{
     RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
     SendTurnRequest, SessionKeyMaterial, SnapshotRequest, StartThreadRequest, ThreadDetailMode,
     ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
-    crypto::{LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material},
+    crypto::{
+        LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material,
+        verify_pairing_public_key_bundle,
+    },
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -136,6 +139,13 @@ impl AppState {
             .map_err(|error| format!("failed to persist connected remote state: {error}"))?;
 
         let min_forward_seq: u64 = fence_seq;
+        // A trusted client that lost its persisted data key cannot use the
+        // encrypted RPC channel, so it asks for a fresh bootstrap over the
+        // relay's plaintext ephemeral channel. Track the last publish per
+        // client public key so a misbehaving peer cannot flood the durable
+        // update log with bootstrap material.
+        const BOOTSTRAP_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(60);
+        let mut bootstrap_request_publishes: HashMap<String, tokio::time::Instant> = HashMap::new();
         loop {
             tokio::select! {
                 event = events.recv() => {
@@ -209,7 +219,22 @@ impl AppState {
                                 RelayServerMessage::ActionRequested { action, payload } => {
                                     self.handle_queued_remote_action(&mut writer, &pairing.data_key, action.action_id, action.action_type, payload).await?;
                                 }
-                                RelayServerMessage::Pong | RelayServerMessage::Presence { .. } | RelayServerMessage::ActionUpdated { .. } | RelayServerMessage::Ready { .. } | RelayServerMessage::Sync { .. } | RelayServerMessage::Update { .. } | RelayServerMessage::Ephemeral { .. } | RelayServerMessage::RpcRegistered { .. } | RelayServerMessage::RpcUnregistered { .. } | RelayServerMessage::RpcResult { .. } | RelayServerMessage::Error { .. } => {}
+                                RelayServerMessage::Ephemeral { body } => {
+                                    if let Some(client_bundle) = parse_bootstrap_request(&body) {
+                                        let now = tokio::time::Instant::now();
+                                        let recently_served = bootstrap_request_publishes
+                                            .get(&client_bundle.public_key)
+                                            .is_some_and(|last| now.duration_since(*last) < BOOTSTRAP_REQUEST_MIN_INTERVAL);
+                                        if recently_served {
+                                            tracing::debug!("ignoring bootstrap request for a recently served client key");
+                                        } else {
+                                            bootstrap_request_publishes.insert(client_bundle.public_key.clone(), now);
+                                            self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle).await?;
+                                            tracing::info!("republished session bootstrap for a keyless trusted client");
+                                        }
+                                    }
+                                }
+                                RelayServerMessage::Pong | RelayServerMessage::Presence { .. } | RelayServerMessage::ActionUpdated { .. } | RelayServerMessage::Ready { .. } | RelayServerMessage::Sync { .. } | RelayServerMessage::Update { .. } | RelayServerMessage::RpcRegistered { .. } | RelayServerMessage::RpcUnregistered { .. } | RelayServerMessage::RpcResult { .. } | RelayServerMessage::Error { .. } => {}
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => {
@@ -975,6 +1000,33 @@ pub(super) fn host_label() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "FalconDeck desktop".to_string())
+}
+
+/// Parses and verifies a `request-bootstrap` ephemeral body sent by a trusted
+/// client that lost its session data key. Returns the verified client bundle,
+/// or `None` when the body is not a bootstrap request, the bundle is
+/// malformed, or its signature does not verify. Any authenticated client peer
+/// on the relay session is a trusted device entitled to the session data key,
+/// so bundle validity plus the relay's peer auth is sufficient to re-issue a
+/// wrapped data key.
+pub(super) fn parse_bootstrap_request(body: &Value) -> Option<PairingPublicKeyBundle> {
+    if body.get("kind").and_then(Value::as_str) != Some("request-bootstrap") {
+        return None;
+    }
+    let bundle_value = body.get("client_bundle")?;
+    let client_bundle = match serde_json::from_value::<PairingPublicKeyBundle>(bundle_value.clone())
+    {
+        Ok(client_bundle) => client_bundle,
+        Err(error) => {
+            tracing::warn!("ignoring bootstrap request with malformed client bundle: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = verify_pairing_public_key_bundle(&client_bundle) {
+        tracing::warn!("ignoring bootstrap request with invalid client bundle signature: {error}");
+        return None;
+    }
+    Some(client_bundle)
 }
 
 pub(super) fn encrypt_remote_daemon_event(

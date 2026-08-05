@@ -119,6 +119,7 @@ interface RelayActions {
   _handleRpcResult: (payload: Extract<RelayServerMessage, { type: 'rpc-result' }>) => Promise<boolean>
   _failPendingRpcs: (message: string) => void
   _processBootstrap: (update: RelayUpdate) => Promise<void>
+  _requestBootstrap: () => boolean
 }
 
 type RelayStore = RelayState & RelayActions
@@ -565,14 +566,21 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     if (update.body.material.client_public_key !== expectedClientPublicKey) return
 
     try {
+      // The daemon may republish a recovery bootstrap under a newer pairing
+      // lineage than the one this client originally claimed (re-pairing and
+      // additional-device pairings mint fresh pairing ids while reusing the
+      // session and data key). Trust is anchored in the pinned daemon
+      // identity, the session id, and this client's own key material, so
+      // adopt the material's pairing id instead of pinning the possibly
+      // stale one.
       verifySessionKeyMaterial(update.body.material, {
         expectedSessionId: get().sessionId,
-        expectedPairingId: _pairingId,
         expectedDaemonPublicKey: _trustedDaemonPublicKey,
         expectedDaemonIdentityPublicKey: _trustedDaemonIdentityPublicKey,
         expectedClientPublicKey,
         expectedClientIdentityPublicKey,
       })
+      _pairingId = update.body.material.pairing_id
       get()._setSessionCrypto(bootstrapSessionCrypto(kp, update.body.material))
       get()._setConnectionStatus('encrypted')
       get()._persistSession()
@@ -581,5 +589,32 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       set({ error: e instanceof Error ? e.message : 'Failed to establish encrypted session' })
     }
     /* v8 ignore stop */
+  },
+
+  // A restored trusted session can hold the client token and local key pair
+  // but no session data key (the daemon deliberately skips the bootstrap for
+  // restored trusted sessions). Ask the daemon for a fresh bootstrap over the
+  // relay's plaintext ephemeral channel; the reply arrives as a durable
+  // session-bootstrap update and _processBootstrap installs the key through
+  // the normal replay path. Returns true when the request was sent.
+  _requestBootstrap: () => {
+    if (_sessionCrypto) return false
+    const keyPair = _clientKeyPair
+    const { deviceId } = get()
+    if (!keyPair || !_clientToken || !deviceId) return false
+    try {
+      get()._sendMessage({
+        type: 'ephemeral',
+        body: {
+          kind: 'request-bootstrap',
+          device_id: deviceId,
+          client_bundle: buildPairingPublicKeyBundle(keyPair),
+        },
+      })
+      return true
+    } catch {
+      // Socket not ready — the caller retries on its own schedule.
+      return false
+    }
   },
 }))

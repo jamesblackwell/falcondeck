@@ -1922,3 +1922,67 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         vec!["request-active"]
     );
 }
+
+#[test]
+fn parses_and_verifies_bootstrap_request_ephemerals() {
+    let key_pair = LocalBoxKeyPair::generate();
+    let bundle = build_pairing_public_key_bundle(&key_pair);
+    let body = json!({
+        "kind": "request-bootstrap",
+        "device_id": "device-1",
+        "client_bundle": bundle.clone(),
+    });
+
+    let parsed = super::remote_bridge::parse_bootstrap_request(&body)
+        .expect("valid bootstrap request should parse");
+    assert_eq!(parsed.public_key, bundle.public_key);
+    assert_eq!(parsed.identity_public_key, bundle.identity_public_key);
+}
+
+#[test]
+fn ignores_non_bootstrap_or_malformed_ephemerals() {
+    let key_pair = LocalBoxKeyPair::generate();
+    let bundle = build_pairing_public_key_bundle(&key_pair);
+
+    // Wrong kind.
+    assert!(
+        super::remote_bridge::parse_bootstrap_request(&json!({
+            "kind": "something-else",
+            "client_bundle": bundle.clone(),
+        }))
+        .is_none()
+    );
+    // Missing bundle.
+    assert!(
+        super::remote_bridge::parse_bootstrap_request(&json!({
+            "kind": "request-bootstrap",
+            "device_id": "device-1",
+        }))
+        .is_none()
+    );
+    // Bundle that does not deserialize.
+    assert!(
+        super::remote_bridge::parse_bootstrap_request(&json!({
+            "kind": "request-bootstrap",
+            "client_bundle": { "not": "a bundle" },
+        }))
+        .is_none()
+    );
+    // Not an object at all.
+    assert!(super::remote_bridge::parse_bootstrap_request(&json!("request-bootstrap")).is_none());
+}
+
+#[test]
+fn rejects_bootstrap_request_with_tampered_bundle_signature() {
+    let key_pair = LocalBoxKeyPair::generate();
+    let mut bundle = build_pairing_public_key_bundle(&key_pair);
+    bundle.public_key = LocalBoxKeyPair::generate().public_key_base64().to_string();
+
+    assert!(
+        super::remote_bridge::parse_bootstrap_request(&json!({
+            "kind": "request-bootstrap",
+            "client_bundle": bundle,
+        }))
+        .is_none()
+    );
+}

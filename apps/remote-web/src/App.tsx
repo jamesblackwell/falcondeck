@@ -108,6 +108,9 @@ const RELAY_PING_INTERVAL_MS = 15_000
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
 const MAX_PENDING_SNAPSHOT_EVENTS = 1_000
+// Retry cadence for asking the daemon to republish the session bootstrap
+// while the connection is up but the session data key is missing.
+const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
 
 export default function App() {
   const params = new URLSearchParams(window.location.search)
@@ -320,7 +323,11 @@ export default function App() {
 
   const failCurrentConnection = useCallback(
     (message: string) => {
-      sessionCryptoRef.current = null
+      // Transient failures (malformed frames, socket errors) must NOT strip
+      // the session data key — a keyless client can only recover through an
+      // explicit bootstrap request. Key material is cleared only when the
+      // relay invalidates the saved session (isInvalidSavedSessionError) or
+      // the user resets the saved connection.
       pendingEncryptedUpdatesRef.current = []
       pendingRelayUpdatesRef.current = []
       if (relayFlushFrameRef.current !== null) {
@@ -329,7 +336,6 @@ export default function App() {
       }
       schedulePersistCurrentSession(
         {
-          dataKey: null,
           lastReceivedSeq: lastReceivedSeqRef.current,
         },
         { immediate: true },
@@ -685,6 +691,37 @@ export default function App() {
     sessionId,
   ])
 
+  // ── Data-key recovery ──────────────────────────────────────────────
+  // A trusted browser that still holds its client token and local key pair
+  // but lost the session data key cannot use the encrypted channel. Ask the
+  // daemon for a fresh bootstrap over the relay's plaintext ephemeral
+  // channel; the reply arrives as a durable session-bootstrap update through
+  // the normal replay path and the existing processing installs the key.
+  useEffect(() => {
+    if (!relayConnected || hasSessionKey || !sessionId || !clientToken) return
+
+    const requestBootstrap = () => {
+      if (sessionCryptoRef.current) return
+      const keyPair = clientKeyPairRef.current
+      const socket = socketRef.current
+      if (!keyPair || !socket || socket.readyState !== WebSocket.OPEN) return
+      sendRelayMessage(socket, {
+        type: 'ephemeral',
+        body: {
+          kind: 'request-bootstrap',
+          device_id: deviceId ?? '',
+          client_bundle: buildPairingPublicKeyBundle(keyPair),
+        },
+      })
+    }
+
+    requestBootstrap()
+    const retryTimer = window.setInterval(requestBootstrap, BOOTSTRAP_REQUEST_RETRY_MS)
+    return () => {
+      window.clearInterval(retryTimer)
+    }
+  }, [clientToken, deviceId, hasSessionKey, relayConnected, sessionId])
+
   async function resolvePendingRpc(
     requestId: string,
     ok: boolean,
@@ -762,9 +799,15 @@ export default function App() {
               continue
             }
             try {
+              // The daemon may republish a recovery bootstrap under a newer
+              // pairing lineage than the one this client originally claimed
+              // (re-pairing and additional-device pairings mint fresh pairing
+              // ids while reusing the session and data key). Trust is
+              // anchored in the pinned daemon identity, the session id, and
+              // this client's own key material, so adopt the material's
+              // pairing id instead of pinning the possibly stale one.
               verifySessionKeyMaterial(update.body.material, {
                 expectedSessionId: sessionId,
-                expectedPairingId: pairingId,
                 expectedDaemonPublicKey: trustedDaemonPublicKeyRef.current,
                 expectedDaemonIdentityPublicKey: trustedDaemonIdentityPublicKeyRef.current,
                 expectedClientPublicKey,
@@ -773,7 +816,7 @@ export default function App() {
               sessionCryptoRef.current = bootstrapSessionCrypto(kp, update.body.material)
               trustedDaemonPublicKeyRef.current ??= update.body.material.daemon_public_key
               trustedDaemonIdentityPublicKeyRef.current ??= update.body.material.daemon_identity_public_key
-              if (!pairingId) {
+              if (pairingId !== update.body.material.pairing_id) {
                 setPairingId(update.body.material.pairing_id)
               }
               setConnectionStatus('connected as client (encrypted)')

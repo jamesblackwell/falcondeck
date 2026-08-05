@@ -4,15 +4,19 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import nacl from 'tweetnacl'
 import {
+  REMOTE_SESSION_STORAGE_VERSION,
   generateBoxKeyPair,
   publicKeyToBase64,
   secretKeyToBase64,
   bytesToBase64,
+  verifyPairingPublicKeyBundle,
 } from '@falcondeck/client-core'
-import type { SessionKeyMaterial, RelayUpdate } from '@falcondeck/client-core'
+import type { PairingPublicKeyBundle, SessionKeyMaterial, RelayUpdate } from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
+import { setJson } from '@/storage/mmkv'
+import { persistClientSecretKey, persistClientToken } from '@/storage/secure'
 
 function resetStore() {
   useRelayStore.setState({
@@ -136,6 +140,91 @@ describe('relay-store crypto operations', () => {
       await store._processBootstrap(update)
       // Should not change encryption state
       expect(useRelayStore.getState().isEncrypted).toBe(false)
+    })
+  })
+
+  describe('_requestBootstrap', () => {
+    // Restores a trusted session that kept its key pair and client token but
+    // lost the session data key — the state data-key recovery targets.
+    async function restoreKeylessSession(kp = generateBoxKeyPair()) {
+      setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
+        relayUrl: 'https://relay.test',
+        pairingCode: 'CODE-123',
+        pairingId: 'pairing-1',
+        sessionId: 'session-1',
+        deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
+        lastReceivedSeq: 10,
+      })
+      await persistClientSecretKey(secretKeyToBase64(kp))
+      await persistClientToken('token-abc')
+      expect(await useRelayStore.getState().restoreSession()).toBe(true)
+      return kp
+    }
+
+    function captureSentMessages() {
+      const sent: unknown[] = []
+      useRelayStore.setState({
+        _sendMessage: (message) => {
+          sent.push(message)
+        },
+      })
+      return sent
+    }
+
+    it('sends a request-bootstrap ephemeral when the session key is missing', async () => {
+      await useRelayStore.getState().disconnect()
+      const kp = await restoreKeylessSession()
+      const sent = captureSentMessages()
+
+      expect(useRelayStore.getState()._requestBootstrap()).toBe(true)
+
+      expect(sent).toHaveLength(1)
+      const message = sent[0] as {
+        type: string
+        body: { kind: string; device_id: string; client_bundle: PairingPublicKeyBundle }
+      }
+      expect(message.type).toBe('ephemeral')
+      expect(message.body.kind).toBe('request-bootstrap')
+      expect(message.body.device_id).toBe('device-1')
+      // The bundle is rebuilt from the persisted key pair and properly signed.
+      expect(message.body.client_bundle.public_key).toBe(publicKeyToBase64(kp))
+      expect(() => verifyPairingPublicKeyBundle(message.body.client_bundle)).not.toThrow()
+    })
+
+    it('does not request a bootstrap when session crypto is already present', async () => {
+      await useRelayStore.getState().disconnect()
+      await restoreKeylessSession()
+      useRelayStore.getState()._setSessionCrypto({
+        dataKey: crypto.getRandomValues(new Uint8Array(32)),
+        material: null,
+      })
+      const sent = captureSentMessages()
+
+      expect(useRelayStore.getState()._requestBootstrap()).toBe(false)
+      expect(sent).toHaveLength(0)
+    })
+
+    it('does not request a bootstrap without a local key pair', async () => {
+      await useRelayStore.getState().disconnect()
+      const sent = captureSentMessages()
+
+      expect(useRelayStore.getState()._requestBootstrap()).toBe(false)
+      expect(sent).toHaveLength(0)
+    })
+
+    it('returns false when the socket send fails so the caller can retry', async () => {
+      await useRelayStore.getState().disconnect()
+      await restoreKeylessSession()
+      useRelayStore.setState({
+        _sendMessage: () => {
+          throw new Error('Remote connection is not ready')
+        },
+      })
+
+      expect(useRelayStore.getState()._requestBootstrap()).toBe(false)
     })
   })
 })

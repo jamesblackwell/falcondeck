@@ -19,6 +19,9 @@ const RELAY_PING_INTERVAL_MS = 15_000
 // Only treat a connection as healthy (and reset backoff) after it stays open this long.
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
+// Retry cadence for asking the daemon to republish the session bootstrap
+// while the connection is up but the session data key is missing.
+const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
 
 function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
@@ -59,6 +62,7 @@ export function useRelayConnection() {
   const snapshot = useSessionStore((s) => s.snapshot)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bootstrapRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryAttempt = useRef(0)
   const reconnectAttempt = useRef(0)
   const pendingEncrypted = useRef<RelayUpdate[]>([])
@@ -311,6 +315,27 @@ export function useRelayConnection() {
         clearTimeout(backoffResetTimer)
         backoffResetTimer = null
       }
+      if (bootstrapRetryTimer.current !== null) {
+        clearTimeout(bootstrapRetryTimer.current)
+        bootstrapRetryTimer.current = null
+      }
+    }
+
+    // A restored trusted session may hold the client token and key pair but
+    // no session data key; without it the encrypted channel is unusable. Ask
+    // the daemon for a fresh bootstrap over the relay's plaintext ephemeral
+    // channel once per connect, retrying every 30s while the key is absent.
+    // The reply lands as a session-bootstrap update through the normal replay
+    // path and _processBootstrap installs the key.
+    const requestBootstrapWhileKeyless = () => {
+      if (!isCurrent || !shouldReconnect) return
+      const current = useRelayStore.getState()
+      if (current._getSessionCrypto()) return
+      current._requestBootstrap()
+      bootstrapRetryTimer.current = setTimeout(() => {
+        bootstrapRetryTimer.current = null
+        requestBootstrapWhileKeyless()
+      }, BOOTSTRAP_REQUEST_RETRY_MS)
     }
 
     const scheduleReconnect = () => {
@@ -404,6 +429,9 @@ export function useRelayConnection() {
           }, RELAY_BACKOFF_RESET_MS)
           relay._setConnectionStatus('connected')
           relay._sendMessage({ type: 'sync', after_seq: relay._getLastReceivedSeq() })
+          if (!relay._getSessionCrypto()) {
+            requestBootstrapWhileKeyless()
+          }
         }
 
         socket.onmessage = (msg) => {
