@@ -96,6 +96,9 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     let router = api::router(state.clone());
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
+    // The Claude PreToolUse hook posts back to this URL; record the actual
+    // bound address since the configured port may be 0 (OS-assigned).
+    state.set_local_base_url(format!("http://{local_addr}"));
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
     let join_handle = tokio::spawn(async move {

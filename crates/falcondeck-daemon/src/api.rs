@@ -79,6 +79,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
+        .route(
+            "/api/claude/hooks/pre-tool-use",
+            post(claude_pre_tool_use),
+        )
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -276,6 +280,13 @@ async fn respond_approval(
             )
             .await?,
     ))
+}
+
+async fn claude_pre_tool_use(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> Json<serde_json::Value> {
+    Json(state.handle_claude_pre_tool_use(payload).await)
 }
 
 async fn git_status(

@@ -632,6 +632,175 @@ pub(super) async fn ingest_notification(
     Ok(())
 }
 
+/// How long a Claude PreToolUse hook waits for a user decision before the
+/// daemon denies the tool call. Matches the hook command's own 600s timeout.
+const CLAUDE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
+
+fn claude_hook_decision(decision: &str, reason: &str) -> Value {
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": decision,
+            "permissionDecisionReason": reason
+        }
+    })
+}
+
+fn claude_tool_input_summary(tool_input: &Value) -> Option<String> {
+    let compact = tool_input.to_string();
+    if compact == "{}" || compact == "null" {
+        return None;
+    }
+    Some(truncate_preview(&compact, 200))
+}
+
+pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -> Value {
+    let no_opinion = Value::Object(serde_json::Map::new());
+    let Some(session_id) = crate::codex::extract_string(&payload, &["session_id"]) else {
+        return no_opinion;
+    };
+    let tool_name = crate::codex::extract_string(&payload, &["tool_name"])
+        .unwrap_or_else(|| "tool".to_string());
+    let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+
+    let located = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces.iter().find_map(|(workspace_id, workspace)| {
+            workspace
+                .threads
+                .values()
+                .find(|thread| {
+                    thread.summary.provider == AgentProvider::Claude
+                        && thread.summary.native_session_id.as_deref() == Some(&session_id)
+                })
+                .map(|thread| (workspace_id.clone(), thread.summary.id.clone()))
+        })
+    };
+    let Some((workspace_id, thread_id)) = located else {
+        // Not one of our sessions; leave the decision to Claude Code.
+        return no_opinion;
+    };
+
+    let allow = claude_hook_decision("allow", "Approved in FalconDeck");
+    {
+        let always_allowed = app.inner.claude_always_allowed_tools.lock().await;
+        if always_allowed
+            .get(&(workspace_id.clone(), thread_id.clone()))
+            .is_some_and(|tools| tools.contains(&tool_name))
+        {
+            return allow;
+        }
+    }
+
+    let request_id = format!("claude-{}", Uuid::new_v4());
+    let request = InteractiveRequest {
+        request_id: request_id.clone(),
+        workspace_id: workspace_id.clone(),
+        thread_id: Some(thread_id.clone()),
+        method: "claude/hooks/pre-tool-use".to_string(),
+        kind: InteractiveRequestKind::Approval,
+        title: format!("Allow {tool_name}?"),
+        detail: claude_tool_input_summary(&tool_input),
+        command: crate::codex::extract_string(&tool_input, &["command"]),
+        path: crate::codex::extract_string(&tool_input, &["file_path", "path"]),
+        turn_id: None,
+        item_id: None,
+        questions: Vec::new(),
+        created_at: Utc::now(),
+    };
+
+    let (decision_tx, decision_rx) = tokio::sync::oneshot::channel();
+    app.inner
+        .claude_approvals
+        .lock()
+        .await
+        .insert((workspace_id.clone(), request_id.clone()), decision_tx);
+    app.inner.interactive_requests.lock().await.insert(
+        (workspace_id.clone(), request_id.clone()),
+        PendingServerRequest {
+            raw_id: Value::Null,
+            request: request.clone(),
+        },
+    );
+
+    let _ = app
+        .with_thread_mut(&workspace_id, &thread_id, |thread| {
+            thread.status = ThreadStatus::WaitingForInput;
+        })
+        .await;
+    app.emit(
+        Some(workspace_id.clone()),
+        Some(thread_id.clone()),
+        UnifiedEvent::InteractiveRequest {
+            request: request.clone(),
+        },
+    );
+    app.notify_remote_attention("approval", &workspace_id, Some(thread_id.clone()))
+        .await;
+    let _ = app
+        .push_conversation_item(
+            &workspace_id,
+            &thread_id,
+            ConversationItem::InteractiveRequest {
+                id: request_id.clone(),
+                request,
+                created_at: Utc::now(),
+                resolved: false,
+            },
+            false,
+        )
+        .await;
+
+    let decision = match timeout(CLAUDE_APPROVAL_TIMEOUT, decision_rx).await {
+        Ok(Ok(decision)) => decision,
+        // Timed out or the sender was dropped: clean up the abandoned request
+        // so the thread does not stay stuck in WaitingForInput.
+        _ => {
+            app.inner
+                .claude_approvals
+                .lock()
+                .await
+                .remove(&(workspace_id.clone(), request_id.clone()));
+            app.inner
+                .interactive_requests
+                .lock()
+                .await
+                .remove(&(workspace_id.clone(), request_id.clone()));
+            let _ = app
+                .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                    thread.status = ThreadStatus::Running;
+                })
+                .await;
+            let _ = app
+                .resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
+                .await;
+            app.emit(
+                Some(workspace_id),
+                None,
+                UnifiedEvent::Snapshot {
+                    snapshot: app.snapshot().await,
+                },
+            );
+            return claude_hook_decision("deny", "FalconDeck approval timed out");
+        }
+    };
+
+    match decision {
+        ApprovalDecision::Allow => allow,
+        ApprovalDecision::AlwaysAllow => {
+            app.inner
+                .claude_always_allowed_tools
+                .lock()
+                .await
+                .entry((workspace_id, thread_id))
+                .or_default()
+                .insert(tool_name);
+            allow
+        }
+        ApprovalDecision::Deny => claude_hook_decision("deny", "Denied in FalconDeck"),
+    }
+}
+
 pub(super) async fn ingest_server_request(
     app: &AppState,
     workspace_id: &str,

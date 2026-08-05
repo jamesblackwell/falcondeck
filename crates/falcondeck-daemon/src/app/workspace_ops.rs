@@ -977,14 +977,23 @@ pub(super) async fn send_turn(
         AgentProvider::Claude => {
             let runtime = app.claude_runtime_for(&request.workspace_id).await?;
             let session_id = thread.native_session_id.clone();
+            let images = inputs
+                .iter()
+                .filter_map(|input| match input {
+                    TurnInputItem::Image(image) => Some(image.clone()),
+                    TurnInputItem::Text { .. } => None,
+                })
+                .collect::<Vec<_>>();
             let spawn = runtime
                 .spawn_turn(
                     &request.thread_id,
                     session_id.as_deref(),
                     &claude_prompt_from_inputs(&inputs, &selected_skills),
+                    &images,
                     thread.agent.model_id.as_deref(),
                     thread.agent.reasoning_effort.as_deref(),
                     is_claude_plan_mode(thread.agent.collaboration_mode_id.as_deref()),
+                    app.local_base_url().as_deref(),
                 )
                 .await?;
             app.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
@@ -1186,6 +1195,49 @@ pub(super) async fn respond_to_interactive_request(
             .cloned()
             .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?
     };
+    let request_key = (workspace_id.clone(), request_id.clone());
+    // Claude approvals resolve through the hook handler's oneshot; the Codex
+    // session must not be touched for them.
+    let is_claude_approval = app
+        .inner
+        .claude_approvals
+        .lock()
+        .await
+        .contains_key(&request_key);
+    if is_claude_approval {
+        let InteractiveResponsePayload::Approval { decision } = response else {
+            return Err(DaemonError::BadRequest(
+                "Claude interactive requests require an approval response".to_string(),
+            ));
+        };
+        if let Some(sender) = app.inner.claude_approvals.lock().await.remove(&request_key) {
+            let _ = sender.send(decision);
+        }
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&request_key);
+        if let Some(thread_id) = pending.request.thread_id {
+            app.with_thread_mut(&workspace_id, &thread_id, |thread| {
+                thread.status = ThreadStatus::Running;
+            })
+            .await?;
+            app.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
+                .await?;
+        }
+        app.emit(
+            Some(workspace_id),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: app.snapshot().await,
+            },
+        );
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("response sent".to_string()),
+        });
+    }
     if let Some(thread_id) = pending.request.thread_id.as_deref() {
         let provider = app.thread_provider(&workspace_id, thread_id).await?;
         if provider != AgentProvider::Codex {
@@ -1369,6 +1421,172 @@ pub(super) async fn refresh_connected_workspace_metadata(
 
     app.persist_local_state().await?;
     Ok(summary)
+}
+
+const CODEX_RECONNECT_MAX_ATTEMPTS: u32 = 5;
+
+fn codex_reconnect_delay(attempt: u32) -> Duration {
+    Duration::from_secs(1 << attempt.min(4))
+}
+
+#[derive(Debug)]
+enum CodexReconnectAttempt {
+    /// The workspace was removed; stop reconnecting for good.
+    WorkspaceGone,
+    /// A live session is already attached (another reconnect won); stop.
+    AlreadyConnected,
+    Reconnected,
+    Failed(String),
+}
+
+/// Respawn the Codex app-server for a workspace after an unexpected exit.
+/// Bounded attempts double as the respawn-storm guard: a fresh session that
+/// dies immediately re-enters here, and after five failures recovery stays
+/// manual until the user reconnects the workspace.
+pub(super) async fn run_codex_reconnect(app: &AppState, workspace_id: &str) {
+    let mut last_error = "unknown error".to_string();
+    for attempt in 0..CODEX_RECONNECT_MAX_ATTEMPTS {
+        tokio::time::sleep(codex_reconnect_delay(attempt)).await;
+        match try_codex_reconnect(app, workspace_id).await {
+            CodexReconnectAttempt::WorkspaceGone | CodexReconnectAttempt::AlreadyConnected => {
+                return;
+            }
+            CodexReconnectAttempt::Reconnected => {
+                let _ = app.emit_service(
+                    Some(workspace_id.to_string()),
+                    None,
+                    falcondeck_core::ServiceLevel::Info,
+                    "Codex reconnected".to_string(),
+                    Some("codex-reconnect".to_string()),
+                );
+                app.emit(
+                    Some(workspace_id.to_string()),
+                    None,
+                    UnifiedEvent::Snapshot {
+                        snapshot: app.snapshot().await,
+                    },
+                );
+                return;
+            }
+            CodexReconnectAttempt::Failed(error) => last_error = error,
+        }
+    }
+
+    let failure = format!("Codex reconnect failed: {last_error}");
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        if let Some(workspace) = workspaces.get_mut(workspace_id)
+            && let Some(agent) = workspace
+                .summary
+                .agents
+                .iter_mut()
+                .find(|agent| agent.provider == AgentProvider::Codex)
+        {
+            agent.account = falcondeck_core::AccountSummary {
+                status: falcondeck_core::AccountStatus::Unknown,
+                label: failure.clone(),
+            };
+        }
+    }
+    let _ = app.emit_service(
+        Some(workspace_id.to_string()),
+        None,
+        falcondeck_core::ServiceLevel::Error,
+        failure,
+        Some("codex-reconnect".to_string()),
+    );
+    app.emit(
+        Some(workspace_id.to_string()),
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+}
+
+async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconnectAttempt {
+    let workspace_path = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let Some(workspace) = workspaces.get(workspace_id) else {
+            return CodexReconnectAttempt::WorkspaceGone;
+        };
+        if workspace
+            .codex_session
+            .as_ref()
+            .is_some_and(|session| !session.is_closed())
+        {
+            return CodexReconnectAttempt::AlreadyConnected;
+        }
+        workspace.summary.path.clone()
+    };
+
+    let bootstrap = match CodexSession::connect(
+        workspace_id.to_string(),
+        workspace_path,
+        app.inner.codex_bin.clone(),
+        app.clone(),
+    )
+    .await
+    {
+        Ok(bootstrap) => bootstrap,
+        Err(error) => return CodexReconnectAttempt::Failed(error.to_string()),
+    };
+    // In-memory thread state stays authoritative: bootstrap.threads is
+    // deliberately dropped; only the session handle and metadata refresh.
+    let CodexBootstrap {
+        session,
+        account,
+        models,
+        collaboration_modes,
+        threads: _,
+    } = bootstrap;
+
+    let mut workspaces = app.inner.workspaces.lock().await;
+    let stale = match workspaces.get_mut(workspace_id) {
+        None => Some(CodexReconnectAttempt::WorkspaceGone),
+        Some(workspace)
+            if workspace
+                .codex_session
+                .as_ref()
+                .is_some_and(|session| !session.is_closed()) =>
+        {
+            Some(CodexReconnectAttempt::AlreadyConnected)
+        }
+        Some(_) => None,
+    };
+    if let Some(outcome) = stale {
+        drop(workspaces);
+        let _ = session.shutdown().await;
+        return outcome;
+    }
+    let workspace = workspaces
+        .get_mut(workspace_id)
+        .expect("workspace checked above");
+    workspace.codex_session = Some(session);
+    let codex_skills = workspace
+        .summary
+        .agents
+        .iter()
+        .find(|agent| agent.provider == AgentProvider::Codex)
+        .map(|agent| agent.skills.clone())
+        .unwrap_or_default();
+    update_workspace_agent_summary(
+        &mut workspace.summary.agents,
+        AgentProvider::Codex,
+        CodexProviderMetadata {
+            account,
+            models,
+            collaboration_modes,
+        },
+        codex_skills,
+    );
+    for thread in workspace.threads.values_mut() {
+        if thread.summary.provider == AgentProvider::Codex {
+            thread.requires_resume = true;
+        }
+    }
+    workspace.summary.updated_at = Utc::now();
+    CodexReconnectAttempt::Reconnected
 }
 
 pub(super) async fn thread_detail(
@@ -1697,5 +1915,67 @@ mod tests {
         assert_eq!(detail.oldest_item_id.as_deref(), Some("msg-2"));
         assert_eq!(detail.newest_item_id.as_deref(), Some("msg-3"));
         assert!(detail.is_partial);
+    }
+
+    #[test]
+    fn codex_reconnect_backoff_doubles_up_to_sixteen_seconds() {
+        assert_eq!(codex_reconnect_delay(0), Duration::from_secs(1));
+        assert_eq!(codex_reconnect_delay(1), Duration::from_secs(2));
+        assert_eq!(codex_reconnect_delay(2), Duration::from_secs(4));
+        assert_eq!(codex_reconnect_delay(3), Duration::from_secs(8));
+        assert_eq!(codex_reconnect_delay(4), Duration::from_secs(16));
+    }
+
+    #[tokio::test]
+    async fn codex_reconnect_bails_out_when_workspace_is_gone() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "codex".to_string(),
+            "claude".to_string(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+
+        let outcome = try_codex_reconnect(&app, "missing-workspace").await;
+        assert!(matches!(outcome, CodexReconnectAttempt::WorkspaceGone));
+    }
+
+    #[tokio::test]
+    async fn codex_reconnect_reports_failure_when_the_binary_is_missing() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            "definitely-missing-codex-binary".to_string(),
+            "claude".to_string(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        app.inner.workspaces.lock().await.insert(
+            "workspace-1".to_string(),
+            ManagedWorkspace {
+                summary: WorkspaceSummary {
+                    id: "workspace-1".to_string(),
+                    path: temp_dir.path().to_string_lossy().to_string(),
+                    status: WorkspaceStatus::Ready,
+                    agents: Vec::new(),
+                    skills: Vec::new(),
+                    default_provider: AgentProvider::Codex,
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    supports_plan_mode: true,
+                    supports_native_plan_mode: true,
+                    account: falcondeck_core::AccountSummary::default(),
+                    current_thread_id: None,
+                    connected_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    last_error: None,
+                },
+                codex_session: None,
+                claude_runtime: None,
+                threads: HashMap::new(),
+            },
+        );
+
+        let outcome = try_codex_reconnect(&app, "workspace-1").await;
+        assert!(matches!(outcome, CodexReconnectAttempt::Failed(_)));
     }
 }

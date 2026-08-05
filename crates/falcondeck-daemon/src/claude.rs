@@ -7,20 +7,23 @@ use std::{
     sync::Arc,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use falcondeck_core::{
     AccountStatus, AccountSummary, AgentCapabilitySummary, AgentProvider, CollaborationModeSummary,
-    ConversationItem, ModelSummary, ReasoningEffortSummary, ThreadAgentParams, ThreadAttention,
-    ThreadStatus, ThreadSummary,
+    ConversationItem, ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams,
+    ThreadAttention, ThreadStatus, ThreadSummary,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::{
+    io::AsyncWriteExt,
     process::{Child, ChildStderr, ChildStdout, Command},
     sync::Mutex,
 };
 use uuid::Uuid;
 
 use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
+use crate::app::agent_helpers::claude_image_reference;
 use crate::error::DaemonError;
 
 pub struct ClaudeBootstrap {
@@ -108,14 +111,17 @@ impl ClaudeRuntime {
             threads,
         })
     }
+    #[allow(clippy::too_many_arguments)]
     pub async fn spawn_turn(
         &self,
         thread_id: &str,
         session_id: Option<&str>,
         prompt: &str,
+        images: &[ImageInput],
         model_id: Option<&str>,
         effort: Option<&str>,
         plan_mode: bool,
+        daemon_base_url: Option<&str>,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
         let next_session_id = session_id
             .map(ToOwned::to_owned)
@@ -139,13 +145,14 @@ impl ClaudeRuntime {
         let mut command = Command::new(&resolved.executable);
         command
             .arg("-p")
-            .arg(prompt)
+            .arg("--input-format")
+            .arg("stream-json")
             .arg("--output-format")
             .arg("stream-json")
             .arg("--include-partial-messages")
             .arg("--verbose")
             .current_dir(PathBuf::from(&self.workspace_path))
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -165,6 +172,12 @@ impl ClaudeRuntime {
         if plan_mode {
             command.arg("--permission-mode").arg("plan");
         }
+        if let Some(settings_path) = daemon_base_url
+            .filter(|_| claude_approvals_enabled())
+            .and_then(|base_url| self.write_hook_settings_file(base_url))
+        {
+            command.arg("--settings").arg(settings_path);
+        }
 
         let mut child = command
             .spawn()
@@ -180,6 +193,16 @@ impl ClaudeRuntime {
                 }
                 DaemonError::Process(format!("failed to start claude: {error}"))
             })?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let input_line = build_claude_stream_json_input(prompt, images);
+            // Write off-task so a CLI that never reads stdin cannot wedge
+            // spawn_turn; dropping the handle delivers EOF and starts the turn.
+            tokio::spawn(async move {
+                let _ = stdin.write_all(input_line.as_bytes()).await;
+                let _ = stdin.write_all(b"\n").await;
+                let _ = stdin.shutdown().await;
+            });
+        }
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let generation = self
@@ -309,6 +332,126 @@ impl ClaudeRuntime {
             collaboration_modes: default_collaboration_modes(),
             capabilities: default_capabilities(),
         }
+    }
+
+    /// Materialize a `--settings` file wiring the PreToolUse hook to the
+    /// daemon's approval endpoint. Uses a stable per-workspace temp path so
+    /// repeated turns rewrite the same file instead of leaking new ones.
+    fn write_hook_settings_file(&self, base_url: &str) -> Option<PathBuf> {
+        let path = env::temp_dir().join(format!(
+            "falcondeck-claude-hooks-{:016x}.json",
+            stable_workspace_hash(&self.workspace_path)
+        ));
+        match fs::write(&path, build_claude_hook_settings(base_url)) {
+            Ok(()) => Some(path),
+            Err(error) => {
+                tracing::warn!("failed to write claude hook settings file: {error}");
+                None
+            }
+        }
+    }
+}
+
+fn claude_approvals_enabled() -> bool {
+    env::var("FALCONDECK_DISABLE_CLAUDE_APPROVALS").as_deref() != Ok("1")
+}
+
+fn build_claude_hook_settings(base_url: &str) -> String {
+    json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": format!(
+                        "curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- {base_url}/api/claude/hooks/pre-tool-use"
+                    ),
+                    "timeout": 600
+                }]
+            }]
+        }
+    })
+    .to_string()
+}
+
+fn stable_workspace_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Largest image file embedded inline as base64; anything bigger degrades to a
+/// text reference so the stream-json line stays a sane size.
+const MAX_EMBEDDED_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+pub fn build_claude_stream_json_input(prompt: &str, images: &[ImageInput]) -> String {
+    let mut content = Vec::new();
+    if !prompt.is_empty() {
+        content.push(json!({ "type": "text", "text": prompt }));
+    }
+    for image in images {
+        content.push(claude_image_content_block(image));
+    }
+    if content.is_empty() {
+        content.push(json!({ "type": "text", "text": prompt }));
+    }
+    json!({
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": content
+        }
+    })
+    .to_string()
+}
+
+fn claude_image_content_block(image: &ImageInput) -> Value {
+    let fallback = || json!({ "type": "text", "text": claude_image_reference(image) });
+    let Some(local_path) = image
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return fallback();
+    };
+    let Some(media_type) = image_media_type_from_extension(local_path) else {
+        return fallback();
+    };
+    let within_limit = fs::metadata(local_path)
+        .map(|metadata| metadata.len() <= MAX_EMBEDDED_IMAGE_BYTES)
+        .unwrap_or(false);
+    if !within_limit {
+        return fallback();
+    }
+    let Ok(bytes) = fs::read(local_path) else {
+        return fallback();
+    };
+    json!({
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": media_type,
+            "data": BASE64.encode(bytes)
+        }
+    })
+}
+
+fn image_media_type_from_extension(path: &str) -> Option<&'static str> {
+    match Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())?
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
     }
 }
 
@@ -837,6 +980,81 @@ mod tests {
         .unwrap();
 
         assert!(hydrate_thread_from_file(&session_path, "/tmp/project").is_none());
+    }
+
+    #[test]
+    fn stream_json_input_wraps_text_only_prompts() {
+        let line = build_claude_stream_json_input("hello world", &[]);
+        let value = serde_json::from_str::<Value>(&line).unwrap();
+        assert_eq!(
+            value,
+            json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "hello world" }]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn stream_json_input_degrades_missing_images_to_text_references() {
+        let line = build_claude_stream_json_input(
+            "look at this",
+            &[ImageInput {
+                id: "img-1".to_string(),
+                name: Some("diagram.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: "ignored".to_string(),
+                local_path: Some("/nonexistent/diagram.png".to_string()),
+            }],
+        );
+        let value = serde_json::from_str::<Value>(&line).unwrap();
+        let content = value["message"]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(
+            content[1]["text"],
+            "[image attachment: /nonexistent/diagram.png]"
+        );
+    }
+
+    #[test]
+    fn stream_json_input_embeds_readable_images_as_base64() {
+        let dir = tempfile::tempdir().unwrap();
+        let image_path = dir.path().join("shot.png");
+        fs::write(&image_path, b"pngdata").unwrap();
+
+        let line = build_claude_stream_json_input(
+            "describe",
+            &[ImageInput {
+                id: "img-1".to_string(),
+                name: Some("shot.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: "ignored".to_string(),
+                local_path: Some(image_path.to_string_lossy().to_string()),
+            }],
+        );
+        let value = serde_json::from_str::<Value>(&line).unwrap();
+        let content = value["message"]["content"].as_array().unwrap();
+        assert_eq!(content[0], json!({ "type": "text", "text": "describe" }));
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], BASE64.encode(b"pngdata"));
+    }
+
+    #[test]
+    fn hook_settings_route_pre_tool_use_to_the_daemon() {
+        let settings =
+            serde_json::from_str::<Value>(&build_claude_hook_settings("http://127.0.0.1:4520"))
+                .unwrap();
+        let hook = &settings["hooks"]["PreToolUse"][0];
+        assert_eq!(hook["matcher"], "*");
+        let command = hook["hooks"][0]["command"].as_str().unwrap();
+        assert!(command.contains("http://127.0.0.1:4520/api/claude/hooks/pre-tool-use"));
+        assert_eq!(hook["hooks"][0]["timeout"], 600);
     }
 
     #[test]

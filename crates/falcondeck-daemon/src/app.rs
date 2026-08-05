@@ -1,8 +1,8 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -22,7 +22,7 @@ use falcondeck_core::{
 use serde_json::{Value, json};
 use tokio::{
     sync::mpsc,
-    sync::{Mutex, broadcast},
+    sync::{Mutex, broadcast, oneshot},
     task::JoinHandle,
     time::{Duration, timeout},
 };
@@ -41,7 +41,7 @@ use crate::{
     },
 };
 
-mod agent_helpers;
+pub(crate) mod agent_helpers;
 pub(crate) mod conversation_helpers;
 mod notifications;
 mod remote_bridge;
@@ -75,6 +75,14 @@ struct InnerState {
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
+    /// Pending Claude PreToolUse approvals keyed by (workspace_id, request_id);
+    /// the hook handler blocks on the receiver until the UI responds.
+    claude_approvals: Mutex<HashMap<(String, String), oneshot::Sender<ApprovalDecision>>>,
+    /// Tools the user always-allowed for a thread, keyed by
+    /// (workspace_id, thread_id).
+    claude_always_allowed_tools: Mutex<HashMap<(String, String), HashSet<String>>>,
+    /// Base HTTP URL the daemon is actually reachable on after binding.
+    local_base_url: OnceLock<String>,
     preferences: Mutex<FalconDeckPreferences>,
     remote: Mutex<RemoteBridgeState>,
 }
@@ -252,6 +260,9 @@ impl AppState {
                 workspaces: Mutex::new(HashMap::new()),
                 saved_workspaces: Mutex::new(HashMap::new()),
                 interactive_requests: Mutex::new(HashMap::new()),
+                claude_approvals: Mutex::new(HashMap::new()),
+                claude_always_allowed_tools: Mutex::new(HashMap::new()),
+                local_base_url: OnceLock::new(),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
@@ -270,6 +281,14 @@ impl AppState {
 
     pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
         self.inner.broadcaster.subscribe()
+    }
+
+    pub fn set_local_base_url(&self, url: String) {
+        let _ = self.inner.local_base_url.set(url);
+    }
+
+    pub fn local_base_url(&self) -> Option<String> {
+        self.inner.local_base_url.get().cloned()
     }
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
@@ -924,6 +943,19 @@ impl AppState {
         params: Value,
     ) -> Result<(), DaemonError> {
         notifications::ingest_server_request(self, workspace_id, raw_id, method, params).await
+    }
+
+    pub async fn handle_claude_pre_tool_use(&self, payload: Value) -> Value {
+        notifications::handle_claude_pre_tool_use(self, payload).await
+    }
+
+    /// Fire-and-forget recovery for a Codex app-server that exited without a
+    /// shutdown request. Backs off between attempts; see `run_codex_reconnect`.
+    pub(crate) fn schedule_codex_reconnect(&self, workspace_id: String) {
+        let app = self.clone();
+        tokio::spawn(async move {
+            workspace_ops::run_codex_reconnect(&app, &workspace_id).await;
+        });
     }
 
     pub fn emit_service(

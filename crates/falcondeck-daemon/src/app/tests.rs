@@ -157,19 +157,26 @@ fn encodes_local_images_for_codex() {
 }
 
 #[test]
-fn claude_prompt_does_not_inline_data_url_images() {
+fn claude_prompt_excludes_image_inputs() {
+    // Images are embedded via the stream-json stdin payload, not the prompt.
     let prompt = claude_prompt_from_inputs(
-        &[TurnInputItem::Image(ImageInput {
-            id: "img-1".to_string(),
-            name: Some("diagram.png".to_string()),
-            mime_type: Some("image/png".to_string()),
-            url: "data:image/png;base64,aGVsbG8=".to_string(),
-            local_path: None,
-        })],
+        &[
+            TurnInputItem::Text {
+                id: None,
+                text: "describe this".to_string(),
+            },
+            TurnInputItem::Image(ImageInput {
+                id: "img-1".to_string(),
+                name: Some("diagram.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: "data:image/png;base64,aGVsbG8=".to_string(),
+                local_path: None,
+            }),
+        ],
         &[],
     );
 
-    assert_eq!(prompt, "[image attachment: diagram.png]");
+    assert_eq!(prompt, "describe this");
 }
 
 #[test]
@@ -1531,6 +1538,231 @@ fn session_not_found_does_not_force_reset_for_trusted_pairings() {
         "relay websocket ticket request failed with status 404 Not Found: session not found",
         true,
     ));
+}
+
+async fn insert_claude_workspace_with_session(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    native_session_id: &str,
+    workspace_path: &std::path::Path,
+) {
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.to_string(),
+        super::ManagedWorkspace {
+            summary: WorkspaceSummary {
+                id: workspace_id.to_string(),
+                path: workspace_path.to_string_lossy().to_string(),
+                status: WorkspaceStatus::Ready,
+                agents: Vec::new(),
+                skills: Vec::new(),
+                default_provider: AgentProvider::Claude,
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                supports_plan_mode: true,
+                supports_native_plan_mode: true,
+                account: falcondeck_core::AccountSummary::default(),
+                current_thread_id: Some(thread_id.to_string()),
+                connected_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+            },
+            codex_session: None,
+            claude_runtime: None,
+            threads: [(
+                thread_id.to_string(),
+                super::ManagedThread::new(ThreadSummary {
+                    id: thread_id.to_string(),
+                    workspace_id: workspace_id.to_string(),
+                    title: "Claude thread".to_string(),
+                    provider: AgentProvider::Claude,
+                    native_session_id: Some(native_session_id.to_string()),
+                    status: ThreadStatus::Running,
+                    updated_at: Utc::now(),
+                    last_message_preview: None,
+                    latest_turn_id: None,
+                    latest_plan: None,
+                    latest_diff: None,
+                    last_tool: None,
+                    last_error: None,
+                    agent: ThreadAgentParams::default(),
+                    attention: ThreadAttention::default(),
+                    is_archived: false,
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        },
+    );
+}
+
+async fn wait_for_pending_claude_request(app: &AppState, workspace_id: &str) -> String {
+    for _ in 0..200 {
+        {
+            let requests = app.inner.interactive_requests.lock().await;
+            if let Some((_, request_id)) = requests
+                .keys()
+                .find(|(request_workspace_id, _)| request_workspace_id == workspace_id)
+            {
+                return request_id.clone();
+            }
+        }
+        sleep(TokioDuration::from_millis(10)).await;
+    }
+    panic!("interactive request never appeared for {workspace_id}");
+}
+
+fn claude_pre_tool_use_payload(session_id: &str, tool_name: &str) -> serde_json::Value {
+    json!({
+        "session_id": session_id,
+        "tool_name": tool_name,
+        "tool_input": { "command": "ls -la" },
+        "cwd": "/tmp/project"
+    })
+}
+
+#[tokio::test]
+async fn claude_pre_tool_use_approval_round_trips_through_interactive_requests() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        "codex".to_string(),
+        "claude".to_string(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "11111111-1111-4111-8111-111111111111",
+        temp_dir.path(),
+    )
+    .await;
+
+    let hook_task = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+                "11111111-1111-4111-8111-111111111111",
+                "Bash",
+            ))
+            .await
+        }
+    });
+
+    let request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    {
+        let requests = app.inner.interactive_requests.lock().await;
+        let pending = requests
+            .get(&("workspace-1".to_string(), request_id.clone()))
+            .unwrap();
+        assert_eq!(pending.request.kind, InteractiveRequestKind::Approval);
+        assert_eq!(pending.request.title, "Allow Bash?");
+        assert_eq!(pending.request.command.as_deref(), Some("ls -la"));
+    }
+    let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_eq!(thread.status, ThreadStatus::WaitingForInput);
+
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        request_id,
+        falcondeck_core::InteractiveResponsePayload::Approval {
+            decision: falcondeck_core::ApprovalDecision::Allow,
+        },
+    )
+    .await
+    .unwrap();
+
+    let response = hook_task.await.unwrap();
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert_eq!(
+        response["hookSpecificOutput"]["hookEventName"],
+        "PreToolUse"
+    );
+    let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_eq!(thread.status, ThreadStatus::Running);
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+    assert!(app.inner.claude_approvals.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn claude_pre_tool_use_ignores_unknown_sessions() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        "codex".to_string(),
+        "claude".to_string(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+
+    let response = app
+        .handle_claude_pre_tool_use(claude_pre_tool_use_payload("unknown-session", "Bash"))
+        .await;
+
+    assert_eq!(response, json!({}));
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn claude_pre_tool_use_always_allow_short_circuits_later_calls() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        "codex".to_string(),
+        "claude".to_string(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "22222222-2222-4222-8222-222222222222",
+        temp_dir.path(),
+    )
+    .await;
+
+    let hook_task = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+                "22222222-2222-4222-8222-222222222222",
+                "Bash",
+            ))
+            .await
+        }
+    });
+    let request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        request_id,
+        falcondeck_core::InteractiveResponsePayload::Approval {
+            decision: falcondeck_core::ApprovalDecision::AlwaysAllow,
+        },
+    )
+    .await
+    .unwrap();
+    let response = hook_task.await.unwrap();
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+
+    // The second call for the same tool must resolve without a new request.
+    let response = app
+        .handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+            "22222222-2222-4222-8222-222222222222",
+            "Bash",
+        ))
+        .await;
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+    assert!(app.inner.claude_approvals.lock().await.is_empty());
 }
 
 #[tokio::test]

@@ -182,17 +182,21 @@ pub(super) fn claude_prompt_from_inputs(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
 ) -> String {
+    // Images are not inlined here: they travel separately to spawn_turn where
+    // build_claude_stream_json_input embeds them (or degrades to a reference).
     inputs
         .iter()
-        .map(|input| match input {
-            TurnInputItem::Text { text, .. } => translate_claude_text_input(text, selected_skills),
-            TurnInputItem::Image(image) => claude_image_reference(image),
+        .filter_map(|input| match input {
+            TurnInputItem::Text { text, .. } => {
+                Some(translate_claude_text_input(text, selected_skills))
+            }
+            TurnInputItem::Image(_) => None,
         })
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-fn claude_image_reference(image: &ImageInput) -> String {
+pub(crate) fn claude_image_reference(image: &ImageInput) -> String {
     if let Some(local_path) = image
         .local_path
         .as_deref()

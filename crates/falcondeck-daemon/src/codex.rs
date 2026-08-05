@@ -77,6 +77,9 @@ pub struct CodexSession {
     next_id: AtomicU64,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, DaemonError>>>>,
     closed: AtomicBool,
+    /// Set before an intentional shutdown so the stdout reader does not treat
+    /// the exit as a crash and schedule a reconnect.
+    expected_exit: AtomicBool,
     state: AppState,
 }
 
@@ -129,6 +132,7 @@ impl CodexSession {
             next_id: AtomicU64::new(1),
             pending: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
+            expected_exit: AtomicBool::new(false),
             state: state.clone(),
         });
 
@@ -264,6 +268,7 @@ impl CodexSession {
     }
 
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
+        self.expected_exit.store(true, Ordering::Release);
         self.closed.store(true, Ordering::Release);
         {
             let pending = std::mem::take(&mut *self.pending.lock().await);
@@ -521,6 +526,11 @@ impl CodexSession {
         }
 
         let _ = self.child.lock().await.wait().await;
+
+        if !self.expected_exit.load(Ordering::Acquire) {
+            self.state
+                .schedule_codex_reconnect(self.workspace_id.clone());
+        }
     }
 }
 
