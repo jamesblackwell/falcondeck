@@ -10,7 +10,8 @@ use crate::error::RelayError;
 use falcondeck_core::RelayUpdate;
 
 use super::app::{
-    PairingRecord, PersistedState, QueuedActionRecord, SessionRecord, TrustedDeviceRecord,
+    PairingRecord, PersistedState, QueuedActionRecord, SessionMeta, SessionRecord,
+    TrustedDeviceRecord,
 };
 
 const FILE_PERSIST_DEBOUNCE_MS: u64 = 150;
@@ -34,27 +35,50 @@ pub(crate) trait PersistenceBackend: Send + Sync {
 
     async fn persist_pairing(
         &self,
-        session: Option<&SessionRecord>,
+        session: Option<&SessionMeta>,
         pairing: Option<&PairingRecord>,
     ) -> Result<(), RelayError>;
 
     async fn persist_device(
         &self,
-        session: &SessionRecord,
-        device_id: Option<&str>,
+        session: &SessionMeta,
+        device: Option<&TrustedDeviceRecord>,
     ) -> Result<(), RelayError>;
 
     async fn persist_action(
         &self,
-        session: &SessionRecord,
-        action_ids: Option<&[&str]>,
+        session: &SessionMeta,
+        actions: &[QueuedActionRecord],
     ) -> Result<(), RelayError>;
 
     async fn persist_update(
         &self,
-        session: &SessionRecord,
+        session: &SessionMeta,
         update: &RelayUpdate,
     ) -> Result<(), RelayError>;
+
+    /// Delete specific update rows (e.g. superseded presence snapshots).
+    async fn remove_updates(
+        &self,
+        session_id: &str,
+        update_ids: &[String],
+    ) -> Result<(), RelayError>;
+
+    /// Delete update rows older than the oldest retained sequence.
+    async fn prune_updates(
+        &self,
+        session_id: &str,
+        oldest_retained_seq: u64,
+    ) -> Result<(), RelayError>;
+
+    /// Delete sessions by id (dependent rows cascade).
+    async fn remove_sessions(&self, session_ids: &[String]) -> Result<(), RelayError>;
+
+    /// Delete pairings by id.
+    async fn remove_pairings(&self, pairing_ids: &[String]) -> Result<(), RelayError>;
+
+    /// Delete queued actions by id.
+    async fn remove_actions(&self, action_ids: &[String]) -> Result<(), RelayError>;
 
     /// Write the entire persisted state (used for pruning, startup
     /// normalization, and the file backend's debounced flush).
@@ -112,7 +136,7 @@ impl PersistenceBackend for FileBackend {
 
     async fn persist_pairing(
         &self,
-        _session: Option<&SessionRecord>,
+        _session: Option<&SessionMeta>,
         _pairing: Option<&PairingRecord>,
     ) -> Result<(), RelayError> {
         // File backend ignores granular changes — AppState will call
@@ -122,25 +146,53 @@ impl PersistenceBackend for FileBackend {
 
     async fn persist_device(
         &self,
-        _session: &SessionRecord,
-        _device_id: Option<&str>,
+        _session: &SessionMeta,
+        _device: Option<&TrustedDeviceRecord>,
     ) -> Result<(), RelayError> {
         Ok(())
     }
 
     async fn persist_action(
         &self,
-        _session: &SessionRecord,
-        _action_ids: Option<&[&str]>,
+        _session: &SessionMeta,
+        _actions: &[QueuedActionRecord],
     ) -> Result<(), RelayError> {
         Ok(())
     }
 
     async fn persist_update(
         &self,
-        _session: &SessionRecord,
+        _session: &SessionMeta,
         _update: &RelayUpdate,
     ) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn remove_updates(
+        &self,
+        _session_id: &str,
+        _update_ids: &[String],
+    ) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn prune_updates(
+        &self,
+        _session_id: &str,
+        _oldest_retained_seq: u64,
+    ) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn remove_sessions(&self, _session_ids: &[String]) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn remove_pairings(&self, _pairing_ids: &[String]) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn remove_actions(&self, _action_ids: &[String]) -> Result<(), RelayError> {
         Ok(())
     }
 
@@ -223,7 +275,7 @@ impl PersistenceBackend for PostgresBackend {
 
     async fn persist_pairing(
         &self,
-        session: Option<&SessionRecord>,
+        session: Option<&SessionMeta>,
         pairing: Option<&PairingRecord>,
     ) -> Result<(), RelayError> {
         let mut client = self.client.lock().await;
@@ -238,49 +290,121 @@ impl PersistenceBackend for PostgresBackend {
 
     async fn persist_device(
         &self,
-        session: &SessionRecord,
-        device_id: Option<&str>,
+        session: &SessionMeta,
+        device: Option<&TrustedDeviceRecord>,
     ) -> Result<(), RelayError> {
         let mut client = self.client.lock().await;
         upsert_session(&mut client, session).await?;
-        if let Some(device_id) = device_id {
-            if let Some(device) = session.devices.get(device_id) {
-                upsert_device(&mut client, &session.session_id, device).await?;
-            }
+        if let Some(device) = device {
+            upsert_device(&mut client, &session.session_id, device).await?;
         }
         Ok(())
     }
 
     async fn persist_action(
         &self,
-        session: &SessionRecord,
-        action_ids: Option<&[&str]>,
+        session: &SessionMeta,
+        actions: &[QueuedActionRecord],
     ) -> Result<(), RelayError> {
         let mut client = self.client.lock().await;
         upsert_session(&mut client, session).await?;
-        let actions = if let Some(action_ids) = action_ids {
-            action_ids
-                .iter()
-                .filter_map(|id| session.actions.get(*id))
-                .cloned()
-                .collect::<Vec<_>>()
-        } else {
-            session.actions.values().cloned().collect::<Vec<_>>()
-        };
         for action in actions {
-            upsert_action(&mut client, &action).await?;
+            upsert_action(&mut client, action).await?;
         }
         Ok(())
     }
 
     async fn persist_update(
         &self,
-        session: &SessionRecord,
+        session: &SessionMeta,
         update: &RelayUpdate,
     ) -> Result<(), RelayError> {
         let mut client = self.client.lock().await;
         upsert_session(&mut client, session).await?;
         upsert_relay_update(&mut client, &session.session_id, update).await?;
+        Ok(())
+    }
+
+    async fn remove_updates(
+        &self,
+        session_id: &str,
+        update_ids: &[String],
+    ) -> Result<(), RelayError> {
+        if update_ids.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.lock().await;
+        client
+            .execute(
+                "DELETE FROM relay_updates WHERE session_id = $1 AND update_id = ANY($2)",
+                &[&session_id, &update_ids],
+            )
+            .await
+            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn prune_updates(
+        &self,
+        session_id: &str,
+        oldest_retained_seq: u64,
+    ) -> Result<(), RelayError> {
+        let oldest = i64::try_from(oldest_retained_seq)
+            .map_err(|_| RelayError::StatePersist("update sequence overflow".to_string()))?;
+        let client = self.client.lock().await;
+        client
+            .execute(
+                "DELETE FROM relay_updates WHERE session_id = $1 AND seq < $2",
+                &[&session_id, &oldest],
+            )
+            .await
+            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_sessions(&self, session_ids: &[String]) -> Result<(), RelayError> {
+        if session_ids.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.lock().await;
+        // Devices, updates, actions, and pairings cascade on delete.
+        client
+            .execute(
+                "DELETE FROM relay_sessions WHERE session_id = ANY($1)",
+                &[&session_ids],
+            )
+            .await
+            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_pairings(&self, pairing_ids: &[String]) -> Result<(), RelayError> {
+        if pairing_ids.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.lock().await;
+        client
+            .execute(
+                "DELETE FROM relay_pairings WHERE pairing_id = ANY($1)",
+                &[&pairing_ids],
+            )
+            .await
+            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+        Ok(())
+    }
+
+    async fn remove_actions(&self, action_ids: &[String]) -> Result<(), RelayError> {
+        if action_ids.is_empty() {
+            return Ok(());
+        }
+        let client = self.client.lock().await;
+        client
+            .execute(
+                "DELETE FROM relay_actions WHERE action_id = ANY($1)",
+                &[&action_ids],
+            )
+            .await
+            .map_err(|error| RelayError::StatePersist(error.to_string()))?;
         Ok(())
     }
 
@@ -626,7 +750,7 @@ async fn load_postgres_state_from_client(
 
 async fn upsert_session(
     client: &mut PostgresClient,
-    session: &SessionRecord,
+    session: &SessionMeta,
 ) -> Result<(), RelayError> {
     client
         .execute(

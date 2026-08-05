@@ -119,15 +119,34 @@ async fn issue_ws_ticket(
     Ok(Json(state.issue_ws_ticket(&session_id, &token).await?))
 }
 
+/// Peers exchange small JSON control frames; anything near this limit is
+/// abuse, not traffic.
+const WS_MAX_MESSAGE_BYTES: usize = 1 << 20;
+
 async fn updates_ws(
     ws: WebSocketUpgrade,
     Query(query): Query<WebSocketQuery>,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, RelayError> {
-    let auth = state
-        .consume_ws_ticket(&query.session_id, &query.ticket)
-        .await?;
-    Ok(ws.on_upgrade(move |socket| socket_loop(socket, state, auth)))
+    // Cheap syntactic validation only: the single-use ticket is consumed
+    // inside the upgrade callback, so an aborted handshake cannot burn it.
+    if query.session_id.trim().is_empty() {
+        return Err(RelayError::BadRequest("session_id is required".to_string()));
+    }
+    Ok(ws
+        .max_message_size(WS_MAX_MESSAGE_BYTES)
+        .max_frame_size(WS_MAX_MESSAGE_BYTES)
+        .on_upgrade(move |socket| async move {
+            match state
+                .consume_ws_ticket(&query.session_id, &query.ticket)
+                .await
+            {
+                Ok(auth) => socket_loop(socket, state, auth).await,
+                Err(error) => {
+                    let _ = send_raw_error(socket, error.to_string()).await;
+                }
+            }
+        }))
 }
 
 async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {

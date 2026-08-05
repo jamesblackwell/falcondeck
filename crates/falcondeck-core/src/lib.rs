@@ -1243,6 +1243,9 @@ pub struct RelayHealthResponse {
     pub pending_pairings: usize,
     /// Number of active relay sessions.
     pub active_sessions: usize,
+    /// Number of sessions with at least one connected peer.
+    #[serde(default)]
+    pub connected_sessions: usize,
 }
 
 /// Encryption scheme used by pairing and relay payloads.

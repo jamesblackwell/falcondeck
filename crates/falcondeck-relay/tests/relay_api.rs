@@ -827,6 +827,10 @@ async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
         let _ = recv_until_update(&mut daemon_ws).await;
     }
 
+    // Pruning runs in the background; the health endpoint keeps a
+    // synchronous trigger so tests can force a pass deterministically.
+    trigger_prune(&client, &server.http_base).await;
+
     let history = get_json::<RelayUpdatesResponse>(
         &client,
         &format!(
@@ -879,6 +883,8 @@ async fn fresh_clients_are_told_history_was_truncated_after_pruning() {
         .await;
         let _ = recv_until_update(&mut daemon_ws).await;
     }
+
+    trigger_prune(&client, &server.http_base).await;
 
     let history = get_json::<RelayUpdatesResponse>(
         &client,
@@ -1061,6 +1067,7 @@ async fn idle_trusted_sessions_are_pruned_after_retention_expires() {
     .await;
 
     tokio::time::sleep(TokioDuration::from_millis(20)).await;
+    trigger_prune(&client, &restarted.http_base).await;
 
     let response = client
         .get(format!(
@@ -1511,6 +1518,104 @@ async fn legacy_state_recovers_sessions_and_skips_incompatible_pairings() {
     assert_eq!(health.active_sessions, 1);
 }
 
+#[tokio::test]
+async fn presence_updates_supersede_older_presence_history() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    // Each connect/disconnect cycle appends durable presence updates; only
+    // the newest snapshot may stay in the replay log.
+    for marker in ["one", "two"] {
+        let daemon_url = ws_url_for(
+            &client,
+            &server.http_base,
+            &server.ws_base,
+            &claim.session_id,
+            &pairing.daemon_token,
+        )
+        .await;
+        let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+        let _ = recv_server_message(&mut daemon_ws).await;
+        send_client_message(
+            &mut daemon_ws,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted {
+                    envelope: test_envelope(marker),
+                },
+            },
+        )
+        .await;
+        let _ = recv_until_update(&mut daemon_ws).await;
+        daemon_ws.close(None).await.unwrap();
+        // Give the relay time to notice the disconnect and append the
+        // corresponding presence update.
+        tokio::time::sleep(TokioDuration::from_millis(100)).await;
+    }
+
+    let history = get_json::<RelayUpdatesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/updates?after_seq=0",
+            server.http_base, claim.session_id
+        ),
+        Some(&claim.client_token),
+    )
+    .await;
+    let presence_count = history
+        .updates
+        .iter()
+        .filter(|update| matches!(update.body, RelayUpdateBody::Presence { .. }))
+        .count();
+    let encrypted_count = history
+        .updates
+        .iter()
+        .filter(|update| matches!(update.body, RelayUpdateBody::Encrypted { .. }))
+        .count();
+    assert_eq!(
+        presence_count, 1,
+        "only the latest presence update should be retained"
+    );
+    assert_eq!(
+        encrypted_count, 2,
+        "encrypted updates must survive presence churn"
+    );
+}
+
+#[tokio::test]
+async fn oversized_rpc_request_ids_are_rejected() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    let _ = recv_server_message(&mut client_ws).await;
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "r".repeat(129),
+            method: "approval.respond".to_string(),
+            params: test_envelope("oversized"),
+        },
+    )
+    .await;
+
+    let response = recv_server_message(&mut client_ws).await;
+    assert!(
+        matches!(response, RelayServerMessage::Error { .. }),
+        "expected error message, got {response:?}"
+    );
+}
+
 async fn create_claimed_session(
     client: &reqwest::Client,
     http_base: &str,
@@ -1565,6 +1670,18 @@ where
         .json::<R>()
         .await
         .unwrap()
+}
+
+/// Force a synchronous prune pass via the health endpoint; retention
+/// otherwise runs on a background interval.
+async fn trigger_prune(client: &reqwest::Client, http_base: &str) {
+    client
+        .get(format!("{http_base}/v1/health"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
 }
 
 async fn get_json<R>(client: &reqwest::Client, url: &str, bearer: Option<&str>) -> R

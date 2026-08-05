@@ -30,6 +30,11 @@ const PUSH_DEDUPE_SECONDS: i64 = 60;
 /// headroom for other traffic. Remaining actions stay `Queued` and are
 /// picked up on subsequent passes.
 const MAX_ACTIONS_PER_DISPATCH: usize = 64;
+/// How often the background task sweeps retained state; pruning no longer
+/// runs on the request path.
+const PRUNE_INTERVAL_SECONDS: u64 = 60;
+/// Upper bound on client-chosen RPC request identifiers.
+const MAX_RPC_REQUEST_ID_LENGTH: usize = 128;
 
 #[derive(Debug, Clone)]
 pub struct RetentionConfig {
@@ -130,6 +135,20 @@ pub(crate) struct SessionRecord {
     pub(crate) updates: Vec<RelayUpdate>,
     #[serde(default)]
     pub(crate) actions: HashMap<String, QueuedActionRecord>,
+}
+
+/// Scalar session fields consumed by backend session upserts, so hot
+/// paths never clone the full update history or action map under the
+/// store lock just to persist a row.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionMeta {
+    pub(crate) session_id: String,
+    pub(crate) pairing_id: String,
+    pub(crate) daemon_token: String,
+    pub(crate) daemon_last_seen_at: Option<DateTime<Utc>>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) next_seq: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -281,10 +300,11 @@ impl AppState {
                 needs_flush: true,
             }),
         };
-        let pruned = state.prune_expired_state().await?;
+        let pruned = !state.prune_expired_state().await?.is_empty();
         if normalized || pruned {
             state.persist_current().await?;
         }
+        state.spawn_prune_task();
         Ok(state)
     }
 
@@ -331,14 +351,17 @@ impl AppState {
                 needs_flush: false,
             }),
         };
-        let pruned = state.prune_expired_state().await?;
+        let pruned = !state.prune_expired_state().await?.is_empty();
         if normalized || pruned {
             state.persist_current().await?;
         }
+        state.spawn_prune_task();
         Ok(state)
     }
 
     pub async fn health(&self) -> RelayHealthResponse {
+        // Health checks keep a synchronous prune trigger; other request
+        // paths rely on the background sweep.
         let _ = self.prune_retained_state().await;
         let store = self.inner.store.lock().await;
         let now = Utc::now();
@@ -348,6 +371,11 @@ impl AppState {
             .values()
             .filter(|pairing| pairing.device_id.is_none() && pairing.expires_at > now)
             .count();
+        let connected_sessions = store
+            .live_sessions
+            .values()
+            .filter(|live| !live.peers.is_empty())
+            .count();
 
         RelayHealthResponse {
             ok: true,
@@ -355,6 +383,7 @@ impl AppState {
             version: self.inner.version.clone(),
             pending_pairings,
             active_sessions: store.data.sessions.len(),
+            connected_sessions,
         }
     }
 
@@ -402,13 +431,13 @@ impl AppState {
                 let provided_token = request.daemon_token.as_deref().ok_or_else(|| {
                     RelayError::Unauthorized("daemon token is required".to_string())
                 })?;
-                if session.daemon_token != provided_token {
+                if !constant_time_eq(&session.daemon_token, provided_token) {
                     return Err(RelayError::Unauthorized("invalid daemon token".to_string()));
                 }
                 session.updated_at = now;
                 session_id = existing_session_id.clone();
                 daemon_token = session.daemon_token.clone();
-                session_snapshot = session.clone();
+                session_snapshot = session.meta();
             } else {
                 let session = SessionRecord {
                     session_id: session_id.clone(),
@@ -429,7 +458,7 @@ impl AppState {
                     updates: Vec::new(),
                     actions: HashMap::new(),
                 };
-                session_snapshot = session.clone();
+                session_snapshot = session.meta();
                 store.data.sessions.insert(session_id.clone(), session);
             }
             let pairing = PairingRecord {
@@ -494,7 +523,7 @@ impl AppState {
             .client_bundle
             .as_ref()
             .map(|bundle| bundle.public_key.clone());
-        let (response, session_snapshot, pairing_snapshot, device_id) = {
+        let (response, session_snapshot, pairing_snapshot, device_snapshot) = {
             let mut store = self.inner.store.lock().await;
             let pairing_id = store
                 .data
@@ -573,7 +602,8 @@ impl AppState {
                     .ok_or_else(|| {
                         RelayError::Conflict("trusted device was not created".to_string())
                     })?;
-                let session_snapshot = session.clone();
+                let session_snapshot = session.meta();
+                let device_snapshot = session.devices.get(&claimed_device_id).cloned();
 
                 (
                     ClaimPairingResponse {
@@ -586,7 +616,7 @@ impl AppState {
                     },
                     session_snapshot,
                     pairing_snapshot,
-                    claimed_device_id,
+                    device_snapshot,
                 )
             } else {
                 let existing_device_id = claimed_public_key.as_ref().and_then(|public_key| {
@@ -641,7 +671,8 @@ impl AppState {
                     .ok_or_else(|| {
                         RelayError::Conflict("trusted device was not created".to_string())
                     })?;
-                let session_snapshot = session.clone();
+                let session_snapshot = session.meta();
+                let device_snapshot = session.devices.get(&device_id).cloned();
                 let pairing = store
                     .data
                     .pairings
@@ -663,7 +694,7 @@ impl AppState {
                     },
                     session_snapshot,
                     pairing_snapshot,
-                    device_id,
+                    device_snapshot,
                 )
             }
         };
@@ -674,8 +705,12 @@ impl AppState {
             PersistMode::Immediate,
         )
         .await?;
-        self.persist_device_state(&session_snapshot, Some(&device_id), PersistMode::Immediate)
-            .await?;
+        self.persist_device_state(
+            &session_snapshot,
+            device_snapshot.as_ref(),
+            PersistMode::Immediate,
+        )
+        .await?;
         Ok(response)
     }
 
@@ -691,7 +726,7 @@ impl AppState {
             .get(pairing_id)
             .ok_or_else(|| RelayError::NotFound("pairing not found".to_string()))?;
 
-        if pairing.daemon_token != daemon_token {
+        if !constant_time_eq(&pairing.daemon_token, daemon_token) {
             return Err(RelayError::Unauthorized("invalid daemon token".to_string()));
         }
 
@@ -754,23 +789,19 @@ impl AppState {
         session_id: &str,
         token: &str,
     ) -> Result<SessionAuth, RelayError> {
-        let _ = self.prune_retained_state().await?;
-        let store = self.inner.store.lock().await;
-        let mut session = store
+        let mut store = self.inner.store.lock().await;
+        let session = store
             .data
             .sessions
-            .get(session_id)
-            .cloned()
+            .get_mut(session_id)
             .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
         session.migrate_legacy_device_fields();
 
-        let (role, device_id) = if session.daemon_token == token {
+        let (role, device_id) = if constant_time_eq(&session.daemon_token, token) {
             (RelayPeerRole::Daemon, None)
-        } else if let Some(device) = session
-            .devices
-            .values()
-            .find(|device| device.client_token == token && device.revoked_at.is_none())
-        {
+        } else if let Some(device) = session.devices.values().find(|device| {
+            constant_time_eq(&device.client_token, token) && device.revoked_at.is_none()
+        }) {
             (RelayPeerRole::Client, Some(device.device_id.clone()))
         } else {
             return Err(RelayError::Unauthorized(
@@ -818,9 +849,13 @@ impl AppState {
         store
             .ws_tickets
             .retain(|_, entry| entry.expires_at > Utc::now());
-        let entry = store
+        let matched = store
             .ws_tickets
-            .remove(ticket)
+            .keys()
+            .find(|candidate| constant_time_eq(candidate, ticket))
+            .cloned();
+        let entry = matched
+            .and_then(|key| store.ws_tickets.remove(&key))
             .ok_or_else(|| RelayError::Unauthorized("invalid websocket ticket".to_string()))?;
         if entry.session_id != session_id {
             return Err(RelayError::Unauthorized(
@@ -928,6 +963,7 @@ impl AppState {
     pub async fn unregister_peer(&self, session_id: &str, peer_id: &str) {
         let mut deferred = Vec::new();
         let mut requeued_actions = Vec::new();
+        let mut requeued_records = Vec::new();
         let mut session_snapshot = None;
         let mut should_redispatch = false;
         {
@@ -1002,24 +1038,17 @@ impl AppState {
                     action.result = None;
                     action.owner_peer_id = None;
                     requeued_actions.push(action.to_public());
+                    requeued_records.push(action.clone());
                     should_redispatch = true;
                 }
                 session.updated_at = now;
-                session_snapshot = Some(session.clone());
+                session_snapshot = Some(session.meta());
             }
         }
 
         if let Some(session) = session_snapshot.as_ref() {
-            let action_ids = requeued_actions
-                .iter()
-                .map(|action| action.action_id.as_str())
-                .collect::<Vec<_>>();
             let _ = self
-                .persist_action_state(
-                    session,
-                    (!action_ids.is_empty()).then_some(action_ids.as_slice()),
-                    PersistMode::Immediate,
-                )
+                .persist_action_state(session, &requeued_records, PersistMode::Immediate)
                 .await;
         }
         for (requester_peer_id, tx, message) in deferred {
@@ -1090,8 +1119,14 @@ impl AppState {
                     .await?;
             }
             RelayClientMessage::Ephemeral { body } => {
-                self.broadcast(session_id, RelayServerMessage::Ephemeral { body })
-                    .await;
+                // The sender already has the payload; echoing it back only
+                // burns queue capacity.
+                self.broadcast_except(
+                    session_id,
+                    Some(peer_id),
+                    RelayServerMessage::Ephemeral { body },
+                )
+                .await;
             }
             RelayClientMessage::RpcRegister { method } => {
                 if !matches!(role, RelayPeerRole::Daemon) {
@@ -1119,6 +1154,11 @@ impl AppState {
                     return Err(RelayError::Unauthorized(
                         "only client peers may initiate rpc calls".to_string(),
                     ));
+                }
+                if request_id.len() > MAX_RPC_REQUEST_ID_LENGTH {
+                    return Err(RelayError::BadRequest(format!(
+                        "rpc request_id must not exceed {MAX_RPC_REQUEST_ID_LENGTH} characters"
+                    )));
                 }
                 self.forward_rpc_call(session_id, peer_id, request_id, method, params)
                     .await;
@@ -1178,16 +1218,34 @@ impl AppState {
         body: RelayUpdateBody,
         persist_mode: PersistMode,
     ) -> Result<(), RelayError> {
-        let (update, session) = {
+        let (update, session, superseded_presence_ids) = {
             let mut store = self.inner.store.lock().await;
             let update;
             let session_snapshot;
+            let mut superseded_presence_ids = Vec::new();
             {
                 let session = store
                     .data
                     .sessions
                     .get_mut(session_id)
                     .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+                if matches!(body, RelayUpdateBody::Presence { .. }) {
+                    // Clients only care about the latest presence snapshot;
+                    // dropping the superseded rows keeps churny peers from
+                    // pushing real updates out of the retained window.
+                    // Sequence numbers are never reused.
+                    superseded_presence_ids = session
+                        .updates
+                        .iter()
+                        .filter(|update| matches!(update.body, RelayUpdateBody::Presence { .. }))
+                        .map(|update| update.id.clone())
+                        .collect();
+                    if !superseded_presence_ids.is_empty() {
+                        session
+                            .updates
+                            .retain(|update| !matches!(update.body, RelayUpdateBody::Presence { .. }));
+                    }
+                }
                 update = RelayUpdate {
                     id: format!("update-{}", Uuid::new_v4().simple()),
                     seq: session.next_seq,
@@ -1197,7 +1255,7 @@ impl AppState {
                 session.next_seq = session.next_seq.saturating_add(1);
                 session.updated_at = update.created_at;
                 session.updates.push(update.clone());
-                session_snapshot = session.clone();
+                session_snapshot = session.meta();
             }
             // Fan out while still holding the store lock: try_send is
             // non-blocking, and releasing the lock first would let two
@@ -1214,9 +1272,15 @@ impl AppState {
                     );
                 }
             }
-            (update, session_snapshot)
+            (update, session_snapshot, superseded_presence_ids)
         };
 
+        if !superseded_presence_ids.is_empty() {
+            self.inner
+                .backend
+                .remove_updates(session_id, &superseded_presence_ids)
+                .await?;
+        }
         self.persist_update_state(&session, &update, persist_mode)
             .await?;
 
@@ -1461,7 +1525,7 @@ impl AppState {
         let device_id = auth
             .device_id
             .ok_or_else(|| RelayError::Unauthorized("missing trusted device".to_string()))?;
-        let (action, session) = {
+        let (action, record, session) = {
             let mut store = self.inner.store.lock().await;
             let session = store
                 .data
@@ -1469,7 +1533,7 @@ impl AppState {
                 .get_mut(session_id)
                 .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
 
-            let action = if let Some(existing) = session
+            let record = if let Some(existing) = session
                 .actions
                 .values()
                 .find(|action| {
@@ -1485,7 +1549,7 @@ impl AppState {
                         "idempotency key already used for a different queued action".to_string(),
                     ));
                 }
-                existing.to_public()
+                existing
             } else {
                 let now = Utc::now();
                 let action = QueuedActionRecord {
@@ -1506,13 +1570,12 @@ impl AppState {
                     .actions
                     .insert(action.action_id.clone(), action.clone());
                 session.updated_at = now;
-                action.to_public()
+                action
             };
-            (action, session.clone())
+            (record.to_public(), record, session.meta())
         };
 
-        let action_ids = [action.action_id.as_str()];
-        self.persist_action_state(&session, Some(&action_ids), PersistMode::Immediate)
+        self.persist_action_state(&session, std::slice::from_ref(&record), PersistMode::Immediate)
             .await?;
         self.append_update(
             session_id,
@@ -1583,9 +1646,10 @@ impl AppState {
                 "only daemon peers may revoke trusted devices".to_string(),
             ));
         }
-        let (revoked_peer_ids, session) = {
+        let (revoked_peer_ids, session, device_snapshot) = {
             let mut store = self.inner.store.lock().await;
             let session_snapshot;
+            let device_snapshot;
             {
                 let session = store
                     .data
@@ -1598,8 +1662,9 @@ impl AppState {
                     .get_mut(device_id)
                     .ok_or_else(|| RelayError::NotFound("trusted device not found".to_string()))?;
                 device.revoked_at = Some(Utc::now());
+                device_snapshot = device.clone();
                 session.updated_at = Utc::now();
-                session_snapshot = session.clone();
+                session_snapshot = session.meta();
             }
             let revoked_peer_ids = store
                 .live_sessions
@@ -1619,9 +1684,9 @@ impl AppState {
                         .collect::<Vec<_>>()
                 })
                 .unwrap_or_default();
-            (revoked_peer_ids, session_snapshot)
+            (revoked_peer_ids, session_snapshot, device_snapshot)
         };
-        self.persist_device_state(&session, Some(device_id), PersistMode::Immediate)
+        self.persist_device_state(&session, Some(&device_snapshot), PersistMode::Immediate)
             .await?;
         for peer_id in revoked_peer_ids {
             self.unregister_peer(session_id, &peer_id).await;
@@ -1646,7 +1711,7 @@ impl AppState {
                 "clients may only register their own push token".to_string(),
             ));
         }
-        let session = {
+        let (session, device_snapshot) = {
             let mut store = self.inner.store.lock().await;
             let session = store
                 .data
@@ -1666,10 +1731,11 @@ impl AppState {
             device.push_token = push_token
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty());
+            let device_snapshot = device.clone();
             session.updated_at = Utc::now();
-            session.clone()
+            (session.meta(), device_snapshot)
         };
-        self.persist_device_state(&session, Some(device_id), PersistMode::Immediate)
+        self.persist_device_state(&session, Some(&device_snapshot), PersistMode::Immediate)
             .await?;
         Ok(())
     }
@@ -1782,7 +1848,7 @@ impl AppState {
         error: Option<String>,
         result: Option<EncryptedEnvelope>,
     ) -> Result<(), RelayError> {
-        let (action, session) = {
+        let (action, record, session) = {
             let mut store = self.inner.store.lock().await;
             let session = store
                 .data
@@ -1815,11 +1881,11 @@ impl AppState {
                 action.owner_peer_id = None;
             }
             action.updated_at = Utc::now();
-            session.updated_at = action.updated_at;
-            (action.to_public(), session.clone())
+            let record = action.clone();
+            session.updated_at = record.updated_at;
+            (record.to_public(), record, session.meta())
         };
-        let action_ids = [action_id];
-        self.persist_action_state(&session, Some(&action_ids), PersistMode::Immediate)
+        self.persist_action_state(&session, std::slice::from_ref(&record), PersistMode::Immediate)
             .await?;
         self.append_update(
             session_id,
@@ -1831,7 +1897,7 @@ impl AppState {
 
     async fn touch_presence(&self, session_id: &str, role: RelayPeerRole, device_id: Option<&str>) {
         let mut session_snapshot = None;
-        let mut touched_device_id = None;
+        let mut touched_device = None;
         let mut store = self.inner.store.lock().await;
         if let Some(session) = store.data.sessions.get_mut(session_id) {
             let now = Utc::now();
@@ -1842,18 +1908,18 @@ impl AppState {
                     if let Some(current_device_id) = device_id {
                         if let Some(device) = session.devices.get_mut(current_device_id) {
                             device.last_seen_at = Some(now);
-                            touched_device_id = Some(current_device_id.to_string());
+                            touched_device = Some(device.clone());
                         }
                     }
                 }
             }
             session.updated_at = now;
-            session_snapshot = Some(session.clone());
+            session_snapshot = Some(session.meta());
         }
         drop(store);
         if let Some(session) = session_snapshot.as_ref() {
             let _ = self
-                .persist_device_state(session, touched_device_id.as_deref(), PersistMode::Deferred)
+                .persist_device_state(session, touched_device.as_ref(), PersistMode::Deferred)
                 .await;
         }
     }
@@ -1888,6 +1954,7 @@ impl AppState {
 
     async fn dispatch_pending_actions(&self, session_id: &str) {
         let mut to_send = Vec::new();
+        let mut dispatched_records = Vec::new();
         let session_snapshot = {
             let mut store = self.inner.store.lock().await;
             let Some(live) = store.live_sessions.get_mut(session_id) else {
@@ -1916,6 +1983,7 @@ impl AppState {
                 action.error = None;
                 action.result = None;
                 action.owner_peer_id = Some(target_peer_id.clone());
+                dispatched_records.push(action.clone());
                 to_send.push((
                     target_peer_id.clone(),
                     target.clone(),
@@ -1923,23 +1991,15 @@ impl AppState {
                     action.payload.clone(),
                 ));
             }
-            Some(session.clone())
+            Some(session.meta())
         };
 
-        if let Some(session) = session_snapshot.as_ref() {
-            let action_ids = to_send
-                .iter()
-                .map(|(_, _, action, _)| action.action_id.as_str())
-                .collect::<Vec<_>>();
-            if !action_ids.is_empty() {
-                let _ = self
-                    .persist_action_state(
-                        session,
-                        Some(action_ids.as_slice()),
-                        PersistMode::Immediate,
-                    )
-                    .await;
-            }
+        if let Some(session) = session_snapshot.as_ref()
+            && !dispatched_records.is_empty()
+        {
+            let _ = self
+                .persist_action_state(session, &dispatched_records, PersistMode::Immediate)
+                .await;
         }
 
         for (peer_id, tx, action, payload) in to_send {
@@ -2017,6 +2077,15 @@ impl AppState {
     }
 
     async fn broadcast(&self, session_id: &str, message: RelayServerMessage) {
+        self.broadcast_except(session_id, None, message).await;
+    }
+
+    async fn broadcast_except(
+        &self,
+        session_id: &str,
+        exclude_peer_id: Option<&str>,
+        message: RelayServerMessage,
+    ) {
         let recipients = {
             let store = self.inner.store.lock().await;
             store
@@ -2025,6 +2094,7 @@ impl AppState {
                 .map(|live| {
                     live.peers
                         .iter()
+                        .filter(|(peer_id, _)| exclude_peer_id != Some(peer_id.as_str()))
                         .map(|(peer_id, peer)| (peer_id.clone(), peer.tx.clone()))
                         .collect::<Vec<_>>()
                 })
@@ -2070,7 +2140,7 @@ impl AppState {
 
     async fn persist_pairing_state(
         &self,
-        session: Option<&SessionRecord>,
+        session: Option<&SessionMeta>,
         pairing: Option<&PairingRecord>,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
@@ -2080,33 +2150,27 @@ impl AppState {
 
     async fn persist_device_state(
         &self,
-        session: &SessionRecord,
-        device_id: Option<&str>,
+        session: &SessionMeta,
+        device: Option<&TrustedDeviceRecord>,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        self.inner
-            .backend
-            .persist_device(session, device_id)
-            .await?;
+        self.inner.backend.persist_device(session, device).await?;
         self.schedule_flush(mode).await
     }
 
     async fn persist_action_state(
         &self,
-        session: &SessionRecord,
-        action_ids: Option<&[&str]>,
+        session: &SessionMeta,
+        actions: &[QueuedActionRecord],
         mode: PersistMode,
     ) -> Result<(), RelayError> {
-        self.inner
-            .backend
-            .persist_action(session, action_ids)
-            .await?;
+        self.inner.backend.persist_action(session, actions).await?;
         self.schedule_flush(mode).await
     }
 
     async fn persist_update_state(
         &self,
-        session: &SessionRecord,
+        session: &SessionMeta,
         update: &RelayUpdate,
         mode: PersistMode,
     ) -> Result<(), RelayError> {
@@ -2149,8 +2213,8 @@ impl AppState {
         self.inner.backend.flush_all(&snapshot).await
     }
 
-    async fn prune_expired_state(&self) -> Result<bool, RelayError> {
-        let changed = {
+    async fn prune_expired_state(&self) -> Result<PruneReport, RelayError> {
+        let report = {
             let mut store = self.inner.store.lock().await;
             let live_session_ids = store.live_sessions.keys().cloned().collect();
             prune_state(
@@ -2160,15 +2224,59 @@ impl AppState {
                 Utc::now(),
             )
         };
-        Ok(changed)
+        Ok(report)
     }
 
     async fn prune_retained_state(&self) -> Result<bool, RelayError> {
-        let changed = self.prune_expired_state().await?;
-        if changed {
-            self.persist_current().await?;
+        let report = self.prune_expired_state().await?;
+        if report.is_empty() {
+            return Ok(false);
         }
-        Ok(changed)
+        if self.inner.needs_flush {
+            // The file backend always snapshots the whole state.
+            self.persist_current().await?;
+        } else {
+            self.apply_prune_report(&report).await?;
+        }
+        Ok(true)
+    }
+
+    /// Everything `prune_state` removes is covered by a targeted delete:
+    /// removed sessions cascade to their dependent rows, and per-session
+    /// update pruning always drops a prefix of the sequence range.
+    async fn apply_prune_report(&self, report: &PruneReport) -> Result<(), RelayError> {
+        let backend = &self.inner.backend;
+        backend.remove_sessions(&report.removed_session_ids).await?;
+        backend.remove_pairings(&report.removed_pairing_ids).await?;
+        backend.remove_actions(&report.removed_action_ids).await?;
+        for (session_id, oldest_retained_seq) in &report.pruned_update_sessions {
+            backend
+                .prune_updates(session_id, *oldest_retained_seq)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Sweep retained state periodically in the background so request
+    /// handlers no longer pay for a full-store prune pass.
+    fn spawn_prune_task(&self) {
+        let inner = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                PRUNE_INTERVAL_SECONDS,
+            ));
+            interval.tick().await; // consume the immediate first tick
+            loop {
+                interval.tick().await;
+                let Some(inner) = inner.upgrade() else {
+                    break;
+                };
+                let state = AppState { inner };
+                if let Err(error) = state.prune_retained_state().await {
+                    warn!(%error, "failed to prune retained relay state");
+                }
+            }
+        });
     }
 }
 
@@ -2185,6 +2293,18 @@ impl PairingRecord {
 }
 
 impl SessionRecord {
+    fn meta(&self) -> SessionMeta {
+        SessionMeta {
+            session_id: self.session_id.clone(),
+            pairing_id: self.pairing_id.clone(),
+            daemon_token: self.daemon_token.clone(),
+            daemon_last_seen_at: self.daemon_last_seen_at,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            next_seq: self.next_seq,
+        }
+    }
+
     fn ensure_next_seq(&mut self) {
         let derived = self
             .updates
@@ -2311,13 +2431,34 @@ fn saturating_sub(instant: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
         .unwrap_or(DateTime::<Utc>::MIN_UTC)
 }
 
+/// What a prune pass removed, so the Postgres backend can delete only the
+/// affected rows instead of rewriting all five tables.
+#[derive(Debug, Default)]
+struct PruneReport {
+    /// Sessions whose oldest retained update advanced, with the new oldest
+    /// retained sequence (update pruning always removes a prefix).
+    pruned_update_sessions: Vec<(String, u64)>,
+    removed_action_ids: Vec<String>,
+    removed_session_ids: Vec<String>,
+    removed_pairing_ids: Vec<String>,
+}
+
+impl PruneReport {
+    fn is_empty(&self) -> bool {
+        self.pruned_update_sessions.is_empty()
+            && self.removed_action_ids.is_empty()
+            && self.removed_session_ids.is_empty()
+            && self.removed_pairing_ids.is_empty()
+    }
+}
+
 fn prune_state(
     state: &mut PersistedState,
     live_session_ids: &std::collections::HashSet<String>,
     retention: &RetentionConfig,
     now: DateTime<Utc>,
-) -> bool {
-    let mut changed = false;
+) -> PruneReport {
+    let mut report = PruneReport::default();
 
     for session in state.sessions.values_mut() {
         session.ensure_next_seq();
@@ -2332,37 +2473,38 @@ fn prune_state(
             session.updates.drain(0..drop_count);
         }
         if session.updates.len() != before_updates {
-            changed = true;
+            report
+                .pruned_update_sessions
+                .push((session.session_id.clone(), session.oldest_retained_seq()));
         }
 
         let action_cutoff = saturating_sub(now, retention.completed_action_retention);
-        let before_actions = session.actions.len();
-        session.actions.retain(|_, action| {
+        session.actions.retain(|action_id, action| {
             let terminal = matches!(
                 action.status,
                 QueuedRemoteActionStatus::Completed | QueuedRemoteActionStatus::Failed
             );
-            !terminal || action.updated_at >= action_cutoff
+            let keep = !terminal || action.updated_at >= action_cutoff;
+            if !keep {
+                report.removed_action_ids.push(action_id.clone());
+            }
+            keep
         });
-        if session.actions.len() != before_actions {
-            changed = true;
-        }
     }
 
     let claimed_pairing_cutoff = saturating_sub(now, retention.claimed_pairing_retention);
-    let before_pairings = state.pairings.len();
-    state.pairings.retain(|_, pairing| {
-        if pairing.device_id.is_none() {
+    state.pairings.retain(|pairing_id, pairing| {
+        let keep = if pairing.device_id.is_none() {
             pairing.expires_at > now
         } else {
             pairing.created_at >= claimed_pairing_cutoff
+        };
+        if !keep {
+            report.removed_pairing_ids.push(pairing_id.clone());
         }
+        keep
     });
-    if state.pairings.len() != before_pairings {
-        changed = true;
-    }
 
-    let session_before = state.sessions.len();
     state.sessions.retain(|session_id, session| {
         if live_session_ids.contains(session_id) {
             return true;
@@ -2387,26 +2529,42 @@ fn prune_state(
             .chain(std::iter::once(session_until))
             .max()
             .unwrap_or(session.updated_at);
-        retain_until > now
+        let keep = retain_until > now;
+        if !keep {
+            report.removed_session_ids.push(session_id.clone());
+        }
+        keep
     });
-    if state.sessions.len() != session_before {
-        changed = true;
-    }
 
     let valid_sessions = state
         .sessions
         .keys()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let pairings_before = state.pairings.len();
-    state
-        .pairings
-        .retain(|_, pairing| valid_sessions.contains(&pairing.session_id));
-    if state.pairings.len() != pairings_before {
-        changed = true;
-    }
+    state.pairings.retain(|pairing_id, pairing| {
+        let keep = valid_sessions.contains(&pairing.session_id);
+        if !keep {
+            report.removed_pairing_ids.push(pairing_id.clone());
+        }
+        keep
+    });
 
-    changed
+    report
+}
+
+/// Compare two secrets without exiting on the first differing byte, so
+/// response timing cannot be used to guess a token prefix. The length
+/// check may short-circuit: token lengths are not secret here.
+pub(crate) fn constant_time_eq(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right.iter())
+        .fold(0u8, |folded, (left, right)| folded | (left ^ right))
+        == 0
 }
 
 // Persistence functions moved to crate::persistence module.
