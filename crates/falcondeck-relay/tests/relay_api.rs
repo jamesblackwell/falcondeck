@@ -948,6 +948,98 @@ async fn client_peers_cannot_append_durable_updates() {
 }
 
 #[tokio::test]
+async fn push_token_registration_requires_matching_device() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let own = client
+        .post(format!(
+            "{}/v1/sessions/{}/devices/{}/push-token",
+            server.http_base, claim.session_id, claim.device_id
+        ))
+        .bearer_auth(&claim.client_token)
+        .json(&serde_json::json!({ "push_token": "ExponentPushToken[test-token]" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(own.status(), StatusCode::OK);
+
+    // Clearing the token is allowed too.
+    let cleared = client
+        .post(format!(
+            "{}/v1/sessions/{}/devices/{}/push-token",
+            server.http_base, claim.session_id, claim.device_id
+        ))
+        .bearer_auth(&claim.client_token)
+        .json(&serde_json::json!({ "push_token": null }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), StatusCode::OK);
+
+    // A client may not register a token for a different device.
+    let other = client
+        .post(format!(
+            "{}/v1/sessions/{}/devices/{}/push-token",
+            server.http_base, claim.session_id, "device-other"
+        ))
+        .bearer_auth(&claim.client_token)
+        .json(&serde_json::json!({ "push_token": "ExponentPushToken[stolen]" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other.status(), StatusCode::UNAUTHORIZED);
+
+    // Unknown devices are rejected even for the daemon token.
+    let unknown = client
+        .post(format!(
+            "{}/v1/sessions/{}/devices/{}/push-token",
+            server.http_base, claim.session_id, "device-missing"
+        ))
+        .bearer_auth(&_pairing.daemon_token)
+        .json(&serde_json::json!({ "push_token": "ExponentPushToken[na]" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn client_peers_cannot_request_push_notifications() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    let _ = recv_server_message(&mut client_ws).await;
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::Notify {
+            kind: "approval".to_string(),
+            workspace_id: None,
+            thread_id: None,
+        },
+    )
+    .await;
+
+    let response = recv_server_message(&mut client_ws).await;
+    assert!(
+        matches!(response, RelayServerMessage::Error { .. }),
+        "expected error message, got {response:?}"
+    );
+}
+
+#[tokio::test]
 async fn idle_trusted_sessions_are_pruned_after_retention_expires() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("relay-state.json");

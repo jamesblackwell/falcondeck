@@ -19,6 +19,11 @@ use crate::error::RelayError;
 const PEER_QUEUE_CAPACITY: usize = 256;
 const WS_TICKET_TTL_SECONDS: i64 = 30;
 const PENDING_RPC_TTL_SECONDS: i64 = 30;
+/// Default Expo Push API endpoint; override (or disable with an empty value)
+/// via `FALCONDECK_RELAY_EXPO_PUSH_URL`.
+const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
+/// Minimum spacing between pushes for the same session/thread.
+const PUSH_DEDUPE_SECONDS: i64 = 60;
 /// Each dispatched action enqueues two messages into the daemon peer
 /// channel (`ActionRequested` + the `ActionStatus` update broadcast), so
 /// cap dispatch passes well below `PEER_QUEUE_CAPACITY / 2` to keep
@@ -67,6 +72,9 @@ struct Store {
     data: PersistedState,
     live_sessions: HashMap<String, LiveSession>,
     ws_tickets: HashMap<String, WebSocketTicket>,
+    /// Last push-notification time per (session, thread-or-kind), so bursts
+    /// of attention events collapse into one push per window.
+    push_dedupe: HashMap<(String, String), DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -133,6 +141,10 @@ pub(crate) struct TrustedDeviceRecord {
     pub(crate) created_at: DateTime<Utc>,
     pub(crate) last_seen_at: Option<DateTime<Utc>>,
     pub(crate) revoked_at: Option<DateTime<Utc>>,
+    /// Expo push token registered by the device for attention notifications.
+    /// Never exposed through the trusted-devices API responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) push_token: Option<String>,
 }
 
 #[derive(Default)]
@@ -263,6 +275,7 @@ impl AppState {
                     data,
                     live_sessions: HashMap::new(),
                     ws_tickets: HashMap::new(),
+                    push_dedupe: HashMap::new(),
                 })),
                 backend,
                 needs_flush: true,
@@ -312,6 +325,7 @@ impl AppState {
                     data,
                     live_sessions: HashMap::new(),
                     ws_tickets: HashMap::new(),
+                    push_dedupe: HashMap::new(),
                 })),
                 backend,
                 needs_flush: false,
@@ -612,6 +626,7 @@ impl AppState {
                             created_at: now,
                             last_seen_at: Some(now),
                             revoked_at: None,
+                            push_token: None,
                         },
                     );
                     (device_id, client_token)
@@ -1139,6 +1154,19 @@ impl AppState {
                 // re-run after each daemon action update to drain any backlog.
                 self.dispatch_pending_actions(session_id).await;
             }
+            RelayClientMessage::Notify {
+                kind,
+                workspace_id,
+                thread_id,
+            } => {
+                if !matches!(role, RelayPeerRole::Daemon) {
+                    return Err(RelayError::Unauthorized(
+                        "only daemon peers may request push notifications".to_string(),
+                    ));
+                }
+                self.dispatch_push_notifications(session_id, kind, workspace_id, thread_id)
+                    .await;
+            }
         }
 
         Ok(())
@@ -1602,6 +1630,149 @@ impl AppState {
         self.trusted_devices(session_id, daemon_token).await
     }
 
+    /// Store (or clear) the Expo push token for a trusted device. Clients may
+    /// only register their own device's token; the daemon may manage any.
+    pub async fn register_push_token(
+        &self,
+        session_id: &str,
+        token: &str,
+        device_id: &str,
+        push_token: Option<String>,
+    ) -> Result<(), RelayError> {
+        let auth = self.authenticate_session(session_id, token).await?;
+        if matches!(auth.role, RelayPeerRole::Client) && auth.device_id.as_deref() != Some(device_id)
+        {
+            return Err(RelayError::Unauthorized(
+                "clients may only register their own push token".to_string(),
+            ));
+        }
+        let session = {
+            let mut store = self.inner.store.lock().await;
+            let session = store
+                .data
+                .sessions
+                .get_mut(session_id)
+                .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+            session.migrate_legacy_device_fields();
+            let device = session
+                .devices
+                .get_mut(device_id)
+                .ok_or_else(|| RelayError::NotFound("trusted device not found".to_string()))?;
+            if device.revoked_at.is_some() {
+                return Err(RelayError::Unauthorized(
+                    "trusted device is revoked".to_string(),
+                ));
+            }
+            device.push_token = push_token
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            session.updated_at = Utc::now();
+            session.clone()
+        };
+        self.persist_device_state(&session, Some(device_id), PersistMode::Immediate)
+            .await?;
+        Ok(())
+    }
+
+    /// Send a generic attention push to every active trusted device that has
+    /// a push token and is not currently connected. The push carries no
+    /// conversation content — only routing identifiers.
+    async fn dispatch_push_notifications(
+        &self,
+        session_id: &str,
+        kind: String,
+        workspace_id: Option<String>,
+        thread_id: Option<String>,
+    ) {
+        let endpoint = std::env::var("FALCONDECK_RELAY_EXPO_PUSH_URL")
+            .unwrap_or_else(|_| EXPO_PUSH_URL.to_string());
+        if endpoint.trim().is_empty() {
+            return;
+        }
+        let recipients = {
+            let mut store = self.inner.store.lock().await;
+            let now = Utc::now();
+            let dedupe_window = Duration::seconds(PUSH_DEDUPE_SECONDS);
+            store
+                .push_dedupe
+                .retain(|_, last| *last + dedupe_window > now);
+            let dedupe_key = (
+                session_id.to_string(),
+                thread_id.clone().unwrap_or_else(|| kind.clone()),
+            );
+            if store.push_dedupe.contains_key(&dedupe_key) {
+                return;
+            }
+            let connected_devices = store
+                .live_sessions
+                .get(session_id)
+                .map(|live| {
+                    live.peers
+                        .values()
+                        .filter_map(|peer| peer.device_id.clone())
+                        .collect::<std::collections::HashSet<_>>()
+                })
+                .unwrap_or_default();
+            let Some(session) = store.data.sessions.get_mut(session_id) else {
+                return;
+            };
+            session.migrate_legacy_device_fields();
+            let recipients = session
+                .devices
+                .values()
+                .filter(|device| device.revoked_at.is_none())
+                .filter(|device| !connected_devices.contains(&device.device_id))
+                .filter_map(|device| device.push_token.clone())
+                .collect::<Vec<_>>();
+            if recipients.is_empty() {
+                return;
+            }
+            store.push_dedupe.insert(dedupe_key, now);
+            recipients
+        };
+
+        let (title, body) = match kind.as_str() {
+            "approval" => ("FalconDeck", "An agent is waiting for your approval"),
+            "question" => ("FalconDeck", "An agent asked you a question"),
+            _ => ("FalconDeck", "An agent needs your attention"),
+        };
+        let messages = recipients
+            .iter()
+            .map(|token| {
+                serde_json::json!({
+                    "to": token,
+                    "title": title,
+                    "body": body,
+                    "sound": "default",
+                    "priority": "high",
+                    "data": {
+                        "sessionId": session_id,
+                        "workspaceId": workspace_id,
+                        "threadId": thread_id,
+                        "kind": kind,
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            match client.post(&endpoint).json(&messages).send().await {
+                Ok(response) if !response.status().is_success() => {
+                    warn!(
+                        session_id,
+                        status = %response.status(),
+                        "push notification delivery was rejected"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(session_id, %error, "failed to deliver push notification");
+                }
+            }
+        });
+    }
+
     async fn update_action(
         &self,
         session_id: &str,
@@ -2046,6 +2217,7 @@ impl SessionRecord {
                     created_at: self.device_created_at.unwrap_or(self.created_at),
                     last_seen_at: self.client_last_seen_at,
                     revoked_at: self.revoked_at,
+                    push_token: None,
                 },
             );
         }

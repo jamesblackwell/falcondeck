@@ -706,6 +706,15 @@ pub(super) async fn ingest_server_request(
                 request: request.clone(),
             },
         );
+        app.notify_remote_attention(
+            match request.kind {
+                InteractiveRequestKind::Approval => "approval",
+                InteractiveRequestKind::Question => "question",
+            },
+            workspace_id,
+            request.thread_id.clone(),
+        )
+        .await;
         if let Some(thread_id) = request.thread_id.clone() {
             app.push_conversation_item(
                 workspace_id,

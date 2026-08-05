@@ -1747,6 +1747,24 @@ pub enum RelayClientMessage {
         /// Optional encrypted result payload.
         result: Option<EncryptedEnvelope>,
     },
+    /// Ask the relay to push a generic attention notification to trusted
+    /// devices that are not currently connected. Daemon-only; carries no
+    /// conversation content so the relay's zero-plaintext posture holds.
+    Notify {
+        /// Attention kind, e.g. `approval` or `question`.
+        kind: String,
+        /// Workspace the attention belongs to, for client-side routing.
+        workspace_id: Option<String>,
+        /// Thread the attention belongs to, for client-side routing.
+        thread_id: Option<String>,
+    },
+}
+
+/// Request body for registering (or clearing) a trusted device's push token.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisterPushTokenRequest {
+    /// Expo push token for the device, or `None` to clear it.
+    pub push_token: Option<String>,
 }
 
 /// Messages emitted by the relay websocket.

@@ -430,8 +430,10 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 created_at TIMESTAMPTZ NOT NULL,
                 last_seen_at TIMESTAMPTZ NULL,
                 revoked_at TIMESTAMPTZ NULL,
+                push_token TEXT NULL,
                 PRIMARY KEY (session_id, device_id)
             );
+            ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL;
             CREATE TABLE IF NOT EXISTS relay_updates (
                 session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
                 seq BIGINT NOT NULL,
@@ -524,7 +526,7 @@ async fn load_postgres_state_from_client(
 
     for row in client
         .query(
-            "SELECT session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at FROM relay_devices ORDER BY created_at ASC",
+            "SELECT session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at, push_token FROM relay_devices ORDER BY created_at ASC",
             &[],
         )
         .await
@@ -540,6 +542,7 @@ async fn load_postgres_state_from_client(
                 created_at: row.get("created_at"),
                 last_seen_at: row.get("last_seen_at"),
                 revoked_at: row.get("revoked_at"),
+                push_token: row.get("push_token"),
             };
             session.devices.insert(device.device_id.clone(), device);
         }
@@ -695,15 +698,16 @@ async fn upsert_device(
 ) -> Result<(), RelayError> {
     client
         .execute(
-            "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at, push_token)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
              ON CONFLICT (session_id, device_id) DO UPDATE SET
                client_token = EXCLUDED.client_token,
                label = EXCLUDED.label,
                public_key = EXCLUDED.public_key,
                created_at = EXCLUDED.created_at,
                last_seen_at = EXCLUDED.last_seen_at,
-               revoked_at = EXCLUDED.revoked_at",
+               revoked_at = EXCLUDED.revoked_at,
+               push_token = EXCLUDED.push_token",
             &[
                 &session_id,
                 &device.device_id,
@@ -713,6 +717,7 @@ async fn upsert_device(
                 &device.created_at,
                 &device.last_seen_at,
                 &device.revoked_at,
+                &device.push_token,
             ],
         )
         .await
@@ -827,8 +832,8 @@ async fn flush_postgres_state(
 
         for device in session.devices.values() {
             tx.execute(
-                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at, push_token)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
                 &[
                     &session.session_id,
                     &device.device_id,
@@ -838,6 +843,7 @@ async fn flush_postgres_state(
                     &device.created_at,
                     &device.last_seen_at,
                     &device.revoked_at,
+                    &device.push_token,
                 ],
             )
             .await

@@ -179,6 +179,12 @@ impl AppState {
                             RemoteBridgeCommand::PublishBootstrap { pairing, client_bundle } => {
                                 self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle).await?;
                             }
+                            RemoteBridgeCommand::NotifyAttention { kind, workspace_id, thread_id } => {
+                                send_relay_message(
+                                    &mut writer,
+                                    &RelayClientMessage::Notify { kind, workspace_id, thread_id },
+                                ).await?;
+                            }
                         }
                     }
                 }

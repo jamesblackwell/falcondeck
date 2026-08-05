@@ -97,6 +97,25 @@ fn is_remote_bridge_missing_session_error(error_msg: &str) -> bool {
 }
 
 impl AppState {
+    /// Best-effort: forward an attention event to the relay so devices that
+    /// are not connected can receive a push notification. A missing or dead
+    /// bridge simply drops the request.
+    pub(super) async fn notify_remote_attention(
+        &self,
+        kind: &str,
+        workspace_id: &str,
+        thread_id: Option<String>,
+    ) {
+        let command_tx = { self.inner.remote.lock().await.command_tx.clone() };
+        if let Some(command_tx) = command_tx {
+            let _ = command_tx.send(super::RemoteBridgeCommand::NotifyAttention {
+                kind: kind.to_string(),
+                workspace_id: Some(workspace_id.to_string()),
+                thread_id,
+            });
+        }
+    }
+
     pub(super) async fn clear_remote_bridge_state(&self) {
         let mut remote = self.inner.remote.lock().await;
         if let (Some(relay_url), Some(pairing)) =

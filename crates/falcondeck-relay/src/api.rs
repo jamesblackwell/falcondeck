@@ -41,6 +41,10 @@ pub fn router(state: AppState) -> Router {
             "/v1/sessions/{session_id}/devices/{device_id}",
             axum::routing::delete(revoke_trusted_device),
         )
+        .route(
+            "/v1/sessions/{session_id}/devices/{device_id}/push-token",
+            post(register_push_token),
+        )
         .route("/v1/updates/ws", get(updates_ws))
         .layer(
             CorsLayer::new()
@@ -284,6 +288,19 @@ async fn revoke_trusted_device(
             .revoke_trusted_device(&session_id, &token, &device_id)
             .await?,
     ))
+}
+
+async fn register_push_token(
+    State(state): State<AppState>,
+    Path((session_id, device_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    Json(request): Json<falcondeck_core::RegisterPushTokenRequest>,
+) -> Result<Json<serde_json::Value>, RelayError> {
+    let token = auth_token(&headers)?;
+    state
+        .register_push_token(&session_id, &token, &device_id, request.push_token)
+        .await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 /// Bound websocket sends so a peer that stops reading (zero TCP window)

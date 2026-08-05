@@ -215,6 +215,13 @@ enum RemoteBridgeCommand {
         pairing: RemotePairingState,
         client_bundle: PairingPublicKeyBundle,
     },
+    /// Ask the relay to push a generic attention notification to trusted
+    /// devices that are not currently connected.
+    NotifyAttention {
+        kind: String,
+        workspace_id: Option<String>,
+        thread_id: Option<String>,
+    },
 }
 
 impl AppState {
