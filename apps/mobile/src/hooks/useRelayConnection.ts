@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { AppState } from 'react-native'
 
 import { normalizeEventEnvelope, normalizeDaemonSnapshot } from '@falcondeck/client-core'
 import type {
@@ -10,6 +11,7 @@ import type {
   RelayWebSocketTicketResponse,
 } from '@falcondeck/client-core'
 
+import { registerPushToken } from '@/lib/push-notifications'
 import { useRelayStore, useSessionStore } from '@/store'
 
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
@@ -31,6 +33,19 @@ function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   return null
 }
 
+/**
+ * iOS kills the relay socket when the app backgrounds; waiting for the dead
+ * socket to error plus the backoff delay makes resume feel slow. When the app
+ * returns to the foreground and the socket is not OPEN, reconnect immediately.
+ * Transitions away from 'active' do nothing — the OS tears the socket down.
+ */
+export function shouldReconnectOnAppForeground(
+  nextAppState: string,
+  socketReadyState: number | null,
+) {
+  return nextAppState === 'active' && socketReadyState !== WebSocket.OPEN
+}
+
 export function isInvalidSavedSessionError(message: string | null) {
   return !!message && /invalid session token|session not found|trusted device|failed with status 401|failed with status 404/i.test(
     message,
@@ -39,6 +54,7 @@ export function isInvalidSavedSessionError(message: string | null) {
 
 export function useRelayConnection() {
   const sessionId = useRelayStore((s) => s.sessionId)
+  const deviceId = useRelayStore((s) => s.deviceId)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const snapshot = useSessionStore((s) => s.snapshot)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -337,6 +353,20 @@ export function useRelayConnection() {
       useRelayStore.getState()._setError(message)
     }
 
+    // iOS kills the socket on background; on foreground, skip the dead-socket
+    // error + backoff dance and reconnect right away. Leaving 'active' does
+    // nothing — the OS tears the socket down naturally.
+    const appStateSubscription = AppState.addEventListener('change', (nextAppState) => {
+      if (!isCurrent || !shouldReconnect) return
+      if (!shouldReconnectOnAppForeground(nextAppState, activeSocket?.readyState ?? null)) return
+      if (reconnectTimer.current) {
+        clearTimeout(reconnectTimer.current)
+        reconnectTimer.current = null
+      }
+      reconnectAttempt.current = 0
+      setReconnectGeneration((value) => value + 1)
+    })
+
     void fetch(`${relayUrl}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`, {
       method: 'POST',
       headers: {
@@ -449,6 +479,7 @@ export function useRelayConnection() {
     return () => {
       isCurrent = false
       shouldReconnect = false
+      appStateSubscription.remove()
       clearSocketTimers()
       activeSocket?.close()
       relay._setSocket(null)
@@ -495,4 +526,16 @@ export function useRelayConnection() {
 
     void requestSnapshot()
   }, [isEncrypted, requestSnapshot, sessionId, snapshot])
+
+  // Once the session is usable (encrypted), register this device's push token
+  // with the relay so it can alert us when an agent needs attention while the
+  // app is disconnected. Fire-and-forget: registerPushToken never throws and
+  // dedupes re-registration internally.
+  useEffect(() => {
+    if (!isEncrypted || !sessionId || !deviceId) return
+    const relay = useRelayStore.getState()
+    const clientToken = relay._getClientToken()
+    if (!clientToken) return
+    void registerPushToken(relay.relayUrl, sessionId, deviceId, clientToken)
+  }, [deviceId, isEncrypted, sessionId])
 }

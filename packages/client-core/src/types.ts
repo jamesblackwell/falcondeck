@@ -629,3 +629,12 @@ export type RelayClientMessage =
       error?: string | null
       result?: EncryptedEnvelope | null
     }
+  // Sent by the daemon when an agent needs attention; the relay forwards it as
+  // a push notification to disconnected devices. Clients never send it — it is
+  // mirrored here for protocol parity with the Rust types.
+  | {
+      type: 'notify'
+      kind: string
+      workspace_id?: string | null
+      thread_id?: string | null
+    }

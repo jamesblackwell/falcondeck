@@ -44,6 +44,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     ],
     'expo-secure-store',
     'expo-font',
+    'expo-notifications',
     [
       'expo-camera',
       {

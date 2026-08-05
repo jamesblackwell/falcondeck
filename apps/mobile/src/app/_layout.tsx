@@ -8,14 +8,40 @@ import { StatusBar } from 'expo-status-bar'
 import * as SplashScreen from 'expo-splash-screen'
 
 import { useRelayConnection } from '@/hooks/useRelayConnection'
+import {
+  addNotificationResponseListener,
+  configureForegroundNotificationHandler,
+  ensureAndroidNotificationChannel,
+  processInitialNotificationResponse,
+} from '@/lib/push-notifications'
 import { clearMobileSessionCache, loadMobileSessionCache } from '@/storage/mobile-session-cache'
 import { useRelayStore, useSessionStore } from '@/store'
 
 SplashScreen.preventAutoHideAsync()
 
+// Configure before any notification can arrive: suppress alerts while the app
+// is foregrounded, and make sure Android 8+ has a channel to post to. Both are
+// no-throw and degrade silently where notifications are unavailable.
+configureForegroundNotificationHandler()
+void ensureAndroidNotificationChannel()
+
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false)
   useRelayConnection()
+
+  useEffect(() => {
+    const subscription = addNotificationResponseListener()
+    return () => {
+      subscription?.remove()
+    }
+  }, [])
+
+  useEffect(() => {
+    // Only after stores hydrate — otherwise cache restoration would clobber
+    // the workspace/thread selection made from the launching notification.
+    if (!isReady) return
+    void processInitialNotificationResponse()
+  }, [isReady])
 
   useEffect(() => {
     async function restore() {

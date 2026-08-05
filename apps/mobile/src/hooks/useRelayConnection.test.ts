@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { EventEnvelope, RelayUpdate, MachinePresence } from '@falcondeck/client-core'
-import { isInvalidSavedSessionError } from './useRelayConnection'
+import { isInvalidSavedSessionError, shouldReconnectOnAppForeground } from './useRelayConnection'
 
 // Re-implement parseDaemonEvent to test in isolation
 // (it's a module-private function in useRelayConnection.ts)
@@ -213,6 +213,29 @@ describe('WebSocket URL construction', () => {
   it('passes through non-http URLs unchanged', () => {
     const url = buildWsUrl('wss://already-ws.test', 's1', 't1')
     expect(url).toBe('wss://already-ws.test/v1/updates/ws?session_id=s1&ticket=t1')
+  })
+})
+
+describe('foreground reconnect trigger', () => {
+  it('reconnects when foregrounding with a dead socket', () => {
+    expect(shouldReconnectOnAppForeground('active', WebSocket.CLOSED)).toBe(true)
+    expect(shouldReconnectOnAppForeground('active', WebSocket.CLOSING)).toBe(true)
+    expect(shouldReconnectOnAppForeground('active', WebSocket.CONNECTING)).toBe(true)
+  })
+
+  it('reconnects when foregrounding with no socket at all', () => {
+    expect(shouldReconnectOnAppForeground('active', null)).toBe(true)
+  })
+
+  it('does nothing when foregrounding with a healthy open socket', () => {
+    expect(shouldReconnectOnAppForeground('active', WebSocket.OPEN)).toBe(false)
+  })
+
+  it('does nothing when leaving the foreground — the OS tears the socket down', () => {
+    expect(shouldReconnectOnAppForeground('background', WebSocket.CLOSED)).toBe(false)
+    expect(shouldReconnectOnAppForeground('background', null)).toBe(false)
+    expect(shouldReconnectOnAppForeground('inactive', WebSocket.OPEN)).toBe(false)
+    expect(shouldReconnectOnAppForeground('inactive', null)).toBe(false)
   })
 })
 
