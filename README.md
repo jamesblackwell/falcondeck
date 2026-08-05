@@ -61,9 +61,9 @@ The included Ansible setup can deploy:
 - the hosted remote web app at `app.falcondeck.com`
 - the public site at `falcondeck.com`
 
-For a simple self-hosted setup, start with the examples in [`ops/ansible/README.md`](/Users/James/www/sites/falcondeck/ops/ansible/README.md). Copy the example inventory, set your host and DNS values, run the bootstrap playbook, then run the relay deploy playbook.
+For a simple self-hosted setup, start with the examples in [`ops/ansible/README.md`](ops/ansible/README.md). Copy the example inventory, set your host and DNS values, run the bootstrap playbook, then run the relay deploy playbook.
 
-For more background on the production shape and relay persistence model, see [`docs/11-deployment-ops.md`](/Users/James/www/sites/falcondeck/docs/11-deployment-ops.md).
+For more background on the production shape and relay persistence model, see [`docs/11-deployment-ops.md`](docs/11-deployment-ops.md).
 
 ## Monorepo
 
