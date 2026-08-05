@@ -844,6 +844,110 @@ async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
 }
 
 #[tokio::test]
+async fn fresh_clients_are_told_history_was_truncated_after_pruning() {
+    let server = spawn_server_with_retention(RetentionConfig {
+        update_retention: Duration::days(7),
+        max_updates_per_session: 1,
+        trusted_device_retention: Duration::days(180),
+        claimed_pairing_retention: Duration::days(1),
+        completed_action_retention: Duration::days(3),
+    })
+    .await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    for marker in ["one", "two", "three"] {
+        send_client_message(
+            &mut daemon_ws,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted {
+                    envelope: test_envelope(marker),
+                },
+            },
+        )
+        .await;
+        let _ = recv_until_update(&mut daemon_ws).await;
+    }
+
+    let history = get_json::<RelayUpdatesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/updates?after_seq=0",
+            server.http_base, claim.session_id
+        ),
+        Some(&claim.client_token),
+    )
+    .await;
+
+    // A brand-new client (after_seq=0) must learn that pruned history is
+    // unrecoverable so it bootstraps from a fresh daemon snapshot.
+    assert!(history.cursor.history_truncated);
+    assert!(history.cursor.requires_bootstrap);
+}
+
+#[tokio::test]
+async fn client_peers_cannot_append_durable_updates() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (_pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    let _ = recv_server_message(&mut client_ws).await;
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::Update {
+            body: RelayUpdateBody::Encrypted {
+                envelope: test_envelope("forged-by-client"),
+            },
+        },
+    )
+    .await;
+
+    let response = recv_server_message(&mut client_ws).await;
+    assert!(
+        matches!(response, RelayServerMessage::Error { .. }),
+        "expected error message, got {response:?}"
+    );
+
+    let history = get_json::<RelayUpdatesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/updates?after_seq=0",
+            server.http_base, claim.session_id
+        ),
+        Some(&claim.client_token),
+    )
+    .await;
+    assert!(
+        history
+            .updates
+            .iter()
+            .all(|update| !matches!(update.body, RelayUpdateBody::Encrypted { .. })),
+        "client-forged update must not be appended to the replay log"
+    );
+}
+
+#[tokio::test]
 async fn idle_trusted_sessions_are_pruned_after_retention_expires() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("relay-state.json");
@@ -1262,39 +1366,46 @@ async fn queued_action_idempotency_is_scoped_per_device() {
 async fn legacy_state_recovers_sessions_and_skips_incompatible_pairings() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("relay-state.json");
+    // Timestamps are generated relative to now; hardcoded dates eventually
+    // age past the retention window and the recovered session gets pruned.
+    let created_at = (chrono::Utc::now() - Duration::minutes(10)).to_rfc3339();
+    let expires_at = (chrono::Utc::now() - Duration::minutes(5)).to_rfc3339();
+    let updated_at = (chrono::Utc::now() - Duration::minutes(5)).to_rfc3339();
     std::fs::write(
         &state_path,
-        r#"{
-  "pairings": {
-    "pairing-old": {
+        format!(
+            r#"{{
+  "pairings": {{
+    "pairing-old": {{
       "pairing_id": "pairing-old",
       "pairing_code": "ABC12345",
       "daemon_token": "daemon-old",
       "label": "legacy",
       "session_id": "session-old",
-      "daemon_bundle": {"daemonVersion":"0.1.0"},
+      "daemon_bundle": {{"daemonVersion":"0.1.0"}},
       "client_bundle": null,
-      "created_at": "2026-03-15T12:51:18.340992458Z",
-      "expires_at": "2026-03-15T13:01:18.340992458Z"
-    }
-  },
-  "sessions": {
-    "session-old": {
+      "created_at": "{created_at}",
+      "expires_at": "{expires_at}"
+    }}
+  }},
+  "sessions": {{
+    "session-old": {{
       "session_id": "session-old",
       "pairing_id": "pairing-old",
       "daemon_token": "daemon-old",
       "client_token": "client-old",
-      "created_at": "2026-03-15T12:51:18.804798247Z",
-      "updated_at": "2026-03-15T12:51:21.511622140Z",
-      "updates": [{
+      "created_at": "{created_at}",
+      "updated_at": "{updated_at}",
+      "updates": [{{
         "id":"update-old",
         "seq":1,
-        "body":{"kind":"daemon-event","event":{"seq":0}},
-        "created_at":"2026-03-15T12:51:21.511622140Z"
-      }]
-    }
-  }
-}"#,
+        "body":{{"kind":"daemon-event","event":{{"seq":0}}}},
+        "created_at":"{updated_at}"
+      }}]
+    }}
+  }}
+}}"#
+        ),
     )
     .unwrap();
 

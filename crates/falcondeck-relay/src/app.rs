@@ -18,6 +18,13 @@ use crate::error::RelayError;
 
 const PEER_QUEUE_CAPACITY: usize = 256;
 const WS_TICKET_TTL_SECONDS: i64 = 30;
+const PENDING_RPC_TTL_SECONDS: i64 = 30;
+/// Each dispatched action enqueues two messages into the daemon peer
+/// channel (`ActionRequested` + the `ActionStatus` update broadcast), so
+/// cap dispatch passes well below `PEER_QUEUE_CAPACITY / 2` to keep
+/// headroom for other traffic. Remaining actions stay `Queued` and are
+/// picked up on subsequent passes.
+const MAX_ACTIONS_PER_DISPATCH: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct RetentionConfig {
@@ -138,6 +145,36 @@ struct LiveSession {
 struct PendingRpc {
     requester_peer_id: String,
     responder_peer_id: String,
+    expires_at: DateTime<Utc>,
+}
+
+impl LiveSession {
+    /// Remove expired pending RPC entries, returning the requester peers
+    /// (if still connected) that should receive a failure result.
+    fn take_expired_rpcs(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Vec<(String, String, mpsc::Sender<RelayServerMessage>)> {
+        let expired_request_ids = self
+            .pending_rpc
+            .iter()
+            .filter(|(_, pending)| pending.expires_at <= now)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        let mut notify = Vec::new();
+        for request_id in expired_request_ids {
+            if let Some(pending) = self.pending_rpc.remove(&request_id)
+                && let Some(requester) = self.peers.get(&pending.requester_peer_id)
+            {
+                notify.push((
+                    request_id,
+                    pending.requester_peer_id.clone(),
+                    requester.tx.clone(),
+                ));
+            }
+        }
+        notify
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -775,6 +812,29 @@ impl AppState {
                 "websocket ticket does not match session".to_string(),
             ));
         }
+        // The device may have been revoked between ticket issuance and use;
+        // re-check the record so a pre-issued ticket cannot bypass revocation.
+        if matches!(entry.role, RelayPeerRole::Client) {
+            let device_active =
+                store
+                    .data
+                    .sessions
+                    .get_mut(&entry.session_id)
+                    .is_some_and(|session| {
+                        session.migrate_legacy_device_fields();
+                        entry.device_id.as_deref().is_some_and(|device_id| {
+                            session
+                                .devices
+                                .get(device_id)
+                                .is_some_and(|device| device.revoked_at.is_none())
+                        })
+                    });
+            if !device_active {
+                return Err(RelayError::Unauthorized(
+                    "trusted device is revoked or missing".to_string(),
+                ));
+            }
+        }
         Ok(SessionAuth {
             session_id: entry.session_id,
             role: entry.role,
@@ -1003,6 +1063,14 @@ impl AppState {
                 .await;
             }
             RelayClientMessage::Update { body } => {
+                // Only the daemon writes durable updates; a client peer must
+                // not be able to forge Presence/ActionStatus/SessionBootstrap
+                // bodies into the replay log.
+                if !matches!(role, RelayPeerRole::Daemon) {
+                    return Err(RelayError::Unauthorized(
+                        "only daemon peers may submit durable updates".to_string(),
+                    ));
+                }
                 self.append_update(session_id, body, PersistMode::Deferred)
                     .await?;
             }
@@ -1067,6 +1135,9 @@ impl AppState {
                 }
                 self.update_action(session_id, peer_id, &action_id, status, error, result)
                     .await?;
+                // Dispatch passes are capped at MAX_ACTIONS_PER_DISPATCH, so
+                // re-run after each daemon action update to drain any backlog.
+                self.dispatch_pending_actions(session_id).await;
             }
         }
 
@@ -1079,7 +1150,7 @@ impl AppState {
         body: RelayUpdateBody,
         persist_mode: PersistMode,
     ) -> Result<(), RelayError> {
-        let (update, session, recipients) = {
+        let (update, session) = {
             let mut store = self.inner.store.lock().await;
             let update;
             let session_snapshot;
@@ -1100,29 +1171,23 @@ impl AppState {
                 session.updates.push(update.clone());
                 session_snapshot = session.clone();
             }
-            let recipients = store
-                .live_sessions
-                .get(session_id)
-                .map(|live| {
-                    live.peers
-                        .iter()
-                        .map(|(peer_id, peer)| (peer_id.clone(), peer.tx.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            (update, session_snapshot, recipients)
+            // Fan out while still holding the store lock: try_send is
+            // non-blocking, and releasing the lock first would let two
+            // concurrent appends deliver seq N+1 before seq N.
+            if let Some(live) = store.live_sessions.get(session_id) {
+                for (peer_id, peer) in &live.peers {
+                    self.queue_message(
+                        session_id,
+                        peer_id,
+                        &peer.tx,
+                        RelayServerMessage::Update {
+                            update: update.clone(),
+                        },
+                    );
+                }
+            }
+            (update, session_snapshot)
         };
-
-        for (peer_id, tx) in recipients {
-            self.queue_message(
-                session_id,
-                &peer_id,
-                &tx,
-                RelayServerMessage::Update {
-                    update: update.clone(),
-                },
-            );
-        }
 
         self.persist_update_state(&session, &update, persist_mode)
             .await?;
@@ -1186,9 +1251,13 @@ impl AppState {
     ) {
         let mut response = None;
         let mut target = None;
+        let mut expired = Vec::new();
         {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
+                // Sweeping first also means a duplicate request_id whose
+                // previous entry expired is replaced instead of failed.
+                expired = live.take_expired_rpcs(Utc::now());
                 let requester = live.peers.get(peer_id).map(|peer| peer.tx.clone());
                 if live.pending_rpc.contains_key(&request_id) {
                     response = requester.map(|tx| {
@@ -1210,6 +1279,7 @@ impl AppState {
                             PendingRpc {
                                 requester_peer_id: peer_id.to_string(),
                                 responder_peer_id: owner_peer_id.clone(),
+                                expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
                             },
                         );
                         target = Some((owner_peer_id, owner.tx.clone()));
@@ -1245,6 +1315,7 @@ impl AppState {
             }
         }
 
+        self.notify_expired_rpcs(session_id, expired);
         if let Some((owner_peer_id, tx)) = target {
             self.queue_message(
                 session_id,
@@ -1261,6 +1332,41 @@ impl AppState {
         }
     }
 
+    /// Drop pending RPC entries older than their TTL and fail them back to
+    /// the requester, so an unanswered call cannot poison its request_id
+    /// forever. Called from RPC paths and the websocket idle-check tick.
+    pub async fn sweep_expired_rpcs(&self, session_id: &str) {
+        let expired = {
+            let mut store = self.inner.store.lock().await;
+            store
+                .live_sessions
+                .get_mut(session_id)
+                .map(|live| live.take_expired_rpcs(Utc::now()))
+                .unwrap_or_default()
+        };
+        self.notify_expired_rpcs(session_id, expired);
+    }
+
+    fn notify_expired_rpcs(
+        &self,
+        session_id: &str,
+        expired: Vec<(String, String, mpsc::Sender<RelayServerMessage>)>,
+    ) {
+        for (request_id, requester_peer_id, tx) in expired {
+            self.queue_message(
+                session_id,
+                &requester_peer_id,
+                &tx,
+                RelayServerMessage::RpcResult {
+                    request_id,
+                    ok: false,
+                    result: None,
+                    error: None,
+                },
+            );
+        }
+    }
+
     async fn resolve_rpc(
         &self,
         session_id: &str,
@@ -1271,9 +1377,11 @@ impl AppState {
         error: Option<EncryptedEnvelope>,
     ) {
         let mut response = None;
+        let mut expired = Vec::new();
         {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
+                expired = live.take_expired_rpcs(Utc::now());
                 if let Some(pending) = live.pending_rpc.remove(&request_id) {
                     if pending.responder_peer_id != peer_id {
                         warn!(
@@ -1294,6 +1402,7 @@ impl AppState {
             }
         }
 
+        self.notify_expired_rpcs(session_id, expired);
         if let Some((requester_peer_id, tx)) = response {
             self.queue_message(
                 session_id,
@@ -1625,6 +1734,9 @@ impl AppState {
                 return;
             };
             for action in session.actions.values_mut() {
+                if to_send.len() >= MAX_ACTIONS_PER_DISPATCH {
+                    break;
+                }
                 if !matches!(action.status, QueuedRemoteActionStatus::Queued) {
                     continue;
                 }
@@ -1962,7 +2074,9 @@ impl SessionRecord {
     }
 
     fn history_truncated(&self, after_seq: u64) -> bool {
-        after_seq > 0 && after_seq.saturating_add(1) < self.oldest_retained_seq()
+        // A brand-new client (after_seq == 0) must also learn that early
+        // history is gone so it recovers from a fresh daemon snapshot.
+        after_seq.saturating_add(1) < self.oldest_retained_seq()
     }
 
     fn trusted_devices(&self) -> Vec<TrustedDevice> {
@@ -2013,6 +2127,18 @@ impl QueuedActionRecord {
     }
 }
 
+fn saturating_add(instant: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
+    instant
+        .checked_add_signed(duration)
+        .unwrap_or(DateTime::<Utc>::MAX_UTC)
+}
+
+fn saturating_sub(instant: DateTime<Utc>, duration: Duration) -> DateTime<Utc> {
+    instant
+        .checked_sub_signed(duration)
+        .unwrap_or(DateTime::<Utc>::MIN_UTC)
+}
+
 fn prune_state(
     state: &mut PersistedState,
     live_session_ids: &std::collections::HashSet<String>,
@@ -2024,7 +2150,7 @@ fn prune_state(
     for session in state.sessions.values_mut() {
         session.ensure_next_seq();
 
-        let update_cutoff = now - retention.update_retention;
+        let update_cutoff = saturating_sub(now, retention.update_retention);
         let before_updates = session.updates.len();
         session
             .updates
@@ -2037,7 +2163,7 @@ fn prune_state(
             changed = true;
         }
 
-        let action_cutoff = now - retention.completed_action_retention;
+        let action_cutoff = saturating_sub(now, retention.completed_action_retention);
         let before_actions = session.actions.len();
         session.actions.retain(|_, action| {
             let terminal = matches!(
@@ -2051,7 +2177,7 @@ fn prune_state(
         }
     }
 
-    let claimed_pairing_cutoff = now - retention.claimed_pairing_retention;
+    let claimed_pairing_cutoff = saturating_sub(now, retention.claimed_pairing_retention);
     let before_pairings = state.pairings.len();
     state.pairings.retain(|_, pairing| {
         if pairing.device_id.is_none() {
@@ -2070,17 +2196,19 @@ fn prune_state(
             return true;
         }
 
+        // A corrupt state file (or extreme retention config) can push these
+        // additions out of chrono's range; saturate instead of panicking.
         let trusted_until = session
             .devices
             .values()
             .filter(|device| device.revoked_at.is_none())
             .map(|device| device.last_seen_at.unwrap_or(device.created_at))
             .max()
-            .map(|last_seen| last_seen + retention.trusted_device_retention);
+            .map(|last_seen| saturating_add(last_seen, retention.trusted_device_retention));
         let daemon_until = session
             .daemon_last_seen_at
-            .map(|seen| seen + retention.update_retention);
-        let session_until = session.updated_at + retention.update_retention;
+            .map(|seen| saturating_add(seen, retention.update_retention));
+        let session_until = saturating_add(session.updated_at, retention.update_retention);
         let retain_until = trusted_until
             .into_iter()
             .chain(daemon_until)

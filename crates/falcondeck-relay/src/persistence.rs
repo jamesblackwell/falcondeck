@@ -14,6 +14,10 @@ use super::app::{
 };
 
 const FILE_PERSIST_DEBOUNCE_MS: u64 = 150;
+/// Upper bound on how long deferred persist requests may coalesce: the
+/// debounce timer resets on every request, so sustained update traffic
+/// would otherwise starve persistence forever.
+const FILE_PERSIST_MAX_DEBOUNCE_MS: u64 = 1_000;
 
 // ── Trait ────────────────────────────────────────────────────────────
 
@@ -61,20 +65,25 @@ pub(crate) trait PersistenceBackend: Send + Sync {
 
 pub(crate) struct FileBackend {
     state_path: PathBuf,
-    persist_lock: Mutex<()>,
+    /// Serializes all writes to the state file, including those made by the
+    /// spawned deferred-flush task.
+    persist_lock: std::sync::Arc<Mutex<()>>,
     deferred_task: Mutex<Option<DeferredFlush>>,
 }
 
 /// Holds the state needed to execute a deferred flush.
 struct DeferredFlush {
     handle: JoinHandle<()>,
+    /// When the oldest un-flushed deferred request was made, used to cap
+    /// how long back-to-back requests can keep resetting the debounce.
+    first_requested_at: tokio::time::Instant,
 }
 
 impl FileBackend {
     pub(crate) fn new(state_path: PathBuf) -> Self {
         Self {
             state_path,
-            persist_lock: Mutex::new(()),
+            persist_lock: std::sync::Arc::new(Mutex::new(())),
             deferred_task: Mutex::new(None),
         }
     }
@@ -152,19 +161,29 @@ impl FileBackend {
             + 'static,
     {
         let mut task = self.deferred_task.lock().await;
-        if let Some(deferred) = task.take() {
-            deferred.handle.abort();
-        }
+        let first_requested_at = match task.take() {
+            // Carry the pending request's age forward so resets cannot
+            // starve persistence; a finished handle means its flush already
+            // ran, so the age window starts over.
+            Some(deferred) if !deferred.handle.is_finished() => {
+                deferred.handle.abort();
+                deferred.first_requested_at
+            }
+            _ => tokio::time::Instant::now(),
+        };
+        let deadline = (tokio::time::Instant::now()
+            + std::time::Duration::from_millis(FILE_PERSIST_DEBOUNCE_MS))
+        .min(first_requested_at + std::time::Duration::from_millis(FILE_PERSIST_MAX_DEBOUNCE_MS));
 
-        // We need a reference to self for write_now, but we can't move self
-        // into the spawned task.  Instead, capture just the path and lock.
-        // Since the lock is behind Arc in AppState, we'll handle the actual
-        // write in the closure.
         let state_path = self.state_path.clone();
+        let persist_lock = std::sync::Arc::clone(&self.persist_lock);
         *task = Some(DeferredFlush {
+            first_requested_at,
             handle: tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(FILE_PERSIST_DEBOUNCE_MS))
-                    .await;
+                tokio::time::sleep_until(deadline).await;
+                // Hold the persist lock across the write so the deferred
+                // task cannot race an immediate flush on the same file.
+                let _guard = persist_lock.lock().await;
                 if let Ok(snapshot) = snapshot_fn().await {
                     let _ = persist_state_to_file(&state_path, &snapshot).await;
                 }
@@ -304,15 +323,20 @@ async fn persist_state_to_file(path: &Path, state: &PersistedState) -> Result<()
             .await
             .map_err(|error| RelayError::StatePersist(error.to_string()))?;
     }
-    let tmp_path = path.with_extension("tmp");
+    // Unique tmp name per write: concurrent writers sharing one tmp path
+    // can tear each other's files or rename a partial write into place.
+    let tmp_path = path.with_extension(format!("tmp-{}", uuid::Uuid::new_v4().simple()));
     let json = serde_json::to_vec_pretty(state)
         .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    fs::write(&tmp_path, json)
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
-    fs::rename(&tmp_path, path)
-        .await
-        .map_err(|error| RelayError::StatePersist(error.to_string()))?;
+    let result = async {
+        fs::write(&tmp_path, json).await?;
+        fs::rename(&tmp_path, path).await
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(RelayError::StatePersist(error.to_string()));
+    }
     Ok(())
 }
 
@@ -415,6 +439,14 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 body JSONB NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 PRIMARY KEY (session_id, seq)
+            );
+            -- Backfill next_seq for rows that predate the column: sequence
+            -- numbers must never be reused after pruning, so derive at least
+            -- MAX(seq) + 1 from the retained updates.
+            UPDATE relay_sessions SET next_seq = GREATEST(
+                next_seq,
+                (SELECT COALESCE(MAX(seq) + 1, 1) FROM relay_updates u
+                 WHERE u.session_id = relay_sessions.session_id)
             );
             CREATE TABLE IF NOT EXISTS relay_actions (
                 action_id TEXT PRIMARY KEY,
@@ -603,7 +635,7 @@ async fn upsert_session(
                daemon_last_seen_at = EXCLUDED.daemon_last_seen_at,
                created_at = EXCLUDED.created_at,
                updated_at = EXCLUDED.updated_at,
-               next_seq = EXCLUDED.next_seq",
+               next_seq = GREATEST(relay_sessions.next_seq, EXCLUDED.next_seq)",
             &[
                 &session.session_id,
                 &session.pairing_id,

@@ -8,6 +8,24 @@ fn env_or_default(name: &str, default: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| default.to_string())
 }
 
+/// `chrono::Duration::days` panics on out-of-range values, so fall back to
+/// the (known in-range) default instead of aborting startup.
+fn duration_days_or(days: i64, default_days: i64) -> Duration {
+    Duration::try_days(days).unwrap_or_else(|| {
+        tracing::warn!("duration of {days} days is out of range; using {default_days} days");
+        Duration::days(default_days)
+    })
+}
+
+fn duration_seconds_or(seconds: i64, default_seconds: i64) -> Duration {
+    Duration::try_seconds(seconds).unwrap_or_else(|| {
+        tracing::warn!(
+            "duration of {seconds} seconds is out of range; using {default_seconds} seconds"
+        );
+        Duration::seconds(default_seconds)
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -34,11 +52,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<i64>()
         .unwrap_or(600);
     let retention = RetentionConfig {
-        update_retention: Duration::days(
+        update_retention: duration_days_or(
             env_or_default("FALCONDECK_RELAY_UPDATE_RETENTION_DAYS", "7")
                 .parse::<i64>()
                 .unwrap_or(7)
                 .max(1),
+            7,
         ),
         max_updates_per_session: env_or_default(
             "FALCONDECK_RELAY_MAX_UPDATES_PER_SESSION",
@@ -47,31 +66,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<usize>()
         .unwrap_or(10_000)
         .max(1),
-        trusted_device_retention: Duration::days(
+        trusted_device_retention: duration_days_or(
             env_or_default("FALCONDECK_RELAY_TRUSTED_DEVICE_RETENTION_DAYS", "180")
                 .parse::<i64>()
                 .unwrap_or(180)
                 .max(1),
+            180,
         ),
-        claimed_pairing_retention: Duration::days(
+        claimed_pairing_retention: duration_days_or(
             env_or_default("FALCONDECK_RELAY_CLAIMED_PAIRING_RETENTION_DAYS", "1")
                 .parse::<i64>()
                 .unwrap_or(1)
                 .max(0),
+            1,
         ),
-        completed_action_retention: Duration::days(
+        completed_action_retention: duration_days_or(
             env_or_default("FALCONDECK_RELAY_COMPLETED_ACTION_RETENTION_DAYS", "3")
                 .parse::<i64>()
                 .unwrap_or(3)
                 .max(0),
+            3,
         ),
     };
 
+    let pairing_ttl = duration_seconds_or(pairing_ttl_seconds.max(1), 600);
     let state = if let Some(database_url) = database_url {
         AppState::load_postgres_with_retention(
             env!("CARGO_PKG_VERSION").to_string(),
             database_url,
-            Duration::seconds(pairing_ttl_seconds.max(1)),
+            pairing_ttl,
             retention,
         )
         .await?
@@ -79,7 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AppState::load_with_retention(
             env!("CARGO_PKG_VERSION").to_string(),
             PathBuf::from(state_path),
-            Duration::seconds(pairing_ttl_seconds.max(1)),
+            pairing_ttl,
             retention,
         )
         .await?

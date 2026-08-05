@@ -139,7 +139,10 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
     };
 
     let (mut sender, mut receiver) = socket.split();
-    if send_message(&mut sender, &ready).await.is_err() {
+    if send_message_with_timeout(&mut sender, &ready)
+        .await
+        .is_err()
+    {
         state.unregister_peer(&auth.session_id, &peer_id).await;
         return;
     }
@@ -159,7 +162,7 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
             maybe_message = rx.recv() => {
                 match maybe_message {
                     Some(message) => {
-                        if send_message(&mut sender, &message).await.is_err() {
+                        if send_message_with_timeout(&mut sender, &message).await.is_err() {
                             break;
                         }
                     }
@@ -180,7 +183,10 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                                     let server_message = RelayServerMessage::Error {
                                         message: error.to_string(),
                                     };
-                                    if send_message(&mut sender, &server_message).await.is_err() {
+                                    if send_message_with_timeout(&mut sender, &server_message)
+                                        .await
+                                        .is_err()
+                                    {
                                         break;
                                     }
                                 }
@@ -189,7 +195,10 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                                 let server_message = RelayServerMessage::Error {
                                     message: format!("invalid websocket payload: {error}"),
                                 };
-                                if send_message(&mut sender, &server_message).await.is_err() {
+                                if send_message_with_timeout(&mut sender, &server_message)
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -204,7 +213,10 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                         let server_message = RelayServerMessage::Error {
                             message: "binary websocket payloads are not supported".to_string(),
                         };
-                        if send_message(&mut sender, &server_message).await.is_err() {
+                        if send_message_with_timeout(&mut sender, &server_message)
+                            .await
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -212,6 +224,7 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                 }
             }
             _ = idle_check.tick() => {
+                state.sweep_expired_rpcs(&auth.session_id).await;
                 if last_activity.elapsed() > idle_timeout {
                     tracing::warn!(
                         session_id = %auth.session_id,
@@ -271,6 +284,21 @@ async fn revoke_trusted_device(
             .revoke_trusted_device(&session_id, &token, &device_id)
             .await?,
     ))
+}
+
+/// Bound websocket sends so a peer that stops reading (zero TCP window)
+/// cannot stall the socket loop forever; on timeout the connection is torn
+/// down and `unregister_peer` runs.
+async fn send_message_with_timeout(
+    sender: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: &RelayServerMessage,
+) -> Result<(), axum::Error> {
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(10),
+        send_message(sender, message),
+    )
+    .await
+    .map_err(|elapsed| axum::Error::new(std::io::Error::other(elapsed.to_string())))?
 }
 
 async fn send_message(
