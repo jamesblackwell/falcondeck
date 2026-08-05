@@ -102,27 +102,31 @@ pub(super) async fn persist_app_state(
     path: &PathBuf,
     state: &PersistedAppState,
 ) -> Result<(), DaemonError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-    let tmp_path = path.with_extension("json.tmp");
     let payload = serde_json::to_vec_pretty(state)?;
-    fs::write(&tmp_path, payload).await?;
-    fs::rename(&tmp_path, path).await?;
-    Ok(())
+    write_atomically(path, payload).await
 }
 
 pub(super) async fn persist_preferences(
     path: &PathBuf,
     preferences: &FalconDeckPreferences,
 ) -> Result<(), DaemonError> {
+    let payload = serde_json::to_vec_pretty(preferences)?;
+    write_atomically(path, payload).await
+}
+
+/// Persist callers run concurrently; a shared temp path would let one
+/// writer's rename publish another writer's half-written file. Each write
+/// gets its own temp file so the atomic rename is the only shared step.
+async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result<(), DaemonError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    let tmp_path = path.with_extension("json.tmp");
-    let payload = serde_json::to_vec_pretty(preferences)?;
+    let tmp_path = path.with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4().simple()));
     fs::write(&tmp_path, payload).await?;
-    fs::rename(&tmp_path, path).await?;
+    if let Err(error) = fs::rename(&tmp_path, path).await {
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(error.into());
+    }
     Ok(())
 }
 
