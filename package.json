@@ -13,5 +13,9 @@
     "desktop:version:sync": "node ./scripts/prepare-desktop-release.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   }
 }

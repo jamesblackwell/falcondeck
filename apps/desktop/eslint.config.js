@@ -19,5 +19,10 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    rules: {
+      // The app syncs local state from the daemon snapshot inside guarded
+      // effects; those intentional writes trip this rule wholesale.
+      'react-hooks/set-state-in-effect': 'off',
+    },
   },
 ])
