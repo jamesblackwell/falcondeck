@@ -1,11 +1,13 @@
 /**
  * Tests for relay-store crypto operations — _encryptJson, _decryptJson, _processBootstrap.
  */
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import nacl from 'tweetnacl'
 import {
   REMOTE_SESSION_STORAGE_VERSION,
+  deriveIdentityKeyPair,
   generateBoxKeyPair,
+  identityPublicKeyToBase64,
   publicKeyToBase64,
   secretKeyToBase64,
   bytesToBase64,
@@ -15,8 +17,8 @@ import type { PairingPublicKeyBundle, SessionKeyMaterial, RelayUpdate } from '@f
 import { useRelayStore } from './relay-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
-import { setJson } from '@/storage/mmkv'
-import { persistClientSecretKey, persistClientToken } from '@/storage/secure'
+import { getJson, setJson } from '@/storage/mmkv'
+import { loadClientToken, persistClientSecretKey, persistClientToken } from '@/storage/secure'
 
 function resetStore() {
   useRelayStore.setState({
@@ -32,6 +34,12 @@ function resetStore() {
   })
   resetSecureStore()
   resetMMKV()
+  // disconnect() fires a best-effort push-token clear; keep it off the network.
+  globalThis.fetch = vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({ ok: true }),
+  }) as unknown as typeof fetch
 }
 
 describe('relay-store crypto operations', () => {
@@ -140,6 +148,61 @@ describe('relay-store crypto operations', () => {
       await store._processBootstrap(update)
       // Should not change encryption state
       expect(useRelayStore.getState().isEncrypted).toBe(false)
+    })
+
+    it('keeps the pairing intact when an addressed bootstrap fails verification', async () => {
+      // A malformed durable bootstrap replayed by a buggy or compromised
+      // relay must not unpair the device — only surface an error and skip.
+      const kp = generateBoxKeyPair()
+      setJson('relay.session', {
+        version: REMOTE_SESSION_STORAGE_VERSION,
+        relayUrl: 'https://relay.test',
+        pairingCode: 'CODE-123',
+        pairingId: 'pairing-1',
+        sessionId: 'session-1',
+        deviceId: 'device-1',
+        daemonPublicKey: 'daemon-public-key',
+        daemonIdentityPublicKey: 'daemon-identity-key',
+        lastReceivedSeq: 10,
+      })
+      await persistClientSecretKey(secretKeyToBase64(kp))
+      await persistClientToken('token-abc')
+      expect(await useRelayStore.getState().restoreSession()).toBe(true)
+
+      const update: RelayUpdate = {
+        id: 'u1',
+        seq: 11,
+        body: {
+          t: 'session-bootstrap',
+          material: {
+            encryption_variant: 'data_key_v1',
+            identity_variant: 'ed25519_v1',
+            pairing_id: 'pairing-1',
+            session_id: 'session-1',
+            daemon_public_key: 'daemon-public-key',
+            daemon_identity_public_key: 'daemon-identity-key',
+            // Addressed to this client so processing reaches verification…
+            client_public_key: publicKeyToBase64(kp),
+            client_identity_public_key: identityPublicKeyToBase64(deriveIdentityKeyPair(kp)),
+            client_wrapped_data_key: { encryption_variant: 'data_key_v1', wrapped_key: 'xxx' },
+            daemon_wrapped_data_key: null,
+            // …which fails on the bogus signature.
+            signature: 'sig',
+          },
+        },
+        created_at: new Date().toISOString(),
+      }
+
+      await useRelayStore.getState()._processBootstrap(update)
+
+      const state = useRelayStore.getState()
+      expect(state.error).toBeTruthy()
+      // The session, key pair, secure storage, and persisted session survive.
+      expect(state.sessionId).toBe('session-1')
+      expect(state.connectionStatus).not.toBe('not_connected')
+      expect(state._getKeyPair()).not.toBeNull()
+      expect(getJson('relay.session')).not.toBeNull()
+      await expect(loadClientToken()).resolves.toBe('token-abc')
     })
   })
 

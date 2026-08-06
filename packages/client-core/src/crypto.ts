@@ -174,14 +174,21 @@ export function identityPublicKeyToBase64(keyPair: IdentityKeyPair) {
   return bytesToBase64(keyPair.publicKey)
 }
 
+// Copy into a same-realm Uint8Array: some runtimes (jsdom and similar test
+// realms) hand back cross-realm arrays from TextEncoder that fail tweetnacl's
+// instanceof-based type checks.
+function signingPayloadBytes(payload: string) {
+  return new Uint8Array(encoder.encode(payload))
+}
+
 function pairingBundleSigningPayload(bundle: Pick<PairingPublicKeyBundle, 'public_key' | 'identity_public_key'>) {
-  return encoder.encode(
+  return signingPayloadBytes(
     `falcondeck-pairing-bundle-v1\ndata_key_v1\ned25519_v1\n${bundle.public_key}\n${bundle.identity_public_key}`,
   )
 }
 
 function sessionBootstrapSigningPayload(material: SessionKeyMaterial) {
-  return encoder.encode(
+  return signingPayloadBytes(
     `falcondeck-session-bootstrap-v1\ndata_key_v1\ned25519_v1\n${material.pairing_id}\n${material.session_id}\n${material.daemon_public_key}\n${material.daemon_identity_public_key}\n${material.client_public_key}\n${material.client_identity_public_key}\n${material.client_wrapped_data_key.wrapped_key}\n${material.daemon_wrapped_data_key?.wrapped_key ?? ''}`,
   )
 }
@@ -202,9 +209,7 @@ export function buildPairingPublicKeyBundle(keyPair: BoxKeyPair): PairingPublicK
 }
 
 function pairingClaimChallengeSigningPayload(pairingCode: string, challenge: string) {
-  // Copy into a same-realm Uint8Array: some runtimes (jsdom) hand back
-  // cross-realm arrays from TextEncoder that fail tweetnacl's type checks.
-  return new Uint8Array(encoder.encode(`falcondeck-pairing-claim-v1\n${pairingCode}\n${challenge}`))
+  return signingPayloadBytes(`falcondeck-pairing-claim-v1\n${pairingCode}\n${challenge}`)
 }
 
 /**

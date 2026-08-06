@@ -30,11 +30,17 @@ export default function RootLayout() {
   useRelayConnection()
 
   useEffect(() => {
+    // Only after stores hydrate — a tap handled earlier would have its
+    // workspace/thread selection clobbered by cache restoration. A tap that
+    // lands during hydration is still delivered: it becomes the OS's last
+    // notification response, which processInitialNotificationResponse below
+    // picks up (deduped, so already-handled taps are not replayed).
+    if (!isReady) return
     const subscription = addNotificationResponseListener()
     return () => {
       subscription?.remove()
     }
-  }, [])
+  }, [isReady])
 
   useEffect(() => {
     // Only after stores hydrate — otherwise cache restoration would clobber

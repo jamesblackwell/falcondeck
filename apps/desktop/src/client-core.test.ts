@@ -398,6 +398,97 @@ describe('client-core conversation helpers', () => {
     expect(renamed?.threads.find((entry) => entry.id === 'thread-2')?.title).toBe('Renamed')
   })
 
+  it('does not resurrect an archived thread from a late thread-updated event', () => {
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace()],
+      threads: [thread()],
+      interactive_requests: [],
+      preferences: normalizePreferences(null),
+    }
+    // e.g. mark_read lands after the thread was archived (and thus dropped
+    // from the snapshot); the unknown-id insert must not bring it back.
+    const event: EventEnvelope = {
+      seq: 7,
+      emitted_at: '2026-03-15T11:10:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-archived',
+      event: {
+        type: 'thread-updated',
+        thread: thread({ id: 'thread-archived', is_archived: true }),
+      },
+    }
+
+    expect(applySnapshotEvent(snapshot, event)?.threads.map((entry) => entry.id)).toEqual([
+      'thread-1',
+    ])
+  })
+
+  it('removes a thread from the list when an update archives it', () => {
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace()],
+      threads: [thread(), thread({ id: 'thread-2' })],
+      interactive_requests: [],
+      preferences: normalizePreferences(null),
+    }
+    const event: EventEnvelope = {
+      seq: 8,
+      emitted_at: '2026-03-15T11:20:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: {
+        type: 'thread-updated',
+        thread: thread({ id: 'thread-1', is_archived: true }),
+      },
+    }
+
+    expect(applySnapshotEvent(snapshot, event)?.threads.map((entry) => entry.id)).toEqual([
+      'thread-2',
+    ])
+  })
+
+  it('normalizes raw tool-call items delivered through conversation-item events', () => {
+    const detail: ThreadDetail = {
+      workspace: workspace(),
+      thread: thread(),
+      items: [],
+      has_older: false,
+      oldest_item_id: null,
+      newest_item_id: null,
+      is_partial: false,
+    }
+    // Simulates a daemon payload whose tool_call display is missing entirely;
+    // normalizeEventEnvelope does not repair conversation-item payloads.
+    const rawItem = {
+      kind: 'tool_call',
+      id: 'tool-1',
+      title: 'bash',
+      tool_kind: 'bash',
+      status: 'completed',
+      output: null,
+      exit_code: null,
+      created_at: '2026-03-15T10:06:00Z',
+      completed_at: null,
+    } as unknown as ConversationItem
+    const event: EventEnvelope = {
+      seq: 9,
+      emitted_at: '2026-03-15T10:06:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: { type: 'conversation-item-added', item: rawItem },
+    }
+
+    const next = applyEventToThreadDetail(detail, event)
+    const inserted = next?.items.find((item) => item.id === 'tool-1')
+    expect(inserted?.kind).toBe('tool_call')
+    expect(inserted && inserted.kind === 'tool_call' ? inserted.display : null).toMatchObject({
+      is_read_only: false,
+      activity_kind: 'other',
+      history_mode: 'full',
+    })
+  })
+
   it('returns no conversation items for a new thread composer', () => {
     const detail: ThreadDetail = {
       workspace: workspace(),

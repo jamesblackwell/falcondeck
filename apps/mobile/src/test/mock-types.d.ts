@@ -22,9 +22,11 @@ declare module 'expo-notifications' {
     next: { granted: boolean; canAskAgain: boolean; status: string },
     onRequest?: { granted: boolean; canAskAgain: boolean; status: string },
   ): void
+  export function __setPermissionRequestHook(hook: (() => void | Promise<void>) | null): void
   export function __setPushToken(next: string | null): void
   export function __setPushTokenError(error: Error): void
   export function __setLastResponse(next: unknown): void
+  export function __getLastResponse(): unknown
   export function __emitResponse(event: unknown): void
   export function __getHandler(): {
     handleNotification: (notification: unknown) => Promise<{

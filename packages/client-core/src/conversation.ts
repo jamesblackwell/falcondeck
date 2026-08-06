@@ -6,11 +6,17 @@ import type {
   ToolActivityKind,
   ToolDetailsMode,
 } from './types'
-import { normalizeEventEnvelope, normalizePreferences, normalizeThreadDetail } from './normalization'
+import {
+  normalizeConversationItem,
+  normalizeEventEnvelope,
+  normalizePreferences,
+  normalizeThreadDetail,
+} from './normalization'
 
 export function sortConversationItems(items: ConversationItem[]) {
-  // Plain code-unit comparison: created_at is ISO-8601, so lexicographic order
-  // is chronological order and ICU collation is unnecessary on this hot path.
+  // Plain code-unit comparison: created_at values are uniform ISO-8601 strings
+  // (same UTC offset and precision from the daemon), so lexicographic order is
+  // chronological order and ICU collation is unnecessary on this hot path.
   return [...items].sort((left, right) =>
     left.created_at < right.created_at ? -1 : left.created_at > right.created_at ? 1 : 0,
   )
@@ -61,15 +67,29 @@ export function upsertConversationItem(
     return sortConversationItems(clone)
   }
 
+  if (next.created_at > last.created_at) {
+    return [...items, next]
+  }
+
   // Provider timestamps are often second-precision, so an update to an
   // earlier item can tie the tail's created_at; only take the append fast
-  // path when the item cannot already exist earlier in the list.
-  if (
-    next.created_at > last.created_at ||
-    (next.created_at === last.created_at &&
-      !items.some((item) => item.id === next.id && item.kind === next.kind))
-  ) {
-    return [...items, next]
+  // path when the item cannot already exist earlier in the list. The list is
+  // sorted, so items tying the tail's timestamp cluster at the tail — scan
+  // backwards and bail at the first older timestamp instead of scanning the
+  // whole list.
+  if (next.created_at === last.created_at) {
+    let existsInTailTie = false
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index]
+      if (item.created_at !== next.created_at) break
+      if (item.id === next.id && item.kind === next.kind) {
+        existsInTailTie = true
+        break
+      }
+    }
+    if (!existsInTailTie) {
+      return [...items, next]
+    }
   }
 
   const index = items.findIndex((item) => item.id === next.id && item.kind === next.kind)
@@ -119,7 +139,12 @@ export function applyEventToThreadDetail(detail: ThreadDetail | null, event: Eve
       const normalizedDetail = normalizeThreadDetail(detail)
       return {
         ...normalizedDetail,
-        items: upsertConversationItem(normalizedDetail.items, normalizedEvent.event.item),
+        // normalizeEventEnvelope does not normalize conversation-item
+        // payloads, so repair the incoming item here before upserting it.
+        items: upsertConversationItem(
+          normalizedDetail.items,
+          normalizeConversationItem(normalizedEvent.event.item),
+        ),
       }
     }
     default:

@@ -23,6 +23,7 @@ import { useSessionStore } from '@/store/session-store'
 
 const PUSH_REGISTRATION_KEY = 'push.lastRegistration'
 const PUSH_ENABLED_KEY = 'push.enabled'
+const PUSH_LAST_HANDLED_RESPONSE_KEY = 'push.lastHandledNotificationResponse'
 
 interface PersistedPushRegistration {
   sessionId: string
@@ -141,6 +142,19 @@ export async function getPushTokenSafely(): Promise<string | null> {
   }
 }
 
+// registerPushToken and clearPushToken can race — the settings toggle, the
+// connection effect, and disconnect all fire them independently. Serialize
+// them through a single promise chain so a stale registration can never land
+// after a clear. Operations swallow their own errors, so the chain never
+// rejects.
+let pushTokenOperations: Promise<void> = Promise.resolve()
+
+function enqueuePushTokenOperation(operation: () => Promise<void>): Promise<void> {
+  const next = pushTokenOperations.then(operation)
+  pushTokenOperations = next
+  return next
+}
+
 /**
  * Register this device's Expo push token with the relay. Fire-and-forget safe:
  * never throws, no-ops while the user has push notifications disabled, and
@@ -153,26 +167,33 @@ export async function registerPushToken(
   deviceId: string,
   clientToken: string,
 ): Promise<void> {
-  try {
-    if (!isPushEnabled()) return
+  return enqueuePushTokenOperation(async () => {
+    try {
+      if (!isPushEnabled()) return
 
-    const token = await getPushTokenSafely()
-    if (!token) return
+      const token = await getPushTokenSafely()
+      if (!token) return
 
-    const last = getJson<PersistedPushRegistration>(PUSH_REGISTRATION_KEY)
-    if (last && last.token === token && last.sessionId === sessionId && last.deviceId === deviceId) {
-      return
+      // The permission prompt can stay open long enough for the user to flip
+      // the push toggle off; re-check before POSTing so a freshly disabled
+      // device does not (re)register.
+      if (!isPushEnabled()) return
+
+      const last = getJson<PersistedPushRegistration>(PUSH_REGISTRATION_KEY)
+      if (last && last.token === token && last.sessionId === sessionId && last.deviceId === deviceId) {
+        return
+      }
+
+      await postPushToken(relayUrl, sessionId, deviceId, clientToken, token)
+      setJson(PUSH_REGISTRATION_KEY, {
+        sessionId,
+        deviceId,
+        token,
+      } satisfies PersistedPushRegistration)
+    } catch (error) {
+      console.warn('Failed to register push token with relay', error)
     }
-
-    await postPushToken(relayUrl, sessionId, deviceId, clientToken, token)
-    setJson(PUSH_REGISTRATION_KEY, {
-      sessionId,
-      deviceId,
-      token,
-    } satisfies PersistedPushRegistration)
-  } catch (error) {
-    console.warn('Failed to register push token with relay', error)
-  }
+  })
 }
 
 /**
@@ -185,12 +206,14 @@ export async function clearPushToken(
   deviceId: string,
   clientToken: string,
 ): Promise<void> {
-  try {
-    removeKey(PUSH_REGISTRATION_KEY)
-    await postPushToken(relayUrl, sessionId, deviceId, clientToken, null)
-  } catch (error) {
-    console.warn('Failed to clear push token on relay', error)
-  }
+  return enqueuePushTokenOperation(async () => {
+    try {
+      removeKey(PUSH_REGISTRATION_KEY)
+      await postPushToken(relayUrl, sessionId, deviceId, clientToken, null)
+    } catch (error) {
+      console.warn('Failed to clear push token on relay', error)
+    }
+  })
 }
 
 /**
@@ -226,6 +249,28 @@ function dataFromResponse(response: Notifications.NotificationResponse | null): 
   return response?.notification?.request?.content?.data ?? null
 }
 
+function responseIdentifier(response: Notifications.NotificationResponse): string | null {
+  const identifier = response?.notification?.request?.identifier
+  return typeof identifier === 'string' && identifier.length > 0 ? identifier : null
+}
+
+/**
+ * Remember which tap response was last handled so a cold start cannot replay
+ * it: getLastNotificationResponseAsync returns the last response EVER, not
+ * just the one that launched the current process.
+ */
+function rememberHandledResponse(response: Notifications.NotificationResponse): void {
+  const identifier = responseIdentifier(response)
+  if (identifier) {
+    setJson(PUSH_LAST_HANDLED_RESPONSE_KEY, identifier)
+  }
+}
+
+function wasResponseAlreadyHandled(response: Notifications.NotificationResponse): boolean {
+  const identifier = responseIdentifier(response)
+  return !!identifier && getJson<string>(PUSH_LAST_HANDLED_RESPONSE_KEY) === identifier
+}
+
 /**
  * Subscribe to notification taps. Returns the subscription (or null when the
  * native module is unavailable) — callers must remove it on cleanup.
@@ -234,6 +279,7 @@ export function addNotificationResponseListener(): { remove: () => void } | null
   try {
     return Notifications.addNotificationResponseReceivedListener((response) => {
       try {
+        rememberHandledResponse(response)
         handleNotificationTapData(dataFromResponse(response))
       } catch (error) {
         console.warn('Failed to handle notification tap', error)
@@ -255,13 +301,24 @@ export function __resetInitialNotificationResponseForTests(): void {
 /**
  * Handle the tap that cold-started the app (the response listener can miss
  * it). Call once the stores have hydrated so the selection is not clobbered.
+ * Skips responses already handled in this or an earlier app run.
  */
 export async function processInitialNotificationResponse(): Promise<void> {
   if (initialResponseProcessed) return
   initialResponseProcessed = true
   try {
     const response = await Notifications.getLastNotificationResponseAsync()
+    if (!response || wasResponseAlreadyHandled(response)) return
+    rememberHandledResponse(response)
     handleNotificationTapData(dataFromResponse(response))
+    // Where the installed SDK supports it, also clear the stored response so
+    // even an identifier-less response cannot replay on the next cold start.
+    const clearLastResponse = (
+      Notifications as { clearLastNotificationResponseAsync?: () => Promise<void> }
+    ).clearLastNotificationResponseAsync
+    if (typeof clearLastResponse === 'function') {
+      await clearLastResponse()
+    }
   } catch (error) {
     console.warn('Failed to process launch notification', error)
   }

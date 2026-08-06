@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import {
   applySnapshotEvent,
@@ -163,7 +163,11 @@ export default function App() {
   const trustedDaemonPublicKeyRef = useRef<string | null>(persistedSession?.daemonPublicKey ?? null)
   const trustedDaemonIdentityPublicKeyRef = useRef<string | null>(persistedSession?.daemonIdentityPublicKey ?? null)
   const pendingEncryptedUpdatesRef = useRef<RelayUpdate[]>([])
+  const evictedWhileParkedRef = useRef(false)
+  const pendingTruncationNextSeqRef = useRef<number | null>(null)
   const pendingSnapshotEventsRef = useRef<EventEnvelope[]>([])
+  const pendingSnapshotSeqsRef = useRef(new Set<number>())
+  const snapshotPresentRef = useRef(false)
   const lastReceivedSeqRef = useRef(persistedSession?.lastReceivedSeq ?? 0)
   const pendingSessionPersistRef = useRef<Partial<PersistedRemoteSession> | null>(null)
   const sessionPersistTimerRef = useRef<number | null>(null)
@@ -241,7 +245,10 @@ export default function App() {
     trustedDaemonPublicKeyRef.current = null
     trustedDaemonIdentityPublicKeyRef.current = null
     pendingEncryptedUpdatesRef.current = []
+    evictedWhileParkedRef.current = false
+    pendingTruncationNextSeqRef.current = null
     pendingSnapshotEventsRef.current = []
+    pendingSnapshotSeqsRef.current.clear()
     pendingSessionPersistRef.current = null
     pendingRelayUpdatesRef.current = []
     lastReceivedSeqRef.current = 0
@@ -333,6 +340,8 @@ export default function App() {
       // relay invalidates the saved session (isInvalidSavedSessionError) or
       // the user resets the saved connection.
       pendingEncryptedUpdatesRef.current = []
+      evictedWhileParkedRef.current = false
+      pendingTruncationNextSeqRef.current = null
       pendingRelayUpdatesRef.current = []
       if (relayFlushFrameRef.current !== null) {
         window.cancelAnimationFrame(relayFlushFrameRef.current)
@@ -523,6 +532,8 @@ export default function App() {
     let backoffResetTimer: number | null = null
     socketRef.current = null
     pendingEncryptedUpdatesRef.current = []
+    evictedWhileParkedRef.current = false
+    pendingTruncationNextSeqRef.current = null
     pendingRelayUpdatesRef.current = []
     setConnectionStatus('connecting')
     setMachinePresence(null)
@@ -551,6 +562,8 @@ export default function App() {
         pendingRpc.current.delete(reqId)
       }
       pendingEncryptedUpdatesRef.current = []
+      evictedWhileParkedRef.current = false
+      pendingTruncationNextSeqRef.current = null
       pendingRelayUpdatesRef.current = []
       if (relayFlushFrameRef.current !== null) {
         window.cancelAnimationFrame(relayFlushFrameRef.current)
@@ -628,14 +641,20 @@ export default function App() {
               break
             case 'sync':
               if (payload.history_truncated) {
-                // The cursor must never move backwards after a relay restore.
-                lastReceivedSeqRef.current = Math.max(lastReceivedSeqRef.current, payload.next_seq - 1, 0)
+                // Updates were lost server-side; rebuild derived state from a
+                // fresh snapshot. The cursor is NOT advanced or persisted
+                // here: this sync's updates have not been consumed yet (a
+                // keyless browser parks them, and a disconnect clears the
+                // parked buffer — advancing up front would skip them
+                // permanently). The truncation's next_seq is adopted at flush
+                // end instead, once nothing is parked.
+                pendingTruncationNextSeqRef.current = Math.max(
+                  pendingTruncationNextSeqRef.current ?? 0,
+                  payload.next_seq,
+                )
                 setSnapshot(null)
                 setThreadDetail(null)
                 setThreadItems({})
-                schedulePersistCurrentSession({
-                  lastReceivedSeq: lastReceivedSeqRef.current,
-                }, { immediate: true })
               }
               pendingRelayUpdatesRef.current.push(...payload.updates)
               scheduleRelayFlush()
@@ -753,15 +772,41 @@ export default function App() {
 
   const bufferPendingSnapshotEvents = useCallback((events: EventEnvelope[]) => {
     const buffer = pendingSnapshotEventsRef.current
+    const seenSeqs = pendingSnapshotSeqsRef.current
     for (const event of events) {
-      if (buffer.some((buffered) => buffered.seq === event.seq)) continue
+      if (seenSeqs.has(event.seq)) continue
       if (buffer.length >= MAX_PENDING_SNAPSHOT_EVENTS) {
         console.warn('Dropping oldest buffered daemon event; snapshot is taking too long')
-        buffer.shift()
+        const dropped = buffer.shift()
+        if (dropped) {
+          seenSeqs.delete(dropped.seq)
+        }
       }
+      seenSeqs.add(event.seq)
       buffer.push(event)
     }
   }, [])
+
+  // Mirrors whether a snapshot is loaded so the relay flush (which runs from
+  // rAF callbacks with stale closures) can decide to buffer or apply without
+  // reaching into a setState updater. If the mirror briefly lags a snapshot
+  // arrival, events buffered in that window are drained here.
+  useLayoutEffect(() => {
+    snapshotPresentRef.current = snapshot !== null
+    if (snapshot && pendingSnapshotEventsRef.current.length > 0) {
+      const buffered = pendingSnapshotEventsRef.current
+      pendingSnapshotEventsRef.current = []
+      pendingSnapshotSeqsRef.current.clear()
+      setSnapshot((current) => {
+        if (!current) return current
+        let next: DaemonSnapshot | null = current
+        for (const event of buffered) {
+          next = applySnapshotEvent(next, event)
+        }
+        return next ?? current
+      })
+    }
+  }, [snapshot])
 
   const flushRelayUpdates = useCallback(async () => {
     if (relayFlushInProgressRef.current) {
@@ -828,6 +873,14 @@ export default function App() {
                 batch.splice(index + 1, 0, ...pendingEncryptedUpdatesRef.current)
                 pendingEncryptedUpdatesRef.current = []
               }
+              if (evictedWhileParkedRef.current) {
+                // Updates were evicted while parked waiting for this key, so
+                // the drained window has a silent gap; drop the snapshot and
+                // let the refetch effect rebuild state (it replays events
+                // buffered while the RPC is in flight).
+                evictedWhileParkedRef.current = false
+                setSnapshot(null)
+              }
               advanceCursor(update.seq)
               schedulePersistCurrentSession(
                 {
@@ -865,6 +918,7 @@ export default function App() {
             if (pendingEncryptedUpdatesRef.current.length >= MAX_PENDING_ENCRYPTED_UPDATES) {
               console.warn('Dropping oldest parked encrypted relay update; buffer is full')
               pendingEncryptedUpdatesRef.current.shift()
+              evictedWhileParkedRef.current = true
             }
             pendingEncryptedUpdatesRef.current.push(update)
             continue
@@ -874,7 +928,11 @@ export default function App() {
           try {
             decrypted = await decryptJson(sc.dataKey, update.body.envelope)
           } catch (e) {
-            // Leave the cursor behind this update so a later sync replays it.
+            // Decryption failed: the cursor is not advanced for this update.
+            // If nothing later in the batch decrypts either, a later sync
+            // replays it; if a later update does decrypt, the cursor advances
+            // past this one — skipping a single undecryptable update is the
+            // accepted trade-off over stalling the stream.
             setError(e instanceof Error ? e.message : 'Failed to decrypt relay update')
             continue
           }
@@ -901,17 +959,25 @@ export default function App() {
         if (daemonEvents.length > 0) {
           const { passthroughEvents, updatesByThread } =
             collectConversationItemUpdates(daemonEvents)
-          setSnapshot((current) => {
+          const hasSnapshotEvent = passthroughEvents.some(
+            (event) => event.event.type === 'snapshot',
+          )
+          if (!snapshotPresentRef.current && !hasSnapshotEvent) {
             // While snapshot.current is in flight the snapshot is null and
-            // events cannot be applied; park them (dedup makes this safe if
-            // React re-runs the updater) and replay once the RPC resolves. A
-            // full snapshot event can still seed from null directly.
-            if (!current && !passthroughEvents.some((event) => event.event.type === 'snapshot')) {
-              bufferPendingSnapshotEvents(passthroughEvents)
-              return current
-            }
-            return applyDaemonEventsToSnapshot(current, passthroughEvents)
-          })
+            // events cannot be applied; park them (deduped by seq) and replay
+            // once the RPC resolves. A full snapshot event can still seed
+            // from null directly.
+            bufferPendingSnapshotEvents(passthroughEvents)
+          } else {
+            setSnapshot((current) => {
+              if (!current && !hasSnapshotEvent) {
+                // The mirror ref lagged a snapshot reset; skip applying onto
+                // null — the refetch effect supersedes these events.
+                return current
+              }
+              return applyDaemonEventsToSnapshot(current, passthroughEvents)
+            })
+          }
           if (updatesByThread.size > 0) {
             setThreadItems((current) =>
               applyDaemonEventsToThreadItems(current, updatesByThread),
@@ -925,6 +991,24 @@ export default function App() {
             ),
           )
         }
+      }
+
+      // A truncated sync may deliver no replayable updates at all (idle
+      // session aged out), so the per-update cursor advance above never runs;
+      // adopt the truncation point here once nothing is parked, otherwise the
+      // cursor stays stuck and every reconnect replays the truncation.
+      const truncationNextSeq = pendingTruncationNextSeqRef.current
+      if (truncationNextSeq !== null && pendingEncryptedUpdatesRef.current.length === 0) {
+        pendingTruncationNextSeqRef.current = null
+        lastReceivedSeqRef.current = Math.max(
+          lastReceivedSeqRef.current,
+          truncationNextSeq - 1,
+          0,
+        )
+        schedulePersistCurrentSession(
+          { lastReceivedSeq: lastReceivedSeqRef.current },
+          { immediate: true },
+        )
       }
     } finally {
       relayFlushInProgressRef.current = false
@@ -998,6 +1082,7 @@ export default function App() {
         // lost to the older snapshot the RPC returned.
         const buffered = pendingSnapshotEventsRef.current
         pendingSnapshotEventsRef.current = []
+        pendingSnapshotSeqsRef.current.clear()
         setSnapshot((current) => {
           if (current) return current
           let next: DaemonSnapshot | null = normalizeDaemonSnapshot(nextSnapshot)
@@ -1079,7 +1164,10 @@ export default function App() {
     window.localStorage.setItem(CLIENT_KEYPAIR_STORAGE_KEY, secretKeyToBase64(keyPair))
     sessionCryptoRef.current = null
     pendingEncryptedUpdatesRef.current = []
+    evictedWhileParkedRef.current = false
+    pendingTruncationNextSeqRef.current = null
     pendingSnapshotEventsRef.current = []
+    pendingSnapshotSeqsRef.current.clear()
     pendingRelayUpdatesRef.current = []
     if (relayFlushFrameRef.current !== null) {
       window.cancelAnimationFrame(relayFlushFrameRef.current)

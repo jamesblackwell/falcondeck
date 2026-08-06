@@ -5,7 +5,12 @@
  */
 import { describe, it, expect } from 'vitest'
 import type { EventEnvelope, RelayUpdate, MachinePresence } from '@falcondeck/client-core'
-import { isInvalidSavedSessionError, shouldReconnectOnAppForeground } from './useRelayConnection'
+import {
+  isInvalidSavedSessionError,
+  resolveTruncationCursor,
+  shouldReconnectOnAppForeground,
+  shouldRefetchStaleSnapshot,
+} from './useRelayConnection'
 
 // Re-implement parseDaemonEvent to test in isolation
 // (it's a module-private function in useRelayConnection.ts)
@@ -240,17 +245,69 @@ describe('foreground reconnect trigger', () => {
 })
 
 describe('invalid saved session detection', () => {
-  it('detects relay responses that mean the saved session is dead', () => {
+  it('detects the relay-authored errors that mean the saved session is dead', () => {
     expect(isInvalidSavedSessionError('invalid session token')).toBe(true)
     expect(isInvalidSavedSessionError('session not found')).toBe(true)
-    expect(isInvalidSavedSessionError('trusted device revoked')).toBe(true)
-    expect(isInvalidSavedSessionError('Failed with status 401')).toBe(true)
-    expect(isInvalidSavedSessionError('Failed with status 404')).toBe(true)
+    expect(isInvalidSavedSessionError('trusted device is revoked or missing')).toBe(true)
+    expect(isInvalidSavedSessionError('trusted device is revoked')).toBe(true)
+    expect(isInvalidSavedSessionError('trusted device not found')).toBe(true)
+    // Case-insensitive and whitespace-tolerant, but still exact.
+    expect(isInvalidSavedSessionError('Session not found')).toBe(true)
+    expect(isInvalidSavedSessionError(' invalid session token ')).toBe(true)
   })
 
   it('ignores transient connection failures', () => {
     expect(isInvalidSavedSessionError('Network error')).toBe(false)
     expect(isInvalidSavedSessionError('Failed with status 500')).toBe(false)
     expect(isInvalidSavedSessionError(null)).toBe(false)
+  })
+
+  it('ignores generic HTTP status fallbacks — proxies and CDNs answer 401/404 too', () => {
+    expect(isInvalidSavedSessionError('Failed with status 401')).toBe(false)
+    expect(isInvalidSavedSessionError('Failed with status 404')).toBe(false)
+  })
+
+  it('ignores messages that merely mention the relay error strings', () => {
+    expect(isInvalidSavedSessionError('proxy error: session not found in cache backend')).toBe(false)
+    expect(isInvalidSavedSessionError('trusted device sync postponed')).toBe(false)
+    expect(isInvalidSavedSessionError('upstream said "invalid session token" while restarting')).toBe(false)
+  })
+})
+
+describe('stale snapshot refetch cap', () => {
+  it('refetches while events raced the RPC and the cap is not reached', () => {
+    expect(shouldRefetchStaleSnapshot(10, 12, 0)).toBe(true)
+    expect(shouldRefetchStaleSnapshot(10, 11, 1)).toBe(true)
+    expect(shouldRefetchStaleSnapshot(10, 99, 2)).toBe(true)
+  })
+
+  it('gives up after three refetches so the stale response is applied as a base', () => {
+    expect(shouldRefetchStaleSnapshot(10, 12, 3)).toBe(false)
+    expect(shouldRefetchStaleSnapshot(10, 12, 4)).toBe(false)
+  })
+
+  it('does not refetch when no events landed mid-flight', () => {
+    expect(shouldRefetchStaleSnapshot(10, 10, 0)).toBe(false)
+    expect(shouldRefetchStaleSnapshot(10, 9, 0)).toBe(false)
+  })
+})
+
+describe('truncation cursor recovery', () => {
+  it('advances to the truncation point when a truncated sync carried no updates', () => {
+    // history_truncated with updates: [] — the per-update advance never runs,
+    // so the flush must adopt next_seq - 1 or the cursor stays stuck forever.
+    expect(resolveTruncationCursor(42, 0)).toBe(41)
+  })
+
+  it('clamps to zero for an empty session', () => {
+    expect(resolveTruncationCursor(0, 0)).toBe(0)
+  })
+
+  it('stays put while encrypted updates are parked waiting for the session key', () => {
+    expect(resolveTruncationCursor(42, 3)).toBeNull()
+  })
+
+  it('does nothing without a pending truncation', () => {
+    expect(resolveTruncationCursor(null, 0)).toBeNull()
   })
 })

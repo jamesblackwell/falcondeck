@@ -34,9 +34,20 @@ function upsertThread(
 ) {
   const existing = threads.findIndex((thread) => thread.id === nextThread.id)
   if (existing === -1) {
+    // An update to an archived thread (mark_read etc.) must not resurrect it
+    // into the sidebar.
+    if (nextThread.is_archived) {
+      return threads
+    }
     // Snapshots list threads newest-first, so a thread whose thread-started
     // event was missed still becomes visible at the top.
     return [nextThread, ...threads]
+  }
+
+  // A thread that just became archived leaves the list the same way it would
+  // be absent from a fresh snapshot.
+  if (nextThread.is_archived) {
+    return threads.filter((thread) => thread.id !== nextThread.id)
   }
 
   return threads.map((thread) => (thread.id === nextThread.id ? nextThread : thread))

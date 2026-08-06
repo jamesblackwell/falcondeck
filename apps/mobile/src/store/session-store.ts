@@ -235,8 +235,45 @@ function buildCacheFromState(state: SessionState): MobileSessionCache | null {
   }
 }
 
+// Streaming turns persist the cache after every applied event batch;
+// serializing the full cache to MMKV that often is wasteful. Throttle writes
+// to at most one per second, with a trailing write so the latest state still
+// lands after a burst.
+const CACHE_PERSIST_THROTTLE_MS = 1_000
+let lastCachePersistAt = 0
+let trailingCachePersistTimer: ReturnType<typeof setTimeout> | null = null
+
+/** Test-only: make the next persist write through immediately. */
+export function __resetSessionCachePersistThrottleForTests(): void {
+  if (trailingCachePersistTimer) {
+    clearTimeout(trailingCachePersistTimer)
+    trailingCachePersistTimer = null
+  }
+  lastCachePersistAt = 0
+}
+
+function writeStateCache(state: SessionState) {
+  const cache = buildCacheFromState(state)
+  // A null cache just means there is no snapshot to derive one from (e.g.
+  // right after a truncation reset). Deleting the persisted cache here would
+  // defeat reset({ preserveCache: true }); explicit clearing goes through
+  // clearMobileSessionCache instead.
+  if (!cache) return
+  lastCachePersistAt = Date.now()
+  persistMobileSessionCache(cache)
+}
+
 function persistStateCache(state: SessionState) {
-  persistMobileSessionCache(buildCacheFromState(state))
+  const elapsed = Date.now() - lastCachePersistAt
+  if (elapsed >= CACHE_PERSIST_THROTTLE_MS) {
+    writeStateCache(state)
+    return
+  }
+  if (trailingCachePersistTimer) return
+  trailingCachePersistTimer = setTimeout(() => {
+    trailingCachePersistTimer = null
+    writeStateCache(useSessionStore.getState())
+  }, CACHE_PERSIST_THROTTLE_MS - elapsed)
 }
 
 function applyEventsToState(state: SessionState, events: EventEnvelope[]): SessionState {
@@ -441,6 +478,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   reset: (options) => {
     set(initialState)
+    // Drop any throttled trailing write: it would persist (or, before the
+    // null-cache guard, delete) a cache derived from the cleared state.
+    if (trailingCachePersistTimer) {
+      clearTimeout(trailingCachePersistTimer)
+      trailingCachePersistTimer = null
+    }
     // A relay history truncation only needs derived state rebuilt; wiping the
     // offline cache would blank the UI until the next snapshot arrives.
     if (!options?.preserveCache) {

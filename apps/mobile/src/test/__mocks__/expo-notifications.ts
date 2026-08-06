@@ -8,11 +8,12 @@ type NotificationBehavior = {
 }
 export type NotificationResponse = {
   actionIdentifier: string
-  notification: { request: { content: { data: unknown } } }
+  notification: { request: { identifier?: string; content: { data: unknown } } }
 }
 
 let permissions: PermissionsResult = { granted: true, canAskAgain: true, status: 'granted' }
 let requestedPermissions: PermissionsResult | null = null
+let permissionRequestHook: (() => void | Promise<void>) | null = null
 let pushToken: string | null = 'ExponentPushToken[test]'
 let tokenError: Error | null = null
 let lastResponse: NotificationResponse | null = null
@@ -32,6 +33,7 @@ export async function getPermissionsAsync(): Promise<PermissionsResult> {
 }
 
 export async function requestPermissionsAsync(): Promise<PermissionsResult> {
+  await permissionRequestHook?.()
   return requestedPermissions ?? permissions
 }
 
@@ -57,11 +59,19 @@ export async function getLastNotificationResponseAsync(): Promise<NotificationRe
   return lastResponse
 }
 
+export async function clearLastNotificationResponseAsync(): Promise<void> {
+  lastResponse = null
+}
+
 // ── Test helpers ───────────────────────────────────────────────────
 
 export function __setPermissions(next: PermissionsResult, onRequest?: PermissionsResult) {
   permissions = next
   requestedPermissions = onRequest ?? null
+}
+
+export function __setPermissionRequestHook(hook: (() => void | Promise<void>) | null) {
+  permissionRequestHook = hook
 }
 
 export function __setPushToken(next: string | null) {
@@ -75,6 +85,10 @@ export function __setPushTokenError(error: Error) {
 
 export function __setLastResponse(next: NotificationResponse | null) {
   lastResponse = next
+}
+
+export function __getLastResponse() {
+  return lastResponse
 }
 
 export function __emitResponse(event: NotificationResponse) {
@@ -92,6 +106,7 @@ export function __getChannels() {
 export function __reset() {
   permissions = { granted: true, canAskAgain: true, status: 'granted' }
   requestedPermissions = null
+  permissionRequestHook = null
   pushToken = 'ExponentPushToken[test]'
   tokenError = null
   lastResponse = null

@@ -7,8 +7,10 @@ import {
   __emitResponse,
   __getChannels,
   __getHandler,
+  __getLastResponse,
   __reset as resetNotifications,
   __setLastResponse,
+  __setPermissionRequestHook,
   __setPermissions,
   __setPushToken,
   __setPushTokenError,
@@ -46,8 +48,8 @@ function mockFetchOk() {
   return fetchMock
 }
 
-function tapResponse(data: unknown) {
-  return { actionIdentifier: 'default', notification: { request: { content: { data } } } }
+function tapResponse(data: unknown, identifier = 'notification-1') {
+  return { actionIdentifier: 'default', notification: { request: { identifier, content: { data } } } }
 }
 
 describe('push-notifications', () => {
@@ -172,6 +174,23 @@ describe('push-notifications', () => {
       await registerPushToken(RELAY_URL, SESSION_ID, DEVICE_ID, CLIENT_TOKEN)
 
       expect(fetchMock).not.toHaveBeenCalled()
+    })
+
+    it('does not POST when push is disabled while the permission prompt is open', async () => {
+      const fetchMock = mockFetchOk()
+      __setPermissions(
+        { granted: false, canAskAgain: true, status: 'undetermined' },
+        { granted: true, canAskAgain: true, status: 'granted' },
+      )
+      // The user flips the toggle off while the system prompt is showing.
+      __setPermissionRequestHook(() => {
+        setPushEnabled(false)
+      })
+
+      await registerPushToken(RELAY_URL, SESSION_ID, DEVICE_ID, CLIENT_TOKEN)
+
+      expect(fetchMock).not.toHaveBeenCalled()
+      expect(getJson('push.lastRegistration')).toBeNull()
     })
   })
 
@@ -396,6 +415,47 @@ describe('push-notifications', () => {
 
       expect(selectThread).toHaveBeenCalledTimes(1)
       expect(selectThread).toHaveBeenCalledWith('w1', 't1')
+    })
+
+    it('does not replay a stale response on the next cold start', async () => {
+      // getLastNotificationResponseAsync returns the last response EVER, so a
+      // later cold start (fresh process, same storage) sees the same response
+      // again; the persisted identifier must suppress the repeat.
+      const selectThread = vi.fn()
+      useSessionStore.setState({ selectThread })
+      const response = tapResponse({ workspaceId: 'w1', threadId: 't1', kind: 'question' })
+      __setLastResponse(response)
+
+      await processInitialNotificationResponse()
+      expect(selectThread).toHaveBeenCalledTimes(1)
+      // Where the SDK supports it, the stored response is cleared outright.
+      expect(__getLastResponse()).toBeNull()
+
+      // Simulate a later cold start: new process (module flag reset), but the
+      // OS still reports the already-handled response.
+      __resetInitialNotificationResponseForTests()
+      __setLastResponse(response)
+      await processInitialNotificationResponse()
+
+      expect(selectThread).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not replay a tap already handled by the live response listener', async () => {
+      const selectThread = vi.fn()
+      useSessionStore.setState({ selectThread })
+      const response = tapResponse({ workspaceId: 'w1', threadId: 't1', kind: 'approval' })
+
+      const subscription = addNotificationResponseListener()
+      __emitResponse(response)
+      expect(selectThread).toHaveBeenCalledTimes(1)
+      subscription!.remove()
+
+      // The handled tap remains the OS's "last response" and resurfaces on
+      // the next cold start.
+      __setLastResponse(response)
+      await processInitialNotificationResponse()
+
+      expect(selectThread).toHaveBeenCalledTimes(1)
     })
 
     it('is a no-op when the app was not launched from a notification', async () => {

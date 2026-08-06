@@ -343,8 +343,16 @@ export function isClaimedPairingError(message: string | null) {
   return !!message && /pairing has already been claimed/i.test(message)
 }
 
+/**
+ * Matches only the relay's own structured error strings (exact, anchored) for
+ * conditions that permanently invalidate the saved session. Substring or
+ * status-code matching is dangerous here: a proxy/CDN 404 or an unrelated
+ * message that merely mentions these words must never wipe local key material.
+ */
 export function isInvalidSavedSessionError(message: string | null) {
-  return !!message && /invalid session token|session not found|trusted device/i.test(message)
+  return !!message && /^(invalid session token|session not found|trusted device is revoked or missing|trusted device is revoked|trusted device not found)$/i.test(
+    message.trim(),
+  )
 }
 
 export function deriveConnectionHelpState({

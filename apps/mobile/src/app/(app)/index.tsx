@@ -344,6 +344,10 @@ export default function HomeScreen() {
   }, [resetScrollState, scrollToBottom, selectedThreadId])
 
   useEffect(() => {
+    // The cleanup below cancels any pending debounce whenever the deps change
+    // (or the screen unmounts), so an early return — switching threads,
+    // backgrounding, losing encryption — can never let a stale timer mark the
+    // previous thread read with captured values.
     if (appState !== 'active' || !workspace || !selectedThread || !sessionId || !isEncrypted) return
 
     const readSeq = selectedThread.attention.last_agent_activity_seq
@@ -357,9 +361,6 @@ export default function HomeScreen() {
     const workspaceId = workspace.id
     const threadId = selectedThread.id
 
-    if (markReadTimerRef.current) {
-      clearTimeout(markReadTimerRef.current)
-    }
     markReadTimerRef.current = setTimeout(() => {
       markReadTimerRef.current = null
       const relay = useRelayStore.getState()
@@ -389,15 +390,14 @@ export default function HomeScreen() {
         )
         .catch(() => {})
     }, 1_000)
-  }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace])
 
-  useEffect(() => {
     return () => {
       if (markReadTimerRef.current) {
         clearTimeout(markReadTimerRef.current)
+        markReadTimerRef.current = null
       }
     }
-  }, [])
+  }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace])
 
   return (
     <KeyboardAvoidingView

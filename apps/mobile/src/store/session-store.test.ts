@@ -1,7 +1,10 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 
 import { MOBILE_SESSION_CACHE_VERSION, buildProjectGroups } from '@falcondeck/client-core'
-import { useSessionStore } from './session-store'
+import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
+
+import { loadMobileSessionCache } from '@/storage/mobile-session-cache'
+import { __resetSessionCachePersistThrottleForTests, useSessionStore } from './session-store'
 import {
   workspace,
   thread,
@@ -437,6 +440,58 @@ describe('session-store', () => {
       )
       expect(filtered).toHaveLength(1)
       expect(filtered[0].request_id).toBe('a1')
+    })
+  })
+
+  describe('cache persistence', () => {
+    beforeEach(() => {
+      resetMMKV()
+      __resetSessionCachePersistThrottleForTests()
+    })
+
+    it('persists the derived cache when state changes', () => {
+      useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot()))
+
+      const cached = loadMobileSessionCache()
+      expect(cached).not.toBeNull()
+      expect(cached?.snapshot.threads.map((entry) => entry.id)).toEqual(['thread-1'])
+    })
+
+    it('does not delete a preserved cache while the snapshot is still null', () => {
+      useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot()))
+      expect(loadMobileSessionCache()).not.toBeNull()
+
+      // A relay history truncation resets state but preserves the cache…
+      useSessionStore.getState().reset({ preserveCache: true })
+      // …and the flush that follows persists while the snapshot is still
+      // null. That write must be skipped, not turned into a delete.
+      __resetSessionCachePersistThrottleForTests()
+      useSessionStore.getState().applyDaemonEvent(
+        conversationItemAddedEvent(assistantMessage('msg-1', 'streamed')),
+      )
+
+      expect(loadMobileSessionCache()).not.toBeNull()
+    })
+
+    it('throttles rapid cache writes and flushes the latest state in a trailing write', () => {
+      vi.useFakeTimers()
+      try {
+        __resetSessionCachePersistThrottleForTests()
+        const { applyDaemonEvent } = useSessionStore.getState()
+
+        applyDaemonEvent(snapshotEvent(snapshot({ threads: [thread({ id: 't1' })] })))
+        expect(loadMobileSessionCache()?.snapshot.threads.map((entry) => entry.id)).toEqual(['t1'])
+
+        // Within the throttle window the write is deferred…
+        applyDaemonEvent(threadUpdatedEvent(thread({ id: 't2' })))
+        expect(loadMobileSessionCache()?.snapshot.threads.map((entry) => entry.id)).toEqual(['t1'])
+
+        // …and lands as a trailing write carrying the latest state.
+        vi.advanceTimersByTime(1_000)
+        expect(loadMobileSessionCache()?.snapshot.threads.map((entry) => entry.id)).toEqual(['t2', 't1'])
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 

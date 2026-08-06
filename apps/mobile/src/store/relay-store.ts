@@ -623,7 +623,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       get()._setConnectionStatus('encrypted')
       get()._persistSession()
     } catch (e) {
-      await get().disconnect()
+      // A malformed or unverifiable bootstrap must not unpair the device:
+      // bootstraps are durable updates the relay replays, so one bad update
+      // from a buggy or compromised relay would otherwise wipe key material
+      // on every mobile client, permanently. Match remote-web: surface the
+      // error, skip the update, and leave stored key material untouched.
       set({ error: e instanceof Error ? e.message : 'Failed to establish encrypted session' })
     }
     /* v8 ignore stop */

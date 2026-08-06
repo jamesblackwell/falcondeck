@@ -1,6 +1,7 @@
 import type {
   AccountSummary,
   AgentProvider,
+  ConversationItem,
   ConversationPreferences,
   SkillSummary,
   DaemonSnapshot,
@@ -226,16 +227,18 @@ export function normalizeWorkspaceSummary(
   }
 }
 
+export function normalizeConversationItem(item: ConversationItem): ConversationItem {
+  return item.kind === 'tool_call'
+    ? {
+        ...item,
+        display: normalizeToolCallDisplay((item as { display?: unknown }).display),
+      }
+    : item
+}
+
 export function normalizeThreadDetail(value: ThreadDetail | unknown): ThreadDetail {
   const detail = (value ?? {}) as Partial<ThreadDetail>
-  const items = (detail.items ?? []).map((item) =>
-    item.kind === 'tool_call'
-      ? {
-          ...item,
-          display: normalizeToolCallDisplay((item as { display?: unknown }).display),
-        }
-      : item,
-  )
+  const items = (detail.items ?? []).map((item) => normalizeConversationItem(item))
   return {
     workspace: normalizeWorkspaceSummary(detail.workspace),
     thread: normalizeThreadSummary(detail.thread),

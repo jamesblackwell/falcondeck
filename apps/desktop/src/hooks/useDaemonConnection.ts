@@ -19,6 +19,9 @@ const DAEMON_BOOTSTRAP_RETRY_COUNT = 12
 const DAEMON_BOOTSTRAP_RETRY_DELAY_MS = 500
 const DAEMON_RECONNECT_BASE_DELAY_MS = 500
 const DAEMON_RECONNECT_MAX_DELAY_MS = 10_000
+// Only treat a connection as healthy (and reset backoff) after it stays open
+// this long — mirrors the relay clients.
+const DAEMON_BACKOFF_RESET_MS = 10_000
 
 function threadCacheKey(workspaceId: string, threadId: string) {
   return `${workspaceId}:${threadId}`
@@ -101,9 +104,14 @@ export function useDaemonConnection() {
   useEffect(() => {
     let socket: WebSocket | null = null
     let reconnectTimer: number | null = null
+    let backoffResetTimer: number | null = null
     let cancelled = false
 
     const teardownSocket = () => {
+      if (backoffResetTimer !== null) {
+        window.clearTimeout(backoffResetTimer)
+        backoffResetTimer = null
+      }
       if (!socket) return
       // Null out handlers before closing so onerror/onclose cannot double-fire
       // and schedule overlapping reconnects.
@@ -150,7 +158,13 @@ export function useDaemonConnection() {
           socket = nextApi.connectEvents(handleEvent)
           socket.onopen = () => {
             if (cancelled) return
-            reconnectAttemptRef.current = 0
+            // Resetting backoff immediately would defeat it when the daemon
+            // drops connections right after accepting them; only reset once
+            // the connection has stayed open for a while.
+            backoffResetTimer = window.setTimeout(() => {
+              backoffResetTimer = null
+              reconnectAttemptRef.current = 0
+            }, DAEMON_BACKOFF_RESET_MS)
           }
           socket.onclose = () => {
             if (cancelled) return

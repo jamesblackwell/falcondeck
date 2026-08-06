@@ -22,6 +22,10 @@ const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
 // Retry cadence for asking the daemon to republish the session bootstrap
 // while the connection is up but the session data key is missing.
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
+// During an active turn the cursor advances continuously, so a snapshot RPC
+// response can come back stale forever; bound the refetch loop.
+const MAX_SNAPSHOT_REFETCH_ATTEMPTS = 3
+const SNAPSHOT_REFETCH_DELAY_MS = 1_000
 
 function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
@@ -49,10 +53,47 @@ export function shouldReconnectOnAppForeground(
   return nextAppState === 'active' && socketReadyState !== WebSocket.OPEN
 }
 
+/**
+ * Matches only the relay's own structured error strings (exact, anchored) for
+ * conditions that permanently invalidate the saved session. Substring or
+ * status-code matching is dangerous here: a proxy/CDN 404 or an unrelated
+ * message that merely mentions these words must never wipe local key material.
+ */
 export function isInvalidSavedSessionError(message: string | null) {
-  return !!message && /invalid session token|session not found|trusted device|failed with status 401|failed with status 404/i.test(
-    message,
+  return !!message && /^(invalid session token|session not found|trusted device is revoked or missing|trusted device is revoked|trusted device not found)$/i.test(
+    message.trim(),
   )
+}
+
+/**
+ * A snapshot RPC that raced incremental events is stale; refetching gets a
+ * fresher one, but during an active turn the cursor advances on every flush,
+ * so the refetch loop must be bounded. Past the cap the stale response is
+ * applied as a base — an older snapshot plus the events that follow is
+ * strictly better than no snapshot at all.
+ */
+export function shouldRefetchStaleSnapshot(
+  cursorAtRequest: number,
+  cursorNow: number,
+  refetchAttempt: number,
+) {
+  return cursorNow > cursorAtRequest && refetchAttempt < MAX_SNAPSHOT_REFETCH_ATTEMPTS
+}
+
+/**
+ * A truncated sync can carry no replayable updates at all (e.g. an idle
+ * session aged out server-side). The cursor still has to advance to the
+ * truncation point or every reconnect replays the lost window forever — but
+ * only once nothing is parked, because parked updates must stay ahead of the
+ * cursor until they are actually processed. Returns the cursor seq to adopt,
+ * or null when no advance should happen.
+ */
+export function resolveTruncationCursor(
+  truncationNextSeq: number | null,
+  parkedUpdateCount: number,
+): number | null {
+  if (truncationNextSeq === null || parkedUpdateCount > 0) return null
+  return Math.max(truncationNextSeq - 1, 0)
 }
 
 export function useRelayConnection() {
@@ -62,10 +103,14 @@ export function useRelayConnection() {
   const snapshot = useSessionStore((s) => s.snapshot)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const snapshotRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const bootstrapRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryAttempt = useRef(0)
+  const snapshotRefetchAttempt = useRef(0)
   const reconnectAttempt = useRef(0)
   const pendingEncrypted = useRef<RelayUpdate[]>([])
+  const evictedWhileParked = useRef(false)
+  const pendingTruncationNextSeq = useRef<number | null>(null)
   const pendingRelayUpdates = useRef<RelayUpdate[]>([])
   const relayFlushFrame = useRef<number | null>(null)
   const relayFlushTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -89,12 +134,22 @@ export function useRelayConnection() {
           { requestIdPrefix: 'mobile-snapshot' },
         ),
       )
-      if (useRelayStore.getState()._getLastReceivedSeq() > cursorAtRequest) {
+      if (
+        shouldRefetchStaleSnapshot(
+          cursorAtRequest,
+          useRelayStore.getState()._getLastReceivedSeq(),
+          snapshotRefetchAttempt.current,
+        )
+      ) {
         // Incremental events landed while the RPC was in flight; applying this
-        // response could clobber them, so fetch a fresh snapshot instead.
+        // response could clobber them, so fetch a fresh snapshot instead —
+        // bounded, because during an active turn every response is stale. Once
+        // the cap is hit the stale response below is applied as a base.
+        snapshotRefetchAttempt.current += 1
         shouldRefetch = true
         return
       }
+      snapshotRefetchAttempt.current = 0
       useSessionStore.getState().applyDaemonEvents([
         {
           seq: 0,
@@ -122,8 +177,11 @@ export function useRelayConnection() {
       }
     } finally {
       snapshotRequestInFlight.current = false
-      if (shouldRefetch) {
-        void requestSnapshot()
+      if (shouldRefetch && !snapshotRefetchTimer.current) {
+        snapshotRefetchTimer.current = setTimeout(() => {
+          snapshotRefetchTimer.current = null
+          void requestSnapshot()
+        }, SNAPSHOT_REFETCH_DELAY_MS)
       }
     }
   }, [])
@@ -167,6 +225,13 @@ export function useRelayConnection() {
               batch.splice(index + 1, 0, ...pendingEncrypted.current)
               pendingEncrypted.current = []
             }
+            if (evictedWhileParked.current && relay._getSessionCrypto()) {
+              // Updates were evicted while parked waiting for this key, so
+              // the drained window has a silent gap; rebuild derived state
+              // from a fresh snapshot instead of trusting the partial replay.
+              evictedWhileParked.current = false
+              snapshotAfterCrypto.current = true
+            }
             advanceCursor(update.seq)
             if (snapshotAfterCrypto.current && relay._getSessionCrypto()) {
               snapshotAfterCrypto.current = false
@@ -196,6 +261,7 @@ export function useRelayConnection() {
             if (pendingEncrypted.current.length >= MAX_PENDING_ENCRYPTED_UPDATES) {
               console.warn('Dropping oldest parked encrypted relay update; buffer is full')
               pendingEncrypted.current.shift()
+              evictedWhileParked.current = true
             }
             pendingEncrypted.current.push(update)
             continue
@@ -209,7 +275,11 @@ export function useRelayConnection() {
               daemonEvents.push(event)
             }
           } catch (e) {
-            // Leave the cursor behind this update so a later sync replays it.
+            // Decryption failed: the cursor is not advanced for this update.
+            // If nothing later in the batch decrypts either, a later sync
+            // replays it; if a later update does decrypt, the cursor advances
+            // past this one — skipping a single undecryptable update is the
+            // accepted trade-off over stalling the stream.
             relay._setError(e instanceof Error ? e.message : 'Failed to decrypt update')
           }
         }
@@ -229,6 +299,21 @@ export function useRelayConnection() {
         if (relay._getSessionCrypto() && !useSessionStore.getState().snapshot) {
           void requestSnapshot()
         }
+      }
+
+      // A truncated sync may deliver no replayable updates at all (idle
+      // session aged out), so the per-update cursor advance above never runs;
+      // adopt the truncation point here once nothing is parked, otherwise the
+      // cursor stays stuck and every reconnect replays the truncation.
+      const truncationCursor = resolveTruncationCursor(
+        pendingTruncationNextSeq.current,
+        pendingEncrypted.current.length,
+      )
+      if (truncationCursor !== null) {
+        pendingTruncationNextSeq.current = null
+        const relay = useRelayStore.getState()
+        relay._setLastReceivedSeq(truncationCursor)
+        relay._persistSession()
       }
     } finally {
       relayFlushInProgress.current = false
@@ -290,12 +375,19 @@ export function useRelayConnection() {
     relay._setMachinePresence(null)
     relay._setError(null)
     pendingEncrypted.current = []
+    evictedWhileParked.current = false
+    pendingTruncationNextSeq.current = null
     pendingRelayUpdates.current = []
     snapshotRequestInFlight.current = false
     snapshotRetryAttempt.current = 0
+    snapshotRefetchAttempt.current = 0
     if (snapshotRetryTimer.current) {
       clearTimeout(snapshotRetryTimer.current)
       snapshotRetryTimer.current = null
+    }
+    if (snapshotRefetchTimer.current) {
+      clearTimeout(snapshotRefetchTimer.current)
+      snapshotRefetchTimer.current = null
     }
     if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
       globalThis.cancelAnimationFrame(relayFlushFrame.current)
@@ -346,12 +438,19 @@ export function useRelayConnection() {
       relay._setSocket(null)
       relay._failPendingRpcs('Remote connection dropped')
       pendingEncrypted.current = []
+      evictedWhileParked.current = false
+      pendingTruncationNextSeq.current = null
       pendingRelayUpdates.current = []
       snapshotRequestInFlight.current = false
       snapshotRetryAttempt.current = 0
+      snapshotRefetchAttempt.current = 0
       if (snapshotRetryTimer.current) {
         clearTimeout(snapshotRetryTimer.current)
         snapshotRetryTimer.current = null
+      }
+      if (snapshotRefetchTimer.current) {
+        clearTimeout(snapshotRefetchTimer.current)
+        snapshotRefetchTimer.current = null
       }
       if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
         globalThis.cancelAnimationFrame(relayFlushFrame.current)
@@ -458,8 +557,14 @@ export function useRelayConnection() {
                 // Updates were lost server-side; recover derived state from a
                 // fresh snapshot, but keep the offline cache so the UI does
                 // not go blank if the app restarts before it arrives. The
-                // cursor is left to the normal flush so retained updates are
-                // still processed.
+                // cursor is left to the flush: retained updates advance it as
+                // they are consumed, and the truncation's next_seq is adopted
+                // at flush end so a truncated sync with no updates at all
+                // still advances past the lost window.
+                pendingTruncationNextSeq.current = Math.max(
+                  pendingTruncationNextSeq.current ?? 0,
+                  payload.next_seq,
+                )
                 useSessionStore.getState().reset({ preserveCache: true })
                 if (relay._getSessionCrypto()) {
                   void requestSnapshot()
@@ -513,12 +618,19 @@ export function useRelayConnection() {
       relay._setSocket(null)
       relay._failPendingRpcs('Remote connection closed')
       pendingEncrypted.current = []
+      evictedWhileParked.current = false
+      pendingTruncationNextSeq.current = null
       pendingRelayUpdates.current = []
       snapshotRequestInFlight.current = false
       snapshotRetryAttempt.current = 0
+      snapshotRefetchAttempt.current = 0
       if (snapshotRetryTimer.current) {
         clearTimeout(snapshotRetryTimer.current)
         snapshotRetryTimer.current = null
+      }
+      if (snapshotRefetchTimer.current) {
+        clearTimeout(snapshotRefetchTimer.current)
+        snapshotRefetchTimer.current = null
       }
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current)
