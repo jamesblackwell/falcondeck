@@ -18,8 +18,6 @@ function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
     connected_at: '2026-03-20T12:00:00Z',
     updated_at: '2026-03-20T12:00:00Z',
     last_error: null,
-    supports_plan_mode: true,
-    supports_native_plan_mode: true,
     ...overrides,
   }
 }

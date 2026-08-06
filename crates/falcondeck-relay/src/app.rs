@@ -2740,7 +2740,7 @@ impl SessionRecord {
                 revoked_at: device.revoked_at,
             })
             .collect::<Vec<_>>();
-        devices.sort_by(|left, right| left.created_at.cmp(&right.created_at));
+        devices.sort_by_key(|device| device.created_at);
         devices
     }
 

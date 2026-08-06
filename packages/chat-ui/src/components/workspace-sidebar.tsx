@@ -1,7 +1,17 @@
 import * as React from 'react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Archive, ChevronDown, FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
+import {
+  Archive,
+  Check,
+  ChevronDown,
+  Copy,
+  FolderPlus,
+  LoaderCircle,
+  Pin,
+  PinOff,
+  SquarePen,
+} from 'lucide-react'
 
 import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
 import {
@@ -23,12 +33,29 @@ const OPTIMISTIC_SELECTION_TTL_MS = 1_500
 const THREAD_MENU_WIDTH_PX = 176
 const THREAD_MENU_VIEWPORT_PADDING_PX = 8
 const THREAD_MENU_ROW_HEIGHT_PX = 36
+const THREAD_MENU_SEPARATOR_HEIGHT_PX = 9
 
 type ThreadContextMenuState = {
   workspaceId: string
   thread: ThreadSummary
   x: number
   y: number
+}
+
+async function copyTextToClipboard(text: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+  } catch {
+    // Clipboard API can be unavailable in older webviews; fall back to execCommand.
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    textarea.remove()
+  }
 }
 
 type SidebarEmptyState = {
@@ -45,6 +72,8 @@ export type WorkspaceSidebarProps = {
   onNewThread?: (workspaceId: string) => void
   onArchiveThread?: ThreadItemArchiveHandler
   onRenameThread?: (workspaceId: string, threadId: string, title: string) => Promise<void> | void
+  onTogglePinThread?: (workspaceId: string, threadId: string, pinned: boolean) => Promise<void> | void
+  onMarkThreadRead?: (workspaceId: string, threadId: string) => Promise<void> | void
   onAddProject?: () => void
   isAddingProject?: boolean
   title?: string
@@ -72,16 +101,21 @@ const ThreadList = memo(function ThreadList({
   nowTick: number
 }) {
   const [expanded, setExpanded] = useState(false)
-  const hasOverflow = group.threads.length > VISIBLE_THREAD_LIMIT
+  const orderedThreads = useMemo(() => {
+    const pinned = group.threads.filter((thread) => thread.is_pinned)
+    if (pinned.length === 0) return group.threads
+    return [...pinned, ...group.threads.filter((thread) => !thread.is_pinned)]
+  }, [group.threads])
+  const hasOverflow = orderedThreads.length > VISIBLE_THREAD_LIMIT
   const selectedIsHidden =
     hasOverflow &&
     !expanded &&
     selectedThreadId != null &&
-    group.threads.findIndex((thread) => thread.id === selectedThreadId) >= VISIBLE_THREAD_LIMIT
+    orderedThreads.findIndex((thread) => thread.id === selectedThreadId) >= VISIBLE_THREAD_LIMIT
 
   const showAll = expanded || selectedIsHidden
-  const visible = showAll ? group.threads : group.threads.slice(0, VISIBLE_THREAD_LIMIT)
-  const hiddenCount = group.threads.length - VISIBLE_THREAD_LIMIT
+  const visible = showAll ? orderedThreads : orderedThreads.slice(0, VISIBLE_THREAD_LIMIT)
+  const hiddenCount = orderedThreads.length - VISIBLE_THREAD_LIMIT
 
   return (
     <>
@@ -123,6 +157,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onNewThread,
   onArchiveThread,
   onRenameThread,
+  onTogglePinThread,
+  onMarkThreadRead,
   onAddProject,
   isAddingProject = false,
   title = 'Threads',
@@ -263,10 +299,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const handleOpenThreadContextMenu = useCallback(
     (args: ThreadContextMenuState) => {
-      if (!onArchiveThread && !onRenameThread) return
+      if (!onArchiveThread && !onRenameThread && !onTogglePinThread && !onMarkThreadRead) return
       setThreadContextMenu(args)
     },
-    [onArchiveThread, onRenameThread],
+    [onArchiveThread, onMarkThreadRead, onRenameThread, onTogglePinThread],
   )
 
   const handleArchiveFromContextMenu = useCallback(() => {
@@ -280,6 +316,27 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     if (!threadContextMenu || !onRenameThread) return
     openRenameDialog(threadContextMenu.workspaceId, threadContextMenu.thread)
   }, [onRenameThread, openRenameDialog, threadContextMenu])
+
+  const handleTogglePinFromContextMenu = useCallback(() => {
+    if (!threadContextMenu || !onTogglePinThread) return
+    const { workspaceId, thread } = threadContextMenu
+    setThreadContextMenu(null)
+    void Promise.resolve(onTogglePinThread(workspaceId, thread.id, !thread.is_pinned)).catch(
+      () => {},
+    )
+  }, [onTogglePinThread, threadContextMenu])
+
+  const handleMarkReadFromContextMenu = useCallback(() => {
+    if (!threadContextMenu || !onMarkThreadRead) return
+    const { workspaceId, thread } = threadContextMenu
+    setThreadContextMenu(null)
+    void Promise.resolve(onMarkThreadRead(workspaceId, thread.id)).catch(() => {})
+  }, [onMarkThreadRead, threadContextMenu])
+
+  const workspacePathById = useMemo(
+    () => new Map(groups.map((group) => [group.workspace.id, group.workspace.path])),
+    [groups],
+  )
 
   const handleRenameSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -431,11 +488,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       <ThreadContextMenu
         menuRef={threadContextMenuRef}
         target={threadContextMenu}
+        workspacePath={
+          threadContextMenu ? workspacePathById.get(threadContextMenu.workspaceId) ?? null : null
+        }
         canRename={Boolean(onRenameThread)}
         canArchive={Boolean(onArchiveThread)}
+        canPin={Boolean(onTogglePinThread)}
+        canMarkRead={Boolean(onMarkThreadRead)}
         onClose={closeThreadContextMenu}
         onRename={handleStartRenameFromContextMenu}
         onArchive={handleArchiveFromContextMenu}
+        onTogglePin={handleTogglePinFromContextMenu}
+        onMarkRead={handleMarkReadFromContextMenu}
       />
       <RenameThreadDialog
         target={renameTarget}
@@ -450,33 +514,91 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   )
 })
 
+function ThreadMenuItem({
+  icon,
+  label,
+  destructive = false,
+  onClick,
+}: {
+  icon: React.ReactNode
+  label: string
+  destructive?: boolean
+  onClick: () => void
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className={cn(
+        'flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)]',
+        destructive ? 'text-danger hover:bg-danger/10' : 'text-fg-primary hover:bg-surface-3',
+      )}
+    >
+      {icon}
+      {label}
+    </button>
+  )
+}
+
 const ThreadContextMenu = memo(
   function ThreadContextMenu({
     target,
+    workspacePath,
     canRename,
     canArchive,
+    canPin,
+    canMarkRead,
     onClose,
     onRename,
     onArchive,
+    onTogglePin,
+    onMarkRead,
     menuRef,
   }: {
     target: ThreadContextMenuState | null
+    workspacePath: string | null
     canRename: boolean
     canArchive: boolean
+    canPin: boolean
+    canMarkRead: boolean
     onClose: () => void
     onRename: () => void
     onArchive: () => void
+    onTogglePin: () => void
+    onMarkRead: () => void
     menuRef: React.RefObject<HTMLDivElement | null>
   }) {
-    if (!target || typeof document === 'undefined' || (!canRename && !canArchive)) {
+    const [copiedField, setCopiedField] = useState<'path' | 'session' | null>(null)
+
+    useEffect(() => {
+      setCopiedField(null)
+    }, [target])
+
+    if (!target || typeof document === 'undefined') {
       return null
     }
 
+    const showMarkRead = canMarkRead && target.thread.attention.unread
+    const sessionId = target.thread.native_session_id
+    const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
+    const rowCount =
+      Number(canPin) +
+      Number(canRename) +
+      Number(showMarkRead) +
+      Number(Boolean(workspacePath)) +
+      Number(Boolean(sessionId)) +
+      Number(canArchive)
+
+    if (rowCount === 0) {
+      return null
+    }
+
+    const separatorCount = Number(Boolean(workspacePath) || Boolean(sessionId)) + Number(canArchive)
     const menuHeight =
-      THREAD_MENU_VIEWPORT_PADDING_PX +
-      THREAD_MENU_ROW_HEIGHT_PX * Number(canRename) +
-      THREAD_MENU_ROW_HEIGHT_PX * Number(canArchive) +
-      THREAD_MENU_VIEWPORT_PADDING_PX
+      THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
+      THREAD_MENU_ROW_HEIGHT_PX * rowCount +
+      THREAD_MENU_SEPARATOR_HEIGHT_PX * separatorCount
     const left = Math.max(
       THREAD_MENU_VIEWPORT_PADDING_PX,
       Math.min(
@@ -489,40 +611,90 @@ const ThreadContextMenu = memo(
       Math.min(target.y, window.innerHeight - menuHeight - THREAD_MENU_VIEWPORT_PADDING_PX),
     )
 
+    const handleCopy = (field: 'path' | 'session', text: string) => {
+      void copyTextToClipboard(text).then(() => {
+        setCopiedField(field)
+        window.setTimeout(onClose, 600)
+      })
+    }
+
     return createPortal(
       <div
         ref={menuRef}
         role="menu"
         aria-label={`Actions for ${target.thread.title || 'thread'}`}
-        className="fixed z-50 w-44 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+        className="fixed z-50 w-52 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
         style={{ left, top }}
       >
+        {canPin ? (
+          <ThreadMenuItem
+            icon={
+              target.thread.is_pinned ? (
+                <PinOff className={iconClassName} />
+              ) : (
+                <Pin className={iconClassName} />
+              )
+            }
+            label={target.thread.is_pinned ? 'Unpin chat' : 'Pin chat'}
+            onClick={onTogglePin}
+          />
+        ) : null}
         {canRename ? (
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              onRename()
-            }}
-            className="flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3"
-          >
-            <SquarePen className="h-3.5 w-3.5 text-fg-muted" />
-            Rename
-          </button>
+          <ThreadMenuItem
+            icon={<SquarePen className={iconClassName} />}
+            label="Rename"
+            onClick={onRename}
+          />
+        ) : null}
+        {showMarkRead ? (
+          <ThreadMenuItem
+            icon={<Check className={iconClassName} />}
+            label="Mark as read"
+            onClick={onMarkRead}
+          />
+        ) : null}
+        {workspacePath || sessionId ? (
+          <div role="separator" className="mx-2 my-1 border-t border-border-subtle" />
+        ) : null}
+        {workspacePath ? (
+          <ThreadMenuItem
+            icon={
+              copiedField === 'path' ? (
+                <Check className="h-3.5 w-3.5 text-success" />
+              ) : (
+                <Copy className={iconClassName} />
+              )
+            }
+            label={copiedField === 'path' ? 'Copied' : 'Copy working directory'}
+            onClick={() => handleCopy('path', workspacePath)}
+          />
+        ) : null}
+        {sessionId ? (
+          <ThreadMenuItem
+            icon={
+              copiedField === 'session' ? (
+                <Check className="h-3.5 w-3.5 text-success" />
+              ) : (
+                <Copy className={iconClassName} />
+              )
+            }
+            label={copiedField === 'session' ? 'Copied' : 'Copy session ID'}
+            onClick={() => handleCopy('session', sessionId)}
+          />
         ) : null}
         {canArchive ? (
-          <button
-            type="button"
-            role="menuitem"
-            onClick={() => {
-              onArchive()
-              onClose()
-            }}
-            className="flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-danger hover:bg-danger/10"
-          >
-            <Archive className="h-3.5 w-3.5" />
-            Archive
-          </button>
+          <>
+            <div role="separator" className="mx-2 my-1 border-t border-border-subtle" />
+            <ThreadMenuItem
+              icon={<Archive className="h-3.5 w-3.5" />}
+              label="Archive"
+              destructive
+              onClick={() => {
+                onArchive()
+                onClose()
+              }}
+            />
+          </>
         ) : null}
       </div>,
       document.body,

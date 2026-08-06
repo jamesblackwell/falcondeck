@@ -46,7 +46,13 @@ export function buildSidebarRows(
 
     if (!isOpen) return [workspaceRow]
 
-    const hasOverflow = group.threads.length > VISIBLE_THREAD_LIMIT
+    const pinned = group.threads.filter((thread) => thread.is_pinned)
+    const orderedThreads =
+      pinned.length > 0
+        ? [...pinned, ...group.threads.filter((thread) => !thread.is_pinned)]
+        : group.threads
+
+    const hasOverflow = orderedThreads.length > VISIBLE_THREAD_LIMIT
     const isExpanded = expandedThreadLists.has(group.workspace.id)
 
     // Auto-expand if the selected thread is beyond the visible limit
@@ -54,10 +60,10 @@ export function buildSidebarRows(
       hasOverflow &&
       !isExpanded &&
       selectedThreadId != null &&
-      group.threads.findIndex((t) => t.id === selectedThreadId) >= VISIBLE_THREAD_LIMIT
+      orderedThreads.findIndex((t) => t.id === selectedThreadId) >= VISIBLE_THREAD_LIMIT
 
     const showAll = isExpanded || selectedIsHidden
-    const visible = hasOverflow && !showAll ? group.threads.slice(0, VISIBLE_THREAD_LIMIT) : group.threads
+    const visible = hasOverflow && !showAll ? orderedThreads.slice(0, VISIBLE_THREAD_LIMIT) : orderedThreads
 
     const threadRows: SidebarRow[] = visible.map((thread) => ({
       key: `thread:${thread.id}`,
@@ -73,7 +79,7 @@ export function buildSidebarRows(
         key: `overflow:${group.workspace.id}`,
         type: 'overflow',
         workspaceId: group.workspace.id,
-        hiddenCount: group.threads.length - VISIBLE_THREAD_LIMIT,
+        hiddenCount: orderedThreads.length - VISIBLE_THREAD_LIMIT,
         isExpanded: showAll,
       })
     }

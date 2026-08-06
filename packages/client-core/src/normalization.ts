@@ -139,8 +139,6 @@ function fallbackWorkspaceAgent(workspace: Partial<WorkspaceSummary>): Workspace
     models: workspace.models ?? [],
     collaboration_modes: workspace.collaboration_modes ?? [],
     skills: (workspace.skills ?? []).map((skill) => normalizeSkill(skill)),
-    supports_plan_mode: workspace.supports_plan_mode ?? true,
-    supports_native_plan_mode: workspace.supports_native_plan_mode ?? true,
     capabilities: { supports_review: true },
   }
 }
@@ -160,8 +158,6 @@ function normalizeWorkspaceAgent(
     models: agent.models ?? [],
     collaboration_modes: agent.collaboration_modes ?? [],
     skills: (agent.skills ?? []).map((skill) => normalizeSkill(skill)),
-    supports_plan_mode: agent.supports_plan_mode ?? true,
-    supports_native_plan_mode: agent.supports_native_plan_mode ?? true,
     capabilities: {
       supports_review: agent.capabilities?.supports_review ?? false,
     },
@@ -198,6 +194,7 @@ export function normalizeThreadSummary(value: ThreadSummary | unknown): ThreadSu
       last_read_seq: thread.attention?.last_read_seq ?? 0,
     },
     is_archived: thread.is_archived ?? false,
+    is_pinned: thread.is_pinned ?? false,
   }
 }
 
@@ -217,8 +214,6 @@ export function normalizeWorkspaceSummary(
     default_provider: normalizeProvider(workspace.default_provider),
     models: workspace.models ?? [],
     collaboration_modes: workspace.collaboration_modes ?? [],
-    supports_plan_mode: workspace.supports_plan_mode ?? true,
-    supports_native_plan_mode: workspace.supports_native_plan_mode ?? true,
     account: normalizeAccount(workspace.account),
     current_thread_id: workspace.current_thread_id ?? null,
     connected_at: workspace.connected_at ?? new Date(0).toISOString(),

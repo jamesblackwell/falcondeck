@@ -506,9 +506,9 @@ fn classify_tool_activity_kind(
         || normalized_output.contains("failing")
     {
         ToolActivityKind::Test
-    } else if normalized_kind.contains("webfetch") || normalized_title.starts_with("web fetch") {
-        ToolActivityKind::WebSearch
-    } else if normalized_kind.contains("websearch")
+    } else if normalized_kind.contains("webfetch")
+        || normalized_title.starts_with("web fetch")
+        || normalized_kind.contains("websearch")
         || normalized_kind.contains("web_search")
         || normalized_title.starts_with("web search")
     {

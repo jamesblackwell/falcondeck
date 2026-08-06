@@ -109,7 +109,7 @@ impl ClaudeRuntime {
 
         let account = read_auth_status(&resolved.executable).await;
         let models = curated_models();
-        let collaboration_modes = default_collaboration_modes();
+        let collaboration_modes = Vec::new();
         let capabilities = default_capabilities();
         let threads = hydrate_threads(&workspace_path);
 
@@ -141,7 +141,6 @@ impl ClaudeRuntime {
         images: &[ImageInput],
         model_id: Option<&str>,
         effort: Option<&str>,
-        plan_mode: bool,
         daemon_base_url: Option<&str>,
         settings_dir: &Path,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
@@ -202,9 +201,6 @@ impl ClaudeRuntime {
         }
         if let Some(effort) = effort {
             command.arg("--effort").arg(effort);
-        }
-        if plan_mode {
-            command.arg("--permission-mode").arg("plan");
         }
         if let Some(settings_path) = daemon_base_url
             .filter(|_| claude_approvals_enabled())
@@ -395,7 +391,7 @@ impl ClaudeRuntime {
         ClaudeProviderMetadata {
             account: read_auth_status(&self.claude_bin).await,
             models: curated_models(),
-            collaboration_modes: default_collaboration_modes(),
+            collaboration_modes: Vec::new(),
             capabilities: default_capabilities(),
         }
     }
@@ -649,17 +645,6 @@ fn request_graceful_stop(child: &mut Child) -> std::io::Result<bool> {
     }
 }
 
-fn default_collaboration_modes() -> Vec<CollaborationModeSummary> {
-    vec![CollaborationModeSummary {
-        id: "plan".to_string(),
-        label: "Plan".to_string(),
-        mode: Some("plan".to_string()),
-        model_id: None,
-        reasoning_effort: Some("medium".to_string()),
-        is_native: true,
-    }]
-}
-
 fn default_capabilities() -> AgentCapabilitySummary {
     AgentCapabilitySummary {
         supports_review: false,
@@ -876,7 +861,7 @@ pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedClaudeThread> {
     }
 
     let mut threads = threads_by_session.into_values().collect::<Vec<_>>();
-    threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread.summary.updated_at));
     threads
 }
 
@@ -1046,6 +1031,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         agent: ThreadAgentParams::default(),
         attention: ThreadAttention::default(),
         is_archived: false,
+        is_pinned: false,
     };
 
     Some(HydratedClaudeThread { summary, items })

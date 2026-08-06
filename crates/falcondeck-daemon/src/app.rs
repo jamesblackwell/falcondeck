@@ -164,6 +164,8 @@ struct PersistedWorkspaceState {
     #[serde(default)]
     archived_thread_ids: Vec<String>,
     #[serde(default)]
+    pinned_thread_ids: Vec<String>,
+    #[serde(default)]
     thread_states: Vec<PersistedThreadState>,
 }
 
@@ -472,6 +474,9 @@ impl AppState {
                 is_archived: persisted_workspace
                     .archived_thread_ids
                     .contains(&state.thread_id),
+                is_pinned: persisted_workspace
+                    .pinned_thread_ids
+                    .contains(&state.thread_id),
             };
             let mut thread = ManagedThread::new(summary);
             thread.manual_title = state.manual_title;
@@ -494,8 +499,6 @@ impl AppState {
                     models: Vec::new(),
                     collaboration_modes: Vec::new(),
                     skills: Vec::new(),
-                    supports_plan_mode: true,
-                    supports_native_plan_mode: true,
                     capabilities: AgentCapabilitySummary {
                         supports_review: true,
                     },
@@ -509,8 +512,6 @@ impl AppState {
                     models: Vec::new(),
                     collaboration_modes: Vec::new(),
                     skills: Vec::new(),
-                    supports_plan_mode: true,
-                    supports_native_plan_mode: true,
                     capabilities: AgentCapabilitySummary {
                         supports_review: false,
                     },
@@ -523,8 +524,6 @@ impl AppState {
                 .unwrap_or(AgentProvider::Codex),
             models: Vec::new(),
             collaboration_modes: Vec::new(),
-            supports_plan_mode: true,
-            supports_native_plan_mode: true,
             account: falcondeck_core::AccountSummary {
                 status: falcondeck_core::AccountStatus::Unknown,
                 label: "Reconnecting".to_string(),
@@ -684,13 +683,13 @@ impl AppState {
                 })
             })
             .collect::<Vec<_>>();
-        threads.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        threads.sort_by_key(|thread| std::cmp::Reverse(thread.updated_at));
 
         let mut interactive_request_list = interactive_requests
             .values()
             .map(|request| request.request.clone())
             .collect::<Vec<_>>();
-        interactive_request_list.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        interactive_request_list.sort_by_key(|request| std::cmp::Reverse(request.created_at));
 
         DaemonSnapshot {
             daemon: self.inner.daemon.clone(),
@@ -906,6 +905,12 @@ impl AppState {
                 .filter(|thread| thread.summary.is_archived)
                 .map(|thread| thread.summary.id.clone())
                 .collect();
+            let pinned_thread_ids = workspace
+                .threads
+                .values()
+                .filter(|thread| thread.summary.is_pinned)
+                .map(|thread| thread.summary.id.clone())
+                .collect();
             let mut thread_states = workspace
                 .threads
                 .values()
@@ -933,6 +938,7 @@ impl AppState {
                     default_provider: Some(workspace.summary.default_provider.clone()),
                     last_error: workspace.summary.last_error.clone(),
                     archived_thread_ids,
+                    pinned_thread_ids,
                     thread_states,
                 },
             );
@@ -1083,8 +1089,6 @@ impl IntoWorkspaceAgentUpdate for CodexProviderMetadata {
             models: self.models,
             collaboration_modes: self.collaboration_modes,
             skills,
-            supports_plan_mode: true,
-            supports_native_plan_mode: true,
             capabilities: AgentCapabilitySummary {
                 supports_review: true,
             },
@@ -1104,8 +1108,6 @@ impl IntoWorkspaceAgentUpdate for ClaudeProviderMetadata {
             models: self.models,
             collaboration_modes: self.collaboration_modes,
             skills,
-            supports_plan_mode: true,
-            supports_native_plan_mode: true,
             capabilities: self.capabilities,
         }
     }

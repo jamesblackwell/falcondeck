@@ -32,12 +32,12 @@ type DesktopConversationPaneProps = {
   isThreadDetailPending: boolean
   interactiveRequests: InteractiveRequest[]
   onStartPairing: () => void
-  onRefreshRemoteStatus: () => void
   onInteractiveResponse: (
     request: InteractiveRequest,
     response: InteractiveResponsePayload,
   ) => void
   promptInputProps: ComponentProps<typeof PromptInput>
+  headerControls?: ReactNode
 }
 
 export function DesktopConversationPane({
@@ -57,9 +57,9 @@ export function DesktopConversationPane({
   isThreadDetailPending,
   interactiveRequests,
   onStartPairing,
-  onRefreshRemoteStatus,
   onInteractiveResponse,
   promptInputProps,
+  headerControls,
 }: DesktopConversationPaneProps) {
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface-1">
@@ -68,11 +68,11 @@ export function DesktopConversationPane({
           remoteStatus={remoteStatus}
           pairingLink={pairingLink}
           onStartPairing={onStartPairing}
-          onRefreshStatus={onRefreshRemoteStatus}
           isStartingRemote={isStartingRemote}
           remoteControlsDisabled={remoteControlsDisabled}
           remoteControlsUnavailableReason={remoteControlsUnavailableReason}
         />
+        {headerControls}
       </SessionHeader>
       <Conversation
         threadKey={

@@ -24,9 +24,6 @@ const promptInputProps = {
   reasoningOptions: ['low', 'medium', 'high'],
   selectedEffort: 'medium',
   onEffortChange: noop,
-  collaborationModes: [],
-  selectedCollaborationModeId: null,
-  onCollaborationModeChange: noop,
   disabled: false,
   sendDisabled: false,
 }
@@ -80,16 +77,22 @@ describe('PromptInput', () => {
         {...promptInputProps}
         value="Draft message"
         showProviderSelector
-        models={[{ id: 'gpt-5.4', label: 'gpt-5.4', is_default: true } as any]}
+        models={[
+          {
+            id: 'gpt-5.4',
+            label: 'gpt-5.4',
+            is_default: true,
+            default_reasoning_effort: null,
+            supported_reasoning_efforts: [],
+          },
+        ]}
         selectedModelId="gpt-5.4"
-        showPlanModeToggle
         sendDisabled
       />,
     )
 
     expect(screen.getByPlaceholderText('Ask anything')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'codex' })).not.toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Enable plan mode' })).not.toBeDisabled()
     expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled()
   })
 })

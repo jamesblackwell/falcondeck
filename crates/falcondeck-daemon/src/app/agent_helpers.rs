@@ -1,6 +1,5 @@
 use falcondeck_core::{
-    AgentProvider, CollaborationModeSummary, ImageInput, SelectedSkillReference, SkillSummary,
-    TurnInputItem, WorkspaceSummary,
+    AgentProvider, ImageInput, SelectedSkillReference, SkillSummary, TurnInputItem,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -310,14 +309,6 @@ where
     translated
 }
 
-pub(super) fn is_claude_plan_mode(mode_id: Option<&str>) -> bool {
-    mode_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.eq_ignore_ascii_case("plan"))
-        .unwrap_or(false)
-}
-
 pub(crate) fn extract_claude_text_delta(value: &Value) -> Option<String> {
     if matches!(extract_string(value, &["type"]).as_deref(), Some("result")) {
         // Error results are surfaced via `extract_claude_error`; folding them
@@ -393,14 +384,11 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         }
         let id = extract_string(content_block, &["id"])
             .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
-        let title = synthesize_claude_tool_title(
-            extract_string(content_block, &["name"]).as_deref(),
-            content_block.get("input"),
-            None,
-        );
+        let name = extract_string(content_block, &["name"]);
+        let title = synthesize_claude_tool_title(name.as_deref(), content_block.get("input"), None);
         return Some(ClaudeToolEvent {
             id,
-            tool_kind: Some(title.clone()),
+            tool_kind: name.or_else(|| Some(title.clone())),
             title: Some(title),
             status: "running".to_string(),
             output: None,
@@ -420,14 +408,11 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         if let Some(tool_use) = tool_use {
             let id = extract_string(tool_use, &["id"])
                 .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
-            let title = synthesize_claude_tool_title(
-                extract_string(tool_use, &["name"]).as_deref(),
-                tool_use.get("input"),
-                None,
-            );
+            let name = extract_string(tool_use, &["name"]);
+            let title = synthesize_claude_tool_title(name.as_deref(), tool_use.get("input"), None);
             return Some(ClaudeToolEvent {
                 id,
-                tool_kind: Some(title.clone()),
+                tool_kind: name.or_else(|| Some(title.clone())),
                 title: Some(title),
                 status: "running".to_string(),
                 output: None,
@@ -441,8 +426,9 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
 
     let id = extract_string(event, &["tool_use_id", "toolUseId", "id"])
         .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
+    let name = extract_string(event, &["tool_name", "toolName", "name"]);
     let title = synthesize_claude_tool_title(
-        extract_string(event, &["tool_name", "toolName", "name"]).as_deref(),
+        name.as_deref(),
         event.get("input"),
         event.get("result").or_else(|| value.get("toolUseResult")),
     );
@@ -456,7 +442,7 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         .or_else(|| stringify_claude_value(value.get("toolUseResult")));
     Some(ClaudeToolEvent {
         id,
-        tool_kind: Some(title.clone()),
+        tool_kind: name.or_else(|| Some(title.clone())),
         title: Some(title),
         status: status.to_string(),
         output,
@@ -611,16 +597,16 @@ fn claude_tool_result_title(value: &Value, tool_result: &Value) -> Option<String
         return Some(format!("Read {file_path}"));
     }
 
-    if let Some(items) = tool_result.get("content").and_then(Value::as_array) {
-        if let Some(tool_name) = items.iter().find_map(|item| {
+    if let Some(items) = tool_result.get("content").and_then(Value::as_array)
+        && let Some(tool_name) = items.iter().find_map(|item| {
             if extract_string(item, &["type"]).as_deref() == Some("tool_reference") {
                 extract_string(item, &["tool_name", "toolName", "name"])
             } else {
                 None
             }
-        }) {
-            return Some(format!("Search tools: {tool_name}"));
-        }
+        })
+    {
+        return Some(format!("Search tools: {tool_name}"));
     }
 
     None
@@ -812,99 +798,4 @@ pub(super) fn parse_agent_provider(value: String) -> Option<AgentProvider> {
         "claude" => Some(AgentProvider::Claude),
         _ => None,
     }
-}
-
-pub(super) fn codex_inputs_with_plan_mode_shim(
-    inputs: &[TurnInputItem],
-    selected_skills: &[ResolvedSelectedSkill],
-    use_plan_mode_shim: bool,
-) -> Vec<Value> {
-    if !use_plan_mode_shim {
-        return codex_inputs(inputs, selected_skills);
-    }
-
-    let mut shimmed_inputs = vec![json!({
-        "type": "text",
-        "text": plan_mode_prompt_shim(),
-    })];
-    shimmed_inputs.extend(codex_inputs(inputs, selected_skills));
-    shimmed_inputs
-}
-
-fn plan_mode_prompt_shim() -> &'static str {
-    "Enter plan mode for this turn. Explore first, ask clarifying questions if needed, and produce a decision-complete implementation plan before making repo-tracked changes. Do not perform mutating work until the user explicitly exits plan mode."
-}
-
-fn mode_matches_plan(mode: &CollaborationModeSummary) -> bool {
-    mode.mode
-        .as_deref()
-        .unwrap_or(mode.id.as_str())
-        .eq_ignore_ascii_case("plan")
-}
-
-pub(super) fn should_use_plan_mode_shim(
-    summary: &WorkspaceSummary,
-    provider: &AgentProvider,
-    mode_id: Option<&str>,
-) -> bool {
-    let agent = summary
-        .agents
-        .iter()
-        .find(|agent| &agent.provider == provider);
-    let supports_plan_mode = agent
-        .map(|agent| agent.supports_plan_mode)
-        .unwrap_or(summary.supports_plan_mode);
-    let supports_native_plan_mode = agent
-        .map(|agent| agent.supports_native_plan_mode)
-        .unwrap_or(summary.supports_native_plan_mode);
-
-    if !supports_plan_mode || supports_native_plan_mode {
-        return false;
-    }
-
-    let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return false;
-    };
-
-    agent
-        .map(|agent| &agent.collaboration_modes)
-        .unwrap_or(&summary.collaboration_modes)
-        .iter()
-        .find(|mode| mode.id == mode_id)
-        .map(mode_matches_plan)
-        .unwrap_or_else(|| mode_id.eq_ignore_ascii_case("plan"))
-}
-
-pub(super) fn collaboration_mode_payload(
-    mode_id: Option<&str>,
-    selected_model_id: Option<&str>,
-    reasoning_effort: Option<&str>,
-    supports_native_plan_mode: bool,
-) -> Value {
-    if !supports_native_plan_mode {
-        return Value::Null;
-    }
-
-    let Some(mode_id) = mode_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Value::Null;
-    };
-
-    let mut settings = serde_json::Map::new();
-    if let Some(model_id) = selected_model_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        settings.insert("model".to_string(), json!(model_id));
-    }
-    if let Some(reasoning_effort) = reasoning_effort
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        settings.insert("reasoning_effort".to_string(), json!(reasoning_effort));
-    }
-
-    json!({
-        "mode": mode_id,
-        "settings": settings,
-    })
 }

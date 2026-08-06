@@ -7,13 +7,9 @@ import { ChevronLeft } from 'lucide-react-native'
 import { DrawerActions } from '@react-navigation/native'
 import { useNavigation, useRouter } from 'expo-router'
 import {
-  defaultCollaborationModeId,
   defaultProvider,
   encryptJson,
-  isPlanModeEnabled,
   providerForThread,
-  supportsPlanMode,
-  togglePlanMode,
   workspaceModels,
   type AgentProvider,
   type ConversationPresentation,
@@ -78,12 +74,11 @@ export default function HomeScreen() {
       sessionId: s.sessionId,
     })),
   )
-  const { attachments, draft, isSubmitting, selectedCollaborationMode, selectedEffort, selectedModel, selectedProvider } = useUIStore(
+  const { attachments, draft, isSubmitting, selectedEffort, selectedModel, selectedProvider } = useUIStore(
     useShallow((s) => ({
       attachments: s.attachments,
       draft: s.draft,
       isSubmitting: s.isSubmitting,
-      selectedCollaborationMode: s.selectedCollaborationMode,
       selectedEffort: s.selectedEffort,
       selectedModel: s.selectedModel,
       selectedProvider: s.selectedProvider,
@@ -95,7 +90,6 @@ export default function HomeScreen() {
     setSelectedModel,
     setSelectedEffort,
     setSelectedProvider,
-    setSelectedCollaborationMode,
     removeAttachment,
   } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
@@ -130,15 +124,6 @@ export default function HomeScreen() {
     if (supported.length > 0) return supported
     return resolvedModel?.default_reasoning_effort ? [resolvedModel.default_reasoning_effort] : ['medium']
   }, [resolvedModel])
-  const showPlanModeToggle = useMemo(
-    () => supportsPlanMode(workspace, activeProvider),
-    [activeProvider, workspace],
-  )
-  const planModeEnabled = useMemo(
-    () => isPlanModeEnabled(selectedCollaborationMode, workspace, activeProvider),
-    [activeProvider, selectedCollaborationMode, workspace],
-  )
-
   const isThreadRunning = selectedThread?.status === 'running'
   const showThinking = shouldShowThinkingIndicator(presentation, isThreadRunning)
   const isSelectedThreadLoading = !!selectedThreadId && detailLoadingThreadId === selectedThreadId
@@ -153,7 +138,6 @@ export default function HomeScreen() {
       setSelectedProvider(null)
       setSelectedModel(null)
       setSelectedEffort('medium')
-      setSelectedCollaborationMode(null)
       return
     }
 
@@ -181,7 +165,6 @@ export default function HomeScreen() {
           supportedEfforts[0] ??
           'medium',
       )
-      setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
       return
     }
 
@@ -196,10 +179,8 @@ export default function HomeScreen() {
         supportedEfforts[0] ??
         'medium',
     )
-    setSelectedCollaborationMode(null)
   }, [
     selectedThread,
-    setSelectedCollaborationMode,
     setSelectedEffort,
     setSelectedModel,
     setSelectedProvider,
@@ -222,9 +203,8 @@ export default function HomeScreen() {
       // Reset model and effort for the new provider
       setSelectedModel(null)
       setSelectedEffort(null)
-      setSelectedCollaborationMode(null)
     },
-    [selectedThread, setSelectedCollaborationMode, setSelectedProvider, setSelectedModel, setSelectedEffort],
+    [selectedThread, setSelectedProvider, setSelectedModel, setSelectedEffort],
   )
 
   const handleOpenDrawer = useCallback(() => {
@@ -504,16 +484,9 @@ export default function HomeScreen() {
           effortOptions={effortOptions}
           selectedProvider={activeProvider}
           showProviderSelector={!selectedThread}
-          showPlanModeToggle={showPlanModeToggle}
-          planModeEnabled={planModeEnabled}
           onSelectModel={setSelectedModel}
           onSelectEffort={setSelectedEffort}
           onSelectProvider={handleProviderChange}
-          onTogglePlanMode={(enabled) =>
-            setSelectedCollaborationMode(
-              togglePlanMode(enabled, workspace, selectedCollaborationMode, activeProvider),
-            )
-          }
         />
       </View>
     </KeyboardAvoidingView>

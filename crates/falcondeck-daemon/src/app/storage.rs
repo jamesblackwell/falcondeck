@@ -91,6 +91,7 @@ where
                 default_provider: Some(AgentProvider::Codex),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             },
             PersistedWorkspaceEntry::State(workspace) => workspace,
@@ -445,6 +446,7 @@ mod tests {
                     default_provider: Some(AgentProvider::Codex),
                     last_error: None,
                     archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
                 },
                 PersistedWorkspaceState {
@@ -454,6 +456,7 @@ mod tests {
                     default_provider: Some(AgentProvider::Codex),
                     last_error: None,
                     archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                     thread_states: Vec::new(),
                 },
             ]

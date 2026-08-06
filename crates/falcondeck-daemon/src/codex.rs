@@ -1562,6 +1562,7 @@ mod tests {
                 agent: ThreadAgentParams::default(),
                 attention: ThreadAttention::default(),
                 is_archived: false,
+                is_pinned: false,
             },
             &thread_read,
             &[
@@ -1627,6 +1628,7 @@ mod tests {
                 agent: ThreadAgentParams::default(),
                 attention: ThreadAttention::default(),
                 is_archived: false,
+                is_pinned: false,
             },
             &json!({ "thread": { "turns": [{ "id": "turn-1", "status": "completed" }] } }),
             &[ConversationItem::AssistantMessage {
@@ -1661,6 +1663,7 @@ mod tests {
                 agent: ThreadAgentParams::default(),
                 attention: ThreadAttention::default(),
                 is_archived: false,
+                is_pinned: false,
             },
             &json!({ "thread": { "turns": [] } }),
             &[ConversationItem::Service {

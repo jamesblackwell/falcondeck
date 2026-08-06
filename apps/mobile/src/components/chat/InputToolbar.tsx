@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { View, Pressable, Modal } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ChevronDown, Check, Map } from 'lucide-react-native'
+import { ChevronDown, Check } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import { formatModelLabel, type AgentProvider, type ModelSummary } from '@falcondeck/client-core'
@@ -19,9 +19,6 @@ interface InputToolbarProps {
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
-  showPlanModeToggle?: boolean
-  planModeEnabled?: boolean
-  onTogglePlanMode?: (enabled: boolean) => void
 }
 
 function capitalize(s: string) {
@@ -51,9 +48,6 @@ export const InputToolbar = memo(function InputToolbar({
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
-  showPlanModeToggle = false,
-  planModeEnabled = false,
-  onTogglePlanMode,
 }: InputToolbarProps) {
   const { theme } = useUnistyles()
   const [sheet, setSheet] = useState<SheetConfig>(null)
@@ -165,33 +159,6 @@ export const InputToolbar = memo(function InputToolbar({
           <ChevronDown size={10} color={theme.colors.fg.muted} />
         </Pressable>
 
-        {showPlanModeToggle ? (
-          <Pressable
-            style={[
-              styles.chip,
-              planModeEnabled && styles.planChipActive,
-              disabled && styles.controlDisabled,
-            ]}
-            disabled={disabled}
-            onPress={() => {
-              void Haptics.selectionAsync()
-              onTogglePlanMode?.(!planModeEnabled)
-            }}
-          >
-            <Map
-              size={10}
-              color={planModeEnabled ? theme.colors.surface[0] : theme.colors.fg.muted}
-            />
-            <Text
-              variant="caption"
-              size="2xs"
-              color={planModeEnabled ? 'primary' : 'secondary'}
-              style={planModeEnabled ? styles.planChipTextActive : undefined}
-            >
-              Plan
-            </Text>
-          </Pressable>
-        ) : null}
       </View>
 
       {sheet ? (
@@ -256,12 +223,6 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[1],
     backgroundColor: theme.colors.surface[3],
     borderRadius: theme.radius.full,
-  },
-  planChipActive: {
-    backgroundColor: theme.colors.accent.default,
-  },
-  planChipTextActive: {
-    color: theme.colors.surface[0],
   },
   controlDisabled: {
     opacity: 0.55,

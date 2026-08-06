@@ -11,7 +11,6 @@ describe('ui-store', () => {
       selectedProvider: null,
       selectedModel: null,
       selectedEffort: 'medium',
-      selectedCollaborationMode: null,
       isSubmitting: false,
     })
   })
@@ -55,11 +54,6 @@ describe('ui-store', () => {
   it('sets selected reasoning effort', () => {
     useUIStore.getState().setSelectedEffort('high')
     expect(useUIStore.getState().selectedEffort).toBe('high')
-  })
-
-  it('sets selected collaboration mode', () => {
-    useUIStore.getState().setSelectedCollaborationMode('pair')
-    expect(useUIStore.getState().selectedCollaborationMode).toBe('pair')
   })
 
   it('tracks submission state', () => {

@@ -77,6 +77,7 @@ describe('SessionListItem props contract', () => {
           last_read_seq: 0,
         },
         is_archived: false,
+        is_pinned: false,
       },
       workspaceId: 'workspace-1',
       isSelected: true,

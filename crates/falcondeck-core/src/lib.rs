@@ -314,13 +314,14 @@ pub struct StartThreadRequest {
     pub provider: Option<AgentProvider>,
     /// Optional model identifier override for the new thread.
     pub model_id: Option<String>,
-    /// Optional collaboration mode override for the new thread.
-    pub collaboration_mode_id: Option<String>,
     /// Optional approval policy for the new thread.
     pub approval_policy: Option<String>,
 }
 
 /// Request payload used to update thread-level agent settings.
+///
+/// Fields wrapped in a double `Option` distinguish "leave unchanged" (absent)
+/// from "clear the value" (explicit `null`).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UpdateThreadRequest {
     /// Workspace identifier that owns the thread.
@@ -328,16 +329,31 @@ pub struct UpdateThreadRequest {
     /// Thread identifier being updated.
     pub thread_id: String,
     /// Optional thread title override.
+    #[serde(default)]
     pub title: Option<String>,
     /// Optional provider override for the thread.
     #[serde(default)]
     pub provider: Option<AgentProvider>,
-    /// Optional model identifier override for future turns.
-    pub model_id: Option<String>,
-    /// Optional reasoning effort override for future turns.
-    pub reasoning_effort: Option<String>,
-    /// Optional collaboration mode override for future turns.
-    pub collaboration_mode_id: Option<String>,
+    /// Model identifier override for future turns; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub model_id: Option<Option<String>>,
+    /// Reasoning effort override for future turns; absent leaves it unchanged.
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub reasoning_effort: Option<Option<String>>,
+    /// Optional pin state override for the thread.
+    #[serde(default)]
+    pub pinned: Option<bool>,
+}
+
+/// Deserializes a present-but-possibly-null field into `Some(inner)`, so a
+/// missing field (`None` via `#[serde(default)]`) is distinguishable from an
+/// explicit `null` (`Some(None)`).
+fn deserialize_explicit_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Request payload used to mark thread events as read.
@@ -535,8 +551,6 @@ pub struct SendTurnRequest {
     pub model_id: Option<String>,
     /// Optional reasoning effort override for this turn.
     pub reasoning_effort: Option<String>,
-    /// Optional collaboration mode override for this turn.
-    pub collaboration_mode_id: Option<String>,
     /// Optional approval policy override for this turn.
     pub approval_policy: Option<String>,
     /// Optional provider-specific service tier for this turn.
@@ -630,12 +644,6 @@ pub struct WorkspaceSummary {
     /// Collaboration modes exposed by the workspace.
     #[serde(default)]
     pub collaboration_modes: Vec<CollaborationModeSummary>,
-    /// Whether plan mode is supported through a compatibility layer.
-    #[serde(default = "default_true")]
-    pub supports_plan_mode: bool,
-    /// Whether the provider supports plan mode natively.
-    #[serde(default = "default_true")]
-    pub supports_native_plan_mode: bool,
     /// Account status for the default provider.
     #[serde(default)]
     pub account: AccountSummary,
@@ -673,12 +681,6 @@ pub struct WorkspaceAgentSummary {
     /// Provider-scoped skill catalog for the workspace.
     #[serde(default)]
     pub skills: Vec<SkillSummary>,
-    /// Whether plan mode is supported through a compatibility layer.
-    #[serde(default = "default_true")]
-    pub supports_plan_mode: bool,
-    /// Whether the provider supports plan mode natively.
-    #[serde(default = "default_true")]
-    pub supports_native_plan_mode: bool,
     /// Capability flags reported by the provider.
     #[serde(default)]
     pub capabilities: AgentCapabilitySummary,
@@ -807,6 +809,9 @@ pub struct ThreadSummary {
     /// Whether the thread has been archived.
     #[serde(default)]
     pub is_archived: bool,
+    /// Whether the thread is pinned to the top of its project group.
+    #[serde(default)]
+    pub is_pinned: bool,
 }
 
 /// Attention state derived from thread activity.

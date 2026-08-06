@@ -209,7 +209,7 @@ export function useDaemonConnection() {
   }, [handleEvent])
 
   // Reconcile selection when snapshot changes
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId, {
       preserveEmptyThreadSelection: true,
@@ -221,7 +221,7 @@ export function useDaemonConnection() {
       setSelectedThreadId(nextSelection.threadId)
     }
   }, [snapshot, selectedThreadId, selectedWorkspaceId])
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   useEffect(() => {
     try {
@@ -237,7 +237,7 @@ export function useDaemonConnection() {
     }
   }, [selectedThreadId, selectedWorkspaceId])
 
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useLayoutEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId) {
       if (threadDetail !== null) {
@@ -263,10 +263,10 @@ export function useDaemonConnection() {
       setThreadDetail(null)
     }
   }, [selectedThreadId, selectedWorkspaceId, threadDetail])
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   // Fetch thread detail on selection change
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (!api || !selectedWorkspaceId || !selectedThreadId) {
       setThreadDetail(null)
@@ -298,7 +298,7 @@ export function useDaemonConnection() {
     })
     return () => { cancelled = true }
   }, [api, selectedThreadId, selectedWorkspaceId, snapshot?.threads])
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   // Prefetch likely-next threads so switching can render from memory immediately.
   useEffect(() => {
@@ -380,13 +380,13 @@ export function useDaemonConnection() {
   }, [api, remoteStatus])
 
   // Refresh git on workspace change
-  /* eslint-disable react-hooks/set-state-in-effect */
+   
   useEffect(() => {
     if (selectedWorkspaceId) {
       setGitRefreshTrigger((c) => c + 1)
     }
   }, [selectedWorkspaceId])
-  /* eslint-enable react-hooks/set-state-in-effect */
+   
 
   return {
     api,

@@ -1,10 +1,9 @@
-import { ImagePlus, Map, Send, X } from 'lucide-react'
+import { ImagePlus, Send, X } from 'lucide-react'
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 
 import type {
   ActiveSlashQuery,
   AgentProvider,
-  CollaborationModeSummary,
   ImageInput,
   ModelSummary,
   SkillSummary,
@@ -33,12 +32,6 @@ export type PromptInputProps = {
   reasoningOptions: string[]
   selectedEffort: string | null
   onEffortChange: (value: string) => void
-  collaborationModes: CollaborationModeSummary[]
-  selectedCollaborationModeId: string | null
-  onCollaborationModeChange: (value: string) => void
-  showPlanModeToggle?: boolean
-  planModeEnabled?: boolean
-  onPlanModeChange?: (enabled: boolean) => void
   disabled?: boolean
   sendDisabled?: boolean
   compact?: boolean
@@ -65,9 +58,6 @@ export const PromptInput = memo(function PromptInput({
   reasoningOptions,
   selectedEffort,
   onEffortChange,
-  showPlanModeToggle = false,
-  planModeEnabled = false,
-  onPlanModeChange,
   disabled = false,
   sendDisabled = false,
   compact = false,
@@ -348,22 +338,6 @@ export const PromptInput = memo(function PromptInput({
                 disabled={disabled || reasoningOptions.length === 0}
               />
             </>
-          ) : null}
-
-          {showPlanModeToggle ? (
-            <Button
-              type="button"
-              variant={planModeEnabled ? 'secondary' : 'ghost'}
-              size="icon"
-              disabled={disabled}
-              onClick={() => onPlanModeChange?.(!planModeEnabled)}
-              className="rounded-full"
-              aria-pressed={planModeEnabled}
-              title="Enable plan mode"
-              aria-label="Enable plan mode"
-            >
-              <Map className="h-4 w-4" />
-            </Button>
           ) : null}
 
           <div className="ml-auto flex items-center gap-2">

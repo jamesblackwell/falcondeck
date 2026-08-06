@@ -560,10 +560,6 @@ impl AppState {
                     workspace_id: required(&["workspaceId", "workspace_id"])?,
                     provider: extract_string(&params, &["provider"]).and_then(parse_agent_provider),
                     model_id: extract_string(&params, &["modelId", "model_id"]),
-                    collaboration_mode_id: extract_string(
-                        &params,
-                        &["collaborationModeId", "collaboration_mode_id"],
-                    ),
                     approval_policy: extract_string(
                         &params,
                         &["approvalPolicy", "approval_policy"],
@@ -600,15 +596,12 @@ impl AppState {
                     thread_id: required(&["threadId", "thread_id"])?,
                     title: extract_string(&params, &["title"]),
                     provider: extract_string(&params, &["provider"]).and_then(parse_agent_provider),
-                    model_id: extract_string(&params, &["modelId", "model_id"]),
-                    reasoning_effort: extract_string(
+                    model_id: explicit_optional_string(&params, &["modelId", "model_id"]),
+                    reasoning_effort: explicit_optional_string(
                         &params,
                         &["reasoningEffort", "reasoning_effort"],
                     ),
-                    collaboration_mode_id: extract_string(
-                        &params,
-                        &["collaborationModeId", "collaboration_mode_id"],
-                    ),
+                    pinned: params.get("pinned").and_then(Value::as_bool),
                 };
                 self.update_thread(request)
                     .await
@@ -648,10 +641,6 @@ impl AppState {
                     reasoning_effort: extract_string(
                         &params,
                         &["reasoningEffort", "reasoning_effort"],
-                    ),
-                    collaboration_mode_id: extract_string(
-                        &params,
-                        &["collaborationModeId", "collaboration_mode_id"],
                     ),
                     approval_policy: extract_string(
                         &params,
@@ -758,10 +747,6 @@ impl AppState {
                         provider: extract_string(&params, &["provider"])
                             .and_then(parse_agent_provider),
                         model_id: extract_string(&params, &["modelId", "model_id"]),
-                        collaboration_mode_id: extract_string(
-                            &params,
-                            &["collaborationModeId", "collaboration_mode_id"],
-                        ),
                         approval_policy: extract_string(
                             &params,
                             &["approvalPolicy", "approval_policy"],
@@ -787,15 +772,12 @@ impl AppState {
                         title: extract_string(&params, &["title"]),
                         provider: extract_string(&params, &["provider"])
                             .and_then(parse_agent_provider),
-                        model_id: extract_string(&params, &["modelId", "model_id"]),
-                        reasoning_effort: extract_string(
+                        model_id: explicit_optional_string(&params, &["modelId", "model_id"]),
+                        reasoning_effort: explicit_optional_string(
                             &params,
                             &["reasoningEffort", "reasoning_effort"],
                         ),
-                        collaboration_mode_id: extract_string(
-                            &params,
-                            &["collaborationModeId", "collaboration_mode_id"],
-                        ),
+                        pinned: params.get("pinned").and_then(Value::as_bool),
                     };
                     self.update_thread(request)
                         .await
@@ -858,10 +840,6 @@ impl AppState {
                         reasoning_effort: extract_string(
                             &params,
                             &["reasoningEffort", "reasoning_effort"],
-                        ),
-                        collaboration_mode_id: extract_string(
-                            &params,
-                            &["collaborationModeId", "collaboration_mode_id"],
                         ),
                         approval_policy: extract_string(
                             &params,
@@ -1091,4 +1069,12 @@ async fn send_relay_message(
         .send(Message::Text(payload.into()))
         .await
         .map_err(|error| format!("failed to send relay message: {error}"))
+}
+
+/// Reads a string field that distinguishes "absent" from an explicit `null`:
+/// a missing key yields `None`, a present key yields `Some(value_or_none)`.
+fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<String>> {
+    keys.iter()
+        .find_map(|key| params.get(key))
+        .map(|value| value.as_str().map(ToOwned::to_owned))
 }

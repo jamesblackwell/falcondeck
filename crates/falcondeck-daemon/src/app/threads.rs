@@ -126,6 +126,7 @@ impl AppState {
                     agent: ThreadAgentParams::default(),
                     attention: ThreadAttention::default(),
                     is_archived: false,
+                    is_pinned: false,
                 })
             });
         let before = thread.summary.updated_at;

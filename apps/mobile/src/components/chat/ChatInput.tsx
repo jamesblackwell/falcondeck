@@ -36,12 +36,9 @@ interface ChatInputProps {
   effortOptions: string[]
   selectedProvider: AgentProvider
   showProviderSelector: boolean
-  showPlanModeToggle?: boolean
-  planModeEnabled?: boolean
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
-  onTogglePlanMode?: (enabled: boolean) => void
 }
 
 const MIN_INPUT_HEIGHT = 44
@@ -63,12 +60,9 @@ export const ChatInput = memo(function ChatInput({
   effortOptions,
   selectedProvider,
   showProviderSelector,
-  showPlanModeToggle,
-  planModeEnabled,
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
-  onTogglePlanMode,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
   const [caretIndex, setCaretIndex] = useState(value.length)
@@ -305,9 +299,6 @@ export const ChatInput = memo(function ChatInput({
               onSelectModel={onSelectModel}
               onSelectEffort={onSelectEffort}
               onSelectProvider={onSelectProvider}
-              showPlanModeToggle={showPlanModeToggle}
-              planModeEnabled={planModeEnabled}
-              onTogglePlanMode={onTogglePlanMode}
             />
           </View>
           <Pressable

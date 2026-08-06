@@ -124,7 +124,6 @@ export type RemotePairingPopoverProps = {
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
   onStartPairing: () => void
-  onRefreshStatus: () => void
   isStartingRemote: boolean
   remoteControlsDisabled: boolean
   remoteControlsUnavailableReason: string | null
@@ -134,7 +133,6 @@ export function RemotePairingPopover({
   remoteStatus,
   pairingLink,
   onStartPairing,
-  onRefreshStatus: _onRefreshStatus,
   isStartingRemote,
   remoteControlsDisabled,
   remoteControlsUnavailableReason,

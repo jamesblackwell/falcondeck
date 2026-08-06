@@ -68,6 +68,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     last_tool: null,
     last_error: null,
     is_archived: false,
+    is_pinned: false,
     agent: {
       model_id: null,
       reasoning_effort: null,
@@ -745,7 +746,7 @@ describe('client-core remote session persistence', () => {
       sessionId: 'session-1',
       clientToken: 'client-1',
       clientSecretKey: 'secret',
-    } as any
+    } as unknown as Parameters<typeof shouldReusePersistedRemoteSession>[1]
 
     expect(shouldReusePersistedRemoteSession(new URLSearchParams(), persisted)).toBeNull()
   })

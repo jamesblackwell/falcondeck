@@ -181,7 +181,7 @@ pub(super) async fn connect_workspace_internal(
             items: thread.items,
         }
     }));
-    threads.sort_by(|left, right| right.summary.updated_at.cmp(&left.summary.updated_at));
+    threads.sort_by_key(|thread| std::cmp::Reverse(thread.summary.updated_at));
     let persisted_thread_states = persisted_workspace_ref
         .map(|workspace| {
             workspace
@@ -230,6 +230,7 @@ pub(super) async fn connect_workspace_internal(
                 agent: ThreadAgentParams::default(),
                 attention: ThreadAttention::default(),
                 is_archived: false,
+                is_pinned: false,
             },
             items: Vec::new(),
         });
@@ -250,8 +251,6 @@ pub(super) async fn connect_workspace_internal(
             models: codex_models.clone(),
             collaboration_modes: codex_collaboration_modes.clone(),
             skills: codex_skills.clone(),
-            supports_plan_mode: true,
-            supports_native_plan_mode: true,
             capabilities: AgentCapabilitySummary {
                 supports_review: true,
             },
@@ -262,8 +261,6 @@ pub(super) async fn connect_workspace_internal(
             models: claude_models.clone(),
             collaboration_modes: claude_collaboration_modes.clone(),
             skills: claude_skills.clone(),
-            supports_plan_mode: true,
-            supports_native_plan_mode: true,
             capabilities: claude_capabilities,
         },
     ];
@@ -288,8 +285,6 @@ pub(super) async fn connect_workspace_internal(
         default_provider: default_provider.clone(),
         models: codex_models,
         collaboration_modes: codex_collaboration_modes.clone(),
-        supports_plan_mode: true,
-        supports_native_plan_mode: true,
         account: codex_account,
         current_thread_id,
         connected_at: now,
@@ -313,6 +308,12 @@ pub(super) async fn connect_workspace_internal(
                         .unwrap_or(false)
                     {
                         thread.summary.is_archived = true;
+                    }
+                    if persisted_workspace_ref
+                        .map(|pw| pw.pinned_thread_ids.contains(&thread.summary.id))
+                        .unwrap_or(false)
+                    {
+                        thread.summary.is_pinned = true;
                     }
                     if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
                         if let Some(provider) = state.provider.clone() {
@@ -350,6 +351,7 @@ pub(super) async fn connect_workspace_internal(
                 default_provider: Some(summary.default_provider.clone()),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             }),
     );
@@ -401,7 +403,7 @@ pub(super) async fn start_thread(
     app: &AppState,
     request: StartThreadRequest,
 ) -> Result<ThreadHandle, DaemonError> {
-    let (provider, supports_native_plan_mode, default_model_id) = {
+    let (provider, default_model_id) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(&request.workspace_id)
@@ -418,10 +420,6 @@ pub(super) async fn start_thread(
             .cloned();
         (
             provider,
-            agent
-                .as_ref()
-                .map(|agent| agent.supports_native_plan_mode)
-                .unwrap_or(workspace.summary.supports_native_plan_mode),
             agent.and_then(|agent| {
                 agent
                     .models
@@ -446,12 +444,6 @@ pub(super) async fn start_thread(
                     json!({
                         "cwd": workspace_path,
                         "model": model_id,
-                        "collaborationMode": collaboration_mode_payload(
-                            request.collaboration_mode_id.as_deref(),
-                            model_id.as_deref(),
-                            None,
-                            supports_native_plan_mode,
-                        ),
                         "approvalPolicy": approval_policy
                     }),
                 )
@@ -493,12 +485,13 @@ pub(super) async fn start_thread(
         agent: ThreadAgentParams {
             model_id,
             reasoning_effort: None,
-            collaboration_mode_id: request.collaboration_mode_id,
+            collaboration_mode_id: None,
             approval_policy: Some(approval_policy),
             service_tier: None,
         },
         attention: ThreadAttention::default(),
         is_archived: false,
+        is_pinned: false,
     };
     workspace.summary.current_thread_id = Some(thread_id.clone());
     workspace.summary.default_provider = provider;
@@ -861,7 +854,7 @@ pub(super) async fn send_turn(
         .unwrap_or_else(|| "on-request".to_string());
 
     let user_message = build_user_message_item(&inputs);
-    let (thread, requires_resume, use_plan_mode_shim, provider, selected_skills) = {
+    let (thread, requires_resume, provider, selected_skills) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(&request.workspace_id)
@@ -898,6 +891,7 @@ pub(super) async fn send_turn(
                     agent: ThreadAgentParams::default(),
                     attention: ThreadAttention::default(),
                     is_archived: false,
+                    is_pinned: false,
                 })
             });
         managed.summary.provider = provider.clone();
@@ -912,21 +906,12 @@ pub(super) async fn send_turn(
             .agent
             .reasoning_effort
             .clone());
-        managed.summary.agent.collaboration_mode_id = request
-            .collaboration_mode_id
-            .clone()
-            .or(managed.summary.agent.collaboration_mode_id.clone());
         managed.summary.agent.approval_policy = Some(approval_policy.clone());
         managed.summary.agent.service_tier = request.service_tier.clone().or(managed
             .summary
             .agent
             .service_tier
             .clone());
-        let use_plan_mode_shim = should_use_plan_mode_shim(
-            &workspace.summary,
-            &provider,
-            request.collaboration_mode_id.as_deref(),
-        );
         let selected_skills = resolve_selected_skills(
             &workspace.summary.skills,
             &request.selected_skills,
@@ -946,7 +931,6 @@ pub(super) async fn send_turn(
         (
             managed.summary.clone(),
             managed.requires_resume,
-            use_plan_mode_shim,
             provider,
             selected_skills,
         )
@@ -985,16 +969,10 @@ pub(super) async fn send_turn(
                     "turn/start",
                     json!({
                         "threadId": request.thread_id,
-                        "input": codex_inputs_with_plan_mode_shim(&inputs, &selected_skills, use_plan_mode_shim),
+                        "input": codex_inputs(&inputs, &selected_skills),
                         "cwd": workspace_path,
                         "model": request.model_id,
                         "effort": request.reasoning_effort,
-                        "collaborationMode": collaboration_mode_payload(
-                            request.collaboration_mode_id.as_deref(),
-                            request.model_id.as_deref(),
-                            request.reasoning_effort.as_deref(),
-                            !use_plan_mode_shim,
-                        ),
                         "approvalPolicy": approval_policy,
                         "serviceTier": request.service_tier
                     }),
@@ -1027,7 +1005,6 @@ pub(super) async fn send_turn(
                     &images,
                     thread.agent.model_id.as_deref(),
                     thread.agent.reasoning_effort.as_deref(),
-                    is_claude_plan_mode(thread.agent.collaboration_mode_id.as_deref()),
                     app.local_base_url().as_deref(),
                     &settings_dir,
                 )
@@ -1116,9 +1093,15 @@ pub(super) async fn update_thread(
             thread.ai_title_in_flight = false;
         }
 
-        thread.summary.agent.model_id = request.model_id.clone();
-        thread.summary.agent.reasoning_effort = request.reasoning_effort.clone();
-        thread.summary.agent.collaboration_mode_id = request.collaboration_mode_id.clone();
+        if let Some(model_id) = request.model_id.clone() {
+            thread.summary.agent.model_id = model_id;
+        }
+        if let Some(reasoning_effort) = request.reasoning_effort.clone() {
+            thread.summary.agent.reasoning_effort = reasoning_effort;
+        }
+        if let Some(pinned) = request.pinned {
+            thread.summary.is_pinned = pinned;
+        }
         thread.summary.updated_at = now;
         workspace.summary.current_thread_id = Some(request.thread_id.clone());
         workspace.summary.updated_at = now;
@@ -2015,8 +1998,6 @@ mod tests {
                     default_provider: AgentProvider::Codex,
                     models: Vec::new(),
                     collaboration_modes: Vec::new(),
-                    supports_plan_mode: true,
-                    supports_native_plan_mode: true,
                     account: falcondeck_core::AccountSummary::default(),
                     current_thread_id: None,
                     connected_at: Utc::now(),

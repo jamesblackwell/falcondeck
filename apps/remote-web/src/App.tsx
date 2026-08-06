@@ -9,7 +9,6 @@ import {
   bytesToBase64,
   countAwaitingResponseThreads,
   conversationItemsForSelection,
-  defaultCollaborationModeId,
   DEFAULT_REMOTE_RELAY_URL,
   decryptJson,
   deriveThreadAttentionPresentation,
@@ -18,7 +17,6 @@ import {
   filesToImageInputs,
   generateBoxKeyPair,
   identityPublicKeyToBase64,
-  isPlanModeEnabled,
   normalizeDaemonSnapshot,
   normalizePreferences,
   normalizeThreadDetail,
@@ -33,12 +31,9 @@ import {
   shouldReusePersistedRemoteSession,
   signPairingClaimChallenge,
   REMOTE_SESSION_STORAGE_VERSION,
-  supportsPlanMode,
-  togglePlanMode,
   upsertConversationItem,
   verifyPairingPublicKeyBundle,
   verifySessionKeyMaterial,
-  workspaceCollaborationModes,
   workspaceModels,
   type AgentProvider,
   type ClaimPairingRequest,
@@ -143,7 +138,6 @@ export default function App() {
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
-  const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
@@ -1345,7 +1339,6 @@ export default function App() {
             workspace_id: selectedWorkspace.id,
             provider: selectedProvider,
             model_id: selectedModel,
-            collaboration_mode_id: selectedCollaborationMode,
             approval_policy: 'on-request',
           }),
         )
@@ -1364,7 +1357,6 @@ export default function App() {
         provider: selectedThread?.provider ?? selectedProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
-        collaboration_mode_id: selectedCollaborationMode,
         approval_policy: 'on-request',
       }, { awaitCompletion: false })
       setError(null)
@@ -1410,7 +1402,6 @@ export default function App() {
       setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
-      setSelectedCollaborationMode(null)
       selectionSeedRef.current = null
       return
     }
@@ -1431,14 +1422,12 @@ export default function App() {
           reasoningOptions(snapshot, selectedWorkspace.id, nextProvider, nextModelId)[0] ??
           'medium',
       )
-      setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
       return
     }
     setSelectedModel(fallbackModelId)
     setSelectedEffort(
       reasoningOptions(snapshot, selectedWorkspace.id, nextProvider, fallbackModelId)[0] ?? 'medium',
     )
-    setSelectedCollaborationMode(null)
   }, [selectedThread, selectedWorkspace, snapshot])
 
   useEffect(() => {
@@ -1475,11 +1464,9 @@ export default function App() {
     async ({
       modelId,
       effort,
-      collaborationModeId,
     }: {
       modelId: string | null
       effort: string | null
-      collaborationModeId: string | null
     }) => {
       if (!selectedWorkspace || !selectedThreadId) return
       const requestId = ++threadSettingsRequestRef.current
@@ -1491,7 +1478,6 @@ export default function App() {
             provider: selectedThread?.provider ?? selectedProvider,
             model_id: modelId,
             reasoning_effort: effort,
-            collaboration_mode_id: collaborationModeId,
           }),
         )
         if (requestId !== threadSettingsRequestRef.current) return
@@ -1503,6 +1489,25 @@ export default function App() {
       }
     },
     [applyThreadHandle, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace],
+  )
+
+  const handleTogglePinThread = useCallback(
+    async (workspaceId: string, threadId: string, pinned: boolean) => {
+      try {
+        const handle = normalizeThreadHandle(
+          await submitQueuedAction<ThreadHandle>('thread.update', {
+            workspace_id: workspaceId,
+            thread_id: threadId,
+            pinned,
+          }),
+        )
+        applyThreadHandle(handle)
+        setError(null)
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Remote action failed')
+      }
+    },
+    [applyThreadHandle],
   )
 
   const handleUpdatePreferences = useCallback(
@@ -1537,12 +1542,10 @@ export default function App() {
       void persistThreadSettings({
         modelId,
         effort: nextEffort,
-        collaborationModeId: selectedCollaborationMode,
       })
     },
     [
       persistThreadSettings,
-      selectedCollaborationMode,
       selectedEffort,
       selectedWorkspace?.id,
       snapshot,
@@ -1556,22 +1559,9 @@ export default function App() {
       void persistThreadSettings({
         modelId: selectedModel,
         effort,
-        collaborationModeId: selectedCollaborationMode,
       })
     },
-    [persistThreadSettings, selectedCollaborationMode, selectedModel],
-  )
-
-  const handleCollaborationModeChange = useCallback(
-    (modeId: string | null) => {
-      setSelectedCollaborationMode(modeId)
-      void persistThreadSettings({
-        modelId: selectedModel,
-        effort: selectedEffort,
-        collaborationModeId: modeId,
-      })
-    },
-    [persistThreadSettings, selectedEffort, selectedModel],
+    [persistThreadSettings, selectedModel],
   )
 
   const handleProviderChange = useCallback(
@@ -1584,7 +1574,6 @@ export default function App() {
       setSelectedEffort(
         reasoningOptions(snapshot, selectedWorkspace?.id ?? null, provider, fallbackModelId)[0] ?? 'medium',
       )
-      setSelectedCollaborationMode(null)
     },
     [selectedThread, selectedWorkspace, snapshot],
   )
@@ -1600,18 +1589,6 @@ export default function App() {
   const models = useMemo(
     () => workspaceModels(selectedWorkspace, activeProvider),
     [activeProvider, selectedWorkspace],
-  )
-  const collaborationModes = useMemo(
-    () => workspaceCollaborationModes(selectedWorkspace, activeProvider),
-    [activeProvider, selectedWorkspace],
-  )
-  const showPlanModeToggle = useMemo(
-    () => supportsPlanMode(selectedWorkspace, activeProvider),
-    [activeProvider, selectedWorkspace],
-  )
-  const planModeEnabled = useMemo(
-    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, activeProvider),
-    [activeProvider, selectedCollaborationMode, selectedWorkspace],
   )
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
     setThreadDetail(null)
@@ -1895,6 +1872,7 @@ export default function App() {
                 onSelectWorkspace={handleSelectWorkspace}
                 onSelectThread={handleSelectThread}
                 onNewThread={handleNewThread}
+                onTogglePinThread={handleTogglePinThread}
                 title="Projects"
                 errors={error ? [error] : []}
                 emptyState={{
@@ -1918,6 +1896,7 @@ export default function App() {
           onSelectWorkspace={handleSelectWorkspace}
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
+          onTogglePinThread={handleTogglePinThread}
           title="Projects"
           errors={error ? [error] : []}
           emptyState={{
@@ -1969,16 +1948,6 @@ export default function App() {
               reasoningOptions={currentReasoningOptions}
               selectedEffort={selectedEffort}
               onEffortChange={handleEffortChange}
-              collaborationModes={collaborationModes}
-              selectedCollaborationModeId={selectedCollaborationMode}
-              onCollaborationModeChange={(value) => handleCollaborationModeChange(value)}
-              showPlanModeToggle={showPlanModeToggle}
-              planModeEnabled={planModeEnabled}
-              onPlanModeChange={(enabled) =>
-                handleCollaborationModeChange(
-                  togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, activeProvider),
-                )
-              }
               disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
             />
           </div>

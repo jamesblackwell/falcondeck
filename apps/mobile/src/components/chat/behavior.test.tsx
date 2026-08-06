@@ -125,35 +125,6 @@ describe('chat behavior components', () => {
     expect(textOf(renderer)).toContain('Claude')
   })
 
-  it('renders and toggles the plan mode chip', () => {
-    const onTogglePlanMode = vi.fn()
-    const renderer = renderComponent(
-      <InputToolbar
-        models={[]}
-        selectedModel={null}
-        selectedEffort="medium"
-        effortOptions={['medium']}
-        selectedProvider="codex"
-        showProviderSelector={false}
-        showPlanModeToggle
-        planModeEnabled={false}
-        onSelectModel={vi.fn()}
-        onSelectEffort={vi.fn()}
-        onSelectProvider={vi.fn()}
-        onTogglePlanMode={onTogglePlanMode}
-      />,
-    )
-
-    expect(textOf(renderer)).toContain('Plan')
-
-    const buttons = renderer.root.findAllByType('Pressable' as any)
-    act(() => {
-      buttons[buttons.length - 1]!.props.onPress()
-    })
-
-    expect(onTogglePlanMode).toHaveBeenCalledWith(true)
-  })
-
   it('disables toolbar controls when the composer is disabled', () => {
     const renderer = renderComponent(
       <InputToolbar
@@ -163,12 +134,10 @@ describe('chat behavior components', () => {
         effortOptions={['medium']}
         selectedProvider="codex"
         showProviderSelector
-        showPlanModeToggle
         disabled
         onSelectModel={vi.fn()}
         onSelectEffort={vi.fn()}
         onSelectProvider={vi.fn()}
-        onTogglePlanMode={vi.fn()}
       />,
     )
 

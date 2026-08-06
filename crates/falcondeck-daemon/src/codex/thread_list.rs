@@ -164,6 +164,7 @@ pub(super) fn parse_threads(
                     },
                     attention: ThreadAttention::default(),
                     is_archived: false,
+                    is_pinned: false,
                 },
                 session_path: extract_string(entry, &["path"]),
             })

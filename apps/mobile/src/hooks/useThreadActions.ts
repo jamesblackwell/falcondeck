@@ -33,5 +33,23 @@ export function useThreadActions() {
     }
   }, [])
 
-  return { archiveThread, renameThread }
+  const setThreadPinned = useCallback(
+    async (workspaceId: string, threadId: string, pinned: boolean) => {
+      const relay = useRelayStore.getState()
+      try {
+        await relay._callRpc(
+          'thread.update',
+          { workspace_id: workspaceId, thread_id: threadId, pinned },
+          { requestIdPrefix: 'mobile-thread' },
+        )
+        relay._setError(null)
+      } catch (e) {
+        relay._setError(e instanceof Error ? e.message : 'Failed to update pin')
+        throw e
+      }
+    },
+    [],
+  )
+
+  return { archiveThread, renameThread, setThreadPinned }
 }

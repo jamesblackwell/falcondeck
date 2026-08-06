@@ -28,7 +28,7 @@ export const SidebarView = memo(function SidebarView({
 }: SidebarViewProps) {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
-  const { archiveThread, renameThread } = useThreadActions()
+  const { archiveThread, renameThread, setThreadPinned } = useThreadActions()
 
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set())
   const [expandedThreadLists, setExpandedThreadLists] = useState<Set<string>>(() => new Set())
@@ -38,7 +38,7 @@ export const SidebarView = memo(function SidebarView({
   } | null>(null)
   const [sheetMode, setSheetMode] = useState<'menu' | 'rename'>('menu')
   const [renameValue, setRenameValue] = useState('')
-  const [pendingAction, setPendingAction] = useState<'archive' | 'rename' | null>(null)
+  const [pendingAction, setPendingAction] = useState<'archive' | 'rename' | 'pin' | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   const rows = useMemo(
@@ -106,6 +106,25 @@ export const SidebarView = memo(function SidebarView({
     setSheetMode('rename')
     setActionError(null)
   }, [])
+
+  const handleTogglePin = useCallback(async () => {
+    if (!optionsTarget) return
+    void Haptics.selectionAsync()
+    setPendingAction('pin')
+    setActionError(null)
+    try {
+      await setThreadPinned(
+        optionsTarget.workspaceId,
+        optionsTarget.thread.id,
+        !optionsTarget.thread.is_pinned,
+      )
+      closeThreadOptions()
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Failed to update pin')
+    } finally {
+      setPendingAction(null)
+    }
+  }, [closeThreadOptions, optionsTarget, setThreadPinned])
 
   const handleRenameThread = useCallback(async () => {
     if (!optionsTarget) return
@@ -232,6 +251,16 @@ export const SidebarView = memo(function SidebarView({
           </>
         ) : (
           <>
+            <Pressable
+              style={styles.sheetItem}
+              onPress={() => void handleTogglePin()}
+              disabled={pendingAction === 'pin'}
+            >
+              <Text variant="label" color="primary">
+                {optionsTarget.thread.is_pinned ? 'Unpin' : 'Pin'}
+              </Text>
+              <ChevronRight size={14} color={theme.colors.fg.muted} />
+            </Pressable>
             <Pressable style={styles.sheetItem} onPress={handleStartRename}>
               <Text variant="label" color="primary">
                 Rename

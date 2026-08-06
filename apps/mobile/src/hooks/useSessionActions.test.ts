@@ -37,7 +37,6 @@ function resetAll() {
     selectedProvider: null,
     selectedModel: null,
     selectedEffort: 'medium',
-    selectedCollaborationMode: null,
     isSubmitting: false,
   })
 }
@@ -242,7 +241,6 @@ describe('submitTurn guards', () => {
       selectedProvider: 'codex',
       selectedModel: 'gpt-5',
       selectedEffort: 'high',
-      selectedCollaborationMode: 'plan',
       isSubmitting: false,
     })
 
@@ -281,7 +279,6 @@ describe('submitTurn guards', () => {
         provider: 'codex',
         model_id: 'gpt-5',
         reasoning_effort: 'high',
-        collaboration_mode_id: 'plan',
         approval_policy: 'on-request',
       },
       { requestIdPrefix: 'mobile-turn' },

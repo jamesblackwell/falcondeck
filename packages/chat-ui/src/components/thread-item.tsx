@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { memo, useMemo } from 'react'
-import { Archive, LoaderCircle } from 'lucide-react'
+import { Archive, LoaderCircle, Pin } from 'lucide-react'
 
 import { deriveThreadAttentionPresentation, type ThreadSummary } from '@falcondeck/client-core'
 import { Badge, cn } from '@falcondeck/ui'
@@ -84,6 +84,9 @@ export const ThreadItem = memo(
           <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] text-fg-primary">
             {thread.title}
           </span>
+          {thread.is_pinned ? (
+            <Pin aria-label="Pinned" className="h-3 w-3 shrink-0 rotate-45 text-fg-muted" />
+          ) : null}
         </button>
         {attention.showBadge ? (
           <Badge variant="success" className="shrink-0 bg-success/15 text-success">

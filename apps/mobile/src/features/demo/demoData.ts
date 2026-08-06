@@ -81,6 +81,7 @@ const demoThreads: ThreadSummary[] = [
     agent: DEMO_AGENT,
     attention: makeAttention(10),
     is_archived: false,
+    is_pinned: false,
   },
   {
     id: 'demo-thread-2',
@@ -98,6 +99,7 @@ const demoThreads: ThreadSummary[] = [
     agent: DEMO_AGENT,
     attention: makeAttention(5),
     is_archived: false,
+    is_pinned: false,
   },
 ]
 

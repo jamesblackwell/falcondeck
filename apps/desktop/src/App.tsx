@@ -4,15 +4,10 @@ import {
   buildProjectGroups,
   countAwaitingResponseThreads,
   conversationItemsForSelection,
-  defaultCollaborationModeId,
   deriveThreadAttentionPresentation,
   filesToImageInputs,
-  isPlanModeEnabled,
   providerForThread,
   selectedSkillsFromText,
-  supportsPlanMode,
-  togglePlanMode,
-  workspaceCollaborationModes,
   workspaceModels,
   type AgentProvider,
   type ConversationItem,
@@ -43,10 +38,12 @@ import { DesktopConversationPane } from './components/DesktopConversationPane'
 import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
 import { DiffPanel } from './components/DiffPanel'
+import { PanelToggles } from './components/PanelToggles'
 import { ProjectImportOverlay } from './components/ProjectImportOverlay'
 import { SettingsView } from './components/SettingsView'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
+import { usePanelVisibility } from './hooks/usePanelVisibility'
 
 const COMPOSER_SELECTIONS_STORAGE_KEY = 'falcondeck.desktop.composer-selections.v1'
 
@@ -151,6 +148,7 @@ function AppInner() {
     gitRefreshTrigger,
   } = useDaemonConnection()
   const updater = useAppUpdater()
+  const { sidebarVisible, railVisible, toggleSidebar, toggleRail } = usePanelVisibility()
 
   const [draft, setDraft] = useState('')
   const [relayUrl] = useState(
@@ -160,7 +158,6 @@ function AppInner() {
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
-  const [selectedCollaborationMode, setSelectedCollaborationMode] = useState<string | null>(null)
   const [persistedComposerSelections, setPersistedComposerSelections] =
     useState<PersistedComposerSelections>(() => readPersistedComposerSelections())
   const [isAddingProject, setIsAddingProject] = useState(false)
@@ -240,7 +237,6 @@ function AppInner() {
       setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
-      setSelectedCollaborationMode(null)
       selectionSeedRef.current = null
       return
     }
@@ -271,7 +267,6 @@ function AppInner() {
         nextProvider,
       ) ?? 'medium',
     )
-    setSelectedCollaborationMode(defaultCollaborationModeId(selectedThread))
   }, [persistedComposerSelections, selectedThread, selectedWorkspace])
 
   useEffect(() => {
@@ -477,11 +472,9 @@ function AppInner() {
     async ({
       modelId,
       effort,
-      collaborationModeId,
     }: {
       modelId: string | null
       effort: string | null
-      collaborationModeId: string | null
     }) => {
       if (!api || !selectedWorkspace || !selectedThreadId) return
       const requestId = ++threadSettingsRequestRef.current
@@ -492,7 +485,6 @@ function AppInner() {
           provider: selectedThread?.provider ?? selectedProvider,
           model_id: modelId,
           reasoning_effort: effort,
-          collaboration_mode_id: collaborationModeId,
         })
         if (requestId !== threadSettingsRequestRef.current) return
         applyThreadHandle(handle)
@@ -518,12 +510,11 @@ function AppInner() {
           : defaultReasoningEffort(selectedThread, selectedWorkspace, modelId, provider)
       setSelectedEffort(nextEffort)
       rememberComposerSelection(provider, { modelId, effort: nextEffort })
-      void persistThreadSettings({ modelId, effort: nextEffort, collaborationModeId: selectedCollaborationMode })
+      void persistThreadSettings({ modelId, effort: nextEffort })
     },
     [
       persistThreadSettings,
       rememberComposerSelection,
-      selectedCollaborationMode,
       selectedEffort,
       selectedProvider,
       selectedThread,
@@ -536,24 +527,15 @@ function AppInner() {
       const provider = selectedThread?.provider ?? selectedProvider
       setSelectedEffort(effort)
       rememberComposerSelection(provider, { modelId: selectedModel, effort })
-      void persistThreadSettings({ modelId: selectedModel, effort, collaborationModeId: selectedCollaborationMode })
+      void persistThreadSettings({ modelId: selectedModel, effort })
     },
     [
       persistThreadSettings,
       rememberComposerSelection,
-      selectedCollaborationMode,
       selectedModel,
       selectedProvider,
       selectedThread,
     ],
-  )
-
-  const handleCollaborationModeChange = useCallback(
-    (modeId: string | null) => {
-      setSelectedCollaborationMode(modeId)
-      void persistThreadSettings({ modelId: selectedModel, effort: selectedEffort, collaborationModeId: modeId })
-    },
-    [persistThreadSettings, selectedEffort, selectedModel],
   )
 
   const handleProviderChange = useCallback(
@@ -581,7 +563,6 @@ function AppInner() {
           provider,
         ) ?? 'medium',
       )
-      setSelectedCollaborationMode(null)
     },
     [persistedComposerSelections, selectedThread, selectedWorkspace],
   )
@@ -639,7 +620,6 @@ function AppInner() {
           workspace_id: selectedWorkspace.id,
           provider: activeProvider,
           model_id: selectedModel,
-          collaboration_mode_id: selectedCollaborationMode,
           approval_policy: 'on-request',
         })
         activeThreadId = handle.thread.id
@@ -660,7 +640,6 @@ function AppInner() {
         provider: activeProvider,
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
-        collaboration_mode_id: selectedCollaborationMode,
         approval_policy: 'on-request',
       })
       setActionError(null)
@@ -766,7 +745,6 @@ function AppInner() {
     attachments,
     selectedModel,
     selectedEffort,
-    selectedCollaborationMode,
   ])
 
   const handlePickImages = useCallback(
@@ -937,6 +915,57 @@ function AppInner() {
     [api, applyThreadHandle, setActionError, toast],
   )
 
+  const handleTogglePinThread = useCallback(
+    async (workspaceId: string, threadId: string, pinned: boolean) => {
+      if (!api) throw new Error('FalconDeck is still connecting')
+      try {
+        const handle = await api.updateThread({
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          pinned,
+        })
+        applyThreadHandle(handle)
+        setActionError(null)
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Failed to update pin'
+        setActionError(msg)
+        toast({ variant: 'danger', title: 'Failed to update pin', description: msg })
+      }
+    },
+    [api, applyThreadHandle, setActionError, toast],
+  )
+
+  const handleMarkThreadRead = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      if (!api) return
+      const thread = snapshot?.threads.find(
+        (entry) => entry.workspace_id === workspaceId && entry.id === threadId,
+      )
+      const readSeq = thread?.attention.last_agent_activity_seq ?? 0
+      try {
+        const updated = await api.markThreadRead({
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          read_seq: readSeq,
+        })
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                threads: current.threads.map((entry) =>
+                  entry.id === updated.id ? updated : entry,
+                ),
+              }
+            : current,
+        )
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Failed to mark thread as read'
+        setActionError(msg)
+      }
+    },
+    [api, setActionError, setSnapshot, snapshot?.threads],
+  )
+
   // Memoized derived values
   const isThreadDetailPending = Boolean(
     selectedThreadId &&
@@ -962,18 +991,6 @@ function AppInner() {
   const models = useMemo(
     () => workspaceModels(selectedWorkspace, activeProvider),
     [activeProvider, selectedWorkspace],
-  )
-  const collaborationModes = useMemo(
-    () => workspaceCollaborationModes(selectedWorkspace, activeProvider),
-    [activeProvider, selectedWorkspace],
-  )
-  const showPlanModeToggle = useMemo(
-    () => supportsPlanMode(selectedWorkspace, activeProvider),
-    [activeProvider, selectedWorkspace],
-  )
-  const planModeEnabled = useMemo(
-    () => isPlanModeEnabled(selectedCollaborationMode, selectedWorkspace, activeProvider),
-    [activeProvider, selectedCollaborationMode, selectedWorkspace],
   )
   const sendBlockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
   const isComposerDisabled = isSending || workspaceComposerDisabled(selectedWorkspace)
@@ -1021,6 +1038,8 @@ function AppInner() {
             onNewThread={handleNewThread}
             onArchiveThread={handleArchiveThread}
             onRenameThread={handleRenameThread}
+            onTogglePinThread={handleTogglePinThread}
+            onMarkThreadRead={handleMarkThreadRead}
             onAddProject={handleAddProject}
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
@@ -1069,7 +1088,6 @@ function AppInner() {
               isThreadDetailPending={isThreadDetailPending}
               interactiveRequests={interactiveRequests}
               onStartPairing={handleStartPairingCallback}
-              onRefreshRemoteStatus={handleRefreshRemoteStatus}
               onInteractiveResponse={handleInteractiveResponseCallback}
               promptInputProps={{
                 value: draft,
@@ -1089,18 +1107,17 @@ function AppInner() {
                 reasoningOptions: currentReasoningOptions,
                 selectedEffort,
                 onEffortChange: handleEffortChange,
-                collaborationModes,
-                selectedCollaborationModeId: selectedCollaborationMode,
-                onCollaborationModeChange: handleCollaborationModeChange,
-                showPlanModeToggle,
-                planModeEnabled,
-                onPlanModeChange: (enabled) =>
-                  handleCollaborationModeChange(
-                    togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, activeProvider),
-                  ),
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
               }}
+              headerControls={
+                <PanelToggles
+                  sidebarVisible={sidebarVisible}
+                  railVisible={railVisible}
+                  onToggleSidebar={toggleSidebar}
+                  onToggleRail={toggleRail}
+                />
+              }
             />
           )
         }
@@ -1109,6 +1126,8 @@ function AppInner() {
             ? undefined
             : <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
         }
+        sidebarVisible={sidebarVisible}
+        railVisible={railVisible}
       />
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
     </>

@@ -2,10 +2,10 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use falcondeck_core::{
-    AgentProvider, CollaborationModeSummary, ConversationItem, ImageInput, InteractiveRequest,
-    InteractiveRequestKind, SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus,
-    ThreadSummary, ToolActivityKind, ToolHistoryMode, TurnInputItem, UpdateThreadRequest,
-    WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary,
+    AgentProvider, ConversationItem, ImageInput, InteractiveRequest, InteractiveRequestKind,
+    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary,
+    ToolActivityKind, ToolHistoryMode, TurnInputItem, UpdateThreadRequest, WorkspaceStatus,
+    WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
 use serde_json::json;
@@ -15,9 +15,8 @@ use tokio::time::{Duration as TokioDuration, sleep};
 
 use super::{
     AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
-    claude_prompt_from_inputs, codex_inputs, codex_inputs_with_plan_mode_shim,
-    collaboration_mode_payload, conversation_helpers::tool_display_metadata, encode_base64,
-    notification_timestamp, plan_step_status, should_surface_tool_item, should_use_plan_mode_shim,
+    claude_prompt_from_inputs, codex_inputs, conversation_helpers::tool_display_metadata,
+    encode_base64, notification_timestamp, plan_step_status, should_surface_tool_item,
     workspace_status_after_account_update,
 };
 
@@ -27,111 +26,6 @@ fn filters_internal_codex_item_kinds_from_tool_timeline() {
     assert!(!should_surface_tool_item("agentMessage"));
     assert!(!should_surface_tool_item("reasoning"));
     assert!(should_surface_tool_item("commandExecution"));
-}
-
-#[test]
-fn builds_structured_collaboration_mode_payload() {
-    let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), true);
-    assert_eq!(
-        payload,
-        json!({
-            "mode": "plan",
-            "settings": {
-                "model": "gpt-5.4",
-                "reasoning_effort": "high"
-            }
-        })
-    );
-}
-
-#[test]
-fn skips_structured_collaboration_mode_payload_for_non_native_plan_mode() {
-    let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), false);
-    assert_eq!(payload, serde_json::Value::Null);
-}
-
-#[test]
-fn injects_plan_mode_prompt_shim_before_user_inputs() {
-    let payload = codex_inputs_with_plan_mode_shim(
-        &[TurnInputItem::Text {
-            id: None,
-            text: "Inspect the repo".to_string(),
-        }],
-        &[],
-        true,
-    );
-    assert_eq!(payload.len(), 2);
-    assert_eq!(payload[0]["type"], "text");
-    assert!(
-        payload[0]["text"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Enter plan mode for this turn")
-    );
-    assert_eq!(payload[1]["text"], "Inspect the repo");
-}
-
-#[test]
-fn only_uses_plan_mode_shim_for_non_native_plan_mode_workspaces() {
-    let workspace = WorkspaceSummary {
-        id: "workspace-1".to_string(),
-        path: "/tmp/falcondeck".to_string(),
-        status: WorkspaceStatus::Ready,
-        agents: vec![WorkspaceAgentSummary {
-            provider: AgentProvider::Codex,
-            account: falcondeck_core::AccountSummary {
-                status: falcondeck_core::AccountStatus::Ready,
-                label: "ready".to_string(),
-            },
-            models: Vec::new(),
-            collaboration_modes: vec![CollaborationModeSummary {
-                id: "plan".to_string(),
-                label: "Plan".to_string(),
-                mode: Some("plan".to_string()),
-                model_id: None,
-                reasoning_effort: Some("medium".to_string()),
-                is_native: false,
-            }],
-            skills: Vec::new(),
-            supports_plan_mode: true,
-            supports_native_plan_mode: false,
-            capabilities: falcondeck_core::AgentCapabilitySummary {
-                supports_review: true,
-            },
-        }],
-        skills: Vec::new(),
-        default_provider: AgentProvider::Codex,
-        models: Vec::new(),
-        collaboration_modes: vec![CollaborationModeSummary {
-            id: "plan".to_string(),
-            label: "Plan".to_string(),
-            mode: Some("plan".to_string()),
-            model_id: None,
-            reasoning_effort: Some("medium".to_string()),
-            is_native: false,
-        }],
-        supports_plan_mode: true,
-        supports_native_plan_mode: false,
-        account: falcondeck_core::AccountSummary {
-            status: falcondeck_core::AccountStatus::Ready,
-            label: "ready".to_string(),
-        },
-        current_thread_id: None,
-        connected_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_error: None,
-    };
-
-    assert!(should_use_plan_mode_shim(
-        &workspace,
-        &AgentProvider::Codex,
-        Some("plan")
-    ));
-    assert!(!should_use_plan_mode_shim(
-        &workspace,
-        &AgentProvider::Codex,
-        None
-    ));
 }
 
 #[test]
@@ -303,7 +197,7 @@ fn merging_claude_text_ignores_repeated_final_result_echo() {
     assert_eq!(merged, "First part.Second part.");
     // Genuinely new text still appends.
     let appended = super::merge_claude_assistant_text("First part.", "Second part.");
-    assert_eq!(appended, "First part.Second part.");
+    assert_eq!(appended, "First part.\n\nSecond part.");
 }
 
 #[test]
@@ -322,7 +216,7 @@ fn extracts_nested_claude_tool_use_and_result_events() {
         })),
         Some(super::ClaudeToolEvent {
             id: "toolu_123".to_string(),
-            title: Some("Glob".to_string()),
+            title: Some("Find files".to_string()),
             tool_kind: Some("Glob".to_string()),
             status: "running".to_string(),
             output: None
@@ -382,6 +276,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 default_provider: Some(AgentProvider::Codex),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             },
             super::PersistedWorkspaceState {
@@ -391,6 +286,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 default_provider: Some(AgentProvider::Codex),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                 thread_states: Vec::new(),
             },
         ]
@@ -418,6 +314,7 @@ fn persisted_state_reads_workspace_thread_selection() {
             default_provider: Some(AgentProvider::Codex),
             last_error: None,
             archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
             thread_states: Vec::new(),
         }]
     );
@@ -442,6 +339,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         agent: ThreadAgentParams::default(),
         attention: ThreadAttention::default(),
         is_archived: false,
+        is_pinned: false,
     };
 
     let new_thread = super::ManagedThread::new(summary.clone());
@@ -516,8 +414,6 @@ async fn update_thread_title_marks_thread_as_manual() {
                 default_provider: AgentProvider::Codex,
                 models: Vec::new(),
                 collaboration_modes: Vec::new(),
-                supports_plan_mode: true,
-                supports_native_plan_mode: true,
                 account: falcondeck_core::AccountSummary::default(),
                 current_thread_id: Some(thread_id.clone()),
                 connected_at: Utc::now(),
@@ -545,6 +441,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     agent: ThreadAgentParams::default(),
                     attention: ThreadAttention::default(),
                     is_archived: false,
+                    is_pinned: false,
                 }),
             )]
             .into_iter()
@@ -560,7 +457,7 @@ async fn update_thread_title_marks_thread_as_manual() {
             provider: None,
             model_id: None,
             reasoning_effort: None,
-            collaboration_mode_id: None,
+            pinned: None,
         })
         .await
         .unwrap();
@@ -574,6 +471,55 @@ async fn update_thread_title_marks_thread_as_manual() {
     assert!(thread.manual_title);
     assert!(thread.ai_title_generated);
     assert_eq!(thread.summary.title, "Session renaming flow");
+    drop(workspaces);
+
+    // A title-only update must not clear previously selected agent settings.
+    app.with_thread_mut(&workspace_id, &thread_id, |thread| {
+        thread.agent.model_id = Some("gpt-5.4".to_string());
+        thread.agent.reasoning_effort = Some("high".to_string());
+    })
+    .await
+    .unwrap();
+    app.update_thread(UpdateThreadRequest {
+        workspace_id: workspace_id.clone(),
+        thread_id: thread_id.clone(),
+        title: Some("Renamed again".to_string()),
+        provider: None,
+        model_id: None,
+        reasoning_effort: None,
+        pinned: None,
+    })
+    .await
+    .unwrap();
+    let handle = app
+        .update_thread(UpdateThreadRequest {
+            workspace_id: workspace_id.clone(),
+            thread_id: thread_id.clone(),
+            title: None,
+            provider: None,
+            model_id: None,
+            reasoning_effort: None,
+            pinned: Some(true),
+        })
+        .await
+        .unwrap();
+    assert!(handle.thread.is_pinned);
+    assert_eq!(handle.thread.agent.model_id.as_deref(), Some("gpt-5.4"));
+    assert_eq!(handle.thread.agent.reasoning_effort.as_deref(), Some("high"));
+
+    // An explicit null clears the setting; an absent field leaves it alone.
+    let request: UpdateThreadRequest = serde_json::from_value(json!({
+        "workspace_id": workspace_id,
+        "thread_id": thread_id,
+        "model_id": null,
+    }))
+    .unwrap();
+    assert_eq!(request.model_id, Some(None));
+    assert_eq!(request.reasoning_effort, None);
+    let handle = app.update_thread(request).await.unwrap();
+    assert_eq!(handle.thread.agent.model_id, None);
+    assert_eq!(handle.thread.agent.reasoning_effort.as_deref(), Some("high"));
+    assert!(handle.thread.is_pinned);
 }
 
 #[test]
@@ -927,6 +873,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
             default_provider: Some(AgentProvider::Claude),
             last_error: Some("Previous reconnect failed".to_string()),
             archived_thread_ids: vec!["thread-1".to_string()],
+            pinned_thread_ids: Vec::new(),
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(thread_updated_at),
@@ -1034,6 +981,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 default_provider: Some(AgentProvider::Codex),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-a".to_string(),
                     updated_at: None,
@@ -1058,6 +1006,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 default_provider: Some(AgentProvider::Claude),
                 last_error: Some("Still disconnected".to_string()),
                 archived_thread_ids: Vec::new(),
+                pinned_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-b".to_string(),
                     updated_at: None,
@@ -1097,6 +1046,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
             ..ThreadAttention::default()
         },
         is_archived: false,
+        is_pinned: false,
     };
     let live_workspace = WorkspaceSummary {
         id: live_workspace_id.clone(),
@@ -1107,8 +1057,6 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         default_provider: AgentProvider::Codex,
         models: Vec::new(),
         collaboration_modes: Vec::new(),
-        supports_plan_mode: true,
-        supports_native_plan_mode: true,
         account: falcondeck_core::AccountSummary::default(),
         current_thread_id: Some("thread-a".to_string()),
         connected_at: Utc::now(),
@@ -1199,6 +1147,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         agent: ThreadAgentParams::default(),
         attention: ThreadAttention::default(),
         is_archived: false,
+        is_pinned: false,
     };
     let workspace = WorkspaceSummary {
         id: workspace_id.clone(),
@@ -1209,8 +1158,6 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         default_provider: AgentProvider::Codex,
         models: Vec::new(),
         collaboration_modes: Vec::new(),
-        supports_plan_mode: true,
-        supports_native_plan_mode: true,
         account: falcondeck_core::AccountSummary::default(),
         current_thread_id: Some("thread-1".to_string()),
         connected_at: Utc::now(),
@@ -1580,8 +1527,6 @@ async fn insert_claude_workspace_with_session(
                 default_provider: AgentProvider::Claude,
                 models: Vec::new(),
                 collaboration_modes: Vec::new(),
-                supports_plan_mode: true,
-                supports_native_plan_mode: true,
                 account: falcondeck_core::AccountSummary::default(),
                 current_thread_id: Some(thread_id.to_string()),
                 connected_at: Utc::now(),
@@ -1609,6 +1554,7 @@ async fn insert_claude_workspace_with_session(
                     agent: ThreadAgentParams::default(),
                     attention: ThreadAttention::default(),
                     is_archived: false,
+                    is_pinned: false,
                 }),
             )]
             .into_iter()
@@ -2024,6 +1970,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         agent: ThreadAgentParams::default(),
         attention: ThreadAttention::default(),
         is_archived: false,
+        is_pinned: false,
     };
     let archived_thread = ThreadSummary {
         id: "thread-archived".to_string(),
@@ -2042,6 +1989,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         agent: ThreadAgentParams::default(),
         attention: ThreadAttention::default(),
         is_archived: true,
+        is_pinned: false,
     };
 
     app.inner.workspaces.lock().await.insert(
@@ -2056,8 +2004,6 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
                 default_provider: AgentProvider::Codex,
                 models: Vec::new(),
                 collaboration_modes: Vec::new(),
-                supports_plan_mode: true,
-                supports_native_plan_mode: true,
                 account: falcondeck_core::AccountSummary::default(),
                 current_thread_id: Some("thread-archived".to_string()),
                 connected_at: Utc::now(),

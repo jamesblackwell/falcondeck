@@ -77,8 +77,6 @@ export type WorkspaceAgentSummary = {
   models: ModelSummary[]
   collaboration_modes: CollaborationModeSummary[]
   skills?: SkillSummary[]
-  supports_plan_mode?: boolean
-  supports_native_plan_mode?: boolean
   capabilities?: AgentCapabilitySummary
 }
 
@@ -159,8 +157,6 @@ export type WorkspaceSummary = {
   default_provider?: AgentProvider
   models: ModelSummary[]
   collaboration_modes: CollaborationModeSummary[]
-  supports_plan_mode?: boolean
-  supports_native_plan_mode?: boolean
   account: AccountSummary
   current_thread_id: string | null
   connected_at: string
@@ -205,6 +201,7 @@ export type ThreadSummary = {
   agent: ThreadAgentParams
   attention: ThreadAttention
   is_archived: boolean
+  is_pinned: boolean
 }
 
 export type InteractiveRequestKind = 'approval' | 'question'
@@ -412,7 +409,7 @@ export type UpdateThreadPayload = {
   provider?: AgentProvider | null
   model_id?: string | null
   reasoning_effort?: string | null
-  collaboration_mode_id?: string | null
+  pinned?: boolean
 }
 
 export type MarkThreadReadPayload = {
