@@ -126,10 +126,13 @@ pub(super) fn parse_threads(
                             &["approvalPolicy", "approval_policy"],
                         ),
                         service_tier: extract_string(entry, &["serviceTier", "service_tier"]),
+                        permission_mode: None,
+                        sandbox_mode: None,
                     },
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    goal: None,
                 },
                 session_path: extract_string(entry, &["path"]),
             })

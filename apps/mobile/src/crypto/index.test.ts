@@ -9,7 +9,6 @@ import {
   base64ToBytes,
   encryptJson,
   decryptJson,
-  bootstrapSessionCrypto,
 } from './index'
 
 describe('crypto re-exports from client-core', () => {

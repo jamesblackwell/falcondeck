@@ -2,8 +2,8 @@ use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
-    ConversationItem, ImageInput, ThreadDetail, ThreadDetailMode, ThreadDetailRequest,
-    TurnInputItem,
+    ConversationItem, ImageInput, SetThreadGoalRequest, ThreadDetail, ThreadDetailMode,
+    ThreadDetailRequest, ThreadGoal, TurnInputItem,
 };
 use uuid::Uuid;
 
@@ -231,6 +231,7 @@ pub(super) async fn connect_workspace_internal(
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                goal: None,
             },
             items: Vec::new(),
         });
@@ -444,6 +445,7 @@ pub(super) async fn start_thread(
                     json!({
                         "cwd": workspace_path,
                         "model": model_id,
+                        "sandbox": request.sandbox_mode,
                         "approvalPolicy": approval_policy
                     }),
                 )
@@ -488,10 +490,13 @@ pub(super) async fn start_thread(
             collaboration_mode_id: None,
             approval_policy: Some(approval_policy),
             service_tier: None,
+            permission_mode: request.permission_mode,
+            sandbox_mode: request.sandbox_mode,
         },
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        goal: None,
     };
     workspace.summary.current_thread_id = Some(thread_id.clone());
     workspace.summary.default_provider = provider;
@@ -892,6 +897,7 @@ pub(super) async fn send_turn(
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    goal: None,
                 })
             });
         managed.summary.provider = provider.clone();
@@ -911,6 +917,16 @@ pub(super) async fn send_turn(
             .summary
             .agent
             .service_tier
+            .clone());
+        managed.summary.agent.permission_mode = request.permission_mode.clone().or(managed
+            .summary
+            .agent
+            .permission_mode
+            .clone());
+        managed.summary.agent.sandbox_mode = request.sandbox_mode.clone().or(managed
+            .summary
+            .agent
+            .sandbox_mode
             .clone());
         let selected_skills = resolve_selected_skills(
             &workspace.summary.skills,
@@ -973,6 +989,7 @@ pub(super) async fn send_turn(
                         "cwd": workspace_path,
                         "model": request.model_id,
                         "effort": request.reasoning_effort,
+                        "sandboxPolicy": sandbox_policy_payload(thread.agent.sandbox_mode.as_deref()),
                         "approvalPolicy": approval_policy,
                         "serviceTier": request.service_tier
                     }),
@@ -1005,6 +1022,7 @@ pub(super) async fn send_turn(
                     &images,
                     thread.agent.model_id.as_deref(),
                     thread.agent.reasoning_effort.as_deref(),
+                    thread.agent.permission_mode.as_deref(),
                     app.local_base_url().as_deref(),
                     &settings_dir,
                 )
@@ -1102,11 +1120,20 @@ pub(super) async fn update_thread(
         if let Some(pinned) = request.pinned {
             thread.summary.is_pinned = pinned;
         }
+        if let Some(permission_mode) = request.permission_mode.clone() {
+            thread.summary.agent.permission_mode =
+                permission_mode.filter(|mode| !mode.eq_ignore_ascii_case("default"));
+        }
+        if let Some(sandbox_mode) = request.sandbox_mode.clone() {
+            thread.summary.agent.sandbox_mode = sandbox_mode;
+        }
         // Pin toggles must not bump recency: updated_at drives the sidebar
         // sort, and unpinning a stale thread should return it to its place.
         let is_pin_only_update = request.title.is_none()
             && request.model_id.is_none()
             && request.reasoning_effort.is_none()
+            && request.permission_mode.is_none()
+            && request.sandbox_mode.is_none()
             && request.pinned.is_some();
         if !is_pin_only_update {
             thread.summary.updated_at = now;
@@ -1133,6 +1160,174 @@ pub(super) async fn update_thread(
         workspace: workspace_summary,
         thread,
     })
+}
+
+/// Maps the simple sandbox mode strings stored on threads to the tagged
+/// `SandboxPolicy` object the Codex `turn/start` request expects. `None`
+/// leaves the provider on its config default.
+pub(super) fn sandbox_policy_payload(mode: Option<&str>) -> Value {
+    match mode.map(str::trim) {
+        Some("read-only") => json!({ "type": "readOnly" }),
+        Some("workspace-write") => json!({ "type": "workspaceWrite" }),
+        Some("danger-full-access") => json!({ "type": "dangerFullAccess" }),
+        _ => Value::Null,
+    }
+}
+
+pub(super) async fn set_thread_goal(
+    app: &AppState,
+    request: SetThreadGoalRequest,
+) -> Result<ThreadSummary, DaemonError> {
+    let objective = request
+        .objective
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let provider = app
+        .thread_provider(&request.workspace_id, &request.thread_id)
+        .await?;
+
+    match provider {
+        AgentProvider::Codex => {
+            let session = app.session_for(&request.workspace_id).await?;
+            session
+                .send_request(
+                    "thread/goal/set",
+                    json!({
+                        "threadId": request.thread_id,
+                        "objective": objective,
+                        "status": request.status,
+                        "tokenBudget": request.token_budget,
+                    }),
+                )
+                .await?;
+        }
+        AgentProvider::Claude => {
+            // Claude's goal support is the `/goal` slash command; drive it
+            // through a normal turn so the session-scoped Stop hook engages.
+            let Some(objective) = objective.clone() else {
+                return Err(DaemonError::BadRequest(
+                    "an objective is required to set a goal".to_string(),
+                ));
+            };
+            send_turn(
+                app,
+                falcondeck_core::SendTurnRequest {
+                    workspace_id: request.workspace_id.clone(),
+                    thread_id: request.thread_id.clone(),
+                    inputs: vec![TurnInputItem::Text {
+                        id: None,
+                        text: format!("/goal {objective}"),
+                    }],
+                    selected_skills: Vec::new(),
+                    provider: Some(AgentProvider::Claude),
+                    model_id: None,
+                    reasoning_effort: None,
+                    approval_policy: None,
+                    service_tier: None,
+                    permission_mode: None,
+                    sandbox_mode: None,
+                },
+            )
+            .await?;
+        }
+    }
+
+    // Reflect the goal locally right away; Codex refines it via
+    // thread/goal/updated notifications as usage accrues.
+    app.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
+        match (&objective, &mut thread.goal) {
+            (Some(objective), _) => {
+                thread.goal = Some(ThreadGoal {
+                    objective: objective.clone(),
+                    status: request
+                        .status
+                        .clone()
+                        .unwrap_or_else(|| "active".to_string()),
+                    token_budget: request.token_budget,
+                    tokens_used: None,
+                    time_used_seconds: None,
+                });
+            }
+            (None, Some(goal)) => {
+                // Status-only update (pause/resume) keeps the objective.
+                if let Some(status) = request.status.clone() {
+                    goal.status = status;
+                }
+                if request.token_budget.is_some() {
+                    goal.token_budget = request.token_budget;
+                }
+            }
+            (None, None) => {}
+        }
+    })
+    .await?;
+    let thread = app
+        .thread_summary(&request.workspace_id, &request.thread_id)
+        .await?;
+    app.emit(
+        Some(request.workspace_id.clone()),
+        Some(request.thread_id.clone()),
+        UnifiedEvent::ThreadUpdated {
+            thread: thread.clone(),
+        },
+    );
+    let _ = app.persist_local_state().await;
+    Ok(thread)
+}
+
+pub(super) async fn clear_thread_goal(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<ThreadSummary, DaemonError> {
+    let provider = app.thread_provider(workspace_id, thread_id).await?;
+    match provider {
+        AgentProvider::Codex => {
+            let session = app.session_for(workspace_id).await?;
+            session
+                .send_request("thread/goal/clear", json!({ "threadId": thread_id }))
+                .await?;
+        }
+        AgentProvider::Claude => {
+            send_turn(
+                app,
+                falcondeck_core::SendTurnRequest {
+                    workspace_id: workspace_id.to_string(),
+                    thread_id: thread_id.to_string(),
+                    inputs: vec![TurnInputItem::Text {
+                        id: None,
+                        text: "/goal clear".to_string(),
+                    }],
+                    selected_skills: Vec::new(),
+                    provider: Some(AgentProvider::Claude),
+                    model_id: None,
+                    reasoning_effort: None,
+                    approval_policy: None,
+                    service_tier: None,
+                    permission_mode: None,
+                    sandbox_mode: None,
+                },
+            )
+            .await?;
+        }
+    }
+
+    app.with_thread_mut(workspace_id, thread_id, |thread| {
+        thread.goal = None;
+    })
+    .await?;
+    let thread = app.thread_summary(workspace_id, thread_id).await?;
+    app.emit(
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
+        UnifiedEvent::ThreadUpdated {
+            thread: thread.clone(),
+        },
+    );
+    let _ = app.persist_local_state().await;
+    Ok(thread)
 }
 
 pub(super) async fn start_review(

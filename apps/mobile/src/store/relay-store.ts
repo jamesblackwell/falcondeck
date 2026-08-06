@@ -38,7 +38,6 @@ import {
   type MachinePresence,
   type RelayClientMessage,
   type RelayServerMessage,
-  type RelayWebSocketTicketResponse,
   type RelayUpdate,
 } from '@falcondeck/client-core'
 

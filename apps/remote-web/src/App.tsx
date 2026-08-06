@@ -138,6 +138,8 @@ export default function App() {
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
+  const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null)
+  const [selectedSandboxMode, setSelectedSandboxMode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
@@ -1340,6 +1342,8 @@ export default function App() {
             provider: selectedProvider,
             model_id: selectedModel,
             approval_policy: 'on-request',
+            permission_mode: selectedPermissionMode,
+            sandbox_mode: selectedSandboxMode,
           }),
         )
         activeThreadId = handle.thread.id
@@ -1358,6 +1362,8 @@ export default function App() {
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         approval_policy: 'on-request',
+        permission_mode: selectedPermissionMode,
+        sandbox_mode: selectedSandboxMode,
       }, { awaitCompletion: false })
       setError(null)
     } catch (e) {
@@ -1402,6 +1408,8 @@ export default function App() {
       setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
+      setSelectedPermissionMode(null)
+      setSelectedSandboxMode(null)
       selectionSeedRef.current = null
       return
     }
@@ -1411,6 +1419,8 @@ export default function App() {
 
     const nextProvider = providerForThread(selectedThread, selectedWorkspace)
     setSelectedProvider(nextProvider)
+    setSelectedPermissionMode(selectedThread?.agent.permission_mode ?? null)
+    setSelectedSandboxMode(selectedThread?.agent.sandbox_mode ?? null)
     const providerModels = workspaceModels(selectedWorkspace, nextProvider)
     const fallbackModelId =
       providerModels.find((m) => m.is_default)?.id ?? providerModels[0]?.id ?? null
@@ -1508,6 +1518,36 @@ export default function App() {
       }
     },
     [applyThreadHandle],
+  )
+
+  const handlePermissionModeChange = useCallback(
+    (mode: string | null) => {
+      setSelectedPermissionMode(mode)
+      if (!selectedWorkspace || !selectedThreadId) return
+      void submitQueuedAction<ThreadHandle>('thread.update', {
+        workspace_id: selectedWorkspace.id,
+        thread_id: selectedThreadId,
+        permission_mode: mode,
+      })
+        .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
+        .catch((e) => setError(e instanceof Error ? e.message : 'Remote action failed'))
+    },
+    [applyThreadHandle, selectedThreadId, selectedWorkspace],
+  )
+
+  const handleSandboxModeChange = useCallback(
+    (mode: string | null) => {
+      setSelectedSandboxMode(mode)
+      if (!selectedWorkspace || !selectedThreadId) return
+      void submitQueuedAction<ThreadHandle>('thread.update', {
+        workspace_id: selectedWorkspace.id,
+        thread_id: selectedThreadId,
+        sandbox_mode: mode,
+      })
+        .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
+        .catch((e) => setError(e instanceof Error ? e.message : 'Remote action failed'))
+    },
+    [applyThreadHandle, selectedThreadId, selectedWorkspace],
   )
 
   const handleUpdatePreferences = useCallback(
@@ -1948,6 +1988,10 @@ export default function App() {
               reasoningOptions={currentReasoningOptions}
               selectedEffort={selectedEffort}
               onEffortChange={handleEffortChange}
+              selectedPermissionMode={selectedPermissionMode}
+              onPermissionModeChange={handlePermissionModeChange}
+              selectedSandboxMode={selectedSandboxMode}
+              onSandboxModeChange={handleSandboxModeChange}
               disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
             />
           </div>

@@ -2,7 +2,7 @@ import React, { Fragment, forwardRef, useImperativeHandle } from 'react'
 
 import { View } from 'react-native'
 
-export type FlashListRef<T> = {
+export type FlashListRef<_T> = {
   scrollToOffset: (params: { offset: number; animated?: boolean }) => void
   scrollToEnd: (params?: { animated?: boolean }) => void
 }

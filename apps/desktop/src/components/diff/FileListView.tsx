@@ -8,6 +8,7 @@ import {
   GitBranch,
   LoaderCircle,
   RefreshCw,
+  ScanSearch,
 } from 'lucide-react'
 
 import type { GitFileStatus, GitStatusEntry } from '@falcondeck/client-core'
@@ -40,6 +41,8 @@ export type FileListViewProps = {
   error: string | null
   onRefresh: () => void
   onSelectFile: (entry: GitStatusEntry) => void
+  onStartReview?: (() => void) | null
+  isReviewPending?: boolean
 }
 
 export const FileListView = memo(function FileListView({
@@ -49,6 +52,8 @@ export const FileListView = memo(function FileListView({
   error,
   onRefresh,
   onSelectFile,
+  onStartReview = null,
+  isReviewPending = false,
 }: FileListViewProps) {
   return (
     <div className="flex h-full flex-col">
@@ -60,6 +65,24 @@ export const FileListView = memo(function FileListView({
             {branch}
           </div>
         ) : null}
+        <div className="ml-auto" />
+        {onStartReview && entries.length > 0 ? (
+          <button
+            type="button"
+            onClick={onStartReview}
+            disabled={isReviewPending}
+            title="Review uncommitted changes"
+            aria-label="Review uncommitted changes"
+            aria-busy={isReviewPending}
+            className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
+          >
+            {isReviewPending ? (
+              <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <ScanSearch aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={onRefresh}
@@ -67,7 +90,7 @@ export const FileListView = memo(function FileListView({
           title="Refresh changes"
           aria-label="Refresh changes"
           aria-busy={isLoading}
-          className="fd-focus ml-auto rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
+          className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
         >
           <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
         </button>

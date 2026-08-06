@@ -82,6 +82,7 @@ const demoThreads: ThreadSummary[] = [
     attention: makeAttention(10),
     is_archived: false,
     is_pinned: false,
+    goal: null,
   },
   {
     id: 'demo-thread-2',
@@ -100,6 +101,7 @@ const demoThreads: ThreadSummary[] = [
     attention: makeAttention(5),
     is_archived: false,
     is_pinned: false,
+    goal: null,
   },
 ]
 

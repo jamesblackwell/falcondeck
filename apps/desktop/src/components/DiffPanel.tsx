@@ -1,4 +1,5 @@
 import { memo, useState } from 'react'
+import { useToast } from '@falcondeck/ui'
 
 import type { createDaemonApiClient, GitFileStatus } from '@falcondeck/client-core'
 
@@ -11,9 +12,18 @@ export type DiffPanelProps = {
   api: ReturnType<typeof createDaemonApiClient> | null
   workspaceId: string | null
   refreshTrigger: number
+  /** Codex thread eligible to run a review over the working tree, if any. */
+  reviewThreadId?: string | null
 }
 
-export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrigger }: DiffPanelProps) {
+export const DiffPanel = memo(function DiffPanel({
+  api,
+  workspaceId,
+  refreshTrigger,
+  reviewThreadId = null,
+}: DiffPanelProps) {
+  const { toast } = useToast()
+  const [isReviewPending, setIsReviewPending] = useState(false)
   const [selection, setSelection] = useState<{
     workspaceId: string
     filePath: string
@@ -54,6 +64,34 @@ export const DiffPanel = memo(function DiffPanel({ api, workspaceId, refreshTrig
         isLoading={isLoading}
         error={error}
         onRefresh={() => void refresh()}
+        isReviewPending={isReviewPending}
+        onStartReview={
+          api && workspaceId && reviewThreadId
+            ? () => {
+                setIsReviewPending(true)
+                void api
+                  .startReview({
+                    workspace_id: workspaceId,
+                    thread_id: reviewThreadId,
+                    target: { type: 'uncommittedChanges' },
+                  })
+                  .then(() =>
+                    toast({
+                      title: 'Review started',
+                      description: 'Codex is reviewing the uncommitted changes in this thread.',
+                    }),
+                  )
+                  .catch((error: unknown) =>
+                    toast({
+                      variant: 'danger',
+                      title: 'Failed to start review',
+                      description: error instanceof Error ? error.message : undefined,
+                    }),
+                  )
+                  .finally(() => setIsReviewPending(false))
+              }
+            : null
+        }
         onSelectFile={(entry) =>
           setSelection(workspaceId ? { workspaceId, filePath: entry.path, status: entry.status } : null)
         }

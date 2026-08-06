@@ -141,6 +141,7 @@ impl ClaudeRuntime {
         images: &[ImageInput],
         model_id: Option<&str>,
         effort: Option<&str>,
+        permission_mode: Option<&str>,
         daemon_base_url: Option<&str>,
         settings_dir: &Path,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
@@ -180,6 +181,7 @@ impl ClaudeRuntime {
             .arg("--output-format")
             .arg("stream-json")
             .arg("--include-partial-messages")
+            .arg("--include-hook-events")
             .arg("--verbose")
             .current_dir(PathBuf::from(&self.workspace_path))
             .stdin(Stdio::piped())
@@ -201,6 +203,12 @@ impl ClaudeRuntime {
         }
         if let Some(effort) = effort {
             command.arg("--effort").arg(effort);
+        }
+        if let Some(permission_mode) = permission_mode
+            .map(str::trim)
+            .filter(|mode| !mode.is_empty() && !mode.eq_ignore_ascii_case("default"))
+        {
+            command.arg("--permission-mode").arg(permission_mode);
         }
         if let Some(settings_path) = daemon_base_url
             .filter(|_| claude_approvals_enabled())
@@ -1048,6 +1056,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        goal: None,
     };
 
     Some(HydratedClaudeThread { summary, items })

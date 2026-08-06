@@ -1,6 +1,6 @@
 import React from 'react'
 import { describe, it, expect, afterEach } from 'vitest'
-import { renderComponent, cleanup, renderPure, textOf } from '../../test/render'
+import { renderComponent, cleanup, renderPure } from '../../test/render'
 import { Text } from './Text'
 import { Button } from './Button'
 import { Badge } from './Badge'

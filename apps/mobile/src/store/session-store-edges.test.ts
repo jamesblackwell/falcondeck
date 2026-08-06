@@ -12,7 +12,6 @@ import {
   userMessage,
   toolCall,
   serviceMessage,
-  approval,
   threadDetail,
   snapshotEvent,
   conversationItemAddedEvent,
@@ -125,7 +124,7 @@ describe('session-store edge cases', () => {
         workspaces: [workspace({ id: 'w1' })],
         threads: [thread({ id: 't1', workspace_id: 'w1' })],
       })
-      const { applyDaemonEvent, selectThread, reconcileSelection } = useSessionStore.getState()
+      const { applyDaemonEvent, selectThread } = useSessionStore.getState()
       applyDaemonEvent(snapshotEvent(snap))
       selectThread('w1', 't1')
 

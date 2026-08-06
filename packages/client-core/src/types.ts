@@ -86,6 +86,16 @@ export type ThreadAgentParams = {
   collaboration_mode_id: string | null
   approval_policy: string | null
   service_tier: string | null
+  permission_mode?: string | null
+  sandbox_mode?: string | null
+}
+
+export type ThreadGoal = {
+  objective: string
+  status: string
+  token_budget?: number | null
+  tokens_used?: number | null
+  time_used_seconds?: number | null
 }
 
 export type ToolDetailsMode = 'auto' | 'expanded' | 'compact' | 'hide_read_only_details'
@@ -202,6 +212,7 @@ export type ThreadSummary = {
   attention: ThreadAttention
   is_archived: boolean
   is_pinned: boolean
+  goal: ThreadGoal | null
 }
 
 export type InteractiveRequestKind = 'approval' | 'question'
@@ -410,6 +421,27 @@ export type UpdateThreadPayload = {
   model_id?: string | null
   reasoning_effort?: string | null
   pinned?: boolean
+  permission_mode?: string | null
+  sandbox_mode?: string | null
+}
+
+export type ReviewTarget =
+  | { type: 'uncommittedChanges' }
+  | { type: 'baseBranch'; branch: string }
+  | { type: 'commit'; sha: string }
+
+export type StartReviewPayload = {
+  workspace_id: string
+  thread_id: string
+  target: ReviewTarget
+}
+
+export type SetThreadGoalPayload = {
+  workspace_id: string
+  thread_id: string
+  objective?: string | null
+  token_budget?: number | null
+  status?: string | null
 }
 
 export type MarkThreadReadPayload = {

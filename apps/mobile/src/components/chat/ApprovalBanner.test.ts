@@ -1,5 +1,4 @@
 import { describe, it, expect } from 'vitest'
-import type { ApprovalRequest } from '@falcondeck/client-core'
 import { approval } from '../../test/factories'
 
 // Test the ApprovalBanner's data contract — verify it accesses the

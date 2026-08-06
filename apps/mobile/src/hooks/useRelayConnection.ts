@@ -172,6 +172,9 @@ export function useRelayConnection() {
         snapshotRetryAttempt.current += 1
         snapshotRetryTimer.current = setTimeout(() => {
           snapshotRetryTimer.current = null
+          // Deliberate self-reference for the retry: the callback has no deps
+          // and all mutable state lives in refs, so the binding stays valid.
+          // eslint-disable-next-line react-hooks/immutability
           void requestSnapshot()
         }, delay)
       }

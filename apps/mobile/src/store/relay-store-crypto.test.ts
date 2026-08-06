@@ -2,7 +2,6 @@
  * Tests for relay-store crypto operations — _encryptJson, _decryptJson, _processBootstrap.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import nacl from 'tweetnacl'
 import {
   REMOTE_SESSION_STORAGE_VERSION,
   deriveIdentityKeyPair,
@@ -10,10 +9,9 @@ import {
   identityPublicKeyToBase64,
   publicKeyToBase64,
   secretKeyToBase64,
-  bytesToBase64,
   verifyPairingPublicKeyBundle,
 } from '@falcondeck/client-core'
-import type { PairingPublicKeyBundle, SessionKeyMaterial, RelayUpdate } from '@falcondeck/client-core'
+import type { PairingPublicKeyBundle, RelayUpdate } from '@falcondeck/client-core'
 import { useRelayStore } from './relay-store'
 import { __reset as resetSecureStore } from 'expo-secure-store'
 import { __resetAllStores as resetMMKV } from 'react-native-mmkv'

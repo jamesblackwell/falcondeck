@@ -11,8 +11,6 @@ import {
   snapshot,
   assistantMessage,
   userMessage,
-  toolCall,
-  serviceMessage,
   approval,
   threadDetail,
   snapshotEvent,

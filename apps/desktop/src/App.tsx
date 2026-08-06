@@ -15,10 +15,11 @@ import {
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type ThreadHandle,
+  type ThreadSummary,
   type TurnInputItem,
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
-import { NewThreadState } from '@falcondeck/chat-ui'
+import { GoalControl, NewThreadState } from '@falcondeck/chat-ui'
 import { ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
@@ -158,6 +159,8 @@ function AppInner() {
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
+  const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null)
+  const [selectedSandboxMode, setSelectedSandboxMode] = useState<string | null>(null)
   const [persistedComposerSelections, setPersistedComposerSelections] =
     useState<PersistedComposerSelections>(() => readPersistedComposerSelections())
   const [isAddingProject, setIsAddingProject] = useState(false)
@@ -237,6 +240,8 @@ function AppInner() {
       setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
+      setSelectedPermissionMode(null)
+      setSelectedSandboxMode(null)
       selectionSeedRef.current = null
       return
     }
@@ -267,6 +272,8 @@ function AppInner() {
         nextProvider,
       ) ?? 'medium',
     )
+    setSelectedPermissionMode(selectedThread?.agent.permission_mode ?? null)
+    setSelectedSandboxMode(selectedThread?.agent.sandbox_mode ?? null)
   }, [persistedComposerSelections, selectedThread, selectedWorkspace])
 
   useEffect(() => {
@@ -538,6 +545,93 @@ function AppInner() {
     ],
   )
 
+  const handlePermissionModeChange = useCallback(
+    (mode: string | null) => {
+      setSelectedPermissionMode(mode)
+      if (!api || !selectedWorkspace || !selectedThreadId) return
+      void api
+        .updateThread({
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          permission_mode: mode,
+        })
+        .then(applyThreadHandle)
+        .catch((error: unknown) => {
+          const msg = error instanceof Error ? error.message : 'Failed to update permission mode'
+          setActionError(msg)
+        })
+    },
+    [api, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
+  )
+
+  const handleSandboxModeChange = useCallback(
+    (mode: string | null) => {
+      setSelectedSandboxMode(mode)
+      if (!api || !selectedWorkspace || !selectedThreadId) return
+      void api
+        .updateThread({
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          sandbox_mode: mode,
+        })
+        .then(applyThreadHandle)
+        .catch((error: unknown) => {
+          const msg = error instanceof Error ? error.message : 'Failed to update sandbox mode'
+          setActionError(msg)
+        })
+    },
+    [api, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
+  )
+
+  const applyThreadSummary = useCallback(
+    (thread: ThreadSummary) => {
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              threads: current.threads.map((entry) => (entry.id === thread.id ? thread : entry)),
+            }
+          : current,
+      )
+    },
+    [setSnapshot],
+  )
+
+  const handleSetGoal = useCallback(
+    async (objective: string, tokenBudget: number | null) => {
+      if (!api || !selectedWorkspace || !selectedThreadId) {
+        throw new Error('Select a thread first')
+      }
+      const thread = await api.setThreadGoal({
+        workspace_id: selectedWorkspace.id,
+        thread_id: selectedThreadId,
+        objective,
+        token_budget: tokenBudget,
+      })
+      applyThreadSummary(thread)
+    },
+    [api, applyThreadSummary, selectedThreadId, selectedWorkspace],
+  )
+
+  const handleClearGoal = useCallback(async () => {
+    if (!api || !selectedWorkspace || !selectedThreadId) return
+    const thread = await api.clearThreadGoal(selectedWorkspace.id, selectedThreadId)
+    applyThreadSummary(thread)
+  }, [api, applyThreadSummary, selectedThreadId, selectedWorkspace])
+
+  const handleSetGoalStatus = useCallback(
+    async (status: 'active' | 'paused') => {
+      if (!api || !selectedWorkspace || !selectedThreadId) return
+      const thread = await api.setThreadGoal({
+        workspace_id: selectedWorkspace.id,
+        thread_id: selectedThreadId,
+        status,
+      })
+      applyThreadSummary(thread)
+    },
+    [api, applyThreadSummary, selectedThreadId, selectedWorkspace],
+  )
+
   const handleProviderChange = useCallback(
     (provider: AgentProvider) => {
       if (selectedThread) return
@@ -563,6 +657,8 @@ function AppInner() {
           provider,
         ) ?? 'medium',
       )
+      setSelectedPermissionMode(null)
+      setSelectedSandboxMode(null)
     },
     [persistedComposerSelections, selectedThread, selectedWorkspace],
   )
@@ -621,6 +717,8 @@ function AppInner() {
           provider: activeProvider,
           model_id: selectedModel,
           approval_policy: 'on-request',
+          permission_mode: selectedPermissionMode,
+          sandbox_mode: selectedSandboxMode,
         })
         activeThreadId = handle.thread.id
         setSelectedThreadId(activeThreadId)
@@ -641,6 +739,8 @@ function AppInner() {
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         approval_policy: 'on-request',
+        permission_mode: selectedPermissionMode,
+        sandbox_mode: selectedSandboxMode,
       })
       setActionError(null)
     } catch (error) {
@@ -1107,16 +1207,31 @@ function AppInner() {
                 reasoningOptions: currentReasoningOptions,
                 selectedEffort,
                 onEffortChange: handleEffortChange,
+                selectedPermissionMode,
+                onPermissionModeChange: handlePermissionModeChange,
+                selectedSandboxMode,
+                onSandboxModeChange: handleSandboxModeChange,
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
               }}
               headerControls={
-                <PanelToggles
+                <>
+                  {selectedThread ? (
+                    <GoalControl
+                      goal={selectedThread.goal}
+                      provider={activeProvider}
+                      onSetGoal={handleSetGoal}
+                      onClearGoal={handleClearGoal}
+                      onSetGoalStatus={handleSetGoalStatus}
+                    />
+                  ) : null}
+                  <PanelToggles
                   sidebarVisible={sidebarVisible}
                   railVisible={railVisible}
                   onToggleSidebar={toggleSidebar}
                   onToggleRail={toggleRail}
-                />
+                  />
+                </>
               }
             />
           )
@@ -1124,7 +1239,16 @@ function AppInner() {
         rail={
           isSettingsOpen
             ? undefined
-            : <DiffPanel api={api} workspaceId={selectedWorkspaceId} refreshTrigger={gitRefreshTrigger} />
+            : (
+                <DiffPanel
+                  api={api}
+                  workspaceId={selectedWorkspaceId}
+                  refreshTrigger={gitRefreshTrigger}
+                  reviewThreadId={
+                    selectedThread?.provider === 'codex' ? selectedThread.id : null
+                  }
+                />
+              )
         }
         sidebarVisible={sidebarVisible}
         railVisible={railVisible}

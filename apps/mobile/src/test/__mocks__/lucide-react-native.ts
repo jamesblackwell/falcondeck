@@ -1,6 +1,6 @@
 // Stub all lucide icons as simple span elements
-const createIcon = (name: string) => {
-  return function Icon(props: any) { return null }
+const createIcon = (_name: string) => {
+  return function Icon(_props: any) { return null }
 }
 
 export const AlertTriangle = createIcon('AlertTriangle')

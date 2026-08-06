@@ -28,6 +28,9 @@ export function useCollapsible(defaultOpen: boolean) {
 
   const onContentLayout = useCallback(
     (event: LayoutChangeEvent) => {
+      // Writing `.value` is how Reanimated shared values are updated; the rule
+      // reads it as mutating a hook argument.
+      // eslint-disable-next-line react-hooks/immutability
       contentHeight.value = event.nativeEvent.layout.height
     },
     [contentHeight],

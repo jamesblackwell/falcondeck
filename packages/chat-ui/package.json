@@ -11,7 +11,8 @@
     "@falcondeck/ui": "file:../ui",
     "lucide-react": "^0.577.0",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "@radix-ui/react-popover": "^1.1.15"
   },
   "peerDependencies": {
     "react": "^19.2.0",

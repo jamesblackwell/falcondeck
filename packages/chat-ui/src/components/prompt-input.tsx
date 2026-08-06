@@ -11,7 +11,13 @@ import type {
 import { activeSlashQuery, canonicalSkillAlias, providerSupportsSkill } from '@falcondeck/client-core'
 import { Button } from '@falcondeck/ui'
 
-import { ModelSelector, ProviderSelector, ReasoningSelector } from './model-selector'
+import {
+  ModelSelector,
+  PermissionModeSelector,
+  ProviderSelector,
+  ReasoningSelector,
+  SandboxSelector,
+} from './model-selector'
 import { attachmentLabel, canRenderAttachmentImage } from './attachment-preview'
 
 export type PromptInputProps = {
@@ -32,6 +38,10 @@ export type PromptInputProps = {
   reasoningOptions: string[]
   selectedEffort: string | null
   onEffortChange: (value: string) => void
+  selectedPermissionMode?: string | null
+  onPermissionModeChange?: (value: string | null) => void
+  selectedSandboxMode?: string | null
+  onSandboxModeChange?: (value: string | null) => void
   disabled?: boolean
   sendDisabled?: boolean
   compact?: boolean
@@ -58,6 +68,10 @@ export const PromptInput = memo(function PromptInput({
   reasoningOptions,
   selectedEffort,
   onEffortChange,
+  selectedPermissionMode = null,
+  onPermissionModeChange,
+  selectedSandboxMode = null,
+  onSandboxModeChange,
   disabled = false,
   sendDisabled = false,
   compact = false,
@@ -339,6 +353,20 @@ export const PromptInput = memo(function PromptInput({
                 onValueChange={onEffortChange}
                 disabled={disabled || reasoningOptions.length === 0}
               />
+              {selectedProvider === 'claude' && onPermissionModeChange ? (
+                <PermissionModeSelector
+                  value={selectedPermissionMode}
+                  onValueChange={onPermissionModeChange}
+                  disabled={disabled}
+                />
+              ) : null}
+              {selectedProvider === 'codex' && onSandboxModeChange ? (
+                <SandboxSelector
+                  value={selectedSandboxMode}
+                  onValueChange={onSandboxModeChange}
+                  disabled={disabled}
+                />
+              ) : null}
             </>
           ) : null}
 

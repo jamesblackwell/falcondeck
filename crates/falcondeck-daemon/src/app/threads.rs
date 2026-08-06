@@ -127,6 +127,7 @@ impl AppState {
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    goal: None,
                 })
             });
         let before = thread.summary.updated_at;

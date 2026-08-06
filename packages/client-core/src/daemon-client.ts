@@ -18,6 +18,8 @@ import type {
   ThreadSummary,
   TurnInputItem,
   UpdatePreferencesPayload,
+  SetThreadGoalPayload,
+  StartReviewPayload,
   UpdateThreadPayload,
   WorkspaceSummary,
 } from './types'
@@ -46,17 +48,19 @@ export type SendTurnPayload = {
   provider?: AgentProvider | null
   model_id?: string | null
   reasoning_effort?: string | null
-  collaboration_mode_id?: string | null
   approval_policy?: string | null
   service_tier?: string | null
+  permission_mode?: string | null
+  sandbox_mode?: string | null
 }
 
 export type StartThreadPayload = {
   workspace_id: string
   provider?: AgentProvider | null
   model_id?: string | null
-  collaboration_mode_id?: string | null
   approval_policy?: string | null
+  permission_mode?: string | null
+  sandbox_mode?: string | null
 }
 
 export function createDaemonApiClient(baseUrl: string) {
@@ -179,6 +183,31 @@ export function createDaemonApiClient(baseUrl: string) {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
         }),
+      )
+    },
+    async startReview(payload: StartReviewPayload) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/review`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ target: payload.target }),
+        }),
+      )
+    },
+    async setThreadGoal(payload: SetThreadGoalPayload) {
+      return normalizeThreadSummary(
+        await parseJson<ThreadSummary>(await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/goal`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        })),
+      )
+    },
+    async clearThreadGoal(workspaceId: string, threadId: string) {
+      return normalizeThreadSummary(
+        await parseJson<ThreadSummary>(await fetch(`${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/goal`, {
+          method: 'DELETE',
+        })),
       )
     },
     async markThreadRead(payload: MarkThreadReadPayload) {

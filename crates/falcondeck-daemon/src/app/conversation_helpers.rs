@@ -222,14 +222,14 @@ pub(super) fn notification_timestamp(
             "createdAt",
             "created_at",
         ],
-        "turn/started" | "turn/step/started" => &[
+        "turn/started" => &[
             "timestamp",
             "startedAt",
             "started_at",
             "createdAt",
             "created_at",
         ],
-        "turn/completed" | "turn/step/completed" => &[
+        "turn/completed" => &[
             "timestamp",
             "completedAt",
             "completed_at",
@@ -245,14 +245,6 @@ pub(super) fn notification_timestamp(
         ],
     };
     extract_datetime_or_timestamp(params, preferred_keys)
-}
-
-pub(super) fn plan_step_status(method: &str, params: &Value) -> Option<String> {
-    extract_string(params, &["status"]).or_else(|| match method {
-        "turn/step/started" => Some("in_progress".to_string()),
-        "turn/step/completed" => Some("completed".to_string()),
-        _ => None,
-    })
 }
 
 pub(super) fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQuestion> {

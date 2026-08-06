@@ -21,8 +21,6 @@ function mockPairingFetch(claim: Record<string, unknown>) {
 }
 
 function resetStore() {
-  // Reset internal refs by disconnecting
-  const state = useRelayStore.getState()
   // Force reset internal state
   useRelayStore.setState({
     relayUrl: 'https://connect.falcondeck.com',

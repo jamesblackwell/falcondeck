@@ -195,6 +195,7 @@ export function normalizeThreadSummary(value: ThreadSummary | unknown): ThreadSu
     },
     is_archived: thread.is_archived ?? false,
     is_pinned: thread.is_pinned ?? false,
+    goal: thread.goal ?? null,
   }
 }
 

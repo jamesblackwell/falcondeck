@@ -91,3 +91,78 @@ export function ReasoningSelector({
     </Select>
   )
 }
+
+const PERMISSION_MODES: { value: string; label: string }[] = [
+  { value: 'default', label: 'Ask to approve' },
+  { value: 'acceptEdits', label: 'Accept edits' },
+  { value: 'auto', label: 'Auto' },
+  { value: 'dontAsk', label: "Don't ask" },
+  { value: 'bypassPermissions', label: 'Bypass permissions' },
+]
+
+/** Claude permission mode picker; `null` value means the CLI default. */
+export function PermissionModeSelector({
+  value,
+  onValueChange,
+  disabled = false,
+}: {
+  value: string | null
+  onValueChange: (value: string | null) => void
+  disabled?: boolean
+}) {
+  return (
+    <Select
+      value={value ?? 'default'}
+      onValueChange={(next) => onValueChange(next === 'default' ? null : next)}
+      disabled={disabled}
+    >
+      <SelectTrigger disabled={disabled} aria-label="Permission mode">
+        <SelectValue placeholder="Permissions" />
+      </SelectTrigger>
+      <SelectContent>
+        {PERMISSION_MODES.map((mode) => (
+          <SelectItem key={mode.value} value={mode.value}>
+            {mode.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+const SANDBOX_MODES: { value: string; label: string }[] = [
+  { value: 'default', label: 'Default sandbox' },
+  { value: 'read-only', label: 'Read only' },
+  { value: 'workspace-write', label: 'Workspace write' },
+  { value: 'danger-full-access', label: 'Full access' },
+]
+
+/** Codex sandbox mode picker; `null` value defers to the provider config. */
+export function SandboxSelector({
+  value,
+  onValueChange,
+  disabled = false,
+}: {
+  value: string | null
+  onValueChange: (value: string | null) => void
+  disabled?: boolean
+}) {
+  return (
+    <Select
+      value={value ?? 'default'}
+      onValueChange={(next) => onValueChange(next === 'default' ? null : next)}
+      disabled={disabled}
+    >
+      <SelectTrigger disabled={disabled} aria-label="Sandbox mode">
+        <SelectValue placeholder="Sandbox" />
+      </SelectTrigger>
+      <SelectContent>
+        {SANDBOX_MODES.map((mode) => (
+          <SelectItem key={mode.value} value={mode.value}>
+            {mode.label}
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
+  )
+}

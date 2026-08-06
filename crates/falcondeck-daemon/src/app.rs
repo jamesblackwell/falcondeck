@@ -33,7 +33,7 @@ use crate::{
     claude::{ClaudeBootstrap, ClaudeProviderMetadata, ClaudeRuntime},
     codex::{
         CodexBootstrap, CodexProviderMetadata, CodexSession, extract_string, extract_thread_id,
-        extract_thread_title, parse_account, parse_thread_plan,
+        extract_thread_title, parse_account, parse_thread_goal, parse_thread_plan,
     },
     error::DaemonError,
     skills::{
@@ -477,6 +477,7 @@ impl AppState {
                 is_pinned: persisted_workspace
                     .pinned_thread_ids
                     .contains(&state.thread_id),
+                goal: None,
             };
             let mut thread = ManagedThread::new(summary);
             thread.manual_title = state.manual_title;
@@ -877,6 +878,21 @@ impl AppState {
         request: &ThreadDetailRequest,
     ) -> Result<ThreadDetail, DaemonError> {
         workspace_ops::thread_detail(self, request).await
+    }
+
+    pub async fn set_thread_goal(
+        &self,
+        request: falcondeck_core::SetThreadGoalRequest,
+    ) -> Result<ThreadSummary, DaemonError> {
+        workspace_ops::set_thread_goal(self, request).await
+    }
+
+    pub async fn clear_thread_goal(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<ThreadSummary, DaemonError> {
+        workspace_ops::clear_thread_goal(self, workspace_id, thread_id).await
     }
 
     pub async fn mark_thread_read(

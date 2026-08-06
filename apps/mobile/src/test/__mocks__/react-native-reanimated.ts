@@ -21,7 +21,4 @@ const Animated = {
   createAnimatedComponent: (c: any) => c,
 }
 
-export default {
-  View,
-  createAnimatedComponent: (c: any) => c,
-}
+export default Animated

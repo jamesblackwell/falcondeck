@@ -1098,6 +1098,19 @@ pub fn parse_thread_plan(value: &Value) -> Option<ThreadPlan> {
     Some(ThreadPlan { explanation, steps })
 }
 
+/// Parses a `thread/goal/updated` notification payload into a `ThreadGoal`.
+pub fn parse_thread_goal(value: &Value) -> Option<falcondeck_core::ThreadGoal> {
+    let goal = value.get("goal")?;
+    let objective = extract_string(goal, &["objective"])?;
+    Some(falcondeck_core::ThreadGoal {
+        objective,
+        status: extract_string(goal, &["status"]).unwrap_or_else(|| "active".to_string()),
+        token_budget: goal.get("tokenBudget").and_then(Value::as_i64),
+        tokens_used: goal.get("tokensUsed").and_then(Value::as_i64),
+        time_used_seconds: goal.get("timeUsedSeconds").and_then(Value::as_i64),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1533,6 +1546,7 @@ mod tests {
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                goal: None,
             },
             &thread_read,
             &[
@@ -1599,6 +1613,7 @@ mod tests {
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                goal: None,
             },
             &json!({ "thread": { "turns": [{ "id": "turn-1", "status": "completed" }] } }),
             &[ConversationItem::AssistantMessage {
@@ -1634,6 +1649,7 @@ mod tests {
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
+                goal: None,
             },
             &json!({ "thread": { "turns": [] } }),
             &[ConversationItem::Service {

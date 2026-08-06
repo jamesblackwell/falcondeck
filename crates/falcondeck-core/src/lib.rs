@@ -316,6 +316,12 @@ pub struct StartThreadRequest {
     pub model_id: Option<String>,
     /// Optional approval policy for the new thread.
     pub approval_policy: Option<String>,
+    /// Optional Codex sandbox mode for the new thread.
+    #[serde(default)]
+    pub sandbox_mode: Option<String>,
+    /// Optional Claude permission mode for the new thread.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 /// Request payload used to update thread-level agent settings.
@@ -343,6 +349,12 @@ pub struct UpdateThreadRequest {
     /// Optional pin state override for the thread.
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// Claude permission mode override; explicit `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub permission_mode: Option<Option<String>>,
+    /// Codex sandbox mode override; explicit `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub sandbox_mode: Option<Option<String>>,
 }
 
 /// Deserializes a present-but-possibly-null field into `Some(inner)`, so a
@@ -519,6 +531,12 @@ pub struct ThreadAgentParams {
     pub approval_policy: Option<String>,
     /// Optional provider-specific service tier.
     pub service_tier: Option<String>,
+    /// Claude permission mode (acceptEdits | auto | dontAsk | bypassPermissions).
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Codex sandbox mode (read-only | workspace-write | danger-full-access).
+    #[serde(default)]
+    pub sandbox_mode: Option<String>,
 }
 
 /// Supported agent providers.
@@ -555,6 +573,12 @@ pub struct SendTurnRequest {
     pub approval_policy: Option<String>,
     /// Optional provider-specific service tier for this turn.
     pub service_tier: Option<String>,
+    /// Optional Claude permission mode for this turn.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Optional Codex sandbox mode for this turn.
+    #[serde(default)]
+    pub sandbox_mode: Option<String>,
 }
 
 /// Request payload used to start a code review flow.
@@ -564,8 +588,27 @@ pub struct StartReviewRequest {
     pub workspace_id: String,
     /// Thread identifier where review output should be posted.
     pub thread_id: String,
-    /// File or target path to review.
-    pub target: String,
+    /// What the review should cover.
+    pub target: ReviewTarget,
+}
+
+/// Target selection for a code review, mirroring the Codex `ReviewTarget`
+/// protocol shape.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ReviewTarget {
+    /// Review the working tree: staged, unstaged, and untracked files.
+    UncommittedChanges,
+    /// Review changes between the current branch and the given base branch.
+    BaseBranch {
+        /// Base branch to diff against.
+        branch: String,
+    },
+    /// Review the changes introduced by a specific commit.
+    Commit {
+        /// Commit SHA to review.
+        sha: String,
+    },
 }
 
 /// Request payload used to answer an approval prompt.
@@ -812,6 +855,9 @@ pub struct ThreadSummary {
     /// Whether the thread is pinned to the top of its project group.
     #[serde(default)]
     pub is_pinned: bool,
+    /// Active goal attached to the thread, if any.
+    #[serde(default)]
+    pub goal: Option<ThreadGoal>,
 }
 
 /// Attention state derived from thread activity.
@@ -869,6 +915,48 @@ pub enum ThreadStatus {
     WaitingForInput,
     /// The thread encountered an error.
     Error,
+}
+
+/// Persistent objective attached to a thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadGoal {
+    /// User-provided objective the agent works toward.
+    pub objective: String,
+    /// Lifecycle status reported by the provider
+    /// (active | paused | blocked | usageLimited | budgetLimited | complete).
+    #[serde(default = "default_goal_status")]
+    pub status: String,
+    /// Optional output-token budget for the goal.
+    #[serde(default)]
+    pub token_budget: Option<i64>,
+    /// Tokens consumed so far, when the provider reports usage.
+    #[serde(default)]
+    pub tokens_used: Option<i64>,
+    /// Wall-clock seconds spent on the goal, when reported.
+    #[serde(default)]
+    pub time_used_seconds: Option<i64>,
+}
+
+fn default_goal_status() -> String {
+    "active".to_string()
+}
+
+/// Request payload used to set or update a thread goal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetThreadGoalRequest {
+    /// Workspace identifier that owns the thread.
+    pub workspace_id: String,
+    /// Thread the goal applies to.
+    pub thread_id: String,
+    /// Objective text; required when creating a goal.
+    #[serde(default)]
+    pub objective: Option<String>,
+    /// Optional output-token budget (Codex only).
+    #[serde(default)]
+    pub token_budget: Option<i64>,
+    /// Optional status override, e.g. "paused" or "active" (Codex only).
+    #[serde(default)]
+    pub status: Option<String>,
 }
 
 /// Structured plan emitted by an agent turn.

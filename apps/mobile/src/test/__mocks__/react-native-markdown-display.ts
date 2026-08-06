@@ -10,7 +10,7 @@ export type ASTNode = {
   children?: ASTNode[]
 }
 
-function Markdown({ children, style, rules }: { children: string; style?: any; rules?: any }) {
+function Markdown({ children }: { children: string; style?: any; rules?: any }) {
   return createElement('View', null, children)
 }
 

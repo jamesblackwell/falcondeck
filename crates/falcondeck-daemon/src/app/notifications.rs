@@ -168,45 +168,35 @@ pub(super) async fn ingest_notification(
                     .await;
             }
         }
-        "turn/step/started" | "turn/step/completed" => {
+        "thread/goal/updated" => {
             if let Some(thread_id) = extract_thread_id(&params) {
-                let step = extract_string(&params, &["step"]);
-                let status = plan_step_status(method, &params);
-                let turn_id = extract_string(&params, &["turnId", "turn_id"]);
-                let updated_at = notification_timestamp(method, &params).unwrap_or_else(Utc::now);
-
-                let thread = app
-                    .upsert_thread(workspace_id, &thread_id, |thread| {
-                        thread.updated_at = updated_at;
-                        if let Some(plan) = &mut thread.latest_plan
-                            && let Some(s) = step.clone()
-                            && let Some(step_obj) = plan.steps.iter_mut().find(|st| st.step == s)
-                            && let Some(st) = status.clone()
-                        {
-                            step_obj.status = st;
-                        }
-                    })
-                    .await?;
-
-                if let (Some(turn_id), Some(plan)) = (turn_id, thread.latest_plan.clone()) {
-                    app.push_conversation_item(
-                        workspace_id,
-                        &thread_id,
-                        ConversationItem::Plan {
-                            id: format!("plan-{turn_id}"),
-                            plan,
-                            created_at: updated_at,
-                        },
-                        true,
-                    )
-                    .await?;
-                }
-
+                let goal = parse_thread_goal(&params);
+                app.with_thread_mut(workspace_id, &thread_id, |thread| {
+                    thread.goal = goal.clone();
+                })
+                .await?;
+                let thread = app.thread_summary(workspace_id, &thread_id).await?;
                 app.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id),
                     UnifiedEvent::ThreadUpdated { thread },
                 );
+                let _ = app.persist_local_state().await;
+            }
+        }
+        "thread/goal/cleared" => {
+            if let Some(thread_id) = extract_thread_id(&params) {
+                app.with_thread_mut(workspace_id, &thread_id, |thread| {
+                    thread.goal = None;
+                })
+                .await?;
+                let thread = app.thread_summary(workspace_id, &thread_id).await?;
+                app.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+                let _ = app.persist_local_state().await;
             }
         }
         "turn/plan/updated" => {

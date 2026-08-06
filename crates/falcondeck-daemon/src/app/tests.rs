@@ -16,9 +16,76 @@ use tokio::time::{Duration as TokioDuration, sleep};
 use super::{
     AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
     claude_prompt_from_inputs, codex_inputs, conversation_helpers::tool_display_metadata,
-    encode_base64, notification_timestamp, plan_step_status, should_surface_tool_item,
+    encode_base64, notification_timestamp, should_surface_tool_item,
     workspace_status_after_account_update,
 };
+
+#[test]
+fn parses_thread_goal_notifications() {
+    let goal = crate::codex::parse_thread_goal(&json!({
+        "threadId": "thread-1",
+        "goal": {
+            "objective": "Ship the release",
+            "status": "active",
+            "tokenBudget": 500000,
+            "tokensUsed": 12000,
+            "timeUsedSeconds": 90,
+            "createdAt": 1,
+            "updatedAt": 2
+        }
+    }))
+    .expect("goal");
+    assert_eq!(goal.objective, "Ship the release");
+    assert_eq!(goal.status, "active");
+    assert_eq!(goal.token_budget, Some(500000));
+    assert_eq!(goal.tokens_used, Some(12000));
+    assert!(crate::codex::parse_thread_goal(&json!({ "threadId": "t" })).is_none());
+}
+
+#[test]
+fn maps_sandbox_modes_to_codex_policy_payloads() {
+    use super::workspace_ops::sandbox_policy_payload;
+    assert_eq!(
+        sandbox_policy_payload(Some("read-only")),
+        json!({ "type": "readOnly" })
+    );
+    assert_eq!(
+        sandbox_policy_payload(Some("workspace-write")),
+        json!({ "type": "workspaceWrite" })
+    );
+    assert_eq!(
+        sandbox_policy_payload(Some("danger-full-access")),
+        json!({ "type": "dangerFullAccess" })
+    );
+    assert_eq!(sandbox_policy_payload(None), serde_json::Value::Null);
+    assert_eq!(
+        sandbox_policy_payload(Some("bogus")),
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn review_targets_serialize_to_tagged_protocol_objects() {
+    use falcondeck_core::ReviewTarget;
+    assert_eq!(
+        serde_json::to_value(ReviewTarget::UncommittedChanges).unwrap(),
+        json!({ "type": "uncommittedChanges" })
+    );
+    assert_eq!(
+        serde_json::to_value(ReviewTarget::BaseBranch {
+            branch: "main".to_string()
+        })
+        .unwrap(),
+        json!({ "type": "baseBranch", "branch": "main" })
+    );
+    assert_eq!(
+        serde_json::to_value(ReviewTarget::Commit {
+            sha: "abc123".to_string()
+        })
+        .unwrap(),
+        json!({ "type": "commit", "sha": "abc123" })
+    );
+}
 
 #[test]
 fn filters_internal_codex_item_kinds_from_tool_timeline() {
@@ -94,25 +161,6 @@ fn account_updates_do_not_clobber_runtime_status() {
             &falcondeck_core::AccountStatus::NeedsAuth,
         ),
         WorkspaceStatus::NeedsAuth
-    );
-}
-
-#[test]
-fn infers_plan_step_status_from_notification_method() {
-    assert_eq!(
-        plan_step_status("turn/step/started", &json!({ "step": "Inspect" })),
-        Some("in_progress".to_string())
-    );
-    assert_eq!(
-        plan_step_status("turn/step/completed", &json!({ "step": "Inspect" })),
-        Some("completed".to_string())
-    );
-    assert_eq!(
-        plan_step_status(
-            "turn/step/started",
-            &json!({ "step": "Inspect", "status": "running" }),
-        ),
-        Some("running".to_string())
     );
 }
 
@@ -340,6 +388,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        goal: None,
     };
 
     let new_thread = super::ManagedThread::new(summary.clone());
@@ -442,6 +491,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    goal: None,
                 }),
             )]
             .into_iter()
@@ -458,6 +508,8 @@ async fn update_thread_title_marks_thread_as_manual() {
             model_id: None,
             reasoning_effort: None,
             pinned: None,
+            permission_mode: None,
+            sandbox_mode: None,
         })
         .await
         .unwrap();
@@ -488,6 +540,8 @@ async fn update_thread_title_marks_thread_as_manual() {
         model_id: None,
         reasoning_effort: None,
         pinned: None,
+        permission_mode: None,
+        sandbox_mode: None,
     })
     .await
     .unwrap();
@@ -500,6 +554,8 @@ async fn update_thread_title_marks_thread_as_manual() {
             model_id: None,
             reasoning_effort: None,
             pinned: Some(true),
+            permission_mode: None,
+            sandbox_mode: None,
         })
         .await
         .unwrap();
@@ -1053,6 +1109,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         },
         is_archived: false,
         is_pinned: false,
+        goal: None,
     };
     let live_workspace = WorkspaceSummary {
         id: live_workspace_id.clone(),
@@ -1154,6 +1211,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        goal: None,
     };
     let workspace = WorkspaceSummary {
         id: workspace_id.clone(),
@@ -1561,6 +1619,7 @@ async fn insert_claude_workspace_with_session(
                     attention: ThreadAttention::default(),
                     is_archived: false,
                     is_pinned: false,
+                    goal: None,
                 }),
             )]
             .into_iter()
@@ -1977,6 +2036,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         attention: ThreadAttention::default(),
         is_archived: false,
         is_pinned: false,
+        goal: None,
     };
     let archived_thread = ThreadSummary {
         id: "thread-archived".to_string(),
@@ -1996,6 +2056,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         attention: ThreadAttention::default(),
         is_archived: true,
         is_pinned: false,
+        goal: None,
     };
 
     app.inner.workspaces.lock().await.insert(

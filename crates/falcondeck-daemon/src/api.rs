@@ -15,9 +15,9 @@ use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest,
-    MarkThreadReadRequest, SendTurnRequest, SnapshotRequest, StartRemotePairingRequest,
-    StartReviewRequest, StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
-    UpdatePreferencesRequest, UpdateThreadRequest,
+    MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest, SnapshotRequest,
+    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, ThreadDetailMode,
+    ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
 };
 
 use crate::{app::AppState, error::DaemonError};
@@ -116,6 +116,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/read",
             post(mark_thread_read),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/goal",
+            post(set_thread_goal).delete(clear_thread_goal),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/interrupt",
@@ -288,6 +292,25 @@ async fn mark_thread_read(
         state
             .mark_thread_read(&workspace_id, &thread_id, request.read_seq)
             .await?,
+    ))
+}
+
+async fn set_thread_goal(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(mut request): Json<SetThreadGoalRequest>,
+) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
+    request.workspace_id = workspace_id;
+    request.thread_id = thread_id;
+    Ok(Json(state.set_thread_goal(request).await?))
+}
+
+async fn clear_thread_goal(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
+    Ok(Json(
+        state.clear_thread_goal(&workspace_id, &thread_id).await?,
     ))
 }
 

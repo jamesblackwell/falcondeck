@@ -4,7 +4,7 @@
  * test the pure logic functions extracted from it.
  */
 import { describe, it, expect } from 'vitest'
-import type { EventEnvelope, RelayUpdate, MachinePresence } from '@falcondeck/client-core'
+import type { EventEnvelope, RelayUpdate } from '@falcondeck/client-core'
 import {
   isInvalidSavedSessionError,
   resolveTruncationCursor,

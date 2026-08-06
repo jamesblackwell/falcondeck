@@ -564,6 +564,11 @@ impl AppState {
                         &params,
                         &["approvalPolicy", "approval_policy"],
                     ),
+                    sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
+                    permission_mode: extract_string(
+                        &params,
+                        &["permissionMode", "permission_mode"],
+                    ),
                 };
                 self.start_thread(request)
                     .await
@@ -602,10 +607,42 @@ impl AppState {
                         &["reasoningEffort", "reasoning_effort"],
                     ),
                     pinned: params.get("pinned").and_then(Value::as_bool),
+                    permission_mode: explicit_optional_string(
+                        &params,
+                        &["permissionMode", "permission_mode"],
+                    ),
+                    sandbox_mode: explicit_optional_string(
+                        &params,
+                        &["sandboxMode", "sandbox_mode"],
+                    ),
                 };
                 self.update_thread(request)
                     .await
                     .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
+            "thread.goal.set" => {
+                let request = falcondeck_core::SetThreadGoalRequest {
+                    workspace_id: required(&["workspaceId", "workspace_id"])?,
+                    thread_id: required(&["threadId", "thread_id"])?,
+                    objective: extract_string(&params, &["objective"]),
+                    token_budget: params
+                        .get("tokenBudget")
+                        .or_else(|| params.get("token_budget"))
+                        .and_then(Value::as_i64),
+                    status: extract_string(&params, &["status"]),
+                };
+                self.set_thread_goal(request)
+                    .await
+                    .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
+            "thread.goal.clear" => {
+                let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                let thread_id = required(&["threadId", "thread_id"])?;
+                self.clear_thread_goal(&workspace_id, &thread_id)
+                    .await
+                    .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
                     .map_err(|error| error.to_string())
             }
             "thread.mark_read" => {
@@ -647,6 +684,11 @@ impl AppState {
                         &["approvalPolicy", "approval_policy"],
                     ),
                     service_tier: extract_string(&params, &["serviceTier", "service_tier"]),
+                    permission_mode: extract_string(
+                        &params,
+                        &["permissionMode", "permission_mode"],
+                    ),
+                    sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
                 };
                 self.send_turn(request)
                     .await
@@ -751,6 +793,11 @@ impl AppState {
                             &params,
                             &["approvalPolicy", "approval_policy"],
                         ),
+                        sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
+                        permission_mode: extract_string(
+                            &params,
+                            &["permissionMode", "permission_mode"],
+                        ),
                     };
                     self.start_thread(request)
                         .await
@@ -778,6 +825,14 @@ impl AppState {
                             &["reasoningEffort", "reasoning_effort"],
                         ),
                         pinned: params.get("pinned").and_then(Value::as_bool),
+                        permission_mode: explicit_optional_string(
+                            &params,
+                            &["permissionMode", "permission_mode"],
+                        ),
+                        sandbox_mode: explicit_optional_string(
+                            &params,
+                            &["sandboxMode", "sandbox_mode"],
+                        ),
                     };
                     self.update_thread(request)
                         .await
@@ -846,6 +901,11 @@ impl AppState {
                             &["approvalPolicy", "approval_policy"],
                         ),
                         service_tier: extract_string(&params, &["serviceTier", "service_tier"]),
+                        permission_mode: extract_string(
+                            &params,
+                            &["permissionMode", "permission_mode"],
+                        ),
+                        sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
                     };
                     self.send_turn(request).await.and_then(|response| {
                         serde_json::to_value(response).map_err(DaemonError::from)
