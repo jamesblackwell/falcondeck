@@ -23,6 +23,9 @@ if [[ ! -f "$VARS_FILE" ]]; then
   exit 1
 fi
 
+# Run from the ansible dir so ansible.cfg (relative roles_path) is picked up.
+cd "$ANSIBLE_DIR"
+
 exec ansible-playbook \
   -i "$INVENTORY_FILE" \
   -e @"$VARS_FILE" \
