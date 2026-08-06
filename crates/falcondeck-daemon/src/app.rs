@@ -220,8 +220,9 @@ struct PersistedRemoteSecrets {
 #[derive(Debug, Clone)]
 enum RemoteBridgeCommand {
     PublishBootstrap {
-        pairing: RemotePairingState,
-        client_bundle: PairingPublicKeyBundle,
+        // Boxed to keep the enum small; NotifyAttention is sent far more often.
+        pairing: Box<RemotePairingState>,
+        client_bundle: Box<PairingPublicKeyBundle>,
     },
     /// Ask the relay to push a generic attention notification to trusted
     /// devices that are not currently connected.
@@ -1150,7 +1151,7 @@ fn decode_fixed_base64<const N: usize>(value: &str) -> Result<[u8; N], String> {
     }
 
     let bytes = value.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return Err("invalid base64 length".to_string());
     }
 

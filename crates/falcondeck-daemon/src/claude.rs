@@ -277,9 +277,9 @@ impl ClaudeRuntime {
         let child = {
             let mut active = self.active_turns.lock().await;
             match active.get(thread_id) {
-                Some(turn) if turn.generation == generation => active
-                    .remove(thread_id)
-                    .map(|turn| turn.child),
+                Some(turn) if turn.generation == generation => {
+                    active.remove(thread_id).map(|turn| turn.child)
+                }
                 // Missing or newer entry: this turn was superseded (or the
                 // runtime shut down); the caller must not touch thread state.
                 _ => {

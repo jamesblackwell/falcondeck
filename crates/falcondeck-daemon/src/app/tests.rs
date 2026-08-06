@@ -16,9 +16,9 @@ use tokio::time::{Duration as TokioDuration, sleep};
 use super::{
     AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
     claude_prompt_from_inputs, codex_inputs, codex_inputs_with_plan_mode_shim,
-    collaboration_mode_payload, encode_base64, notification_timestamp, plan_step_status,
-    conversation_helpers::tool_display_metadata, should_surface_tool_item,
-    should_use_plan_mode_shim, workspace_status_after_account_update,
+    collaboration_mode_payload, conversation_helpers::tool_display_metadata, encode_base64,
+    notification_timestamp, plan_step_status, should_surface_tool_item, should_use_plan_mode_shim,
+    workspace_status_after_account_update,
 };
 
 #[test]
@@ -46,8 +46,7 @@ fn builds_structured_collaboration_mode_payload() {
 
 #[test]
 fn skips_structured_collaboration_mode_payload_for_non_native_plan_mode() {
-    let payload =
-        collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), false);
+    let payload = collaboration_mode_payload(Some("plan"), Some("gpt-5.4"), Some("high"), false);
     assert_eq!(payload, serde_json::Value::Null);
 }
 
@@ -355,7 +354,13 @@ fn extracts_nested_claude_tool_use_and_result_events() {
 
 #[test]
 fn derives_summary_mode_for_low_signal_explore_tools() {
-    let display = tool_display_metadata("rg -n tool_call src", "commandExecution", "completed", Some(0), Some("match"));
+    let display = tool_display_metadata(
+        "rg -n tool_call src",
+        "commandExecution",
+        "completed",
+        Some(0),
+        Some("match"),
+    );
     assert_eq!(display.activity_kind, ToolActivityKind::Search);
     assert_eq!(display.history_mode, ToolHistoryMode::Summary);
 }

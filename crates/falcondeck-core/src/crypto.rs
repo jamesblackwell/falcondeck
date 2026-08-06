@@ -334,7 +334,10 @@ pub fn sign_pairing_claim_challenge(
     pairing_code: &str,
     challenge: &str,
 ) -> String {
-    identity_key_pair.sign_bytes(&pairing_claim_challenge_signing_payload(pairing_code, challenge))
+    identity_key_pair.sign_bytes(&pairing_claim_challenge_signing_payload(
+        pairing_code,
+        challenge,
+    ))
 }
 
 /// Verifies a pairing claim challenge signature against the claimer's
@@ -634,8 +637,7 @@ mod tests {
     fn pairing_claim_challenge_signed_by_the_wrong_key_is_rejected() {
         let key_pair = LocalBoxKeyPair::generate();
         let bundle = build_pairing_public_key_bundle(&key_pair);
-        let other_identity =
-            LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
+        let other_identity = LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
         let challenge = generate_pairing_challenge();
         let signature = sign_pairing_claim_challenge(&other_identity, "PAIRCODE1234", &challenge);
         assert!(

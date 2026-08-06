@@ -79,10 +79,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
-        .route(
-            "/api/claude/hooks/pre-tool-use",
-            post(claude_pre_tool_use),
-        )
+        .route("/api/claude/hooks/pre-tool-use", post(claude_pre_tool_use))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)

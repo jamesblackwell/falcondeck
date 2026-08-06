@@ -173,16 +173,12 @@ pub(super) async fn ingest_notification(
                 let thread = app
                     .upsert_thread(workspace_id, &thread_id, |thread| {
                         thread.updated_at = updated_at;
-                        if let Some(plan) = &mut thread.latest_plan {
-                            if let Some(s) = step.clone() {
-                                if let Some(step_obj) =
-                                    plan.steps.iter_mut().find(|st| st.step == s)
-                                {
-                                    if let Some(st) = status.clone() {
-                                        step_obj.status = st;
-                                    }
-                                }
-                            }
+                        if let Some(plan) = &mut thread.latest_plan
+                            && let Some(s) = step.clone()
+                            && let Some(step_obj) = plan.steps.iter_mut().find(|st| st.step == s)
+                            && let Some(st) = status.clone()
+                        {
+                            step_obj.status = st;
                         }
                     })
                     .await?;

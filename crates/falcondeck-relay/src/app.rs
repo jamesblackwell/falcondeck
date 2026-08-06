@@ -629,8 +629,7 @@ impl AppState {
                 .filter(|challenge| challenge.expires_at > now)
                 .ok_or_else(|| {
                     RelayError::BadRequest(
-                        "pairing challenge missing or expired; request a new challenge"
-                            .to_string(),
+                        "pairing challenge missing or expired; request a new challenge".to_string(),
                     )
                 })?;
             verify_pairing_public_key_bundle(client_bundle).map_err(|_| {
@@ -1011,10 +1010,10 @@ impl AppState {
                 session.daemon_last_seen_at = Some(now);
             }
             RelayPeerRole::Client => {
-                if let Some(current_device_id) = device_id.as_ref() {
-                    if let Some(device) = session.devices.get_mut(current_device_id) {
-                        device.last_seen_at = Some(now);
-                    }
+                if let Some(current_device_id) = device_id.as_ref()
+                    && let Some(device) = session.devices.get_mut(current_device_id)
+                {
+                    device.last_seen_at = Some(now);
                 }
             }
         }
@@ -1092,19 +1091,19 @@ impl AppState {
                     })
                     .collect::<Vec<_>>();
                 for request_id in failed_request_ids {
-                    if let Some(pending) = live.pending_rpc.remove(&request_id) {
-                        if let Some(requester) = live.peers.get(&pending.requester_peer_id) {
-                            deferred.push((
-                                pending.requester_peer_id.clone(),
-                                requester.tx.clone(),
-                                RelayServerMessage::RpcResult {
-                                    request_id,
-                                    ok: false,
-                                    result: None,
-                                    error: None,
-                                },
-                            ));
-                        }
+                    if let Some(pending) = live.pending_rpc.remove(&request_id)
+                        && let Some(requester) = live.peers.get(&pending.requester_peer_id)
+                    {
+                        deferred.push((
+                            pending.requester_peer_id.clone(),
+                            requester.tx.clone(),
+                            RelayServerMessage::RpcResult {
+                                request_id,
+                                ok: false,
+                                result: None,
+                                error: None,
+                            },
+                        ));
                     }
                 }
 
@@ -1333,9 +1332,9 @@ impl AppState {
                         .map(|update| update.id.clone())
                         .collect();
                     if !superseded_presence_ids.is_empty() {
-                        session
-                            .updates
-                            .retain(|update| !matches!(update.body, RelayUpdateBody::Presence { .. }));
+                        session.updates.retain(|update| {
+                            !matches!(update.body, RelayUpdateBody::Presence { .. })
+                        });
                     }
                 }
                 update = RelayUpdate {
@@ -1667,8 +1666,12 @@ impl AppState {
             (record.to_public(), record, session.meta())
         };
 
-        self.persist_action_state(&session, std::slice::from_ref(&record), PersistMode::Immediate)
-            .await?;
+        self.persist_action_state(
+            &session,
+            std::slice::from_ref(&record),
+            PersistMode::Immediate,
+        )
+        .await?;
         self.append_update(
             session_id,
             RelayUpdateBody::ActionStatus {
@@ -1797,7 +1800,8 @@ impl AppState {
         push_token: Option<String>,
     ) -> Result<(), RelayError> {
         let auth = self.authenticate_session(session_id, token).await?;
-        if matches!(auth.role, RelayPeerRole::Client) && auth.device_id.as_deref() != Some(device_id)
+        if matches!(auth.role, RelayPeerRole::Client)
+            && auth.device_id.as_deref() != Some(device_id)
         {
             return Err(RelayError::Unauthorized(
                 "clients may only register their own push token".to_string(),
@@ -1979,8 +1983,12 @@ impl AppState {
             session.updated_at = record.updated_at;
             (record.to_public(), record, session.meta())
         };
-        self.persist_action_state(&session, std::slice::from_ref(&record), PersistMode::Immediate)
-            .await?;
+        self.persist_action_state(
+            &session,
+            std::slice::from_ref(&record),
+            PersistMode::Immediate,
+        )
+        .await?;
         self.append_update(
             session_id,
             RelayUpdateBody::ActionStatus { action },
@@ -1999,11 +2007,11 @@ impl AppState {
             match role {
                 RelayPeerRole::Daemon => session.daemon_last_seen_at = Some(now),
                 RelayPeerRole::Client => {
-                    if let Some(current_device_id) = device_id {
-                        if let Some(device) = session.devices.get_mut(current_device_id) {
-                            device.last_seen_at = Some(now);
-                            touched_device = Some(device.clone());
-                        }
+                    if let Some(current_device_id) = device_id
+                        && let Some(device) = session.devices.get_mut(current_device_id)
+                    {
+                        device.last_seen_at = Some(now);
+                        touched_device = Some(device.clone());
                     }
                 }
             }
@@ -2356,9 +2364,8 @@ impl AppState {
     fn spawn_prune_task(&self) {
         let inner = Arc::downgrade(&self.inner);
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(
-                PRUNE_INTERVAL_SECONDS,
-            ));
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(PRUNE_INTERVAL_SECONDS));
             interval.tick().await; // consume the immediate first tick
             loop {
                 interval.tick().await;

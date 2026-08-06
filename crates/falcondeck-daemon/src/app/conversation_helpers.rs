@@ -302,59 +302,59 @@ pub(super) fn parse_interactive_questions(params: &Value) -> Vec<InteractiveQues
 pub(super) fn parse_interactive_response_params(
     params: &Value,
 ) -> Result<InteractiveResponsePayload, String> {
-    if let Some(response) = params.get("response") {
-        if let Some(kind) = extract_string(response, &["kind"]) {
-            return match kind.as_str() {
-                "approval" => match extract_string(response, &["decision"]).as_deref() {
-                    Some("allow") => Ok(InteractiveResponsePayload::Approval {
-                        decision: ApprovalDecision::Allow,
-                    }),
-                    Some("deny") => Ok(InteractiveResponsePayload::Approval {
-                        decision: ApprovalDecision::Deny,
-                    }),
-                    Some("always_allow") => Ok(InteractiveResponsePayload::Approval {
-                        decision: ApprovalDecision::AlwaysAllow,
-                    }),
-                    _ => Err("unsupported approval decision".to_string()),
-                },
-                "question" => Ok(InteractiveResponsePayload::Question {
-                    answers: response
-                        .get("answers")
-                        .and_then(Value::as_object)
-                        .map(|answers| {
-                            answers
-                                .iter()
-                                .map(|(question_id, value)| {
-                                    let answer_values = value
-                                        .as_array()
-                                        .map(|items| {
-                                            items
-                                                .iter()
-                                                .filter_map(Value::as_str)
-                                                .map(str::to_string)
-                                                .collect::<Vec<_>>()
-                                        })
-                                        .or_else(|| {
-                                            value.get("answers").and_then(Value::as_array).map(
-                                                |items| {
-                                                    items
-                                                        .iter()
-                                                        .filter_map(Value::as_str)
-                                                        .map(str::to_string)
-                                                        .collect::<Vec<_>>()
-                                                },
-                                            )
-                                        })
-                                        .unwrap_or_default();
-                                    (question_id.clone(), answer_values)
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+    if let Some(response) = params.get("response")
+        && let Some(kind) = extract_string(response, &["kind"])
+    {
+        return match kind.as_str() {
+            "approval" => match extract_string(response, &["decision"]).as_deref() {
+                Some("allow") => Ok(InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::Allow,
                 }),
-                _ => Err("unsupported interactive response kind".to_string()),
-            };
-        }
+                Some("deny") => Ok(InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::Deny,
+                }),
+                Some("always_allow") => Ok(InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::AlwaysAllow,
+                }),
+                _ => Err("unsupported approval decision".to_string()),
+            },
+            "question" => Ok(InteractiveResponsePayload::Question {
+                answers: response
+                    .get("answers")
+                    .and_then(Value::as_object)
+                    .map(|answers| {
+                        answers
+                            .iter()
+                            .map(|(question_id, value)| {
+                                let answer_values = value
+                                    .as_array()
+                                    .map(|items| {
+                                        items
+                                            .iter()
+                                            .filter_map(Value::as_str)
+                                            .map(str::to_string)
+                                            .collect::<Vec<_>>()
+                                    })
+                                    .or_else(|| {
+                                        value.get("answers").and_then(Value::as_array).map(
+                                            |items| {
+                                                items
+                                                    .iter()
+                                                    .filter_map(Value::as_str)
+                                                    .map(str::to_string)
+                                                    .collect::<Vec<_>>()
+                                            },
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                (question_id.clone(), answer_values)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            }),
+            _ => Err("unsupported interactive response kind".to_string()),
+        };
     }
 
     match extract_string(params, &["decision"]).as_deref() {
@@ -430,7 +430,10 @@ pub(crate) fn tool_display_metadata(
         ToolArtifactKind::Test
     } else if matches!(activity_kind, ToolActivityKind::Approval) {
         ToolArtifactKind::ApprovalRelated
-    } else if output.map(|value| !value.trim().is_empty()).unwrap_or(false) {
+    } else if output
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
         ToolArtifactKind::CommandOutput
     } else {
         ToolArtifactKind::None
@@ -460,8 +463,7 @@ pub(crate) fn tool_display_metadata(
                 | ToolActivityKind::WebSearch
                 | ToolActivityKind::ImageView
                 | ToolActivityKind::Context
-        )
-    {
+        ) {
         ToolHistoryMode::Full
     } else {
         ToolHistoryMode::Summary

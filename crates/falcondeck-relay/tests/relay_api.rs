@@ -587,8 +587,7 @@ async fn claims_signed_by_a_different_identity_key_are_rejected() {
     // A stolen (valid, self-signed) bundle without its secret key: the
     // attacker can only sign the challenge with a different identity key.
     let stolen_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
-    let attacker_identity =
-        LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
+    let attacker_identity = LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
     let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
     let response = client
         .post(format!("{}/v1/pairings/claim", server.http_base))
@@ -690,8 +689,7 @@ async fn stolen_client_bundle_cannot_reattach_as_an_existing_trusted_device() {
     // client token, because they cannot sign the fresh challenge with the
     // victim's identity secret key.
     let stolen_bundle = build_pairing_public_key_bundle(&victim_key_pair);
-    let attacker_identity =
-        LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
+    let attacker_identity = LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
     let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
     let response = client
         .post(format!("{}/v1/pairings/claim", server.http_base))

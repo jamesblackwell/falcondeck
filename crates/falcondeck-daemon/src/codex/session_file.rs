@@ -23,12 +23,12 @@ pub(super) fn hydrate_thread_items_from_session_file(
             .and_then(Value::as_str)
             .unwrap_or_default();
 
-        if matches!(entry_type, "session_meta" | "turn_context") {
-            if let Some(cwd) = extract_cwd(&value) {
-                matches_workspace = cwd == workspace_path;
-                if !matches_workspace {
-                    return Vec::new();
-                }
+        if matches!(entry_type, "session_meta" | "turn_context")
+            && let Some(cwd) = extract_cwd(&value)
+        {
+            matches_workspace = cwd == workspace_path;
+            if !matches_workspace {
+                return Vec::new();
             }
         }
 

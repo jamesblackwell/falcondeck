@@ -361,14 +361,13 @@ async fn send_raw_error(mut socket: WebSocket, message: String) -> Result<(), ax
 }
 
 fn auth_token(headers: &HeaderMap) -> Result<String, RelayError> {
-    if let Some(header) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(value) = header.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                let trimmed = token.trim();
-                if !trimmed.is_empty() {
-                    return Ok(trimmed.to_string());
-                }
-            }
+    if let Some(header) = headers.get(axum::http::header::AUTHORIZATION)
+        && let Ok(value) = header.to_str()
+        && let Some(token) = value.strip_prefix("Bearer ")
+    {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
         }
     }
 

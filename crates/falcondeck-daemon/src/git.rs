@@ -89,19 +89,19 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
         .output()
         .await;
 
-    if let Ok(output) = numstat_output {
-        if output.status.success() {
-            let numstat_text = String::from_utf8_lossy(&output.stdout);
-            for line in numstat_text.lines() {
-                let parts: Vec<&str> = line.splitn(3, '\t').collect();
-                if parts.len() == 3 {
-                    let insertions = parts[0].parse::<u32>().ok();
-                    let deletions = parts[1].parse::<u32>().ok();
-                    let path = parts[2];
-                    if let Some(entry) = entries.iter_mut().find(|e| e.path == path) {
-                        entry.insertions = insertions;
-                        entry.deletions = deletions;
-                    }
+    if let Ok(output) = numstat_output
+        && output.status.success()
+    {
+        let numstat_text = String::from_utf8_lossy(&output.stdout);
+        for line in numstat_text.lines() {
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 {
+                let insertions = parts[0].parse::<u32>().ok();
+                let deletions = parts[1].parse::<u32>().ok();
+                let path = parts[2];
+                if let Some(entry) = entries.iter_mut().find(|e| e.path == path) {
+                    entry.insertions = insertions;
+                    entry.deletions = deletions;
                 }
             }
         }
@@ -114,22 +114,22 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
         .output()
         .await;
 
-    if let Ok(output) = staged_numstat {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                let parts: Vec<&str> = line.splitn(3, '\t').collect();
-                if parts.len() == 3 {
-                    let insertions = parts[0].parse::<u32>().ok();
-                    let deletions = parts[1].parse::<u32>().ok();
-                    let path = parts[2];
-                    if let Some(entry) = entries.iter_mut().find(|e| e.path == path) {
-                        if entry.insertions.is_none() {
-                            entry.insertions = insertions;
-                        }
-                        if entry.deletions.is_none() {
-                            entry.deletions = deletions;
-                        }
+    if let Ok(output) = staged_numstat
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let parts: Vec<&str> = line.splitn(3, '\t').collect();
+            if parts.len() == 3 {
+                let insertions = parts[0].parse::<u32>().ok();
+                let deletions = parts[1].parse::<u32>().ok();
+                let path = parts[2];
+                if let Some(entry) = entries.iter_mut().find(|e| e.path == path) {
+                    if entry.insertions.is_none() {
+                        entry.insertions = insertions;
+                    }
+                    if entry.deletions.is_none() {
+                        entry.deletions = deletions;
                     }
                 }
             }

@@ -181,9 +181,13 @@ impl CodexSession {
             .await?;
         session.send_notification("initialized", json!({})).await?;
 
-        let account_value = session.send_control_request("account/read", json!({})).await?;
+        let account_value = session
+            .send_control_request("account/read", json!({}))
+            .await?;
         let account = parse_account(&account_value);
-        let models_value = session.send_control_request("model/list", json!({})).await?;
+        let models_value = session
+            .send_control_request("model/list", json!({}))
+            .await?;
         let models = parse_models(&models_value);
         let collaboration_modes_value = session
             .send_control_request("collaborationMode/list", json!({}))
@@ -217,12 +221,11 @@ impl CodexSession {
             let (summary, items) = match session.read_thread(&summary.id).await {
                 Ok(value) => {
                     let mut items = hydrate_thread_items(&value);
-                    if items.is_empty() {
-                        if let Some(path) =
+                    if items.is_empty()
+                        && let Some(path) =
                             extract_thread_session_path(&value).or(session_path.clone())
-                        {
-                            items = hydrate_thread_items_from_session_file(&path, &workspace_path);
-                        }
+                    {
+                        items = hydrate_thread_items_from_session_file(&path, &workspace_path);
                     }
                     (hydrate_thread_summary(summary, &value, &items), items)
                 }
@@ -433,28 +436,27 @@ impl CodexSession {
 
                     match serde_json::from_str::<Value>(&line) {
                         Ok(message) => {
-                            if let Some(id) = message.get("id").and_then(Value::as_u64) {
-                                if message.get("method").is_none() {
-                                    if let Some(tx) = self.pending.lock().await.remove(&id) {
-                                        if let Some(error) = message.get("error") {
-                                            let _ =
-                                                tx.send(Err(DaemonError::Rpc(error.to_string())));
-                                        } else {
-                                            let _ = tx.send(Ok(message
-                                                .get("result")
-                                                .cloned()
-                                                .unwrap_or(Value::Null)));
-                                        }
+                            if let Some(id) = message.get("id").and_then(Value::as_u64)
+                                && message.get("method").is_none()
+                            {
+                                if let Some(tx) = self.pending.lock().await.remove(&id) {
+                                    if let Some(error) = message.get("error") {
+                                        let _ = tx.send(Err(DaemonError::Rpc(error.to_string())));
+                                    } else {
+                                        let _ = tx.send(Ok(message
+                                            .get("result")
+                                            .cloned()
+                                            .unwrap_or(Value::Null)));
                                     }
-                                    continue;
                                 }
+                                continue;
                             }
 
                             if let Some(method) = message.get("method").and_then(Value::as_str) {
                                 let params = message.get("params").cloned().unwrap_or(Value::Null);
                                 if message.get("id").is_some() {
-                                    if let Some(raw_id) = message.get("id").cloned() {
-                                        if let Err(error) = self
+                                    if let Some(raw_id) = message.get("id").cloned()
+                                        && let Err(error) = self
                                             .state
                                             .ingest_server_request(
                                                 &self.workspace_id,
@@ -463,11 +465,8 @@ impl CodexSession {
                                                 params,
                                             )
                                             .await
-                                        {
-                                            warn!(
-                                                "failed to ingest server request {method}: {error}"
-                                            );
-                                        }
+                                    {
+                                        warn!("failed to ingest server request {method}: {error}");
                                     }
                                 } else if let Err(error) = self
                                     .state
@@ -589,10 +588,10 @@ fn extract_thread_record(value: &Value) -> Option<&Value> {
             return Some(value);
         }
 
-        if let Some(thread) = value.get("thread") {
-            if let Some(found) = walk(thread) {
-                return Some(found);
-            }
+        if let Some(thread) = value.get("thread")
+            && let Some(found) = walk(thread)
+        {
+            return Some(found);
         }
 
         if let Some(object) = value.as_object() {
@@ -760,7 +759,8 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
         }),
         "commandExecution" | "fileChange" | "webSearch" | "imageView" | "contextCompaction" => {
             let output = extract_string(item, &["output", "stdout", "result", "detail", "query"]);
-            let status = extract_string(item, &["status"]).unwrap_or_else(|| "completed".to_string());
+            let status =
+                extract_string(item, &["status"]).unwrap_or_else(|| "completed".to_string());
             let exit_code = item
                 .get("exitCode")
                 .or_else(|| item.get("exit_code"))
@@ -1064,8 +1064,8 @@ pub fn parse_thread_plan(value: &Value) -> Option<ThreadPlan> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use falcondeck_core::ToolHistoryMode;
+    use std::io::Write;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -1475,7 +1475,12 @@ mod tests {
             other => panic!("expected reasoning item, got {other:?}"),
         }
         match &items[2] {
-            ConversationItem::ToolCall { title, output, display, .. } => {
+            ConversationItem::ToolCall {
+                title,
+                output,
+                display,
+                ..
+            } => {
                 assert_eq!(title, "git status --short");
                 assert_eq!(output.as_deref(), Some("ok"));
                 assert_eq!(display.history_mode, ToolHistoryMode::Summary);

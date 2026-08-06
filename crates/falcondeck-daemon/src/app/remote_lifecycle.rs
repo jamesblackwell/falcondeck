@@ -120,14 +120,13 @@ impl AppState {
         let mut remote = self.inner.remote.lock().await;
         if let (Some(relay_url), Some(pairing)) =
             (remote.relay_url.as_ref(), remote.pairing.as_ref())
-        {
-            if let Err(error) = delete_remote_secrets(remote_secret_storage_key(
+            && let Err(error) = delete_remote_secrets(remote_secret_storage_key(
                 relay_url,
                 &pairing.pairing_id,
                 pairing.session_id.as_deref(),
-            )) {
-                tracing::warn!("failed to clear remote secure storage: {error}");
-            }
+            ))
+        {
+            tracing::warn!("failed to clear remote secure storage: {error}");
         }
         if let Some(task) = remote.task.take() {
             task.abort();
@@ -162,14 +161,12 @@ impl AppState {
         let (mut status, relay_url, session_id, daemon_token) = snapshot;
         if let (Some(relay_url), Some(session_id), Some(daemon_token)) =
             (relay_url, session_id, daemon_token)
-        {
-            if let Ok(remote_status) = self
+            && let Ok(remote_status) = self
                 .fetch_remote_status(&relay_url, &session_id, &daemon_token)
                 .await
-            {
-                status.trusted_devices = remote_status.devices;
-                status.presence = Some(remote_status.presence);
-            }
+        {
+            status.trusted_devices = remote_status.devices;
+            status.presence = Some(remote_status.presence);
         }
 
         status
@@ -286,10 +283,8 @@ impl AppState {
             let mut remote = self.inner.remote.lock().await;
             reconcile_remote_runtime_state(&mut remote);
             let additional_pairing = remote.task.is_some();
-            if !additional_pairing {
-                if let Some(task) = remote.task.take() {
-                    task.abort();
-                }
+            if !additional_pairing && let Some(task) = remote.task.take() {
+                task.abort();
             }
             if let Some(task) = remote.pairing_watch_task.take() {
                 task.abort();
@@ -440,14 +435,13 @@ impl AppState {
                     if should_clear_pairing || should_reset_persisted_remote {
                         if let (Some(current_relay_url), Some(current_pairing)) =
                             (remote.relay_url.as_ref(), remote.pairing.as_ref())
-                        {
-                            if let Err(error) = delete_remote_secrets(remote_secret_storage_key(
+                            && let Err(error) = delete_remote_secrets(remote_secret_storage_key(
                                 current_relay_url,
                                 &current_pairing.pairing_id,
                                 current_pairing.session_id.as_deref(),
-                            )) {
-                                tracing::warn!("failed to clear remote secure storage: {error}");
-                            }
+                            ))
+                        {
+                            tracing::warn!("failed to clear remote secure storage: {error}");
                         }
                         remote.relay_url = None;
                         remote.daemon_token = None;
@@ -667,18 +661,18 @@ impl AppState {
                 }
             };
 
-            if let Some(client_bundle) = response.client_bundle.as_ref() {
-                if let Err(error) = verify_pairing_public_key_bundle(client_bundle) {
-                    self.set_pairing_watch_error(
-                        &relay_url,
-                        &daemon_token,
-                        &pairing_id,
-                        format!("relay pairing returned an invalid client bundle: {error}"),
-                    )
-                    .await;
-                    sleep(Duration::from_secs(2)).await;
-                    continue;
-                }
+            if let Some(client_bundle) = response.client_bundle.as_ref()
+                && let Err(error) = verify_pairing_public_key_bundle(client_bundle)
+            {
+                self.set_pairing_watch_error(
+                    &relay_url,
+                    &daemon_token,
+                    &pairing_id,
+                    format!("relay pairing returned an invalid client bundle: {error}"),
+                )
+                .await;
+                sleep(Duration::from_secs(2)).await;
+                continue;
             }
 
             if !self
@@ -692,11 +686,11 @@ impl AppState {
                 falcondeck_core::PairingStatus::Pending => {
                     {
                         let mut remote = self.inner.remote.lock().await;
-                        if let Some(current_pairing) = remote.pending_pairing.as_mut() {
-                            if current_pairing.pairing_id == pairing_id {
-                                current_pairing.session_id = response.session_id.clone();
-                                current_pairing.client_bundle = response.client_bundle.clone();
-                            }
+                        if let Some(current_pairing) = remote.pending_pairing.as_mut()
+                            && current_pairing.pairing_id == pairing_id
+                        {
+                            current_pairing.session_id = response.session_id.clone();
+                            current_pairing.client_bundle = response.client_bundle.clone();
                         }
                         remote.last_error = None;
                     }
@@ -710,12 +704,12 @@ impl AppState {
                         {
                             false
                         } else {
-                            if let Some(current_pairing) = remote.pending_pairing.as_ref() {
-                                if current_pairing.pairing_id == pairing_id {
-                                    remote.last_error = Some(
-                                        "remote pairing expired before it was claimed".to_string(),
-                                    );
-                                }
+                            if let Some(current_pairing) = remote.pending_pairing.as_ref()
+                                && current_pairing.pairing_id == pairing_id
+                            {
+                                remote.last_error = Some(
+                                    "remote pairing expired before it was claimed".to_string(),
+                                );
                             }
                             remote.pending_pairing = None;
                             remote.pairing_watch_task = None;
@@ -790,8 +784,8 @@ impl AppState {
                                     Some((
                                         command_tx,
                                         RemoteBridgeCommand::PublishBootstrap {
-                                            pairing: pairing_snapshot,
-                                            client_bundle,
+                                            pairing: Box::new(pairing_snapshot),
+                                            client_bundle: Box::new(client_bundle),
                                         },
                                     )),
                                     true,

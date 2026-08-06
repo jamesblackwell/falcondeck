@@ -278,10 +278,10 @@ impl AppState {
     }
 
     async fn generate_ai_thread_title(&self, input: &AiThreadTitleInput) -> Option<String> {
-        if input.prefer_claude {
-            if let Some(title) = self.generate_ai_thread_title_with_claude(input).await {
-                return Some(title);
-            }
+        if input.prefer_claude
+            && let Some(title) = self.generate_ai_thread_title_with_claude(input).await
+        {
+            return Some(title);
         }
         self.generate_ai_thread_title_with_codex(input).await
     }
@@ -599,34 +599,32 @@ impl AppState {
                 .position(|entry| conversation_item_identity(entry) == id),
         };
 
-        if update_existing {
-            if let Some(index) = existing_index {
-                thread.items[index] = item.clone();
-                let track_attention = marks_agent_activity(&item);
-                if track_attention {
-                    thread.summary.attention.last_agent_activity_seq = thread
-                        .summary
-                        .attention
-                        .last_agent_activity_seq
-                        .max(self.inner.sequence.load(Ordering::Relaxed));
-                }
-                drop(workspaces);
+        if update_existing && let Some(index) = existing_index {
+            thread.items[index] = item.clone();
+            let track_attention = marks_agent_activity(&item);
+            if track_attention {
+                thread.summary.attention.last_agent_activity_seq = thread
+                    .summary
+                    .attention
+                    .last_agent_activity_seq
+                    .max(self.inner.sequence.load(Ordering::Relaxed));
+            }
+            drop(workspaces);
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ConversationItemUpdated { item },
+            );
+            if track_attention {
+                let thread = self.thread_summary(workspace_id, thread_id).await?;
                 self.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id.to_string()),
-                    UnifiedEvent::ConversationItemUpdated { item },
+                    UnifiedEvent::ThreadUpdated { thread },
                 );
-                if track_attention {
-                    let thread = self.thread_summary(workspace_id, thread_id).await?;
-                    self.emit(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id.to_string()),
-                        UnifiedEvent::ThreadUpdated { thread },
-                    );
-                    self.persist_local_state().await?;
-                }
-                return Ok(());
+                self.persist_local_state().await?;
             }
+            return Ok(());
         }
 
         let index = thread.items.len();

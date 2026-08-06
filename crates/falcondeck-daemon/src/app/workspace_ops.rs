@@ -906,10 +906,9 @@ pub(super) async fn send_turn(
         if !managed.manual_title
             && !managed.ai_title_generated
             && is_placeholder_thread_title(&managed.summary.title)
+            && let Some(title) = provisional_thread_title_from_inputs(&inputs)
         {
-            if let Some(title) = provisional_thread_title_from_inputs(&inputs) {
-                managed.summary.title = title;
-            }
+            managed.summary.title = title;
         }
         managed.summary.updated_at = now;
         workspace.summary.current_thread_id = Some(managed.summary.id.clone());
@@ -945,10 +944,10 @@ pub(super) async fn send_turn(
             if requires_resume {
                 session.resume_thread(&request.thread_id).await?;
                 let mut workspaces = app.inner.workspaces.lock().await;
-                if let Some(workspace) = workspaces.get_mut(&request.workspace_id) {
-                    if let Some(thread) = workspace.threads.get_mut(&request.thread_id) {
-                        thread.requires_resume = false;
-                    }
+                if let Some(workspace) = workspaces.get_mut(&request.workspace_id)
+                    && let Some(thread) = workspace.threads.get_mut(&request.thread_id)
+                {
+                    thread.requires_resume = false;
                 }
             }
 
@@ -1061,12 +1060,12 @@ pub(super) async fn update_thread(
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         let now = Utc::now();
 
-        if let Some(provider) = request.provider.clone() {
-            if provider != thread.summary.provider {
-                return Err(DaemonError::BadRequest(
-                    "threads are permanently bound to their original provider".to_string(),
-                ));
-            }
+        if let Some(provider) = request.provider.clone()
+            && provider != thread.summary.provider
+        {
+            return Err(DaemonError::BadRequest(
+                "threads are permanently bound to their original provider".to_string(),
+            ));
         }
 
         if let Some(title) = request.title.as_deref().map(str::trim) {
@@ -1638,8 +1637,12 @@ fn thread_detail_window(
     };
     let build_window =
         |window: Vec<ConversationItem>, has_older: bool, is_partial: bool| ThreadDetailWindow {
-            oldest_item_id: window.first().map(|item| conversation_item_id(item).to_string()),
-            newest_item_id: window.last().map(|item| conversation_item_id(item).to_string()),
+            oldest_item_id: window
+                .first()
+                .map(|item| conversation_item_id(item).to_string()),
+            newest_item_id: window
+                .last()
+                .map(|item| conversation_item_id(item).to_string()),
             items: window,
             has_older,
             is_partial,
@@ -1661,7 +1664,9 @@ fn thread_detail_window(
                 .iter()
                 .position(|item| conversation_item_id(item) == before_item_id)
                 .ok_or_else(|| {
-                    DaemonError::BadRequest("before_item_id was not found in the thread".to_string())
+                    DaemonError::BadRequest(
+                        "before_item_id was not found in the thread".to_string(),
+                    )
                 })?;
             let limit = clamp_limit(request.limit, DEFAULT_BEFORE_LIMIT);
             let start = before_index.saturating_sub(limit);

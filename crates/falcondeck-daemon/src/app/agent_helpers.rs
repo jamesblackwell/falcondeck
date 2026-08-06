@@ -357,9 +357,7 @@ pub(super) fn extract_claude_text_delta(value: &Value) -> Option<String> {
         .and_then(|delta| extract_string(delta, &["text"]))
 }
 
-pub(super) fn extract_claude_tool_event(
-    value: &Value,
-) -> Option<ClaudeToolEvent> {
+pub(super) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent> {
     let top_level_type = extract_string(value, &["type"]);
     let event = claude_event_value(value);
     let event_type =
