@@ -77,6 +77,7 @@ export const DiffPanel = memo(function DiffPanel({
                   })
                   .then(() =>
                     toast({
+                      variant: 'default',
                       title: 'Review started',
                       description: 'Codex is reviewing the uncommitted changes in this thread.',
                     }),
