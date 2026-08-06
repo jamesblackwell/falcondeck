@@ -1,9 +1,6 @@
-import React from 'react'
-
 import {
   formatModelLabel,
   type AgentProvider,
-  type CollaborationModeSummary,
   type ModelSummary,
 } from '@falcondeck/client-core'
 
@@ -88,33 +85,6 @@ export function ReasoningSelector({
         {options.map((option) => (
           <SelectItem key={option} value={option}>
             {option.charAt(0).toUpperCase() + option.slice(1)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  )
-}
-
-export function CollaborationModeSelector({
-  value,
-  modes,
-  onValueChange,
-  disabled = false,
-}: {
-  value: string | null
-  modes: CollaborationModeSummary[]
-  onValueChange: (value: string) => void
-  disabled?: boolean
-}) {
-  return (
-    <Select value={value ?? undefined} onValueChange={onValueChange} disabled={disabled}>
-      <SelectTrigger disabled={disabled}>
-        <SelectValue placeholder="Mode" />
-      </SelectTrigger>
-      <SelectContent>
-        {modes.map((mode) => (
-          <SelectItem key={mode.id} value={mode.id}>
-            {mode.label}
           </SelectItem>
         ))}
       </SelectContent>
