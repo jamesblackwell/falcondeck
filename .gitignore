@@ -11,6 +11,7 @@ node_modules/
 web-build/
 
 # Local machine and tool output
+.claude/settings.local.json
 .DS_Store
 /var
 *.tsbuildinfo

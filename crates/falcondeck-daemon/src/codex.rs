@@ -1112,12 +1112,12 @@ mod tests {
         let account = parse_account(&json!({
             "account": {
                 "type": "chatgpt",
-                "email": "ai@blackwell.page"
+                "email": "dev@example.com"
             },
             "requiresOpenaiAuth": true
         }));
         assert_eq!(account.status, AccountStatus::Ready);
-        assert_eq!(account.label, "ai@blackwell.page");
+        assert_eq!(account.label, "dev@example.com");
     }
 
     #[test]
