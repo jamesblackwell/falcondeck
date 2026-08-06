@@ -184,10 +184,10 @@ mobile-dev: mobile-prepare
 		if [ -n "$$current_udid" ] && xcrun simctl list devices booted | grep -q "$$current_udid"; then \
 			booted_udid="$$current_udid"; \
 		else \
-			booted_udid=$$(xcrun simctl list devices booted | sed -n 's/.*(\\([^)]*\\)) (Booted)/\\1/p' | head -n 1); \
+			booted_udid=$$(xcrun simctl list devices booted | sed -n 's/.*(\([0-9A-F-]*\)) (Booted).*/\1/p' | head -n 1); \
 		fi; \
 		if [ -z "$$booted_udid" ]; then \
-			simulator_udid=$$(xcrun simctl list devices available | sed -n 's/^[[:space:]]*$(IOS_SIMULATOR) (\\([^)]*\\)) (Available)$$/\\1/p' | head -n 1); \
+			simulator_udid=$$(xcrun simctl list devices available | sed -n 's/^[[:space:]]*$(IOS_SIMULATOR) (\([0-9A-F-]*\)) (.*/\1/p' | head -n 1); \
 			if [ -z "$$simulator_udid" ]; then \
 				echo "Could not find an available simulator named $(IOS_SIMULATOR)."; \
 				exit 1; \

@@ -202,7 +202,7 @@ export const PromptInput = memo(function PromptInput({
   )
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-3 pt-2 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-3 md:px-0 md:pt-0 md:pb-0">
+    <div className="mx-auto w-full max-w-3xl px-3 pt-2 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-4 md:px-6 md:pt-0 md:pb-0">
       <div className="rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2">
         {/* Attachment previews */}
         {attachments.length > 0 ? (
@@ -228,7 +228,7 @@ export const PromptInput = memo(function PromptInput({
                     type="button"
                     onClick={() => onRemoveAttachment(attachment.id)}
                     disabled={disabled}
-                    className="absolute -top-1.5 -right-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border-default bg-surface-3 text-fg-secondary shadow-sm transition-colors hover:bg-surface-4 hover:text-fg-primary disabled:pointer-events-none disabled:opacity-60"
+                    className="fd-focus absolute -top-1.5 -right-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-border-default bg-surface-3 text-fg-secondary shadow-sm transition-colors hover:bg-surface-4 hover:text-fg-primary disabled:pointer-events-none disabled:opacity-60"
                     aria-label={`Remove ${attachment.name ?? 'image attachment'}`}
                   >
                     <X className="h-3 w-3" />
@@ -249,7 +249,9 @@ export const PromptInput = memo(function PromptInput({
           onKeyUp={() => updateSlashQuery(value)}
           onPaste={handlePaste}
           placeholder={disabled ? 'Add a project to get started...' : 'Ask anything'}
-          className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[16px] leading-relaxed text-fg-primary placeholder:text-fg-muted focus:outline-none md:text-[length:var(--fd-text-base)]"
+          /* 16px on small screens keeps iOS Safari from zooming in on focus;
+             drops to the standard body size once there is room. */
+          className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[length:var(--fd-text-md)] leading-relaxed text-fg-primary placeholder:text-fg-muted focus:outline-none md:text-[length:var(--fd-text-base)]"
           style={{ minHeight: `${PROMPT_INPUT_MIN_HEIGHT}px`, maxHeight: `${PROMPT_INPUT_MAX_HEIGHT}px` }}
           rows={1}
         />
@@ -279,10 +281,10 @@ export const PromptInput = memo(function PromptInput({
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
                           <span className="font-medium">{skill.alias}</span>
-                          <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-fg-muted">
+                          <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
                             {skill.availability}
                           </span>
-                          <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-fg-muted">
+                          <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
                             {skill.source_kind.replace('_', ' ')}
                           </span>
                         </div>
