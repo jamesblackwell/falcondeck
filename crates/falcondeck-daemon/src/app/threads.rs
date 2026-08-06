@@ -30,7 +30,9 @@ use super::{
     },
 };
 use crate::{
-    agent_binary::resolve_agent_binary, claude::ClaudeRuntime, codex::CodexSession,
+    agent_binary::{preferred_command_path, resolve_agent_binary},
+    claude::ClaudeRuntime,
+    codex::CodexSession,
     error::DaemonError,
 };
 
@@ -291,25 +293,26 @@ impl AppState {
         input: &AiThreadTitleInput,
     ) -> Option<String> {
         let resolved = resolve_agent_binary("claude", &self.inner.claude_bin);
-        let output = timeout(
-            Duration::from_secs(20),
-            Command::new(&resolved.executable)
-                .arg("-p")
-                .arg(&input.prompt)
-                .arg("--model")
-                .arg("haiku")
-                .arg("--output-format")
-                .arg("text")
-                .arg("--max-turns")
-                .arg("1")
-                .arg("--no-session-persistence")
-                .current_dir(&input.workspace_path)
-                .stdin(Stdio::null())
-                .output(),
-        )
-        .await
-        .ok()?
-        .ok()?;
+        let mut command = Command::new(&resolved.executable);
+        command
+            .arg("-p")
+            .arg(&input.prompt)
+            .arg("--model")
+            .arg("haiku")
+            .arg("--output-format")
+            .arg("text")
+            .arg("--tools")
+            .arg("")
+            .arg("--no-session-persistence")
+            .current_dir(&input.workspace_path)
+            .stdin(Stdio::null());
+        if let Some(path) = preferred_command_path(&resolved.executable) {
+            command.env("PATH", path);
+        }
+        let output = timeout(Duration::from_secs(20), command.output())
+            .await
+            .ok()?
+            .ok()?;
 
         if !output.status.success() {
             return None;
@@ -327,27 +330,28 @@ impl AppState {
             "falcondeck-thread-title-{}.txt",
             Uuid::new_v4().simple()
         ));
-        let output = timeout(
-            Duration::from_secs(25),
-            Command::new(&resolved.executable)
-                .arg("exec")
-                .arg("--skip-git-repo-check")
-                .arg("--ephemeral")
-                .arg("--color")
-                .arg("never")
-                .arg("-s")
-                .arg("read-only")
-                .arg("-o")
-                .arg(&output_path)
-                .arg(&input.prompt)
-                .current_dir(&input.workspace_path)
-                .stdin(Stdio::null())
-                .stderr(Stdio::null())
-                .output(),
-        )
-        .await
-        .ok()?
-        .ok()?;
+        let mut command = Command::new(&resolved.executable);
+        command
+            .arg("exec")
+            .arg("--skip-git-repo-check")
+            .arg("--ephemeral")
+            .arg("--color")
+            .arg("never")
+            .arg("-s")
+            .arg("read-only")
+            .arg("-o")
+            .arg(&output_path)
+            .arg(&input.prompt)
+            .current_dir(&input.workspace_path)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(path) = preferred_command_path(&resolved.executable) {
+            command.env("PATH", path);
+        }
+        let output = timeout(Duration::from_secs(25), command.output())
+            .await
+            .ok()?
+            .ok()?;
 
         if !output.status.success() {
             let _ = fs::remove_file(&output_path).await;

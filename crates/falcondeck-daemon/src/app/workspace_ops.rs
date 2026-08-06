@@ -217,7 +217,10 @@ pub(super) async fn connect_workspace_internal(
                 provider: state.provider.clone().unwrap_or(AgentProvider::Codex),
                 native_session_id: state.native_session_id.clone(),
                 status: restored_status,
-                updated_at: now,
+                updated_at: state
+                    .updated_at
+                    .or_else(|| persisted_workspace_ref.and_then(|workspace| workspace.updated_at))
+                    .unwrap_or(now),
                 last_message_preview: None,
                 latest_turn_id: None,
                 latest_plan: None,

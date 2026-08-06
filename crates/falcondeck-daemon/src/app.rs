@@ -171,6 +171,8 @@ struct PersistedWorkspaceState {
 struct PersistedThreadState {
     thread_id: String,
     #[serde(default)]
+    updated_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default)]
     provider: Option<AgentProvider>,
     #[serde(default)]
     native_session_id: Option<String>,
@@ -451,7 +453,10 @@ impl AppState {
                 provider: state.provider.clone().unwrap_or(AgentProvider::Codex),
                 native_session_id: state.native_session_id.clone(),
                 status,
-                updated_at: now,
+                updated_at: state
+                    .updated_at
+                    .or(persisted_workspace.updated_at)
+                    .unwrap_or(now),
                 last_message_preview: None,
                 latest_turn_id: None,
                 latest_plan: None,
@@ -906,6 +911,7 @@ impl AppState {
                 .values()
                 .map(|thread| PersistedThreadState {
                     thread_id: thread.summary.id.clone(),
+                    updated_at: Some(thread.summary.updated_at),
                     provider: Some(thread.summary.provider.clone()),
                     native_session_id: thread.summary.native_session_id.clone(),
                     title: Some(thread.summary.title.clone()),

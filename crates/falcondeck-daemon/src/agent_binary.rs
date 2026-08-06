@@ -1,5 +1,6 @@
 use std::{
     env,
+    ffi::OsString,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -103,6 +104,14 @@ pub fn missing_binary_message(
     )
 }
 
+pub fn preferred_command_path(executable: &str) -> Option<OsString> {
+    build_preferred_command_path(
+        Path::new(executable),
+        env::var_os("HOME"),
+        env::var_os("PATH"),
+    )
+}
+
 fn resolve_from_path(bin_name: &str) -> Option<String> {
     env::var_os("PATH").and_then(|paths| {
         env::split_paths(&paths)
@@ -178,9 +187,72 @@ fn normalize_existing_path(path: &Path) -> Option<String> {
         .map(|resolved| resolved.display().to_string())
 }
 
+fn build_preferred_command_path(
+    executable: &Path,
+    home: Option<OsString>,
+    existing_path: Option<OsString>,
+) -> Option<OsString> {
+    let mut entries = Vec::new();
+
+    if executable.is_absolute() {
+        if let Some(parent) = executable.parent().map(Path::to_path_buf) {
+            push_unique_path(&mut entries, parent);
+        }
+        if let Some(parent) = executable
+            .canonicalize()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+        {
+            push_unique_path(&mut entries, parent);
+        }
+    }
+
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        push_unique_path(&mut entries, home.join(".local/bin"));
+        push_unique_path(&mut entries, home.join(".cargo/bin"));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        push_unique_path(&mut entries, PathBuf::from("/opt/homebrew/bin"));
+        push_unique_path(&mut entries, PathBuf::from("/usr/local/bin"));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        push_unique_path(&mut entries, PathBuf::from("/usr/local/bin"));
+        push_unique_path(&mut entries, PathBuf::from("/usr/bin"));
+    }
+
+    if let Some(existing_path) = existing_path {
+        for entry in env::split_paths(&existing_path) {
+            push_unique_path(&mut entries, entry);
+        }
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    env::join_paths(entries).ok()
+}
+
+fn push_unique_path(entries: &mut Vec<PathBuf>, entry: PathBuf) {
+    if entry.as_os_str().is_empty() || entries.iter().any(|existing| existing == &entry) {
+        return;
+    }
+    entries.push(entry);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ResolutionDiagnostics, missing_binary_message};
+    use std::{
+        ffi::OsString,
+        path::{Path, PathBuf},
+    };
+
+    use super::{ResolutionDiagnostics, build_preferred_command_path, missing_binary_message};
 
     #[test]
     fn missing_binary_message_includes_checked_sources() {
@@ -205,5 +277,23 @@ mod tests {
         assert!(message.contains("the current PATH"));
         assert!(message.contains("your login shell via `command -v`"));
         assert!(message.contains("/opt/homebrew/bin/claude"));
+    }
+
+    #[test]
+    fn preferred_command_path_prioritizes_executable_parent() {
+        let path = build_preferred_command_path(
+            Path::new("/opt/homebrew/bin/codex"),
+            Some(OsString::from("/Users/example")),
+            Some(OsString::from("/usr/local/bin:/usr/bin")),
+        )
+        .expect("path should be built");
+
+        let entries = std::env::split_paths(&path).collect::<Vec<PathBuf>>();
+
+        assert_eq!(entries[0], PathBuf::from("/opt/homebrew/bin"));
+        assert!(entries.contains(&PathBuf::from("/Users/example/.local/bin")));
+        assert!(entries.contains(&PathBuf::from("/Users/example/.cargo/bin")));
+        assert!(entries.contains(&PathBuf::from("/usr/local/bin")));
+        assert!(entries.contains(&PathBuf::from("/usr/bin")));
     }
 }

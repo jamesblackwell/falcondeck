@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { ChevronDown, Check, Map } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
-import type { AgentProvider, ModelSummary } from '@falcondeck/client-core'
+import { formatModelLabel, type AgentProvider, type ModelSummary } from '@falcondeck/client-core'
 
 import { Text } from '@/components/ui'
 
@@ -65,14 +65,14 @@ export const InputToolbar = memo(function InputToolbar({
   }, [disabled])
 
   const currentModel = selectedModel ? models.find((m) => m.id === selectedModel) : null
-  const modelDisplayLabel = currentModel?.label ?? 'Default'
+  const modelDisplayLabel = currentModel ? formatModelLabel(currentModel.label) : 'Default'
 
   const openModelSheet = useCallback(() => {
     if (disabled) return
 
     const items = [
       { value: '__default__', label: 'Default' },
-      ...models.map((m) => ({ value: m.id, label: m.label })),
+      ...models.map((m) => ({ value: m.id, label: formatModelLabel(m.label) })),
     ]
     setSheet({
       title: 'Model',

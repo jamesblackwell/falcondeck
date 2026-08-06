@@ -27,7 +27,12 @@ import { NewThreadState } from '@falcondeck/chat-ui'
 import { ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
-import { markInteractiveRequestResolved, normalizeSendError, workspaceSendBlockReason } from './app-utils'
+import {
+  markInteractiveRequestResolved,
+  normalizeSendError,
+  workspaceComposerDisabled,
+  workspaceSendBlockReason,
+} from './app-utils'
 import {
   defaultReasoningEffort,
   reasoningOptions,
@@ -971,7 +976,7 @@ function AppInner() {
     [activeProvider, selectedCollaborationMode, selectedWorkspace],
   )
   const sendBlockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
-  const isDisabled = !selectedWorkspace || isSending || Boolean(sendBlockReason)
+  const isComposerDisabled = isSending || workspaceComposerDisabled(selectedWorkspace)
   const workspaces = useMemo(() => snapshot?.workspaces ?? [], [snapshot?.workspaces])
 
   const newThreadEmptyState = useMemo(
@@ -1093,7 +1098,8 @@ function AppInner() {
                   handleCollaborationModeChange(
                     togglePlanMode(enabled, selectedWorkspace, selectedCollaborationMode, activeProvider),
                   ),
-                disabled: isDisabled,
+                disabled: isComposerDisabled,
+                sendDisabled: Boolean(sendBlockReason),
               }}
             />
           )

@@ -1,5 +1,24 @@
 SHELL := /bin/sh
 
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+# Prefer the native Homebrew toolchain on Apple Silicon so npm uses arm64 bindings.
+ifeq ($(UNAME_S),Darwin)
+ifeq ($(UNAME_M),arm64)
+ifneq ($(wildcard /opt/homebrew/bin/node),)
+export PATH := /opt/homebrew/bin:$(PATH)
+endif
+endif
+endif
+
+DESKTOP_TAURI_TARGET :=
+ifeq ($(UNAME_S),Darwin)
+ifeq ($(UNAME_M),arm64)
+DESKTOP_TAURI_TARGET := aarch64-apple-darwin
+endif
+endif
+
 ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 DESKTOP_DIR := $(ROOT)/apps/desktop
 MOBILE_DIR := $(ROOT)/apps/mobile
@@ -17,10 +36,17 @@ REMOTE_WEB_PORT ?= 4174
 RELAY_BIND_HOST ?= 0.0.0.0
 CODEX_BIN ?= codex
 TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
+DESKTOP_NATIVE_CHECK = cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')" && npm exec -- node -e "import('rolldown').then(() => undefined, (error) => { console.error(error); process.exit(1) })"
 TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
+ifeq ($(strip $(DESKTOP_TAURI_TARGET)),)
 TAURI_BUILD = cd "$(DESKTOP_DIR)" && npm exec tauri -- build
 TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --bundles app --config src-tauri/tauri.local.conf.json
 DESKTOP_BUNDLE_APP := $(ROOT)/target/release/bundle/macos/FalconDeck.app
+else
+TAURI_BUILD = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --target $(DESKTOP_TAURI_TARGET)
+TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --target $(DESKTOP_TAURI_TARGET) --bundles app --config src-tauri/tauri.local.conf.json
+DESKTOP_BUNDLE_APP := $(ROOT)/target/$(DESKTOP_TAURI_TARGET)/release/bundle/macos/FalconDeck.app
+endif
 APPLICATIONS_APP := /Applications/FalconDeck.app
 MOBILE_METRO_PORT ?= 8081
 IOS_SIMULATOR ?= iPhone 16 Pro
@@ -79,11 +105,11 @@ desktop-prepare:
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
 		fi; \
-		if ! (cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')"); then \
-			echo "Retrying workspace install after native binding check failed"; \
+		if ! ($(DESKTOP_NATIVE_CHECK)); then \
+			echo "Retrying workspace install after desktop native dependency check failed"; \
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
-			(cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')"); \
+			($(DESKTOP_NATIVE_CHECK)); \
 		fi
 
 desktop-brand-assets: desktop-prepare
@@ -254,6 +280,17 @@ desktop-dev-stop: desktop-prepare
 
 desktop-install: desktop-brand-assets
 	@set -e; \
+		if [ -n "$(DESKTOP_TAURI_TARGET)" ]; then \
+			if command -v rustup >/dev/null 2>&1; then \
+				if ! rustup target list --installed | grep -qx "$(DESKTOP_TAURI_TARGET)"; then \
+					echo "Installing Rust target $(DESKTOP_TAURI_TARGET)"; \
+					rustup target add "$(DESKTOP_TAURI_TARGET)"; \
+				fi; \
+			else \
+				echo "rustup is required to build the native desktop target $(DESKTOP_TAURI_TARGET)"; \
+				exit 1; \
+			fi; \
+		fi; \
 		echo "Building packaged FalconDeck desktop app"; \
 		rm -rf "$(DESKTOP_BUNDLE_APP)"; \
 		$(TAURI_BUILD_INSTALL); \

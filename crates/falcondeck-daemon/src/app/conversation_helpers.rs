@@ -486,7 +486,9 @@ fn classify_tool_activity_kind(
     normalized_kind: &str,
     normalized_output: &str,
 ) -> ToolActivityKind {
-    if normalized_kind.contains("approval")
+    if normalized_output.contains("requested permissions")
+        || normalized_output.contains("permission")
+        || normalized_kind.contains("approval")
         || normalized_title.contains("approval")
         || normalized_title.contains("permission")
     {
@@ -504,11 +506,16 @@ fn classify_tool_activity_kind(
         || normalized_output.contains("failing")
     {
         ToolActivityKind::Test
+    } else if normalized_kind.contains("webfetch") || normalized_title.starts_with("web fetch") {
+        ToolActivityKind::WebSearch
     } else if normalized_kind.contains("websearch")
         || normalized_kind.contains("web_search")
         || normalized_title.starts_with("web search")
     {
         ToolActivityKind::WebSearch
+    } else if normalized_kind.contains("toolsearch") || normalized_title.starts_with("search tools")
+    {
+        ToolActivityKind::Search
     } else if normalized_kind.contains("imageview")
         || normalized_kind.contains("image_view")
         || normalized_title.starts_with("image view")
@@ -526,25 +533,32 @@ fn classify_tool_activity_kind(
         || normalized_title.starts_with("edit ")
     {
         ToolActivityKind::Edit
+    } else if normalized_kind.contains("skill") || normalized_title.starts_with("load skill") {
+        ToolActivityKind::Context
     } else if normalized_kind.contains("read")
         || normalized_kind.contains("inspect")
         || normalized_title.starts_with("cat ")
         || normalized_title.starts_with("sed -n ")
         || normalized_title.starts_with("read ")
+        || normalized_title.starts_with("read /")
     {
         ToolActivityKind::Read
-    } else if normalized_kind.contains("list")
-        || normalized_title.starts_with("ls ")
-        || normalized_title.starts_with("find ")
-    {
+    } else if normalized_kind.contains("glob") || normalized_title.starts_with("find ") {
         ToolActivityKind::List
-    } else if normalized_kind.contains("search")
-        || normalized_kind.contains("grep")
+    } else if normalized_kind.contains("grep")
+        || normalized_kind.contains("search")
+        || normalized_title.starts_with("read ")
         || normalized_title.starts_with("rg ")
     {
         ToolActivityKind::Search
+    } else if normalized_kind.contains("list") || normalized_title.starts_with("ls ") {
+        ToolActivityKind::List
     } else if normalized_kind.contains("command")
+        || normalized_kind.contains("bash")
         || normalized_title.starts_with("bash:")
+        || normalized_title.starts_with("python")
+        || normalized_title.starts_with("python3")
+        || normalized_title.starts_with("node ")
         || normalized_title.starts_with("/bin/")
         || normalized_title.starts_with("git ")
         || normalized_title.starts_with("pwd")
@@ -568,6 +582,9 @@ fn summarize_tool_title(title: &str, activity_kind: ToolActivityKind) -> Option<
     }
     if trimmed.starts_with("rg ") {
         return Some("Search workspace".to_string());
+    }
+    if trimmed.starts_with("search tools") {
+        return Some("Search tools".to_string());
     }
     if trimmed.starts_with("ls ") {
         return Some("List files".to_string());

@@ -918,6 +918,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     let workspace_path = temp_dir.path().join("project-a");
     std::fs::create_dir_all(&workspace_path).unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");
+    let thread_updated_at = Utc::now() - Duration::minutes(6);
     let persisted = PersistedAppState {
         workspaces: vec![super::PersistedWorkspaceState {
             path: workspace_path.to_string_lossy().to_string(),
@@ -928,6 +929,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
             archived_thread_ids: vec!["thread-1".to_string()],
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
+                updated_at: Some(thread_updated_at),
                 provider: Some(AgentProvider::Claude),
                 native_session_id: Some("native-session-1".to_string()),
                 title: Some("Recovered thread".to_string()),
@@ -992,6 +994,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
         Some("native-session-1")
     );
     assert_eq!(thread.status, ThreadStatus::Error);
+    assert_eq!(thread.updated_at, thread_updated_at);
     assert!(thread.is_archived);
     assert!(thread.last_error.is_some());
 
@@ -1033,6 +1036,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 archived_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-a".to_string(),
+                    updated_at: None,
                     provider: Some(AgentProvider::Codex),
                     native_session_id: Some("native-a".to_string()),
                     title: Some("Thread A".to_string()),
@@ -1056,6 +1060,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 archived_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-b".to_string(),
+                    updated_at: None,
                     provider: Some(AgentProvider::Claude),
                     native_session_id: Some("native-b".to_string()),
                     title: Some("Thread B".to_string()),

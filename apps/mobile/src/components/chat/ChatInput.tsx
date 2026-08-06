@@ -54,7 +54,7 @@ export const ChatInput = memo(function ChatInput({
   onPickImages,
   onRemoveAttachment,
   disabled,
-  placeholder = 'Ask your agent...',
+  placeholder = 'Ask anything',
   attachments,
   skills,
   models,

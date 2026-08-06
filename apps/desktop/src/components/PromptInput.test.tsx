@@ -7,6 +7,7 @@ import { PromptInput } from '@falcondeck/chat-ui'
 const noop = vi.fn()
 
 const promptInputProps = {
+  value: '',
   onValueChange: noop,
   onSubmit: noop,
   onPickImages: noop,
@@ -26,6 +27,8 @@ const promptInputProps = {
   collaborationModes: [],
   selectedCollaborationModeId: null,
   onCollaborationModeChange: noop,
+  disabled: false,
+  sendDisabled: false,
 }
 
 describe('PromptInput', () => {
@@ -51,23 +54,42 @@ describe('PromptInput', () => {
 
     const { rerender } = render(
       <PromptInput
-        value={'Line one\nLine two\nLine three'}
         {...promptInputProps}
+        value={'Line one\nLine two\nLine three'}
       />,
     )
 
-    const textarea = screen.getByPlaceholderText('Ask your coding agent anything...') as HTMLTextAreaElement
+    const textarea = screen.getByPlaceholderText('Ask anything') as HTMLTextAreaElement
     expect(textarea.style.height).toBe('180px')
 
     mockScrollHeight = 52
 
     rerender(
       <PromptInput
-        value=""
         {...promptInputProps}
+        value=""
       />,
     )
 
     expect(textarea.style.height).toBe('52px')
+  })
+
+  it('keeps new-thread controls enabled when sending is blocked but the composer is otherwise available', () => {
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="Draft message"
+        showProviderSelector
+        models={[{ id: 'gpt-5.4', label: 'gpt-5.4', is_default: true } as any]}
+        selectedModelId="gpt-5.4"
+        showPlanModeToggle
+        sendDisabled
+      />,
+    )
+
+    expect(screen.getByPlaceholderText('Ask anything')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'codex' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Enable plan mode' })).not.toBeDisabled()
+    expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled()
   })
 })

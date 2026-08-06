@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 
-import { normalizeSendError, workspaceSendBlockReason } from './app-utils'
+import { normalizeSendError, workspaceComposerDisabled, workspaceSendBlockReason } from './app-utils'
 
 function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary {
   return {
@@ -25,6 +25,23 @@ function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
 }
 
 describe('workspaceSendBlockReason', () => {
+  it('keeps the composer interactive when only the selected provider needs auth', () => {
+    expect(
+      workspaceComposerDisabled(
+        workspace({
+          agents: [
+            {
+              provider: 'claude',
+              account: { status: 'needs_auth', label: 'Sign in' },
+              models: [],
+              collaboration_modes: [],
+            },
+          ],
+        }),
+      ),
+    ).toBe(false)
+  })
+
   it('surfaces reconnecting project guidance', () => {
     expect(
       workspaceSendBlockReason(

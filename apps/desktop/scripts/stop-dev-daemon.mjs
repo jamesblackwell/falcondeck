@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 
 const pidPath = join(homedir(), '.falcondeck', 'daemon-state.dev.pid')
+const devDaemonPort = '4123'
 
 function removePidFile() {
   try {
@@ -22,17 +23,64 @@ function processExists(pid) {
   }
 }
 
-if (!existsSync(pidPath)) {
-  console.log('No FalconDeck dev daemon pid file found.')
-  process.exit(0)
+function commandForPid(pid) {
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' }).trim()
+  } catch {
+    return ''
+  }
 }
 
-const rawPid = readFileSync(pidPath, 'utf8').trim()
-const pid = Number.parseInt(rawPid, 10)
+function fallbackDevDaemonPid() {
+  if (process.platform === 'win32') {
+    return null
+  }
+
+  try {
+    const output = execFileSync(
+      'lsof',
+      [`-tiTCP:${devDaemonPort}`, '-sTCP:LISTEN', '-n', '-P'],
+      { encoding: 'utf8' },
+    )
+
+    for (const rawPid of output.split(/\s+/).filter(Boolean)) {
+      const pid = Number.parseInt(rawPid, 10)
+      if (!Number.isInteger(pid) || pid <= 0) {
+        continue
+      }
+
+      const command = commandForPid(pid)
+      if (command.includes('falcondeck-daemon') && command.includes(`--port=${devDaemonPort}`)) {
+        return pid
+      }
+    }
+  } catch {
+    // Ignore fallback lookup failures and behave as though nothing is running.
+  }
+
+  return null
+}
+
+let pid = null
+if (existsSync(pidPath)) {
+  const rawPid = readFileSync(pidPath, 'utf8').trim()
+  const parsedPid = Number.parseInt(rawPid, 10)
+
+  if (!Number.isInteger(parsedPid) || parsedPid <= 0) {
+    removePidFile()
+    pid = fallbackDevDaemonPid()
+  } else if (processExists(parsedPid)) {
+    pid = parsedPid
+  } else {
+    removePidFile()
+    pid = fallbackDevDaemonPid()
+  }
+} else {
+  pid = fallbackDevDaemonPid()
+}
 
 if (!Number.isInteger(pid) || pid <= 0) {
-  removePidFile()
-  console.log('Removed invalid FalconDeck dev daemon pid file.')
+  console.log('No FalconDeck dev daemon found.')
   process.exit(0)
 }
 

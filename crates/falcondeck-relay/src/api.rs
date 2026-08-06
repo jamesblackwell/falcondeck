@@ -5,7 +5,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
-    response::IntoResponse,
+    response::{Html, IntoResponse},
     routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -24,6 +24,7 @@ use crate::{
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(landing_page))
         .route("/health", get(health))
         .route("/v1/health", get(health))
         .route("/v1/pairings", post(start_pairing))
@@ -69,6 +70,42 @@ struct WebSocketQuery {
 
 async fn health(State(state): State<AppState>) -> Json<falcondeck_core::RelayHealthResponse> {
     Json(state.health().await)
+}
+
+const RELAY_LANDING_PAGE: &str = r##"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FalconDeck Relay</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #090b12; color: #f6f7fb; }
+    main { width: min(34rem, calc(100% - 3rem)); padding: 2.5rem; border: 1px solid #272c3b; border-radius: 1.25rem; background: #10131d; box-shadow: 0 1.5rem 4rem #0008; }
+    .mark { display: inline-grid; place-items: center; width: 2.75rem; height: 2.75rem; border-radius: .8rem; background: #6d5dfc; font-weight: 800; }
+    h1 { margin: 1.5rem 0 .5rem; font-size: clamp(2rem, 7vw, 3rem); letter-spacing: -.05em; }
+    p { color: #aeb5c8; line-height: 1.6; }
+    .status { display: inline-flex; align-items: center; gap: .5rem; margin: 1.25rem 0; color: #b9f6c8; font-weight: 700; }
+    .dot { width: .6rem; height: .6rem; border-radius: 999px; background: #55d187; box-shadow: 0 0 .8rem #55d187; }
+    a { display: inline-block; margin-top: .75rem; color: #fff; font-weight: 700; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    small { display: block; margin-top: 2.5rem; color: #70788d; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark" aria-hidden="true">F</div>
+    <h1>FalconDeck Relay</h1>
+    <div class="status"><span class="dot"></span>Operational</div>
+    <p>This endpoint securely coordinates FalconDeck pairing, remote connections, and encrypted session updates.</p>
+    <a href="https://app.falcondeck.com">Open FalconDeck&nbsp;→</a>
+    <small>Service status: <a href="/health">/health</a></small>
+  </main>
+</body>
+</html>"##;
+
+async fn landing_page() -> Html<&'static str> {
+    Html(RELAY_LANDING_PAGE)
 }
 
 async fn start_pairing(

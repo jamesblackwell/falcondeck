@@ -40,6 +40,7 @@ export type PromptInputProps = {
   planModeEnabled?: boolean
   onPlanModeChange?: (enabled: boolean) => void
   disabled?: boolean
+  sendDisabled?: boolean
   compact?: boolean
 }
 
@@ -68,12 +69,13 @@ export const PromptInput = memo(function PromptInput({
   planModeEnabled = false,
   onPlanModeChange,
   disabled = false,
+  sendDisabled = false,
   compact = false,
 }: PromptInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
-  const canSubmit = (value.trim().length > 0 || attachments.length > 0) && !disabled
+  const canSubmit = (value.trim().length > 0 || attachments.length > 0) && !disabled && !sendDisabled
 
   const filteredSkills = useMemo(() => {
     const query = slashQuery?.query.trim().toLowerCase() ?? ''
@@ -256,8 +258,8 @@ export const PromptInput = memo(function PromptInput({
           onClick={() => updateSlashQuery(value)}
           onKeyUp={() => updateSlashQuery(value)}
           onPaste={handlePaste}
-          placeholder={disabled ? 'Add a project to get started...' : 'Ask your coding agent anything...'}
-          className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[16px] leading-relaxed text-fg-primary placeholder:text-fg-secondary focus:outline-none md:text-[length:var(--fd-text-base)]"
+          placeholder={disabled ? 'Add a project to get started...' : 'Ask anything'}
+          className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[16px] leading-relaxed text-fg-primary placeholder:text-fg-muted focus:outline-none md:text-[length:var(--fd-text-base)]"
           style={{ minHeight: `${PROMPT_INPUT_MIN_HEIGHT}px`, maxHeight: `${PROMPT_INPUT_MAX_HEIGHT}px` }}
           rows={1}
         />

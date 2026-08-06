@@ -22,8 +22,14 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::agent_binary::preferred_command_path;
 use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
 use crate::app::agent_helpers::claude_image_reference;
+use crate::app::agent_helpers::{
+    extract_claude_assistant_message_id, extract_claude_text_delta, extract_claude_tool_event,
+    extract_claude_user_message_text, merge_claude_assistant_text,
+};
+use crate::app::conversation_helpers::tool_display_metadata;
 use crate::error::DaemonError;
 
 pub struct ClaudeBootstrap {
@@ -181,6 +187,9 @@ impl ClaudeRuntime {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(path) = preferred_command_path(&resolved.executable) {
+            command.env("PATH", path);
+        }
 
         if let Some(existing_session_id) = session_id {
             command.arg("--resume").arg(existing_session_id);
@@ -723,22 +732,46 @@ pub fn curated_models() -> Vec<ModelSummary> {
                 },
             ],
         },
+        ModelSummary {
+            id: "fable".to_string(),
+            label: "Fable 5".to_string(),
+            is_default: false,
+            default_reasoning_effort: Some("high".to_string()),
+            supported_reasoning_efforts: vec![
+                ReasoningEffortSummary {
+                    reasoning_effort: "low".to_string(),
+                    description: "Fastest responses".to_string(),
+                },
+                ReasoningEffortSummary {
+                    reasoning_effort: "medium".to_string(),
+                    description: "Balanced reasoning".to_string(),
+                },
+                ReasoningEffortSummary {
+                    reasoning_effort: "high".to_string(),
+                    description: "Deeper reasoning".to_string(),
+                },
+                ReasoningEffortSummary {
+                    reasoning_effort: "max".to_string(),
+                    description: "Maximum effort".to_string(),
+                },
+            ],
+        },
     ]
 }
 
 pub async fn read_auth_status(claude_bin: &str) -> AccountSummary {
     // `claude auth status` can hang on network checks; never let it block
     // workspace connect or the periodic metadata refresh.
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(10),
-        Command::new(claude_bin)
-            .arg("auth")
-            .arg("status")
-            .stdin(Stdio::null())
-            .kill_on_drop(true)
-            .output(),
-    )
-    .await;
+    let mut command = Command::new(claude_bin);
+    command
+        .arg("auth")
+        .arg("status")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    if let Some(path) = preferred_command_path(claude_bin) {
+        command.env("PATH", path);
+    }
+    let output = tokio::time::timeout(tokio::time::Duration::from_secs(10), command.output()).await;
     let output = match output {
         Ok(output) => output,
         Err(_) => {
@@ -899,6 +932,10 @@ fn collect_session_files(root: &Path, files: &mut Vec<PathBuf>) {
 }
 
 fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<HydratedClaudeThread> {
+    let file_updated_at = fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .map(DateTime::<Utc>::from);
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
     let mut session_id = None;
@@ -906,6 +943,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
     let mut title = None;
     let mut updated_at = None;
     let mut items = Vec::new();
+    let mut tool_identity = HashMap::<String, (String, String)>::new();
 
     for line in reader.lines().map_while(Result::ok) {
         let Ok(value) = serde_json::from_str::<Value>(&line) else {
@@ -927,8 +965,50 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
             ],
         )
         .or(updated_at);
-        if let Some(item) = hydrate_conversation_item(&value) {
-            items.push(item);
+        let created_at = extract_datetime(&value, &["created_at", "createdAt", "timestamp"])
+            .unwrap_or_else(Utc::now);
+        if let Some(text) = extract_claude_text_delta(&value) {
+            let id = extract_claude_assistant_message_id(&value)
+                .unwrap_or_else(|| format!("assistant-{}", created_at.timestamp_millis()));
+            upsert_hydrated_assistant_message(&mut items, &id, created_at, &text);
+            continue;
+        }
+        if let Some(tool_event) = extract_claude_tool_event(&value) {
+            let known_identity = tool_identity.get(&tool_event.id).cloned();
+            let title = tool_event
+                .title
+                .or_else(|| known_identity.as_ref().map(|(title, _)| title.clone()))
+                .unwrap_or_else(|| "Claude tool".to_string());
+            let tool_kind = tool_event
+                .tool_kind
+                .or_else(|| {
+                    known_identity
+                        .as_ref()
+                        .map(|(_, tool_kind)| tool_kind.clone())
+                })
+                .unwrap_or_else(|| title.clone());
+            if tool_event.status == "running" {
+                tool_identity.insert(tool_event.id.clone(), (title.clone(), tool_kind.clone()));
+            }
+            upsert_hydrated_tool_call(
+                &mut items,
+                &tool_event.id,
+                &title,
+                &tool_kind,
+                &tool_event.status,
+                tool_event.output.as_deref(),
+                created_at,
+            );
+            continue;
+        }
+        if let Some(text) = extract_claude_user_message_text(&value) {
+            items.push(ConversationItem::UserMessage {
+                id: extract_string(&value, &["uuid", "id"])
+                    .unwrap_or_else(|| format!("user-{}", created_at.timestamp_millis())),
+                text,
+                attachments: Vec::new(),
+                created_at,
+            });
         }
     }
 
@@ -956,7 +1036,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         provider: AgentProvider::Claude,
         native_session_id: Some(session_id),
         status: ThreadStatus::Idle,
-        updated_at: updated_at.unwrap_or(now),
+        updated_at: updated_at.or(file_updated_at).unwrap_or(now),
         last_message_preview,
         latest_turn_id: None,
         latest_plan: None,
@@ -971,31 +1051,75 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
     Some(HydratedClaudeThread { summary, items })
 }
 
-fn hydrate_conversation_item(value: &Value) -> Option<ConversationItem> {
-    let event_type = extract_string(value, &["type", "event"])?;
-    let created_at =
-        extract_datetime(value, &["created_at", "createdAt", "timestamp"]).unwrap_or_else(Utc::now);
-    match event_type.as_str() {
-        "user" | "user_message" => {
-            extract_string(value, &["text", "message", "content"]).map(|text| {
-                ConversationItem::UserMessage {
-                    id: extract_string(value, &["uuid", "id"])
-                        .unwrap_or_else(|| format!("user-{}", created_at.timestamp_millis())),
-                    text,
-                    attachments: Vec::new(),
-                    created_at,
-                }
-            })
-        }
-        "assistant" | "assistant_message" => extract_string(value, &["text", "message", "content"])
-            .map(|text| ConversationItem::AssistantMessage {
-                id: extract_string(value, &["uuid", "id"])
-                    .unwrap_or_else(|| format!("assistant-{}", created_at.timestamp_millis())),
-                text,
-                created_at,
-            }),
-        _ => None,
+fn upsert_hydrated_assistant_message(
+    items: &mut Vec<ConversationItem>,
+    id: &str,
+    created_at: DateTime<Utc>,
+    text: &str,
+) {
+    if let Some(ConversationItem::AssistantMessage { text: existing, .. }) = items
+        .iter_mut()
+        .find(|item| matches!(item, ConversationItem::AssistantMessage { id: existing_id, .. } if existing_id == id))
+    {
+        *existing = merge_claude_assistant_text(existing, text);
+        return;
     }
+
+    items.push(ConversationItem::AssistantMessage {
+        id: id.to_string(),
+        text: text.trim().to_string(),
+        created_at,
+    });
+}
+
+fn upsert_hydrated_tool_call(
+    items: &mut Vec<ConversationItem>,
+    id: &str,
+    title: &str,
+    tool_kind: &str,
+    status: &str,
+    output: Option<&str>,
+    created_at: DateTime<Utc>,
+) {
+    let display = tool_display_metadata(title, tool_kind, status, None, output);
+    let completed_at = if status == "running" {
+        None
+    } else {
+        Some(created_at)
+    };
+
+    if let Some(ConversationItem::ToolCall {
+        title: existing_title,
+        tool_kind: existing_kind,
+        status: existing_status,
+        output: existing_output,
+        display: existing_display,
+        completed_at: existing_completed_at,
+        ..
+    }) = items
+        .iter_mut()
+        .find(|item| matches!(item, ConversationItem::ToolCall { id: existing_id, .. } if existing_id == id))
+    {
+        *existing_title = title.to_string();
+        *existing_kind = tool_kind.to_string();
+        *existing_status = status.to_string();
+        *existing_output = output.map(ToOwned::to_owned);
+        *existing_display = display;
+        *existing_completed_at = completed_at;
+        return;
+    }
+
+    items.push(ConversationItem::ToolCall {
+        id: id.to_string(),
+        title: title.to_string(),
+        tool_kind: tool_kind.to_string(),
+        status: status.to_string(),
+        output: output.map(ToOwned::to_owned),
+        exit_code: None,
+        display,
+        created_at,
+        completed_at,
+    });
 }
 
 fn extract_string(value: &Value, keys: &[&str]) -> Option<String> {
@@ -1065,7 +1189,7 @@ mod tests {
     #[test]
     fn exposes_curated_claude_models_with_versioned_labels() {
         let models = curated_models();
-        assert_eq!(models.len(), 3);
+        assert_eq!(models.len(), 4);
         assert_eq!(models[0].id, "haiku");
         assert_eq!(models[0].label, "Haiku 4.5");
         assert_eq!(models[1].id, "sonnet");
@@ -1073,6 +1197,8 @@ mod tests {
         assert!(models[1].is_default);
         assert_eq!(models[2].id, "opus");
         assert_eq!(models[2].label, "Opus 4.6");
+        assert_eq!(models[3].id, "fable");
+        assert_eq!(models[3].label, "Fable 5");
     }
 
     #[test]
@@ -1087,7 +1213,10 @@ mod tests {
                     "cwd": "/tmp/project",
                     "title": "Feature work",
                     "type": "user",
-                    "text": "hello",
+                    "message": {
+                        "role": "user",
+                        "content": "hello"
+                    },
                     "created_at": "2026-03-19T10:00:00Z"
                 })
                 .to_string(),
@@ -1095,8 +1224,61 @@ mod tests {
                     "session_id": "11111111-1111-4111-8111-111111111111",
                     "cwd": "/tmp/project",
                     "type": "assistant",
-                    "text": "world",
+                    "message": {
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "world"
+                            }
+                        ]
+                    },
                     "created_at": "2026-03-19T10:00:01Z"
+                })
+                .to_string(),
+                json!({
+                    "session_id": "11111111-1111-4111-8111-111111111111",
+                    "cwd": "/tmp/project",
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_read",
+                                "name": "Read",
+                                "input": {
+                                    "file_path": "/tmp/notes.md"
+                                }
+                            }
+                        ]
+                    },
+                    "created_at": "2026-03-19T10:00:02Z"
+                })
+                .to_string(),
+                json!({
+                    "session_id": "11111111-1111-4111-8111-111111111111",
+                    "cwd": "/tmp/project",
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "toolu_read",
+                                "content": "line 1"
+                            }
+                        ]
+                    },
+                    "toolUseResult": {
+                        "file": {
+                            "filePath": "/tmp/notes.md",
+                            "content": "line 1"
+                        }
+                    },
+                    "created_at": "2026-03-19T10:00:03Z"
                 })
                 .to_string(),
             ]
@@ -1110,7 +1292,46 @@ mod tests {
             hydrated.summary.native_session_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
         );
-        assert_eq!(hydrated.items.len(), 2);
+        assert_eq!(hydrated.items.len(), 3);
+        assert!(matches!(
+            hydrated.items.get(1),
+            Some(ConversationItem::AssistantMessage { text, .. }) if text == "world"
+        ));
+        assert!(matches!(
+            hydrated.items.get(2),
+            Some(ConversationItem::ToolCall { title, status, output, .. })
+                if title == "Read /tmp/notes.md"
+                    && status == "completed"
+                    && output.as_deref() == Some("line 1")
+        ));
+    }
+
+    #[test]
+    fn uses_session_file_mtime_when_claude_records_have_no_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir
+            .path()
+            .join("22222222-2222-4222-8222-222222222222.jsonl");
+        fs::write(
+            &session_path,
+            json!({
+                "sessionId": "22222222-2222-4222-8222-222222222222",
+                "cwd": "/tmp/project",
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "hello"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let file_updated_at =
+            DateTime::<Utc>::from(fs::metadata(&session_path).unwrap().modified().unwrap());
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+
+        assert_eq!(hydrated.summary.updated_at, file_updated_at);
     }
 
     #[test]

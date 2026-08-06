@@ -25,7 +25,7 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
+use crate::agent_binary::{missing_binary_message, preferred_command_path, resolve_agent_binary};
 use crate::skills::canonical_skill_alias;
 use crate::{
     app::{AppState, conversation_helpers::tool_display_metadata},
@@ -91,13 +91,18 @@ impl CodexSession {
         state: AppState,
     ) -> Result<CodexBootstrap, DaemonError> {
         let resolved = resolve_agent_binary("codex", &codex_bin);
-        let mut child = Command::new(&resolved.executable)
+        let mut command = Command::new(&resolved.executable);
+        command
             .arg("app-server")
             .current_dir(PathBuf::from(&workspace_path))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
+            .kill_on_drop(true);
+        if let Some(path) = preferred_command_path(&resolved.executable) {
+            command.env("PATH", path);
+        }
+        let mut child = command
             .spawn()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {

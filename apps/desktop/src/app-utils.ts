@@ -15,6 +15,20 @@ export function providerLabel(provider: AgentProvider) {
   return provider === 'claude' ? 'Claude' : 'Codex'
 }
 
+export function workspaceComposerDisabled(workspace: WorkspaceSummary | null | undefined) {
+  if (!workspace) return true
+
+  switch (workspace.status) {
+    case 'connecting':
+    case 'disconnected':
+    case 'error':
+    case 'needs_auth':
+      return true
+    default:
+      return false
+  }
+}
+
 export function workspaceSendBlockReason(
   workspace: WorkspaceSummary | null | undefined,
   provider: AgentProvider,

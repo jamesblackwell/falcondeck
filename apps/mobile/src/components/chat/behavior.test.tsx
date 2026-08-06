@@ -119,7 +119,7 @@ describe('chat behavior components', () => {
       />,
     )
 
-    expect(textOf(renderer)).toContain('GPT-5')
+    expect(textOf(renderer)).toContain('gpt-5')
     expect(textOf(renderer)).toContain('Medium')
     expect(textOf(renderer)).toContain('Codex')
     expect(textOf(renderer)).toContain('Claude')

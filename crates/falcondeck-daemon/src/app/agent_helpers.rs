@@ -318,7 +318,7 @@ pub(super) fn is_claude_plan_mode(mode_id: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn extract_claude_text_delta(value: &Value) -> Option<String> {
+pub(crate) fn extract_claude_text_delta(value: &Value) -> Option<String> {
     if matches!(extract_string(value, &["type"]).as_deref(), Some("result")) {
         // Error results are surfaced via `extract_claude_error`; folding them
         // into the assistant message would render the failure as agent prose.
@@ -357,7 +357,7 @@ pub(super) fn extract_claude_text_delta(value: &Value) -> Option<String> {
         .and_then(|delta| extract_string(delta, &["text"]))
 }
 
-pub(super) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent> {
+pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent> {
     let top_level_type = extract_string(value, &["type"]);
     let event = claude_event_value(value);
     let event_type =
@@ -375,11 +375,12 @@ pub(super) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
             })?;
         let id = extract_string(tool_result, &["tool_use_id", "toolUseId", "id"])
             .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
-        let output = extract_string(tool_result, &["content", "text"]);
+        let title = claude_tool_result_title(value, tool_result);
+        let output = claude_tool_result_output(value, tool_result);
         return Some(ClaudeToolEvent {
             id,
-            title: None,
-            tool_kind: None,
+            title: title.clone(),
+            tool_kind: title,
             status: "completed".to_string(),
             output,
         });
@@ -392,8 +393,11 @@ pub(super) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         }
         let id = extract_string(content_block, &["id"])
             .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
-        let title =
-            extract_string(content_block, &["name"]).unwrap_or_else(|| "Claude tool".to_string());
+        let title = synthesize_claude_tool_title(
+            extract_string(content_block, &["name"]).as_deref(),
+            content_block.get("input"),
+            None,
+        );
         return Some(ClaudeToolEvent {
             id,
             tool_kind: Some(title.clone()),
@@ -416,8 +420,11 @@ pub(super) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         if let Some(tool_use) = tool_use {
             let id = extract_string(tool_use, &["id"])
                 .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
-            let title =
-                extract_string(tool_use, &["name"]).unwrap_or_else(|| "Claude tool".to_string());
+            let title = synthesize_claude_tool_title(
+                extract_string(tool_use, &["name"]).as_deref(),
+                tool_use.get("input"),
+                None,
+            );
             return Some(ClaudeToolEvent {
                 id,
                 tool_kind: Some(title.clone()),
@@ -434,14 +441,19 @@ pub(super) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
 
     let id = extract_string(event, &["tool_use_id", "toolUseId", "id"])
         .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
-    let title = extract_string(event, &["tool_name", "toolName", "name"])
-        .unwrap_or_else(|| "Claude tool".to_string());
+    let title = synthesize_claude_tool_title(
+        extract_string(event, &["tool_name", "toolName", "name"]).as_deref(),
+        event.get("input"),
+        event.get("result").or_else(|| value.get("toolUseResult")),
+    );
     let status = if event_type.contains("end") || event_type.contains("result") {
         "completed"
     } else {
         "running"
     };
-    let output = extract_string(event, &["output", "result", "text"]);
+    let output = extract_string(event, &["output", "text"])
+        .or_else(|| stringify_claude_value(event.get("result")))
+        .or_else(|| stringify_claude_value(value.get("toolUseResult")));
     Some(ClaudeToolEvent {
         id,
         tool_kind: Some(title.clone()),
@@ -452,7 +464,7 @@ pub(super) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct ClaudeToolEvent {
+pub(crate) struct ClaudeToolEvent {
     pub id: String,
     pub title: Option<String>,
     pub tool_kind: Option<String>,
@@ -494,11 +506,63 @@ pub(super) fn extract_claude_error(value: &Value) -> Option<String> {
         })
 }
 
-pub(super) fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> String {
+pub(crate) fn extract_claude_assistant_message_id(value: &Value) -> Option<String> {
+    value
+        .get("message")
+        .and_then(|message| extract_string(message, &["id"]))
+        .or_else(|| extract_string(value, &["uuid", "id"]))
+}
+
+pub(crate) fn extract_claude_user_message_text(value: &Value) -> Option<String> {
+    if extract_string(value, &["type"]).as_deref() != Some("user") {
+        return None;
+    }
+
+    if let Some(text) = extract_string(value, &["text"]) {
+        return Some(text);
+    }
+
+    let message = value.get("message")?;
+    if let Some(content) = message.get("content") {
+        if let Some(text) = content.as_str() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+        if let Some(items) = content.as_array() {
+            if items
+                .iter()
+                .any(|item| extract_string(item, &["type"]).as_deref() == Some("tool_result"))
+            {
+                return None;
+            }
+
+            let combined = items
+                .iter()
+                .filter(|item| extract_string(item, &["type"]).as_deref() == Some("text"))
+                .filter_map(|item| extract_string(item, &["text"]))
+                .collect::<Vec<_>>()
+                .join("");
+            let trimmed = combined.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    extract_string(message, &["text"])
+}
+
+pub(crate) fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> String {
+    let next_chunk = next_chunk.trim();
     if current.is_empty() {
         return next_chunk.to_string();
     }
     if next_chunk.is_empty() || current == next_chunk {
+        return current.to_string();
+    }
+    if next_chunk.len() > 24 && current.contains(next_chunk) {
         return current.to_string();
     }
     if next_chunk.starts_with(current) {
@@ -510,7 +574,214 @@ pub(super) fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> St
     if current.ends_with(next_chunk) {
         return current.to_string();
     }
-    format!("{current}{next_chunk}")
+    if let Some(overlap) = longest_suffix_prefix_overlap(current, next_chunk) {
+        return format!("{current}{}", &next_chunk[overlap..]);
+    }
+
+    let separator = if current.ends_with('\n') || next_chunk.starts_with('\n') {
+        ""
+    } else if current.ends_with(['.', '!', '?', ':']) {
+        "\n\n"
+    } else {
+        " "
+    };
+    format!("{current}{separator}{next_chunk}")
+}
+
+fn claude_tool_result_title(value: &Value, tool_result: &Value) -> Option<String> {
+    if let Some(command_name) = value
+        .get("toolUseResult")
+        .and_then(|result| extract_string(result, &["commandName"]))
+    {
+        return Some(format!("Load skill: {command_name}"));
+    }
+
+    if let Some(query) = value
+        .get("toolUseResult")
+        .and_then(|result| extract_string(result, &["query"]))
+    {
+        return Some(format!("Search tools: {query}"));
+    }
+
+    if let Some(file_path) = value
+        .get("toolUseResult")
+        .and_then(|result| result.get("file"))
+        .and_then(|file| extract_string(file, &["filePath", "path"]))
+    {
+        return Some(format!("Read {file_path}"));
+    }
+
+    if let Some(items) = tool_result.get("content").and_then(Value::as_array) {
+        if let Some(tool_name) = items.iter().find_map(|item| {
+            if extract_string(item, &["type"]).as_deref() == Some("tool_reference") {
+                extract_string(item, &["tool_name", "toolName", "name"])
+            } else {
+                None
+            }
+        }) {
+            return Some(format!("Search tools: {tool_name}"));
+        }
+    }
+
+    None
+}
+
+fn claude_tool_result_output(value: &Value, tool_result: &Value) -> Option<String> {
+    stringify_claude_value(value.get("toolUseResult"))
+        .or_else(|| extract_string(tool_result, &["content", "text"]))
+        .or_else(|| stringify_claude_value(tool_result.get("content")))
+}
+
+fn synthesize_claude_tool_title(
+    name: Option<&str>,
+    input: Option<&Value>,
+    result: Option<&Value>,
+) -> String {
+    let Some(name) = name.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "Claude tool".to_string();
+    };
+
+    match name.to_ascii_lowercase().as_str() {
+        "read" => input
+            .and_then(|input| extract_string(input, &["file_path", "filePath", "path"]))
+            .map(|path| format!("Read {path}"))
+            .unwrap_or_else(|| "Read".to_string()),
+        "glob" => input
+            .and_then(|input| {
+                extract_string(input, &["pattern"]).or_else(|| extract_string(input, &["path"]))
+            })
+            .map(|pattern| format!("Find {pattern}"))
+            .unwrap_or_else(|| "Find files".to_string()),
+        "grep" => input
+            .and_then(|input| {
+                extract_string(input, &["pattern"]).or_else(|| extract_string(input, &["query"]))
+            })
+            .map(|pattern| format!("Search {pattern}"))
+            .unwrap_or_else(|| "Search workspace".to_string()),
+        "bash" => input
+            .and_then(|input| {
+                extract_string(input, &["command"])
+                    .or_else(|| extract_string(input, &["description"]))
+            })
+            .map(|command| truncate_claude_tool_label(&command, 120))
+            .unwrap_or_else(|| "Bash".to_string()),
+        "webfetch" => input
+            .and_then(|input| extract_string(input, &["url"]))
+            .map(|url| format!("Web fetch {url}"))
+            .unwrap_or_else(|| "Web fetch".to_string()),
+        "toolsearch" => input
+            .and_then(|input| extract_string(input, &["query"]))
+            .or_else(|| result.and_then(|result| extract_string(result, &["query"])))
+            .map(|query| format!("Search tools: {query}"))
+            .unwrap_or_else(|| "Search tools".to_string()),
+        "skill" => input
+            .and_then(|input| extract_string(input, &["skill"]))
+            .or_else(|| result.and_then(|result| extract_string(result, &["commandName"])))
+            .map(|skill| format!("Load skill: {skill}"))
+            .unwrap_or_else(|| "Load skill".to_string()),
+        _ => name.to_string(),
+    }
+}
+
+fn stringify_claude_value(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::Null => None,
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Value::Object(object) => {
+            if let Some(file_content) = object
+                .get("file")
+                .and_then(|file| extract_string(file, &["content"]))
+            {
+                return Some(file_content);
+            }
+
+            let object_value = Value::Object(object.clone());
+            let mut parts = Vec::new();
+            if let Some(stdout) = extract_string(&object_value, &["stdout"]) {
+                parts.push(stdout);
+            }
+            if let Some(stderr) = extract_string(&object_value, &["stderr"]) {
+                parts.push(stderr);
+            }
+            if let Some(result) = extract_string(&object_value, &["result"]) {
+                parts.push(result);
+            }
+            if let Some(message) = extract_string(&object_value, &["message"]) {
+                parts.push(message);
+            }
+            if let Some(matches) = object.get("matches").and_then(Value::as_array) {
+                let rendered = matches
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if !rendered.is_empty() {
+                    parts.push(rendered);
+                }
+            }
+            if let Some(filenames) = object.get("filenames").and_then(Value::as_array) {
+                let rendered = filenames
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !rendered.is_empty() {
+                    parts.push(rendered);
+                }
+            }
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n").trim().to_string())
+            }
+        }
+        Value::Array(items) => {
+            let rendered = items
+                .iter()
+                .filter_map(|item| {
+                    extract_string(item, &["text", "tool_name", "toolName", "name"])
+                        .or_else(|| item.as_str().map(ToOwned::to_owned))
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = rendered.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        other => Some(other.to_string()),
+    }
+}
+
+fn truncate_claude_tool_label(value: &str, limit: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_string();
+    }
+
+    let mut result = trimmed
+        .chars()
+        .take(limit.saturating_sub(1))
+        .collect::<String>();
+    result.push('…');
+    result
+}
+
+fn longest_suffix_prefix_overlap(current: &str, next: &str) -> Option<usize> {
+    let max = current.len().min(next.len());
+    (16..=max)
+        .rev()
+        .find(|size| current.ends_with(&next[..*size]))
 }
 
 fn claude_event_value(value: &Value) -> &Value {

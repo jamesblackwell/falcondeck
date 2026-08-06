@@ -33,6 +33,10 @@ export function workspaceModels(
   return workspaceAgent(workspace, provider)?.models ?? workspace?.models ?? []
 }
 
+export function formatModelLabel(label: string) {
+  return label.toLowerCase()
+}
+
 export function workspaceCollaborationModes(
   workspace: WorkspaceSummary | null | undefined,
   provider: AgentProvider,

@@ -1,7 +1,9 @@
 use std::{
+    collections::hash_map::DefaultHasher,
     env, fs,
+    hash::{Hash, Hasher},
     net::{SocketAddr, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -70,27 +72,33 @@ fn repo_root() -> Result<PathBuf, String> {
         .map_err(|error| error.to_string())
 }
 
-fn daemon_build_stamp() -> Result<String, String> {
-    let executable = if cfg!(windows) {
-        "falcondeck-daemon.exe"
-    } else {
-        "falcondeck-daemon"
-    };
-    let path = repo_root()?.join("target").join("debug").join(executable);
-    let metadata = fs::metadata(&path).map_err(|error| {
-        format!(
-            "failed to read daemon build metadata for {:?}: {error}",
-            path
-        )
-    })?;
-    let modified = metadata
-        .modified()
-        .map_err(|error| format!("failed to read daemon build timestamp: {error}"))?;
-    let stamp = modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| format!("invalid daemon build timestamp: {error}"))?
-        .as_millis();
-    Ok(stamp.to_string())
+fn collect_dev_daemon_inputs(root: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        if path.is_dir() {
+            collect_dev_daemon_inputs(&path, files)?;
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn dev_daemon_source_stamp() -> Result<String, String> {
+    let root = repo_root()?;
+    let mut files = vec![root.join("Cargo.toml"), root.join("Cargo.lock")];
+    collect_dev_daemon_inputs(&root.join("crates/falcondeck-core"), &mut files)?;
+    collect_dev_daemon_inputs(&root.join("crates/falcondeck-daemon"), &mut files)?;
+    files.sort();
+
+    let mut hasher = DefaultHasher::new();
+    for path in files {
+        path.strip_prefix(&root).unwrap_or(&path).hash(&mut hasher);
+        fs::read(&path)
+            .map_err(|error| format!("failed to fingerprint {path:?}: {error}"))?
+            .hash(&mut hasher);
+    }
+    Ok(format!("{:016x}", hasher.finish()))
 }
 
 fn read_dev_stamp() -> Option<String> {
@@ -171,7 +179,7 @@ fn stop_dev_daemon_process() -> Result<(), String> {
 
 fn ensure_dev_daemon() -> Result<String, String> {
     let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DAEMON_PORT));
-    let expected_stamp = daemon_build_stamp().ok();
+    let expected_stamp = dev_daemon_source_stamp().ok();
     let running_stamp = read_dev_stamp();
     let needs_restart =
         daemon_reachable(addr) && expected_stamp.is_some() && expected_stamp != running_stamp;
@@ -228,8 +236,54 @@ fn ensure_dev_daemon() -> Result<String, String> {
 }
 
 fn resolve_agent_bin(bin_name: &str, override_var: &str) -> String {
-    let configured = env::var(override_var).unwrap_or_else(|_| bin_name.to_string());
-    resolve_agent_binary(bin_name, &configured).executable
+    if let Ok(configured) = env::var(override_var) {
+        return resolve_agent_binary(bin_name, &configured).executable;
+    }
+
+    if !cfg!(debug_assertions) {
+        if let Some(preferred) = preferred_packaged_agent_bin(bin_name) {
+            return resolve_agent_binary(bin_name, &preferred).executable;
+        }
+    }
+
+    resolve_agent_binary(bin_name, bin_name).executable
+}
+
+fn preferred_packaged_agent_bin(bin_name: &str) -> Option<String> {
+    let mut candidates = Vec::new();
+
+    if let Ok(home) = env::var("HOME") {
+        let home = PathBuf::from(home);
+        candidates.push(home.join(".local/bin").join(bin_name));
+        candidates.push(home.join(".cargo/bin").join(bin_name));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        #[cfg(target_arch = "aarch64")]
+        candidates.push(PathBuf::from("/opt/homebrew/bin").join(bin_name));
+        candidates.push(PathBuf::from("/usr/local/bin").join(bin_name));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        candidates.push(PathBuf::from("/usr/local/bin").join(bin_name));
+        candidates.push(PathBuf::from("/usr/bin").join(bin_name));
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|path| normalize_existing_path(&path))
+}
+
+fn normalize_existing_path(path: &Path) -> Option<String> {
+    if !path.is_absolute() || !path.is_file() {
+        return None;
+    }
+
+    path.canonicalize()
+        .ok()
+        .map(|resolved| resolved.display().to_string())
 }
 
 #[tauri::command]

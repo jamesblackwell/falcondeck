@@ -24,6 +24,7 @@ import {
   signPairingClaimChallenge,
   upsertConversationItem,
   verifyPairingClaimChallenge,
+  formatModelLabel,
   type ConversationItem,
   type EventEnvelope,
   type PersistedRemoteSession,
@@ -125,6 +126,11 @@ describe('client-core grouping', () => {
 })
 
 describe('client-core skills helpers', () => {
+  it('normalizes model labels to lowercase for display', () => {
+    expect(formatModelLabel('GPT-5.4-Mini')).toBe('gpt-5.4-mini')
+    expect(formatModelLabel('Sonnet 4.6')).toBe('sonnet 4.6')
+  })
+
   it('parses selected skills from slash aliases without treating paths as skills', () => {
     const skills = [
       {

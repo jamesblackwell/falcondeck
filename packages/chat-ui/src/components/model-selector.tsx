@@ -1,5 +1,11 @@
 import React from 'react'
-import type { AgentProvider, CollaborationModeSummary, ModelSummary } from '@falcondeck/client-core'
+
+import {
+  formatModelLabel,
+  type AgentProvider,
+  type CollaborationModeSummary,
+  type ModelSummary,
+} from '@falcondeck/client-core'
 
 import { Button, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@falcondeck/ui'
 
@@ -54,7 +60,7 @@ export function ModelSelector({
       <SelectContent>
         {models.map((model) => (
           <SelectItem key={model.id} value={model.id}>
-            {model.label}
+            {formatModelLabel(model.label)}
           </SelectItem>
         ))}
       </SelectContent>
