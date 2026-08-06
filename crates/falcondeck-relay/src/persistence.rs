@@ -529,10 +529,13 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 daemon_last_seen_at TIMESTAMPTZ NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
-                next_seq BIGINT NOT NULL DEFAULT 1
+                next_seq BIGINT NOT NULL DEFAULT 1,
+                oldest_lost_seq BIGINT NOT NULL DEFAULT 0
             );
             ALTER TABLE relay_sessions
                 ADD COLUMN IF NOT EXISTS next_seq BIGINT NOT NULL DEFAULT 1;
+            ALTER TABLE relay_sessions
+                ADD COLUMN IF NOT EXISTS oldest_lost_seq BIGINT NOT NULL DEFAULT 0;
             CREATE TABLE IF NOT EXISTS relay_pairings (
                 pairing_id TEXT PRIMARY KEY,
                 pairing_code TEXT NOT NULL UNIQUE,
@@ -551,6 +554,7 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 client_token TEXT NOT NULL UNIQUE,
                 label TEXT NULL,
                 public_key TEXT NULL,
+                identity_public_key TEXT NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 last_seen_at TIMESTAMPTZ NULL,
                 revoked_at TIMESTAMPTZ NULL,
@@ -558,6 +562,7 @@ async fn init_postgres_schema(client: &PostgresClient) -> Result<(), RelayError>
                 PRIMARY KEY (session_id, device_id)
             );
             ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS push_token TEXT NULL;
+            ALTER TABLE relay_devices ADD COLUMN IF NOT EXISTS identity_public_key TEXT NULL;
             CREATE TABLE IF NOT EXISTS relay_updates (
                 session_id TEXT NOT NULL REFERENCES relay_sessions(session_id) ON DELETE CASCADE,
                 seq BIGINT NOT NULL,
@@ -614,7 +619,7 @@ async fn load_postgres_state_from_client(
 
     for row in client
         .query(
-            "SELECT session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq FROM relay_sessions",
+            "SELECT session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq, oldest_lost_seq FROM relay_sessions",
             &[],
         )
         .await
@@ -642,6 +647,10 @@ async fn load_postgres_state_from_client(
                     .get::<_, i64>("next_seq")
                     .try_into()
                     .map_err(|_| RelayError::StateLoad("invalid next sequence".to_string()))?,
+                oldest_lost_seq: row
+                    .get::<_, i64>("oldest_lost_seq")
+                    .try_into()
+                    .map_err(|_| RelayError::StateLoad("invalid lost sequence".to_string()))?,
                 updates: Vec::new(),
                 actions: std::collections::HashMap::new(),
             },
@@ -650,7 +659,7 @@ async fn load_postgres_state_from_client(
 
     for row in client
         .query(
-            "SELECT session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at, push_token FROM relay_devices ORDER BY created_at ASC",
+            "SELECT session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token FROM relay_devices ORDER BY created_at ASC",
             &[],
         )
         .await
@@ -663,6 +672,7 @@ async fn load_postgres_state_from_client(
                 client_token: row.get("client_token"),
                 label: row.get("label"),
                 public_key: row.get("public_key"),
+                identity_public_key: row.get("identity_public_key"),
                 created_at: row.get("created_at"),
                 last_seen_at: row.get("last_seen_at"),
                 revoked_at: row.get("revoked_at"),
@@ -754,15 +764,19 @@ async fn upsert_session(
 ) -> Result<(), RelayError> {
     client
         .execute(
-            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            // Concurrent writers can upsert from stale SessionMeta
+            // snapshots; GREATEST/LEAST keep the timestamps and sequence
+            // watermarks monotonic (both skip NULLs in Postgres).
+            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq, oldest_lost_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (session_id) DO UPDATE SET
                pairing_id = EXCLUDED.pairing_id,
                daemon_token = EXCLUDED.daemon_token,
-               daemon_last_seen_at = EXCLUDED.daemon_last_seen_at,
-               created_at = EXCLUDED.created_at,
-               updated_at = EXCLUDED.updated_at,
-               next_seq = GREATEST(relay_sessions.next_seq, EXCLUDED.next_seq)",
+               daemon_last_seen_at = GREATEST(relay_sessions.daemon_last_seen_at, EXCLUDED.daemon_last_seen_at),
+               created_at = LEAST(relay_sessions.created_at, EXCLUDED.created_at),
+               updated_at = GREATEST(relay_sessions.updated_at, EXCLUDED.updated_at),
+               next_seq = GREATEST(relay_sessions.next_seq, EXCLUDED.next_seq),
+               oldest_lost_seq = GREATEST(relay_sessions.oldest_lost_seq, EXCLUDED.oldest_lost_seq)",
             &[
                 &session.session_id,
                 &session.pairing_id,
@@ -772,6 +786,8 @@ async fn upsert_session(
                 &session.updated_at,
                 &i64::try_from(session.next_seq)
                     .map_err(|_| RelayError::StatePersist("next sequence overflow".to_string()))?,
+                &i64::try_from(session.oldest_lost_seq)
+                    .map_err(|_| RelayError::StatePersist("lost sequence overflow".to_string()))?,
             ],
         )
         .await
@@ -822,12 +838,13 @@ async fn upsert_device(
 ) -> Result<(), RelayError> {
     client
         .execute(
-            "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at, push_token)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (session_id, device_id) DO UPDATE SET
                client_token = EXCLUDED.client_token,
                label = EXCLUDED.label,
                public_key = EXCLUDED.public_key,
+               identity_public_key = EXCLUDED.identity_public_key,
                created_at = EXCLUDED.created_at,
                last_seen_at = EXCLUDED.last_seen_at,
                revoked_at = EXCLUDED.revoked_at,
@@ -838,6 +855,7 @@ async fn upsert_device(
                 &device.client_token,
                 &device.label,
                 &device.public_key,
+                &device.identity_public_key,
                 &device.created_at,
                 &device.last_seen_at,
                 &device.revoked_at,
@@ -938,8 +956,8 @@ async fn flush_postgres_state(
 
     for session in state.sessions.values() {
         tx.execute(
-            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO relay_sessions (session_id, pairing_id, daemon_token, daemon_last_seen_at, created_at, updated_at, next_seq, oldest_lost_seq)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             &[
                 &session.session_id,
                 &session.pairing_id,
@@ -949,6 +967,8 @@ async fn flush_postgres_state(
                 &session.updated_at,
                 &i64::try_from(session.next_seq)
                     .map_err(|_| RelayError::StatePersist("next sequence overflow".to_string()))?,
+                &i64::try_from(session.oldest_lost_seq)
+                    .map_err(|_| RelayError::StatePersist("lost sequence overflow".to_string()))?,
             ],
         )
         .await
@@ -956,14 +976,15 @@ async fn flush_postgres_state(
 
         for device in session.devices.values() {
             tx.execute(
-                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, created_at, last_seen_at, revoked_at, push_token)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                "INSERT INTO relay_devices (session_id, device_id, client_token, label, public_key, identity_public_key, created_at, last_seen_at, revoked_at, push_token)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &session.session_id,
                     &device.device_id,
                     &device.client_token,
                     &device.label,
                     &device.public_key,
+                    &device.identity_public_key,
                     &device.created_at,
                     &device.last_seen_at,
                     &device.revoked_at,

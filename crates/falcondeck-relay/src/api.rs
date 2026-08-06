@@ -127,9 +127,11 @@ async fn issue_ws_ticket(
     Ok(Json(state.issue_ws_ticket(&session_id, &token).await?))
 }
 
-/// Peers exchange small JSON control frames; anything near this limit is
-/// abuse, not traffic.
-const WS_MAX_MESSAGE_BYTES: usize = 1 << 20;
+/// Peers mostly exchange small JSON control frames, but daemon payloads
+/// (full encrypted snapshots, large thread.detail RPC results) ride the
+/// same socket and base64 inflates them by a third, so the cap must leave
+/// generous headroom; anything near this limit is abuse, not traffic.
+const WS_MAX_MESSAGE_BYTES: usize = 16 << 20;
 
 async fn updates_ws(
     ws: WebSocketUpgrade,
@@ -251,7 +253,20 @@ async fn socket_loop(socket: WebSocket, state: AppState, auth: SessionAuth) {
                             break;
                         }
                     }
-                    Some(Err(_)) | None => break,
+                    Some(Err(_)) => {
+                        // Oversized frames are the most likely receive
+                        // failure; tell the peer why before dropping so it
+                        // does not silently reconnect into the same wall.
+                        let server_message = RelayServerMessage::Error {
+                            message: format!(
+                                "websocket message could not be received; \
+                                 messages must not exceed {WS_MAX_MESSAGE_BYTES} bytes"
+                            ),
+                        };
+                        let _ = send_message_with_timeout(&mut sender, &server_message).await;
+                        break;
+                    }
+                    None => break,
                 }
             }
             _ = idle_check.tick() => {

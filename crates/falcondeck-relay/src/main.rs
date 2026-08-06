@@ -48,9 +48,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    // Clamp to the range start_pairing accepts, so an oversized env value
+    // cannot make every default-TTL pairing request fail validation.
     let pairing_ttl_seconds = env_or_default("FALCONDECK_RELAY_PAIRING_TTL_SECONDS", "600")
         .parse::<i64>()
-        .unwrap_or(600);
+        .unwrap_or(600)
+        .clamp(1, 86_400);
     let retention = RetentionConfig {
         update_retention: duration_days_or(
             env_or_default("FALCONDECK_RELAY_UPDATE_RETENTION_DAYS", "7")
@@ -89,7 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
     };
 
-    let pairing_ttl = duration_seconds_or(pairing_ttl_seconds.max(1), 600);
+    let pairing_ttl = duration_seconds_or(pairing_ttl_seconds, 600);
     let state = if let Some(database_url) = database_url {
         AppState::load_postgres_with_retention(
             env!("CARGO_PKG_VERSION").to_string(),

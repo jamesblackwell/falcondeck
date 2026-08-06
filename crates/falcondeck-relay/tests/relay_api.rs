@@ -3,10 +3,10 @@ use std::{net::SocketAddr, path::PathBuf};
 use chrono::Duration;
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, EncryptionVariant,
-    PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle, PairingStatus,
-    PairingStatusResponse, RelayClientMessage, RelayServerMessage, RelayUpdate, RelayUpdateBody,
-    RelayUpdatesResponse, RelayWebSocketTicketResponse, StartPairingRequest, StartPairingResponse,
-    SubmitQueuedActionRequest, TrustedDevicesResponse,
+    IdentityVariant, PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle,
+    PairingStatus, PairingStatusResponse, RelayClientMessage, RelayServerMessage, RelayUpdate,
+    RelayUpdateBody, RelayUpdatesResponse, RelayWebSocketTicketResponse, StartPairingRequest,
+    StartPairingResponse, SubmitQueuedActionRequest, TrustedDevicesResponse,
     crypto::{
         LocalBoxKeyPair, LocalIdentityKeyPair, build_pairing_public_key_bundle, encrypt_json,
         generate_data_key, sign_pairing_claim_challenge,
@@ -29,6 +29,7 @@ struct TestServer {
     task: JoinHandle<()>,
     http_base: String,
     ws_base: String,
+    state: AppState,
 }
 
 #[tokio::test]
@@ -359,20 +360,29 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
     )
     .await;
 
+    // The relay forwards the call under a peer-namespaced request id so
+    // identical ids from different devices cannot collide; the daemon
+    // echoes whatever id it received.
     let rpc_request = recv_server_message(&mut daemon_ws).await;
-    assert_eq!(
-        rpc_request,
-        RelayServerMessage::RpcRequest {
-            request_id: "req-1".to_string(),
-            method: "approval.respond".to_string(),
-            params: test_envelope("allow"),
-        }
+    let RelayServerMessage::RpcRequest {
+        request_id: forwarded_request_id,
+        method,
+        params,
+    } = rpc_request
+    else {
+        panic!("expected rpc request, got {rpc_request:?}");
+    };
+    assert!(
+        forwarded_request_id.ends_with(":req-1"),
+        "forwarded request id should be namespaced: {forwarded_request_id}"
     );
+    assert_eq!(method, "approval.respond");
+    assert_eq!(params, test_envelope("allow"));
 
     send_client_message(
         &mut daemon_ws,
         &RelayClientMessage::RpcResult {
-            request_id: "req-1".to_string(),
+            request_id: forwarded_request_id,
             ok: true,
             result: Some(test_envelope("ok")),
             error: None,
@@ -735,6 +745,156 @@ async fn stolen_client_bundle_cannot_reattach_as_an_existing_trusted_device() {
 }
 
 #[tokio::test]
+async fn forged_bundle_with_victim_box_key_cannot_reattach_as_the_victim_device() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let victim_key_pair = LocalBoxKeyPair::generate();
+
+    let pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+    let victim_claim = claim_with_challenge(
+        &client,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("victim phone"),
+        &victim_key_pair,
+    )
+    .await;
+
+    // A bundle's self-signature only binds it to the identity key inside
+    // the bundle itself, so an attacker holding the pairing code and the
+    // victim's *published* box public key can mint a validly signed bundle
+    // pairing that box key with their own identity key — and sign the
+    // fresh challenge with that identity key so the claim proof passes.
+    // The relay must still refuse to hand out the victim device's token.
+    let attacker_identity = LocalIdentityKeyPair::from_box_key_pair(&LocalBoxKeyPair::generate());
+    let forged_bundle = forged_bundle_for(&victim_key_pair, &attacker_identity);
+    let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let response = client
+        .post(format!("{}/v1/pairings/claim", server.http_base))
+        .json(&ClaimPairingRequest {
+            pairing_code: pairing.pairing_code.clone(),
+            label: Some("attacker".to_string()),
+            client_bundle: Some(forged_bundle),
+            challenge_signature: sign_pairing_claim_challenge(
+                &attacker_identity,
+                &pairing.pairing_code,
+                &challenge.challenge,
+            ),
+        })
+        .send()
+        .await
+        .unwrap();
+    if response.status() == StatusCode::OK {
+        let attacker_claim = response.json::<ClaimPairingResponse>().await.unwrap();
+        assert_ne!(attacker_claim.device_id, victim_claim.device_id);
+        assert_ne!(attacker_claim.client_token, victim_claim.client_token);
+    } else {
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    // The victim's trusted device is untouched.
+    let devices = get_json::<TrustedDevicesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/devices",
+            server.http_base, victim_claim.session_id
+        ),
+        Some(&pairing.daemon_token),
+    )
+    .await;
+    let victim_device = devices
+        .devices
+        .iter()
+        .find(|device| device.device_id == victim_claim.device_id)
+        .expect("victim device should still exist");
+    assert_eq!(
+        victim_device.status,
+        falcondeck_core::TrustedDeviceStatus::Active
+    );
+
+    // The victim can still re-claim with the real identity secret key.
+    let reclaim = claim_with_challenge(
+        &client,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("victim phone"),
+        &victim_key_pair,
+    )
+    .await;
+    assert_eq!(reclaim.device_id, victim_claim.device_id);
+    assert_eq!(reclaim.client_token, victim_claim.client_token);
+}
+
+#[tokio::test]
+async fn revoked_devices_cannot_reclaim_a_dead_client_token() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let key_pair = LocalBoxKeyPair::generate();
+
+    let pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: None,
+            daemon_token: None,
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+    let claim = claim_with_challenge(
+        &client,
+        &server.http_base,
+        &pairing.pairing_code,
+        Some("phone"),
+        &key_pair,
+    )
+    .await;
+
+    let revoked = client
+        .delete(format!(
+            "{}/v1/sessions/{}/devices/{}",
+            server.http_base, claim.session_id, claim.device_id
+        ))
+        .bearer_auth(&pairing.daemon_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(revoked.status(), StatusCode::OK);
+
+    // Re-claiming the same pairing code must not "succeed" with the
+    // revoked device's client token, which authenticate_session would then
+    // reject anyway; the claim falls through to the conflict handling.
+    let challenge = request_challenge(&client, &server.http_base, &pairing.pairing_code).await;
+    let response = client
+        .post(format!("{}/v1/pairings/claim", server.http_base))
+        .json(&signed_claim_request(
+            &pairing.pairing_code,
+            &challenge.challenge,
+            Some("phone"),
+            &key_pair,
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn queued_actions_are_not_redispatched_while_the_daemon_is_still_connected() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
@@ -1040,7 +1200,7 @@ async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
 
     // Pruning runs in the background; the health endpoint keeps a
     // synchronous trigger so tests can force a pass deterministically.
-    trigger_prune(&client, &server.http_base).await;
+    trigger_prune(&server).await;
 
     let history = get_json::<RelayUpdatesResponse>(
         &client,
@@ -1095,7 +1255,7 @@ async fn fresh_clients_are_told_history_was_truncated_after_pruning() {
         let _ = recv_until_update(&mut daemon_ws).await;
     }
 
-    trigger_prune(&client, &server.http_base).await;
+    trigger_prune(&server).await;
 
     let history = get_json::<RelayUpdatesResponse>(
         &client,
@@ -1278,7 +1438,7 @@ async fn idle_trusted_sessions_are_pruned_after_retention_expires() {
     .await;
 
     tokio::time::sleep(TokioDuration::from_millis(20)).await;
-    trigger_prune(&client, &restarted.http_base).await;
+    trigger_prune(&restarted).await;
 
     let response = client
         .get(format!(
@@ -1788,6 +1948,12 @@ async fn presence_updates_supersede_older_presence_history() {
         encrypted_count, 2,
         "encrypted updates must survive presence churn"
     );
+    // Superseding presence rows removes the oldest retained update, but
+    // nothing a client needs was lost — it must not report truncation.
+    assert!(
+        !history.cursor.history_truncated,
+        "presence supersede must not flag history as truncated"
+    );
 }
 
 #[tokio::test]
@@ -1821,6 +1987,146 @@ async fn oversized_rpc_request_ids_are_rejected() {
     assert!(
         matches!(response, RelayServerMessage::Error { .. }),
         "expected error message, got {response:?}"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_request_ids_from_different_devices_do_not_collide() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, first_claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let second_pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("tablet".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: Some(pairing.session_id.clone()),
+            daemon_token: Some(pairing.daemon_token.clone()),
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+    let second_claim = claim_with_challenge(
+        &client,
+        &server.http_base,
+        &second_pairing.pairing_code,
+        Some("tablet"),
+        &LocalBoxKeyPair::generate(),
+    )
+    .await;
+
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &first_claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let first_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &first_claim.session_id,
+        &first_claim.client_token,
+    )
+    .await;
+    let second_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &second_claim.session_id,
+        &second_claim.client_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let (mut first_ws, _) = connect_async(first_url).await.unwrap();
+    let (mut second_ws, _) = connect_async(second_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+    let _ = recv_server_message(&mut first_ws).await;
+    let _ = recv_server_message(&mut second_ws).await;
+
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::RpcRegister {
+            method: "thread.detail".to_string(),
+        },
+    )
+    .await;
+    let ack = recv_server_message(&mut daemon_ws).await;
+    assert!(matches!(ack, RelayServerMessage::RpcRegistered { .. }));
+
+    // Both devices use the same client-chosen request id, as fresh
+    // per-device counters naturally produce.
+    send_client_message(
+        &mut first_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "mobile-detail-0".to_string(),
+            method: "thread.detail".to_string(),
+            params: test_envelope("first-params"),
+        },
+    )
+    .await;
+    send_client_message(
+        &mut second_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "mobile-detail-0".to_string(),
+            method: "thread.detail".to_string(),
+            params: test_envelope("second-params"),
+        },
+    )
+    .await;
+
+    // The daemon sees two distinct namespaced ids and answers each call
+    // with a result tied to that call's params.
+    for _ in 0..2 {
+        let message = recv_server_message(&mut daemon_ws).await;
+        let RelayServerMessage::RpcRequest {
+            request_id, params, ..
+        } = message
+        else {
+            panic!("expected rpc request, got {message:?}");
+        };
+        let marker = if params == test_envelope("first-params") {
+            "first-result"
+        } else {
+            "second-result"
+        };
+        send_client_message(
+            &mut daemon_ws,
+            &RelayClientMessage::RpcResult {
+                request_id,
+                ok: true,
+                result: Some(test_envelope(marker)),
+                error: None,
+            },
+        )
+        .await;
+    }
+
+    // Each device receives its own result under its own request id.
+    let first_result = recv_server_message(&mut first_ws).await;
+    assert_eq!(
+        first_result,
+        RelayServerMessage::RpcResult {
+            request_id: "mobile-detail-0".to_string(),
+            ok: true,
+            result: Some(test_envelope("first-result")),
+            error: None,
+        }
+    );
+    let second_result = recv_server_message(&mut second_ws).await;
+    assert_eq!(
+        second_result,
+        RelayServerMessage::RpcResult {
+            request_id: "mobile-detail-0".to_string(),
+            ok: true,
+            result: Some(test_envelope("second-result")),
+            error: None,
+        }
     );
 }
 
@@ -1929,16 +2235,10 @@ where
         .unwrap()
 }
 
-/// Force a synchronous prune pass via the health endpoint; retention
-/// otherwise runs on a background interval.
-async fn trigger_prune(client: &reqwest::Client, http_base: &str) {
-    client
-        .get(format!("{http_base}/v1/health"))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+/// Force a synchronous prune pass; retention otherwise runs only on the
+/// relay's background interval.
+async fn trigger_prune(server: &TestServer) {
+    server.state.force_prune().await.unwrap();
 }
 
 async fn get_json<R>(client: &reqwest::Client, url: &str, bearer: Option<&str>) -> R
@@ -2093,8 +2393,9 @@ async fn spawn_server_at_with_retention(
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let router_state = state.clone();
     let task = tokio::spawn(async move {
-        axum::serve(listener, router(state)).await.unwrap();
+        axum::serve(listener, router(router_state)).await.unwrap();
     });
 
     TestServer {
@@ -2102,6 +2403,7 @@ async fn spawn_server_at_with_retention(
         task,
         http_base: format!("http://{}", format_addr(addr)),
         ws_base: format!("ws://{}", format_addr(addr)),
+        state,
     }
 }
 
@@ -2115,6 +2417,29 @@ fn format_addr(addr: SocketAddr) -> String {
 fn test_bundle() -> PairingPublicKeyBundle {
     let key_pair = LocalBoxKeyPair::generate();
     build_pairing_public_key_bundle(&key_pair)
+}
+
+/// Builds a validly self-signed bundle that pairs the given box public key
+/// with an unrelated identity key — the forgery an attacker can mint from a
+/// victim's published box public key alone.
+fn forged_bundle_for(
+    box_key_pair: &LocalBoxKeyPair,
+    identity: &LocalIdentityKeyPair,
+) -> PairingPublicKeyBundle {
+    let mut bundle = PairingPublicKeyBundle {
+        encryption_variant: EncryptionVariant::DataKeyV1,
+        identity_variant: IdentityVariant::Ed25519V1,
+        public_key: box_key_pair.public_key_base64().to_string(),
+        identity_public_key: identity.public_key_base64().to_string(),
+        signature: String::new(),
+    };
+    // Mirrors `pairing_bundle_signing_payload` in falcondeck-core.
+    let payload = format!(
+        "falcondeck-pairing-bundle-v1\ndata_key_v1\ned25519_v1\n{}\n{}",
+        bundle.public_key, bundle.identity_public_key
+    );
+    bundle.signature = identity.sign_bytes(payload.as_bytes());
+    bundle
 }
 
 fn test_envelope(marker: &str) -> EncryptedEnvelope {
