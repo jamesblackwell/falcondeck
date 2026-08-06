@@ -605,6 +605,7 @@ fn reconnect_attempt_uses_current_trusted_pairing_state() {
         task: None,
         pairing_watch_task: None,
         command_tx: None,
+        trusted_client_bundles: Vec::new(),
     };
 
     let pairing = super::current_pairing_for_remote_attempt(
@@ -662,6 +663,7 @@ fn reconnect_attempt_ignores_pending_additional_pairing_state() {
         task: None,
         pairing_watch_task: None,
         command_tx: None,
+        trusted_client_bundles: Vec::new(),
     };
 
     let pairing = super::current_pairing_for_remote_attempt(
@@ -696,6 +698,7 @@ async fn finished_remote_tasks_are_pruned_before_pairing_logic() {
         task: Some(finished_task),
         pairing_watch_task: Some(finished_watch_task),
         command_tx: Some(command_tx),
+        trusted_client_bundles: Vec::new(),
     };
 
     super::prune_finished_remote_tasks(&mut remote);
@@ -750,6 +753,7 @@ async fn reconcile_remote_runtime_state_clears_orphaned_additional_pairing() {
         task: Some(finished_task),
         pairing_watch_task: Some(running_watch_task),
         command_tx: Some(command_tx),
+        trusted_client_bundles: Vec::new(),
     };
 
     super::reconcile_remote_runtime_state(&mut remote);
@@ -793,6 +797,7 @@ fn remote_status_response_hides_stale_unclaimed_pairing_without_a_live_bridge() 
         task: None,
         pairing_watch_task: None,
         command_tx: None,
+        trusted_client_bundles: Vec::new(),
     };
 
     let response = super::build_remote_status_response(&remote);
@@ -835,6 +840,7 @@ fn remote_status_response_hides_stale_trusted_pairing_without_a_live_bridge() {
         task: None,
         pairing_watch_task: None,
         command_tx: None,
+        trusted_client_bundles: Vec::new(),
     };
 
     let response = super::build_remote_status_response(&remote);
@@ -875,6 +881,7 @@ async fn restore_skips_expired_unclaimed_remote_pairing() {
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
             ),
             data_key_base64: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+            trusted_client_bundles: Vec::new(),
         }),
     };
 
@@ -1263,6 +1270,7 @@ async fn restore_skips_legacy_loopback_remote_pairing() {
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
             ),
             data_key_base64: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+            trusted_client_bundles: Vec::new(),
         }),
     };
 
@@ -1315,6 +1323,7 @@ async fn restore_skips_trusted_remote_with_legacy_unsigned_client_key() {
                 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
             ),
             data_key_base64: Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string()),
+            trusted_client_bundles: Vec::new(),
         }),
     };
 
@@ -1429,6 +1438,7 @@ async fn restore_reads_remote_secrets_from_secure_storage() {
             secure_storage_key: Some(secure_storage_key),
             local_secret_key_base64: None,
             data_key_base64: None,
+            trusted_client_bundles: Vec::new(),
         }),
     };
 
@@ -1486,6 +1496,7 @@ async fn restore_keeps_trusted_remote_without_client_bundle() {
             secure_storage_key: Some(secure_storage_key),
             local_secret_key_base64: None,
             data_key_base64: None,
+            trusted_client_bundles: Vec::new(),
         }),
     };
 
@@ -1768,6 +1779,213 @@ async fn claude_pre_tool_use_always_allow_short_circuits_later_calls() {
     );
     assert!(app.inner.interactive_requests.lock().await.is_empty());
     assert!(app.inner.claude_approvals.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn claude_pre_tool_use_cleans_up_when_the_hook_client_disconnects() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        "codex".to_string(),
+        "claude".to_string(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "33333333-3333-4333-8333-333333333333",
+        temp_dir.path(),
+    )
+    .await;
+
+    // Simulate the hook's curl dying: axum drops the handler future while it
+    // awaits the user's decision.
+    let hook_task = tokio::spawn({
+        let app = app.clone();
+        async move {
+            let _ = tokio::time::timeout(
+                TokioDuration::from_millis(100),
+                app.handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+                    "33333333-3333-4333-8333-333333333333",
+                    "Bash",
+                )),
+            )
+            .await;
+        }
+    });
+    wait_for_pending_claude_request(&app, "workspace-1").await;
+    hook_task.await.unwrap();
+
+    // Cleanup runs on a spawned task; allow it a moment to land.
+    for _ in 0..200 {
+        if app.inner.interactive_requests.lock().await.is_empty()
+            && app.inner.claude_approvals.lock().await.is_empty()
+        {
+            break;
+        }
+        sleep(TokioDuration::from_millis(10)).await;
+    }
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+    assert!(app.inner.claude_approvals.lock().await.is_empty());
+    let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_eq!(thread.status, ThreadStatus::Running);
+}
+
+#[tokio::test]
+async fn claude_pre_tool_use_handles_concurrent_hook_calls_for_one_session() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        "codex".to_string(),
+        "claude".to_string(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "44444444-4444-4444-8444-444444444444",
+        temp_dir.path(),
+    )
+    .await;
+    let spawn_hook = |app: &AppState| {
+        tokio::spawn({
+            let app = app.clone();
+            async move {
+                app.handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+                    "44444444-4444-4444-8444-444444444444",
+                    "Bash",
+                ))
+                .await
+            }
+        })
+    };
+
+    let first_hook = spawn_hook(&app);
+    let first_request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    let second_hook = spawn_hook(&app);
+    let second_request_id = 'wait: {
+        for _ in 0..200 {
+            {
+                let requests = app.inner.interactive_requests.lock().await;
+                if let Some((_, request_id)) = requests
+                    .keys()
+                    .find(|(_, request_id)| request_id != &first_request_id)
+                {
+                    break 'wait request_id.clone();
+                }
+            }
+            sleep(TokioDuration::from_millis(10)).await;
+        }
+        panic!("second concurrent hook call never registered its own request");
+    };
+    assert_ne!(first_request_id, second_request_id);
+
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        first_request_id,
+        falcondeck_core::InteractiveResponsePayload::Approval {
+            decision: falcondeck_core::ApprovalDecision::AlwaysAllow,
+        },
+    )
+    .await
+    .unwrap();
+    let response = first_hook.await.unwrap();
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+
+    // The second call was registered before the always-allow landed, so it
+    // still resolves through its own pending request.
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        second_request_id,
+        falcondeck_core::InteractiveResponsePayload::Approval {
+            decision: falcondeck_core::ApprovalDecision::Allow,
+        },
+    )
+    .await
+    .unwrap();
+    let response = second_hook.await.unwrap();
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+
+    // A third call short-circuits on the always-allow without a new request.
+    let response = app
+        .handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+            "44444444-4444-4444-8444-444444444444",
+            "Bash",
+        ))
+        .await;
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+    assert!(app.inner.claude_approvals.lock().await.is_empty());
+}
+
+#[test]
+fn interrupt_turn_statuses_do_not_notify_remote_attention() {
+    for status in ["canceled", "Cancelled", "INTERRUPTED", " aborted "] {
+        assert!(super::notifications::is_interrupt_turn_status(status));
+    }
+    for status in ["completed", "failed", ""] {
+        assert!(!super::notifications::is_interrupt_turn_status(status));
+    }
+}
+
+#[test]
+fn trusted_client_bundles_dedupe_by_public_key_and_stay_capped() {
+    let mut trusted = Vec::new();
+    let bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+    super::remember_trusted_client_bundle(&mut trusted, &bundle);
+    super::remember_trusted_client_bundle(&mut trusted, &bundle);
+    assert_eq!(trusted.len(), 1);
+
+    for _ in 0..(super::MAX_TRUSTED_CLIENT_BUNDLES + 5) {
+        super::remember_trusted_client_bundle(
+            &mut trusted,
+            &build_pairing_public_key_bundle(&LocalBoxKeyPair::generate()),
+        );
+    }
+    assert_eq!(trusted.len(), super::MAX_TRUSTED_CLIENT_BUNDLES);
+    // The original entry was the oldest and must have been evicted.
+    assert!(
+        !super::remote_bridge::is_trusted_client_bundle(&trusted, &bundle),
+        "capped list should evict the oldest bundle"
+    );
+}
+
+#[test]
+fn bootstrap_requests_only_match_exact_trusted_bundles() {
+    let trusted_key_pair = LocalBoxKeyPair::generate();
+    let trusted_bundle = build_pairing_public_key_bundle(&trusted_key_pair);
+    let trusted = vec![trusted_bundle.clone()];
+
+    assert!(super::remote_bridge::is_trusted_client_bundle(
+        &trusted,
+        &trusted_bundle
+    ));
+
+    let attacker_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+    assert!(!super::remote_bridge::is_trusted_client_bundle(
+        &trusted,
+        &attacker_bundle
+    ));
+
+    // Matching the encryption key alone is not enough: the identity key must
+    // match too.
+    let mut mixed_bundle = trusted_bundle.clone();
+    mixed_bundle.identity_public_key = attacker_bundle.identity_public_key.clone();
+    assert!(!super::remote_bridge::is_trusted_client_bundle(
+        &trusted,
+        &mixed_bundle
+    ));
 }
 
 #[tokio::test]

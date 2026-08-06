@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -85,6 +85,9 @@ struct InnerState {
     local_base_url: OnceLock<String>,
     preferences: Mutex<FalconDeckPreferences>,
     remote: Mutex<RemoteBridgeState>,
+    /// Set at the start of `shutdown` so respawn/reconnect paths cannot race
+    /// the teardown with fresh agent processes.
+    shutting_down: AtomicBool,
 }
 
 struct ManagedWorkspace {
@@ -122,6 +125,11 @@ struct RemoteBridgeState {
     task: Option<JoinHandle<()>>,
     pairing_watch_task: Option<JoinHandle<()>>,
     command_tx: Option<mpsc::UnboundedSender<RemoteBridgeCommand>>,
+    /// Client bundles that completed a pairing claim on this daemon. The
+    /// ephemeral request-bootstrap path only serves the data key to bundles in
+    /// this list, so a compromised relay cannot mint its own bundle and be
+    /// handed the key.
+    trusted_client_bundles: Vec<PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone)]
@@ -209,6 +217,8 @@ struct PersistedRemoteState {
     local_secret_key_base64: Option<String>,
     #[serde(default)]
     data_key_base64: Option<String>,
+    #[serde(default)]
+    trusted_client_bundles: Vec<PairingPublicKeyBundle>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -275,7 +285,9 @@ impl AppState {
                     task: None,
                     pairing_watch_task: None,
                     command_tx: None,
+                    trusted_client_bundles: Vec::new(),
                 }),
+                shutting_down: AtomicBool::new(false),
             }),
         }
     }
@@ -582,7 +594,14 @@ impl AppState {
         }
     }
 
+    pub(crate) fn is_shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(Ordering::Acquire)
+    }
+
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
+        // Flag first: reconnect/respawn paths check this before spawning new
+        // agent processes, so nothing new starts while we tear down.
+        self.inner.shutting_down.store(true, Ordering::Release);
         let snapshots = {
             let workspaces = self.inner.workspaces.lock().await;
             workspaces
@@ -953,6 +972,9 @@ impl AppState {
     /// Fire-and-forget recovery for a Codex app-server that exited without a
     /// shutdown request. Backs off between attempts; see `run_codex_reconnect`.
     pub(crate) fn schedule_codex_reconnect(&self, workspace_id: String) {
+        if self.is_shutting_down() {
+            return;
+        }
         let app = self.clone();
         tokio::spawn(async move {
             workspace_ops::run_codex_reconnect(&app, &workspace_id).await;

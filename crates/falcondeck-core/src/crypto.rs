@@ -283,6 +283,13 @@ fn pairing_claim_challenge_signing_payload(pairing_code: &str, challenge: &str) 
     format!("falcondeck-pairing-claim-v1\n{pairing_code}\n{challenge}").into_bytes()
 }
 
+/// The claim payload joins its fields with `\n`; a pairing code or challenge
+/// embedding CR/LF would let one signature verify for a different
+/// `(code, challenge)` pair, so such inputs must never be signed or accepted.
+fn pairing_claim_challenge_inputs_are_malformed(pairing_code: &str, challenge: &str) -> bool {
+    pairing_code.contains(['\n', '\r']) || challenge.contains(['\n', '\r'])
+}
+
 /// Builds a signed pairing bundle from a local box key pair.
 pub fn build_pairing_public_key_bundle(key_pair: &LocalBoxKeyPair) -> PairingPublicKeyBundle {
     let identity_key_pair = LocalIdentityKeyPair::from_box_key_pair(key_pair);
@@ -329,11 +336,19 @@ pub fn generate_pairing_challenge() -> String {
 
 /// Signs a relay-issued pairing claim challenge with the claimer's identity
 /// key, binding the claim to both the pairing code and the challenge.
+///
+/// Inputs containing `\n` or `\r` would make the delimiter-joined payload
+/// ambiguous (TS clients sign the identical string, so the format cannot
+/// change); for those this returns an empty signature, which can never
+/// verify.
 pub fn sign_pairing_claim_challenge(
     identity_key_pair: &LocalIdentityKeyPair,
     pairing_code: &str,
     challenge: &str,
 ) -> String {
+    if pairing_claim_challenge_inputs_are_malformed(pairing_code, challenge) {
+        return String::new();
+    }
     identity_key_pair.sign_bytes(&pairing_claim_challenge_signing_payload(
         pairing_code,
         challenge,
@@ -346,14 +361,20 @@ pub fn sign_pairing_claim_challenge(
 /// # Errors
 ///
 /// Returns [`CryptoError`] if the key, signature, or payload binding is
-/// invalid.
+/// invalid, if the pairing code or challenge is empty, or if either embeds
+/// `\n`/`\r` payload delimiters (see
+/// [`sign_pairing_claim_challenge`]).
 pub fn verify_pairing_claim_challenge(
     identity_public_key_base64: &str,
     pairing_code: &str,
     challenge: &str,
     signature_base64: &str,
 ) -> Result<(), CryptoError> {
-    if identity_public_key_base64.is_empty() || challenge.is_empty() || signature_base64.is_empty()
+    if identity_public_key_base64.is_empty()
+        || pairing_code.is_empty()
+        || challenge.is_empty()
+        || signature_base64.is_empty()
+        || pairing_claim_challenge_inputs_are_malformed(pairing_code, challenge)
     {
         return Err(CryptoError::InvalidSignature);
     }
@@ -630,6 +651,54 @@ mod tests {
                 &signature,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn pairing_claim_challenge_rejects_delimiter_injection() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let bundle = build_pairing_public_key_bundle(&key_pair);
+        let identity = LocalIdentityKeyPair::from_box_key_pair(&key_pair);
+
+        // Signing refuses ambiguous payloads outright: the empty signature it
+        // returns can never verify.
+        assert!(sign_pairing_claim_challenge(&identity, "CODE\nEVIL", "challenge").is_empty());
+        assert!(sign_pairing_claim_challenge(&identity, "CODE", "chal\rlenge").is_empty());
+
+        // A signature over the raw joined payload (as a hostile client could
+        // craft) must not verify for either delimiter-shifted interpretation.
+        let raw_payload = b"falcondeck-pairing-claim-v1\nX\nY\nZ";
+        let shifted_signature = identity.sign_bytes(raw_payload);
+        assert!(
+            verify_pairing_claim_challenge(
+                &bundle.identity_public_key,
+                "X",
+                "Y\nZ",
+                &shifted_signature,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_pairing_claim_challenge(
+                &bundle.identity_public_key,
+                "X\nY",
+                "Z",
+                &shifted_signature,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pairing_claim_challenge_rejects_empty_pairing_code() {
+        let key_pair = LocalBoxKeyPair::generate();
+        let bundle = build_pairing_public_key_bundle(&key_pair);
+        let identity = LocalIdentityKeyPair::from_box_key_pair(&key_pair);
+        let challenge = generate_pairing_challenge();
+        let signature = sign_pairing_claim_challenge(&identity, "", &challenge);
+        assert!(
+            verify_pairing_claim_challenge(&bundle.identity_public_key, "", &challenge, &signature)
+                .is_err()
         );
     }
 

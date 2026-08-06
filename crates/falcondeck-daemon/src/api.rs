@@ -1,10 +1,12 @@
 use axum::{
     Json, Router,
     extract::{
-        Path, Query, State,
+        Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    response::IntoResponse,
+    http::{HeaderValue, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
 use futures_util::StreamExt;
@@ -19,6 +21,60 @@ use falcondeck_core::{
 };
 
 use crate::{app::AppState, error::DaemonError};
+
+/// Browser origins allowed to call the daemon API: the Tauri webview only
+/// (dev server plus the prod webview origins). The API is unauthenticated and
+/// includes approval endpoints, so arbitrary web pages must never be able to
+/// read responses or send permitted cross-origin writes.
+const ALLOWED_BROWSER_ORIGINS: [&str; 5] = [
+    "tauri://localhost",
+    "http://tauri.localhost",
+    "https://tauri.localhost",
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+];
+
+/// Rejects any request whose `Host` is not a loopback authority. CORS cannot
+/// stop DNS rebinding (the origin looks same-site to the browser), but the
+/// rebound request still carries the attacker's hostname in `Host`, so this
+/// check defeats it. Requests without an `Origin` header (the Claude hook's
+/// curl POST, native clients) are unaffected: they always target
+/// `127.0.0.1:<port>` directly.
+async fn require_loopback_host(request: Request, next: Next) -> Response {
+    let host = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        // HTTP/2 requests carry the authority in the URI instead of a header.
+        .or_else(|| {
+            request
+                .uri()
+                .authority()
+                .map(|authority| authority.to_string())
+        });
+    match host {
+        Some(host) if is_loopback_host(&host) => next.run(request).await,
+        _ => StatusCode::FORBIDDEN.into_response(),
+    }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // Bracketed IPv6 authority: `[::1]` with an optional `:port` suffix.
+        let Some((address, port)) = rest.split_once(']') else {
+            return false;
+        };
+        if !(port.is_empty() || port.starts_with(':')) {
+            return false;
+        }
+        address
+    } else {
+        host.rsplit_once(':').map(|(name, _)| name).unwrap_or(host)
+    };
+    name.eq_ignore_ascii_case("localhost") || matches!(name, "127.0.0.1" | "::1")
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -82,10 +138,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/claude/hooks/pre-tool-use", post(claude_pre_tool_use))
         .layer(
             CorsLayer::new()
-                .allow_origin(Any)
+                .allow_origin(ALLOWED_BROWSER_ORIGINS.map(HeaderValue::from_static))
                 .allow_methods(Any)
                 .allow_headers(Any),
         )
+        // Added after the CORS layer so it runs first: a DNS-rebound request
+        // must be rejected before anything else sees it.
+        .layer(middleware::from_fn(require_loopback_host))
         .with_state(state)
 }
 
@@ -385,5 +444,31 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_loopback_host;
+
+    #[test]
+    fn accepts_loopback_hosts_with_and_without_ports() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.0.0.1:4520"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LocalHost:4520"));
+        assert!(is_loopback_host("[::1]"));
+        assert!(is_loopback_host("[::1]:4520"));
+    }
+
+    #[test]
+    fn rejects_non_loopback_hosts() {
+        assert!(!is_loopback_host("evil.com"));
+        assert!(!is_loopback_host("evil.com:4520"));
+        assert!(!is_loopback_host("localhost.evil.com"));
+        assert!(!is_loopback_host("127.0.0.1.evil.com"));
+        assert!(!is_loopback_host("[2001:db8::1]:4520"));
+        assert!(!is_loopback_host("[::1]evil"));
+        assert!(!is_loopback_host(""));
     }
 }

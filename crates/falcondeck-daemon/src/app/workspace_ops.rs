@@ -808,10 +808,36 @@ fn stable_attachment_identifier_hash(value: &str) -> u64 {
     hash
 }
 
+/// Surfaces a one-time (per daemon process) service warning when Claude
+/// approvals would be active but curl is missing, so the hook settings file is
+/// skipped and tool calls run without FalconDeck approval prompts.
+async fn warn_once_if_claude_approvals_unavailable(app: &AppState, workspace_id: &str) {
+    static CURL_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
+    if app.local_base_url().is_none()
+        || !crate::claude::claude_approvals_enabled()
+        || crate::claude::curl_available()
+        || CURL_WARNING_EMITTED.set(()).is_err()
+    {
+        return;
+    }
+    let _ = app.emit_service(
+        Some(workspace_id.to_string()),
+        None,
+        falcondeck_core::ServiceLevel::Warning,
+        "Claude approvals disabled: curl not found".to_string(),
+        Some("claude-hooks".to_string()),
+    );
+}
+
 pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
 ) -> Result<CommandResponse, DaemonError> {
+    if app.is_shutting_down() {
+        return Err(DaemonError::BadRequest(
+            "daemon is shutting down".to_string(),
+        ));
+    }
     let inputs = if request.inputs.is_empty() {
         return Err(DaemonError::BadRequest(
             "at least one input item is required".to_string(),
@@ -983,6 +1009,13 @@ pub(super) async fn send_turn(
                     TurnInputItem::Text { .. } => None,
                 })
                 .collect::<Vec<_>>();
+            warn_once_if_claude_approvals_unavailable(app, &request.workspace_id).await;
+            let settings_dir = app
+                .inner
+                .state_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("claude-hooks");
             let spawn = runtime
                 .spawn_turn(
                     &request.thread_id,
@@ -993,6 +1026,7 @@ pub(super) async fn send_turn(
                     thread.agent.reasoning_effort.as_deref(),
                     is_claude_plan_mode(thread.agent.collaboration_mode_id.as_deref()),
                     app.local_base_url().as_deref(),
+                    &settings_dir,
                 )
                 .await?;
             app.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
@@ -1006,7 +1040,6 @@ pub(super) async fn send_turn(
                 app.monitor_claude_turn(
                     workspace_id,
                     thread_id,
-                    spawn.session_id,
                     spawn.generation,
                     spawn.stdout,
                     spawn.stderr,
@@ -1219,7 +1252,12 @@ pub(super) async fn respond_to_interactive_request(
             .remove(&request_key);
         if let Some(thread_id) = pending.request.thread_id {
             app.with_thread_mut(&workspace_id, &thread_id, |thread| {
-                thread.status = ThreadStatus::Running;
+                // Only revive threads that are actually waiting on this
+                // approval; the turn may have died in the meantime and
+                // forcing Running back would leave a permanent spinner.
+                if matches!(thread.status, ThreadStatus::WaitingForInput) {
+                    thread.status = ThreadStatus::Running;
+                }
             })
             .await?;
             app.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
@@ -1291,7 +1329,11 @@ pub(super) async fn respond_to_interactive_request(
 
     if let Some(thread_id) = pending.request.thread_id {
         app.with_thread_mut(&workspace_id, &thread_id, |thread| {
-            thread.status = ThreadStatus::Running;
+            // See the Claude branch above: never force Running onto a thread
+            // whose turn already ended.
+            if matches!(thread.status, ThreadStatus::WaitingForInput) {
+                thread.status = ThreadStatus::Running;
+            }
         })
         .await?;
         app.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
@@ -1446,6 +1488,10 @@ pub(super) async fn run_codex_reconnect(app: &AppState, workspace_id: &str) {
     let mut last_error = "unknown error".to_string();
     for attempt in 0..CODEX_RECONNECT_MAX_ATTEMPTS {
         tokio::time::sleep(codex_reconnect_delay(attempt)).await;
+        // Never race the daemon's own shutdown with a fresh app-server spawn.
+        if app.is_shutting_down() {
+            return;
+        }
         match try_codex_reconnect(app, workspace_id).await {
             CodexReconnectAttempt::WorkspaceGone | CodexReconnectAttempt::AlreadyConnected => {
                 return;

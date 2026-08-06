@@ -117,6 +117,7 @@ pub(super) async fn ingest_notification(
                     .unwrap_or_else(|| "turn".to_string());
                 let status =
                     extract_string(&params, &["status"]).unwrap_or_else(|| "completed".to_string());
+                let turn_was_interrupted = is_interrupt_turn_status(&status);
                 let error = extract_string(&params, &["error"]).or_else(|| {
                     extract_string(params.get("error").unwrap_or(&Value::Null), &["message"])
                 });
@@ -149,16 +150,20 @@ pub(super) async fn ingest_notification(
                 // A finished turn means the agent is waiting on the user;
                 // let disconnected devices know. The relay only pushes to
                 // devices without a live connection and dedupes per thread.
-                app.notify_remote_attention(
-                    if error.is_some() {
-                        "turn-error"
-                    } else {
-                        "turn-complete"
-                    },
-                    workspace_id,
-                    Some(thread_id.clone()),
-                )
-                .await;
+                // A user-requested interrupt is not attention-worthy, though:
+                // the user just acted on this thread themselves.
+                if !turn_was_interrupted {
+                    app.notify_remote_attention(
+                        if error.is_some() {
+                            "turn-error"
+                        } else {
+                            "turn-complete"
+                        },
+                        workspace_id,
+                        Some(thread_id.clone()),
+                    )
+                    .await;
+                }
                 app.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id)
                     .await;
             }
@@ -642,8 +647,20 @@ pub(super) async fn ingest_notification(
 }
 
 /// How long a Claude PreToolUse hook waits for a user decision before the
-/// daemon denies the tool call. Matches the hook command's own 600s timeout.
-const CLAUDE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(600);
+/// daemon denies the tool call. Deliberately below curl's 570s `--max-time`
+/// and Claude's 600s hook timeout so the daemon always answers first instead
+/// of racing the fail-closed fallback in the hook command.
+const CLAUDE_APPROVAL_TIMEOUT: Duration = Duration::from_secs(540);
+
+/// Terminal turn statuses that represent a user-requested stop rather than a
+/// finished turn; see `thread_status_from_turn_status` for the canonical
+/// non-error set Codex reports.
+pub(super) fn is_interrupt_turn_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "canceled" | "cancelled" | "interrupted" | "aborted"
+    )
+}
 
 fn claude_hook_decision(decision: &str, reason: &str) -> Value {
     json!({
@@ -661,6 +678,80 @@ fn claude_tool_input_summary(tool_input: &Value) -> Option<String> {
         return None;
     }
     Some(truncate_preview(&compact, 200))
+}
+
+/// Removes every trace of a pending Claude approval: both map entries, the
+/// unresolved conversation item, and the thread's `WaitingForInput` status
+/// (restored to `Running` only when still waiting — the turn may already have
+/// finished by other means, and stomping a terminal status would leave a
+/// permanent spinner).
+async fn cleanup_abandoned_claude_approval(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    request_id: &str,
+) {
+    app.inner
+        .claude_approvals
+        .lock()
+        .await
+        .remove(&(workspace_id.to_string(), request_id.to_string()));
+    app.inner
+        .interactive_requests
+        .lock()
+        .await
+        .remove(&(workspace_id.to_string(), request_id.to_string()));
+    let _ = app
+        .with_thread_mut(workspace_id, thread_id, |thread| {
+            if matches!(thread.status, ThreadStatus::WaitingForInput) {
+                thread.status = ThreadStatus::Running;
+            }
+        })
+        .await;
+    let _ = app
+        .resolve_interactive_request_item(workspace_id, thread_id, request_id)
+        .await;
+    app.emit(
+        Some(workspace_id.to_string()),
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+}
+
+/// Axum drops the hook handler future when the hook's curl process dies.
+/// Without cleanup that leaks the approval sender and interactive request
+/// entry forever, leaving a stuck attention badge in every snapshot. This
+/// guard runs the abandonment cleanup on drop unless the handler completed
+/// normally and disarmed it.
+struct ClaudeApprovalGuard {
+    app: AppState,
+    workspace_id: String,
+    thread_id: String,
+    request_id: String,
+    completed: bool,
+}
+
+impl ClaudeApprovalGuard {
+    fn disarm(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ClaudeApprovalGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        let app = self.app.clone();
+        let workspace_id = std::mem::take(&mut self.workspace_id);
+        let thread_id = std::mem::take(&mut self.thread_id);
+        let request_id = std::mem::take(&mut self.request_id);
+        tokio::spawn(async move {
+            cleanup_abandoned_claude_approval(&app, &workspace_id, &thread_id, &request_id).await;
+        });
+    }
 }
 
 pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -> Value {
@@ -731,6 +822,13 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
             request: request.clone(),
         },
     );
+    let mut guard = ClaudeApprovalGuard {
+        app: app.clone(),
+        workspace_id: workspace_id.clone(),
+        thread_id: thread_id.clone(),
+        request_id: request_id.clone(),
+        completed: false,
+    };
 
     let _ = app
         .with_thread_mut(&workspace_id, &thread_id, |thread| {
@@ -761,35 +859,17 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
         .await;
 
     let decision = match timeout(CLAUDE_APPROVAL_TIMEOUT, decision_rx).await {
-        Ok(Ok(decision)) => decision,
+        Ok(Ok(decision)) => {
+            // The responder in `respond_to_interactive_request` already
+            // removed both map entries and resolved the conversation item.
+            guard.disarm();
+            decision
+        }
         // Timed out or the sender was dropped: clean up the abandoned request
         // so the thread does not stay stuck in WaitingForInput.
         _ => {
-            app.inner
-                .claude_approvals
-                .lock()
-                .await
-                .remove(&(workspace_id.clone(), request_id.clone()));
-            app.inner
-                .interactive_requests
-                .lock()
-                .await
-                .remove(&(workspace_id.clone(), request_id.clone()));
-            let _ = app
-                .with_thread_mut(&workspace_id, &thread_id, |thread| {
-                    thread.status = ThreadStatus::Running;
-                })
-                .await;
-            let _ = app
-                .resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
-                .await;
-            app.emit(
-                Some(workspace_id),
-                None,
-                UnifiedEvent::Snapshot {
-                    snapshot: app.snapshot().await,
-                },
-            );
+            guard.disarm();
+            cleanup_abandoned_claude_approval(app, &workspace_id, &thread_id, &request_id).await;
             return claude_hook_decision("deny", "FalconDeck approval timed out");
         }
     };

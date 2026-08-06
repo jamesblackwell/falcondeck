@@ -1,10 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     env, fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Write as _},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -79,6 +79,10 @@ pub struct ClaudeRuntime {
     claude_bin: String,
     active_turns: Mutex<HashMap<String, ActiveTurn>>,
     interrupted_turns: Mutex<HashSet<String>>,
+    /// Per-thread locks serializing the whole remove-kill-spawn-insert
+    /// sequence in `spawn_turn`, so two concurrent spawns can never run two
+    /// CLI processes against one session.
+    turn_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     next_turn_generation: std::sync::atomic::AtomicU64,
 }
 
@@ -93,6 +97,7 @@ impl ClaudeRuntime {
             claude_bin: resolved.executable.clone(),
             active_turns: Mutex::new(HashMap::new()),
             interrupted_turns: Mutex::new(HashSet::new()),
+            turn_locks: Mutex::new(HashMap::new()),
             next_turn_generation: std::sync::atomic::AtomicU64::new(1),
         });
 
@@ -111,6 +116,16 @@ impl ClaudeRuntime {
             threads,
         })
     }
+
+    async fn turn_lock(&self, thread_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.turn_locks
+            .lock()
+            .await
+            .entry(thread_id.to_string())
+            .or_default()
+            .clone()
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_turn(
         &self,
@@ -122,10 +137,19 @@ impl ClaudeRuntime {
         effort: Option<&str>,
         plan_mode: bool,
         daemon_base_url: Option<&str>,
+        settings_dir: &Path,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
+        // Serialize the whole remove-kill-spawn-insert sequence per thread so
+        // concurrent spawns cannot run two CLI processes on one session.
+        let turn_lock = self.turn_lock(thread_id).await;
+        let _turn_guard = turn_lock.lock().await;
+
         let next_session_id = session_id
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| Uuid::new_v4().to_string());
+        // Clear any interrupt aimed at earlier turns; interrupts arriving from
+        // here on target this spawn and are re-checked after insertion below.
+        self.interrupted_turns.lock().await.remove(thread_id);
         // A thread maps to one Claude session; two concurrent CLI processes
         // resuming the same session corrupt its transcript. Stop any previous
         // turn for this thread before spawning a replacement.
@@ -141,6 +165,7 @@ impl ClaudeRuntime {
             }
         }
 
+        let input_line = build_claude_stream_json_input(prompt, images).await;
         let resolved = resolve_agent_binary("claude", &self.claude_bin);
         let mut command = Command::new(&resolved.executable);
         command
@@ -174,7 +199,7 @@ impl ClaudeRuntime {
         }
         if let Some(settings_path) = daemon_base_url
             .filter(|_| claude_approvals_enabled())
-            .and_then(|base_url| self.write_hook_settings_file(base_url))
+            .and_then(|base_url| self.write_hook_settings_file(base_url, settings_dir))
         {
             command.arg("--settings").arg(settings_path);
         }
@@ -194,7 +219,6 @@ impl ClaudeRuntime {
                 DaemonError::Process(format!("failed to start claude: {error}"))
             })?;
         if let Some(mut stdin) = child.stdin.take() {
-            let input_line = build_claude_stream_json_input(prompt, images);
             // Write off-task so a CLI that never reads stdin cannot wedge
             // spawn_turn; dropping the handle delivers EOF and starts the turn.
             tokio::spawn(async move {
@@ -208,11 +232,21 @@ impl ClaudeRuntime {
         let generation = self
             .next_turn_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.interrupted_turns.lock().await.remove(thread_id);
         self.active_turns
             .lock()
             .await
             .insert(thread_id.to_string(), ActiveTurn { generation, child });
+
+        // An interrupt that raced this spawn found no active entry and left
+        // its flag behind; the user's stop wins, so signal the fresh child
+        // right away (the flag stays set so `finish_turn` reports a clean
+        // interrupt instead of an error exit).
+        if self.interrupted_turns.lock().await.contains(thread_id) {
+            let mut active = self.active_turns.lock().await;
+            if let Some(turn) = active.get_mut(thread_id) {
+                let _ = request_graceful_stop(&mut turn.child);
+            }
+        }
 
         Ok(ClaudeTurnSpawn {
             session_id: next_session_id,
@@ -226,16 +260,39 @@ impl ClaudeRuntime {
         let signalled = {
             let mut active = self.active_turns.lock().await;
             match active.get_mut(thread_id) {
-                Some(turn) => request_graceful_stop(&mut turn.child).map_err(|error| {
-                    DaemonError::Process(format!("failed to interrupt claude turn: {error}"))
-                })?,
-                None => return Ok(()),
+                Some(turn) => {
+                    // Flag before signalling, while still holding the
+                    // active-turns lock: `finish_turn` must never observe the
+                    // SIGTERM exit ahead of the interrupted flag.
+                    self.interrupted_turns
+                        .lock()
+                        .await
+                        .insert(thread_id.to_string());
+                    match request_graceful_stop(&mut turn.child) {
+                        Ok(signalled) => signalled,
+                        Err(error) => {
+                            // Nothing was signalled; do not misreport the
+                            // turn's eventual natural exit as an interrupt.
+                            self.interrupted_turns.lock().await.remove(thread_id);
+                            return Err(DaemonError::Process(format!(
+                                "failed to interrupt claude turn: {error}"
+                            )));
+                        }
+                    }
+                }
+                None => {
+                    // No active entry can also mean a spawn is mid-replace
+                    // (the entry is removed for the duration). Record the stop
+                    // anyway: the spawn re-checks this flag after inserting
+                    // the new child and stops it immediately.
+                    self.interrupted_turns
+                        .lock()
+                        .await
+                        .insert(thread_id.to_string());
+                    return Ok(());
+                }
             }
         };
-        self.interrupted_turns
-            .lock()
-            .await
-            .insert(thread_id.to_string());
 
         if signalled {
             // SIGTERM lets the CLI abort the turn, run SessionEnd hooks, and
@@ -335,14 +392,51 @@ impl ClaudeRuntime {
     }
 
     /// Materialize a `--settings` file wiring the PreToolUse hook to the
-    /// daemon's approval endpoint. Uses a stable per-workspace temp path so
-    /// repeated turns rewrite the same file instead of leaking new ones.
-    fn write_hook_settings_file(&self, base_url: &str) -> Option<PathBuf> {
-        let path = env::temp_dir().join(format!(
-            "falcondeck-claude-hooks-{:016x}.json",
+    /// daemon's approval endpoint. The file lives in the daemon's private
+    /// state directory (mode 0700, file 0600) under a stable per-workspace
+    /// name, so repeated turns rewrite the same file — it persists across
+    /// turns and daemon restarts, and no other local user can pre-create or
+    /// tamper with it the way a shared temp dir would allow.
+    fn write_hook_settings_file(&self, base_url: &str, settings_dir: &Path) -> Option<PathBuf> {
+        if !curl_available() {
+            // Without curl the hook command could never reach the daemon.
+            // Skip the settings file entirely (documented fail-open for this
+            // case: a deny-all hook would break every tool call), and let the
+            // caller surface the one-time service warning.
+            static CURL_MISSING_LOGGED: OnceLock<()> = OnceLock::new();
+            if CURL_MISSING_LOGGED.set(()).is_ok() {
+                tracing::warn!("Claude approvals disabled: curl not found");
+            }
+            return None;
+        }
+        if let Err(error) = fs::create_dir_all(settings_dir) {
+            tracing::warn!("failed to create claude hook settings dir: {error}");
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(error) = fs::set_permissions(settings_dir, fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!("failed to restrict claude hook settings dir: {error}");
+                return None;
+            }
+        }
+        let path = settings_dir.join(format!(
+            "claude-hooks-{:016x}.json",
             stable_workspace_hash(&self.workspace_path)
         ));
-        match fs::write(&path, build_claude_hook_settings(base_url)) {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let written = options
+            .open(&path)
+            .and_then(|mut file| file.write_all(build_claude_hook_settings(base_url).as_bytes()));
+        match written {
             Ok(()) => Some(path),
             Err(error) => {
                 tracing::warn!("failed to write claude hook settings file: {error}");
@@ -352,11 +446,40 @@ impl ClaudeRuntime {
     }
 }
 
-fn claude_approvals_enabled() -> bool {
+pub(crate) fn claude_approvals_enabled() -> bool {
     env::var("FALCONDECK_DISABLE_CLAUDE_APPROVALS").as_deref() != Ok("1")
 }
 
+/// Whether `curl` (the transport for the PreToolUse hook command) is on PATH.
+/// Probed once per process; the result cannot change without a restart in any
+/// scenario worth optimizing for.
+pub(crate) fn curl_available() -> bool {
+    static CURL_AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *CURL_AVAILABLE.get_or_init(|| {
+        std::process::Command::new("curl")
+            .arg("--version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    })
+}
+
 fn build_claude_hook_settings(base_url: &str) -> String {
+    // Fail closed: if curl cannot reach the daemon (crash, timeout, refused
+    // connection) the `||` fallback prints an explicit deny decision instead
+    // of letting Claude Code treat the silent failure as "no opinion".
+    // curl's 570s ceiling sits between the daemon's 540s approval timeout and
+    // Claude's 600s hook timeout, so the daemon always answers first.
+    let deny_decision = json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": "FalconDeck approval unavailable"
+        }
+    })
+    .to_string();
     json!({
         "hooks": {
             "PreToolUse": [{
@@ -364,7 +487,7 @@ fn build_claude_hook_settings(base_url: &str) -> String {
                 "hooks": [{
                     "type": "command",
                     "command": format!(
-                        "curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- {base_url}/api/claude/hooks/pre-tool-use"
+                        "curl -sS --max-time 570 -X POST -H 'Content-Type: application/json' --data-binary @- {base_url}/api/claude/hooks/pre-tool-use || printf '%s' '{deny_decision}'"
                     ),
                     "timeout": 600
                 }]
@@ -383,20 +506,36 @@ fn stable_workspace_hash(value: &str) -> u64 {
     hash
 }
 
-/// Largest image file embedded inline as base64; anything bigger degrades to a
-/// text reference so the stream-json line stays a sane size.
-const MAX_EMBEDDED_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+/// Largest raw image file embedded inline as base64 (3.5 MiB); anything
+/// bigger degrades to a text reference so a single stream-json line stays a
+/// sane size even after the ~4/3 base64 expansion.
+const MAX_EMBEDDED_IMAGE_BYTES: u64 = 3 * 1024 * 1024 + 512 * 1024;
 
-pub fn build_claude_stream_json_input(prompt: &str, images: &[ImageInput]) -> String {
+/// Aggregate base64-encoded budget across all images in one turn; images past
+/// the budget degrade to text references instead of ballooning the input line.
+const MAX_TOTAL_ENCODED_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+pub async fn build_claude_stream_json_input(prompt: &str, images: &[ImageInput]) -> String {
+    build_claude_stream_json_input_with_budget(prompt, images, MAX_TOTAL_ENCODED_IMAGE_BYTES).await
+}
+
+async fn build_claude_stream_json_input_with_budget(
+    prompt: &str,
+    images: &[ImageInput],
+    max_total_encoded_bytes: usize,
+) -> String {
     let mut content = Vec::new();
-    if !prompt.is_empty() {
+    if !prompt.trim().is_empty() {
         content.push(json!({ "type": "text", "text": prompt }));
     }
+    let mut encoded_budget = max_total_encoded_bytes;
     for image in images {
-        content.push(claude_image_content_block(image));
+        content.push(claude_image_content_block(image, &mut encoded_budget).await);
     }
     if content.is_empty() {
-        content.push(json!({ "type": "text", "text": prompt }));
+        // The API rejects empty text blocks, so an empty or whitespace-only
+        // prompt with no embeddable images gets an explicit placeholder.
+        content.push(json!({ "type": "text", "text": "[empty prompt]" }));
     }
     json!({
         "type": "user",
@@ -408,7 +547,7 @@ pub fn build_claude_stream_json_input(prompt: &str, images: &[ImageInput]) -> St
     .to_string()
 }
 
-fn claude_image_content_block(image: &ImageInput) -> Value {
+async fn claude_image_content_block(image: &ImageInput, encoded_budget: &mut usize) -> Value {
     let fallback = || json!({ "type": "text", "text": claude_image_reference(image) });
     let Some(local_path) = image
         .local_path
@@ -421,21 +560,40 @@ fn claude_image_content_block(image: &ImageInput) -> Value {
     let Some(media_type) = image_media_type_from_extension(local_path) else {
         return fallback();
     };
-    let within_limit = fs::metadata(local_path)
-        .map(|metadata| metadata.len() <= MAX_EMBEDDED_IMAGE_BYTES)
-        .unwrap_or(false);
-    if !within_limit {
-        return fallback();
-    }
-    let Ok(bytes) = fs::read(local_path) else {
+    // File IO and base64 encoding are blocking work; keep them off the async
+    // runtime threads.
+    let path = local_path.to_string();
+    let encoded = tokio::task::spawn_blocking(move || -> Option<String> {
+        // Metadata check is a fast path; the read result is what gets
+        // enforced, so a file growing between the two cannot bypass the cap.
+        let metadata_within_limit = fs::metadata(&path)
+            .map(|metadata| metadata.len() <= MAX_EMBEDDED_IMAGE_BYTES)
+            .unwrap_or(false);
+        if !metadata_within_limit {
+            return None;
+        }
+        let bytes = fs::read(&path).ok()?;
+        if bytes.len() as u64 > MAX_EMBEDDED_IMAGE_BYTES {
+            return None;
+        }
+        Some(BASE64.encode(bytes))
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(encoded) = encoded else {
         return fallback();
     };
+    if encoded.len() > *encoded_budget {
+        return fallback();
+    }
+    *encoded_budget -= encoded.len();
     json!({
         "type": "image",
         "source": {
             "type": "base64",
             "media_type": media_type,
-            "data": BASE64.encode(bytes)
+            "data": encoded
         }
     })
 }
@@ -982,9 +1140,9 @@ mod tests {
         assert!(hydrate_thread_from_file(&session_path, "/tmp/project").is_none());
     }
 
-    #[test]
-    fn stream_json_input_wraps_text_only_prompts() {
-        let line = build_claude_stream_json_input("hello world", &[]);
+    #[tokio::test]
+    async fn stream_json_input_wraps_text_only_prompts() {
+        let line = build_claude_stream_json_input("hello world", &[]).await;
         let value = serde_json::from_str::<Value>(&line).unwrap();
         assert_eq!(
             value,
@@ -998,8 +1156,21 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stream_json_input_degrades_missing_images_to_text_references() {
+    #[tokio::test]
+    async fn stream_json_input_replaces_empty_prompts_with_a_placeholder() {
+        for prompt in ["", "   \n\t"] {
+            let line = build_claude_stream_json_input(prompt, &[]).await;
+            let value = serde_json::from_str::<Value>(&line).unwrap();
+            assert_eq!(
+                value["message"]["content"],
+                json!([{ "type": "text", "text": "[empty prompt]" }]),
+                "prompt {prompt:?} must not produce an empty text block"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_json_input_degrades_missing_images_to_text_references() {
         let line = build_claude_stream_json_input(
             "look at this",
             &[ImageInput {
@@ -1009,7 +1180,8 @@ mod tests {
                 url: "ignored".to_string(),
                 local_path: Some("/nonexistent/diagram.png".to_string()),
             }],
-        );
+        )
+        .await;
         let value = serde_json::from_str::<Value>(&line).unwrap();
         let content = value["message"]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -1020,8 +1192,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stream_json_input_embeds_readable_images_as_base64() {
+    #[tokio::test]
+    async fn stream_json_input_embeds_readable_images_as_base64() {
         let dir = tempfile::tempdir().unwrap();
         let image_path = dir.path().join("shot.png");
         fs::write(&image_path, b"pngdata").unwrap();
@@ -1035,7 +1207,8 @@ mod tests {
                 url: "ignored".to_string(),
                 local_path: Some(image_path.to_string_lossy().to_string()),
             }],
-        );
+        )
+        .await;
         let value = serde_json::from_str::<Value>(&line).unwrap();
         let content = value["message"]["content"].as_array().unwrap();
         assert_eq!(content[0], json!({ "type": "text", "text": "describe" }));
@@ -1043,6 +1216,40 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert_eq!(content[1]["source"]["data"], BASE64.encode(b"pngdata"));
+    }
+
+    #[tokio::test]
+    async fn stream_json_input_degrades_images_past_the_aggregate_encoded_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_path = dir.path().join("first.png");
+        let second_path = dir.path().join("second.png");
+        fs::write(&first_path, b"pngdata").unwrap();
+        fs::write(&second_path, b"pngdata").unwrap();
+        let image = |id: &str, path: &Path| ImageInput {
+            id: id.to_string(),
+            name: Some("shot.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: "ignored".to_string(),
+            local_path: Some(path.to_string_lossy().to_string()),
+        };
+
+        // Budget covers exactly one encoded copy; the second image must
+        // degrade to a text reference.
+        let budget = BASE64.encode(b"pngdata").len();
+        let line = build_claude_stream_json_input_with_budget(
+            "describe",
+            &[image("img-1", &first_path), image("img-2", &second_path)],
+            budget,
+        )
+        .await;
+        let value = serde_json::from_str::<Value>(&line).unwrap();
+        let content = value["message"]["content"].as_array().unwrap();
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[2]["type"], "text");
+        assert_eq!(
+            content[2]["text"],
+            format!("[image attachment: {}]", second_path.to_string_lossy())
+        );
     }
 
     #[test]
@@ -1054,7 +1261,44 @@ mod tests {
         assert_eq!(hook["matcher"], "*");
         let command = hook["hooks"][0]["command"].as_str().unwrap();
         assert!(command.contains("http://127.0.0.1:4520/api/claude/hooks/pre-tool-use"));
+        assert!(command.contains("--max-time 570"));
         assert_eq!(hook["hooks"][0]["timeout"], 600);
+    }
+
+    #[test]
+    fn hook_command_denies_when_curl_cannot_reach_the_daemon() {
+        let settings =
+            serde_json::from_str::<Value>(&build_claude_hook_settings("http://127.0.0.1:4520"))
+                .unwrap();
+        let command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        let (_, fallback) = command.split_once("|| printf '%s' '").unwrap();
+        let deny = serde_json::from_str::<Value>(fallback.trim_end_matches('\'')).unwrap();
+        assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(
+            deny["hookSpecificOutput"]["permissionDecisionReason"],
+            "FalconDeck approval unavailable"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupt_without_an_active_turn_records_the_stop_for_racing_spawns() {
+        let runtime = ClaudeRuntime {
+            workspace_path: "/tmp/project".to_string(),
+            claude_bin: "claude".to_string(),
+            active_turns: Mutex::new(HashMap::new()),
+            interrupted_turns: Mutex::new(HashSet::new()),
+            turn_locks: Mutex::new(HashMap::new()),
+            next_turn_generation: std::sync::atomic::AtomicU64::new(1),
+        };
+
+        runtime.interrupt_turn("thread-1").await.unwrap();
+
+        assert!(
+            runtime.interrupted_turns.lock().await.contains("thread-1"),
+            "a spawn in progress must observe the user's stop"
+        );
     }
 
     #[test]

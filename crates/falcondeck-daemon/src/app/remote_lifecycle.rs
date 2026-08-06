@@ -1,7 +1,7 @@
 use chrono::Utc;
 use falcondeck_core::{
-    PairingStatusResponse, RemoteConnectionStatus, RemotePairingSession, RemoteStatusResponse,
-    StartPairingRequest, StartPairingResponse, StartRemotePairingRequest,
+    PairingPublicKeyBundle, PairingStatusResponse, RemoteConnectionStatus, RemotePairingSession,
+    RemoteStatusResponse, StartPairingRequest, StartPairingResponse, StartRemotePairingRequest,
     crypto::{
         LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key,
         verify_pairing_public_key_bundle,
@@ -96,6 +96,32 @@ fn is_remote_bridge_missing_session_error(error_msg: &str) -> bool {
     error_msg.contains("session not found")
 }
 
+/// Hard cap on remembered trusted client bundles so a hostile relay replaying
+/// pairing claims cannot grow the list without bound.
+pub(super) const MAX_TRUSTED_CLIENT_BUNDLES: usize = 32;
+
+/// Records a client bundle that completed a pairing claim, deduplicated by
+/// encryption public key (newest bundle wins) and capped at
+/// [`MAX_TRUSTED_CLIENT_BUNDLES`] (oldest entry evicted). Only bundles in this
+/// list may be served the session data key through the ephemeral
+/// request-bootstrap channel.
+pub(super) fn remember_trusted_client_bundle(
+    trusted: &mut Vec<PairingPublicKeyBundle>,
+    bundle: &PairingPublicKeyBundle,
+) {
+    if let Some(existing) = trusted
+        .iter_mut()
+        .find(|existing| existing.public_key == bundle.public_key)
+    {
+        *existing = bundle.clone();
+        return;
+    }
+    if trusted.len() >= MAX_TRUSTED_CLIENT_BUNDLES {
+        trusted.remove(0);
+    }
+    trusted.push(bundle.clone());
+}
+
 impl AppState {
     /// Best-effort: forward an attention event to the relay so devices that
     /// are not connected can receive a push notification. A missing or dead
@@ -141,6 +167,7 @@ impl AppState {
         remote.daemon_token = None;
         remote.last_error = None;
         remote.command_tx = None;
+        remote.trusted_client_bundles.clear();
     }
 
     pub async fn remote_status(&self) -> RemoteStatusResponse {
@@ -253,6 +280,7 @@ impl AppState {
                 DaemonError::Rpc(format!("failed to parse relay pairing response: {error}"))
             })?;
 
+        let reused_existing_pairing = seed_pairing.is_some();
         let remote_pairing = if let Some(previous_pairing) = seed_pairing {
             RemotePairingState {
                 pairing_id: pairing.pairing_id.clone(),
@@ -311,6 +339,11 @@ impl AppState {
                 remote.pairing_watch_task = Some(watch_task);
             } else {
                 remote.pending_pairing = None;
+                if !reused_existing_pairing {
+                    // A brand-new pairing mints fresh key material; bundles
+                    // trusted for the previous session must not carry over.
+                    remote.trusted_client_bundles.clear();
+                }
                 remote.pairing = Some(remote_pairing.clone());
                 let (command_tx, command_rx) = mpsc::unbounded_channel();
                 let app = self.clone();
@@ -446,6 +479,7 @@ impl AppState {
                         remote.relay_url = None;
                         remote.daemon_token = None;
                         remote.pairing = None;
+                        remote.trusted_client_bundles.clear();
                     }
                     drop(remote);
                     let _ = self.persist_local_state().await;
@@ -576,6 +610,9 @@ impl AppState {
                 if current_pairing.trusted_at.is_none() {
                     current_pairing.trusted_at = Some(Utc::now());
                 }
+            }
+            if let Some(bundle) = client_bundle.as_ref() {
+                remember_trusted_client_bundle(&mut remote.trusted_client_bundles, bundle);
             }
             remote.last_error = None;
         }
@@ -778,6 +815,10 @@ impl AppState {
                             let pairing_snapshot = current_pairing.clone();
                             remote.pending_pairing = None;
                             remote.pairing_watch_task = None;
+                            remember_trusted_client_bundle(
+                                &mut remote.trusted_client_bundles,
+                                &client_bundle,
+                            );
                             if let Some(command_tx) = remote.command_tx.clone() {
                                 remote.last_error = None;
                                 (
@@ -841,6 +882,7 @@ impl AppState {
         let data_key = decode_fixed_base64::<32>(&secrets.data_key_base64).map_err(|error| {
             DaemonError::BadRequest(format!("invalid persisted relay data key: {error}"))
         })?;
+        let mut trusted_client_bundles = remote.trusted_client_bundles.clone();
         let pairing = RemotePairingState {
             pairing_id: remote.pairing_id,
             pairing_code: remote.pairing_code,
@@ -854,6 +896,11 @@ impl AppState {
         };
         let relay_url = remote.relay_url;
         let daemon_token = remote.daemon_token;
+        // Seed the allowlist with the primary device's pairing bundle so
+        // installs persisted before the list existed keep keyless recovery.
+        if let Some(bundle) = pairing.client_bundle.as_ref() {
+            remember_trusted_client_bundle(&mut trusted_client_bundles, bundle);
+        }
 
         {
             let mut current = self.inner.remote.lock().await;
@@ -871,6 +918,7 @@ impl AppState {
             current.daemon_token = Some(daemon_token.clone());
             current.pairing = Some(pairing.clone());
             current.pending_pairing = None;
+            current.trusted_client_bundles = trusted_client_bundles;
             current.last_error = None;
 
             let (command_tx, command_rx) = mpsc::unbounded_channel();

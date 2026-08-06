@@ -97,6 +97,7 @@ impl CodexSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
@@ -164,83 +165,101 @@ impl CodexSession {
             });
         }
 
-        session
-            .send_control_request(
-                "initialize",
-                json!({
-                    "clientInfo": {
-                        "name": "falcondeck",
-                        "title": "FalconDeck",
-                        "version": "0.1.0"
-                    },
-                    "capabilities": {
-                        "experimentalApi": true
-                    }
-                }),
-            )
-            .await?;
-        session.send_notification("initialized", json!({})).await?;
+        // Any bootstrap failure must tear the freshly spawned app-server back
+        // down; returning early would orphan the process (until the daemon
+        // itself exits and kill_on_drop reaps it).
+        let bootstrap_result = async {
+            session
+                .send_control_request(
+                    "initialize",
+                    json!({
+                        "clientInfo": {
+                            "name": "falcondeck",
+                            "title": "FalconDeck",
+                            "version": "0.1.0"
+                        },
+                        "capabilities": {
+                            "experimentalApi": true
+                        }
+                    }),
+                )
+                .await?;
+            session.send_notification("initialized", json!({})).await?;
 
-        let account_value = session
-            .send_control_request("account/read", json!({}))
-            .await?;
-        let account = parse_account(&account_value);
-        let models_value = session
-            .send_control_request("model/list", json!({}))
-            .await?;
-        let models = parse_models(&models_value);
-        let collaboration_modes_value = session
-            .send_control_request("collaborationMode/list", json!({}))
-            .await
-            .unwrap_or(Value::Null);
-        let collaboration_modes = parse_collaboration_modes(&collaboration_modes_value);
-        let threads_value = session
-            .send_control_request(
-                "thread/list",
-                json!({
-                    "limit": 100,
-                    "sourceKinds": [
-                        "cli",
-                        "vscode",
-                        "appServer",
-                        "subAgentReview",
-                        "subAgentCompact",
-                        "subAgentThreadSpawn",
-                        "unknown"
-                    ]
-                }),
-            )
-            .await?;
-        let thread_records = parse_threads(&workspace_id, &workspace_path, &threads_value);
-        let mut threads = Vec::with_capacity(thread_records.len());
-        for record in thread_records {
-            let ParsedThreadRecord {
-                summary,
-                session_path,
-            } = record;
-            let (summary, items) = match session.read_thread(&summary.id).await {
-                Ok(value) => {
-                    let mut items = hydrate_thread_items(&value);
-                    if items.is_empty()
-                        && let Some(path) =
-                            extract_thread_session_path(&value).or(session_path.clone())
-                    {
-                        items = hydrate_thread_items_from_session_file(&path, &workspace_path);
+            let account_value = session
+                .send_control_request("account/read", json!({}))
+                .await?;
+            let account = parse_account(&account_value);
+            let models_value = session
+                .send_control_request("model/list", json!({}))
+                .await?;
+            let models = parse_models(&models_value);
+            let collaboration_modes_value = session
+                .send_control_request("collaborationMode/list", json!({}))
+                .await
+                .unwrap_or(Value::Null);
+            let collaboration_modes = parse_collaboration_modes(&collaboration_modes_value);
+            let threads_value = session
+                .send_control_request(
+                    "thread/list",
+                    json!({
+                        "limit": 100,
+                        "sourceKinds": [
+                            "cli",
+                            "vscode",
+                            "appServer",
+                            "subAgentReview",
+                            "subAgentCompact",
+                            "subAgentThreadSpawn",
+                            "unknown"
+                        ]
+                    }),
+                )
+                .await?;
+            let thread_records = parse_threads(&workspace_id, &workspace_path, &threads_value);
+            let mut threads = Vec::with_capacity(thread_records.len());
+            for record in thread_records {
+                let ParsedThreadRecord {
+                    summary,
+                    session_path,
+                } = record;
+                let (summary, items) = match session.read_thread(&summary.id).await {
+                    Ok(value) => {
+                        let mut items = hydrate_thread_items(&value);
+                        if items.is_empty()
+                            && let Some(path) =
+                                extract_thread_session_path(&value).or(session_path.clone())
+                        {
+                            items = hydrate_thread_items_from_session_file(&path, &workspace_path);
+                        }
+                        (hydrate_thread_summary(summary, &value, &items), items)
                     }
-                    (hydrate_thread_summary(summary, &value, &items), items)
-                }
-                Err(error) => {
-                    warn!("failed to read codex thread {}: {error}", summary.id);
-                    let items = session_path
-                        .as_deref()
-                        .map(|path| hydrate_thread_items_from_session_file(path, &workspace_path))
-                        .unwrap_or_default();
-                    let summary = hydrate_thread_summary(summary, &Value::Null, &items);
-                    (summary, items)
-                }
-            };
-            threads.push(HydratedThread { summary, items });
+                    Err(error) => {
+                        warn!("failed to read codex thread {}: {error}", summary.id);
+                        let items = session_path
+                            .as_deref()
+                            .map(|path| {
+                                hydrate_thread_items_from_session_file(path, &workspace_path)
+                            })
+                            .unwrap_or_default();
+                        let summary = hydrate_thread_summary(summary, &Value::Null, &items);
+                        (summary, items)
+                    }
+                };
+                threads.push(HydratedThread { summary, items });
+            }
+
+            Ok::<_, DaemonError>((account, models, collaboration_modes, threads))
         }
+        .await;
+
+        let (account, models, collaboration_modes, threads) = match bootstrap_result {
+            Ok(bootstrap) => bootstrap,
+            Err(error) => {
+                let _ = session.shutdown().await;
+                return Err(error);
+            }
+        };
 
         Ok(CodexBootstrap {
             session,
@@ -296,6 +315,29 @@ impl CodexSession {
     }
 
     pub async fn send_request(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
+        self.send_request_with_timeout(method, params, None).await
+    }
+
+    /// Bounded variant of `send_request` for control-plane calls that must not
+    /// wait forever on a wedged app-server.
+    pub async fn send_control_request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, DaemonError> {
+        self.send_request_with_timeout(method, params, Some(CONTROL_REQUEST_TIMEOUT))
+            .await
+    }
+
+    /// The single place a request awaits its response: the timeout branch must
+    /// remove the pending entry itself, otherwise an elapsed control request
+    /// would leak its response slot in `pending` forever.
+    async fn send_request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout: Option<Duration>,
+    ) -> Result<Value, DaemonError> {
         if self.is_closed() {
             return Err(self.disconnected_error());
         }
@@ -327,7 +369,20 @@ impl CodexSession {
             )));
         }
 
-        match rx.await {
+        let received = match response_timeout {
+            Some(duration) => match timeout(duration, rx).await {
+                Ok(received) => received,
+                Err(_) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(DaemonError::Rpc(format!(
+                        "codex app-server did not respond to {method} within {}s",
+                        duration.as_secs()
+                    )));
+                }
+            },
+            None => rx.await,
+        };
+        match received {
             Ok(result) => result,
             Err(_) => {
                 self.pending.lock().await.remove(&id);
@@ -335,22 +390,6 @@ impl CodexSession {
                     "codex app-server disconnected before responding to {method}"
                 )))
             }
-        }
-    }
-
-    /// Bounded variant of `send_request` for control-plane calls that must not
-    /// wait forever on a wedged app-server.
-    pub async fn send_control_request(
-        &self,
-        method: &str,
-        params: Value,
-    ) -> Result<Value, DaemonError> {
-        match timeout(CONTROL_REQUEST_TIMEOUT, self.send_request(method, params)).await {
-            Ok(result) => result,
-            Err(_) => Err(DaemonError::Rpc(format!(
-                "codex app-server did not respond to {method} within {}s",
-                CONTROL_REQUEST_TIMEOUT.as_secs()
-            ))),
         }
     }
 
@@ -526,7 +565,7 @@ impl CodexSession {
 
         let _ = self.child.lock().await.wait().await;
 
-        if !self.expected_exit.load(Ordering::Acquire) {
+        if !self.expected_exit.load(Ordering::Acquire) && !self.state.is_shutting_down() {
             self.state
                 .schedule_codex_reconnect(self.workspace_id.clone());
         }

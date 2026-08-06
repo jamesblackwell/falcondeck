@@ -363,7 +363,6 @@ impl AppState {
         &self,
         workspace_id: String,
         thread_id: String,
-        _session_id: String,
         turn_generation: u64,
         stdout: Option<tokio::process::ChildStdout>,
         stderr: Option<tokio::process::ChildStderr>,

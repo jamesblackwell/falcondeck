@@ -63,7 +63,7 @@ async fn health_and_snapshot_routes_work_with_cors() {
     assert_eq!(health.status(), reqwest::StatusCode::OK);
     assert_eq!(
         health.headers().get("access-control-allow-origin").unwrap(),
-        "*"
+        "http://127.0.0.1:1420"
     );
     let health: HealthResponse = health.json().await.unwrap();
     assert!(health.ok);
@@ -92,8 +92,64 @@ async fn health_and_snapshot_routes_work_with_cors() {
             .headers()
             .get("access-control-allow-origin")
             .unwrap(),
-        "*"
+        "http://127.0.0.1:1420"
     );
+
+    // Foreign web origins must not be granted CORS access to the
+    // unauthenticated approval API.
+    let foreign = client
+        .get(format!("{}/api/health", daemon.base_url()))
+        .header("Origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), reqwest::StatusCode::OK);
+    assert!(
+        foreign
+            .headers()
+            .get("access-control-allow-origin")
+            .is_none()
+    );
+
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn rejects_requests_with_non_loopback_host_headers() {
+    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    // DNS rebinding: the browser resolves an attacker hostname to 127.0.0.1,
+    // so the request arrives with a foreign Host header. It must be refused.
+    let rebound = client
+        .get(format!("{}/api/health", daemon.base_url()))
+        .header(reqwest::header::HOST, "evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rebound.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // A normal loopback request (reqwest sets Host to 127.0.0.1:<port>).
+    let normal = client
+        .get(format!("{}/api/health", daemon.base_url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(normal.status(), reqwest::StatusCode::OK);
+
+    // The Claude hook posts with curl semantics: no Origin header, loopback
+    // Host. It must keep working.
+    let hook = client
+        .post(format!(
+            "{}/api/claude/hooks/pre-tool-use",
+            daemon.base_url()
+        ))
+        .header("Content-Type", "application/json")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hook.status(), reqwest::StatusCode::OK);
 
     daemon.shutdown().await.unwrap();
 }
@@ -326,16 +382,30 @@ async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral
         .await
         .unwrap();
     let pairing = remote.pairing.unwrap();
+    let device_key_pair = LocalBoxKeyPair::generate();
+    let device_public_key = device_key_pair.public_key_base64().to_string();
     let claim = claim_pairing_with_challenge(
         &client,
         &relay_base,
         &pairing.pairing_code,
         "keyless-client-test",
-        &LocalBoxKeyPair::generate(),
+        &device_key_pair,
     )
     .await;
 
     wait_for_connected(&client, &daemon.base_url()).await;
+
+    // The initial connect already publishes a bootstrap for the paired
+    // device; remember how many exist so the re-request is distinguishable.
+    let initial_updates = wait_for_device_bootstrap(
+        &client,
+        &relay_base,
+        &claim.session_id,
+        &claim.client_token,
+        &device_public_key,
+    )
+    .await;
+    let initial_bootstrap_count = count_device_bootstraps(&initial_updates, &device_public_key);
 
     // Simulate a trusted device that still holds its client token and local
     // key pair but lost the session data key: connect a plain client
@@ -359,45 +429,59 @@ async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral
     ))
     .await
     .unwrap();
+    let send_bootstrap_request = |bundle: falcondeck_core::PairingPublicKeyBundle| {
+        serde_json::to_string(&serde_json::json!({
+            "type": "ephemeral",
+            "body": {
+                "kind": "request-bootstrap",
+                "device_id": claim.device_id,
+                "client_bundle": bundle,
+            },
+        }))
+        .unwrap()
+    };
 
-    let recovery_key_pair = LocalBoxKeyPair::generate();
-    let recovery_bundle = build_pairing_public_key_bundle(&recovery_key_pair);
-    let recovery_public_key = recovery_bundle.public_key.clone();
+    // A fresh self-signed bundle (what a compromised relay could mint) is
+    // sent first; it must be ignored because it never completed pairing.
+    let attacker_bundle = build_pairing_public_key_bundle(&LocalBoxKeyPair::generate());
+    let attacker_public_key = attacker_bundle.public_key.clone();
     socket
         .send(tokio_tungstenite::tungstenite::Message::Text(
-            serde_json::to_string(&serde_json::json!({
-                "type": "ephemeral",
-                "body": {
-                    "kind": "request-bootstrap",
-                    "device_id": claim.device_id,
-                    "client_bundle": recovery_bundle,
-                },
-            }))
-            .unwrap()
-            .into(),
+            send_bootstrap_request(attacker_bundle).into(),
+        ))
+        .await
+        .unwrap();
+
+    // The device's own pairing bundle must be served a fresh bootstrap.
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            send_bootstrap_request(build_pairing_public_key_bundle(&device_key_pair)).into(),
         ))
         .await
         .unwrap();
 
     // The daemon must answer with a durable SessionBootstrap wrapped to the
     // requester's public key, delivered through the normal replay path.
-    let updates = wait_for_device_bootstrap(
-        &client,
-        &relay_base,
-        &claim.session_id,
-        &claim.client_token,
-        &recovery_public_key,
-    )
-    .await;
-    assert!(
-        updates.updates.iter().any(|update| {
-            matches!(
-                &update.body,
-                RelayUpdateBody::SessionBootstrap { material }
-                    if material.client_public_key == recovery_public_key
-            )
-        }),
-        "keyless client should receive bootstrap material for its requested bundle"
+    let mut republished = None;
+    for _ in 0..40 {
+        let updates =
+            fetch_relay_updates(&client, &relay_base, &claim.session_id, &claim.client_token).await;
+        if count_device_bootstraps(&updates, &device_public_key) > initial_bootstrap_count {
+            republished = Some(updates);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let updates =
+        republished.expect("keyless client should receive bootstrap material for its own bundle");
+
+    // The websocket delivers messages in order, so by the time the device's
+    // re-request was served the attacker request had already been processed —
+    // and it must not have produced any bootstrap material.
+    assert_eq!(
+        count_device_bootstraps(&updates, &attacker_public_key),
+        0,
+        "an unpaired self-signed bundle must never be served the data key"
     );
 
     daemon.shutdown().await.unwrap();
@@ -487,6 +571,39 @@ async fn wait_for_trusted_device_count(
     panic!("daemon never reported {expected_devices} trusted devices");
 }
 
+async fn fetch_relay_updates(
+    client: &reqwest::Client,
+    relay_base: &str,
+    session_id: &str,
+    client_token: &str,
+) -> RelayUpdatesResponse {
+    client
+        .get(format!(
+            "{relay_base}/v1/sessions/{session_id}/updates?after_seq=0"
+        ))
+        .bearer_auth(client_token)
+        .send()
+        .await
+        .unwrap()
+        .json::<RelayUpdatesResponse>()
+        .await
+        .unwrap()
+}
+
+fn count_device_bootstraps(updates: &RelayUpdatesResponse, client_public_key: &str) -> usize {
+    updates
+        .updates
+        .iter()
+        .filter(|update| {
+            matches!(
+                &update.body,
+                RelayUpdateBody::SessionBootstrap { material }
+                    if material.client_public_key == client_public_key
+            )
+        })
+        .count()
+}
+
 async fn wait_for_device_bootstrap(
     client: &reqwest::Client,
     relay_base: &str,
@@ -495,24 +612,8 @@ async fn wait_for_device_bootstrap(
     expected_client_public_key: &str,
 ) -> RelayUpdatesResponse {
     for _ in 0..40 {
-        let updates = client
-            .get(format!(
-                "{relay_base}/v1/sessions/{session_id}/updates?after_seq=0"
-            ))
-            .bearer_auth(client_token)
-            .send()
-            .await
-            .unwrap()
-            .json::<RelayUpdatesResponse>()
-            .await
-            .unwrap();
-        if updates.updates.iter().any(|update| {
-            matches!(
-                &update.body,
-                RelayUpdateBody::SessionBootstrap { material }
-                    if material.client_public_key == expected_client_public_key
-            )
-        }) {
+        let updates = fetch_relay_updates(client, relay_base, session_id, client_token).await;
+        if count_device_bootstraps(&updates, expected_client_public_key) > 0 {
             return updates;
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;

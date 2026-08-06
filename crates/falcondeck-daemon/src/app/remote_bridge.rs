@@ -145,7 +145,15 @@ impl AppState {
         // client public key so a misbehaving peer cannot flood the durable
         // update log with bootstrap material.
         const BOOTSTRAP_REQUEST_MIN_INTERVAL: Duration = Duration::from_secs(60);
+        // Keys are attacker-controlled (fresh key pairs are free), so the
+        // per-key map alone is not a rate limit: also enforce a global
+        // minimum interval between publishes and a hard per-connection
+        // budget, and prune the map so it cannot grow unbounded.
+        const BOOTSTRAP_GLOBAL_MIN_INTERVAL: Duration = Duration::from_secs(10);
+        const BOOTSTRAP_MAX_PUBLISHES_PER_CONNECTION: u32 = 5;
         let mut bootstrap_request_publishes: HashMap<String, tokio::time::Instant> = HashMap::new();
+        let mut bootstrap_publishes_used: u32 = 0;
+        let mut last_bootstrap_publish: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
                 event = events.recv() => {
@@ -221,14 +229,32 @@ impl AppState {
                                 }
                                 RelayServerMessage::Ephemeral { body } => {
                                     if let Some(client_bundle) = parse_bootstrap_request(&body) {
+                                        // Self-signed validity is not trust: only bundles the
+                                        // daemon saw complete a pairing claim may be handed the
+                                        // data key, otherwise a compromised relay could mint its
+                                        // own bundle and decrypt the whole session.
+                                        let trusted = {
+                                            let remote = self.inner.remote.lock().await;
+                                            is_trusted_client_bundle(&remote.trusted_client_bundles, &client_bundle)
+                                        };
                                         let now = tokio::time::Instant::now();
+                                        bootstrap_request_publishes
+                                            .retain(|_, last| now.duration_since(*last) < BOOTSTRAP_REQUEST_MIN_INTERVAL);
                                         let recently_served = bootstrap_request_publishes
                                             .get(&client_bundle.public_key)
                                             .is_some_and(|last| now.duration_since(*last) < BOOTSTRAP_REQUEST_MIN_INTERVAL);
-                                        if recently_served {
-                                            tracing::debug!("ignoring bootstrap request for a recently served client key");
+                                        let globally_throttled = last_bootstrap_publish
+                                            .is_some_and(|last| now.duration_since(last) < BOOTSTRAP_GLOBAL_MIN_INTERVAL);
+                                        if !trusted {
+                                            tracing::warn!("ignoring bootstrap request from a client bundle that never completed pairing");
+                                        } else if bootstrap_publishes_used >= BOOTSTRAP_MAX_PUBLISHES_PER_CONNECTION {
+                                            tracing::warn!("ignoring bootstrap request: per-connection publish budget exhausted");
+                                        } else if recently_served || globally_throttled {
+                                            tracing::debug!("ignoring bootstrap request inside the publish rate window");
                                         } else {
                                             bootstrap_request_publishes.insert(client_bundle.public_key.clone(), now);
+                                            bootstrap_publishes_used += 1;
+                                            last_bootstrap_publish = Some(now);
                                             self.publish_session_bootstrap(&mut writer, &pairing, &client_bundle).await?;
                                             tracing::info!("republished session bootstrap for a keyless trusted client");
                                         }
@@ -1005,10 +1031,10 @@ pub(super) fn host_label() -> String {
 /// Parses and verifies a `request-bootstrap` ephemeral body sent by a trusted
 /// client that lost its session data key. Returns the verified client bundle,
 /// or `None` when the body is not a bootstrap request, the bundle is
-/// malformed, or its signature does not verify. Any authenticated client peer
-/// on the relay session is a trusted device entitled to the session data key,
-/// so bundle validity plus the relay's peer auth is sufficient to re-issue a
-/// wrapped data key.
+/// malformed, or its signature does not verify. Signature validity only
+/// proves the sender holds the bundle's own keys — anyone can self-sign a
+/// fresh bundle — so the caller must additionally check the bundle against
+/// the daemon's trusted-client-bundle allowlist before serving the data key.
 pub(super) fn parse_bootstrap_request(body: &Value) -> Option<PairingPublicKeyBundle> {
     if body.get("kind").and_then(Value::as_str) != Some("request-bootstrap") {
         return None;
@@ -1027,6 +1053,18 @@ pub(super) fn parse_bootstrap_request(body: &Value) -> Option<PairingPublicKeyBu
         return None;
     }
     Some(client_bundle)
+}
+
+/// True when the requesting bundle exactly matches (encryption public key AND
+/// identity public key) a bundle that completed pairing on this daemon.
+pub(super) fn is_trusted_client_bundle(
+    trusted: &[PairingPublicKeyBundle],
+    bundle: &PairingPublicKeyBundle,
+) -> bool {
+    trusted.iter().any(|candidate| {
+        candidate.public_key == bundle.public_key
+            && candidate.identity_public_key == bundle.identity_public_key
+    })
 }
 
 pub(super) fn encrypt_remote_daemon_event(

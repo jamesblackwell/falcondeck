@@ -259,6 +259,7 @@ pub(super) fn persisted_remote_state(
         secure_storage_key: Some(secure_storage_key),
         local_secret_key_base64: None,
         data_key_base64: None,
+        trusted_client_bundles: remote.trusted_client_bundles.clone(),
     }))
 }
 
@@ -516,6 +517,7 @@ mod tests {
                 secure_storage_key: Some(secure_storage_key.to_string()),
                 local_secret_key_base64: Some("inline-secret".to_string()),
                 data_key_base64: Some("inline-key".to_string()),
+                trusted_client_bundles: Vec::new(),
             },
             secure_storage_key,
         )
@@ -541,6 +543,7 @@ mod tests {
             secure_storage_key: None,
             local_secret_key_base64: None,
             data_key_base64: None,
+            trusted_client_bundles: Vec::new(),
         };
 
         assert!(invalid_persisted_remote_reason(&remote).is_none());
@@ -564,6 +567,7 @@ mod tests {
             secure_storage_key: None,
             local_secret_key_base64: None,
             data_key_base64: None,
+            trusted_client_bundles: Vec::new(),
         };
 
         let reason = invalid_persisted_remote_reason(&remote).unwrap();
@@ -586,6 +590,7 @@ mod tests {
             secure_storage_key: None,
             local_secret_key_base64: None,
             data_key_base64: None,
+            trusted_client_bundles: Vec::new(),
         };
 
         assert!(invalid_persisted_remote_reason(&remote).is_none());
