@@ -49,7 +49,7 @@ export function PanelHeader({
         <button
           type="button"
           className={cn(
-            'flex w-full cursor-pointer items-center justify-between px-4 py-3 text-left',
+            'fd-focus-inset flex w-full cursor-pointer items-center justify-between px-4 py-3 text-left',
             className,
           )}
           {...(props as React.ButtonHTMLAttributes<HTMLButtonElement>)}

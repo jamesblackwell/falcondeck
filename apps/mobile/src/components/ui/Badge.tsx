@@ -37,7 +37,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
     borderCurve: 'continuous',
   },
-  dot: { width: 6, height: 6, borderRadius: 3 },
+  dot: { width: theme.spacing[1.5], height: theme.spacing[1.5], borderRadius: theme.radius.full },
   bg_default: { backgroundColor: theme.colors.surface[3] },
   bg_success: { backgroundColor: theme.colors.success.muted },
   bg_warning: { backgroundColor: theme.colors.warning.muted },

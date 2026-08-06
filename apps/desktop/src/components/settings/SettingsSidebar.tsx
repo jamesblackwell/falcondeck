@@ -21,7 +21,7 @@ export function SettingsSidebar({
         <button
           type="button"
           onClick={onClose}
-          className="flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-[length:var(--fd-text-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-primary"
+          className="fd-focus flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-[length:var(--fd-text-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-primary"
         >
           <ArrowLeft className="h-4 w-4" />
           Back to app
@@ -40,7 +40,7 @@ export function SettingsSidebar({
                 onClick={() => onSelectSection(item.id)}
                 aria-current={isActive ? 'page' : undefined}
                 className={cn(
-                  'flex w-full items-start gap-3 rounded-[var(--fd-radius-lg)] px-3 py-2.5 text-left transition-colors',
+                  'fd-focus flex w-full items-start gap-3 rounded-[var(--fd-radius-lg)] px-3 py-2.5 text-left transition-colors',
                   isActive
                     ? 'bg-surface-3 text-fg-primary'
                     : 'text-fg-secondary hover:bg-surface-2 hover:text-fg-primary',

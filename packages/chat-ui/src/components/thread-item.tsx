@@ -67,7 +67,7 @@ export const ThreadItem = memo(
       >
         <button
           type="button"
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] text-left"
           onClick={() => onSelect(workspaceId, thread.id)}
         >
           <span className="flex h-4 w-4 shrink-0 items-center justify-center">
@@ -76,7 +76,7 @@ export const ThreadItem = memo(
             ) : attention.level === 'error' ? (
               <span className="h-2.5 w-2.5 rounded-full bg-danger" />
             ) : attention.level === 'awaiting_response' ? (
-              <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-color-warning-muted)]" />
+              <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
             ) : attention.showUnreadDot ? (
               <span className="h-2.5 w-2.5 rounded-full bg-info" />
             ) : null}
@@ -85,11 +85,11 @@ export const ThreadItem = memo(
             {thread.title}
           </span>
           {thread.is_pinned ? (
-            <Pin aria-label="Pinned" className="h-3 w-3 shrink-0 rotate-45 text-fg-muted" />
+            <Pin role="img" aria-label="Pinned" className="h-3 w-3 shrink-0 rotate-45 text-fg-muted" />
           ) : null}
         </button>
         {attention.showBadge ? (
-          <Badge variant="success" className="shrink-0 bg-success/15 text-success">
+          <Badge variant="success" className="shrink-0">
             {attention.badgeLabel}
           </Badge>
         ) : (
@@ -105,9 +105,10 @@ export const ThreadItem = memo(
               void Promise.resolve(onArchive(workspaceId, thread.id)).catch(() => {})
             }}
             title="Archive thread"
-            className="hidden shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:text-fg-secondary group-hover:block"
+            aria-label={`Archive thread ${thread.title}`}
+            className="fd-focus hidden shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:text-fg-secondary focus-visible:block group-hover:block"
           >
-            <Archive className="h-3.5 w-3.5" />
+            <Archive aria-hidden="true" className="h-3.5 w-3.5" />
           </button>
         ) : null}
       </div>

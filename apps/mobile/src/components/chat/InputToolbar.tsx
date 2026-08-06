@@ -111,6 +111,8 @@ export const InputToolbar = memo(function InputToolbar({
               const active = p.value === selectedProvider
               return (
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
                   key={p.value}
                   style={[styles.providerSegment, active && styles.providerSegmentActive]}
                   disabled={disabled}
@@ -138,6 +140,9 @@ export const InputToolbar = memo(function InputToolbar({
         {models.length > 0 ? (
           <Pressable
             style={[styles.chip, disabled && styles.controlDisabled]}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: Boolean(disabled) }}
+            hitSlop={12}
             onPress={openModelSheet}
             disabled={disabled}
           >
@@ -150,6 +155,9 @@ export const InputToolbar = memo(function InputToolbar({
 
         <Pressable
           style={[styles.chip, disabled && styles.controlDisabled]}
+          accessibilityRole="button"
+          accessibilityState={{ disabled: Boolean(disabled) }}
+          hitSlop={12}
           onPress={openEffortSheet}
           disabled={disabled}
         >
@@ -163,7 +171,12 @@ export const InputToolbar = memo(function InputToolbar({
 
       {sheet ? (
         <Modal transparent animationType="slide" onRequestClose={() => setSheet(null)}>
-          <Pressable style={styles.backdrop} onPress={() => setSheet(null)} />
+          <Pressable
+            style={styles.backdrop}
+            onPress={() => setSheet(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Close"
+          />
           <View style={styles.sheet}>
             <View style={styles.sheetHandle} />
             <Text variant="label" color="primary" weight="semibold" style={styles.sheetTitle}>
@@ -205,7 +218,7 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderColor: theme.colors.border.subtle,
     backgroundColor: theme.colors.surface[1],
-    padding: 2,
+    padding: theme.spacing[0.5],
   },
   providerSegment: {
     paddingHorizontal: theme.spacing[2],
@@ -229,7 +242,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   backdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    backgroundColor: theme.colors.overlay,
   },
   sheet: {
     backgroundColor: theme.colors.surface[1],
@@ -239,9 +252,9 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[4],
   },
   sheetHandle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
+    width: theme.spacing[8] + theme.spacing[1],
+    height: theme.spacing[1],
+    borderRadius: theme.radius.full,
     backgroundColor: theme.colors.border.emphasis,
     alignSelf: 'center',
     marginTop: theme.spacing[2],

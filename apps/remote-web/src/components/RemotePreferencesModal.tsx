@@ -46,7 +46,7 @@ export function RemotePreferencesModal({
   }))
 
   return (
-    <div className="fixed inset-0 z-50 bg-surface-0/80 backdrop-blur-sm">
+    <div className="fixed inset-0 z-50 bg-[var(--fd-overlay-strong)] backdrop-blur-sm">
       <button
         type="button"
         className="absolute inset-0 h-full w-full"
@@ -81,7 +81,7 @@ export function RemotePreferencesModal({
                   conversation: { tool_details_mode: option.value },
                 })
               }
-              className={`rounded-[var(--fd-radius-lg)] border p-3 text-left transition-colors ${
+              className={`fd-focus rounded-[var(--fd-radius-lg)] border p-3 text-left transition-colors ${
                 currentPreferences.conversation.tool_details_mode === option.value
                   ? 'border-accent/50 bg-accent/10'
                   : 'border-border-subtle bg-surface-2 hover:bg-surface-3'

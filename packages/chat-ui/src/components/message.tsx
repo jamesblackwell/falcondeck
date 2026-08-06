@@ -203,7 +203,7 @@ function ToolCallMessage({
           type="button"
           aria-expanded={open}
           aria-label={`Toggle ${item.title}`}
-          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2"
+          className="fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2"
         >
           <ToolStatusIcon item={item} />
           <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
@@ -282,7 +282,7 @@ function DiffMessage({
         <button
           type="button"
           aria-expanded={open}
-          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors hover:bg-surface-2"
+          className="fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left transition-colors hover:bg-surface-2"
         >
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
           <span className="flex-1 text-[length:var(--fd-text-xs)] font-medium text-fg-tertiary">
@@ -324,7 +324,7 @@ function ToolSummaryMessage({
         <button
           type="button"
           aria-expanded={open}
-          className="flex w-full items-center gap-2 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 px-3 py-2 text-left transition-colors hover:bg-surface-2"
+          className="fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 px-3 py-2 text-left transition-colors hover:bg-surface-2"
         >
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
           <div className="min-w-0 flex-1">

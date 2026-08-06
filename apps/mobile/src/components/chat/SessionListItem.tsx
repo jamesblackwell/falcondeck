@@ -45,6 +45,8 @@ function SessionListItemInner({
 
   return (
     <Pressable
+      accessibilityRole="button"
+      accessibilityHint="Double tap and hold for thread options"
       style={[styles.container, isSelected ? styles.selected : undefined]}
       onPress={handlePress}
       onLongPress={handleLongPress}
@@ -105,7 +107,7 @@ const styles = StyleSheet.create((theme) => ({
   dot: {
     width: 10,
     height: 10,
-    borderRadius: 999,
+    borderRadius: theme.radius.full,
   },
 }))
 

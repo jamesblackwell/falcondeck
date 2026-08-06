@@ -10,6 +10,7 @@ import {
   shadow,
   duration,
   iconSize,
+  minTouchTarget,
 } from './tokens'
 
 const darkTheme = {
@@ -22,6 +23,7 @@ const darkTheme = {
   shadow,
   duration,
   iconSize,
+  minTouchTarget,
 } as const
 
 type AppThemes = {

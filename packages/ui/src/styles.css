@@ -75,6 +75,15 @@
   --fd-accent-strong: #6ee7b7;
   --fd-accent-dim: rgba(52, 211, 153, 0.07);
 
+  /* === Overlay / Scrim === */
+  /* Two tiers only. `overlay` sits behind centered dialogs and popovers, where
+     the underlying surface should stay legible. `overlay-strong` is for
+     full-screen sheets and drawers that own the whole viewport, and is always
+     paired with a backdrop blur. Mirrored by colors.overlay / colors.overlayStrong
+     in apps/mobile/src/theme/tokens.ts — keep the alphas in sync. */
+  --fd-overlay: rgba(0, 0, 0, 0.45);
+  --fd-overlay-strong: rgba(9, 9, 11, 0.8);
+
   /* === Semantic Colors === */
   --fd-success: #34d399;
   --fd-success-muted: rgba(52, 211, 153, 0.12);
@@ -136,6 +145,11 @@
   --fd-tracking-wide: 0.04em;
   --fd-tracking-widest: 0.12em;
 
+  /* === Focus === */
+  --fd-focus-ring-width: 2px;
+  --fd-focus-ring-offset: 2px;
+  --fd-focus-ring-color: var(--fd-accent);
+
   /* === Transitions === */
   --fd-duration-fast: 100ms;
   --fd-duration-normal: 150ms;
@@ -160,6 +174,23 @@ body {
   -moz-osx-font-smoothing: grayscale;
   -webkit-user-select: none;
   user-select: none;
+}
+
+/* === Focus Ring ===
+   Add the `fd-focus` class to any interactive element — Button/Input/Textarea
+   already include it. Keyboard-only by design (`:focus-visible`), so pointer
+   interaction stays visually quiet. Declared here rather than as a Tailwind
+   utility so it is unlayered and reliably wins over `outline-none`. */
+.fd-focus:focus-visible {
+  outline: var(--fd-focus-ring-width) solid var(--fd-focus-ring-color);
+  outline-offset: var(--fd-focus-ring-offset);
+}
+
+/* Inset variant for controls flush against a panel edge, where an offset ring
+   would be clipped by the parent's overflow. */
+.fd-focus-inset:focus-visible {
+  outline: var(--fd-focus-ring-width) solid var(--fd-focus-ring-color);
+  outline-offset: calc(-1 * var(--fd-focus-ring-width));
 }
 
 /* Allow selection in content areas only */

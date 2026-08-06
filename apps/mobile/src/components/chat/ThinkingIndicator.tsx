@@ -55,9 +55,9 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[1],
   },
   dot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
+    width: theme.spacing[2],
+    height: theme.spacing[2],
+    borderRadius: theme.radius.full,
     backgroundColor: theme.colors.fg.muted,
   },
 }))

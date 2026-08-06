@@ -51,7 +51,10 @@ export const SessionHeader = memo(function SessionHeader({
               {pathLabel ?? 'No project'}
             </p>
             {thread ? (
-              <Badge variant="default" className="h-5 px-1.5 text-[10px] uppercase tracking-[0.08em]">
+              <Badge
+                variant="default"
+                className="h-5 px-1.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em]"
+              >
                 {thread.provider}
               </Badge>
             ) : null}

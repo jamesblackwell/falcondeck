@@ -1792,7 +1792,7 @@ export default function App() {
           <button
             type="button"
             onClick={() => setShowProjects((value) => !value)}
-            className="flex shrink-0 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-secondary transition-colors hover:bg-surface-2 hover:text-fg-primary md:hidden"
+            className="fd-focus flex shrink-0 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-secondary transition-colors hover:bg-surface-2 hover:text-fg-primary md:hidden"
             aria-label={showProjects ? 'Hide projects' : 'Show projects'}
           >
             <PanelLeft className="h-4 w-4" />
@@ -1837,7 +1837,7 @@ export default function App() {
       />
 
       {showProjects ? (
-        <div className="fixed inset-0 z-40 bg-surface-0/80 backdrop-blur-sm md:hidden">
+        <div className="fixed inset-0 z-40 bg-[var(--fd-overlay-strong)] backdrop-blur-sm md:hidden">
           <button
             type="button"
             className="absolute inset-0 h-full w-full"

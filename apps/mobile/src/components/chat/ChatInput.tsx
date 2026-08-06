@@ -43,6 +43,8 @@ interface ChatInputProps {
 
 const MIN_INPUT_HEIGHT = 44
 const MAX_INPUT_HEIGHT = 140
+// Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
+const CONTROL_SIZE = 32
 
 export const ChatInput = memo(function ChatInput({
   value,
@@ -285,8 +287,15 @@ export const ChatInput = memo(function ChatInput({
               style={[styles.attachButton, disabled ? styles.attachButtonDisabled : null]}
               onPress={onPickImages}
               disabled={disabled}
+              accessibilityRole="button"
+              accessibilityLabel="Attach image"
+              accessibilityState={{ disabled: Boolean(disabled) }}
+              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
             >
-              <ImagePlus size={16} color={disabled ? theme.colors.fg.faint : theme.colors.fg.muted} />
+              <ImagePlus
+                size={theme.iconSize.sm}
+                color={disabled ? theme.colors.fg.faint : theme.colors.fg.muted}
+              />
             </Pressable>
             <InputToolbar
               models={models}
@@ -305,8 +314,15 @@ export const ChatInput = memo(function ChatInput({
             style={[styles.sendButton, canSend ? styles.sendActive : styles.sendInactive]}
             onPress={handleSubmit}
             disabled={!canSend}
+            accessibilityRole="button"
+            accessibilityLabel="Send message"
+            accessibilityState={{ disabled: !canSend }}
+            hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
           >
-            <Send size={16} color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint} />
+            <Send
+              size={theme.iconSize.sm}
+              color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint}
+            />
           </Pressable>
         </View>
       </View>
@@ -398,8 +414,8 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
   },
   attachButton: {
-    width: 32,
-    height: 32,
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
     borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
@@ -409,8 +425,8 @@ const styles = StyleSheet.create((theme) => ({
     opacity: 0.6,
   },
   sendButton: {
-    width: 32,
-    height: 32,
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
     borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',

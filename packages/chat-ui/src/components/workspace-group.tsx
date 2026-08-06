@@ -29,7 +29,8 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelect
       >
         <button
           type="button"
-          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          aria-expanded={isOpen}
+          className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] text-left"
           onClick={() => {
             if (isOpen) {
               setIsOpen(false)
@@ -56,9 +57,10 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelect
             type="button"
             onClick={onNewThread}
             title={`Start new thread in ${pathLabel}`}
-            className="shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
+            aria-label={`Start new thread in ${pathLabel}`}
+            className="fd-focus shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
           >
-            <SquarePen className="h-3.5 w-3.5" />
+            <SquarePen aria-hidden="true" className="h-3.5 w-3.5" />
           </button>
         ) : null}
       </div>

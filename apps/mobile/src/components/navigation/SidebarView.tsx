@@ -153,6 +153,8 @@ export const SidebarView = memo(function SidebarView({
           <Pressable
             style={styles.workspaceHeader}
             onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: item.isOpen }}
           >
             <View style={styles.workspaceLeft}>
               {item.isOpen ? (
@@ -180,6 +182,8 @@ export const SidebarView = memo(function SidebarView({
           <Pressable
             style={styles.overflowRow}
             onPress={() => toggleThreadListExpanded(item.workspaceId)}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: item.isExpanded }}
           >
             <ChevronDown
               size={12}
@@ -253,6 +257,7 @@ export const SidebarView = memo(function SidebarView({
           <>
             <Pressable
               style={styles.sheetItem}
+              accessibilityRole="button"
               onPress={() => void handleTogglePin()}
               disabled={pendingAction === 'pin'}
             >
@@ -261,7 +266,11 @@ export const SidebarView = memo(function SidebarView({
               </Text>
               <ChevronRight size={14} color={theme.colors.fg.muted} />
             </Pressable>
-            <Pressable style={styles.sheetItem} onPress={handleStartRename}>
+            <Pressable
+              style={styles.sheetItem}
+              accessibilityRole="button"
+              onPress={handleStartRename}
+            >
               <Text variant="label" color="primary">
                 Rename
               </Text>
@@ -269,6 +278,7 @@ export const SidebarView = memo(function SidebarView({
             </Pressable>
             <Pressable
               style={[styles.sheetItem, styles.dangerRow]}
+              accessibilityRole="button"
               onPress={() => void handleArchiveThread()}
               disabled={pendingAction === 'archive'}
             >
@@ -311,7 +321,12 @@ export const SidebarView = memo(function SidebarView({
             style={styles.sheetContainer}
             behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           >
-            <Pressable style={styles.sheetBackdrop} onPress={closeThreadOptions} />
+            <Pressable
+              style={styles.sheetBackdrop}
+              onPress={closeThreadOptions}
+              accessibilityRole="button"
+              accessibilityLabel="Close thread options"
+            />
             {renderSheetContent()}
           </KeyboardAvoidingView>
         </Modal>
@@ -365,7 +380,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   sheetBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
+    backgroundColor: theme.colors.overlay,
   },
   sheet: {
     backgroundColor: theme.colors.surface[1],
@@ -375,9 +390,9 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[4],
   },
   sheetHandle: {
-    width: 38,
-    height: 4,
-    borderRadius: 2,
+    width: theme.spacing[8] + theme.spacing[1],
+    height: theme.spacing[1],
+    borderRadius: theme.radius.full,
     backgroundColor: theme.colors.border.emphasis,
     alignSelf: 'center',
     marginTop: theme.spacing[2],

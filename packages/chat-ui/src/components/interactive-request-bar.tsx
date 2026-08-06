@@ -21,14 +21,15 @@ export function InteractiveRequestBar({ requests, onRespond }: InteractiveReques
       <button
         type="button"
         onClick={() => setExpanded((current) => !current)}
-        className="flex w-full items-center gap-2 bg-warning-muted/20 px-4 py-2 text-[length:var(--fd-text-xs)] font-medium text-warning transition-colors hover:bg-warning-muted/35"
+        aria-expanded={expanded}
+        className="fd-focus-inset flex w-full items-center gap-2 bg-warning-muted/20 px-4 py-2 text-[length:var(--fd-text-xs)] font-medium text-warning transition-colors hover:bg-warning-muted/35"
       >
-        <BellDot className="h-3.5 w-3.5" />
+        <BellDot aria-hidden="true" className="h-3.5 w-3.5" />
         {requests.length === 1 ? '1 response pending' : `${requests.length} responses pending`}
         <Badge variant="warning" className="ml-1">
           {requests.length}
         </Badge>
-        <span className="ml-auto">
+        <span aria-hidden="true" className="ml-auto">
           {expanded ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
         </span>
       </button>

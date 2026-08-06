@@ -1,6 +1,6 @@
 import { memo, useCallback } from 'react'
 import { Pressable, type PressableProps, ActivityIndicator } from 'react-native'
-import { StyleSheet } from 'react-native-unistyles'
+import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated'
 import * as Haptics from 'expo-haptics'
 
@@ -31,6 +31,7 @@ export const Button = memo(function Button({
   children,
   ...props
 }: ButtonProps) {
+  const { theme } = useUnistyles()
   const scale = useSharedValue(1)
 
   const animatedStyle = useAnimatedStyle(() => ({
@@ -68,6 +69,9 @@ export const Button = memo(function Button({
         (disabled || loading) ? styles.disabled : undefined,
         animatedStyle,
       ]}
+      accessibilityRole="button"
+      accessibilityState={{ disabled: Boolean(disabled || loading), busy: Boolean(loading) }}
+      hitSlop={size === 'icon' ? (theme.minTouchTarget - 40) / 2 : undefined}
       disabled={disabled || loading}
       onPress={handlePress}
       onPressIn={handlePressIn}
@@ -75,7 +79,10 @@ export const Button = memo(function Button({
       {...props}
     >
       {loading ? (
-        <ActivityIndicator size="small" color={isInverted ? '#09090b' : '#f4f4f6'} />
+        <ActivityIndicator
+          size="small"
+          color={isInverted ? theme.colors.surface[0] : theme.colors.fg.primary}
+        />
       ) : (
         <>
           {icon}
@@ -109,7 +116,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   variant_ghost: { backgroundColor: theme.colors.transparent },
   variant_danger: { backgroundColor: theme.colors.danger.default },
-  size_default: { height: 44, paddingHorizontal: theme.spacing[4] },
+  size_default: { height: theme.minTouchTarget, paddingHorizontal: theme.spacing[4] },
   size_sm: { height: 36, paddingHorizontal: theme.spacing[3], borderRadius: theme.radius.md },
   size_lg: { height: 52, paddingHorizontal: theme.spacing[5], borderRadius: theme.radius.xl },
   size_icon: { height: 40, width: 40, borderRadius: theme.radius.md },

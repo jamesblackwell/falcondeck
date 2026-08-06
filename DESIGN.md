@@ -76,6 +76,8 @@ Rules:
 - Prefer token aliases like `bg-surface-1`, `text-fg-primary`, and `border-border-subtle` on web.
 - On mobile, mirror the same meaning through `colors.surface`, `colors.fg`, `colors.border`, and `colors.accent`.
 - Do not introduce new brand colors without updating both token systems.
+- For a translucent accent or semantic fill, reach for the tokenized `-muted` / `-dim` variant instead of an ad hoc alpha modifier like `bg-accent/10`.
+- Web tokens are named `--fd-*`. There is no `--fd-color-*` prefix; the `--color-*` aliases exist only so Tailwind can generate `bg-surface-1` style utilities. A `var(--fd-color-…)` reference silently resolves to nothing.
 
 ## Typography
 
@@ -100,6 +102,9 @@ Rules:
 - Prefer medium and semibold weight for structure instead of oversized text
 - Use mono selectively for paths, ids, timestamps, and machine output
 - Keep copy dense but readable; FalconDeck is a tool, not a marketing-heavy product surface
+- On web, always size text through the scale: `text-[length:var(--fd-text-*)]`, never a raw `text-[13px]`. The smallest step is `--fd-text-2xs` at `11px`
+- On mobile, size text through `theme.fontSize.*`, and derive `lineHeight` as `fontSize * theme.lineHeight.*` rather than hardcoding a pixel value
+- `--fd-text-md` (`16px`) is the deliberate size for text inputs on small screens, because anything smaller makes iOS Safari zoom on focus. Step down to `--fd-text-base` at the `md` breakpoint
 
 ## Spacing, Radius, and Depth
 
@@ -116,6 +121,12 @@ Radius:
 - Cards and panels: `12px`
 - Large panels and overlays: `16px`
 - Pill shapes: full radius
+
+Radius rules:
+
+- Reference radii through tokens: `rounded-[var(--fd-radius-*)]` on web, `theme.radius.*` on mobile
+- Pills and dots use the full radius token rather than a large magic number like `999` or half the width
+- Icons follow their own scale: `theme.iconSize.*` on mobile, where `xs` (`14`) is the dense size used inside list rows and disclosure headers
 
 Depth:
 
@@ -139,6 +150,57 @@ When adding a new shared pattern:
 - Start with token usage
 - Check whether it belongs in `packages/ui`
 - Keep states consistent across desktop, remote web, and mobile
+
+## Interaction Patterns
+
+These are the established cross-platform behaviours. Match them instead of inventing a new affordance for the same job.
+
+### Context menus (per-item actions)
+
+Secondary actions on a list item live in a context menu, never in a row of always-visible icon buttons.
+
+- Desktop and remote web: right-click the row (`onContextMenu`), which opens a portalled menu with `role="menu"` positioned at the cursor. The menu closes on outside pointerdown, `Escape`, scroll, and resize.
+- Mobile: long-press the row, which opens a bottom sheet with the same actions in the same order.
+
+Rules:
+
+- Keep the action list and its order identical across platforms.
+- Order is: pin/unpin, rename, mark as read, then a separator, then copy actions, then a separator, then destructive actions last.
+- Destructive items use `danger` foreground with a muted danger hover fill.
+- If a menu is positioned manually, the width constant used for viewport clamping must match the rendered width, or the menu will overflow the screen edge.
+- One action may also appear inline on hover as a shortcut (thread archive), but the context menu remains the complete list.
+
+### Collapsible side panels
+
+The desktop shell has two optional panels around the main column.
+
+- `⌘B` toggles the left sidebar; `⌥⌘B` toggles the right side panel.
+- Both toggles are also exposed as icon buttons with `aria-pressed` reflecting visibility, so the state is discoverable without the shortcut.
+- Visibility persists across launches. The sidebar defaults to visible, the right panel to hidden.
+- Hiding a panel unmounts it rather than shrinking it to zero width.
+
+### Focus and keyboard access
+
+Every interactive element must show a visible keyboard focus indicator.
+
+- Web: apply the `fd-focus` class (or `fd-focus-inset` where an offset ring would be clipped by a scrolling parent). It renders an accent outline on `:focus-visible` only, so pointer interaction stays quiet. `Button`, `Input`, `Textarea`, `Select`, and `PanelHeader` already include it.
+- Never use `outline-none` without providing a replacement indicator.
+- An action that is only revealed on hover must also reveal itself on `focus-visible`, or keyboard users can tab to an invisible control.
+- Icon-only controls need an `aria-label` on web and an `accessibilityLabel` plus `accessibilityRole="button"` on mobile. A `title` alone is not sufficient.
+- Decorative icons sitting next to a text label should be `aria-hidden`.
+
+### Touch targets
+
+Mobile controls follow a 44pt minimum. When the painted control is deliberately smaller, keep the visual size and add `hitSlop` to reach 44pt rather than inflating the design.
+
+## Overlays and Scrims
+
+Two tiers only, tokenized on both platforms:
+
+- `--fd-overlay` / `colors.overlay` — centered dialogs, popovers, and option sheets, where the surface underneath should stay legible.
+- `--fd-overlay-strong` / `colors.overlayStrong` — full-screen drawers and sheets that own the viewport. Always paired with a backdrop blur.
+
+Do not introduce a third scrim alpha.
 
 ## Brand and Logo System
 

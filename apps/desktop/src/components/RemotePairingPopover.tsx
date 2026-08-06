@@ -60,7 +60,7 @@ function PairingCard({ link, code }: { link: string; code: string }) {
         <button
           type="button"
           onClick={() => void handleOpenLink()}
-          className="inline-flex h-9 items-center justify-center gap-2 rounded-[var(--fd-radius-lg)] bg-surface-3 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-4"
+          className="fd-focus inline-flex h-9 items-center justify-center gap-2 rounded-[var(--fd-radius-lg)] bg-surface-3 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-4"
         >
           <Copy className="h-3.5 w-3.5" />
           Open link
@@ -150,7 +150,7 @@ export function RemotePairingPopover({
       <Popover.Trigger asChild>
         <button
           type="button"
-          className="flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-secondary"
+          className="fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-secondary"
         >
           {isConnected ? (
             <StatusIndicator status="connected" size="sm" />
@@ -251,7 +251,7 @@ export function RemotePairingPopover({
                 type="button"
                 onClick={onStartPairing}
                 disabled={isStartingRemote || remoteControlsDisabled}
-                className="flex w-full items-center justify-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-secondary"
+                className="fd-focus flex w-full items-center justify-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-secondary"
               >
                 {isStartingRemote ? (
                   <LoaderCircle className="h-3 w-3 animate-spin" />

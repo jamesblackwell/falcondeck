@@ -64,9 +64,12 @@ export const FileListView = memo(function FileListView({
           type="button"
           onClick={onRefresh}
           disabled={isLoading}
-          className="ml-auto rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
+          title="Refresh changes"
+          aria-label="Refresh changes"
+          aria-busy={isLoading}
+          className="fd-focus ml-auto rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
         >
-          <RefreshCw className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          <RefreshCw aria-hidden="true" className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
         </button>
       </div>
 
@@ -88,7 +91,7 @@ export const FileListView = memo(function FileListView({
                 key={entry.path}
                 type="button"
                 onClick={() => onSelectFile(entry)}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-surface-2"
+                className="fd-focus-inset flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-surface-2"
               >
                 <StatusIcon status={entry.status} />
                 <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)]">

@@ -30,7 +30,9 @@ import { WorkspaceGroup } from './workspace-group'
 const VISIBLE_THREAD_LIMIT = 5
 const RELATIVE_TIME_TICK_MS = 60_000
 const OPTIMISTIC_SELECTION_TTL_MS = 1_500
-const THREAD_MENU_WIDTH_PX = 176
+// Must match the rendered menu width below (`w-52`), or the viewport clamp
+// lets the menu overflow the right edge.
+const THREAD_MENU_WIDTH_PX = 208
 const THREAD_MENU_VIEWPORT_PADDING_PX = 8
 const THREAD_MENU_ROW_HEIGHT_PX = 36
 const THREAD_MENU_SEPARATOR_HEIGHT_PX = 9
@@ -138,9 +140,10 @@ const ThreadList = memo(function ThreadList({
         <button
           type="button"
           onClick={() => setExpanded(!showAll)}
-          className="flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
+          aria-expanded={showAll}
+          className="fd-focus flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
         >
-          <ChevronDown className={cn('h-3 w-3', showAll && 'rotate-180')} />
+          <ChevronDown aria-hidden="true" className={cn('h-3 w-3', showAll && 'rotate-180')} />
           {showAll ? 'Show less' : `${hiddenCount} older threads`}
         </button>
       ) : null}
@@ -415,9 +418,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             <button
               type="button"
               onClick={() => handleNewThread(visualSelectedWorkspaceId)}
-              className="flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
+              className="fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
             >
-              <SquarePen className="h-3.5 w-3.5" />
+              <SquarePen aria-hidden="true" className="h-3.5 w-3.5" />
               New thread
             </button>
           ) : (
@@ -431,11 +434,14 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               className="h-7 w-7"
               onClick={onAddProject}
               disabled={isAddingProject}
+              title="Add project"
+              aria-label="Add project"
+              aria-busy={isAddingProject}
             >
               {isAddingProject ? (
-                <LoaderCircle className="h-4 w-4 animate-spin" />
+                <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin" />
               ) : (
-                <FolderPlus className="h-4 w-4" />
+                <FolderPlus aria-hidden="true" className="h-4 w-4" />
               )}
             </Button>
           ) : null}
@@ -531,11 +537,15 @@ function ThreadMenuItem({
       role="menuitem"
       onClick={onClick}
       className={cn(
-        'flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)]',
-        destructive ? 'text-danger hover:bg-danger/10' : 'text-fg-primary hover:bg-surface-3',
+        'fd-focus-inset flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)]',
+        destructive
+          ? 'text-danger hover:bg-danger-muted focus-visible:bg-danger-muted'
+          : 'text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3',
       )}
     >
-      {icon}
+      <span aria-hidden="true" className="flex shrink-0 items-center">
+        {icon}
+      </span>
       {label}
     </button>
   )
@@ -725,7 +735,7 @@ const RenameThreadDialog = memo(function RenameThreadDialog({
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
       onMouseDown={(event) => {
         if (event.target !== event.currentTarget) return
         onClose()

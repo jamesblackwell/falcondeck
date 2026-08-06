@@ -57,6 +57,12 @@ export const colors = {
     removedText: '#fca5a5',
   },
 
+  // Overlay / scrim — mirrors --fd-overlay / --fd-overlay-strong on web.
+  // `overlay` backs centered dialogs and option sheets; `overlayStrong` backs
+  // full-screen drawers and is always paired with a blur.
+  overlay: 'rgba(0, 0, 0, 0.45)',
+  overlayStrong: 'rgba(9, 9, 11, 0.8)',
+
   transparent: 'transparent',
   white: '#ffffff',
   black: '#000000',
@@ -146,8 +152,14 @@ export const duration = {
 } as const
 
 export const iconSize = {
+  // xs is the dense inline size used inside list rows and disclosure headers.
+  xs: 14,
   sm: 16,
   md: 20,
   lg: 24,
   xl: 32,
 } as const
+
+// Minimum touch target per Apple HIG / Material. Pair with hitSlop when the
+// painted control is smaller than this.
+export const minTouchTarget = 44

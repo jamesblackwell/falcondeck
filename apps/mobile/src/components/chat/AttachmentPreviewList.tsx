@@ -60,10 +60,13 @@ export const AttachmentPreviewList = memo(function AttachmentPreviewList({
             <Pressable
               style={[styles.removeButton, disabled && styles.removeButtonDisabled]}
               onPress={() => onRemoveAttachment(attachment.id)}
-              hitSlop={8}
+              hitSlop={12}
               disabled={disabled}
+              accessibilityRole="button"
+              accessibilityLabel={`Remove ${attachmentLabel(attachment)}`}
+              accessibilityState={{ disabled: Boolean(disabled) }}
             >
-              <X size={12} color={theme.colors.surface[0]} />
+              <X size={theme.iconSize.xs} color={theme.colors.surface[0]} />
             </Pressable>
           ) : null}
         </View>
@@ -106,7 +109,7 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.65)',
+    backgroundColor: theme.colors.overlayStrong,
   },
   removeButtonDisabled: {
     opacity: 0.5,

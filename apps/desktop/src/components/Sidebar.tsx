@@ -25,14 +25,14 @@ export function DesktopSidebar({
             type="button"
             onClick={onOpenSettings}
             className={cn(
-              'flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors',
+              'fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors',
               settingsOpen
                 ? 'bg-surface-3 text-fg-primary'
                 : 'text-fg-secondary hover:bg-surface-3 hover:text-fg-primary',
             )}
             aria-current={settingsOpen ? 'page' : undefined}
           >
-            <Settings className="h-4 w-4 shrink-0" />
+            <Settings aria-hidden="true" className="h-4 w-4 shrink-0" />
             <span>Settings</span>
           </button>
         ) : null

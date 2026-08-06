@@ -48,7 +48,7 @@ export const StatusIndicator = memo(function StatusIndicator({
 
 const styles = StyleSheet.create((theme) => ({
   base: { borderRadius: theme.radius.full },
-  sm: { width: 6, height: 6 },
+  sm: { width: theme.spacing[1.5], height: theme.spacing[1.5] },
   md: { width: 10, height: 10 },
   connected: { backgroundColor: theme.colors.success.default },
   connecting: { backgroundColor: theme.colors.warning.default },

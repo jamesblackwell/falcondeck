@@ -17,10 +17,11 @@ export function PreferenceToggle({
     <button
       type="button"
       onClick={() => onToggle(!enabled)}
+      aria-pressed={enabled}
       className={cn(
-        'flex w-full items-start justify-between gap-4 rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors',
+        'fd-focus flex w-full items-start justify-between gap-4 rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors',
         enabled
-          ? 'border-accent/40 bg-accent/10'
+          ? 'border-accent/40 bg-accent-dim'
           : 'border-border-subtle bg-surface-2 hover:bg-surface-3',
       )}
     >

@@ -242,14 +242,14 @@ export const Conversation = memo(function Conversation({
               <button
                 type="button"
                 onClick={() => setExpansionMode('expanded')}
-                className="text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary"
+                className="fd-focus rounded-[var(--fd-radius-sm)] text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary"
               >
                 Expand all
               </button>
               <button
                 type="button"
                 onClick={() => setExpansionMode('collapsed')}
-                className="text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary"
+                className="fd-focus rounded-[var(--fd-radius-sm)] text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-primary"
               >
                 Collapse all
               </button>
@@ -291,7 +291,7 @@ export const Conversation = memo(function Conversation({
             <button
               type="button"
               onClick={jumpToBottom}
-              className="pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-border-default bg-surface-2 text-fg-muted shadow-md transition-colors hover:bg-surface-3 hover:text-fg-primary"
+              className="fd-focus pointer-events-auto flex h-7 w-7 items-center justify-center rounded-full border border-border-default bg-surface-2 text-fg-muted shadow-md transition-colors hover:bg-surface-3 hover:text-fg-primary"
             >
               <ChevronDown className="h-4 w-4" />
             </button>

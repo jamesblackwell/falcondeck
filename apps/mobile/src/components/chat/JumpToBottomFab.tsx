@@ -10,6 +10,8 @@ import Animated, {
 import { ChevronDown } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
+const FAB_SIZE = 40
+
 interface JumpToBottomFabProps {
   visible: boolean
   onPress: () => void
@@ -41,8 +43,14 @@ export const JumpToBottomFab = memo(function JumpToBottomFab({
 
   return (
     <Animated.View style={[styles.wrapper, animatedStyle]} pointerEvents={visible ? 'auto' : 'none'}>
-      <Pressable style={styles.button} onPress={handlePress}>
-        <ChevronDown size={20} color={theme.colors.fg.primary} />
+      <Pressable
+        style={styles.button}
+        onPress={handlePress}
+        accessibilityRole="button"
+        accessibilityLabel="Jump to latest message"
+        hitSlop={(theme.minTouchTarget - FAB_SIZE) / 2}
+      >
+        <ChevronDown size={theme.iconSize.md} color={theme.colors.fg.primary} />
       </Pressable>
     </Animated.View>
   )
@@ -55,8 +63,8 @@ const styles = StyleSheet.create((theme) => ({
     alignSelf: 'center',
   },
   button: {
-    width: 40,
-    height: 40,
+    width: FAB_SIZE,
+    height: FAB_SIZE,
     borderRadius: theme.radius.full,
     backgroundColor: theme.colors.surface[3],
     borderWidth: 1,
