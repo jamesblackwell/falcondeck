@@ -1102,8 +1102,16 @@ pub(super) async fn update_thread(
         if let Some(pinned) = request.pinned {
             thread.summary.is_pinned = pinned;
         }
-        thread.summary.updated_at = now;
-        workspace.summary.current_thread_id = Some(request.thread_id.clone());
+        // Pin toggles must not bump recency: updated_at drives the sidebar
+        // sort, and unpinning a stale thread should return it to its place.
+        let is_pin_only_update = request.title.is_none()
+            && request.model_id.is_none()
+            && request.reasoning_effort.is_none()
+            && request.pinned.is_some();
+        if !is_pin_only_update {
+            thread.summary.updated_at = now;
+            workspace.summary.current_thread_id = Some(request.thread_id.clone());
+        }
         workspace.summary.updated_at = now;
 
         workspace.summary.clone()
