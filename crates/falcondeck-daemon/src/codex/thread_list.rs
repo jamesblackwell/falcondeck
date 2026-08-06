@@ -62,41 +62,6 @@ fn parse_reasoning_efforts(value: &Value) -> Vec<ReasoningEffortSummary> {
         .collect()
 }
 
-pub(super) fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
-    value
-        .get("result")
-        .and_then(Value::as_object)
-        .and_then(|result| result.get("data"))
-        .and_then(Value::as_array)
-        .or_else(|| value.get("data").and_then(Value::as_array))
-        .or_else(|| value.get("modes").and_then(Value::as_array))
-        .or_else(|| value.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let settings = entry.get("settings");
-            let id = extract_string(entry, &["id", "mode", "name"])?;
-            Some(CollaborationModeSummary {
-                id: id.clone(),
-                label: extract_string(entry, &["label", "name"]).unwrap_or(id),
-                mode: extract_string(entry, &["mode"]),
-                model_id: extract_string(entry, &["model", "modelId", "model_id"]).or_else(|| {
-                    settings.and_then(|settings| {
-                        extract_string(settings, &["model", "modelId", "model_id"])
-                    })
-                }),
-                reasoning_effort: extract_string(entry, &["reasoningEffort", "reasoning_effort"])
-                    .or_else(|| {
-                        settings.and_then(|settings| {
-                            extract_string(settings, &["reasoningEffort", "reasoning_effort"])
-                        })
-                    }),
-                is_native: true,
-            })
-        })
-        .collect()
-}
-
 pub(super) fn parse_threads(
     workspace_id: &str,
     workspace_path: &str,

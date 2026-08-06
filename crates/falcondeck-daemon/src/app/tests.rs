@@ -505,7 +505,10 @@ async fn update_thread_title_marks_thread_as_manual() {
         .unwrap();
     assert!(handle.thread.is_pinned);
     assert_eq!(handle.thread.agent.model_id.as_deref(), Some("gpt-5.4"));
-    assert_eq!(handle.thread.agent.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        handle.thread.agent.reasoning_effort.as_deref(),
+        Some("high")
+    );
 
     // An explicit null clears the setting; an absent field leaves it alone.
     let request: UpdateThreadRequest = serde_json::from_value(json!({
@@ -518,7 +521,10 @@ async fn update_thread_title_marks_thread_as_manual() {
     assert_eq!(request.reasoning_effort, None);
     let handle = app.update_thread(request).await.unwrap();
     assert_eq!(handle.thread.agent.model_id, None);
-    assert_eq!(handle.thread.agent.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        handle.thread.agent.reasoning_effort.as_deref(),
+        Some("high")
+    );
     assert!(handle.thread.is_pinned);
 }
 

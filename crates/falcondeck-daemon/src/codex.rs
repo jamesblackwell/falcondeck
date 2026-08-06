@@ -36,7 +36,7 @@ mod session_file;
 mod thread_list;
 
 use session_file::hydrate_thread_items_from_session_file;
-use thread_list::{parse_collaboration_modes, parse_models, parse_threads};
+use thread_list::{parse_models, parse_threads};
 
 pub struct CodexBootstrap {
     pub session: Arc<CodexSession>,
@@ -199,11 +199,9 @@ impl CodexSession {
                 .send_control_request("model/list", json!({}))
                 .await?;
             let models = parse_models(&models_value);
-            let collaboration_modes_value = session
-                .send_control_request("collaborationMode/list", json!({}))
-                .await
-                .unwrap_or(Value::Null);
-            let collaboration_modes = parse_collaboration_modes(&collaboration_modes_value);
+            // `collaborationMode/list` was removed from the Codex app-server
+            // protocol; the daemon no longer surfaces collaboration modes.
+            let collaboration_modes = Vec::new();
             let threads_value = session
                 .send_control_request(
                     "thread/list",
@@ -282,15 +280,10 @@ impl CodexSession {
     pub async fn provider_metadata(&self) -> Result<CodexProviderMetadata, DaemonError> {
         let account_value = self.send_control_request("account/read", json!({})).await?;
         let models_value = self.send_control_request("model/list", json!({})).await?;
-        let collaboration_modes_value = self
-            .send_control_request("collaborationMode/list", json!({}))
-            .await
-            .unwrap_or(Value::Null);
-
         Ok(CodexProviderMetadata {
             account: parse_account(&account_value),
             models: parse_models(&models_value),
-            collaboration_modes: parse_collaboration_modes(&collaboration_modes_value),
+            collaboration_modes: Vec::new(),
         })
     }
 
@@ -1158,29 +1151,6 @@ mod tests {
             Some("medium")
         );
         assert_eq!(models[0].supported_reasoning_efforts.len(), 2);
-    }
-
-    #[test]
-    fn parses_collaboration_modes_from_result_data_shape() {
-        let modes = parse_collaboration_modes(&json!({
-            "result": {
-                "data": [{
-                    "mode": "plan",
-                    "name": "Plan",
-                    "settings": {
-                        "model": "gpt-5.4",
-                        "reasoning_effort": "high"
-                    }
-                }]
-            }
-        }));
-        assert_eq!(modes.len(), 1);
-        assert_eq!(modes[0].id, "plan");
-        assert_eq!(modes[0].label, "Plan");
-        assert_eq!(modes[0].mode.as_deref(), Some("plan"));
-        assert_eq!(modes[0].model_id.as_deref(), Some("gpt-5.4"));
-        assert_eq!(modes[0].reasoning_effort.as_deref(), Some("high"));
-        assert!(modes[0].is_native);
     }
 
     #[test]

@@ -671,11 +671,15 @@ pub fn curated_models() -> Vec<ModelSummary> {
                     reasoning_effort: "high".to_string(),
                     description: "Deeper reasoning".to_string(),
                 },
+                ReasoningEffortSummary {
+                    reasoning_effort: "xhigh".to_string(),
+                    description: "Extended reasoning".to_string(),
+                },
             ],
         },
         ModelSummary {
             id: "sonnet".to_string(),
-            label: "Sonnet 4.6".to_string(),
+            label: "Sonnet 5".to_string(),
             is_default: true,
             default_reasoning_effort: Some("medium".to_string()),
             supported_reasoning_efforts: vec![
@@ -691,11 +695,15 @@ pub fn curated_models() -> Vec<ModelSummary> {
                     reasoning_effort: "high".to_string(),
                     description: "Deeper reasoning".to_string(),
                 },
+                ReasoningEffortSummary {
+                    reasoning_effort: "xhigh".to_string(),
+                    description: "Extended reasoning".to_string(),
+                },
             ],
         },
         ModelSummary {
             id: "opus".to_string(),
-            label: "Opus 4.6".to_string(),
+            label: "Opus 5".to_string(),
             is_default: false,
             default_reasoning_effort: Some("high".to_string()),
             supported_reasoning_efforts: vec![
@@ -710,6 +718,10 @@ pub fn curated_models() -> Vec<ModelSummary> {
                 ReasoningEffortSummary {
                     reasoning_effort: "high".to_string(),
                     description: "Deeper reasoning".to_string(),
+                },
+                ReasoningEffortSummary {
+                    reasoning_effort: "xhigh".to_string(),
+                    description: "Extended reasoning".to_string(),
                 },
                 ReasoningEffortSummary {
                     reasoning_effort: "max".to_string(),
@@ -734,6 +746,10 @@ pub fn curated_models() -> Vec<ModelSummary> {
                 ReasoningEffortSummary {
                     reasoning_effort: "high".to_string(),
                     description: "Deeper reasoning".to_string(),
+                },
+                ReasoningEffortSummary {
+                    reasoning_effort: "xhigh".to_string(),
+                    description: "Extended reasoning".to_string(),
                 },
                 ReasoningEffortSummary {
                     reasoning_effort: "max".to_string(),
@@ -1179,10 +1195,10 @@ mod tests {
         assert_eq!(models[0].id, "haiku");
         assert_eq!(models[0].label, "Haiku 4.5");
         assert_eq!(models[1].id, "sonnet");
-        assert_eq!(models[1].label, "Sonnet 4.6");
+        assert_eq!(models[1].label, "Sonnet 5");
         assert!(models[1].is_default);
         assert_eq!(models[2].id, "opus");
-        assert_eq!(models[2].label, "Opus 4.6");
+        assert_eq!(models[2].label, "Opus 5");
         assert_eq!(models[3].id, "fable");
         assert_eq!(models[3].label, "Fable 5");
     }
