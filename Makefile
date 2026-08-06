@@ -237,9 +237,11 @@ mobile-dev: mobile-prepare
 			echo "Expo dev server running in background (pid $$metro_pid)"; \
 		fi; \
 		echo "Building FalconDeck for simulator $$booted_udid"; \
-		cd "$(MOBILE_DIR)/ios" && xcodebuild -workspace FalconDeck.xcworkspace -scheme FalconDeck -configuration Debug -destination "id=$$booted_udid" -derivedDataPath .derivedData GCC_PREPROCESSOR_DEFINITIONS='$$(inherited) RCT_METRO_PORT=$(MOBILE_METRO_PORT)' build; \
+		extra_build_settings=""; \
+		if [ "$(MOBILE_METRO_PORT)" != "8081" ]; then extra_build_settings="GCC_PREPROCESSOR_DEFINITIONS=\$$(inherited) RCT_METRO_PORT=$(MOBILE_METRO_PORT)"; fi; \
+		cd "$(MOBILE_DIR)/ios" && xcodebuild -workspace FalconDeck.xcworkspace -scheme FalconDeck -configuration Debug -destination "id=$$booted_udid" -derivedDataPath DerivedData $$extra_build_settings build; \
 		xcrun simctl terminate $$booted_udid com.falcondeck.mobile >/dev/null 2>&1 || true; \
-		xcrun simctl install $$booted_udid "$(MOBILE_DIR)/ios/.derivedData/Build/Products/Debug-iphonesimulator/FalconDeck.app"; \
+		xcrun simctl install $$booted_udid "$(MOBILE_DIR)/ios/DerivedData/Build/Products/Debug-iphonesimulator/FalconDeck.app"; \
 		xcrun simctl launch $$booted_udid com.falcondeck.mobile; \
 		echo "FalconDeck launched. Metro log: $(MOBILE_METRO_LOG_FILE)"
 
