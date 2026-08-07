@@ -516,8 +516,7 @@ async fn update_thread_title_marks_thread_as_manual() {
     let state_path = temp_dir.path().join("daemon-state.json");
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
 
@@ -972,8 +971,7 @@ async fn restore_skips_expired_unclaimed_remote_pairing() {
 
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
     app.restore_local_state().await.unwrap();
@@ -1032,8 +1030,10 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
 
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "missing-codex".to_string(),
-        "missing-claude".to_string(),
+        HashMap::from([
+            (AgentProvider::CODEX, "missing-codex".to_string()),
+            (AgentProvider::CLAUDE, "missing-claude".to_string()),
+        ]),
         PathBuf::from(&state_path),
     );
     app.restore_local_state().await.unwrap();
@@ -1100,8 +1100,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
     let state_path = temp_dir.path().join("daemon-state.json");
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
 
@@ -1261,8 +1260,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
     let state_path = temp_dir.path().join("daemon-state.json");
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
 
@@ -1371,8 +1369,7 @@ async fn restore_skips_legacy_loopback_remote_pairing() {
 
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
     app.restore_local_state().await.unwrap();
@@ -1424,8 +1421,7 @@ async fn restore_skips_trusted_remote_with_legacy_unsigned_client_key() {
 
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
     app.restore_local_state().await.unwrap();
@@ -1452,8 +1448,7 @@ async fn persisted_remote_state_moves_secrets_out_of_the_state_file() {
     let relay_url = "https://connect.falcondeck.com/persist".to_string();
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
     let pairing = super::RemotePairingState {
@@ -1539,8 +1534,7 @@ async fn restore_reads_remote_secrets_from_secure_storage() {
 
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
     app.restore_local_state().await.unwrap();
@@ -1597,8 +1591,7 @@ async fn restore_keeps_trusted_remote_without_client_bundle() {
 
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
     app.restore_local_state().await.unwrap();
@@ -1734,8 +1727,7 @@ async fn claude_pre_tool_use_approval_round_trips_through_interactive_requests()
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         temp_dir.path().join("daemon-state.json"),
     );
     insert_claude_workspace_with_session(
@@ -1801,8 +1793,7 @@ async fn claude_pre_tool_use_ignores_unknown_sessions() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         temp_dir.path().join("daemon-state.json"),
     );
 
@@ -1819,8 +1810,7 @@ async fn claude_pre_tool_use_always_allow_short_circuits_later_calls() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         temp_dir.path().join("daemon-state.json"),
     );
     insert_claude_workspace_with_session(
@@ -1878,8 +1868,7 @@ async fn claude_pre_tool_use_cleans_up_when_the_hook_client_disconnects() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         temp_dir.path().join("daemon-state.json"),
     );
     insert_claude_workspace_with_session(
@@ -1929,8 +1918,7 @@ async fn claude_pre_tool_use_handles_concurrent_hook_calls_for_one_session() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         temp_dir.path().join("daemon-state.json"),
     );
     insert_claude_workspace_with_session(
@@ -2088,8 +2076,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
     let state_path = temp_dir.path().join("daemon-state.json");
     let app = AppState::new_with_state_path(
         "test".to_string(),
-        "codex".to_string(),
-        "claude".to_string(),
+        HashMap::new(),
         PathBuf::from(&state_path),
     );
 

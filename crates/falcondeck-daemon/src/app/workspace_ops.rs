@@ -7,7 +7,6 @@ use falcondeck_core::{
 };
 use uuid::Uuid;
 
-use super::acp_threads::start_acp_turn;
 use super::*;
 
 pub(super) async fn connect_workspace(
@@ -107,7 +106,7 @@ pub(super) async fn connect_workspace_internal(
         match CodexSession::connect(
             workspace_id.clone(),
             path_string.clone(),
-            app.inner.codex_bin.clone(),
+            app.provider_bin(&AgentProvider::CODEX),
             app.clone(),
         )
         .await
@@ -123,8 +122,7 @@ pub(super) async fn connect_workspace_internal(
                 // Degrading to a Claude-only workspace is only useful when
                 // Claude is actually installed; with no working provider at
                 // all, surface the connect failure as before.
-                let claude_resolved =
-                    crate::agent_binary::resolve_agent_binary("claude", &app.inner.claude_bin);
+                let claude_resolved = app.resolve_provider_binary(&AgentProvider::CLAUDE);
                 if !Path::new(&claude_resolved.executable).is_file() {
                     return Err(error);
                 }
@@ -156,7 +154,11 @@ pub(super) async fn connect_workspace_internal(
         collaboration_modes: claude_collaboration_modes,
         capabilities: claude_capabilities,
         threads: claude_threads,
-    } = ClaudeRuntime::connect(path_string.clone(), app.inner.claude_bin.clone()).await?;
+    } = ClaudeRuntime::connect(
+        path_string.clone(),
+        app.provider_bin(&AgentProvider::CLAUDE),
+    )
+    .await?;
     let file_backed_skills = discover_file_backed_skills(&path_string);
     let codex_provider_skills = match codex_session.as_ref() {
         Some(session) => load_codex_provider_skills(app, session)
@@ -445,42 +447,21 @@ pub(super) async fn start_thread(
         .approval_policy
         .unwrap_or_else(|| "on-request".to_string());
     let model_id = request.model_id.clone().or(default_model_id);
-    let (thread_id, title, native_session_id) = if provider == AgentProvider::CODEX {
-        let session = app.session_for(&request.workspace_id).await?;
-        let workspace_path = session.workspace_path().to_string();
-        let result = session
-            .send_request(
-                "thread/start",
-                json!({
-                    "cwd": workspace_path,
-                    "model": model_id,
-                    "sandbox": request.sandbox_mode,
-                    "approvalPolicy": approval_policy
-                }),
-            )
-            .await?;
-        (
-            extract_thread_id(&result).ok_or_else(|| {
-                DaemonError::Rpc("thread/start did not return a thread id".to_string())
-            })?,
-            extract_thread_title(&result).unwrap_or_else(|| "New thread".to_string()),
-            extract_thread_id(&result),
+    let StartedThread {
+        thread_id,
+        title,
+        native_session_id,
+    } = ProviderRuntime::for_provider(&provider)
+        .start_thread(
+            app,
+            StartThreadSpec {
+                workspace_id: &request.workspace_id,
+                model_id: model_id.as_deref(),
+                sandbox_mode: request.sandbox_mode.as_deref(),
+                approval_policy: &approval_policy,
+            },
         )
-    } else if provider == AgentProvider::CLAUDE {
-        (
-            format!("claude-thread-{}", Uuid::new_v4().simple()),
-            "New Claude thread".to_string(),
-            None,
-        )
-    } else {
-        // ACP providers open their session lazily on the first turn; the
-        // thread exists daemon-side immediately.
-        (
-            format!("{}-thread-{}", provider.as_str(), Uuid::new_v4().simple()),
-            "New thread".to_string(),
-            None,
-        )
-    };
+        .await?;
     let now = Utc::now();
 
     let mut workspaces = app.inner.workspaces.lock().await;
@@ -826,27 +807,6 @@ fn stable_attachment_identifier_hash(value: &str) -> u64 {
     hash
 }
 
-/// Surfaces a one-time (per daemon process) service warning when Claude
-/// approvals would be active but curl is missing, so the hook settings file is
-/// skipped and tool calls run without FalconDeck approval prompts.
-async fn warn_once_if_claude_approvals_unavailable(app: &AppState, workspace_id: &str) {
-    static CURL_WARNING_EMITTED: OnceLock<()> = OnceLock::new();
-    if app.local_base_url().is_none()
-        || !crate::claude::claude_approvals_enabled()
-        || crate::claude::curl_available()
-        || CURL_WARNING_EMITTED.set(()).is_err()
-    {
-        return;
-    }
-    let _ = app.emit_service(
-        Some(workspace_id.to_string()),
-        None,
-        falcondeck_core::ServiceLevel::Warning,
-        "Claude approvals disabled: curl not found".to_string(),
-        Some("claude-hooks".to_string()),
-    );
-}
-
 pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
@@ -983,97 +943,23 @@ pub(super) async fn send_turn(
         },
     );
 
-    let start_result: Result<(), DaemonError> = if provider == AgentProvider::CODEX {
-        {
-            let session = app.session_for(&request.workspace_id).await?;
-            let workspace_path = session.workspace_path().to_string();
-            if requires_resume {
-                session.resume_thread(&request.thread_id).await?;
-                let mut workspaces = app.inner.workspaces.lock().await;
-                if let Some(workspace) = workspaces.get_mut(&request.workspace_id)
-                    && let Some(thread) = workspace.threads.get_mut(&request.thread_id)
-                {
-                    thread.requires_resume = false;
-                }
-            }
-
-            session
-                .send_request(
-                    "turn/start",
-                    json!({
-                        "threadId": request.thread_id,
-                        "input": codex_inputs(&inputs, &selected_skills),
-                        "cwd": workspace_path,
-                        "model": request.model_id,
-                        "effort": request.reasoning_effort,
-                        "sandboxPolicy": sandbox_policy_payload(thread.agent.sandbox_mode.as_deref()),
-                        "approvalPolicy": approval_policy,
-                        "serviceTier": request.service_tier
-                    }),
-                )
-                .await?;
-            Ok(())
-        }
-    } else if provider == AgentProvider::CLAUDE {
-        {
-            let runtime = app.claude_runtime_for(&request.workspace_id).await?;
-            let session_id = thread.native_session_id.clone();
-            let images = inputs
-                .iter()
-                .filter_map(|input| match input {
-                    TurnInputItem::Image(image) => Some(image.clone()),
-                    TurnInputItem::Text { .. } => None,
-                })
-                .collect::<Vec<_>>();
-            warn_once_if_claude_approvals_unavailable(app, &request.workspace_id).await;
-            let settings_dir = app
-                .inner
-                .state_path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join("claude-hooks");
-            let spawn = runtime
-                .spawn_turn(
-                    &request.thread_id,
-                    session_id.as_deref(),
-                    &claude_prompt_from_inputs(&inputs, &selected_skills),
-                    &images,
-                    thread.agent.model_id.as_deref(),
-                    thread.agent.reasoning_effort.as_deref(),
-                    thread.agent.permission_mode.as_deref(),
-                    app.local_base_url().as_deref(),
-                    &settings_dir,
-                )
-                .await?;
-            app.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
-                thread.native_session_id = Some(spawn.session_id.clone());
-            })
-            .await?;
-            let app = app.clone();
-            let workspace_id = request.workspace_id.clone();
-            let thread_id = request.thread_id.clone();
-            tokio::spawn(async move {
-                app.monitor_claude_turn(
-                    workspace_id,
-                    thread_id,
-                    spawn.generation,
-                    spawn.stdout,
-                    spawn.stderr,
-                )
-                .await;
-            });
-            Ok(())
-        }
-    } else {
-        start_acp_turn(
+    let start_result = ProviderRuntime::for_provider(&provider)
+        .send_turn(
             app,
-            &request.workspace_id,
-            &request.thread_id,
-            &provider,
-            &inputs,
+            TurnSpec {
+                workspace_id: &request.workspace_id,
+                thread_id: &request.thread_id,
+                thread: &thread,
+                inputs: &inputs,
+                selected_skills: &selected_skills,
+                approval_policy: &approval_policy,
+                requested_model_id: request.model_id.as_deref(),
+                requested_reasoning_effort: request.reasoning_effort.as_deref(),
+                service_tier: request.service_tier.as_deref(),
+                requires_resume,
+            },
         )
-        .await
-    };
+        .await;
 
     if let Err(error) = start_result {
         let error_message = error.to_string();
@@ -1253,57 +1139,9 @@ pub(super) async fn set_thread_goal(
         .thread_provider(&request.workspace_id, &request.thread_id)
         .await?;
 
-    if provider == AgentProvider::CODEX {
-        {
-            let session = app.session_for(&request.workspace_id).await?;
-            session
-                .send_request(
-                    "thread/goal/set",
-                    json!({
-                        "threadId": request.thread_id,
-                        "objective": objective,
-                        "status": request.status,
-                        "tokenBudget": request.token_budget,
-                    }),
-                )
-                .await?;
-        }
-    } else if provider == AgentProvider::CLAUDE {
-        {
-            // Claude's goal support is the `/goal` slash command; drive it
-            // through a normal turn so the session-scoped Stop hook engages.
-            let Some(objective) = objective.clone() else {
-                return Err(DaemonError::BadRequest(
-                    "an objective is required to set a goal".to_string(),
-                ));
-            };
-            send_turn(
-                app,
-                falcondeck_core::SendTurnRequest {
-                    workspace_id: request.workspace_id.clone(),
-                    thread_id: request.thread_id.clone(),
-                    inputs: vec![TurnInputItem::Text {
-                        id: None,
-                        text: format!("/goal {objective}"),
-                    }],
-                    selected_skills: Vec::new(),
-                    provider: Some(AgentProvider::CLAUDE),
-                    model_id: None,
-                    reasoning_effort: None,
-                    approval_policy: None,
-                    service_tier: None,
-                    permission_mode: None,
-                    sandbox_mode: None,
-                },
-            )
-            .await?;
-        }
-    } else {
-        return Err(DaemonError::BadRequest(format!(
-            "goals are not supported by the {} provider",
-            provider.as_str()
-        )));
-    }
+    ProviderRuntime::for_provider(&provider)
+        .set_goal(app, &request, objective.as_deref())
+        .await?;
 
     // Reflect the goal locally right away; Codex refines it via
     // thread/goal/updated notifications as usage accrues.
@@ -1354,40 +1192,9 @@ pub(super) async fn clear_thread_goal(
     thread_id: &str,
 ) -> Result<ThreadSummary, DaemonError> {
     let provider = app.thread_provider(workspace_id, thread_id).await?;
-    if provider == AgentProvider::CODEX {
-        let session = app.session_for(workspace_id).await?;
-        session
-            .send_request("thread/goal/clear", json!({ "threadId": thread_id }))
-            .await?;
-    } else if provider == AgentProvider::CLAUDE {
-        {
-            send_turn(
-                app,
-                falcondeck_core::SendTurnRequest {
-                    workspace_id: workspace_id.to_string(),
-                    thread_id: thread_id.to_string(),
-                    inputs: vec![TurnInputItem::Text {
-                        id: None,
-                        text: "/goal clear".to_string(),
-                    }],
-                    selected_skills: Vec::new(),
-                    provider: Some(AgentProvider::CLAUDE),
-                    model_id: None,
-                    reasoning_effort: None,
-                    approval_policy: None,
-                    service_tier: None,
-                    permission_mode: None,
-                    sandbox_mode: None,
-                },
-            )
-            .await?;
-        }
-    } else {
-        return Err(DaemonError::BadRequest(format!(
-            "goals are not supported by the {} provider",
-            provider.as_str()
-        )));
-    }
+    ProviderRuntime::for_provider(&provider)
+        .clear_goal(app, workspace_id, thread_id)
+        .await?;
 
     app.with_thread_mut(workspace_id, thread_id, |thread| {
         thread.goal = None;
@@ -1412,20 +1219,18 @@ pub(super) async fn start_review(
     let provider = app
         .thread_provider(&request.workspace_id, &request.thread_id)
         .await?;
-    if provider != AgentProvider::CODEX {
-        return Err(DaemonError::BadRequest(
-            "code review is only available for Codex threads in this milestone".to_string(),
-        ));
+    if !app
+        .provider_capabilities(&request.workspace_id, &provider)
+        .await
+        .supports_review
+    {
+        return Err(DaemonError::BadRequest(format!(
+            "the {} provider does not support code review",
+            provider.as_str()
+        )));
     }
-    let session = app.session_for(&request.workspace_id).await?;
-    session
-        .send_request(
-            "review/start",
-            json!({
-                "threadId": request.thread_id,
-                "target": request.target
-            }),
-        )
+    ProviderRuntime::for_provider(&provider)
+        .start_review(app, &request)
         .await?;
 
     Ok(CommandResponse {
@@ -1440,52 +1245,8 @@ pub(super) async fn interrupt_turn(
     thread_id: String,
 ) -> Result<CommandResponse, DaemonError> {
     let provider = app.thread_provider(&workspace_id, &thread_id).await?;
-    if provider == AgentProvider::CLAUDE {
-        let runtime = app.claude_runtime_for(&workspace_id).await?;
-        runtime.interrupt_turn(&thread_id).await?;
-        return Ok(CommandResponse {
-            ok: true,
-            message: Some("interrupt requested".to_string()),
-        });
-    }
-    if provider != AgentProvider::CODEX {
-        let runtime = app.acp_runtime_for(&workspace_id, &provider).await?;
-        if let Some(session_id) = {
-            let workspaces = app.inner.workspaces.lock().await;
-            workspaces
-                .get(&workspace_id)
-                .and_then(|workspace| workspace.threads.get(&thread_id))
-                .and_then(|thread| thread.summary.native_session_id.clone())
-        } {
-            runtime.cancel(&session_id).await?;
-        }
-        return Ok(CommandResponse {
-            ok: true,
-            message: Some("interrupt requested".to_string()),
-        });
-    }
-
-    let session = app.session_for(&workspace_id).await?;
-    let turn_id = {
-        let workspaces = app.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .get(&workspace_id)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        workspace
-            .threads
-            .get(&thread_id)
-            .and_then(|thread| thread.summary.latest_turn_id.clone())
-            .ok_or_else(|| DaemonError::BadRequest("no active turn to interrupt".to_string()))?
-    };
-
-    session
-        .send_request(
-            "turn/interrupt",
-            json!({
-                "threadId": thread_id,
-                "turnId": turn_id,
-            }),
-        )
+    ProviderRuntime::for_provider(&provider)
+        .interrupt(app, &workspace_id, &thread_id)
         .await?;
 
     Ok(CommandResponse {
@@ -1646,9 +1407,15 @@ pub(super) async fn respond_to_interactive_request(
             message: Some("response sent".to_string()),
         });
     }
+    // Claude approvals and ACP permissions were answered above; anything left
+    // here is a Codex app-server request and has to go back over its JSON-RPC
+    // connection.
     if let Some(thread_id) = pending.request.thread_id.as_deref() {
         let provider = app.thread_provider(&workspace_id, thread_id).await?;
-        if provider != AgentProvider::CODEX {
+        if !matches!(
+            ProviderRuntime::for_provider(&provider),
+            ProviderRuntime::Codex
+        ) {
             return Err(DaemonError::BadRequest(
                 "Claude interactive requests are not yet routable through FalconDeck".to_string(),
             ));
@@ -1931,7 +1698,7 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
     let bootstrap = match CodexSession::connect(
         workspace_id.to_string(),
         workspace_path,
-        app.inner.codex_bin.clone(),
+        app.provider_bin(&AgentProvider::CODEX),
         app.clone(),
     )
     .await
@@ -2153,12 +1920,7 @@ mod tests {
     async fn materializes_data_url_images_into_durable_local_files() {
         let temp_dir = tempdir().unwrap();
         let state_path = temp_dir.path().join("daemon-state.json");
-        let app = AppState::new_with_state_path(
-            "0.1.0".to_string(),
-            "codex".to_string(),
-            "claude".to_string(),
-            state_path,
-        );
+        let app = AppState::new_with_state_path("0.1.0".to_string(), HashMap::new(), state_path);
         let inputs = vec![TurnInputItem::Image(ImageInput {
             id: "img-1".to_string(),
             name: Some("diagram.png".to_string()),
@@ -2218,8 +1980,7 @@ mod tests {
         let normalized = normalize_image_input(
             &AppState::new_with_state_path(
                 "0.1.0".to_string(),
-                "codex".to_string(),
-                "claude".to_string(),
+                HashMap::new(),
                 Path::new("/tmp/falcondeck-daemon-state.json").to_path_buf(),
             ),
             "workspace-1",
@@ -2237,12 +1998,7 @@ mod tests {
     async fn keeps_materialized_attachments_within_daemon_state_root() {
         let temp_dir = tempdir().unwrap();
         let state_path = temp_dir.path().join("daemon-state.json");
-        let app = AppState::new_with_state_path(
-            "0.1.0".to_string(),
-            "codex".to_string(),
-            "claude".to_string(),
-            state_path,
-        );
+        let app = AppState::new_with_state_path("0.1.0".to_string(), HashMap::new(), state_path);
         let image = ImageInput {
             id: "../../image".to_string(),
             name: Some("diagram.png".to_string()),
@@ -2345,8 +2101,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let app = AppState::new_with_state_path(
             "test".to_string(),
-            "codex".to_string(),
-            "claude".to_string(),
+            HashMap::new(),
             temp_dir.path().join("daemon-state.json"),
         );
 
@@ -2359,8 +2114,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let app = AppState::new_with_state_path(
             "test".to_string(),
-            "definitely-missing-codex-binary".to_string(),
-            "claude".to_string(),
+            HashMap::from([(
+                AgentProvider::CODEX,
+                "definitely-missing-codex-binary".to_string(),
+            )]),
             temp_dir.path().join("daemon-state.json"),
         );
         app.inner.workspaces.lock().await.insert(

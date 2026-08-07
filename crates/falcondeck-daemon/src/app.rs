@@ -46,6 +46,7 @@ pub(crate) mod agent_helpers;
 pub(crate) mod conversation_helpers;
 pub(crate) mod host_provisioning;
 mod notifications;
+mod provider_runtime;
 mod remote_bridge;
 mod remote_lifecycle;
 mod storage;
@@ -54,6 +55,7 @@ mod workspace_ops;
 
 use agent_helpers::*;
 use conversation_helpers::*;
+use provider_runtime::*;
 use remote_bridge::*;
 use remote_lifecycle::*;
 use storage::*;
@@ -68,8 +70,9 @@ pub struct AppState {
 
 struct InnerState {
     daemon: DaemonInfo,
-    codex_bin: String,
-    claude_bin: String,
+    /// Agent binary name or path per provider id. Providers absent from the map
+    /// fall back to their id; see `AppState::provider_bin`.
+    provider_bins: HashMap<AgentProvider, String>,
     state_path: PathBuf,
     preferences_path: PathBuf,
     sequence: AtomicU64,
@@ -121,7 +124,10 @@ impl AppState {
     /// Directory holding daemon-owned config files (providers.json,
     /// connectors.json, daemon-state.json).
     pub(crate) fn state_dir(&self) -> Option<std::path::PathBuf> {
-        self.inner.state_path.parent().map(std::path::Path::to_path_buf)
+        self.inner
+            .state_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
     }
 
     /// Workspace agent entries for every configured ACP provider. Accounts
@@ -150,13 +156,7 @@ impl AppState {
 /// Display label for built-in providers; ACP providers carry their configured
 /// label on the workspace agent entry instead.
 fn provider_label(provider: &AgentProvider) -> String {
-    if *provider == AgentProvider::CODEX {
-        "Codex".to_string()
-    } else if *provider == AgentProvider::CLAUDE {
-        "Claude".to_string()
-    } else {
-        provider.as_str().to_string()
-    }
+    ProviderRuntime::for_provider(provider).label()
 }
 
 #[derive(Clone)]
@@ -302,14 +302,13 @@ enum RemoteBridgeCommand {
 }
 
 impl AppState {
-    pub fn new(version: String, codex_bin: String, claude_bin: String) -> Self {
-        Self::new_with_state_path(version, codex_bin, claude_bin, default_state_path())
+    pub fn new(version: String, provider_bins: HashMap<AgentProvider, String>) -> Self {
+        Self::new_with_state_path(version, provider_bins, default_state_path())
     }
 
     pub fn new_with_state_path(
         version: String,
-        codex_bin: String,
-        claude_bin: String,
+        provider_bins: HashMap<AgentProvider, String>,
         state_path: PathBuf,
     ) -> Self {
         let (broadcaster, _) = broadcast::channel(2048);
@@ -320,8 +319,7 @@ impl AppState {
                     version,
                     started_at: Utc::now(),
                 },
-                codex_bin,
-                claude_bin,
+                provider_bins,
                 state_path,
                 preferences_path,
                 sequence: AtomicU64::new(1),

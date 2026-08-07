@@ -122,9 +122,9 @@ pub fn providers_overview(state_dir: &Path) -> Value {
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect::<Vec<_>>();
-            let binary_found = command.first().is_some_and(|bin| {
-                Path::new(&resolve_agent_binary(bin, bin).executable).is_file()
-            });
+            let binary_found = command
+                .first()
+                .is_some_and(|bin| Path::new(&resolve_agent_binary(bin, bin).executable).is_file());
             Some(json!({
                 "id": id,
                 "label": entry.get("label").and_then(Value::as_str).unwrap_or(id),
@@ -143,7 +143,9 @@ pub fn write_providers_file(state_dir: &Path, providers: &Value) -> Result<(), S
         .map_err(|error| format!("invalid providers payload: {error}"))?;
     for (id, config) in &parsed {
         if id == "codex" || id == "claude" {
-            return Err(format!("'{id}' is a built-in provider and cannot be overridden"));
+            return Err(format!(
+                "'{id}' is a built-in provider and cannot be overridden"
+            ));
         }
         if config.command.is_empty() || config.command[0].trim().is_empty() {
             return Err(format!("provider '{id}' needs a non-empty command"));
@@ -403,10 +405,10 @@ impl AcpRuntime {
         let Some(init) = init.as_ref() else {
             return Vec::new();
         };
-        let entries = init
-            .get("models")
-            .and_then(Value::as_array)
-            .or_else(|| init.pointer("/agentCapabilities/models").and_then(Value::as_array));
+        let entries = init.get("models").and_then(Value::as_array).or_else(|| {
+            init.pointer("/agentCapabilities/models")
+                .and_then(Value::as_array)
+        });
         entries
             .into_iter()
             .flatten()
@@ -507,7 +509,9 @@ impl AcpRuntime {
             &self.config.id,
         ));
 
-        if let Some(native_session) = known_native_session.map(str::trim).filter(|id| !id.is_empty())
+        if let Some(native_session) = known_native_session
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
             && self.supports_load_session().await
         {
             let loaded = self

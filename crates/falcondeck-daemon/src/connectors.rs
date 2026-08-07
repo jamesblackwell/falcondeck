@@ -244,9 +244,7 @@ pub enum ConnectorScope {
 pub fn connectors_overview(workspace_path: Option<&str>) -> Value {
     connectors_overview_at(
         &global_connectors_path(),
-        workspace_path
-            .map(workspace_connectors_path)
-            .as_deref(),
+        workspace_path.map(workspace_connectors_path).as_deref(),
     )
 }
 
@@ -307,8 +305,7 @@ pub fn write_mcp_servers(
     let path = match scope {
         ConnectorScope::Global => global_connectors_path(),
         ConnectorScope::Workspace => {
-            let workspace_path =
-                workspace_path.ok_or("workspace scope requires a workspace_id")?;
+            let workspace_path = workspace_path.ok_or("workspace scope requires a workspace_id")?;
             workspace_connectors_path(workspace_path)
         }
     };
@@ -414,7 +411,10 @@ mod tests {
         let missing = dir.path().join("absent.json");
         let for_codex = load_mcp_servers_from(&global, &missing, "codex");
         assert_eq!(
-            for_codex.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            for_codex
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
             vec!["everywhere"]
         );
         let for_claude = load_mcp_servers_from(&global, &missing, "claude");

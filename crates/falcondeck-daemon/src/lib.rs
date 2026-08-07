@@ -16,8 +16,11 @@ mod git;
 mod skills;
 mod ssh_config;
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+
+use falcondeck_core::AgentProvider;
 
 pub use agent_binary::{AgentBinaryResolution, ResolutionDiagnostics, resolve_agent_binary};
 pub use app::AppState;
@@ -29,9 +32,14 @@ use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 pub struct DaemonConfig {
     /// Socket address bound by the daemon HTTP server.
     pub bind_addr: SocketAddr,
-    /// Executable name or path used for Codex-backed sessions.
+    /// Executable name or path per provider id. Providers left out fall back to
+    /// their id as the command name, so a new provider needs no new field here.
+    pub provider_bins: HashMap<String, String>,
+    /// Executable name or path used for Codex-backed sessions. Superseded by a
+    /// `codex` entry in `provider_bins`; kept as a named field so existing
+    /// embedders keep compiling.
     pub codex_bin: String,
-    /// Executable name or path used for Claude-backed sessions.
+    /// Executable name or path used for Claude-backed sessions. See `codex_bin`.
     pub claude_bin: String,
     /// Optional persisted state location for daemon-local state.
     pub state_path: Option<PathBuf>,
@@ -44,10 +52,31 @@ impl Default for DaemonConfig {
                 IpAddr::V4(Ipv4Addr::LOCALHOST),
                 falcondeck_core::DEFAULT_DAEMON_PORT,
             ),
+            provider_bins: HashMap::new(),
             codex_bin: "codex".to_string(),
             claude_bin: "claude".to_string(),
             state_path: None,
         }
+    }
+}
+
+impl DaemonConfig {
+    /// Folds the legacy named binary fields into the provider map. Explicit map
+    /// entries win, so a caller that has moved to `provider_bins` is never
+    /// overridden by the defaults still sitting on the named fields.
+    fn resolved_provider_bins(&self) -> HashMap<AgentProvider, String> {
+        let mut resolved = self
+            .provider_bins
+            .iter()
+            .map(|(provider, bin)| (AgentProvider::new(provider.clone()), bin.clone()))
+            .collect::<HashMap<_, _>>();
+        resolved
+            .entry(AgentProvider::CODEX)
+            .or_insert_with(|| self.codex_bin.clone());
+        resolved
+            .entry(AgentProvider::CLAUDE)
+            .or_insert_with(|| self.claude_bin.clone());
+        resolved
     }
 }
 
@@ -77,10 +106,10 @@ impl EmbeddedDaemonHandle {
 
 /// Starts the daemon in-process and returns a handle for interacting with it.
 pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle, DaemonError> {
+    let provider_bins = config.resolved_provider_bins();
     let state = AppState::new_with_state_path(
         "0.1.0".to_string(),
-        config.codex_bin,
-        config.claude_bin,
+        provider_bins,
         config.state_path.unwrap_or_else(|| {
             std::env::var("FALCONDECK_STATE_PATH")
                 .map(PathBuf::from)
@@ -135,4 +164,56 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
     tokio::signal::ctrl_c().await?;
     handle.shutdown().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_binary_fields_fill_in_the_provider_map() {
+        let config = DaemonConfig {
+            codex_bin: "/opt/codex".to_string(),
+            claude_bin: "/opt/claude".to_string(),
+            ..DaemonConfig::default()
+        };
+
+        let resolved = config.resolved_provider_bins();
+        assert_eq!(
+            resolved.get(&AgentProvider::CODEX).map(String::as_str),
+            Some("/opt/codex")
+        );
+        assert_eq!(
+            resolved.get(&AgentProvider::CLAUDE).map(String::as_str),
+            Some("/opt/claude")
+        );
+    }
+
+    #[test]
+    fn provider_map_entries_win_over_the_legacy_fields() {
+        let config = DaemonConfig {
+            provider_bins: HashMap::from([
+                ("codex".to_string(), "/custom/codex".to_string()),
+                ("opencode".to_string(), "/custom/opencode".to_string()),
+            ]),
+            ..DaemonConfig::default()
+        };
+
+        let resolved = config.resolved_provider_bins();
+        assert_eq!(
+            resolved.get(&AgentProvider::CODEX).map(String::as_str),
+            Some("/custom/codex")
+        );
+        // Untouched by the map, so the legacy default still applies.
+        assert_eq!(
+            resolved.get(&AgentProvider::CLAUDE).map(String::as_str),
+            Some("claude")
+        );
+        assert_eq!(
+            resolved
+                .get(&AgentProvider::new("opencode".to_string()))
+                .map(String::as_str),
+            Some("/custom/opencode")
+        );
+    }
 }

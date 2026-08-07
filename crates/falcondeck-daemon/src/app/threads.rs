@@ -30,9 +30,7 @@ use super::{
     },
 };
 use crate::{
-    agent_binary::{preferred_command_path, resolve_agent_binary},
-    claude::ClaudeRuntime,
-    codex::CodexSession,
+    agent_binary::preferred_command_path, claude::ClaudeRuntime, codex::CodexSession,
     error::DaemonError,
 };
 
@@ -294,7 +292,7 @@ impl AppState {
         &self,
         input: &AiThreadTitleInput,
     ) -> Option<String> {
-        let resolved = resolve_agent_binary("claude", &self.inner.claude_bin);
+        let resolved = self.resolve_provider_binary(&AgentProvider::CLAUDE);
         let mut command = Command::new(&resolved.executable);
         command
             .arg("-p")
@@ -327,7 +325,7 @@ impl AppState {
         &self,
         input: &AiThreadTitleInput,
     ) -> Option<String> {
-        let resolved = resolve_agent_binary("codex", &self.inner.codex_bin);
+        let resolved = self.resolve_provider_binary(&AgentProvider::CODEX);
         let output_path = std::env::temp_dir().join(format!(
             "falcondeck-thread-title-{}.txt",
             Uuid::new_v4().simple()

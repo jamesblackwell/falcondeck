@@ -1,7 +1,23 @@
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use falcondeck_core::DEFAULT_DAEMON_PORT;
 use falcondeck_daemon::{DaemonConfig, run};
+
+/// Parses repeated `--provider-bin=<id>=<path>` flags into a provider map. This
+/// is the general form; `--codex-bin=`/`--claude-bin=` remain as shorthands.
+fn provider_bin_overrides() -> HashMap<String, String> {
+    std::env::args()
+        .skip(1)
+        .filter_map(|arg| arg.strip_prefix("--provider-bin=").map(str::to_string))
+        .filter_map(|value| {
+            let (provider, bin) = value.split_once('=')?;
+            let provider = provider.trim().to_ascii_lowercase();
+            let bin = bin.trim();
+            (!provider.is_empty() && !bin.is_empty()).then(|| (provider, bin.to_string()))
+        })
+        .collect()
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = DaemonConfig {
         bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+        provider_bins: provider_bin_overrides(),
         codex_bin,
         claude_bin,
         state_path: None,

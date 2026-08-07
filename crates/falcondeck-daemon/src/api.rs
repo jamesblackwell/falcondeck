@@ -156,10 +156,7 @@ pub fn router(state: AppState) -> Router {
             "/api/connectors",
             get(read_connectors).put(update_connectors),
         )
-        .route(
-            "/api/providers",
-            get(read_providers).put(update_providers),
-        )
+        .route("/api/providers", get(read_providers).put(update_providers))
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
         .route("/api/claude/hooks/pre-tool-use", post(claude_pre_tool_use))
