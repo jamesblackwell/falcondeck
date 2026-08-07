@@ -66,6 +66,77 @@ fn maps_sandbox_modes_to_codex_policy_payloads() {
 }
 
 #[test]
+fn codex_approval_responses_match_app_server_protocol() {
+    use falcondeck_core::ApprovalDecision;
+
+    use super::workspace_ops::codex_approval_response;
+
+    // Command/file-change approvals use the decision enum — Codex rejects
+    // anything else as a decline.
+    let no_params = serde_json::Value::Null;
+    assert_eq!(
+        codex_approval_response(
+            "item/commandExecution/requestApproval",
+            &no_params,
+            &ApprovalDecision::Allow
+        ),
+        json!({ "decision": "accept" })
+    );
+    assert_eq!(
+        codex_approval_response(
+            "item/fileChange/requestApproval",
+            &no_params,
+            &ApprovalDecision::AlwaysAllow
+        ),
+        json!({ "decision": "acceptForSession" })
+    );
+    assert_eq!(
+        codex_approval_response(
+            "item/commandExecution/requestApproval",
+            &no_params,
+            &ApprovalDecision::Deny
+        ),
+        json!({ "decision": "decline" })
+    );
+
+    // Permission approvals echo the requested profile back as the grant.
+    let params = json!({
+        "permissions": { "network": { "enabled": true } },
+        "reason": "push to GitHub"
+    });
+    assert_eq!(
+        codex_approval_response(
+            "permissions/requestApproval",
+            &params,
+            &ApprovalDecision::Allow
+        ),
+        json!({
+            "permissions": { "network": { "enabled": true } },
+            "scope": "turn"
+        })
+    );
+    assert_eq!(
+        codex_approval_response(
+            "permissions/requestApproval",
+            &params,
+            &ApprovalDecision::AlwaysAllow
+        ),
+        json!({
+            "permissions": { "network": { "enabled": true } },
+            "scope": "session"
+        })
+    );
+    assert_eq!(
+        codex_approval_response(
+            "permissions/requestApproval",
+            &params,
+            &ApprovalDecision::Deny
+        ),
+        json!({ "permissions": {} })
+    );
+}
+
+#[test]
 fn review_targets_serialize_to_tagged_protocol_objects() {
     use falcondeck_core::ReviewTarget;
     assert_eq!(
@@ -2135,6 +2206,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         super::PendingServerRequest {
             raw_id: json!("raw-active"),
             request: active_request,
+            params: serde_json::Value::Null,
         },
     );
     app.inner.interactive_requests.lock().await.insert(
@@ -2142,6 +2214,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         super::PendingServerRequest {
             raw_id: json!("raw-archived"),
             request: archived_request,
+            params: serde_json::Value::Null,
         },
     );
 

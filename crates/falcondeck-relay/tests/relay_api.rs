@@ -152,6 +152,48 @@ async fn additional_pairings_attach_new_devices_to_the_same_session() {
 }
 
 #[tokio::test]
+async fn revoking_twice_purges_the_device_entirely() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let devices_url = format!(
+        "{}/v1/sessions/{}/devices",
+        server.http_base, claim.session_id
+    );
+    let revoke_url = format!("{}/{}", devices_url, claim.device_id);
+
+    // First revoke marks the device revoked but keeps it listed.
+    let response = client
+        .delete(&revoke_url)
+        .bearer_auth(&pairing.daemon_token)
+        .send()
+        .await
+        .expect("revoke request");
+    assert!(response.status().is_success());
+    let devices =
+        get_json::<TrustedDevicesResponse>(&client, &devices_url, Some(&pairing.daemon_token))
+            .await;
+    assert_eq!(devices.devices.len(), 1);
+    assert_eq!(
+        devices.devices[0].status,
+        falcondeck_core::TrustedDeviceStatus::Revoked
+    );
+
+    // Revoking again purges the entry so the UI's "Remove" clears it.
+    let response = client
+        .delete(&revoke_url)
+        .bearer_auth(&pairing.daemon_token)
+        .send()
+        .await
+        .expect("purge request");
+    assert!(response.status().is_success());
+    let devices =
+        get_json::<TrustedDevicesResponse>(&client, &devices_url, Some(&pairing.daemon_token))
+            .await;
+    assert!(devices.devices.is_empty());
+}
+
+#[tokio::test]
 async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();

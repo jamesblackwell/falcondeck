@@ -23,10 +23,62 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use falcondeck_core::{AgentProvider, ApprovalDecision, PlanStep, ThreadPlan};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use falcondeck_core::{AgentProvider, ApprovalDecision, ImageInput, PlanStep, ThreadPlan};
 
 use crate::agent_binary::resolve_agent_binary;
 use crate::error::DaemonError;
+
+/// Largest raw image file embedded inline for an ACP prompt, mirroring the
+/// Claude path's per-image cap.
+const MAX_ACP_IMAGE_BYTES: u64 = 3_500_000;
+
+/// Builds an ACP `image` content block (`{type, data, mimeType}`) from a
+/// local attachment. Returns `None` when the file is missing, unreadable,
+/// oversized, or has no recognizable image type — callers degrade to text.
+pub async fn acp_image_content_block(image: &ImageInput) -> Option<Value> {
+    let local_path = image
+        .local_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())?;
+    let mime_type = image
+        .mime_type
+        .clone()
+        .filter(|mime| mime.starts_with("image/"))
+        .or_else(|| {
+            match Path::new(local_path)
+                .extension()
+                .and_then(|value| value.to_str())?
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "png" => Some("image/png".to_string()),
+                "jpg" | "jpeg" => Some("image/jpeg".to_string()),
+                "gif" => Some("image/gif".to_string()),
+                "webp" => Some("image/webp".to_string()),
+                _ => None,
+            }
+        })?;
+    let path = local_path.to_string();
+    // File IO and base64 encoding are blocking work; keep them off the async
+    // runtime threads.
+    let encoded = tokio::task::spawn_blocking(move || -> Option<String> {
+        let bytes = std::fs::read(&path).ok()?;
+        if bytes.len() as u64 > MAX_ACP_IMAGE_BYTES {
+            return None;
+        }
+        Some(BASE64.encode(bytes))
+    })
+    .await
+    .ok()
+    .flatten()?;
+    Some(json!({
+        "type": "image",
+        "data": encoded,
+        "mimeType": mime_type
+    }))
+}
 
 /// One configured ACP provider, loaded from `providers.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,6 +96,69 @@ pub struct AcpProviderConfig {
 struct ProvidersFile {
     #[serde(default)]
     providers: HashMap<String, AcpProviderConfig>,
+}
+
+/// Raw + resolved view of `providers.json` for the settings UI. Entries whose
+/// binary is missing are included with `binary_found: false` so the panel can
+/// explain why a configured provider is hidden from pickers.
+pub fn providers_overview(state_dir: &Path) -> Value {
+    let path = state_dir.join("providers.json");
+    let raw: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|body| serde_json::from_str(&body).ok())
+        .unwrap_or_else(|| json!({ "providers": {} }));
+    let entries = raw
+        .get("providers")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let resolved = entries
+        .iter()
+        .filter_map(|(id, entry)| {
+            let command = entry
+                .get("command")
+                .and_then(Value::as_array)?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            let binary_found = command.first().is_some_and(|bin| {
+                Path::new(&resolve_agent_binary(bin, bin).executable).is_file()
+            });
+            Some(json!({
+                "id": id,
+                "label": entry.get("label").and_then(Value::as_str).unwrap_or(id),
+                "command": command,
+                "binary_found": binary_found,
+                "reserved": id == "codex" || id == "claude",
+            }))
+        })
+        .collect::<Vec<_>>();
+    json!({ "providers": entries, "resolved": resolved })
+}
+
+/// Validates and atomically writes `providers.json` (`{"providers": …}`).
+pub fn write_providers_file(state_dir: &Path, providers: &Value) -> Result<(), String> {
+    let parsed = serde_json::from_value::<HashMap<String, AcpProviderConfig>>(providers.clone())
+        .map_err(|error| format!("invalid providers payload: {error}"))?;
+    for (id, config) in &parsed {
+        if id == "codex" || id == "claude" {
+            return Err(format!("'{id}' is a built-in provider and cannot be overridden"));
+        }
+        if config.command.is_empty() || config.command[0].trim().is_empty() {
+            return Err(format!("provider '{id}' needs a non-empty command"));
+        }
+    }
+    std::fs::create_dir_all(state_dir)
+        .map_err(|error| format!("failed to create {}: {error}", state_dir.display()))?;
+    let path = state_dir.join("providers.json");
+    let body = serde_json::to_string_pretty(&json!({ "providers": providers }))
+        .map_err(|error| format!("failed to encode providers file: {error}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body)
+        .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|error| format!("failed to replace {}: {error}", path.display()))
 }
 
 /// Loads ACP provider configs from `<state_dir>/providers.json`.
@@ -264,6 +379,62 @@ impl AcpRuntime {
             .unwrap_or(false)
     }
 
+    /// Capability summary refined from the `initialize` handshake, replacing
+    /// the pre-connection `acp_minimal()` placeholder on the agent entry.
+    pub async fn capability_summary(&self) -> falcondeck_core::AgentCapabilitySummary {
+        let init = self.initialize_result.lock().await;
+        let supports_images = init
+            .as_ref()
+            .and_then(|init| init.pointer("/agentCapabilities/promptCapabilities/image"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        falcondeck_core::AgentCapabilitySummary {
+            supports_interrupt: true,
+            supports_images,
+            ..falcondeck_core::AgentCapabilitySummary::default()
+        }
+    }
+
+    /// Models advertised in the `initialize` response, when the agent exposes
+    /// a catalog (`models` or `agentCapabilities/models`). Baseline ACP has no
+    /// model listing, so an empty result is the common case.
+    pub async fn advertised_models(&self) -> Vec<falcondeck_core::ModelSummary> {
+        let init = self.initialize_result.lock().await;
+        let Some(init) = init.as_ref() else {
+            return Vec::new();
+        };
+        let entries = init
+            .get("models")
+            .and_then(Value::as_array)
+            .or_else(|| init.pointer("/agentCapabilities/models").and_then(Value::as_array));
+        entries
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let id = entry
+                    .get("modelId")
+                    .or_else(|| entry.get("id"))
+                    .and_then(Value::as_str)?
+                    .to_string();
+                Some(falcondeck_core::ModelSummary {
+                    label: entry
+                        .get("name")
+                        .or_else(|| entry.get("label"))
+                        .and_then(Value::as_str)
+                        .unwrap_or(&id)
+                        .to_string(),
+                    id,
+                    is_default: entry
+                        .get("default")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    default_reasoning_effort: None,
+                    supported_reasoning_efforts: Vec::new(),
+                })
+            })
+            .collect()
+    }
+
     async fn write_message(&self, message: &Value) -> Result<(), DaemonError> {
         let mut line = serde_json::to_string(message)
             .map_err(|error| DaemonError::Process(format!("ACP encode failed: {error}")))?;
@@ -316,7 +487,18 @@ impl AcpRuntime {
     }
 
     /// Returns the ACP session id for a thread, creating a session on demand.
-    pub async fn ensure_session(&self, thread_id: &str) -> Result<String, DaemonError> {
+    ///
+    /// When the thread carries a native session id from a previous daemon run
+    /// and the agent negotiated `loadSession`, the session is resumed with
+    /// `session/load` — the agent replays the conversation through
+    /// `session/update` notifications, which repopulates the (empty after
+    /// restart) in-memory thread history. Any load failure falls back to a
+    /// fresh session.
+    pub async fn ensure_session(
+        &self,
+        thread_id: &str,
+        known_native_session: Option<&str>,
+    ) -> Result<String, DaemonError> {
         if let Some(existing) = self.sessions.lock().await.get(thread_id) {
             return Ok(existing.clone());
         }
@@ -324,6 +506,35 @@ impl AcpRuntime {
             &self.workspace_path,
             &self.config.id,
         ));
+
+        if let Some(native_session) = known_native_session.map(str::trim).filter(|id| !id.is_empty())
+            && self.supports_load_session().await
+        {
+            let loaded = self
+                .request(
+                    "session/load",
+                    json!({
+                        "sessionId": native_session,
+                        "cwd": self.workspace_path,
+                        "mcpServers": mcp_servers.clone()
+                    }),
+                )
+                .await;
+            match loaded {
+                Ok(_) => {
+                    self.register_session(thread_id, native_session).await;
+                    return Ok(native_session.to_string());
+                }
+                Err(error) => {
+                    tracing::info!(
+                        provider = %self.config.id,
+                        %error,
+                        "ACP session/load failed; starting a fresh session"
+                    );
+                }
+            }
+        }
+
         let result = self
             .request(
                 "session/new",
@@ -338,15 +549,19 @@ impl AcpRuntime {
             .and_then(Value::as_str)
             .ok_or_else(|| DaemonError::Rpc("ACP session/new returned no sessionId".to_string()))?
             .to_string();
+        self.register_session(thread_id, &session_id).await;
+        Ok(session_id)
+    }
+
+    async fn register_session(&self, thread_id: &str, session_id: &str) {
         self.sessions
             .lock()
             .await
-            .insert(thread_id.to_string(), session_id.clone());
+            .insert(thread_id.to_string(), session_id.to_string());
         self.threads_by_session
             .lock()
             .await
-            .insert(session_id.clone(), thread_id.to_string());
-        Ok(session_id)
+            .insert(session_id.to_string(), thread_id.to_string());
     }
 
     /// Resolves the FalconDeck thread owning an ACP session id.
@@ -364,13 +579,24 @@ impl AcpRuntime {
     /// than handled here: the channel already holds every delta the agent
     /// wrote before its response, so ordering the reset behind them prevents
     /// a late chunk from starting a fresh assistant item.
-    pub async fn prompt(&self, session_id: &str, text: &str) -> Result<String, DaemonError> {
+    /// Sends a turn as ACP content blocks (text and, when the agent supports
+    /// them, images).
+    pub async fn prompt(
+        &self,
+        session_id: &str,
+        content: Vec<Value>,
+    ) -> Result<String, DaemonError> {
+        let content = if content.is_empty() {
+            vec![json!({ "type": "text", "text": "[empty prompt]" })]
+        } else {
+            content
+        };
         let result = self
             .request(
                 "session/prompt",
                 json!({
                     "sessionId": session_id,
-                    "prompt": [ { "type": "text", "text": text } ]
+                    "prompt": content
                 }),
             )
             .await;

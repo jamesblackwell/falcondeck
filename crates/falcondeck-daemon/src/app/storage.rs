@@ -371,9 +371,23 @@ pub(super) fn save_remote_secrets_to_secure_storage(
     }
     let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
         .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
-    entry
-        .set_password(&payload)
-        .map_err(|error| DaemonError::Process(format!("failed to write secure storage: {error}")))
+    match entry.set_password(&payload) {
+        Ok(()) => Ok(()),
+        Err(first_error) => {
+            // On macOS an item created by a differently-signed binary (e.g.
+            // the packaged app vs. a dev build) can't be updated in place:
+            // the add hits errSecDuplicateItem while the update is denied.
+            // Recreating the item under our own signature recovers it.
+            entry.delete_credential().map_err(|delete_error| {
+                DaemonError::Process(format!(
+                    "failed to write secure storage: {first_error} (and could not replace existing item: {delete_error})"
+                ))
+            })?;
+            entry.set_password(&payload).map_err(|error| {
+                DaemonError::Process(format!("failed to write secure storage: {error}"))
+            })
+        }
+    }
 }
 
 #[cfg(not(test))]

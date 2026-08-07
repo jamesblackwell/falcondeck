@@ -71,6 +71,9 @@ pub(crate) trait PersistenceBackend: Send + Sync {
         oldest_retained_seq: u64,
     ) -> Result<(), RelayError>;
 
+    /// Delete a trusted device row outright (purge of a revoked device).
+    async fn remove_device(&self, session_id: &str, device_id: &str) -> Result<(), RelayError>;
+
     /// Delete sessions by id (dependent rows cascade).
     async fn remove_sessions(&self, session_ids: &[String]) -> Result<(), RelayError>;
 
@@ -149,6 +152,11 @@ impl PersistenceBackend for FileBackend {
         _session: &SessionMeta,
         _device: Option<&TrustedDeviceRecord>,
     ) -> Result<(), RelayError> {
+        Ok(())
+    }
+
+    async fn remove_device(&self, _session_id: &str, _device_id: &str) -> Result<(), RelayError> {
+        // Covered by the full-state flush, same as other granular changes.
         Ok(())
     }
 
@@ -298,6 +306,20 @@ impl PersistenceBackend for PostgresBackend {
         if let Some(device) = device {
             upsert_device(&mut client, &session.session_id, device).await?;
         }
+        Ok(())
+    }
+
+    async fn remove_device(&self, session_id: &str, device_id: &str) -> Result<(), RelayError> {
+        let client = self.client.lock().await;
+        client
+            .execute(
+                "DELETE FROM relay_devices WHERE session_id = $1 AND device_id = $2",
+                &[&session_id, &device_id],
+            )
+            .await
+            .map_err(|error| {
+                RelayError::StatePersist(format!("failed to delete device: {error}"))
+            })?;
         Ok(())
     }
 

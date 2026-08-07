@@ -19,6 +19,16 @@ use super::conversation_helpers::tool_display_metadata;
 use super::{AppState, PendingServerRequest};
 
 impl AppState {
+    /// Re-reads `providers.json` so provider edits apply without a daemon
+    /// restart; the list cached at startup is only a fallback shape.
+    pub(super) fn fresh_acp_provider_configs(&self) -> Vec<crate::acp::AcpProviderConfig> {
+        self.inner
+            .state_path
+            .parent()
+            .map(crate::acp::load_acp_provider_configs)
+            .unwrap_or_default()
+    }
+
     /// Returns the live ACP runtime for a provider in a workspace, spawning
     /// and initializing the agent process on first use.
     pub(super) async fn acp_runtime_for(
@@ -38,11 +48,9 @@ impl AppState {
         }
 
         let config = self
-            .inner
-            .acp_provider_configs
-            .iter()
+            .fresh_acp_provider_configs()
+            .into_iter()
             .find(|config| config.id == provider.as_str())
-            .cloned()
             .ok_or_else(|| {
                 DaemonError::BadRequest(format!(
                     "provider '{}' is not configured; add it to providers.json",
@@ -68,7 +76,9 @@ impl AppState {
                     .acp_runtimes
                     .insert(provider.clone(), Arc::clone(&runtime));
                 // First successful handshake proves the binary works; reflect
-                // that on the workspace agent entry.
+                // that on the workspace agent entry, along with the
+                // capabilities and any model catalog the agent negotiated —
+                // replacing the pre-connection acp_minimal() placeholder.
                 if let Some(agent) = workspace
                     .summary
                     .agents
@@ -79,6 +89,11 @@ impl AppState {
                         status: falcondeck_core::AccountStatus::Ready,
                         label: format!("{} connected", runtime.config.label),
                     };
+                    agent.capabilities = runtime.capability_summary().await;
+                    let models = runtime.advertised_models().await;
+                    if !models.is_empty() {
+                        agent.models = models;
+                    }
                 }
             }
         }
@@ -240,6 +255,7 @@ impl AppState {
                     PendingServerRequest {
                         raw_id: Value::Null,
                         request,
+                        params: Value::Null,
                     },
                 );
                 if let Some(thread_id) = thread_id {
@@ -363,13 +379,26 @@ pub(super) async fn start_acp_turn(
     inputs: &[TurnInputItem],
 ) -> Result<(), DaemonError> {
     let runtime = app.acp_runtime_for(workspace_id, provider).await?;
-    let session_id = runtime.ensure_session(thread_id).await?;
+    // A native session id persisted from a previous daemon run lets the agent
+    // resume via session/load instead of starting from a blank session.
+    let known_native_session = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces.get(workspace_id).and_then(|workspace| {
+            workspace
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.summary.native_session_id.clone())
+        })
+    };
+    let session_id = runtime
+        .ensure_session(thread_id, known_native_session.as_deref())
+        .await?;
     app.with_thread_mut(workspace_id, thread_id, |thread| {
         thread.native_session_id = Some(session_id.clone());
     })
     .await?;
 
-    let prompt = inputs
+    let text = inputs
         .iter()
         .filter_map(|input| match input {
             TurnInputItem::Text { text, .. } => Some(text.as_str()),
@@ -377,12 +406,25 @@ pub(super) async fn start_acp_turn(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
+    let mut content = Vec::new();
+    if !text.trim().is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+    if runtime.capability_summary().await.supports_images {
+        for input in inputs {
+            if let TurnInputItem::Image(image) = input
+                && let Some(block) = crate::acp::acp_image_content_block(image).await
+            {
+                content.push(block);
+            }
+        }
+    }
 
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
     tokio::spawn(async move {
-        let outcome = runtime.prompt(&session_id, &prompt).await;
+        let outcome = runtime.prompt(&session_id, content).await;
         let (status, error) = match &outcome {
             Ok(stop_reason) if stop_reason == "cancelled" => (ThreadStatus::Idle, None),
             Ok(_) => (ThreadStatus::Idle, None),

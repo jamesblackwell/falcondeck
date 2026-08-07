@@ -1189,6 +1189,44 @@ pub(super) async fn update_thread(
     })
 }
 
+/// Builds the JSON-RPC result for a Codex approval request. The shapes must
+/// match the app-server protocol exactly — Codex treats an unparseable
+/// response as a decline, which surfaces as "approved in FalconDeck but
+/// denied in Codex".
+pub(super) fn codex_approval_response(
+    method: &str,
+    params: &Value,
+    decision: &ApprovalDecision,
+) -> Value {
+    if method.contains("permissions/") {
+        // permissions/requestApproval wants the granted profile back, not a
+        // decision enum. Granting echoes the requested profile; denying
+        // grants nothing. "Always allow" widens the scope from the current
+        // turn to the whole session.
+        return match decision {
+            ApprovalDecision::Allow | ApprovalDecision::AlwaysAllow => json!({
+                "permissions": params
+                    .get("permissions")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+                "scope": if matches!(decision, ApprovalDecision::AlwaysAllow) {
+                    "session"
+                } else {
+                    "turn"
+                },
+            }),
+            ApprovalDecision::Deny => json!({ "permissions": {} }),
+        };
+    }
+    // commandExecution / fileChange requestApproval decision enums.
+    let decision = match decision {
+        ApprovalDecision::Allow => "accept",
+        ApprovalDecision::Deny => "decline",
+        ApprovalDecision::AlwaysAllow => "acceptForSession",
+    };
+    json!({ "decision": decision })
+}
+
 /// Maps the simple sandbox mode strings stored on threads to the tagged
 /// `SandboxPolicy` object the Codex `turn/start` request expects. `None`
 /// leaves the provider on its config default.
@@ -1620,15 +1658,7 @@ pub(super) async fn respond_to_interactive_request(
 
     let result = match (&pending.request.kind, response) {
         (InteractiveRequestKind::Approval, InteractiveResponsePayload::Approval { decision }) => {
-            let decision = match decision {
-                ApprovalDecision::Allow => "allow",
-                ApprovalDecision::Deny => "deny",
-                ApprovalDecision::AlwaysAllow => "always_allow",
-            };
-            json!({
-                "decision": decision,
-                "acceptSettings": {"forSession": true}
-            })
+            codex_approval_response(&pending.request.method, &pending.params, &decision)
         }
         (InteractiveRequestKind::Question, InteractiveResponsePayload::Question { answers }) => {
             json!({

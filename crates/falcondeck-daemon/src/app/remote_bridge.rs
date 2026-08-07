@@ -84,6 +84,8 @@ impl AppState {
             "workspace.remove",
             "connectors.read",
             "connectors.update",
+            "providers.read",
+            "providers.update",
         ];
         for method in RPC_METHODS {
             send_relay_message(
@@ -564,6 +566,23 @@ impl AppState {
             }
             "preferences.read" => serde_json::to_value(self.preferences().await)
                 .map_err(|error| format!("failed to serialize preferences: {error}")),
+            "providers.read" => {
+                let state_dir = self
+                    .state_dir()
+                    .ok_or_else(|| "daemon state directory unavailable".to_string())?;
+                Ok(crate::acp::providers_overview(&state_dir))
+            }
+            "providers.update" => {
+                let state_dir = self
+                    .state_dir()
+                    .ok_or_else(|| "daemon state directory unavailable".to_string())?;
+                let providers = params
+                    .get("providers")
+                    .cloned()
+                    .ok_or_else(|| "missing providers payload".to_string())?;
+                crate::acp::write_providers_file(&state_dir, &providers)
+                    .map(|()| serde_json::json!({ "ok": true }))
+            }
             "connectors.read" => {
                 let workspace_path = self
                     .connectors_rpc_workspace_path(

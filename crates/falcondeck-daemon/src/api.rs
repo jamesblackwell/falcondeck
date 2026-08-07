@@ -156,6 +156,10 @@ pub fn router(state: AppState) -> Router {
             "/api/connectors",
             get(read_connectors).put(update_connectors),
         )
+        .route(
+            "/api/providers",
+            get(read_providers).put(update_providers),
+        )
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
         .route("/api/claude/hooks/pre-tool-use", post(claude_pre_tool_use))
@@ -453,6 +457,34 @@ async fn connectors_workspace_path(
         .find(|workspace| workspace.id == workspace_id)
         .map(|workspace| Some(workspace.path.clone()))
         .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))
+}
+
+fn providers_state_dir(state: &AppState) -> Result<std::path::PathBuf, DaemonError> {
+    state
+        .state_dir()
+        .ok_or_else(|| DaemonError::Process("daemon state directory unavailable".to_string()))
+}
+
+async fn read_providers(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    Ok(Json(crate::acp::providers_overview(&providers_state_dir(
+        &state,
+    )?)))
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateProvidersRequest {
+    providers: serde_json::Value,
+}
+
+async fn update_providers(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateProvidersRequest>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    crate::acp::write_providers_file(&providers_state_dir(&state)?, &request.providers)
+        .map_err(DaemonError::BadRequest)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn read_connectors(

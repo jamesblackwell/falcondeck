@@ -10,6 +10,7 @@ import type {
 
 import type { AppUpdaterState } from '../hooks/useAppUpdater'
 import type { HostManager, HostView } from '../hosts'
+import { AgentsPanel } from './settings/AgentsPanel'
 import { AppearanceSettingsPanel } from './settings/AppearanceSettingsPanel'
 import { ConnectorsPanel } from './settings/ConnectorsPanel'
 import { GeneralSettingsPanel } from './settings/GeneralSettingsPanel'
@@ -67,6 +68,8 @@ export function SettingsView(props: SettingsViewProps) {
               hosts={props.hosts}
               onToast={props.onToast}
             />
+          ) : activeSection === 'agents' ? (
+            <AgentsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === 'connectors' ? (
             <ConnectorsPanel
               baseUrl={props.baseUrl}

@@ -810,6 +810,7 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
         PendingServerRequest {
             raw_id: Value::Null,
             request: request.clone(),
+            params: Value::Null,
         },
     );
     let mut guard = ClaudeApprovalGuard {
@@ -937,6 +938,7 @@ pub(super) async fn ingest_server_request(
             PendingServerRequest {
                 raw_id,
                 request: request.clone(),
+                params: params.clone(),
             },
         );
 

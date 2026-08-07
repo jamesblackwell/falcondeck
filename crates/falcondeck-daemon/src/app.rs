@@ -75,8 +75,6 @@ struct InnerState {
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
-    /// ACP providers declared in providers.json, loaded at startup.
-    acp_provider_configs: Vec<crate::acp::AcpProviderConfig>,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
     /// Pending Claude PreToolUse approvals keyed by (workspace_id, request_id);
@@ -120,11 +118,18 @@ struct ManagedThread {
 }
 
 impl AppState {
+    /// Directory holding daemon-owned config files (providers.json,
+    /// connectors.json, daemon-state.json).
+    pub(crate) fn state_dir(&self) -> Option<std::path::PathBuf> {
+        self.inner.state_path.parent().map(std::path::Path::to_path_buf)
+    }
+
     /// Workspace agent entries for every configured ACP provider. Accounts
     /// start Unknown and flip to Ready after the first successful handshake.
     pub(crate) fn acp_agent_summaries(&self) -> Vec<WorkspaceAgentSummary> {
-        self.inner
-            .acp_provider_configs
+        // Fresh read so providers added to providers.json appear without a
+        // daemon restart; live runtimes refine these entries after connect.
+        self.fresh_acp_provider_configs()
             .iter()
             .map(|config| WorkspaceAgentSummary {
                 provider: AgentProvider::new(config.id.clone()),
@@ -158,6 +163,10 @@ fn provider_label(provider: &AgentProvider) -> String {
 struct PendingServerRequest {
     raw_id: Value,
     request: InteractiveRequest,
+    /// Raw JSON-RPC params of the originating request. Needed at response
+    /// time: permissions approvals echo the requested profile back as the
+    /// grant, which the normalized `InteractiveRequest` does not carry.
+    params: Value,
 }
 
 struct RemoteBridgeState {
@@ -305,10 +314,6 @@ impl AppState {
     ) -> Self {
         let (broadcaster, _) = broadcast::channel(2048);
         let preferences_path = default_preferences_path(&state_path);
-        let acp_provider_configs = state_path
-            .parent()
-            .map(crate::acp::load_acp_provider_configs)
-            .unwrap_or_default();
         Self {
             inner: Arc::new(InnerState {
                 daemon: DaemonInfo {
@@ -322,7 +327,6 @@ impl AppState {
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
-                acp_provider_configs,
                 saved_workspaces: Mutex::new(HashMap::new()),
                 interactive_requests: Mutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
@@ -716,9 +720,25 @@ impl AppState {
         let interactive_requests = self.inner.interactive_requests.lock().await;
         let preferences = self.inner.preferences.lock().await.clone();
 
+        // Providers added to providers.json after a workspace connected appear
+        // in its agent list on the next snapshot — additive only, so entries
+        // refined by a live runtime (capabilities, account) are untouched.
+        let fresh_acp_agents = self.acp_agent_summaries();
         let mut workspace_list = workspaces
             .values()
-            .map(|workspace| workspace.summary.clone())
+            .map(|workspace| {
+                let mut summary = workspace.summary.clone();
+                for agent in &fresh_acp_agents {
+                    if !summary
+                        .agents
+                        .iter()
+                        .any(|existing| existing.provider == agent.provider)
+                    {
+                        summary.agents.push(agent.clone());
+                    }
+                }
+                summary
+            })
             .collect::<Vec<_>>();
         workspace_list.sort_by(|left, right| left.path.cmp(&right.path));
 

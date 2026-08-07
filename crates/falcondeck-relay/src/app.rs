@@ -1902,8 +1902,15 @@ impl AppState {
                     .devices
                     .get_mut(device_id)
                     .ok_or_else(|| RelayError::NotFound("trusted device not found".to_string()))?;
-                device.revoked_at = Some(Utc::now());
-                device_snapshot = device.clone();
+                if device.revoked_at.is_some() {
+                    // Revoking an already-revoked device purges it entirely —
+                    // this is how the UI's "Remove" clears dead entries.
+                    session.devices.remove(device_id);
+                    device_snapshot = None;
+                } else {
+                    device.revoked_at = Some(Utc::now());
+                    device_snapshot = Some(device.clone());
+                }
                 session.updated_at = Utc::now();
                 session_snapshot = session.meta();
             }
@@ -1927,8 +1934,17 @@ impl AppState {
                 .unwrap_or_default();
             (revoked_peer_ids, session_snapshot, device_snapshot)
         };
-        self.persist_device_state(&session, Some(&device_snapshot), PersistMode::Immediate)
-            .await?;
+        match device_snapshot.as_ref() {
+            Some(device) => {
+                self.persist_device_state(&session, Some(device), PersistMode::Immediate)
+                    .await?;
+            }
+            None => {
+                self.inner.backend.remove_device(session_id, device_id).await?;
+                self.persist_device_state(&session, None, PersistMode::Immediate)
+                    .await?;
+            }
+        }
         for peer_id in revoked_peer_ids {
             self.unregister_peer(session_id, &peer_id).await;
         }

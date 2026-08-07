@@ -1032,9 +1032,33 @@ fn restored_tool_title(item: &Value, item_type: &str) -> String {
     }
 }
 
+/// Machine-readable action markers like `::git-push{cwd="…"}` that Codex
+/// appends to message text. The chat UI renders them as chips; previews
+/// drop them entirely.
+fn is_directive_line(line: &str) -> bool {
+    let line = line.trim();
+    let Some(rest) = line.strip_prefix("::") else {
+        return false;
+    };
+    let Some(brace) = rest.find('{') else {
+        return false;
+    };
+    let name = &rest[..brace];
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && rest.ends_with('}')
+}
+
 fn truncate_preview(text: &str) -> String {
     const MAX_PREVIEW_CHARS: usize = 96;
-    let trimmed = text.trim();
+    let without_directives = text
+        .lines()
+        .filter(|line| !is_directive_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = without_directives.trim();
     if trimmed.chars().count() <= MAX_PREVIEW_CHARS {
         return trimmed.to_string();
     }
