@@ -46,6 +46,7 @@ Packaged desktop builds will be published on the [GitHub Releases page](https://
 - Review diffs, permission requests, and interactive questions with context.
 - Pair trusted devices and continue a session from the web or mobile client.
 - Run agents on remote servers: FalconDeck installs its daemon over SSH, the server enrolls through the relay like a paired phone, and sessions keep running when your laptop sleeps.
+- Give every agent the same tools: MCP servers declared once in `connectors.json` are passed to Claude, Codex, and any ACP provider at spawn time ([docs/CONNECTORS.md](docs/CONNECTORS.md)).
 - Reconnect cleanly after restarts or network changes through the relay event stream.
 - Keep same-folder workflows by default instead of forcing a worktree model.
 

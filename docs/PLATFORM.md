@@ -58,8 +58,9 @@ Two different things need names, and conflating them is the common mistake:
   (a Linear panel, a deploy dashboard, a standup bot). Third-party code, run
   under our extension host (§6).
 
-We use exactly these two words in UI, docs, and code. "Plugin" is banned from
-the product vocabulary.
+UI, docs, and code use these two words. "Plugin" is fine as an informal
+synonym for connectors (that's how ChatGPT-adjacent products use it) — we just
+never use it for extensions, so the two concepts stay separable.
 
 ## 3. Architectural principles (protocol as product)
 
@@ -156,14 +157,17 @@ agents spontaneously initiating without a rule, and cross-thread agent memory.
 
 ## 5. Connectors: first-party MCP and skills UI
 
-Agents already support MCP; FalconDeck currently passes **no** MCP config to
-any provider (Claude spawn has no `--mcp-config`; ACP gets an explicit
-`"mcpServers": []`). This is low-hanging fruit with outsized perceived value:
+Agents already support MCP. The daemon-side pass-through **shipped 2026-08-07**
+(pulled ahead of Phase 2 because it depends on nothing): a merged
+`connectors.json` (global `~/.falcondeck/` + workspace `.falcondeck/`, see
+`docs/CONNECTORS.md`) is materialized per provider at every spawn boundary —
+`--mcp-config` for Claude, `mcpServers` in ACP `session/new`, `-c
+mcp_servers.*` overrides for Codex — and re-read each turn, so edits apply
+without a daemon restart. What remains for Phase 2 is the UI:
 
 - A **Connectors** settings panel: add an MCP server (stdio command or URL +
-  auth), scope it to a workspace or globally, toggle per thread/room.
-- The daemon materializes the config per provider at spawn time (`--mcp-config`
-  for Claude, `mcpServers` in the ACP `session/new`, Codex equivalent).
+  auth), scope it to a workspace or globally, toggle per thread/room — a
+  visual editor over the same `connectors.json`.
 - Skills grow the same treatment: install/enable in UI, availability modeled as
   an open per-provider list (killing the `Codex|Claude|Both` lattice), and the
   hardcoded `.codex/skills`/`.claude/commands` scan generalized per provider.
@@ -201,16 +205,18 @@ Each phase is independently shippable and each unlocks the next:
   Rust + schema publication; snapshot/handshake `version` field; tolerant
   normalizers (pass-through unknown fields); renderer fallbacks for unknown
   kinds; collapse the four daemon dispatchers into one method table with a
-  registration-consistency test; consolidate transport on `RemoteHostClient`.
+  registration-consistency test; consolidate transport on `RemoteHostClient`;
+  begin the SQLite conversation log (system of record, decision §9.2).
 - **Phase 1 — provider agnosticism**: the `ProviderAdapter` trait refactor
   from `docs/PROVIDERS.md` §5 (collapse the ~55 hardcoded provider branches;
   per-provider maps replace named fields); ACP made first-class (capability
   refinement post-handshake, images, `session/load` rehydration, model
   listing); `providers.json` hot-reload plus a Providers settings panel.
-- **Phase 2 — connectors**: MCP config UI + per-provider materialization;
-  skills install/enable UI; open availability model.
+- **Phase 2 — connectors**: Connectors settings UI over `connectors.json`
+  (the daemon-side materialization already shipped, §5); skills install/enable
+  UI; open availability model.
 - **Phase 3 — rooms**: participants, authorship, addressing, per-participant
-  runtimes; FalconDeck-owned item log (system of record) lands here.
+  runtimes, built on the SQLite item log from Phase 0/1.
 - **Phase 4 — extension host**: sidecar + manifest + dynamic RPC + declarative
   cards; automation rules ship as the first first-party extension.
 
@@ -229,14 +235,17 @@ variant reviewing another's diff).
 - `normalizeThreadAgent` dropped `permission_mode`/`sandbox_mode` — fields the
   daemon sets — at the client boundary.
 
-## 9. Open questions
+## 9. Decisions (locked 2026-08-07)
 
-1. **Rooms v1 scope** — is one-human-plus-N-agents enough for the first cut,
-   or is multi-human (true team chat) required before it's interesting? Multi-
-   human pulls identity/auth work forward substantially.
-2. **System of record** — owning the conversation log (instead of rehydrating
-   from provider session files) means storage, retention, and export decisions.
-   SQLite per daemon is the obvious shape; confirm before Phase 3.
-3. **Extension runtime** — Node maximizes ecosystem; Deno gives
-   permissions-by-default sandboxing that matches our trust story. Leaning
-   Deno; needs a decision before Phase 4.
+1. **Rooms v1 scope: one human + N agents.** Multi-human chat drags in
+   identity, auth, and presence work that would delay the novel part
+   (multiple agents collaborating in one thread); solopreneurs get full value
+   without it. Multi-human lands when a real team asks.
+2. **System of record: FalconDeck owns the conversation log — SQLite per
+   daemon.** Rehydrating from provider session files already fails for ACP
+   and cannot support authorship or rooms. Pulled forward into Phase 0/1
+   rather than waiting for rooms.
+3. **Extension runtime: Deno.** Permissions-by-default sandboxing matches the
+   manifest/trust model, single binary to ship, still runs npm packages.
+4. **MCP pass-through shipped immediately** (§5), out of phase order — small,
+   dependency-free, and the most visible gap versus competitors.

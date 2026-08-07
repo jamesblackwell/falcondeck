@@ -92,8 +92,12 @@ impl CodexSession {
     ) -> Result<CodexBootstrap, DaemonError> {
         let resolved = resolve_agent_binary("codex", &codex_bin);
         let mut command = Command::new(&resolved.executable);
+        command.arg("app-server");
+        let mcp_servers = crate::connectors::load_mcp_servers(&workspace_path, "codex");
+        for override_arg in crate::connectors::codex_config_overrides(&mcp_servers) {
+            command.arg("-c").arg(override_arg);
+        }
         command
-            .arg("app-server")
             .current_dir(PathBuf::from(&workspace_path))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

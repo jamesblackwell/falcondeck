@@ -216,6 +216,9 @@ impl ClaudeRuntime {
         {
             command.arg("--settings").arg(settings_path);
         }
+        if let Some(mcp_config_path) = self.write_mcp_config_file(settings_dir) {
+            command.arg("--mcp-config").arg(mcp_config_path);
+        }
 
         let mut child = command
             .spawn()
@@ -453,6 +456,48 @@ impl ClaudeRuntime {
             Ok(()) => Some(path),
             Err(error) => {
                 tracing::warn!("failed to write claude hook settings file: {error}");
+                None
+            }
+        }
+    }
+
+    /// Materialize a `--mcp-config` file from the merged connector config.
+    /// Same private-dir/0600 handling as the hook settings file — connector
+    /// env blocks routinely hold API keys.
+    fn write_mcp_config_file(&self, settings_dir: &Path) -> Option<PathBuf> {
+        let servers = crate::connectors::load_mcp_servers(&self.workspace_path, "claude");
+        let body = crate::connectors::claude_mcp_config_json(&servers)?;
+        if let Err(error) = fs::create_dir_all(settings_dir) {
+            tracing::warn!("failed to create claude mcp config dir: {error}");
+            return None;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(error) = fs::set_permissions(settings_dir, fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!("failed to restrict claude mcp config dir: {error}");
+                return None;
+            }
+        }
+        let path = settings_dir.join(format!(
+            "claude-mcp-{:016x}.json",
+            stable_workspace_hash(&self.workspace_path)
+        ));
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let written = options
+            .open(&path)
+            .and_then(|mut file| file.write_all(body.as_bytes()));
+        match written {
+            Ok(()) => Some(path),
+            Err(error) => {
+                tracing::warn!("failed to write claude mcp config file: {error}");
                 None
             }
         }

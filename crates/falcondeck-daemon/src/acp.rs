@@ -320,12 +320,16 @@ impl AcpRuntime {
         if let Some(existing) = self.sessions.lock().await.get(thread_id) {
             return Ok(existing.clone());
         }
+        let mcp_servers = crate::connectors::acp_mcp_servers(&crate::connectors::load_mcp_servers(
+            &self.workspace_path,
+            &self.config.id,
+        ));
         let result = self
             .request(
                 "session/new",
                 json!({
                     "cwd": self.workspace_path,
-                    "mcpServers": []
+                    "mcpServers": mcp_servers
                 }),
             )
             .await?;

@@ -10,6 +10,7 @@ mod api;
 mod app;
 mod claude;
 mod codex;
+mod connectors;
 mod error;
 mod git;
 mod skills;
