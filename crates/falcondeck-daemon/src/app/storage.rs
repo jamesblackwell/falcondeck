@@ -214,11 +214,12 @@ pub(super) fn apply_auto_expand_patch(
 
 pub(super) fn parse_tool_details_mode(value: &str) -> ToolDetailsMode {
     match value {
+        "collapsed" => ToolDetailsMode::Collapsed,
         "expanded" => ToolDetailsMode::Expanded,
         "compact" => ToolDetailsMode::Compact,
         "hide_read_only_details" => ToolDetailsMode::HideReadOnlyDetails,
         "auto" => ToolDetailsMode::Auto,
-        _ => ToolDetailsMode::Compact,
+        _ => ToolDetailsMode::Collapsed,
     }
 }
 

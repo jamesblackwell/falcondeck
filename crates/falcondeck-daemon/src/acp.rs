@@ -33,37 +33,60 @@ use crate::error::DaemonError;
 /// Claude path's per-image cap.
 const MAX_ACP_IMAGE_BYTES: u64 = 3_500_000;
 
-/// Builds an ACP `image` content block (`{type, data, mimeType}`) from a
-/// local attachment. Returns `None` when the file is missing, unreadable,
-/// oversized, or has no recognizable image type — callers degrade to text.
-pub async fn acp_image_content_block(image: &ImageInput) -> Option<Value> {
-    let local_path = image
+/// Total encoded-image budget per turn, mirroring the Claude path: without it
+/// many individually-legal images could produce a single stdin line in the
+/// hundreds of megabytes.
+pub const MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES: usize = 10_000_000;
+
+/// Builds an ACP content block for a local image attachment: an `image` block
+/// (`{type, data, mimeType}`) when the file is readable, a recognized image
+/// type, and within the per-image and per-turn budgets — otherwise a text
+/// block referencing the path, so the attachment never silently vanishes.
+/// The mime type comes from the file extension, not the client's claim.
+pub async fn acp_image_content_block(image: &ImageInput, encoded_budget: &mut usize) -> Value {
+    let fallback = || {
+        let reference = image
+            .local_path
+            .as_deref()
+            .or(image.name.as_deref())
+            .unwrap_or("attachment");
+        json!({ "type": "text", "text": format!("[attached image: {reference}]") })
+    };
+    let Some(local_path) = image
         .local_path
         .as_deref()
         .map(str::trim)
-        .filter(|path| !path.is_empty())?;
-    let mime_type = image
-        .mime_type
-        .clone()
-        .filter(|mime| mime.starts_with("image/"))
-        .or_else(|| {
-            match Path::new(local_path)
-                .extension()
-                .and_then(|value| value.to_str())?
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "png" => Some("image/png".to_string()),
-                "jpg" | "jpeg" => Some("image/jpeg".to_string()),
-                "gif" => Some("image/gif".to_string()),
-                "webp" => Some("image/webp".to_string()),
-                _ => None,
-            }
-        })?;
+        .filter(|path| !path.is_empty())
+    else {
+        return fallback();
+    };
+    let Some(mime_type) = (match Path::new(local_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg") | Some("jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    }) else {
+        return fallback();
+    };
     let path = local_path.to_string();
     // File IO and base64 encoding are blocking work; keep them off the async
     // runtime threads.
     let encoded = tokio::task::spawn_blocking(move || -> Option<String> {
+        // Metadata check is the fast path; the read result is what gets
+        // enforced, so a file growing between the two cannot bypass the cap —
+        // but a huge file is rejected before being loaded into memory.
+        let metadata_within_limit = std::fs::metadata(&path)
+            .map(|metadata| metadata.len() <= MAX_ACP_IMAGE_BYTES)
+            .unwrap_or(false);
+        if !metadata_within_limit {
+            return None;
+        }
         let bytes = std::fs::read(&path).ok()?;
         if bytes.len() as u64 > MAX_ACP_IMAGE_BYTES {
             return None;
@@ -72,12 +95,19 @@ pub async fn acp_image_content_block(image: &ImageInput) -> Option<Value> {
     })
     .await
     .ok()
-    .flatten()?;
-    Some(json!({
+    .flatten();
+    let Some(encoded) = encoded else {
+        return fallback();
+    };
+    if encoded.len() > *encoded_budget {
+        return fallback();
+    }
+    *encoded_budget -= encoded.len();
+    json!({
         "type": "image",
         "data": encoded,
         "mimeType": mime_type
-    }))
+    })
 }
 
 /// One configured ACP provider, loaded from `providers.json`.
@@ -117,24 +147,30 @@ pub fn providers_overview(state_dir: &Path) -> Value {
         .unwrap_or_default();
     let resolved = entries
         .iter()
-        .filter_map(|(id, entry)| {
-            let command = entry
-                .get("command")
-                .and_then(Value::as_array)?
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>();
+        .map(|(id, entry)| {
+            // Entries whose command is missing or not an array are still
+            // listed (flagged malformed) — the panel's job is explaining why
+            // a configured provider is hidden, and hiding the broken ones
+            // would also make them undeletable through the UI.
+            let command = entry.get("command").and_then(Value::as_array).map(|list| {
+                list.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            });
+            let malformed = command.as_ref().is_none_or(Vec::is_empty);
+            let command = command.unwrap_or_default();
             let binary_found = command
                 .first()
-                .is_some_and(|bin| Path::new(&resolve_agent_binary(bin, bin).executable).is_file());
-            Some(json!({
+                .is_some_and(|bin| crate::agent_binary::agent_binary_available_cached(bin, bin));
+            json!({
                 "id": id,
                 "label": entry.get("label").and_then(Value::as_str).unwrap_or(id),
                 "command": command,
                 "binary_found": binary_found,
                 "reserved": id == "codex" || id == "claude",
-            }))
+                "malformed": malformed,
+            })
         })
         .collect::<Vec<_>>();
     json!({ "providers": entries, "resolved": resolved })
@@ -166,7 +202,9 @@ pub fn write_providers_file(state_dir: &Path, providers: &Value) -> Result<(), S
     let path = state_dir.join("providers.json");
     let body = serde_json::to_string_pretty(&json!({ "providers": providers }))
         .map_err(|error| format!("failed to encode providers file: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
+    // Unique temp name: concurrent writers (panel + remote RPC) sharing one
+    // .tmp path would interleave bytes and publish a corrupted file.
+    let tmp = path.with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4().simple()));
     std::fs::write(&tmp, body)
         .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
     std::fs::rename(&tmp, &path)
@@ -209,10 +247,13 @@ pub fn load_acp_provider_configs(state_dir: &Path) -> Vec<AcpProviderConfig> {
                 .filter(|config| {
                     // A configured provider whose binary is absent stays
                     // dormant instead of surfacing a dead picker entry; it
-                    // appears automatically once the CLI is installed.
-                    let executable =
-                        resolve_agent_binary(&config.command[0], &config.command[0]).executable;
-                    let available = std::path::Path::new(&executable).is_file();
+                    // appears automatically once the CLI is installed. Cached
+                    // probe: this runs on every snapshot and the uncached
+                    // resolver can spawn a login shell for missing binaries.
+                    let available = crate::agent_binary::agent_binary_available_cached(
+                        &config.command[0],
+                        &config.command[0],
+                    );
                     if !available {
                         tracing::info!(
                             provider = %config.id,
@@ -303,9 +344,20 @@ pub struct AcpRuntime {
     current_items: Mutex<HashMap<String, (String, String)>>,
     /// Tool titles/kinds by call id, for enriching status updates.
     current_tools: Mutex<HashMap<String, (String, String)>>,
+    /// Session modes advertised via session/new (or session/load), by
+    /// session id. Backs the permission-mode picker for ACP providers.
+    session_modes: Mutex<HashMap<String, SessionModeState>>,
     initialize_result: Mutex<Option<Value>>,
     closed: AtomicBool,
     events: mpsc::UnboundedSender<AcpEvent>,
+}
+
+/// ACP session mode state: the agent's current mode plus the ids it accepts
+/// through `session/set_mode`.
+#[derive(Debug, Clone, Default)]
+pub struct SessionModeState {
+    pub current: Option<String>,
+    pub available: Vec<String>,
 }
 
 impl AcpRuntime {
@@ -353,6 +405,7 @@ impl AcpRuntime {
             permission_requests: Mutex::new(HashMap::new()),
             current_items: Mutex::new(HashMap::new()),
             current_tools: Mutex::new(HashMap::new()),
+            session_modes: Mutex::new(HashMap::new()),
             initialize_result: Mutex::new(None),
             closed: AtomicBool::new(false),
             events,
@@ -524,6 +577,11 @@ impl AcpRuntime {
             .filter(|id| !id.is_empty())
             && self.supports_load_session().await
         {
+            // The agent replays the conversation as session/update
+            // notifications DURING the session/load request, so the
+            // session→thread mapping must exist before the request goes out
+            // or the event pump drops the entire replayed history.
+            self.register_session(thread_id, native_session).await;
             let loaded = self
                 .request(
                     "session/load",
@@ -535,11 +593,13 @@ impl AcpRuntime {
                 )
                 .await;
             match loaded {
-                Ok(_) => {
-                    self.register_session(thread_id, native_session).await;
+                Ok(result) => {
+                    self.capture_session_modes(native_session, result.get("modes"))
+                        .await;
                     return Ok(native_session.to_string());
                 }
                 Err(error) => {
+                    self.unregister_session(thread_id, native_session).await;
                     tracing::info!(
                         provider = %self.config.id,
                         %error,
@@ -564,7 +624,58 @@ impl AcpRuntime {
             .ok_or_else(|| DaemonError::Rpc("ACP session/new returned no sessionId".to_string()))?
             .to_string();
         self.register_session(thread_id, &session_id).await;
+        self.capture_session_modes(&session_id, result.get("modes"))
+            .await;
         Ok(session_id)
+    }
+
+    /// Records the modes block from a session/new or session/load response.
+    async fn capture_session_modes(&self, session_id: &str, modes: Option<&Value>) {
+        let Some(modes) = modes else { return };
+        let current = modes
+            .get("currentModeId")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let available = modes
+            .get("availableModes")
+            .and_then(Value::as_array)
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if current.is_none() && available.is_empty() {
+            return;
+        }
+        self.session_modes.lock().await.insert(
+            session_id.to_string(),
+            SessionModeState { current, available },
+        );
+    }
+
+    /// Mode state for a session, when the agent advertised any.
+    pub async fn session_mode_state(&self, session_id: &str) -> Option<SessionModeState> {
+        self.session_modes.lock().await.get(session_id).cloned()
+    }
+
+    /// Switches the session's mode via `session/set_mode`.
+    pub async fn set_session_mode(
+        &self,
+        session_id: &str,
+        mode_id: &str,
+    ) -> Result<(), DaemonError> {
+        self.request(
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": mode_id }),
+        )
+        .await?;
+        if let Some(state) = self.session_modes.lock().await.get_mut(session_id) {
+            state.current = Some(mode_id.to_string());
+        }
+        Ok(())
     }
 
     async fn register_session(&self, thread_id: &str, session_id: &str) {
@@ -576,6 +687,13 @@ impl AcpRuntime {
             .lock()
             .await
             .insert(session_id.to_string(), thread_id.to_string());
+    }
+
+    /// Rolls back an eager registration after a failed `session/load`, so a
+    /// stale mapping cannot swallow events from an unrelated future session.
+    async fn unregister_session(&self, thread_id: &str, session_id: &str) {
+        self.sessions.lock().await.remove(thread_id);
+        self.threads_by_session.lock().await.remove(session_id);
     }
 
     /// Resolves the FalconDeck thread owning an ACP session id.
@@ -825,6 +943,14 @@ impl AcpRuntime {
                     }),
                 // Thought chunks are internal reasoning; fold them away for now.
                 "agent_thought_chunk" => None,
+                // The agent switched modes on its own (or confirmed ours).
+                "current_mode_update" => {
+                    if let Some(mode_id) = update.get("currentModeId").and_then(Value::as_str)
+                        && let Some(state) = self.session_modes.lock().await.get_mut(session_id) {
+                            state.current = Some(mode_id.to_string());
+                        }
+                    None
+                }
                 "tool_call" => {
                     let call_id = update
                         .get("toolCallId")

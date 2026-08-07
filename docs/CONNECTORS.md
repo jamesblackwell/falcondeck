@@ -60,6 +60,18 @@ Per-server optional fields:
 - Remote hosts work identically: the files live on the server the daemon runs
   on.
 
+## Security model
+
+Connector commands are spawned by the agent CLIs **outside** FalconDeck's
+approval and sandbox machinery — configuring a connector is configuring code
+that runs as you. The files are only writable by your user (0600), the
+loopback API is protected against browser-origin and DNS-rebinding access, and
+**paired devices can edit connectors over the encrypted relay channel**:
+pairing a device means trusting it with your machine (it can already drive
+agent turns with any permission mode). Remote connector/provider edits emit a
+visible service notice so they never happen silently. Revoke a device in
+Settings → Remote Access if you no longer trust it.
+
 The desktop app edits this same file visually: **Settings → Connectors** —
 server list with per-scope chips, enable toggles, an add-server form, and
 paste-JSON import. The composer shows a plug chip with the count of servers

@@ -215,6 +215,16 @@ pub fn codex_config_overrides(servers: &[McpServerConfig]) -> Vec<String> {
             tracing::info!(server = %server.name, "skipping http MCP server for Codex");
             continue;
         };
+        // Codex consumes these as `-c key=value`, split at the first '='.
+        // A '=' inside the (user-controlled) server or env-var name would
+        // corrupt the split and can fail the whole app-server spawn.
+        if server.name.contains('=') || env.keys().any(|name| name.contains('=')) {
+            tracing::warn!(
+                server = %server.name,
+                "skipping MCP server for Codex: '=' in server or env name breaks -c overrides"
+            );
+            continue;
+        }
         let key = toml_quoted_key(&server.name);
         overrides.push(format!(
             "mcp_servers.{key}.command={}",
@@ -323,7 +333,9 @@ fn write_mcp_servers_at(path: &Path, mcp_servers: &Value) -> Result<(), String> 
 
     let body = serde_json::to_string_pretty(&json!({ "mcpServers": mcp_servers }))
         .map_err(|error| format!("failed to encode connectors file: {error}"))?;
-    let tmp = path.with_extension("json.tmp");
+    // Unique temp name: concurrent writers (panel + remote RPC) sharing one
+    // .tmp path would interleave bytes and publish a corrupted file.
+    let tmp = path.with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4().simple()));
     let mut options = std::fs::OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]

@@ -19,6 +19,35 @@ pub struct ResolutionDiagnostics {
     pub checked_locations: Vec<String>,
 }
 
+/// Whether a binary resolves to an existing file, cached for a short window.
+/// The uncached resolver can fall through to a blocking login-shell probe;
+/// hot paths that only need existence (provider filtering, the settings
+/// overview) must not pay that per call. Installations are rare, so a stale
+/// answer self-corrects within the TTL.
+pub(crate) fn agent_binary_available_cached(bin_name: &str, configured: &str) -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    const TTL: Duration = Duration::from_secs(30);
+    static CACHE: Mutex<Option<std::collections::HashMap<String, (Instant, bool)>>> =
+        Mutex::new(None);
+
+    let key = format!("{bin_name}\u{0}{configured}");
+    if let Ok(guard) = CACHE.lock()
+        && let Some(cache) = guard.as_ref()
+        && let Some((probed_at, available)) = cache.get(&key)
+        && probed_at.elapsed() < TTL
+    {
+        return *available;
+    }
+    let available = Path::new(&resolve_agent_binary(bin_name, configured).executable).is_file();
+    if let Ok(mut guard) = CACHE.lock() {
+        guard
+            .get_or_insert_with(std::collections::HashMap::new)
+            .insert(key, (Instant::now(), available));
+    }
+    available
+}
+
 pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryResolution {
     let configured = configured.trim();
     let mut diagnostics = ResolutionDiagnostics {

@@ -552,264 +552,336 @@ impl AppState {
         let required = |keys: &[&str]| {
             extract_string(&params, keys).ok_or_else(|| "invalid remote rpc payload".to_string())
         };
-        let rpc_result = match method.as_str() {
-            "snapshot.current" => {
-                let request = SnapshotRequest {
-                    include_archived_threads: params
-                        .get("includeArchivedThreads")
-                        .or_else(|| params.get("include_archived_threads"))
-                        .and_then(Value::as_bool)
-                        .unwrap_or(true),
-                };
-                serde_json::to_value(self.snapshot_with_request(&request).await)
-                    .map_err(|error| format!("failed to serialize snapshot: {error}"))
-            }
-            "preferences.read" => serde_json::to_value(self.preferences().await)
-                .map_err(|error| format!("failed to serialize preferences: {error}")),
-            "providers.read" => {
-                let state_dir = self
-                    .state_dir()
-                    .ok_or_else(|| "daemon state directory unavailable".to_string())?;
-                Ok(crate::acp::providers_overview(&state_dir))
-            }
-            "providers.update" => {
-                let state_dir = self
-                    .state_dir()
-                    .ok_or_else(|| "daemon state directory unavailable".to_string())?;
-                let providers = params
-                    .get("providers")
-                    .cloned()
-                    .ok_or_else(|| "missing providers payload".to_string())?;
-                crate::acp::write_providers_file(&state_dir, &providers)
-                    .map(|()| serde_json::json!({ "ok": true }))
-            }
-            "connectors.read" => {
-                let workspace_path = self
-                    .connectors_rpc_workspace_path(
-                        extract_string(&params, &["workspaceId", "workspace_id"]).as_deref(),
-                    )
-                    .await?;
-                Ok(crate::connectors::connectors_overview(
-                    workspace_path.as_deref(),
-                ))
-            }
-            "connectors.update" => {
-                let scope = params
-                    .get("scope")
-                    .cloned()
-                    .and_then(|value| {
-                        serde_json::from_value::<crate::connectors::ConnectorScope>(value).ok()
-                    })
-                    .ok_or_else(|| "invalid connectors scope".to_string())?;
-                let workspace_path = self
-                    .connectors_rpc_workspace_path(
-                        extract_string(&params, &["workspaceId", "workspace_id"]).as_deref(),
-                    )
-                    .await?;
-                let servers = params
-                    .get("mcpServers")
-                    .or_else(|| params.get("mcp_servers"))
-                    .cloned()
-                    .ok_or_else(|| "missing mcpServers payload".to_string())?;
-                crate::connectors::write_mcp_servers(scope, workspace_path.as_deref(), &servers)
-                    .map(|()| serde_json::json!({ "ok": true }))
-            }
-            "thread.start" => {
-                let request = StartThreadRequest {
-                    workspace_id: required(&["workspaceId", "workspace_id"])?,
-                    provider: extract_string(&params, &["provider"]).and_then(parse_agent_provider),
-                    model_id: extract_string(&params, &["modelId", "model_id"]),
-                    approval_policy: extract_string(
-                        &params,
-                        &["approvalPolicy", "approval_policy"],
-                    ),
-                    sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
-                    permission_mode: extract_string(
-                        &params,
-                        &["permissionMode", "permission_mode"],
-                    ),
-                };
-                self.start_thread(request)
-                    .await
-                    .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "thread.detail" => {
-                let request = ThreadDetailRequest {
-                    workspace_id: required(&["workspaceId", "workspace_id"])?,
-                    thread_id: required(&["threadId", "thread_id"])?,
-                    mode: params
-                        .get("mode")
+        // The dispatch runs inside its own async block so a `?` on a bad
+        // request (unknown workspace, missing field) becomes this call's
+        // rpc-result error. Propagating it out of handle_remote_rpc instead
+        // would tear down the whole relay bridge for every connected device
+        // and leave the caller waiting out the relay's 30s RPC timeout.
+        let rpc_result = async {
+            match method.as_str() {
+                "snapshot.current" => {
+                    let request = SnapshotRequest {
+                        include_archived_threads: params
+                            .get("includeArchivedThreads")
+                            .or_else(|| params.get("include_archived_threads"))
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true),
+                    };
+                    serde_json::to_value(self.snapshot_with_request(&request).await)
+                        .map_err(|error| format!("failed to serialize snapshot: {error}"))
+                }
+                "preferences.read" => serde_json::to_value(self.preferences().await)
+                    .map_err(|error| format!("failed to serialize preferences: {error}")),
+                "providers.read" => {
+                    let state_dir = self
+                        .state_dir()
+                        .ok_or_else(|| "daemon state directory unavailable".to_string())?;
+                    Ok(crate::acp::providers_overview(&state_dir))
+                }
+                "providers.update" => {
+                    let state_dir = self
+                        .state_dir()
+                        .ok_or_else(|| "daemon state directory unavailable".to_string())?;
+                    let providers = params
+                        .get("providers")
                         .cloned()
-                        .and_then(|value| serde_json::from_value::<ThreadDetailMode>(value).ok())
-                        .unwrap_or(ThreadDetailMode::Full),
-                    limit: params
-                        .get("limit")
+                        .ok_or_else(|| "missing providers payload".to_string())?;
+                    let result = crate::acp::write_providers_file(&state_dir, &providers)
+                        .map(|()| serde_json::json!({ "ok": true }));
+                    if result.is_ok() {
+                        // Provider commands are exec'd directly by the daemon, so
+                        // remote edits leave a visible trace.
+                        let _ = self.emit_service(
+                            None,
+                            None,
+                            falcondeck_core::ServiceLevel::Info,
+                            "Agent providers updated by a paired device".to_string(),
+                            Some("remote".to_string()),
+                        );
+                    }
+                    result
+                }
+                "connectors.read" => {
+                    let workspace_path = self
+                        .connectors_rpc_workspace_path(
+                            extract_string(&params, &["workspaceId", "workspace_id"]).as_deref(),
+                        )
+                        .await?;
+                    Ok(crate::connectors::connectors_overview(
+                        workspace_path.as_deref(),
+                    ))
+                }
+                "connectors.update" => {
+                    let scope = params
+                        .get("scope")
+                        .cloned()
+                        .and_then(|value| {
+                            serde_json::from_value::<crate::connectors::ConnectorScope>(value).ok()
+                        })
+                        .ok_or_else(|| "invalid connectors scope".to_string())?;
+                    let workspace_path = self
+                        .connectors_rpc_workspace_path(
+                            extract_string(&params, &["workspaceId", "workspace_id"]).as_deref(),
+                        )
+                        .await?;
+                    let servers = params
+                        .get("mcpServers")
+                        .or_else(|| params.get("mcp_servers"))
+                        .cloned()
+                        .ok_or_else(|| "missing mcpServers payload".to_string())?;
+                    let result = crate::connectors::write_mcp_servers(
+                        scope,
+                        workspace_path.as_deref(),
+                        &servers,
+                    )
+                    .map(|()| serde_json::json!({ "ok": true }));
+                    if result.is_ok() {
+                        // Connector commands run outside the approval/sandbox
+                        // machinery, so remote edits leave a visible trace.
+                        let _ = self.emit_service(
+                            None,
+                            None,
+                            falcondeck_core::ServiceLevel::Info,
+                            format!(
+                                "MCP connectors updated by a paired device ({} scope)",
+                                match scope {
+                                    crate::connectors::ConnectorScope::Global => "global",
+                                    crate::connectors::ConnectorScope::Workspace => "workspace",
+                                }
+                            ),
+                            Some("remote".to_string()),
+                        );
+                    }
+                    result
+                }
+                "thread.start" => {
+                    let request = StartThreadRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        provider: extract_string(&params, &["provider"])
+                            .and_then(parse_agent_provider),
+                        model_id: extract_string(&params, &["modelId", "model_id"]),
+                        approval_policy: extract_string(
+                            &params,
+                            &["approvalPolicy", "approval_policy"],
+                        ),
+                        sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
+                        permission_mode: extract_string(
+                            &params,
+                            &["permissionMode", "permission_mode"],
+                        ),
+                    };
+                    self.start_thread(request)
+                        .await
+                        .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "thread.detail" => {
+                    let request = ThreadDetailRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        mode: params
+                            .get("mode")
+                            .cloned()
+                            .and_then(|value| {
+                                serde_json::from_value::<ThreadDetailMode>(value).ok()
+                            })
+                            .unwrap_or(ThreadDetailMode::Full),
+                        limit: params
+                            .get("limit")
+                            .and_then(Value::as_u64)
+                            .and_then(|value| {
+                                (value <= usize::MAX as u64).then_some(value as usize)
+                            }),
+                        before_item_id: extract_string(
+                            &params,
+                            &["beforeItemId", "before_item_id"],
+                        ),
+                    };
+                    self.thread_detail_with_request(&request)
+                        .await
+                        .and_then(|detail| serde_json::to_value(detail).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "thread.update" => {
+                    let request = UpdateThreadRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        title: extract_string(&params, &["title"]),
+                        provider: extract_string(&params, &["provider"])
+                            .and_then(parse_agent_provider),
+                        model_id: explicit_optional_string(&params, &["modelId", "model_id"]),
+                        reasoning_effort: explicit_optional_string(
+                            &params,
+                            &["reasoningEffort", "reasoning_effort"],
+                        ),
+                        pinned: params.get("pinned").and_then(Value::as_bool),
+                        permission_mode: explicit_optional_string(
+                            &params,
+                            &["permissionMode", "permission_mode"],
+                        ),
+                        sandbox_mode: explicit_optional_string(
+                            &params,
+                            &["sandboxMode", "sandbox_mode"],
+                        ),
+                    };
+                    self.update_thread(request)
+                        .await
+                        .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "workspace.connect" => {
+                    let request = falcondeck_core::ConnectWorkspaceRequest {
+                        path: required(&["path"])?,
+                    };
+                    self.connect_workspace(request)
+                        .await
+                        .and_then(|workspace| {
+                            serde_json::to_value(workspace).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "workspace.remove" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    self.remove_workspace(&workspace_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "thread.goal.set" => {
+                    let request = falcondeck_core::SetThreadGoalRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        objective: extract_string(&params, &["objective"]),
+                        token_budget: params
+                            .get("tokenBudget")
+                            .or_else(|| params.get("token_budget"))
+                            .and_then(Value::as_i64),
+                        status: extract_string(&params, &["status"]),
+                    };
+                    self.set_thread_goal(request)
+                        .await
+                        .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "thread.goal.clear" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    self.clear_thread_goal(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "thread.mark_read" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    let read_seq = params
+                        .get("readSeq")
+                        .or_else(|| params.get("read_seq"))
                         .and_then(Value::as_u64)
-                        .and_then(|value| (value <= usize::MAX as u64).then_some(value as usize)),
-                    before_item_id: extract_string(&params, &["beforeItemId", "before_item_id"]),
-                };
-                self.thread_detail_with_request(&request)
-                    .await
-                    .and_then(|detail| serde_json::to_value(detail).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
+                        .ok_or_else(|| "invalid remote rpc payload".to_string())?;
+                    self.mark_thread_read(&workspace_id, &thread_id, read_seq)
+                        .await
+                        .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "turn.start" => {
+                    let request = SendTurnRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        inputs: params
+                            .get("inputs")
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                            .unwrap_or_default(),
+                        selected_skills: params
+                            .get("selectedSkills")
+                            .or_else(|| params.get("selected_skills"))
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok())
+                            .unwrap_or_default(),
+                        provider: extract_string(&params, &["provider"])
+                            .and_then(parse_agent_provider),
+                        model_id: extract_string(&params, &["modelId", "model_id"]),
+                        reasoning_effort: extract_string(
+                            &params,
+                            &["reasoningEffort", "reasoning_effort"],
+                        ),
+                        approval_policy: extract_string(
+                            &params,
+                            &["approvalPolicy", "approval_policy"],
+                        ),
+                        service_tier: extract_string(&params, &["serviceTier", "service_tier"]),
+                        permission_mode: extract_string(
+                            &params,
+                            &["permissionMode", "permission_mode"],
+                        ),
+                        sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
+                    };
+                    self.send_turn(request)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "turn.interrupt" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    self.interrupt_turn(workspace_id, thread_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "interactive.respond" | "approval.respond" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let request_id_param = required(&["requestId", "request_id"])?;
+                    let response = parse_interactive_response_params(&params)
+                        .map_err(|_| "invalid remote rpc payload".to_string())?;
+                    self.respond_to_interactive_request(workspace_id, request_id_param, response)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "preferences.update" => {
+                    let request: UpdatePreferencesRequest = serde_json::from_value(params.clone())
+                        .map_err(|_| "invalid remote rpc payload".to_string())?;
+                    self.update_preferences(request)
+                        .await
+                        .and_then(|preferences| {
+                            serde_json::to_value(preferences).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "thread.archive" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    self.archive_thread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|summary| {
+                            serde_json::to_value(summary).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "thread.unarchive" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    self.unarchive_thread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|summary| {
+                            serde_json::to_value(summary).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                _ => Err(format!("unsupported remote rpc method `{method}`")),
             }
-            "thread.update" => {
-                let request = UpdateThreadRequest {
-                    workspace_id: required(&["workspaceId", "workspace_id"])?,
-                    thread_id: required(&["threadId", "thread_id"])?,
-                    title: extract_string(&params, &["title"]),
-                    provider: extract_string(&params, &["provider"]).and_then(parse_agent_provider),
-                    model_id: explicit_optional_string(&params, &["modelId", "model_id"]),
-                    reasoning_effort: explicit_optional_string(
-                        &params,
-                        &["reasoningEffort", "reasoning_effort"],
-                    ),
-                    pinned: params.get("pinned").and_then(Value::as_bool),
-                    permission_mode: explicit_optional_string(
-                        &params,
-                        &["permissionMode", "permission_mode"],
-                    ),
-                    sandbox_mode: explicit_optional_string(
-                        &params,
-                        &["sandboxMode", "sandbox_mode"],
-                    ),
-                };
-                self.update_thread(request)
-                    .await
-                    .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "workspace.connect" => {
-                let request = falcondeck_core::ConnectWorkspaceRequest {
-                    path: required(&["path"])?,
-                };
-                self.connect_workspace(request)
-                    .await
-                    .and_then(|workspace| {
-                        serde_json::to_value(workspace).map_err(DaemonError::from)
-                    })
-                    .map_err(|error| error.to_string())
-            }
-            "workspace.remove" => {
-                let workspace_id = required(&["workspaceId", "workspace_id"])?;
-                self.remove_workspace(&workspace_id)
-                    .await
-                    .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "thread.goal.set" => {
-                let request = falcondeck_core::SetThreadGoalRequest {
-                    workspace_id: required(&["workspaceId", "workspace_id"])?,
-                    thread_id: required(&["threadId", "thread_id"])?,
-                    objective: extract_string(&params, &["objective"]),
-                    token_budget: params
-                        .get("tokenBudget")
-                        .or_else(|| params.get("token_budget"))
-                        .and_then(Value::as_i64),
-                    status: extract_string(&params, &["status"]),
-                };
-                self.set_thread_goal(request)
-                    .await
-                    .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "thread.goal.clear" => {
-                let workspace_id = required(&["workspaceId", "workspace_id"])?;
-                let thread_id = required(&["threadId", "thread_id"])?;
-                self.clear_thread_goal(&workspace_id, &thread_id)
-                    .await
-                    .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "thread.mark_read" => {
-                let workspace_id = required(&["workspaceId", "workspace_id"])?;
-                let thread_id = required(&["threadId", "thread_id"])?;
-                let read_seq = params
-                    .get("readSeq")
-                    .or_else(|| params.get("read_seq"))
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| "invalid remote rpc payload".to_string())?;
-                self.mark_thread_read(&workspace_id, &thread_id, read_seq)
-                    .await
-                    .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "turn.start" => {
-                let request = SendTurnRequest {
-                    workspace_id: required(&["workspaceId", "workspace_id"])?,
-                    thread_id: required(&["threadId", "thread_id"])?,
-                    inputs: params
-                        .get("inputs")
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or_default(),
-                    selected_skills: params
-                        .get("selectedSkills")
-                        .or_else(|| params.get("selected_skills"))
-                        .cloned()
-                        .and_then(|value| serde_json::from_value(value).ok())
-                        .unwrap_or_default(),
-                    provider: extract_string(&params, &["provider"]).and_then(parse_agent_provider),
-                    model_id: extract_string(&params, &["modelId", "model_id"]),
-                    reasoning_effort: extract_string(
-                        &params,
-                        &["reasoningEffort", "reasoning_effort"],
-                    ),
-                    approval_policy: extract_string(
-                        &params,
-                        &["approvalPolicy", "approval_policy"],
-                    ),
-                    service_tier: extract_string(&params, &["serviceTier", "service_tier"]),
-                    permission_mode: extract_string(
-                        &params,
-                        &["permissionMode", "permission_mode"],
-                    ),
-                    sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
-                };
-                self.send_turn(request)
-                    .await
-                    .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "turn.interrupt" => {
-                let workspace_id = required(&["workspaceId", "workspace_id"])?;
-                let thread_id = required(&["threadId", "thread_id"])?;
-                self.interrupt_turn(workspace_id, thread_id)
-                    .await
-                    .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "interactive.respond" | "approval.respond" => {
-                let workspace_id = required(&["workspaceId", "workspace_id"])?;
-                let request_id_param = required(&["requestId", "request_id"])?;
-                let response = parse_interactive_response_params(&params)
-                    .map_err(|_| "invalid remote rpc payload".to_string())?;
-                self.respond_to_interactive_request(workspace_id, request_id_param, response)
-                    .await
-                    .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            "preferences.update" => {
-                let request: UpdatePreferencesRequest = serde_json::from_value(params.clone())
-                    .map_err(|_| "invalid remote rpc payload".to_string())?;
-                self.update_preferences(request)
-                    .await
-                    .and_then(|preferences| {
-                        serde_json::to_value(preferences).map_err(DaemonError::from)
-                    })
-                    .map_err(|error| error.to_string())
-            }
-            "thread.archive" => {
-                let workspace_id = required(&["workspaceId", "workspace_id"])?;
-                let thread_id = required(&["threadId", "thread_id"])?;
-                self.archive_thread(&workspace_id, &thread_id)
-                    .await
-                    .and_then(|summary| serde_json::to_value(summary).map_err(DaemonError::from))
-                    .map_err(|error| error.to_string())
-            }
-            _ => Err(format!("unsupported remote rpc method `{method}`")),
-        };
+        }
+        .await;
 
         self.send_remote_rpc_result(writer, data_key, request_id, rpc_result)
             .await

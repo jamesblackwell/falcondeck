@@ -79,24 +79,58 @@ impl AppState {
                 // that on the workspace agent entry, along with the
                 // capabilities and any model catalog the agent negotiated —
                 // replacing the pre-connection acp_minimal() placeholder.
-                if let Some(agent) = workspace
+                // Providers hot-added after the workspace connected have no
+                // stored entry yet (the snapshot's placeholder lives in a
+                // clone), so seed one here or the refinement has nothing to
+                // land on and the picker reports "not started" forever.
+                let agent = match workspace
                     .summary
                     .agents
                     .iter_mut()
-                    .find(|agent| &agent.provider == provider)
+                    .position(|agent| &agent.provider == provider)
                 {
-                    agent.account = falcondeck_core::AccountSummary {
-                        status: falcondeck_core::AccountStatus::Ready,
-                        label: format!("{} connected", runtime.config.label),
-                    };
-                    agent.capabilities = runtime.capability_summary().await;
-                    let models = runtime.advertised_models().await;
-                    if !models.is_empty() {
-                        agent.models = models;
+                    Some(index) => &mut workspace.summary.agents[index],
+                    None => {
+                        workspace
+                            .summary
+                            .agents
+                            .push(falcondeck_core::WorkspaceAgentSummary {
+                                provider: provider.clone(),
+                                label: runtime.config.label.clone(),
+                                account: falcondeck_core::AccountSummary {
+                                    status: falcondeck_core::AccountStatus::Unknown,
+                                    label: format!("{} not started", runtime.config.label),
+                                },
+                                models: Vec::new(),
+                                collaboration_modes: Vec::new(),
+                                skills: Vec::new(),
+                                capabilities: falcondeck_core::AgentCapabilitySummary::acp_minimal(
+                                ),
+                            });
+                        workspace.summary.agents.last_mut().expect("just pushed")
                     }
+                };
+                agent.account = falcondeck_core::AccountSummary {
+                    status: falcondeck_core::AccountStatus::Ready,
+                    label: format!("{} connected", runtime.config.label),
+                };
+                agent.capabilities = runtime.capability_summary().await;
+                let models = runtime.advertised_models().await;
+                if !models.is_empty() {
+                    agent.models = models;
                 }
             }
         }
+        // Clients only refresh workspace agent entries on a full snapshot
+        // event; without one they keep showing the pre-connect placeholder
+        // (Unknown account, no models) until something unrelated emits.
+        self.emit(
+            Some(workspace_id.to_string()),
+            None,
+            falcondeck_core::UnifiedEvent::Snapshot {
+                snapshot: self.snapshot().await,
+            },
+        );
 
         let app = self.clone();
         let workspace = workspace_id.to_string();
@@ -380,15 +414,23 @@ pub(super) async fn start_acp_turn(
 ) -> Result<(), DaemonError> {
     let runtime = app.acp_runtime_for(workspace_id, provider).await?;
     // A native session id persisted from a previous daemon run lets the agent
-    // resume via session/load instead of starting from a blank session.
-    let known_native_session = {
+    // resume via session/load instead of starting from a blank session. Only
+    // offered when the in-memory history is EMPTY: session/load replays the
+    // whole conversation through the event pump, so resuming into a thread
+    // that still holds its items (agent process died, daemon alive) would
+    // append the entire history a second time. That case takes session/new —
+    // the agent loses its context, which is the pre-resume status quo.
+    let (known_native_session, requested_permission_mode) = {
         let workspaces = app.inner.workspaces.lock().await;
-        workspaces.get(workspace_id).and_then(|workspace| {
-            workspace
-                .threads
-                .get(thread_id)
-                .and_then(|thread| thread.summary.native_session_id.clone())
-        })
+        let thread = workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id));
+        (
+            thread
+                .filter(|thread| thread.items.is_empty())
+                .and_then(|thread| thread.summary.native_session_id.clone()),
+            thread.and_then(|thread| thread.summary.agent.permission_mode.clone()),
+        )
     };
     let session_id = runtime
         .ensure_session(thread_id, known_native_session.as_deref())
@@ -397,6 +439,54 @@ pub(super) async fn start_acp_turn(
         thread.native_session_id = Some(session_id.clone());
     })
     .await?;
+
+    // Sessions advertise permission modes (ACP session modes). Surface them
+    // on the workspace agent entry so the composer shows the picker, and
+    // apply the user's selection via session/set_mode before prompting.
+    if let Some(mode_state) = runtime.session_mode_state(&session_id).await {
+        if !mode_state.available.is_empty() {
+            let modes_changed = {
+                let mut workspaces = app.inner.workspaces.lock().await;
+                workspaces
+                    .get_mut(workspace_id)
+                    .and_then(|workspace| {
+                        workspace
+                            .summary
+                            .agents
+                            .iter_mut()
+                            .find(|agent| &agent.provider == provider)
+                    })
+                    .is_some_and(|agent| {
+                        if agent.capabilities.permission_modes == mode_state.available {
+                            false
+                        } else {
+                            agent.capabilities.permission_modes = mode_state.available.clone();
+                            true
+                        }
+                    })
+            };
+            if modes_changed {
+                app.emit(
+                    Some(workspace_id.to_string()),
+                    None,
+                    UnifiedEvent::Snapshot {
+                        snapshot: app.snapshot().await,
+                    },
+                );
+            }
+        }
+        if let Some(desired) = requested_permission_mode
+            .as_deref()
+            .filter(|mode| mode_state.available.iter().any(|id| id == mode))
+            .filter(|mode| mode_state.current.as_deref() != Some(mode))
+            && let Err(error) = runtime.set_session_mode(&session_id, desired).await {
+                tracing::warn!(
+                    provider = %runtime.config.id,
+                    %error,
+                    "failed to apply ACP session mode; continuing with agent default"
+                );
+            }
+    }
 
     let text = inputs
         .iter()
@@ -410,13 +500,26 @@ pub(super) async fn start_acp_turn(
     if !text.trim().is_empty() {
         content.push(serde_json::json!({ "type": "text", "text": text }));
     }
-    if runtime.capability_summary().await.supports_images {
-        for input in inputs {
-            if let TurnInputItem::Image(image) = input
-                && let Some(block) = crate::acp::acp_image_content_block(image).await
-            {
-                content.push(block);
-            }
+    let supports_images = runtime.capability_summary().await.supports_images;
+    let mut encoded_budget = crate::acp::MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES;
+    for input in inputs {
+        let TurnInputItem::Image(image) = input else {
+            continue;
+        };
+        if supports_images {
+            // Falls back to a text reference on oversize/unreadable files, so
+            // the attachment is never silently dropped.
+            content.push(crate::acp::acp_image_content_block(image, &mut encoded_budget).await);
+        } else {
+            let reference = image
+                .local_path
+                .as_deref()
+                .or(image.name.as_deref())
+                .unwrap_or("attachment");
+            content.push(serde_json::json!({
+                "type": "text",
+                "text": format!("[attached image: {reference}]"),
+            }));
         }
     }
 

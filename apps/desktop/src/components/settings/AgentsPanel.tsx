@@ -25,6 +25,8 @@ type ProvidersOverview = {
     command: string[]
     binary_found: boolean
     reserved: boolean
+    /** Entry the daemon cannot parse (e.g. command is not an array). */
+    malformed?: boolean
   }>
 }
 
@@ -190,12 +192,26 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
                     <span className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                       {provider.label}
                     </span>
-                    <Badge variant={provider.binary_found ? 'success' : 'warning'}>
-                      {provider.binary_found ? 'Installed' : 'Binary not found'}
+                    <Badge
+                      variant={
+                        provider.malformed
+                          ? 'danger'
+                          : provider.binary_found
+                            ? 'success'
+                            : 'warning'
+                      }
+                    >
+                      {provider.malformed
+                        ? 'Invalid entry'
+                        : provider.binary_found
+                          ? 'Installed'
+                          : 'Binary not found'}
                     </Badge>
                   </div>
                   <p className="truncate font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
-                    {provider.command.join(' ')}
+                    {provider.malformed
+                      ? 'Unreadable command — edit providers.json or remove this entry'
+                      : provider.command.join(' ')}
                   </p>
                 </div>
                 <Button

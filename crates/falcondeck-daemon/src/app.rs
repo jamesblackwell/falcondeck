@@ -714,18 +714,38 @@ impl AppState {
     }
 
     pub async fn snapshot(&self) -> DaemonSnapshot {
+        // Reading providers.json resolves each configured binary, and a
+        // missing binary falls through to a blocking login-shell probe —
+        // never do that while holding the global workspaces lock, which
+        // would stall every approval and turn behind each snapshot.
+        let fresh_acp_agents = self.acp_agent_summaries();
+        let fresh_acp_ids = fresh_acp_agents
+            .iter()
+            .map(|agent| agent.provider.clone())
+            .collect::<std::collections::HashSet<_>>();
+
         let workspaces = self.inner.workspaces.lock().await;
         let interactive_requests = self.inner.interactive_requests.lock().await;
         let preferences = self.inner.preferences.lock().await.clone();
 
-        // Providers added to providers.json after a workspace connected appear
-        // in its agent list on the next snapshot — additive only, so entries
-        // refined by a live runtime (capabilities, account) are untouched.
-        let fresh_acp_agents = self.acp_agent_summaries();
+        // Reconcile providers.json edits onto each workspace's agent list:
+        // additions appear (placeholder entries; live runtimes refine the
+        // stored copy), and removed ACP providers disappear unless their
+        // runtime is still alive — an already-spawned agent keeps serving its
+        // threads until restart.
         let mut workspace_list = workspaces
             .values()
             .map(|workspace| {
                 let mut summary = workspace.summary.clone();
+                summary.agents.retain(|agent| {
+                    agent.provider == AgentProvider::CODEX
+                        || agent.provider == AgentProvider::CLAUDE
+                        || fresh_acp_ids.contains(&agent.provider)
+                        || workspace
+                            .acp_runtimes
+                            .get(&agent.provider)
+                            .is_some_and(|runtime| !runtime.is_closed())
+                });
                 for agent in &fresh_acp_agents {
                     if !summary
                         .agents
