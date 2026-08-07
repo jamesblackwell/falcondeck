@@ -7,5 +7,6 @@ export {
   useSelectedThreadHistory,
   useConversationItems,
   useApprovals,
+  useThinkingDisplay,
 } from './session-store'
 export { useUIStore } from './ui-store'

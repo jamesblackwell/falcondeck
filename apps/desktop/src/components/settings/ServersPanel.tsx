@@ -555,16 +555,19 @@ function AddServerFlow({
       ) : mode === 'manual' ? (
         <div className="space-y-2">
           <Input
+            aria-label="Server display name"
             value={manualName}
             onChange={(event) => setManualName(event.target.value)}
             placeholder="Display name (optional)"
           />
           <Input
+            aria-label="SSH host"
             value={manualTarget}
             onChange={(event) => setManualTarget(event.target.value)}
             placeholder="host.com or user@host.com"
           />
           <Input
+            aria-label="SSH port"
             value={manualPort}
             onChange={(event) => setManualPort(event.target.value)}
             placeholder="SSH port (optional)"
@@ -573,11 +576,13 @@ function AddServerFlow({
       ) : (
         <div className="space-y-2">
           <Input
+            aria-label="Server display name"
             value={manualName}
             onChange={(event) => setManualName(event.target.value)}
             placeholder="Display name"
           />
           <Input
+            aria-label="Pairing code"
             value={pairingCode}
             onChange={(event) => setPairingCode(event.target.value)}
             placeholder="Pairing code from the server daemon"
@@ -603,6 +608,7 @@ function AddServerFlow({
         {showAdvanced ? (
           <div className="mt-2">
             <Input
+              aria-label="Relay URL"
               value={relayUrl}
               onChange={(event) => setRelayUrl(event.target.value)}
               placeholder={DEFAULT_REMOTE_RELAY_URL}

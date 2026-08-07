@@ -48,6 +48,16 @@ export const SidebarView = memo(function SidebarView({
     [groups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId],
   )
 
+  // The drawer runs to the bottom of the screen, so the last thread would sit
+  // under the home indicator without this.
+  const listContentStyle = useMemo(
+    () => ({
+      paddingTop: theme.spacing[3],
+      paddingBottom: theme.spacing[3] + insets.bottom,
+    }),
+    [insets.bottom, theme.spacing],
+  )
+
 
   const toggleWorkspaceCollapse = useCallback((workspaceId: string) => {
     setCollapsedWorkspaces((prev) => {
@@ -154,31 +164,36 @@ export const SidebarView = memo(function SidebarView({
   const renderRow = useCallback(
     ({ item }: { item: SidebarRow }) => {
       if (item.type === 'workspace') {
+        // Two sibling controls, not a button inside a button: nesting them made
+        // VoiceOver read the row as one element and swallowed "new thread".
         return (
-          <Pressable
-            style={styles.workspaceHeader}
-            onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
-            accessibilityRole="button"
-            accessibilityState={{ expanded: item.isOpen }}
-          >
-            <View style={styles.workspaceLeft}>
+          <View style={styles.workspaceHeader}>
+            <Pressable
+              style={styles.workspaceLeft}
+              onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
+              accessibilityRole="button"
+              accessibilityLabel={item.workspaceName}
+              accessibilityHint={item.isOpen ? 'Collapses this project' : 'Expands this project'}
+              accessibilityState={{ expanded: item.isOpen }}
+            >
               {item.isOpen ? (
-                <ChevronDown size={14} color={theme.colors.fg.muted} />
+                <ChevronDown size={theme.iconSize.xs} color={theme.colors.fg.muted} />
               ) : (
-                <ChevronRight size={14} color={theme.colors.fg.muted} />
+                <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
               )}
               <Text variant="label" color="secondary" weight="medium" numberOfLines={1} style={styles.workspaceName}>
                 {item.workspaceName}
               </Text>
-            </View>
+            </Pressable>
             <Button
               variant="ghost"
               size="icon"
+              accessibilityLabel={`New thread in ${item.workspaceName}`}
               onPress={() => onNewThread(item.workspaceId)}
             >
-              <SquarePen size={14} color={theme.colors.fg.muted} />
+              <SquarePen size={theme.iconSize.xs} color={theme.colors.fg.muted} />
             </Button>
-          </Pressable>
+          </View>
         )
       }
 
@@ -212,7 +227,7 @@ export const SidebarView = memo(function SidebarView({
         />
       )
     },
-    [onNewThread, onSelectThread, openThreadOptions, selectedThreadId, theme.colors.fg.muted, toggleWorkspaceCollapse, handleOverflowPress],
+    [onNewThread, onSelectThread, openThreadOptions, selectedThreadId, theme.colors.fg.muted, theme.iconSize.xs, toggleWorkspaceCollapse, handleOverflowPress],
   )
 
   const renderSheetContent = () => {
@@ -315,7 +330,7 @@ export const SidebarView = memo(function SidebarView({
             keyExtractor={(item) => item.key}
             getItemType={(item) => item.type}
             showsVerticalScrollIndicator={false}
-            contentContainerStyle={styles.listContent}
+            contentContainerStyle={listContentStyle}
           />
         )}
       </View>
@@ -348,15 +363,11 @@ const styles = StyleSheet.create((theme) => ({
   list: {
     flex: 1,
   },
-  listContent: {
-    paddingVertical: theme.spacing[3],
-  },
   workspaceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: theme.spacing[3],
-    paddingVertical: theme.spacing[1.5],
     marginTop: theme.spacing[2],
   },
   workspaceLeft: {
@@ -364,6 +375,9 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[2],
+    // The row is the whole tap target for collapsing, so it carries the
+    // minimum height rather than the header wrapper around it.
+    minHeight: theme.minTouchTarget,
   },
   workspaceName: {
     flex: 1,
@@ -372,8 +386,8 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[1.5],
+    minHeight: theme.minTouchTarget,
     paddingHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[1.5],
     marginLeft: theme.spacing[3],
   },
   chevronFlipped: {

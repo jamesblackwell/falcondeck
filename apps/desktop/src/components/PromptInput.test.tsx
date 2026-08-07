@@ -124,6 +124,71 @@ describe('PromptInput', () => {
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 
+  it('greys the capability pickers instead of dropping them, so the row keeps its shape', () => {
+    const capabilities = {
+      supports_review: false,
+      supports_goals: false,
+      supports_images: true,
+      supports_skills: true,
+      supports_interrupt: true,
+      sandbox_modes: [],
+      permission_modes: [],
+    }
+
+    const { rerender } = render(
+      <PromptInput
+        {...promptInputProps}
+        capabilities={capabilities}
+        onPermissionModeChange={noop}
+        onSandboxModeChange={noop}
+      />,
+    )
+
+    // Present but inert: an agent without these modes must not make the
+    // composer reflow when the user switches to it.
+    expect(screen.getByRole('combobox', { name: 'Permission mode' })).toBeDisabled()
+    expect(screen.getByRole('combobox', { name: 'Sandbox mode' })).toBeDisabled()
+
+    rerender(
+      <PromptInput
+        {...promptInputProps}
+        capabilities={{
+          ...capabilities,
+          permission_modes: ['default', 'acceptEdits'],
+          sandbox_modes: ['read-only'],
+        }}
+        onPermissionModeChange={noop}
+        onSandboxModeChange={noop}
+      />,
+    )
+
+    expect(screen.getByRole('combobox', { name: 'Permission mode' })).toBeEnabled()
+    expect(screen.getByRole('combobox', { name: 'Sandbox mode' })).toBeEnabled()
+  })
+
+  it('orders the toggle row capability first, then model and effort', () => {
+    render(
+      <PromptInput
+        {...promptInputProps}
+        showProviderSelector
+        capabilities={{
+          supports_review: false,
+          supports_goals: false,
+          supports_images: true,
+          supports_skills: true,
+          supports_interrupt: true,
+          sandbox_modes: ['read-only'],
+          permission_modes: ['default'],
+        }}
+        onPermissionModeChange={noop}
+        onSandboxModeChange={noop}
+      />,
+    )
+
+    expect(screen.getAllByRole('combobox').map((element) => element.getAttribute('aria-label')))
+      .toEqual(['Agent', 'Permission mode', 'Sandbox mode', 'Model', 'Reasoning effort'])
+  })
+
   it('keeps Send when a turn is running but the draft has content', () => {
     render(
       <PromptInput

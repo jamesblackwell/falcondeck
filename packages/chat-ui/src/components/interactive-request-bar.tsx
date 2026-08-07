@@ -8,7 +8,11 @@ import { InteractiveRequestCard } from './interactive-request-card'
 
 export type InteractiveRequestBarProps = {
   requests: InteractiveRequest[]
-  onRespond: (request: InteractiveRequest, response: InteractiveResponsePayload) => void
+  /** Returning the promise lets the card report a failed answer in place. */
+  onRespond: (
+    request: InteractiveRequest,
+    response: InteractiveResponsePayload,
+  ) => void | Promise<void>
 }
 
 export function InteractiveRequestBar({ requests, onRespond }: InteractiveRequestBarProps) {
@@ -39,7 +43,7 @@ export function InteractiveRequestBar({ requests, onRespond }: InteractiveReques
             <InteractiveRequestCard
               key={request.request_id}
               request={request}
-              onRespond={(response) => onRespond(request, response)}
+              onRespond={(response) => Promise.resolve(onRespond(request, response))}
             />
           ))}
         </div>

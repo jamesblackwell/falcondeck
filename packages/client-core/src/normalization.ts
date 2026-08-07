@@ -55,6 +55,7 @@ const DEFAULT_CONVERSATION_PREFERENCES: ConversationPreferences = {
   },
   group_read_only_tools: true,
   show_expand_all_controls: true,
+  thinking_display: 'auto',
 }
 
 const DEFAULT_PREFERENCES: FalconDeckPreferences = {
@@ -511,6 +512,13 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       ? conversation.tool_details_mode
       : 'collapsed'
 
+  const thinkingDisplay =
+    conversation.thinking_display === 'preview' ||
+    conversation.thinking_display === 'always_expanded' ||
+    conversation.thinking_display === 'always_collapsed'
+      ? conversation.thinking_display
+      : 'auto'
+
   return {
     version: typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : 1,
     conversation: {
@@ -523,6 +531,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       },
       group_read_only_tools: conversation.group_read_only_tools ?? true,
       show_expand_all_controls: conversation.show_expand_all_controls ?? true,
+      thinking_display: thinkingDisplay,
     },
   }
 }

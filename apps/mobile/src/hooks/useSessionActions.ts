@@ -38,6 +38,8 @@ export function useSessionActions() {
               provider: ui.selectedProvider ?? workspace.default_provider,
               model_id: ui.selectedModel,
               approval_policy: 'on-request',
+              permission_mode: ui.selectedPermissionMode,
+              sandbox_mode: ui.selectedSandboxMode,
             },
             { requestIdPrefix: 'mobile-thread' },
           ),
@@ -60,6 +62,8 @@ export function useSessionActions() {
           model_id: ui.selectedModel,
           reasoning_effort: ui.selectedEffort,
           approval_policy: 'on-request',
+          permission_mode: ui.selectedPermissionMode,
+          sandbox_mode: ui.selectedSandboxMode,
         },
         { requestIdPrefix: 'mobile-turn' },
       )

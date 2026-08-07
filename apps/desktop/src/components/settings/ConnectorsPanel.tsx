@@ -515,6 +515,7 @@ function AddConnectorForm({
         <ScopeChip active={mode === 'url'} label="URL" onClick={() => setMode('url')} />
       </div>
       <Input
+        aria-label="Connector name"
         value={name}
         onChange={(event) => setName(event.target.value)}
         placeholder="Name (e.g. linear)"
@@ -522,12 +523,14 @@ function AddConnectorForm({
       {mode === 'command' ? (
         <>
           <Input
+            aria-label="MCP server command"
             value={command}
             onChange={(event) => setCommand(event.target.value)}
             placeholder="Command (e.g. npx -y @linear/mcp-server)"
             className="font-mono"
           />
           <textarea
+            aria-label="Environment variables"
             value={envText}
             onChange={(event) => setEnvText(event.target.value)}
             rows={2}
@@ -539,12 +542,14 @@ function AddConnectorForm({
       ) : (
         <>
           <Input
+            aria-label="MCP server URL"
             value={url}
             onChange={(event) => setUrl(event.target.value)}
             placeholder="https://mcp.example.com/mcp"
             className="font-mono"
           />
           <textarea
+            aria-label="Request headers"
             value={headersText}
             onChange={(event) => setHeadersText(event.target.value)}
             rows={2}

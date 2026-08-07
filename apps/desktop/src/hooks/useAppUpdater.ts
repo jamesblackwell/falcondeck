@@ -67,6 +67,13 @@ export function useAppUpdater() {
   const [state, setState] = useState<AppUpdaterState>(initialState)
   const updateRef = useRef<PendingUpdate | null>(null)
   const inFlightRef = useRef(false)
+  // Read through a ref rather than a dependency: `checkForUpdates` is what the
+  // background schedule below is keyed on, and every check moves the status at
+  // least twice. Depending on the value would tear down and re-arm the initial
+  // 15s timeout on each move, turning a four-hourly check into a hot loop
+  // against GitHub Releases.
+  const statusRef = useRef(state.status)
+  statusRef.current = state.status
   const unsupportedMessage = 'Automatic updates are only available in the packaged FalconDeck desktop app.'
   const devModeMessage = 'Updater checks are disabled in development builds.'
 
@@ -136,19 +143,20 @@ export function useAppUpdater() {
         return { kind: 'unsupported', message: devModeMessage }
       }
 
+      const status = statusRef.current
       if (!manual) {
-        if (state.status === 'available') {
+        if (status === 'available') {
           return { kind: 'available' }
         }
-        if (state.status === 'downloading') {
+        if (status === 'downloading') {
           return { kind: 'downloading' }
         }
-        if (state.status === 'downloaded') {
+        if (status === 'downloaded') {
           return { kind: 'downloaded' }
         }
-      } else if (state.status === 'downloading') {
+      } else if (status === 'downloading') {
         return { kind: 'downloading' }
-      } else if (state.status === 'downloaded') {
+      } else if (status === 'downloaded') {
         return { kind: 'downloaded' }
       }
 
@@ -231,7 +239,7 @@ export function useAppUpdater() {
         inFlightRef.current = false
       }
     },
-    [closeCachedUpdate, devModeMessage, state.status, unsupportedMessage],
+    [closeCachedUpdate, devModeMessage, unsupportedMessage],
   )
 
   useEffect(() => {

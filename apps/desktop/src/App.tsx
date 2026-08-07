@@ -18,12 +18,13 @@ import {
   type InteractiveResponsePayload,
   type ThreadHandle,
   type ThreadIsolation,
+  type ThinkingDisplay,
   type ThreadSummary,
   type TurnInputItem,
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
 import { CommandPalette, GoalControl, NewThreadState } from '@falcondeck/chat-ui'
-import { ToastProvider, useToast } from '@falcondeck/ui'
+import { Button, ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
 import {
@@ -32,6 +33,12 @@ import {
   workspaceComposerDisabled,
   workspaceSendBlockReason,
 } from './app-utils'
+import {
+  preferencesWithThinkingDisplay,
+  readStoredThinkingDisplay,
+  splitPreferencesUpdate,
+  writeStoredThinkingDisplay,
+} from './preferences'
 import {
   defaultReasoningEffort,
   reasoningOptions,
@@ -152,6 +159,8 @@ function AppInner() {
     setSnapshot,
     threadDetail,
     setThreadDetail,
+    threadDetailError,
+    retryThreadDetail,
     remoteStatus,
     setRemoteStatus,
     selectedWorkspaceId,
@@ -189,6 +198,7 @@ function AppInner() {
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
+  const [thinkingDisplay, setThinkingDisplay] = useState<ThinkingDisplay>(readStoredThinkingDisplay)
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
   const notifiedAttentionRef = useRef(new Map<string, string>())
@@ -996,6 +1006,9 @@ function AppInner() {
       const msg = error instanceof Error ? error.message : 'Failed to respond to request'
       setActionError(msg)
       toast({ variant: 'danger', title: 'Failed to respond', description: msg })
+      // Rethrown so the request card can show the failure where the user
+      // clicked, instead of only in a toast that scrolls away.
+      throw error instanceof Error ? error : new Error(msg)
     }
   }
 
@@ -1019,9 +1032,8 @@ function AppInner() {
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
   const handleInteractiveResponseCallback = useCallback(
-    (request: InteractiveRequest, response: InteractiveResponsePayload) => {
-      void handleInteractiveResponse(request.workspace_id, request.request_id, response)
-    },
+    (request: InteractiveRequest, response: InteractiveResponsePayload) =>
+      handleInteractiveResponse(request.workspace_id, request.request_id, response),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [api, apiFor, workspaceHostIndex],
   )
@@ -1093,9 +1105,16 @@ function AppInner() {
 
   const handleUpdatePreferences = useCallback(
     async (payload: UpdatePreferencesPayload) => {
+      const { daemonPayload, thinkingDisplay: nextThinkingDisplay } =
+        splitPreferencesUpdate(payload)
+      if (nextThinkingDisplay) {
+        setThinkingDisplay(nextThinkingDisplay)
+        writeStoredThinkingDisplay(nextThinkingDisplay)
+      }
+      if (!daemonPayload) return
       if (!api) return
       try {
-        const preferences = await api.updatePreferences(payload)
+        const preferences = await api.updatePreferences(daemonPayload)
         setSnapshot((current) => (current ? { ...current, preferences } : current))
         setActionError(null)
       } catch (error) {
@@ -1243,6 +1262,41 @@ function AppInner() {
     [api, apiFor, selectedThreadId, setActionError, setSelectedThreadId, setSnapshot, toast, workspaceHostIndex],
   )
 
+  const handleDeleteThread = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const client = apiFor(workspaceId)
+      if (!client) throw new Error('FalconDeck is still connecting')
+      try {
+        await client.deleteThread(workspaceId, threadId)
+        if (selectedThreadId === threadId) {
+          setSelectedThreadId(null)
+          setThreadDetail(null)
+        }
+        if (!workspaceHostIndex.has(workspaceId) && api) {
+          setSnapshot(await api.snapshot())
+        }
+        setActionError(null)
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Failed to delete thread'
+        setActionError(msg)
+        toast({ variant: 'danger', title: 'Failed to delete thread', description: msg })
+        // Rethrown so the dialog keeps itself open and shows the reason.
+        throw error instanceof Error ? error : new Error(msg)
+      }
+    },
+    [
+      api,
+      apiFor,
+      selectedThreadId,
+      setActionError,
+      setSelectedThreadId,
+      setSnapshot,
+      setThreadDetail,
+      toast,
+      workspaceHostIndex,
+    ],
+  )
+
   const handleRenameThread = useCallback(
     async (workspaceId: string, threadId: string, title: string) => {
       const client = apiFor(workspaceId)
@@ -1355,6 +1409,10 @@ function AppInner() {
   const sendBlockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
   const isComposerDisabled = isSending || workspaceComposerDisabled(selectedWorkspace)
   const workspaces = useMemo(() => viewSnapshot?.workspaces ?? [], [viewSnapshot?.workspaces])
+  const effectivePreferences = useMemo(
+    () => preferencesWithThinkingDisplay(snapshot?.preferences ?? null, thinkingDisplay),
+    [snapshot?.preferences, thinkingDisplay],
+  )
 
   const newThreadEmptyState = useMemo(
     () => (
@@ -1375,7 +1433,28 @@ function AppInner() {
     ),
     [],
   )
+  const threadDetailErrorState = useMemo(
+    () =>
+      threadDetailError ? (
+        <div className="flex min-h-[240px] flex-col items-center justify-center gap-3 text-center">
+          <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+            This conversation could not be loaded.
+          </p>
+          <p className="max-w-md text-[length:var(--fd-text-xs)] text-fg-muted">
+            {threadDetailError}
+          </p>
+          <Button type="button" variant="secondary" size="sm" onClick={retryThreadDetail}>
+            Try again
+          </Button>
+        </div>
+      ) : null,
+    [retryThreadDetail, threadDetailError],
+  )
   const conversationEmptyState = useMemo(() => {
+    // Order matters: a failed load also looks "pending", so the error wins.
+    if (threadDetailErrorState) {
+      return threadDetailErrorState
+    }
     if (isThreadDetailPending) {
       return loadingThreadState
     }
@@ -1383,7 +1462,13 @@ function AppInner() {
       return undefined
     }
     return newThreadEmptyState
-  }, [isThreadDetailPending, loadingThreadState, newThreadEmptyState, selectedThreadId])
+  }, [
+    isThreadDetailPending,
+    loadingThreadState,
+    newThreadEmptyState,
+    selectedThreadId,
+    threadDetailErrorState,
+  ])
 
   return (
     <>
@@ -1404,6 +1489,7 @@ function AppInner() {
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
             onArchiveThread={handleArchiveThread}
+            onDeleteThread={handleDeleteThread}
             onRenameThread={handleRenameThread}
             onTogglePinThread={handleTogglePinThread}
             onMarkThreadRead={handleMarkThreadRead}
@@ -1425,7 +1511,7 @@ function AppInner() {
               hostManager={remoteHosts.manager}
               hosts={remoteHosts.hosts}
               onToast={toast}
-              preferences={snapshot?.preferences ?? null}
+              preferences={effectivePreferences}
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}
               relayUrl={relayUrl}
@@ -1456,7 +1542,7 @@ function AppInner() {
               remoteControlsDisabled={remoteControlsDisabled}
               remoteControlsUnavailableReason={remoteControlsUnavailableReason}
               conversationItems={conversationItems}
-              preferences={snapshot?.preferences ?? null}
+              preferences={effectivePreferences}
               conversationEmptyState={conversationEmptyState}
               isSending={isSending}
               isThreadDetailPending={isThreadDetailPending}

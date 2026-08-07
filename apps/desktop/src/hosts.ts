@@ -110,6 +110,7 @@ export type WorkspaceScopedApi = {
   updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>
   archiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
   unarchiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
+  deleteThread(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
   setThreadGoal(payload: SetThreadGoalPayload): Promise<ThreadSummary>
   clearThreadGoal(workspaceId: string, threadId: string): Promise<ThreadSummary>
   markThreadRead(payload: MarkThreadReadPayload): Promise<ThreadSummary>
@@ -276,6 +277,15 @@ export class HostConnection {
         normalizeThreadSummary(
           await this.rpc('thread.unarchive', { workspaceId, threadId }),
         ),
+      deleteThread: async (workspaceId, threadId) => {
+        const result = await this.rpc<{ ok: boolean; message?: string | null }>('thread.delete', {
+          workspaceId,
+          threadId,
+        })
+        this.detailCache.delete(`${workspaceId}:${threadId}`)
+        await this.refreshSnapshot()
+        return result
+      },
       setThreadGoal: async (payload) =>
         normalizeThreadSummary(await this.rpc('thread.goal.set', payload)),
       clearThreadGoal: async (workspaceId, threadId) =>

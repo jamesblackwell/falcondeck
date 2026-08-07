@@ -194,11 +194,22 @@ export type ConversationHistoryBlock =
           ("Working…" / "Worked for 2m 14s") in the collapsed mode. */
       kind: 'work_session'
       id: string
-      items: Extract<ConversationItem, { kind: 'tool_call' }>[]
+      items: WorkSessionEntry[]
       running: boolean
       started_at: string
       completed_at: string | null
     }
+
+/**
+ * What a buried work run can contain. Reasoning rides along with the tool calls
+ * it interleaves with so expanding the run reveals the agent's thinking in
+ * order — emitting it as its own top-level block instead would shatter one
+ * "Worked for 2m" into a column of one-second rows, because providers tend to
+ * emit a thought between every pair of tool calls.
+ */
+export type WorkSessionEntry =
+  | Extract<ConversationItem, { kind: 'tool_call' }>
+  | Extract<ConversationItem, { kind: 'reasoning' }>
 
 export type ConversationRenderBlock = ConversationHistoryBlock
 
@@ -401,7 +412,7 @@ export function deriveConversationPresentation(
   // ChatGPT-style default: bury contiguous tool runs behind one line. Only
   // approvals, diffs, errors, and failed tests break out of the fold.
   if (mode === 'collapsed') {
-    let workBuffer: Extract<ConversationItem, { kind: 'tool_call' }>[] = []
+    let workBuffer: WorkSessionEntry[] = []
     // Receipts (resolved approvals, service notices) gathered during a run.
     // They render as quiet rows after the run they belong to, so they never
     // interrupt the fold.
@@ -423,7 +434,9 @@ export function deriveConversationPresentation(
         flushReceipts()
         return
       }
-      const running = workBuffer.some((entry) => isRunningToolStatus(entry.status))
+      const running = workBuffer.some(
+        (entry) => entry.kind === 'tool_call' && isRunningToolStatus(entry.status),
+      )
       const last = workBuffer[workBuffer.length - 1]!
       historyBlocks.push({
         kind: 'work_session',
@@ -435,15 +448,34 @@ export function deriveConversationPresentation(
         items: workBuffer,
         running,
         started_at: workBuffer[0]!.created_at,
-        completed_at: running ? null : (last.completed_at ?? last.created_at),
+        completed_at: running
+          ? null
+          : (last.kind === 'tool_call' ? last.completed_at : null) ?? last.created_at,
       })
       workBuffer = []
       flushReceipts()
     }
 
     for (const item of items) {
-      // Reasoning is part of the buried work; don't let it split a run.
-      if (item.kind === 'reasoning') continue
+      // Reasoning is part of the buried work; don't let it split a run. It
+      // joins the open run so expanding reveals it in order, but a thought
+      // with no work around it still gets its own block — otherwise it would
+      // be labelled "Worked for 1s" when no work happened at all.
+      if (item.kind === 'reasoning') {
+        if (workBuffer.length > 0) {
+          workBuffer.push(item)
+          continue
+        }
+        flushReceipts()
+        historyBlocks.push({
+          kind: 'item',
+          id: `${item.kind}:${item.id}`,
+          item,
+          default_open: false,
+          suppress_read_only_detail: false,
+        })
+        continue
+      }
       // Neither do the receipts that accompany work: resolved approvals and
       // service notices. Rendering them between fragments is what turned one
       // "Worked for 2m" into a column of "Worked for 1s" rows.

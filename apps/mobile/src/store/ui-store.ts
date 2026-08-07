@@ -8,6 +8,9 @@ interface UIState {
   selectedProvider: AgentProvider | null
   selectedModel: string | null
   selectedEffort: string | null
+  /** null means "no override" — the daemon keeps whatever the thread already has. */
+  selectedPermissionMode: string | null
+  selectedSandboxMode: string | null
   isSubmitting: boolean
 }
 
@@ -19,6 +22,8 @@ interface UIActions {
   setSelectedProvider: (provider: AgentProvider | null) => void
   setSelectedModel: (modelId: string | null) => void
   setSelectedEffort: (effort: string | null) => void
+  setSelectedPermissionMode: (mode: string | null) => void
+  setSelectedSandboxMode: (mode: string | null) => void
   setIsSubmitting: (submitting: boolean) => void
   clearAttachments: () => void
   clearDraft: () => void
@@ -32,6 +37,8 @@ export const useUIStore = create<UIStore>((set) => ({
   selectedProvider: null,
   selectedModel: null,
   selectedEffort: 'medium',
+  selectedPermissionMode: null,
+  selectedSandboxMode: null,
   isSubmitting: false,
 
   setDraft: (draft) => set({ draft }),
@@ -45,6 +52,8 @@ export const useUIStore = create<UIStore>((set) => ({
   setSelectedProvider: (provider) => set({ selectedProvider: provider }),
   setSelectedModel: (modelId) => set({ selectedModel: modelId }),
   setSelectedEffort: (effort) => set({ selectedEffort: effort }),
+  setSelectedPermissionMode: (mode) => set({ selectedPermissionMode: mode }),
+  setSelectedSandboxMode: (mode) => set({ selectedSandboxMode: mode }),
   setIsSubmitting: (submitting) => set({ isSubmitting: submitting }),
   clearAttachments: () => set({ attachments: [] }),
   clearDraft: () => set({ draft: '' }),

@@ -84,6 +84,9 @@ const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
   { provider: 'claude', label: 'Claude' },
 ]
 
+/** Keeps a disabled picker mounted when the host passes no handler for it. */
+const noopModeChange = () => {}
+
 export const PromptInput = memo(function PromptInput({
   value,
   onValueChange,
@@ -383,6 +386,8 @@ export const PromptInput = memo(function PromptInput({
             </span>
           </label>
 
+          {/* Capability → mode → model → effort → switches. Permission scope
+              leads because it is the toggle with consequences. */}
           {!compact ? (
             <>
               {showProviderSelector ? (
@@ -393,6 +398,18 @@ export const PromptInput = memo(function PromptInput({
                   disabled={disabled || providerLocked}
                 />
               ) : null}
+              <PermissionModeSelector
+                value={selectedPermissionMode}
+                modes={capabilities.permission_modes}
+                onValueChange={onPermissionModeChange ?? noopModeChange}
+                disabled={disabled || !onPermissionModeChange}
+              />
+              <SandboxSelector
+                value={selectedSandboxMode}
+                modes={capabilities.sandbox_modes}
+                onValueChange={onSandboxModeChange ?? noopModeChange}
+                disabled={disabled || !onSandboxModeChange}
+              />
               <ModelSelector
                 value={selectedModelId}
                 models={models}
@@ -405,22 +422,6 @@ export const PromptInput = memo(function PromptInput({
                 onValueChange={onEffortChange}
                 disabled={disabled || reasoningOptions.length === 0}
               />
-              {onPermissionModeChange ? (
-                <PermissionModeSelector
-                  value={selectedPermissionMode}
-                  modes={capabilities.permission_modes}
-                  onValueChange={onPermissionModeChange}
-                  disabled={disabled}
-                />
-              ) : null}
-              {onSandboxModeChange ? (
-                <SandboxSelector
-                  value={selectedSandboxMode}
-                  modes={capabilities.sandbox_modes}
-                  onValueChange={onSandboxModeChange}
-                  disabled={disabled}
-                />
-              ) : null}
               {onIsolationChange ? (
                 <IsolationSelector
                   value={selectedIsolation}

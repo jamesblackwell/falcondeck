@@ -30,6 +30,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
   const canRespond = !!onRespond && !resolved
   const questionAnswers = useMemo(
@@ -59,6 +60,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
     setCurrentQuestionIndex(0)
     setSelectedOptions({})
     setCustomAnswers({})
+    setSubmitError(null)
   }, [request.request_id])
 
   useEffect(() => {
@@ -74,8 +76,13 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   async function submit(response: InteractiveResponsePayload) {
     if (!onRespond) return
     setIsSubmitting(true)
+    setSubmitError(null)
     try {
       await onRespond(response)
+    } catch (error) {
+      // Without this the card resets to its untouched state and the agent
+      // stays blocked, with nothing to tell the user their answer was lost.
+      setSubmitError(error instanceof Error ? error.message : 'Failed to send your response')
     } finally {
       setIsSubmitting(false)
     }
@@ -156,7 +163,12 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                   {currentQuestionIndex + 1} of {request.questions.length}
                 </p>
               </div>
-              <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-primary">{currentQuestion.question}</p>
+              <p
+                id={`fd-question-${currentQuestion.id}`}
+                className="mt-1 text-[length:var(--fd-text-sm)] text-fg-primary"
+              >
+                {currentQuestion.question}
+              </p>
               {currentQuestion.options?.length ? (
                 <div className="mt-3 grid gap-2">
                   {currentQuestion.options.map((option) => {
@@ -194,6 +206,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
               <div className="mt-3">
                 <Input
                   type={currentQuestion.is_secret ? 'password' : 'text'}
+                  aria-labelledby={`fd-question-${currentQuestion.id}`}
                   value={customAnswers[currentQuestion.id] ?? ''}
                   disabled={!canRespond || isSubmitting}
                   onChange={(event) => handleQuestionChange(currentQuestion.id, event.target.value)}
@@ -277,6 +290,11 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                 </>
               )}
             </div>
+          ) : null}
+          {submitError ? (
+            <p role="alert" className="mt-2 text-[length:var(--fd-text-xs)] text-danger">
+              {submitError}
+            </p>
           ) : null}
         </div>
       </div>

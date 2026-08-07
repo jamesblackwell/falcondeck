@@ -48,11 +48,10 @@ export const Conversation = memo(function Conversation({
   const stickyToBottomRef = useRef(true)
   const [showJump, setShowJump] = useState(false)
   const [expansionMode, setExpansionMode] = useState<'default' | 'expanded' | 'collapsed'>('default')
+  // Unresolved requests live in the pinned approval bar, not the transcript.
+  // Reasoning stays in: it is rendered by the thinking-display rules below.
   const renderableItems = useMemo(
-    () =>
-      items.filter(
-        (item) => item.kind !== 'reasoning' && !(item.kind === 'interactive_request' && !item.resolved),
-      ),
+    () => items.filter((item) => !(item.kind === 'interactive_request' && !item.resolved)),
     [items],
   )
   const normalizedPreferences = useMemo(() => normalizePreferences(preferences), [preferences])
@@ -67,6 +66,14 @@ export const Conversation = memo(function Conversation({
   const hasRunningWorkSession = renderBlocks.some(
     (block) => block.kind === 'work_session' && block.running,
   )
+  const thinkingDisplay = normalizedPreferences.conversation.thinking_display
+  // Only the trailing thought is still arriving; anything a later item follows
+  // has finished, which is what `auto` keys its collapse off.
+  const streamingReasoningId = useMemo(() => {
+    if (!isThinking) return null
+    const last = renderableItems.at(-1)
+    return last?.kind === 'reasoning' ? last.id : null
+  }, [isThinking, renderableItems])
   const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
   const showEmptyState =
     renderBlocks.length === 0 && liveActivityGroups.length === 0 && !hasHiddenOnlyItems
@@ -294,6 +301,8 @@ export const Conversation = memo(function Conversation({
                   defaultOpen={block.default_open}
                   expansionMode={expansionMode}
                   suppressReadOnlyDetail={block.suppress_read_only_detail}
+                  thinkingDisplay={thinkingDisplay}
+                  isStreamingReasoning={block.item.id === streamingReasoningId}
                 />
               ) : block.kind === 'work_session' ? (
                 <WorkSessionCard
@@ -302,6 +311,7 @@ export const Conversation = memo(function Conversation({
                   startedAt={block.started_at}
                   completedAt={block.completed_at}
                   expansionMode={expansionMode}
+                  thinkingDisplay={thinkingDisplay}
                 />
               ) : (
                 <ToolSummaryCard
@@ -315,7 +325,12 @@ export const Conversation = memo(function Conversation({
             </div>
           ))}
 
-            {renderBlocks.length > 0 && isThinking && liveActivityGroups.length === 0 && !hasRunningWorkSession ? (
+            {/* A streaming thought already says "Thinking…" in its own header. */}
+            {renderBlocks.length > 0 &&
+            isThinking &&
+            liveActivityGroups.length === 0 &&
+            !hasRunningWorkSession &&
+            !streamingReasoningId ? (
             <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
               <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
               Thinking…

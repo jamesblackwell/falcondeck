@@ -7,21 +7,37 @@ import { cn } from '../lib/utils'
 export const Select = SelectPrimitive.Root
 export const SelectValue = SelectPrimitive.Value
 
+/**
+ * `quiet` drops the chip treatment down to label-plus-chevron text, for rows of
+ * toggles that should read as a sentence rather than a row of buttons.
+ */
+export type SelectTriggerVariant = 'default' | 'quiet'
+
+const SELECT_TRIGGER_VARIANTS: Record<SelectTriggerVariant, string> = {
+  default:
+    'h-8 justify-between gap-1.5 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-3 px-2.5 text-fg-secondary hover:bg-surface-4 data-[state=open]:border-border-emphasis',
+  quiet:
+    'h-7 gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary',
+}
+
 export const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
->(({ className, children, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger> & {
+    variant?: SelectTriggerVariant
+  }
+>(({ className, children, variant = 'default', ...props }, ref) => (
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      'fd-focus inline-flex h-8 items-center justify-between gap-1.5 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-3 px-2.5 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-4 data-[state=open]:border-border-emphasis disabled:cursor-not-allowed disabled:opacity-50',
+      'fd-focus inline-flex max-w-full items-center text-[length:var(--fd-text-xs)] transition-colors duration-[var(--fd-duration-fast)] disabled:cursor-not-allowed disabled:opacity-50',
+      SELECT_TRIGGER_VARIANTS[variant],
       className,
     )}
     {...props}
   >
     {children}
     <SelectPrimitive.Icon asChild>
-      <ChevronDown className="h-3 w-3 text-fg-muted" />
+      <ChevronDown className="h-3 w-3 shrink-0 text-fg-muted" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
 ))

@@ -14,7 +14,11 @@ use falcondeck_core::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use tokio::fs;
+use tokio::{
+    fs,
+    task::spawn_blocking,
+    time::{Duration, timeout},
+};
 
 use super::{
     PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState, PersistedWorkspaceEntry,
@@ -22,6 +26,8 @@ use super::{
 };
 use crate::codex::extract_string;
 use crate::error::DaemonError;
+
+pub(super) const SECURE_STORAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(super) fn default_state_path() -> PathBuf {
     let home = env::var("HOME")
@@ -225,7 +231,7 @@ pub(super) fn parse_tool_details_mode(value: &str) -> ToolDetailsMode {
 
 pub(super) fn persisted_remote_state(
     remote: &RemoteBridgeState,
-) -> Result<Option<PersistedRemoteState>, DaemonError> {
+) -> Result<Option<(PersistedRemoteState, PersistedRemoteSecrets)>, DaemonError> {
     let Some(relay_url) = remote.relay_url.clone() else {
         return Ok(None);
     };
@@ -240,29 +246,29 @@ pub(super) fn persisted_remote_state(
         &pairing.pairing_id,
         pairing.session_id.as_deref(),
     );
-    save_remote_secrets(
-        &secure_storage_key,
-        &PersistedRemoteSecrets {
-            local_secret_key_base64: pairing.local_key_pair.secret_key_base64(),
-            data_key_base64: encode_base64(&pairing.data_key),
+    let secrets = PersistedRemoteSecrets {
+        local_secret_key_base64: pairing.local_key_pair.secret_key_base64(),
+        data_key_base64: encode_base64(&pairing.data_key),
+    };
+    Ok(Some((
+        PersistedRemoteState {
+            relay_url,
+            daemon_token,
+            pairing_id: pairing.pairing_id.clone(),
+            pairing_code: pairing.pairing_code.clone(),
+            session_id: pairing.session_id.clone(),
+            device_id: pairing.device_id.clone(),
+            trusted_at: pairing.trusted_at,
+            expires_at: pairing.expires_at,
+            client_bundle: pairing.client_bundle.clone(),
+            client_public_key: None,
+            secure_storage_key: Some(secure_storage_key),
+            local_secret_key_base64: None,
+            data_key_base64: None,
+            trusted_client_bundles: remote.trusted_client_bundles.clone(),
         },
-    )?;
-    Ok(Some(PersistedRemoteState {
-        relay_url,
-        daemon_token,
-        pairing_id: pairing.pairing_id.clone(),
-        pairing_code: pairing.pairing_code.clone(),
-        session_id: pairing.session_id.clone(),
-        device_id: pairing.device_id.clone(),
-        trusted_at: pairing.trusted_at,
-        expires_at: pairing.expires_at,
-        client_bundle: pairing.client_bundle.clone(),
-        client_public_key: None,
-        secure_storage_key: Some(secure_storage_key),
-        local_secret_key_base64: None,
-        data_key_base64: None,
-        trusted_client_bundles: remote.trusted_client_bundles.clone(),
-    }))
+        secrets,
+    )))
 }
 
 pub(super) fn invalid_persisted_remote_reason(remote: &PersistedRemoteState) -> Option<String> {
@@ -316,6 +322,48 @@ pub(super) fn save_remote_secrets(
 
 pub(super) fn delete_remote_secrets(secure_storage_key: String) -> Result<(), DaemonError> {
     delete_remote_secrets_from_secure_storage(&secure_storage_key)
+}
+
+pub(super) async fn load_remote_secrets_async(
+    remote: PersistedRemoteState,
+    secure_storage_key: String,
+) -> Result<PersistedRemoteSecrets, DaemonError> {
+    if remote.local_secret_key_base64.is_some() && remote.data_key_base64.is_some() {
+        return load_remote_secrets(&remote, &secure_storage_key);
+    }
+
+    timeout(
+        SECURE_STORAGE_TIMEOUT,
+        spawn_blocking(move || load_remote_secrets(&remote, &secure_storage_key)),
+    )
+    .await
+    .map_err(|_| DaemonError::Process("timed out reading persisted remote secrets".to_string()))?
+    .map_err(|error| DaemonError::Process(format!("secure storage task failed: {error}")))?
+}
+
+pub(super) async fn save_remote_secrets_async(
+    secure_storage_key: String,
+    secrets: PersistedRemoteSecrets,
+) -> Result<(), DaemonError> {
+    timeout(
+        SECURE_STORAGE_TIMEOUT,
+        spawn_blocking(move || save_remote_secrets(&secure_storage_key, &secrets)),
+    )
+    .await
+    .map_err(|_| DaemonError::Process("timed out writing persisted remote secrets".to_string()))?
+    .map_err(|error| DaemonError::Process(format!("secure storage task failed: {error}")))?
+}
+
+pub(super) async fn delete_remote_secrets_async(
+    secure_storage_key: String,
+) -> Result<(), DaemonError> {
+    timeout(
+        SECURE_STORAGE_TIMEOUT,
+        spawn_blocking(move || delete_remote_secrets(secure_storage_key)),
+    )
+    .await
+    .map_err(|_| DaemonError::Process("timed out deleting persisted remote secrets".to_string()))?
+    .map_err(|error| DaemonError::Process(format!("secure storage task failed: {error}")))?
 }
 
 /// Headless hosts (Linux servers under systemd) usually have no secret

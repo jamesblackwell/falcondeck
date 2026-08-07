@@ -79,6 +79,9 @@ struct InnerState {
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
+    /// Serializes full state snapshots so an older concurrent snapshot cannot
+    /// overwrite newer remote pairing metadata.
+    persistence: Mutex<()>,
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
     /// Pending Claude PreToolUse approvals keyed by (workspace_id, request_id);
     /// the hook handler blocks on the receiver until the UI responds.
@@ -342,6 +345,7 @@ impl AppState {
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
                 saved_workspaces: Mutex::new(HashMap::new()),
+                persistence: Mutex::new(()),
                 interactive_requests: Mutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
                 claude_always_allowed_tools: Mutex::new(HashMap::new()),
@@ -416,39 +420,6 @@ impl AppState {
             workspaces_to_restore.push(workspace);
         }
 
-        if !workspaces_to_restore.is_empty() {
-            let app = self.clone();
-            tokio::spawn(async move {
-                for workspace in workspaces_to_restore {
-                    let result = timeout(
-                        WORKSPACE_RESTORE_TIMEOUT,
-                        app.connect_workspace_internal(
-                            ConnectWorkspaceRequest {
-                                path: workspace.path.clone(),
-                            },
-                            Some(&workspace),
-                        ),
-                    )
-                    .await;
-
-                    if let Err(error) = match result {
-                        Ok(Ok(_)) => Ok(()),
-                        Ok(Err(error)) => Err(error.to_string()),
-                        Err(_) => Err("workspace restore timed out".to_string()),
-                    } {
-                        tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
-                        let _ = app
-                            .update_workspace_placeholder_status(
-                                &workspace.path,
-                                WorkspaceStatus::Disconnected,
-                                Some(error),
-                            )
-                            .await;
-                    }
-                }
-            });
-        }
-
         if let Some(remote) = persisted.remote {
             let should_migrate_secure_storage = remote.secure_storage_key.is_none()
                 || remote.local_secret_key_base64.is_some()
@@ -480,6 +451,42 @@ impl AppState {
             } else if should_migrate_secure_storage {
                 self.persist_local_state().await?;
             }
+        }
+
+        // Restore the remote bridge before reconnecting workspaces. Workspace
+        // reconnects can persist state; starting them first could race with
+        // remote restoration and overwrite a valid pairing with `remote: null`.
+        if !workspaces_to_restore.is_empty() {
+            let app = self.clone();
+            tokio::spawn(async move {
+                for workspace in workspaces_to_restore {
+                    let result = timeout(
+                        WORKSPACE_RESTORE_TIMEOUT,
+                        app.connect_workspace_internal(
+                            ConnectWorkspaceRequest {
+                                path: workspace.path.clone(),
+                            },
+                            Some(&workspace),
+                        ),
+                    )
+                    .await;
+
+                    if let Err(error) = match result {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => Err("workspace restore timed out".to_string()),
+                    } {
+                        tracing::warn!("failed to restore workspace {}: {error}", workspace.path);
+                        let _ = app
+                            .update_workspace_placeholder_status(
+                                &workspace.path,
+                                WorkspaceStatus::Disconnected,
+                                Some(error),
+                            )
+                            .await;
+                    }
+                }
+            });
         }
 
         Ok(())
@@ -1034,6 +1041,7 @@ impl AppState {
     }
 
     async fn persist_local_state(&self) -> Result<(), DaemonError> {
+        let _persistence_guard = self.inner.persistence.lock().await;
         let saved_workspaces = self.inner.saved_workspaces.lock().await.clone();
         let mut persisted_workspaces = HashMap::new();
         for workspace in saved_workspaces.into_values() {
@@ -1095,11 +1103,29 @@ impl AppState {
         drop(workspaces);
 
         let remote = self.inner.remote.lock().await;
+        let persisted_remote = persisted_remote_state(&remote)?;
+        drop(remote);
+
+        let (persisted_remote, remote_secret_write) = match persisted_remote {
+            Some((persisted_remote, secrets)) => {
+                let secure_storage_key =
+                    persisted_remote.secure_storage_key.clone().ok_or_else(|| {
+                        DaemonError::Process(
+                            "persisted remote state is missing its secure storage key".to_string(),
+                        )
+                    })?;
+                (Some(persisted_remote), Some((secure_storage_key, secrets)))
+            }
+            None => (None, None),
+        };
         let persisted = PersistedAppState {
             workspaces: persisted_workspaces,
-            remote: persisted_remote_state(&remote)?,
+            remote: persisted_remote,
         };
-        drop(remote);
+
+        if let Some((secure_storage_key, secrets)) = remote_secret_write {
+            save_remote_secrets_async(secure_storage_key, secrets).await?;
+        }
 
         persist_app_state(&self.inner.state_path, &persisted).await
     }

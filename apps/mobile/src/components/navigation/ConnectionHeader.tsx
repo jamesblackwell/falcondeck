@@ -50,7 +50,14 @@ export const ConnectionHeader = memo(function ConnectionHeader({
   const badgeState = connectionBadgeState(connectionStatus, isEncrypted, desktopOnline)
 
   return (
-    <Pressable style={styles.container} onPress={onPress} hitSlop={8}>
+    <Pressable
+      style={styles.container}
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Connection: ${badgeState.label}`}
+      accessibilityHint="Opens settings"
+      hitSlop={8}
+    >
       <Badge variant={badgeState.variant} dot>
         {badgeState.label}
       </Badge>

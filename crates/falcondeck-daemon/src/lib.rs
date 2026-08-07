@@ -85,6 +85,7 @@ pub struct EmbeddedDaemonHandle {
     /// Resolved local bind address for the embedded daemon.
     pub local_addr: SocketAddr,
     state: AppState,
+    restore_task: Option<JoinHandle<()>>,
     shutdown: Option<oneshot::Sender<()>>,
     join_handle: JoinHandle<Result<(), std::io::Error>>,
 }
@@ -97,6 +98,9 @@ impl EmbeddedDaemonHandle {
 
     /// Stops the daemon and waits for the server task to exit.
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
+        if let Some(restore_task) = self.restore_task.take() {
+            restore_task.abort();
+        }
         let _ = self.state.shutdown().await;
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -123,16 +127,23 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
                 })
         }),
     );
-    if let Err(error) = state.restore_local_state().await {
-        tracing::warn!("failed to restore daemon local state: {error}");
-    }
-    let router = api::router(state.clone());
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
     // The Claude PreToolUse hook posts back to this URL; record the actual
     // bound address since the configured port may be 0 (OS-assigned).
     state.set_local_base_url(format!("http://{local_addr}"));
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    // Binding the listener is the daemon's readiness boundary. Restore can
+    // touch OS keychains and other slow or unavailable services, so it must
+    // never delay the local API from coming online.
+    let restore_state = state.clone();
+    let restore_task = tokio::spawn(async move {
+        if let Err(error) = restore_state.restore_local_state().await {
+            tracing::warn!("failed to restore daemon local state: {error}");
+        }
+    });
+    let router = api::router(state.clone());
 
     let join_handle = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -145,6 +156,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     Ok(EmbeddedDaemonHandle {
         local_addr,
         state,
+        restore_task: Some(restore_task),
         shutdown: Some(shutdown_tx),
         join_handle,
     })

@@ -14,6 +14,7 @@ import {
 
 import { AttentionInbox } from './attention-inbox'
 import {
+  DeleteThreadDialog,
   RemoveWorkspaceDialog,
   RenameThreadDialog,
   ThreadContextMenu,
@@ -46,6 +47,8 @@ export type WorkspaceSidebarProps = {
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread?: (workspaceId: string) => void
   onArchiveThread?: ThreadItemArchiveHandler
+  /** Permanent, unlike archive: also removes a variant thread's checkout. */
+  onDeleteThread?: (workspaceId: string, threadId: string) => Promise<void> | void
   onRenameThread?: (workspaceId: string, threadId: string, title: string) => Promise<void> | void
   onTogglePinThread?: (workspaceId: string, threadId: string, pinned: boolean) => Promise<void> | void
   onMarkThreadRead?: (workspaceId: string, threadId: string) => Promise<void> | void
@@ -137,6 +140,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onSelectThread,
   onNewThread,
   onArchiveThread,
+  onDeleteThread,
   onRenameThread,
   onTogglePinThread,
   onMarkThreadRead,
@@ -167,6 +171,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [renameValue, setRenameValue] = useState('')
   const [renameError, setRenameError] = useState<string | null>(null)
   const [isRenamingThread, setIsRenamingThread] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<{
+    workspaceId: string
+    thread: ThreadSummary
+  } | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [isDeletingThread, setIsDeletingThread] = useState(false)
   const [workspaceContextMenu, setWorkspaceContextMenu] =
     useState<WorkspaceContextMenuState | null>(null)
   const [removeTarget, setRemoveTarget] = useState<{ workspaceId: string; path: string } | null>(
@@ -289,11 +299,48 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const handleOpenThreadContextMenu = useCallback(
     (args: ThreadContextMenuState) => {
-      if (!onArchiveThread && !onRenameThread && !onTogglePinThread && !onMarkThreadRead) return
+      if (
+        !onArchiveThread &&
+        !onDeleteThread &&
+        !onRenameThread &&
+        !onTogglePinThread &&
+        !onMarkThreadRead
+      ) {
+        return
+      }
       setThreadContextMenu(args)
     },
-    [onArchiveThread, onMarkThreadRead, onRenameThread, onTogglePinThread],
+    [onArchiveThread, onDeleteThread, onMarkThreadRead, onRenameThread, onTogglePinThread],
   )
+
+  const openDeleteDialog = useCallback(() => {
+    if (!threadContextMenu || !onDeleteThread) return
+    const { workspaceId, thread } = threadContextMenu
+    setThreadContextMenu(null)
+    setDeleteError(null)
+    setDeleteTarget({ workspaceId, thread })
+  }, [onDeleteThread, threadContextMenu])
+
+  const closeDeleteDialog = useCallback(() => {
+    if (isDeletingThread) return
+    setDeleteTarget(null)
+    setDeleteError(null)
+  }, [isDeletingThread])
+
+  const handleConfirmDeleteThread = useCallback(async () => {
+    if (!deleteTarget || !onDeleteThread) return
+
+    setIsDeletingThread(true)
+    setDeleteError(null)
+    try {
+      await onDeleteThread(deleteTarget.workspaceId, deleteTarget.thread.id)
+      setDeleteTarget(null)
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : 'Failed to delete thread')
+    } finally {
+      setIsDeletingThread(false)
+    }
+  }, [deleteTarget, onDeleteThread])
 
   const handleArchiveFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onArchiveThread) return
@@ -466,6 +513,21 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   }, [isRenamingThread, renameTarget, resetRenameDialog])
 
   useEffect(() => {
+    if (!deleteTarget) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || isDeletingThread) return
+      setDeleteTarget(null)
+      setDeleteError(null)
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [deleteTarget, isDeletingThread])
+
+  useEffect(() => {
     if (!removeTarget) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -585,13 +647,22 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         }
         canRename={Boolean(onRenameThread)}
         canArchive={Boolean(onArchiveThread)}
+        canDelete={Boolean(onDeleteThread)}
         canPin={Boolean(onTogglePinThread)}
         canMarkRead={Boolean(onMarkThreadRead)}
         onClose={closeThreadContextMenu}
         onRename={handleStartRenameFromContextMenu}
         onArchive={handleArchiveFromContextMenu}
+        onDelete={openDeleteDialog}
         onTogglePin={handleTogglePinFromContextMenu}
         onMarkRead={handleMarkReadFromContextMenu}
+      />
+      <DeleteThreadDialog
+        target={deleteTarget}
+        error={deleteError}
+        pending={isDeletingThread}
+        onClose={closeDeleteDialog}
+        onConfirm={handleConfirmDeleteThread}
       />
       <RenameThreadDialog
         target={renameTarget}

@@ -1,17 +1,27 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { View, Pressable, Modal } from 'react-native'
+import { View, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ChevronDown, Check } from 'lucide-react-native'
+import { ChevronDown } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import {
   formatModelLabel,
+  NO_AGENT_CAPABILITIES,
+  type AgentCapabilitySummary,
   type AgentProvider,
   type ModelSummary,
   type ProviderOption,
 } from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
+
+import {
+  SANDBOX_DEFAULT_VALUE,
+  permissionChipLabel,
+  permissionModeItems,
+  sandboxChipLabel,
+  sandboxModeItems,
+} from './composerModes'
 
 interface InputToolbarProps {
   models: ModelSummary[]
@@ -26,6 +36,12 @@ interface InputToolbarProps {
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
+  /** Drives which mode pickers appear; an agent with no modes shows none. */
+  capabilities?: AgentCapabilitySummary
+  selectedPermissionMode?: string | null
+  selectedSandboxMode?: string | null
+  onSelectPermissionMode?: (mode: string | null) => void
+  onSelectSandboxMode?: (mode: string | null) => void
 }
 
 function capitalize(s: string) {
@@ -37,9 +53,11 @@ const DEFAULT_PROVIDERS: ProviderOption[] = [
   { provider: 'claude', label: 'Claude' },
 ]
 
+const MODEL_DEFAULT_VALUE = '__default__'
+
 type SheetConfig = {
   title: string
-  items: readonly { value: string; label: string }[]
+  items: readonly OptionSheetItem[]
   selected: string | null
   onSelect: (value: string) => void
 } | null
@@ -56,8 +74,12 @@ export const InputToolbar = memo(function InputToolbar({
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
+  capabilities = NO_AGENT_CAPABILITIES,
+  selectedPermissionMode = null,
+  selectedSandboxMode = null,
+  onSelectPermissionMode,
+  onSelectSandboxMode,
 }: InputToolbarProps) {
-  const { theme } = useUnistyles()
   const [sheet, setSheet] = useState<SheetConfig>(null)
 
   useEffect(() => {
@@ -72,17 +94,15 @@ export const InputToolbar = memo(function InputToolbar({
   const openModelSheet = useCallback(() => {
     if (disabled) return
 
-    const items = [
-      { value: '__default__', label: 'Default' },
-      ...models.map((m) => ({ value: m.id, label: formatModelLabel(m.label) })),
-    ]
     setSheet({
       title: 'Model',
-      items,
-      selected: selectedModel ?? '__default__',
+      items: [
+        { value: MODEL_DEFAULT_VALUE, label: 'Default' },
+        ...models.map((m) => ({ value: m.id, label: formatModelLabel(m.label) })),
+      ],
+      selected: selectedModel ?? MODEL_DEFAULT_VALUE,
       onSelect: (id) => {
-        void Haptics.selectionAsync()
-        onSelectModel(id === '__default__' ? null : id)
+        onSelectModel(id === MODEL_DEFAULT_VALUE ? null : id)
         setSheet(null)
       },
     })
@@ -97,16 +117,50 @@ export const InputToolbar = memo(function InputToolbar({
     if (disabled) return
 
     setSheet({
-      title: 'Reasoning Effort',
+      title: 'Reasoning effort',
       items: effortItems,
       selected: selectedEffort,
       onSelect: (value) => {
-        void Haptics.selectionAsync()
         onSelectEffort(value)
         setSheet(null)
       },
     })
   }, [disabled, effortItems, selectedEffort, onSelectEffort])
+
+  const permissionModes = capabilities.permission_modes
+  const sandboxModes = capabilities.sandbox_modes
+  const showPermissionPicker = Boolean(onSelectPermissionMode) && permissionModes.length > 0
+  const showSandboxPicker = Boolean(onSelectSandboxMode) && sandboxModes.length > 0
+
+  const openPermissionSheet = useCallback(() => {
+    if (disabled || !onSelectPermissionMode) return
+
+    setSheet({
+      title: 'Permissions',
+      items: permissionModeItems(permissionModes),
+      // `default` is the daemon's own id for "no override", so it round-trips
+      // to null on the wire while still reading as a chosen option.
+      selected: selectedPermissionMode ?? (permissionModes.includes('default') ? 'default' : null),
+      onSelect: (value) => {
+        onSelectPermissionMode(value === 'default' ? null : value)
+        setSheet(null)
+      },
+    })
+  }, [disabled, onSelectPermissionMode, permissionModes, selectedPermissionMode])
+
+  const openSandboxSheet = useCallback(() => {
+    if (disabled || !onSelectSandboxMode) return
+
+    setSheet({
+      title: 'Sandbox',
+      items: sandboxModeItems(sandboxModes),
+      selected: selectedSandboxMode ?? SANDBOX_DEFAULT_VALUE,
+      onSelect: (value) => {
+        onSelectSandboxMode(value === SANDBOX_DEFAULT_VALUE ? null : value)
+        setSheet(null)
+      },
+    })
+  }, [disabled, onSelectSandboxMode, sandboxModes, selectedSandboxMode])
 
   const currentEffortLabel = capitalize(selectedEffort ?? 'medium')
 
@@ -120,7 +174,8 @@ export const InputToolbar = memo(function InputToolbar({
               return (
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={`${p.label} agent`}
+                  accessibilityState={{ selected: active, disabled }}
                   key={p.provider}
                   style={[styles.providerSegment, active && styles.providerSegmentActive]}
                   disabled={disabled}
@@ -145,70 +200,84 @@ export const InputToolbar = memo(function InputToolbar({
           </View>
         ) : null}
 
-        {models.length > 0 ? (
-          <Pressable
-            style={[styles.chip, disabled && styles.controlDisabled]}
-            accessibilityRole="button"
-            accessibilityState={{ disabled: Boolean(disabled) }}
-            hitSlop={12}
-            onPress={openModelSheet}
+        {/* Order matches the desktop composer: what the agent may do, then
+            where it may do it, then which model and how hard it thinks. */}
+        {showPermissionPicker ? (
+          <Chip
+            label={permissionChipLabel(selectedPermissionMode, permissionModes)}
+            accessibilityLabel="Permission mode"
             disabled={disabled}
-          >
-            <Text variant="caption" color="secondary" size="2xs" numberOfLines={1}>
-              {modelDisplayLabel}
-            </Text>
-            <ChevronDown size={10} color={theme.colors.fg.muted} />
-          </Pressable>
+            onPress={openPermissionSheet}
+          />
         ) : null}
 
-        <Pressable
-          style={[styles.chip, disabled && styles.controlDisabled]}
-          accessibilityRole="button"
-          accessibilityState={{ disabled: Boolean(disabled) }}
-          hitSlop={12}
-          onPress={openEffortSheet}
-          disabled={disabled}
-        >
-          <Text variant="caption" color="secondary" size="2xs">
-            {currentEffortLabel}
-          </Text>
-          <ChevronDown size={10} color={theme.colors.fg.muted} />
-        </Pressable>
+        {showSandboxPicker ? (
+          <Chip
+            label={sandboxChipLabel(selectedSandboxMode)}
+            accessibilityLabel="Sandbox mode"
+            disabled={disabled}
+            onPress={openSandboxSheet}
+          />
+        ) : null}
 
+        {models.length > 0 ? (
+          <Chip
+            label={modelDisplayLabel}
+            accessibilityLabel="Model"
+            disabled={disabled}
+            onPress={openModelSheet}
+          />
+        ) : null}
+
+        <Chip
+          label={currentEffortLabel}
+          accessibilityLabel="Reasoning effort"
+          disabled={disabled}
+          onPress={openEffortSheet}
+        />
       </View>
 
       {sheet ? (
-        <Modal transparent animationType="slide" onRequestClose={() => setSheet(null)}>
-          <Pressable
-            style={styles.backdrop}
-            onPress={() => setSheet(null)}
-            accessibilityRole="button"
-            accessibilityLabel="Close"
-          />
-          <View style={styles.sheet}>
-            <View style={styles.sheetHandle} />
-            <Text variant="label" color="primary" weight="semibold" style={styles.sheetTitle}>
-              {sheet.title}
-            </Text>
-            {sheet.items.map((item) => {
-              const isSelected = item.value === sheet.selected
-              return (
-                <Pressable
-                  key={item.value}
-                  style={[styles.sheetItem, isSelected && styles.sheetItemSelected]}
-                  onPress={() => sheet.onSelect(item.value)}
-                >
-                  <Text color={isSelected ? 'primary' : 'secondary'} size="sm">
-                    {item.label}
-                  </Text>
-                  {isSelected ? <Check size={16} color={theme.colors.accent.default} /> : null}
-                </Pressable>
-              )
-            })}
-          </View>
-        </Modal>
+        <OptionSheet
+          title={sheet.title}
+          items={sheet.items}
+          selected={sheet.selected}
+          onSelect={sheet.onSelect}
+          onClose={() => setSheet(null)}
+        />
       ) : null}
     </>
+  )
+})
+
+const Chip = memo(function Chip({
+  label,
+  accessibilityLabel,
+  disabled,
+  onPress,
+}: {
+  label: string
+  accessibilityLabel: string
+  disabled: boolean
+  onPress: () => void
+}) {
+  const { theme } = useUnistyles()
+
+  return (
+    <Pressable
+      style={[styles.chip, disabled && styles.controlDisabled]}
+      accessibilityRole="button"
+      accessibilityLabel={`${accessibilityLabel}: ${label}`}
+      accessibilityState={{ disabled }}
+      hitSlop={12}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      <Text variant="caption" color="secondary" size="2xs" numberOfLines={1}>
+        {label}
+      </Text>
+      <ChevronDown size={10} color={theme.colors.fg.muted} />
+    </Pressable>
   )
 })
 
@@ -244,43 +313,10 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[1],
     backgroundColor: theme.colors.surface[3],
     borderRadius: theme.radius.full,
+    // Chips shrink so a long mode label never pushes the send button off-row.
+    flexShrink: 1,
   },
   controlDisabled: {
     opacity: 0.55,
-  },
-  backdrop: {
-    flex: 1,
-    backgroundColor: theme.colors.overlay,
-  },
-  sheet: {
-    backgroundColor: theme.colors.surface[1],
-    borderTopLeftRadius: theme.radius['2xl'],
-    borderTopRightRadius: theme.radius['2xl'],
-    paddingBottom: theme.spacing[8],
-    paddingHorizontal: theme.spacing[4],
-  },
-  sheetHandle: {
-    width: theme.spacing[8] + theme.spacing[1],
-    height: theme.spacing[1],
-    borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.border.emphasis,
-    alignSelf: 'center',
-    marginTop: theme.spacing[2],
-    marginBottom: theme.spacing[3],
-  },
-  sheetTitle: {
-    paddingHorizontal: theme.spacing[2],
-    paddingBottom: theme.spacing[2],
-  },
-  sheetItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[2],
-    borderRadius: theme.radius.lg,
-  },
-  sheetItemSelected: {
-    backgroundColor: theme.colors.surface[2],
   },
 }))

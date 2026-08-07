@@ -47,17 +47,21 @@ const BUILT_IN_AGENTS = [
 export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
   const [overview, setOverview] = useState<ProvidersOverview | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [isLoading, setIsLoading] = useState(true)
   const [isAdding, setIsAdding] = useState(false)
 
   const load = useCallback(async () => {
     if (!baseUrl) return
     setLoadError(null)
+    setIsLoading(true)
     try {
       const response = await fetch(`${baseUrl}/api/providers`)
       if (!response.ok) throw new Error(`daemon returned ${response.status}`)
       setOverview((await response.json()) as ProvidersOverview)
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setIsLoading(false)
     }
   }, [baseUrl])
 
@@ -171,6 +175,13 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
                 Retry
               </Button>
             </div>
+          ) : isLoading && !overview ? (
+            // "No custom agents yet" is a claim about the daemon's answer, so
+            // it must not be made before the answer arrives.
+            <div className="flex items-center justify-center gap-2 px-2 py-10 text-[length:var(--fd-text-sm)] text-fg-muted">
+              <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin text-accent" />
+              Loading agents…
+            </div>
           ) : !overview || overview.resolved.length === 0 ? (
             !isAdding ? (
               <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
@@ -260,17 +271,20 @@ function AddAgentForm({
     <div className="space-y-3 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-4">
       <div className="grid grid-cols-2 gap-3">
         <Input
+          aria-label="Agent id"
           value={id}
           onChange={(event) => setId(event.target.value)}
           placeholder="Id (e.g. opencode)"
         />
         <Input
+          aria-label="Agent label"
           value={label}
           onChange={(event) => setLabel(event.target.value)}
           placeholder="Label (e.g. OpenCode)"
         />
       </div>
       <Input
+        aria-label="ACP command"
         value={command}
         onChange={(event) => setCommand(event.target.value)}
         placeholder="ACP command (e.g. opencode acp)"

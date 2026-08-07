@@ -3,18 +3,20 @@ import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable,
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
-import { ChevronLeft } from 'lucide-react-native'
+import { ChevronLeft, Target } from 'lucide-react-native'
 import { DrawerActions } from '@react-navigation/native'
 import { useNavigation, useRouter } from 'expo-router'
 import {
   defaultProvider,
   encryptJson,
   providerForThread,
+  workspaceAgentCapabilities,
   workspaceModels,
   workspaceProviderOptions,
   type AgentProvider,
   type ConversationPresentation,
   type ConversationRenderBlock,
+  type QueuedTurnSummary,
 } from '@falcondeck/client-core'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -29,15 +31,20 @@ import {
 } from '@/store'
 import { useSessionActions } from '@/hooks/useSessionActions'
 import { useInterruptTurn } from '@/hooks/useInterruptTurn'
+import { useThreadActions } from '@/hooks/useThreadActions'
+import { useKeyboardVisible } from '@/hooks/useKeyboardVisible'
 import { useConversationPresentation } from '@/hooks/useRenderBlocks'
 import { useScrollToBottom } from '@/hooks/useScrollToBottom'
-import { Button, Text, EmptyState } from '@/components/ui'
+import { Button, Text, EmptyState, ErrorBanner } from '@/components/ui'
 import {
   ChatInput,
   ApprovalBanner,
   LiveActivityLane,
   MessageRouter,
+  GoalBanner,
+  GoalSheet,
   JumpToBottomFab,
+  QueuedTurns,
   ThinkingIndicator,
 } from '@/components/chat'
 import { ConnectionHeader } from '@/components/navigation'
@@ -48,6 +55,7 @@ const renderBlock = ({ item }: { item: ConversationRenderBlock }) => (
   <MessageRouter item={item} />
 )
 const keyExtractor = (block: ConversationRenderBlock) => block.id
+const EMPTY_QUEUED_TURNS: QueuedTurnSummary[] = []
 const getItemType = (block: ConversationRenderBlock) =>
   block.kind === 'tool_summary' || block.kind === 'work_session' ? block.kind : block.item.kind
 
@@ -67,23 +75,36 @@ export default function HomeScreen() {
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
   const snapshot = useSessionStore((s) => s.snapshot)
-  const { connectionStatus, isEncrypted, machinePresence, relayUrl, sessionId } = useRelayStore(
-    useShallow((s) => ({
-      connectionStatus: s.connectionStatus,
-      isEncrypted: s.isEncrypted,
-      machinePresence: s.machinePresence,
-      relayUrl: s.relayUrl,
-      sessionId: s.sessionId,
-    })),
-  )
-  const { attachments, draft, isSubmitting, selectedEffort, selectedModel, selectedProvider } = useUIStore(
+  const { connectionStatus, error, isEncrypted, machinePresence, relayUrl, sessionId } =
+    useRelayStore(
+      useShallow((s) => ({
+        connectionStatus: s.connectionStatus,
+        error: s.error,
+        isEncrypted: s.isEncrypted,
+        machinePresence: s.machinePresence,
+        relayUrl: s.relayUrl,
+        sessionId: s.sessionId,
+      })),
+    )
+  const {
+    attachments,
+    draft,
+    isSubmitting,
+    selectedEffort,
+    selectedModel,
+    selectedPermissionMode,
+    selectedProvider,
+    selectedSandboxMode,
+  } = useUIStore(
     useShallow((s) => ({
       attachments: s.attachments,
       draft: s.draft,
       isSubmitting: s.isSubmitting,
       selectedEffort: s.selectedEffort,
       selectedModel: s.selectedModel,
+      selectedPermissionMode: s.selectedPermissionMode,
       selectedProvider: s.selectedProvider,
+      selectedSandboxMode: s.selectedSandboxMode,
     })),
   )
   const {
@@ -91,17 +112,23 @@ export default function HomeScreen() {
     setDraft,
     setSelectedModel,
     setSelectedEffort,
+    setSelectedPermissionMode,
     setSelectedProvider,
+    setSelectedSandboxMode,
     removeAttachment,
   } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
   const interruptTurn = useInterruptTurn()
+  const { clearThreadGoal, removeQueuedTurn, setThreadGoal, setThreadMode, steerQueuedTurn } =
+    useThreadActions()
   const { listRef, showJumpButton, onContentSizeChange, onScroll, pauseAutoScrollOnce, resetScrollState, scrollToBottom } =
     useScrollToBottom<ConversationRenderBlock>()
+  const isKeyboardVisible = useKeyboardVisible()
   const [appState, setAppState] = useState(AppState.currentState)
   const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<string | null>(null)
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
+  const [isGoalSheetOpen, setIsGoalSheetOpen] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
   const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSentReadSeqRef = useRef<{ threadId: string; readSeq: number } | null>(null)
@@ -112,6 +139,17 @@ export default function HomeScreen() {
     : (selectedProvider ?? defaultProvider(workspace))
 
   const providerOptions = useMemo(() => workspaceProviderOptions(workspace), [workspace])
+
+  // Which mode pickers the composer shows, and whether a queued message can be
+  // steered — both are per-provider, so they change with the active agent.
+  const capabilities = useMemo(
+    () => workspaceAgentCapabilities(workspace, activeProvider),
+    [activeProvider, workspace],
+  )
+  const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS
+  // A goal belongs to a thread, so there is nothing to set one on until one
+  // exists — same gate as desktop.
+  const showGoalControl = Boolean(selectedThread) && capabilities.supports_goals
 
   // Filter models by active provider (matches desktop behavior)
   const models = useMemo(
@@ -144,12 +182,18 @@ export default function HomeScreen() {
       setSelectedProvider(null)
       setSelectedModel(null)
       setSelectedEffort('medium')
+      setSelectedPermissionMode(null)
+      setSelectedSandboxMode(null)
       return
     }
 
     const seedKey = `${workspace.id}:${selectedThread?.id ?? 'workspace'}`
     if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
+
+    // A thread owns its modes; a not-yet-created one starts with no override.
+    setSelectedPermissionMode(selectedThread?.agent.permission_mode ?? null)
+    setSelectedSandboxMode(selectedThread?.agent.sandbox_mode ?? null)
 
     const nextProvider = providerForThread(selectedThread, workspace)
     setSelectedProvider(nextProvider)
@@ -189,7 +233,9 @@ export default function HomeScreen() {
     selectedThread,
     setSelectedEffort,
     setSelectedModel,
+    setSelectedPermissionMode,
     setSelectedProvider,
+    setSelectedSandboxMode,
     workspace,
   ])
 
@@ -212,6 +258,73 @@ export default function HomeScreen() {
     },
     [selectedThread, setSelectedProvider, setSelectedModel, setSelectedEffort],
   )
+
+  // Local state moves first so the chip responds to the tap; with a thread
+  // selected the choice is also persisted, matching desktop. Before the thread
+  // exists there is nothing to persist to — submitTurn carries it instead.
+  const handlePermissionModeChange = useCallback(
+    (mode: string | null) => {
+      setSelectedPermissionMode(mode)
+      if (!selectedWorkspaceId || !selectedThreadId) return
+      void setThreadMode(selectedWorkspaceId, selectedThreadId, 'permission_mode', mode).catch(
+        () => {},
+      )
+    },
+    [selectedThreadId, selectedWorkspaceId, setSelectedPermissionMode, setThreadMode],
+  )
+
+  const handleSandboxModeChange = useCallback(
+    (mode: string | null) => {
+      setSelectedSandboxMode(mode)
+      if (!selectedWorkspaceId || !selectedThreadId) return
+      void setThreadMode(selectedWorkspaceId, selectedThreadId, 'sandbox_mode', mode).catch(() => {})
+    },
+    [selectedThreadId, selectedWorkspaceId, setSelectedSandboxMode, setThreadMode],
+  )
+
+  const handleRemoveQueuedTurn = useCallback(
+    (queuedId: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
+      return removeQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId)
+    },
+    [removeQueuedTurn, selectedThreadId, selectedWorkspaceId],
+  )
+
+  const handleSteerQueuedTurn = useCallback(
+    (queuedId: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
+      return steerQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId)
+    },
+    [selectedThreadId, selectedWorkspaceId, steerQueuedTurn],
+  )
+
+  const handleSetGoal = useCallback(
+    (objective: string, tokenBudget: number | null) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
+      return setThreadGoal(selectedWorkspaceId, selectedThreadId, {
+        objective,
+        token_budget: tokenBudget,
+      })
+    },
+    [selectedThreadId, selectedWorkspaceId, setThreadGoal],
+  )
+
+  const handleClearGoal = useCallback(() => {
+    if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
+    return clearThreadGoal(selectedWorkspaceId, selectedThreadId)
+  }, [clearThreadGoal, selectedThreadId, selectedWorkspaceId])
+
+  const handleSetGoalStatus = useCallback(
+    (status: 'active' | 'paused') => {
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
+      return setThreadGoal(selectedWorkspaceId, selectedThreadId, { status })
+    },
+    [selectedThreadId, selectedWorkspaceId, setThreadGoal],
+  )
+
+  const handleDismissError = useCallback(() => {
+    useRelayStore.getState()._setError(null)
+  }, [])
 
   const handleOpenDrawer = useCallback(() => {
     navigation.dispatch(DrawerActions.openDrawer())
@@ -392,19 +505,44 @@ export default function HomeScreen() {
       keyboardVerticalOffset={0}
     >
       <View style={styles.header}>
-        <Pressable style={styles.headerLeft} onPress={handleOpenDrawer}>
+        <Pressable
+          style={styles.headerLeft}
+          onPress={handleOpenDrawer}
+          accessibilityRole="button"
+          accessibilityLabel={`Project: ${getWorkspaceTitle(workspace?.path)}`}
+          accessibilityHint="Opens the project and thread list"
+        >
           <ChevronLeft size={18} color={theme.colors.fg.muted} />
           <Text variant="label" color="primary" weight="semibold" numberOfLines={1} style={styles.headerTitle}>
             {getWorkspaceTitle(workspace?.path)}
           </Text>
         </Pressable>
-        <ConnectionHeader
-          connectionStatus={connectionStatus}
-          isEncrypted={isEncrypted}
-          machinePresence={machinePresence}
-          onPress={handleOpenSettings}
-        />
+        <View style={styles.headerRight}>
+          {showGoalControl ? (
+            <Pressable
+              onPress={() => setIsGoalSheetOpen(true)}
+              accessibilityRole="button"
+              accessibilityLabel={
+                selectedThread?.goal ? `Goal: ${selectedThread.goal.objective}` : 'Set a goal'
+              }
+              hitSlop={(theme.minTouchTarget - theme.iconSize.md) / 2}
+            >
+              <Target
+                size={theme.iconSize.md}
+                color={selectedThread?.goal ? theme.colors.accent.default : theme.colors.fg.muted}
+              />
+            </Pressable>
+          ) : null}
+          <ConnectionHeader
+            connectionStatus={connectionStatus}
+            isEncrypted={isEncrypted}
+            machinePresence={machinePresence}
+            onPress={handleOpenSettings}
+          />
+        </View>
       </View>
+
+      <ErrorBanner message={error} onDismiss={handleDismissError} />
 
       {approvals.map((a) => (
         <ApprovalBanner
@@ -480,7 +618,18 @@ export default function HomeScreen() {
 
       <LiveActivityLane groups={liveActivityGroups} />
 
-      <View style={{ paddingBottom: insets.bottom }}>
+      <GoalBanner goal={selectedThread?.goal ?? null} onPress={() => setIsGoalSheetOpen(true)} />
+
+      <QueuedTurns
+        queuedTurns={queuedTurns}
+        canSteer={capabilities.supports_steering}
+        onRemove={handleRemoveQueuedTurn}
+        onSteer={handleSteerQueuedTurn}
+      />
+
+      {/* The keyboard already covers the home indicator, so keeping the inset
+          while it is up would float the composer above the keyboard. */}
+      <View style={{ paddingBottom: isKeyboardVisible ? 0 : insets.bottom }}>
         <ChatInput
           value={draft}
           onChangeText={setDraft}
@@ -507,8 +656,24 @@ export default function HomeScreen() {
           onSelectProvider={handleProviderChange}
           isRunning={isThreadRunning}
           isStopping={isStopping}
+          capabilities={capabilities}
+          selectedPermissionMode={selectedPermissionMode}
+          selectedSandboxMode={selectedSandboxMode}
+          onSelectPermissionMode={handlePermissionModeChange}
+          onSelectSandboxMode={handleSandboxModeChange}
         />
       </View>
+
+      {isGoalSheetOpen && showGoalControl ? (
+        <GoalSheet
+          goal={selectedThread?.goal ?? null}
+          provider={activeProvider}
+          onSetGoal={handleSetGoal}
+          onClearGoal={handleClearGoal}
+          onSetGoalStatus={handleSetGoalStatus}
+          onClose={() => setIsGoalSheetOpen(false)}
+        />
+      ) : null}
     </KeyboardAvoidingView>
   )
 }
@@ -536,6 +701,11 @@ const styles = StyleSheet.create((theme) => ({
   },
   headerTitle: {
     flex: 1,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[3],
   },
   listContainer: {
     flex: 1,

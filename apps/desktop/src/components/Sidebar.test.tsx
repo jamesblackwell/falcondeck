@@ -63,16 +63,20 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
   }
 }
 
-function renderSidebar(overrides: Partial<ComponentProps<typeof DesktopSidebar>> = {}) {
+function renderSidebar(
+  overrides: Partial<ComponentProps<typeof DesktopSidebar>> = {},
+  threadOverrides: Partial<ThreadSummary> = {},
+) {
   const groups: ProjectGroup[] = [
     {
       workspace: workspace(),
-      threads: [thread()],
+      threads: [thread(threadOverrides)],
     },
   ]
 
   const onRenameThread = vi.fn().mockResolvedValue(undefined)
   const onArchiveThread = vi.fn().mockResolvedValue(undefined)
+  const onDeleteThread = vi.fn().mockResolvedValue(undefined)
   const onRemoveWorkspace = vi.fn().mockResolvedValue(undefined)
 
   render(
@@ -84,12 +88,13 @@ function renderSidebar(overrides: Partial<ComponentProps<typeof DesktopSidebar>>
       onSelectThread={() => {}}
       onRenameThread={onRenameThread}
       onArchiveThread={onArchiveThread}
+      onDeleteThread={onDeleteThread}
       onRemoveWorkspace={onRemoveWorkspace}
       {...overrides}
     />,
   )
 
-  return { onRenameThread, onArchiveThread, onRemoveWorkspace }
+  return { onRenameThread, onArchiveThread, onDeleteThread, onRemoveWorkspace }
 }
 
 describe('DesktopSidebar', () => {
@@ -119,6 +124,52 @@ describe('DesktopSidebar', () => {
     })
   })
 
+  it('deletes a thread from the right-click menu after confirmation', async () => {
+    const { onDeleteThread } = renderSidebar()
+
+    fireEvent.contextMenu(screen.getByText('Main thread'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('Archiving keeps it out of the way')
+    expect(onDeleteThread).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
+
+    await waitFor(() => {
+      expect(onDeleteThread).toHaveBeenCalledWith('workspace-1', 'thread-1')
+    })
+  })
+
+  it('warns that deleting an isolated thread takes its checkout with it', async () => {
+    renderSidebar(
+      {},
+      {
+        variant: {
+          slug: 'fix-login',
+          path: '/Users/james/.falcondeck/worktrees/fix-login',
+          branch: 'fd/fix-login',
+          kind: 'worktree',
+        },
+      },
+    )
+
+    fireEvent.contextMenu(screen.getByText('Main thread'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('deletes its isolated worktree')
+    expect(dialog).toHaveTextContent('/Users/james/.falcondeck/worktrees/fix-login')
+  })
+
+  it('leaves the delete item out when deletion is unavailable', () => {
+    renderSidebar({ onDeleteThread: undefined })
+
+    fireEvent.contextMenu(screen.getByText('Main thread'))
+
+    expect(screen.queryByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument()
+  })
+
   it('removes a project from the right-click menu after confirmation', async () => {
     const { onRemoveWorkspace } = renderSidebar()
 
@@ -134,6 +185,41 @@ describe('DesktopSidebar', () => {
     await waitFor(() => {
       expect(onRemoveWorkspace).toHaveBeenCalledWith('workspace-1')
     })
+  })
+
+  it('focuses the context menu and moves through it with the arrow keys', async () => {
+    renderSidebar()
+
+    fireEvent.contextMenu(screen.getByText('Main thread'))
+    const menu = await screen.findByRole('menu')
+    const items = screen.getAllByRole('menuitem')
+
+    // The menu opens from a right-click, so nothing moves focus into it
+    // unless the menu does it itself.
+    expect(items[0]).toHaveFocus()
+
+    fireEvent.keyDown(menu, { key: 'ArrowDown' })
+    expect(items[1]).toHaveFocus()
+
+    fireEvent.keyDown(menu, { key: 'ArrowUp' })
+    expect(items[0]).toHaveFocus()
+
+    // Wraps, so ArrowUp from the first item lands on the last.
+    fireEvent.keyDown(menu, { key: 'ArrowUp' })
+    expect(items[items.length - 1]).toHaveFocus()
+
+    fireEvent.keyDown(menu, { key: 'Home' })
+    expect(items[0]).toHaveFocus()
+  })
+
+  it('moves focus into the delete dialog rather than leaving it on the body', async () => {
+    renderSidebar()
+
+    fireEvent.contextMenu(screen.getByText('Main thread'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
+
+    await screen.findByRole('dialog')
+    expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
   })
 
   it('leaves the project menu out when removal is unavailable', () => {

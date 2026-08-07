@@ -63,12 +63,14 @@ import {
 import {
   CommandPalette,
   Conversation,
+  GoalControl,
   InteractiveRequestBar,
   PromptInput,
+  QueuedTurns,
   SessionHeader,
   WorkspaceSidebar,
 } from '@falcondeck/chat-ui'
-import { Badge, Button } from '@falcondeck/ui'
+import { Badge, Button, ToastProvider, useToast } from '@falcondeck/ui'
 
 import { LoaderCircle, PanelLeft, Settings, X } from 'lucide-react'
 
@@ -79,6 +81,10 @@ import {
   applyDaemonEventsToSnapshot,
   applyDaemonEventsToThreadDetail,
   applyDaemonEventsToThreadItems,
+  AwaitedActionTimeoutError,
+  AWAITED_ACTION_TIMEOUT_MS,
+  canPostNotifications,
+  clearPairingParamsFromUrl,
   clearPendingActionIds,
   CLIENT_KEYPAIR_STORAGE_KEY,
   collectConversationItemUpdates,
@@ -88,19 +94,27 @@ import {
   getDeviceLabel,
   isAbortError,
   isInvalidSavedSessionError,
+  loadNotificationPreference,
   loadOrCreateClientKeyPair,
   loadPendingActionIds,
   loadPersistedRemoteSession,
+  loadPersistedSelection,
   markInteractiveRequestResolved,
   maskIdentifier,
   parseDaemonEvent,
+  persistNotificationPreference,
   persistPendingActionIds,
   persistRemoteSession,
+  persistSelection,
+  postThreadNotification,
   reasoningOptions,
   relayHostLabel,
+  resolveRestoredSelection,
+  scheduleVisibilityAwareFlush,
   sendRelayMessage,
   shouldDiscardPendingAction,
   waitForPollInterval,
+  type NotificationPreference,
 } from './lib/remoteAppUtils'
 
 const DEFAULT_RELAY_URL = DEFAULT_REMOTE_RELAY_URL
@@ -115,6 +129,15 @@ const MAX_PENDING_SNAPSHOT_EVENTS = 1_000
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
 
 export default function App() {
+  return (
+    <ToastProvider>
+      <RemoteApp />
+    </ToastProvider>
+  )
+}
+
+function RemoteApp() {
+  const { toast } = useToast()
   const params = new URLSearchParams(window.location.search)
   const persistedSession = shouldReusePersistedRemoteSession(params, loadPersistedRemoteSession())
   const [relayUrl, setRelayUrl] = useState(
@@ -146,8 +169,15 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
+  const [isClaimingPairing, setIsClaimingPairing] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
   const [showPreferences, setShowPreferences] = useState(false)
+  const [notificationPreference, setNotificationPreference] = useState<NotificationPreference>(
+    () => loadNotificationPreference(),
+  )
+  // Distinguishes the very first connect from a retry after a drop so the
+  // offline banner can stay put across the whole backoff cycle.
+  const [hasConnectedOnce, setHasConnectedOnce] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
   const notifiedAttentionRef = useRef(new Map<string, string>())
@@ -172,8 +202,16 @@ export default function App() {
   const pendingSessionPersistRef = useRef<Partial<PersistedRemoteSession> | null>(null)
   const sessionPersistTimerRef = useRef<number | null>(null)
   const pendingRelayUpdatesRef = useRef<RelayUpdate[]>([])
-  const relayFlushFrameRef = useRef<number | null>(null)
+  // Cancels whichever scheduling mechanism the pending flush was booked on
+  // (rAF when visible, a timer when the tab is hidden).
+  const cancelRelayFlushRef = useRef<(() => void) | null>(null)
   const relayFlushInProgressRef = useRef(false)
+  // The relay socket closes over the scheduler from the render that opened
+  // it; routing through a ref keeps a long-lived socket calling the current
+  // flush rather than one pinned to stale state.
+  const flushRelayUpdatesRef = useRef<() => void>(() => {})
+  const restoredSelectionRef = useRef(false)
+  const desktopOnlineRef = useRef(false)
   const pendingActionPollsRef = useRef(new Set<AbortController>())
   const pendingRpc = useRef(
     new Map<string, { resolve: (value: unknown) => void; reject: (error: Error) => void; timeout: number }>(),
@@ -193,8 +231,9 @@ export default function App() {
         error,
         hasSessionKey,
         isConnected,
+        isReconnecting: hasConnectedOnce,
       }),
-    [connectionStatus, desktopOnline, error, hasSessionKey, isConnected],
+    [connectionStatus, desktopOnline, error, hasConnectedOnce, hasSessionKey, isConnected],
   )
   const connectionDebugRows = useMemo(
     () => [
@@ -218,6 +257,11 @@ export default function App() {
     pendingActionPollsRef.current.clear()
   }, [])
 
+  const cancelRelayFlush = useCallback(() => {
+    cancelRelayFlushRef.current?.()
+    cancelRelayFlushRef.current = null
+  }, [])
+
   const resetSavedRemoteConnection = useCallback(() => {
     suppressReconnectRef.current = true
     abortPendingActionPolls()
@@ -229,10 +273,7 @@ export default function App() {
       window.clearTimeout(sessionPersistTimerRef.current)
       sessionPersistTimerRef.current = null
     }
-    if (relayFlushFrameRef.current !== null) {
-      window.cancelAnimationFrame(relayFlushFrameRef.current)
-      relayFlushFrameRef.current = null
-    }
+    cancelRelayFlush()
     for (const pending of pendingRpc.current.values()) {
       window.clearTimeout(pending.timeout)
       pending.reject(new Error('Remote connection was reset'))
@@ -253,6 +294,8 @@ export default function App() {
     pendingRelayUpdatesRef.current = []
     lastReceivedSeqRef.current = 0
     persistRemoteSession(null)
+    persistSelection(null)
+    restoredSelectionRef.current = false
     clearPendingActionIds()
     window.localStorage.removeItem(CLIENT_KEYPAIR_STORAGE_KEY)
     setPairingId(null)
@@ -267,7 +310,7 @@ export default function App() {
     setSelectedWorkspaceId(null)
     setSelectedThreadId(null)
     setError(null)
-  }, [abortPendingActionPolls])
+  }, [abortPendingActionPolls, cancelRelayFlush])
 
   const persistCurrentSession = useCallback(
     (overrides?: Partial<PersistedRemoteSession>) => {
@@ -343,10 +386,7 @@ export default function App() {
       evictedWhileParkedRef.current = false
       pendingTruncationNextSeqRef.current = null
       pendingRelayUpdatesRef.current = []
-      if (relayFlushFrameRef.current !== null) {
-        window.cancelAnimationFrame(relayFlushFrameRef.current)
-        relayFlushFrameRef.current = null
-      }
+      cancelRelayFlush()
       schedulePersistCurrentSession(
         {
           lastReceivedSeq: lastReceivedSeqRef.current,
@@ -356,7 +396,7 @@ export default function App() {
       setError(message)
       socketRef.current?.close()
     },
-    [schedulePersistCurrentSession],
+    [cancelRelayFlush, schedulePersistCurrentSession],
   )
 
   useEffect(() => {
@@ -431,11 +471,9 @@ export default function App() {
       if (sessionPersistTimerRef.current !== null) {
         window.clearTimeout(sessionPersistTimerRef.current)
       }
-      if (relayFlushFrameRef.current !== null) {
-        window.cancelAnimationFrame(relayFlushFrameRef.current)
-      }
+      cancelRelayFlush()
     }
-  }, [abortPendingActionPolls])
+  }, [abortPendingActionPolls, cancelRelayFlush])
 
   useEffect(() => {
     return () => {
@@ -470,6 +508,21 @@ export default function App() {
   }, [flushPersistedSession])
 
   useEffect(() => {
+    // A truncated relay history drops the snapshot and refetches it. Holding
+    // the selection through that gap keeps the user on the thread they were
+    // reading instead of bouncing them to the daemon's default.
+    if (!snapshot) return
+
+    if (!restoredSelectionRef.current) {
+      restoredSelectionRef.current = true
+      const restored = resolveRestoredSelection(snapshot, loadPersistedSelection())
+      if (restored) {
+        setSelectedWorkspaceId(restored.workspaceId)
+        setSelectedThreadId(restored.threadId)
+        return
+      }
+    }
+
     const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId, {
       preserveEmptyThreadSelection: true,
     })
@@ -480,6 +533,17 @@ export default function App() {
       setSelectedThreadId(nextSelection.threadId)
     }
   }, [snapshot, selectedThreadId, selectedWorkspaceId])
+
+  // Survives a browser reload; the daemon has no idea which thread this
+  // particular browser was looking at.
+  useEffect(() => {
+    if (!selectedWorkspaceId) return
+    persistSelection({ workspaceId: selectedWorkspaceId, threadId: selectedThreadId })
+  }, [selectedThreadId, selectedWorkspaceId])
+
+  useEffect(() => {
+    desktopOnlineRef.current = desktopOnline
+  }, [desktopOnline])
 
   const relayWsUrl = useMemo(() => {
     const trimmed = relayUrl.trim().replace(/\/$/, '')
@@ -567,10 +631,7 @@ export default function App() {
       evictedWhileParkedRef.current = false
       pendingTruncationNextSeqRef.current = null
       pendingRelayUpdatesRef.current = []
-      if (relayFlushFrameRef.current !== null) {
-        window.cancelAnimationFrame(relayFlushFrameRef.current)
-        relayFlushFrameRef.current = null
-      }
+      cancelRelayFlush()
       if (sessionId && clientToken) {
         const base = Math.min(1000 * 2 ** reconnectAttemptRef.current, 10_000)
         reconnectAttemptRef.current += 1
@@ -623,6 +684,7 @@ export default function App() {
             reconnectAttemptRef.current = 0
           }, RELAY_BACKOFF_RESET_MS)
           setConnectionStatus('connected')
+          setHasConnectedOnce(true)
           sendRelayMessage(openSocket, { type: 'sync', after_seq: lastReceivedSeqRef.current })
         }
 
@@ -659,11 +721,11 @@ export default function App() {
                 setThreadItems({})
               }
               pendingRelayUpdatesRef.current.push(...payload.updates)
-              scheduleRelayFlush()
+              flushRelayUpdatesRef.current()
               break
             case 'update':
               pendingRelayUpdatesRef.current.push(payload.update)
-              scheduleRelayFlush()
+              flushRelayUpdatesRef.current()
               break
             case 'presence':
               setMachinePresence(payload.presence)
@@ -1014,12 +1076,9 @@ export default function App() {
       }
     } finally {
       relayFlushInProgressRef.current = false
-      if (
-        pendingRelayUpdatesRef.current.length > 0 &&
-        relayFlushFrameRef.current === null
-      ) {
-        relayFlushFrameRef.current = window.requestAnimationFrame(() => {
-          relayFlushFrameRef.current = null
+      if (pendingRelayUpdatesRef.current.length > 0 && cancelRelayFlushRef.current === null) {
+        cancelRelayFlushRef.current = scheduleVisibilityAwareFlush(() => {
+          cancelRelayFlushRef.current = null
           void flushRelayUpdates()
         })
       }
@@ -1027,15 +1086,33 @@ export default function App() {
   }, [bufferPendingSnapshotEvents, failCurrentConnection, pairingId, schedulePersistCurrentSession, sessionId])
 
   const scheduleRelayFlush = useCallback(() => {
-    if (relayFlushFrameRef.current !== null) {
+    if (cancelRelayFlushRef.current !== null) {
       return
     }
 
-    relayFlushFrameRef.current = window.requestAnimationFrame(() => {
-      relayFlushFrameRef.current = null
+    cancelRelayFlushRef.current = scheduleVisibilityAwareFlush(() => {
+      cancelRelayFlushRef.current = null
       void flushRelayUpdates()
     })
   }, [flushRelayUpdates])
+
+  // The relay socket outlives this render, so it calls the scheduler through
+  // a ref rather than the closure it was opened with.
+  useEffect(() => {
+    flushRelayUpdatesRef.current = scheduleRelayFlush
+  }, [scheduleRelayFlush])
+
+  // A tab returning to the foreground may hold updates that were scheduled on
+  // a throttled timer; drain them immediately rather than waiting it out.
+  useEffect(() => {
+    const drainOnVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      if (pendingRelayUpdatesRef.current.length === 0) return
+      scheduleRelayFlush()
+    }
+    document.addEventListener('visibilitychange', drainOnVisible)
+    return () => document.removeEventListener('visibilitychange', drainOnVisible)
+  }, [scheduleRelayFlush])
 
   useEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId || !relayConnected || !hasSessionKey) {
@@ -1108,6 +1185,24 @@ export default function App() {
   // ── Actions ────────────────────────────────────────────────────────
 
   async function handleClaimPairing() {
+    if (isClaimingPairing) return
+    setIsClaimingPairing(true)
+    try {
+      await claimPairing()
+    } catch (e) {
+      // A rejected fetch here (offline, bad relay host, CORS) previously
+      // vanished into an unhandled rejection and left the button inert.
+      setError(
+        e instanceof Error
+          ? e.message
+          : 'Could not reach the relay. Check the address and your connection.',
+      )
+    } finally {
+      setIsClaimingPairing(false)
+    }
+  }
+
+  async function claimPairing() {
     suppressReconnectRef.current = false
     abortPendingActionPolls()
     const keyPair = clientKeyPairRef.current ?? generateBoxKeyPair()
@@ -1171,10 +1266,7 @@ export default function App() {
     pendingSnapshotEventsRef.current = []
     pendingSnapshotSeqsRef.current.clear()
     pendingRelayUpdatesRef.current = []
-    if (relayFlushFrameRef.current !== null) {
-      window.cancelAnimationFrame(relayFlushFrameRef.current)
-      relayFlushFrameRef.current = null
-    }
+    cancelRelayFlush()
     trustedDaemonPublicKeyRef.current = claim.daemon_bundle.public_key
     trustedDaemonIdentityPublicKeyRef.current = claim.daemon_bundle.identity_public_key
     clearPendingActionIds()
@@ -1203,6 +1295,9 @@ export default function App() {
       dataKey: null,
       lastReceivedSeq: 0,
     })
+    // The code is spent now; keeping it in the address bar leaves it in
+    // history and in any link or screenshot the user shares afterwards.
+    clearPairingParamsFromUrl()
   }
 
   async function callRpc<T = unknown>(method: string, rpcParams: Record<string, unknown>) {
@@ -1228,15 +1323,25 @@ export default function App() {
       signal?: AbortSignal
       sessionIdOverride?: string | null
       clientTokenOverride?: string | null
+      /**
+       * Stop waiting after this long. Only set for calls a person is blocked
+       * on: background polls should keep going, because the relay still runs
+       * the action whenever the daemon comes back.
+       */
+      timeoutMs?: number
     },
   ) {
     const currentSessionId = options?.sessionIdOverride ?? sessionId
     const currentClientToken = options?.clientTokenOverride ?? clientToken
     if (!currentSessionId || !currentClientToken) throw new Error('Remote session is not ready')
+    const deadline = options?.timeoutMs ? Date.now() + options.timeoutMs : null
 
     for (;;) {
       if (options?.signal?.aborted) {
         throw new DOMException('The operation was aborted.', 'AbortError')
+      }
+      if (deadline !== null && Date.now() > deadline) {
+        throw new AwaitedActionTimeoutError(desktopOnlineRef.current)
       }
 
       const response = await fetch(
@@ -1317,7 +1422,7 @@ export default function App() {
         .catch((queuedError) => {
           if (isAbortError(queuedError)) return
           forgetPendingAction(action.action_id)
-          setError(queuedError instanceof Error ? queuedError.message : 'Remote action failed')
+          reportError(queuedError, 'Remote action failed')
         })
         .finally(() => {
           pendingActionPollsRef.current.delete(controller)
@@ -1325,9 +1430,18 @@ export default function App() {
       return null as T
     }
     try {
-      return await pollQueuedAction<T>(action.action_id)
-    } finally {
+      const result = await pollQueuedAction<T>(action.action_id, {
+        timeoutMs: AWAITED_ACTION_TIMEOUT_MS,
+      })
       forgetPendingAction(action.action_id)
+      return result
+    } catch (queuedError) {
+      // A timeout is not an outcome: leave the id tracked so the resume
+      // effect picks the action back up on the next encrypted connection.
+      if (!(queuedError instanceof AwaitedActionTimeoutError)) {
+        forgetPendingAction(action.action_id)
+      }
+      throw queuedError
     }
   }
 
@@ -1346,7 +1460,7 @@ export default function App() {
       )
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to stop turn')
+      reportError(e, 'Failed to stop turn')
     } finally {
       setIsStopping(false)
     }
@@ -1396,7 +1510,7 @@ export default function App() {
     } catch (e) {
       setDraft(submittedDraft)
       setAttachments(submittedAttachments)
-      setError(e instanceof Error ? e.message : 'Remote action failed')
+      reportError(e, 'Failed to send message')
     } finally {
       setIsSubmitting(false)
     }
@@ -1425,7 +1539,7 @@ export default function App() {
       workspace_id: workspaceId,
       request_id: requestId,
       response,
-    }).catch((e) => setError(e instanceof Error ? e.message : 'Interactive response failed'))
+    }).catch((e) => reportError(e, 'Interactive response failed'))
   }
 
   // ── Sync model/effort/mode ─────────────────────────────────────────
@@ -1497,6 +1611,34 @@ export default function App() {
     )
   }, [])
 
+  const applyThreadSummary = useCallback((thread: ThreadSummary) => {
+    setSnapshot((current) =>
+      current
+        ? {
+            ...current,
+            threads: current.threads.map((entry) => (entry.id === thread.id ? thread : entry)),
+          }
+        : current,
+    )
+    setThreadDetail((current) =>
+      current && current.thread.id === thread.id ? { ...current, thread } : current,
+    )
+  }, [])
+
+  /**
+   * The sidebar's error list is desktop-only in this layout, so a failure
+   * raised from a phone would otherwise be completely silent. Toast it and
+   * keep the sidebar copy for the wide layout.
+   */
+  const reportError = useCallback(
+    (cause: unknown, fallback: string) => {
+      const message = cause instanceof Error ? cause.message : fallback
+      setError(message)
+      toast({ variant: 'danger', title: fallback, description: message })
+    },
+    [toast],
+  )
+
   const persistThreadSettings = useCallback(
     async ({
       modelId,
@@ -1522,10 +1664,10 @@ export default function App() {
         setError(null)
       } catch (e) {
         if (requestId !== threadSettingsRequestRef.current) return
-        setError(e instanceof Error ? e.message : 'Remote action failed')
+        reportError(e, 'Failed to update thread settings')
       }
     },
-    [applyThreadHandle, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace],
+    [applyThreadHandle, reportError, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace],
   )
 
   const handleTogglePinThread = useCallback(
@@ -1541,10 +1683,10 @@ export default function App() {
         applyThreadHandle(handle)
         setError(null)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Remote action failed')
+        reportError(e, 'Failed to update pin')
       }
     },
-    [applyThreadHandle],
+    [applyThreadHandle, reportError],
   )
 
   const handlePermissionModeChange = useCallback(
@@ -1557,9 +1699,9 @@ export default function App() {
         permission_mode: mode,
       })
         .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
-        .catch((e) => setError(e instanceof Error ? e.message : 'Remote action failed'))
+        .catch((e) => reportError(e, 'Failed to update permission mode'))
     },
-    [applyThreadHandle, selectedThreadId, selectedWorkspace],
+    [applyThreadHandle, reportError, selectedThreadId, selectedWorkspace],
   )
 
   const handleSandboxModeChange = useCallback(
@@ -1572,9 +1714,9 @@ export default function App() {
         sandbox_mode: mode,
       })
         .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
-        .catch((e) => setError(e instanceof Error ? e.message : 'Remote action failed'))
+        .catch((e) => reportError(e, 'Failed to update sandbox mode'))
     },
-    [applyThreadHandle, selectedThreadId, selectedWorkspace],
+    [applyThreadHandle, reportError, selectedThreadId, selectedWorkspace],
   )
 
   const handleUpdatePreferences = useCallback(
@@ -1586,10 +1728,10 @@ export default function App() {
         setSnapshot((current) => (current ? { ...current, preferences } : current))
         setError(null)
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Remote action failed')
+        reportError(e, 'Failed to save preferences')
       }
     },
-    [],
+    [reportError],
   )
 
   const handleModelChange = useCallback(
@@ -1683,13 +1825,141 @@ export default function App() {
     setSelectedThreadId(null)
     setShowProjects(false)
   }, [])
+  // workspace.remove has no queued-action handler on the daemon (the queue
+  // only covers the write path a reconnect may replay), so this goes over the
+  // encrypted RPC channel like the other structural edits below.
   async function handleRemoveWorkspace(workspaceId: string) {
-    await submitQueuedAction('workspace.remove', { workspace_id: workspaceId })
-    if (selectedWorkspaceId === workspaceId) {
-      setThreadDetail(null)
-      setSelectedWorkspaceId(null)
-      setSelectedThreadId(null)
+    try {
+      await callRpc('workspace.remove', { workspace_id: workspaceId })
+      if (selectedWorkspaceId === workspaceId) {
+        setThreadDetail(null)
+        setSelectedWorkspaceId(null)
+        setSelectedThreadId(null)
+      }
+      setError(null)
+    } catch (e) {
+      // The confirm dialog renders the rejection inline and stays open, so it
+      // has to see the failure rather than a resolved promise.
+      reportError(e, 'Failed to remove project')
+      throw e instanceof Error ? e : new Error('Failed to remove project')
     }
+  }
+
+  async function handleArchiveThread(workspaceId: string, threadId: string) {
+    try {
+      await callRpc('thread.archive', { workspace_id: workspaceId, thread_id: threadId })
+      if (selectedThreadId === threadId) {
+        setThreadDetail(null)
+        setSelectedThreadId(null)
+      }
+      setError(null)
+    } catch (e) {
+      reportError(e, 'Failed to archive thread')
+    }
+  }
+
+  async function handleRenameThread(workspaceId: string, threadId: string, title: string) {
+    try {
+      const handle = normalizeThreadHandle(
+        await callRpc<ThreadHandle>('thread.update', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          title,
+        }),
+      )
+      applyThreadHandle(handle)
+      setError(null)
+    } catch (e) {
+      // The rename dialog keeps itself open on a rejection so the typed title
+      // is not lost, so this has to rethrow after reporting.
+      reportError(e, 'Failed to rename thread')
+      throw e instanceof Error ? e : new Error('Failed to rename thread')
+    }
+  }
+
+  async function handleMarkThreadRead(workspaceId: string, threadId: string) {
+    const thread = snapshot?.threads.find(
+      (entry) => entry.workspace_id === workspaceId && entry.id === threadId,
+    )
+    try {
+      const updated = normalizeThreadSummary(
+        await callRpc<ThreadSummary>('thread.mark_read', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          read_seq: thread?.attention.last_agent_activity_seq ?? 0,
+        }),
+      )
+      applyThreadSummary(updated)
+    } catch (e) {
+      reportError(e, 'Failed to mark thread as read')
+    }
+  }
+
+  async function handleRemoveQueuedTurn(queuedId: string) {
+    if (!selectedWorkspaceId || !selectedThreadId) return
+    try {
+      await callRpc('thread.queue.remove', {
+        workspace_id: selectedWorkspaceId,
+        thread_id: selectedThreadId,
+        queued_id: queuedId,
+      })
+    } catch (e) {
+      reportError(e, 'Failed to remove queued message')
+    }
+  }
+
+  async function handleSteerQueuedTurn(queuedId: string) {
+    if (!selectedWorkspaceId || !selectedThreadId) return
+    try {
+      await callRpc('thread.queue.steer', {
+        workspace_id: selectedWorkspaceId,
+        thread_id: selectedThreadId,
+        queued_id: queuedId,
+      })
+    } catch (e) {
+      // The daemon leaves the message queued when a steer fails, so the chip
+      // the user acted on is still there when they read this.
+      reportError(e, 'Failed to steer queued message')
+    }
+  }
+
+  async function handleSetGoal(objective: string, tokenBudget: number | null) {
+    if (!selectedWorkspaceId || !selectedThreadId) throw new Error('Select a thread first')
+    applyThreadSummary(
+      normalizeThreadSummary(
+        await callRpc<ThreadSummary>('thread.goal.set', {
+          workspace_id: selectedWorkspaceId,
+          thread_id: selectedThreadId,
+          objective,
+          token_budget: tokenBudget,
+        }),
+      ),
+    )
+  }
+
+  async function handleClearGoal() {
+    if (!selectedWorkspaceId || !selectedThreadId) return
+    applyThreadSummary(
+      normalizeThreadSummary(
+        await callRpc<ThreadSummary>('thread.goal.clear', {
+          workspace_id: selectedWorkspaceId,
+          thread_id: selectedThreadId,
+        }),
+      ),
+    )
+  }
+
+  async function handleSetGoalStatus(status: 'active' | 'paused') {
+    if (!selectedWorkspaceId || !selectedThreadId) return
+    applyThreadSummary(
+      normalizeThreadSummary(
+        await callRpc<ThreadSummary>('thread.goal.set', {
+          workspace_id: selectedWorkspaceId,
+          thread_id: selectedThreadId,
+          status,
+        }),
+      ),
+    )
   }
   const isThreadDetailPending = useMemo(
     () =>
@@ -1759,6 +2029,14 @@ export default function App() {
   const handleRemoveAttachment = useCallback((attachmentId: string) => {
     setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId))
   }, [])
+  const handlePickImages = useCallback(
+    (files: FileList | null) => {
+      void filesToImageInputs(files)
+        .then((next) => setAttachments((current) => [...current, ...next]))
+        .catch((cause) => reportError(cause, 'Could not attach that image'))
+    },
+    [reportError],
+  )
 
   useEffect(() => {
     if (!snapshot) return
@@ -1817,12 +2095,10 @@ export default function App() {
       if (previous === attention.level) continue
       notifiedAttentionRef.current.set(thread.id, attention.level)
 
-      if (typeof Notification === 'undefined') continue
-      if (Notification.permission === 'default') {
-        void Notification.requestPermission().catch(() => {})
-        continue
-      }
-      if (Notification.permission !== 'granted') continue
+      // Permission is only ever asked for from the Preferences toggle, which
+      // runs inside a click — Safari and Firefox reject the request outside
+      // one, and a refused prompt is not re-offered.
+      if (!canPostNotifications(notificationPreference)) continue
 
       const body =
         attention.level === 'awaiting_response'
@@ -1830,16 +2106,32 @@ export default function App() {
           : attention.level === 'error'
             ? 'The latest run ended with an error.'
             : 'New activity in this thread.'
-      new Notification(thread.title || 'FalconDeck thread', { body })
+      postThreadNotification(thread.title || 'FalconDeck thread', body)
     }
-  }, [selectedThreadId, snapshot?.interactive_requests, snapshot?.threads, windowFocused])
+  }, [
+    notificationPreference,
+    selectedThreadId,
+    snapshot?.interactive_requests,
+    snapshot?.threads,
+    windowFocused,
+  ])
+
+  const handleNotificationPreferenceChange = useCallback((value: NotificationPreference) => {
+    setNotificationPreference(value)
+    persistNotificationPreference(value)
+  }, [])
 
   useEffect(() => {
     if (!showProjects) return
 
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowProjects(false)
+    }
+    document.addEventListener('keydown', handleKeyDown)
     return () => {
+      document.removeEventListener('keydown', handleKeyDown)
       document.body.style.overflow = previousOverflow
     }
   }, [showProjects])
@@ -1851,6 +2143,7 @@ export default function App() {
       <RemotePairingScreen
         relayUrl={relayUrl}
         pairingCode={pairingCode}
+        isConnecting={isClaimingPairing}
         connectionHelp={connectionHelp}
         connectionDebugRows={connectionDebugRows}
         onRelayUrlChange={setRelayUrl}
@@ -1863,10 +2156,10 @@ export default function App() {
 
   // ── Connected session ──────────────────────────────────────────────
 
-  const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline)
+  const headerConnectionState = connectionBadgeState(connectionStatus, desktopOnline, hasSessionKey)
 
   return (
-    <div className="flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
+    <div className="fd-safe-area flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
       <SessionHeader
         workspace={selectedWorkspace}
         thread={selectedThread}
@@ -1882,15 +2175,26 @@ export default function App() {
           </button>
         }
       >
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
+          {selectedThread && activeCapabilities.supports_goals ? (
+            <GoalControl
+              goal={selectedThread.goal}
+              provider={activeProvider}
+              disabled={!isEncrypted}
+              onSetGoal={handleSetGoal}
+              onClearGoal={handleClearGoal}
+              onSetGoalStatus={handleSetGoalStatus}
+            />
+          ) : null}
           <Button
             type="button"
             variant="ghost"
             size="sm"
+            aria-label="Preferences"
             onClick={() => setShowPreferences(true)}
           >
-            <Settings className="h-4 w-4" />
-            Preferences
+            <Settings aria-hidden="true" className="h-4 w-4" />
+            <span className="hidden sm:inline">Preferences</span>
           </Button>
           <Badge variant={headerConnectionState.variant} dot>
             {headerConnectionState.label}
@@ -1913,21 +2217,29 @@ export default function App() {
       <RemotePreferencesModal
         isOpen={showPreferences}
         preferences={snapshot?.preferences ?? null}
+        notificationPreference={notificationPreference}
         onClose={() => setShowPreferences(false)}
         onUpdatePreferences={(payload) => {
           void handleUpdatePreferences(payload)
         }}
+        onNotificationPreferenceChange={handleNotificationPreferenceChange}
       />
 
       {showProjects ? (
-        <div className="fixed inset-0 z-40 bg-[var(--fd-overlay-strong)] backdrop-blur-sm md:hidden">
+        <div className="fd-safe-area fixed inset-0 z-40 bg-[var(--fd-overlay-strong)] backdrop-blur-sm md:hidden">
           <button
             type="button"
             className="absolute inset-0 h-full w-full"
             aria-label="Close projects"
+            tabIndex={-1}
             onClick={() => setShowProjects(false)}
           />
-          <div className="absolute inset-y-0 left-0 flex w-full max-w-none animate-in slide-in-from-left-8 duration-200">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Projects"
+            className="absolute inset-y-0 left-0 flex w-full max-w-none animate-in slide-in-from-left-8 duration-200"
+          >
             <div className="flex h-full w-full flex-col border-r border-border-default bg-surface-1 shadow-2xl">
               <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
                 <div>
@@ -1943,9 +2255,10 @@ export default function App() {
                   variant="ghost"
                   size="icon"
                   className="h-9 w-9 rounded-full"
+                  aria-label="Close projects"
                   onClick={() => setShowProjects(false)}
                 >
-                  <X className="h-4 w-4" />
+                  <X aria-hidden="true" className="h-4 w-4" />
                 </Button>
               </div>
               <WorkspaceSidebar
@@ -1955,7 +2268,10 @@ export default function App() {
                 onSelectWorkspace={handleSelectWorkspace}
                 onSelectThread={handleSelectThread}
                 onNewThread={handleNewThread}
+                onArchiveThread={handleArchiveThread}
+                onRenameThread={handleRenameThread}
                 onTogglePinThread={handleTogglePinThread}
+                onMarkThreadRead={handleMarkThreadRead}
                 onRemoveWorkspace={handleRemoveWorkspace}
                 title="Projects"
                 errors={error ? [error] : []}
@@ -1987,7 +2303,10 @@ export default function App() {
           onSelectWorkspace={handleSelectWorkspace}
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
+          onArchiveThread={handleArchiveThread}
+          onRenameThread={handleRenameThread}
           onTogglePinThread={handleTogglePinThread}
+          onMarkThreadRead={handleMarkThreadRead}
           onRemoveWorkspace={handleRemoveWorkspace}
           title="Projects"
           errors={error ? [error] : []}
@@ -2022,12 +2341,20 @@ export default function App() {
                 handleInteractiveResponse(request.workspace_id, request.request_id, response)
               }
             />
+            {selectedThread ? (
+              <QueuedTurns
+                queuedTurns={selectedThread.queued_turns}
+                canSteer={activeCapabilities.supports_steering}
+                onRemove={(queuedId) => void handleRemoveQueuedTurn(queuedId)}
+                onSteer={(queuedId) => void handleSteerQueuedTurn(queuedId)}
+              />
+            ) : null}
             <PromptInput
               value={draft}
               onValueChange={setDraft}
               onSubmit={() => void handleSubmit()}
               onStop={() => void handleStop()}
-              onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
+              onPickImages={handlePickImages}
               onRemoveAttachment={handleRemoveAttachment}
               attachments={attachments}
               skills={selectedWorkspace?.skills ?? []}

@@ -417,11 +417,14 @@ pub fn run() {
             if cfg!(debug_assertions) {
                 return Ok(());
             }
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                let state = handle.state::<DesktopState>();
-                let _ = ensure_daemon_running(state).await;
-            });
+
+            // Start the embedded daemon before the window is served. The
+            // packaged app owns the daemon lifecycle, so letting this run as
+            // an ignored background task can leave the UI alive with no local
+            // API or remote relay bridge when startup fails.
+            let state = app.state::<DesktopState>();
+            tauri::async_runtime::block_on(ensure_daemon_running(state))
+                .map_err(|error| format!("failed to start embedded daemon: {error}"))?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

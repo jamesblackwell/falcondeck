@@ -6,7 +6,9 @@ import {
   formatWorkDuration,
   type ConversationItem,
   type ConversationLiveActivityGroup,
+  type ThinkingDisplay,
   type ToolActivitySummary,
+  type WorkSessionEntry,
 } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
@@ -124,6 +126,28 @@ function useExpansionState(defaultOpen: boolean, expansionMode: ExpansionMode, s
   return [open, setOpen] as const
 }
 
+/**
+ * Work that changes something, and so earns a bordered card. Everything else —
+ * reads, searches, fetches — stays a quiet one-line row.
+ */
+const CARD_ACTIVITY_KINDS = new Set(['edit', 'diff', 'command', 'test'])
+
+/**
+ * A call the agent cannot proceed past until someone answers. No provider sets
+ * a dedicated status for this yet, so an approval-flavoured call that is still
+ * in flight is the live signal; the explicit statuses are accepted ahead of a
+ * daemon that starts sending them.
+ */
+function isAwaitingConfirmation(item: Extract<ConversationItem, { kind: 'tool_call' }>) {
+  return (
+    item.status === 'awaiting_confirmation' ||
+    item.status === 'awaiting_approval' ||
+    item.status === 'pending_approval' ||
+    (item.display.artifact_kind === 'approval_related' &&
+      (item.status === 'running' || item.status === 'in_progress'))
+  )
+}
+
 function ToolCallMessage({
   item,
   defaultOpen = false,
@@ -151,53 +175,177 @@ function ToolCallMessage({
   // command's output has nothing to do with the path that appears in it.
   const outputFilePath = activityKind === 'read' || touchesFile ? filePath : null
 
+  // You cannot hide what you are being asked to approve, so a pending
+  // confirmation is forced open and its toggle is disabled.
+  const awaitingConfirmation = isAwaitingConfirmation(item)
+  const asCard = awaitingConfirmation || CARD_ACTIVITY_KINDS.has(activityKind)
+  const effectiveOpen = awaitingConfirmation ? true : open
+
+  const detail = detailAvailable ? (
+    <CodeBlock code={item.output ?? ''} language={null} filePath={outputFilePath} />
+  ) : suppressReadOnlyDetail && hasOutput ? (
+    <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+      Read-only tool details hidden by preference.
+    </p>
+  ) : null
+
+  const fileLink =
+    openFileDiff && touchesFile && filePath ? (
+      // Sibling of the trigger, not a child: a nested button would be invalid
+      // markup and would swallow the toggle.
+      <span className="flex shrink-0 items-center gap-1 text-fg-faint">
+        <FileDiff aria-hidden="true" className="h-3 w-3" />
+        <FileDiffLink
+          filePath={filePath}
+          label={fileBaseName(filePath)}
+          className="max-w-40 truncate font-mono text-[length:var(--fd-text-2xs)] text-fg-tertiary"
+        />
+      </span>
+    ) : null
+
   return (
-    <Collapsible.Root open={open} onOpenChange={setOpen}>
-      <div className="flex w-full items-center gap-1 rounded-[var(--fd-radius-md)] pr-2 transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2">
-        <Collapsible.Trigger asChild>
-          <button
-            type="button"
-            aria-expanded={open}
-            aria-label={`Toggle ${item.title}`}
-            className="fd-focus flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted"
-          >
-            <ToolStatusIcon item={item} />
-            <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
-              {label}
-            </span>
-            <ChevronRight
+    <Collapsible.Root
+      open={effectiveOpen}
+      onOpenChange={awaitingConfirmation ? undefined : setOpen}
+    >
+      <div
+        // The tier is the contract these cards are built around, so it is
+        // stated once here rather than inferred from styling.
+        data-tool-tier={awaitingConfirmation ? 'confirm' : asCard ? 'card' : 'row'}
+        className={cn(
+          'group',
+          asCard &&
+            'overflow-hidden rounded-[var(--fd-radius-lg)] border bg-surface-1',
+          asCard &&
+            (awaitingConfirmation ? 'border-warning/40' : 'border-border-subtle'),
+        )}
+      >
+        <div
+          className={cn(
+            'flex w-full items-center gap-1 pr-2 transition-colors duration-[var(--fd-duration-fast)]',
+            asCard ? 'bg-surface-2/40' : 'rounded-[var(--fd-radius-md)] hover:bg-surface-2',
+          )}
+        >
+          <Collapsible.Trigger asChild disabled={awaitingConfirmation}>
+            <button
+              type="button"
+              aria-expanded={effectiveOpen}
+              aria-label={`Toggle ${item.title}`}
+              disabled={awaitingConfirmation}
               className={cn(
-                'h-3 w-3 shrink-0 transition-transform duration-[var(--fd-duration-fast)]',
-                open && 'rotate-90',
+                'fd-focus flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted',
+                awaitingConfirmation && 'cursor-default',
               )}
-            />
-          </button>
-        </Collapsible.Trigger>
-        {/* Sibling of the trigger, not a child: a nested button would be
-            invalid markup and would swallow the toggle. */}
-        {openFileDiff && touchesFile && filePath ? (
-          <span className="flex shrink-0 items-center gap-1 text-fg-faint">
-            <FileDiff aria-hidden="true" className="h-3 w-3" />
-            <FileDiffLink
-              filePath={filePath}
-              label={fileBaseName(filePath)}
-              className="max-w-40 truncate font-mono text-[length:var(--fd-text-2xs)] text-fg-tertiary"
-            />
-          </span>
-        ) : null}
+            >
+              <ToolStatusIcon item={item} />
+              <span
+                className={cn(
+                  'flex-1 truncate font-mono text-[length:var(--fd-text-xs)]',
+                  item.display.is_error && 'text-danger',
+                )}
+              >
+                {label}
+              </span>
+              {awaitingConfirmation ? (
+                <span className="shrink-0 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-warning">
+                  Awaiting approval
+                </span>
+              ) : (
+                <ChevronRight
+                  className={cn(
+                    'h-3 w-3 shrink-0 transition-[transform,opacity] duration-[var(--fd-duration-fast)]',
+                    open && 'rotate-90',
+                    // The quiet tier earns its quietness by holding the chevron
+                    // back until the row is hovered, focused, or already open.
+                    !asCard &&
+                      !open &&
+                      'opacity-0 group-focus-within:opacity-100 group-hover:opacity-100',
+                  )}
+                />
+              )}
+            </button>
+          </Collapsible.Trigger>
+          {fileLink}
+        </div>
+        <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
+          {detail ? <div className={asCard ? 'px-2 pt-1 pb-2' : 'mt-1 ml-6'}>{detail}</div> : null}
+        </Collapsible.Content>
       </div>
-      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
-        {detailAvailable ? (
-          <div className="mt-1 ml-6">
-            <CodeBlock code={item.output ?? ''} language={null} filePath={outputFilePath} />
-          </div>
-        ) : suppressReadOnlyDetail && hasOutput ? (
-          <p className="mt-1 ml-6 text-[length:var(--fd-text-xs)] text-fg-muted">
-            Read-only tool details hidden by preference.
-          </p>
-        ) : null}
-      </Collapsible.Content>
     </Collapsible.Root>
+  )
+}
+
+/** Height of the `preview` excerpt before the fade takes over. */
+const REASONING_PREVIEW_MAX_HEIGHT_PX = 88
+
+function ReasoningMessage({
+  item,
+  thinkingDisplay = 'auto',
+  streaming = false,
+}: {
+  item: Extract<ConversationItem, { kind: 'reasoning' }>
+  thinkingDisplay?: ThinkingDisplay
+  streaming?: boolean
+}) {
+  // `null` means "still following the preference". A click pins the state so
+  // that a thought the reader opened does not slam shut the moment it stops
+  // streaming — Zed's rule, and the reason `auto` cannot be plain derived state.
+  const [override, setOverride] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    setOverride(null)
+  }, [item.id, thinkingDisplay])
+
+  const open =
+    override ??
+    (thinkingDisplay === 'always_expanded'
+      ? true
+      : thinkingDisplay === 'auto'
+        ? streaming
+        : false)
+  // Preview keeps the excerpt on screen when closed; the other modes hide the
+  // body entirely, so only preview renders content in the closed state.
+  const showPreview = thinkingDisplay === 'preview' && !open
+  const body = useMemo(() => renderMessageContent(item.content), [item.content])
+  const summary = item.summary?.trim()
+  const label = streaming ? 'Thinking…' : summary || 'Thought'
+
+  return (
+    <div className="min-w-0 border-l-2 border-border-subtle pl-3">
+      <button
+        type="button"
+        onClick={() => setOverride(!open)}
+        aria-expanded={open}
+        className="fd-focus flex max-w-full items-center gap-1.5 rounded-[var(--fd-radius-sm)] py-0.5 text-left text-[length:var(--fd-text-sm)] text-fg-muted transition-colors hover:text-fg-secondary"
+      >
+        {streaming ? (
+          <Loader2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+        ) : null}
+        <span className="min-w-0 truncate font-medium">{label}</span>
+        <ChevronRight
+          aria-hidden="true"
+          className={cn('h-3.5 w-3.5 shrink-0 transition-transform', open && 'rotate-90')}
+        />
+      </button>
+      {open || showPreview ? (
+        <div
+          className={cn('relative mt-1', showPreview && 'overflow-hidden')}
+          style={showPreview ? { maxHeight: REASONING_PREVIEW_MAX_HEIGHT_PX } : undefined}
+        >
+          <div className="max-w-none break-words text-[length:var(--fd-text-sm)] text-fg-tertiary">
+            {body}
+          </div>
+          {showPreview ? (
+            <button
+              type="button"
+              onClick={() => setOverride(true)}
+              aria-label="Show the full thought"
+              className="fd-focus absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-surface-1 to-transparent"
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   )
 }
 
@@ -425,11 +573,16 @@ export const MessageCard = memo(function MessageCard({
   defaultOpen = false,
   expansionMode = 'default',
   suppressReadOnlyDetail = false,
+  thinkingDisplay = 'auto',
+  isStreamingReasoning = false,
 }: {
   item: ConversationItem
   defaultOpen?: boolean
   expansionMode?: ExpansionMode
   suppressReadOnlyDetail?: boolean
+  thinkingDisplay?: ThinkingDisplay
+  /** True only for the thought currently arriving, which `auto` expands. */
+  isStreamingReasoning?: boolean
 }) {
   switch (item.kind) {
     case 'user_message':
@@ -446,7 +599,13 @@ export const MessageCard = memo(function MessageCard({
         />
       )
     case 'reasoning':
-      return null
+      return (
+        <ReasoningMessage
+          item={item}
+          thinkingDisplay={thinkingDisplay}
+          streaming={isStreamingReasoning}
+        />
+      )
     case 'plan':
       return <PlanMessage item={item} />
     case 'diff':
@@ -480,18 +639,27 @@ export const WorkSessionCard = memo(function WorkSessionCard({
   startedAt,
   completedAt,
   expansionMode = 'default',
+  thinkingDisplay = 'auto',
 }: {
-  items: Extract<ConversationItem, { kind: 'tool_call' }>[]
+  items: WorkSessionEntry[]
   running: boolean
   startedAt: string
   completedAt: string | null
   expansionMode?: ExpansionMode
+  thinkingDisplay?: ThinkingDisplay
 }) {
   const [open, setOpen] = useExpansionState(false, expansionMode, items[0]?.id ?? 'work')
+  const toolCalls = items.filter(
+    (entry): entry is Extract<ConversationItem, { kind: 'tool_call' }> =>
+      entry.kind === 'tool_call',
+  )
   const currentLabel = running
     ? toolCallLabel(
-        [...items].reverse().find((item) => item.status === 'running' || item.status === 'in_progress')
-          ?.title ?? items[items.length - 1]?.title ?? '',
+        [...toolCalls]
+          .reverse()
+          .find((item) => item.status === 'running' || item.status === 'in_progress')?.title ??
+          toolCalls[toolCalls.length - 1]?.title ??
+          '',
       )
     : null
 
@@ -525,10 +693,18 @@ export const WorkSessionCard = memo(function WorkSessionCard({
         </button>
       </Collapsible.Trigger>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
-        <div className="mt-1 space-y-0.5 border-l border-border-subtle pl-3">
-          {items.map((item) => (
-            <ToolCallMessage key={item.id} item={item} />
-          ))}
+        <div className="mt-1 space-y-1 border-l border-border-subtle pl-3">
+          {items.map((entry) =>
+            entry.kind === 'reasoning' ? (
+              <ReasoningMessage
+                key={`reasoning:${entry.id}`}
+                item={entry}
+                thinkingDisplay={thinkingDisplay}
+              />
+            ) : (
+              <ToolCallMessage key={entry.id} item={entry} />
+            ),
+          )}
         </div>
       </Collapsible.Content>
     </Collapsible.Root>

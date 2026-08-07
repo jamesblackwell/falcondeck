@@ -13,6 +13,7 @@ import { PreferenceToggle } from './PreferenceToggle'
 import {
   formatDateTime,
   formatRelative,
+  THINKING_DISPLAY_OPTIONS,
   TOOL_DETAIL_OPTIONS,
   updateBadgeVariant,
   updateStatusLabel,
@@ -188,6 +189,7 @@ export function GeneralSettingsPanel({
             <button
               key={option.value}
               type="button"
+              aria-pressed={current.conversation.tool_details_mode === option.value}
               onClick={() => onUpdatePreferences({ conversation: { tool_details_mode: option.value } })}
               className={cn(
                 'rounded-[var(--fd-radius-xl)] border p-4 text-left transition-colors',
@@ -211,6 +213,49 @@ export function GeneralSettingsPanel({
               </p>
             </button>
           ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Thinking</CardTitle>
+          <CardDescription>
+            How reasoning blocks reveal themselves in the transcript. Stored on this device until
+            the daemon carries the setting.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-2">
+          {THINKING_DISPLAY_OPTIONS.map((option) => {
+            const selected = current.conversation.thinking_display === option.value
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={selected}
+                onClick={() =>
+                  onUpdatePreferences({ conversation: { thinking_display: option.value } })
+                }
+                className={cn(
+                  'rounded-[var(--fd-radius-xl)] border p-4 text-left transition-colors',
+                  selected
+                    ? 'border-accent/50 bg-accent/10'
+                    : 'border-border-subtle bg-surface-2 hover:bg-surface-3',
+                )}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                    {option.label}
+                  </p>
+                  <Badge variant={selected ? 'success' : 'default'}>
+                    {selected ? 'Selected' : 'Available'}
+                  </Badge>
+                </div>
+                <p className="mt-2 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+                  {option.description}
+                </p>
+              </button>
+            )
+          })}
         </CardContent>
       </Card>
 

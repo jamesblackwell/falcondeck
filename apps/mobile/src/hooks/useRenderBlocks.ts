@@ -13,8 +13,11 @@ export function useConversationPresentation(): ConversationPresentation {
   const preferences = useSessionStore((s) => s.snapshot?.preferences ?? null)
 
   return useMemo(() => {
+    // Reasoning stays in: the presentation layer folds it into the work
+    // session it interleaves with, and ReasoningBlock renders the rest.
+    // Unresolved approvals are dropped because ApprovalBanner already pins
+    // them above the transcript.
     const filteredItems = items.filter((item) => {
-      if (item.kind === 'reasoning') return false
       if (item.kind === 'interactive_request' && !item.resolved) return false
       return true
     })

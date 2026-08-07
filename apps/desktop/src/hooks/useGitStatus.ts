@@ -16,21 +16,28 @@ export function useGitStatus(
   const [error, setError] = useState<string | null>(null)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const initialFetchDone = useRef(false)
+  const lastWorkspaceRef = useRef<string | null>(null)
+  // Responses are only allowed to write the state they were requested for; a
+  // slow reply for the previous workspace must not overwrite the new one.
+  const generationRef = useRef(0)
 
   const fetchStatus = useCallback(async () => {
     if (!api || !workspaceId) {
       setStatus(null)
       return
     }
+    const generation = ++generationRef.current
     setIsLoading(true)
     setError(null)
     try {
       const result = await api.gitStatus(workspaceId)
+      if (generationRef.current !== generation) return
       setStatus(result)
     } catch (err) {
+      if (generationRef.current !== generation) return
       setError(err instanceof Error ? err.message : 'Failed to fetch git status')
     } finally {
-      setIsLoading(false)
+      if (generationRef.current === generation) setIsLoading(false)
     }
   }, [api, workspaceId])
 
@@ -39,11 +46,17 @@ export function useGitStatus(
     if (!api || !workspaceId) {
       setStatus(null)
       initialFetchDone.current = false
+      lastWorkspaceRef.current = null
       return
     }
 
-    if (!initialFetchDone.current) {
+    // A workspace switch is not a refresh: debouncing it leaves the previous
+    // project's files on screen, and they are clickable while they are there.
+    if (!initialFetchDone.current || lastWorkspaceRef.current !== workspaceId) {
       initialFetchDone.current = true
+      lastWorkspaceRef.current = workspaceId
+      setStatus(null)
+      setError(null)
       void fetchStatus()
       return
     }

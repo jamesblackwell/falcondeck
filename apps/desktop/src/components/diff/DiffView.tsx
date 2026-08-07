@@ -51,8 +51,14 @@ export const DiffView = memo(function DiffView({
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b border-border-subtle px-3 pb-2 pt-10">
-        <Button variant="ghost" size="icon" onClick={onBack} className="h-6 w-6">
-          <ArrowLeft className="h-3.5 w-3.5" />
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onBack}
+          aria-label="Back to changed files"
+          className="h-6 w-6"
+        >
+          <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
         </Button>
         <p className="min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
           {filePath}

@@ -19,7 +19,7 @@ import { renderComponent } from '@/test/render'
 import { useRenderBlocks } from './useRenderBlocks'
 
 describe('useRenderBlocks', () => {
-  it('filters reasoning and unresolved interactive requests while preserving tool summaries', () => {
+  it('keeps reasoning, drops unresolved interactive requests, preserves tool summaries', () => {
     let result: ReturnType<typeof useRenderBlocks> = []
 
     itemsMock.mockReturnValue([
@@ -113,6 +113,7 @@ describe('useRenderBlocks', () => {
             },
             group_read_only_tools: true,
             show_expand_all_controls: true,
+            thinking_display: 'auto',
           },
         },
       },
@@ -127,11 +128,16 @@ describe('useRenderBlocks', () => {
 
     expect(result.map((block) => block.kind)).toEqual([
       'item',
+      'item',
       'tool_summary',
       'item',
     ])
     expect(result[0]?.id).toBe('assistant_message:assistant-1')
-    expect(result[1]?.id).toBe('tool-summary:tool-1')
-    expect(result[2]?.id).toBe('interactive_request:request-2')
+    // Reasoning used to be filtered out here, which made it unreachable in the
+    // app. It now reaches the router, which renders it collapsed.
+    expect(result[1]?.id).toBe('reasoning:reasoning-1')
+    expect(result[2]?.id).toBe('tool-summary:tool-1')
+    expect(result[3]?.id).toBe('interactive_request:request-2')
+    expect(result.some((block) => block.id === 'interactive_request:request-1')).toBe(false)
   })
 })

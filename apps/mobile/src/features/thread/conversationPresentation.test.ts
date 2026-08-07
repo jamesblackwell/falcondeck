@@ -18,6 +18,7 @@ const preferences: FalconDeckPreferences = {
     },
     group_read_only_tools: true,
     show_expand_all_controls: true,
+    thinking_display: 'auto',
   },
 }
 

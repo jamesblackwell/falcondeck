@@ -281,6 +281,8 @@ describe('submitTurn guards', () => {
         model_id: 'gpt-5',
         reasoning_effort: 'high',
         approval_policy: 'on-request',
+        permission_mode: null,
+        sandbox_mode: null,
       },
       { requestIdPrefix: 'mobile-turn' },
     )

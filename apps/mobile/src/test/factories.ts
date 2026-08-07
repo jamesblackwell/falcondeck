@@ -94,6 +94,7 @@ export function preferences(overrides: Partial<FalconDeckPreferences> = {}): Fal
       },
       group_read_only_tools: true,
       show_expand_all_controls: true,
+      thinking_display: 'auto',
     },
     ...overrides,
   }

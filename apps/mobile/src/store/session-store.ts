@@ -20,6 +20,7 @@ import {
   type DaemonSnapshot,
   type EventEnvelope,
   type MobileSessionCache,
+  type ThinkingDisplay,
   type ThreadDetail,
 } from '@falcondeck/client-core'
 
@@ -524,6 +525,12 @@ export function useConversationItems() {
     if (s.selectedThreadId) return s.threadItems[s.selectedThreadId] ?? EMPTY_ITEMS
     return EMPTY_ITEMS
   }))
+}
+
+/** Subscribes to a primitive, so transcript rows reading it only re-render
+    when the preference itself changes — not on every streamed item. */
+export function useThinkingDisplay(): ThinkingDisplay {
+  return useSessionStore((s) => s.snapshot?.preferences.conversation.thinking_display ?? 'auto')
 }
 
 export function useApprovals() {

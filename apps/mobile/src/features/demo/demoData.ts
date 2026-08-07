@@ -121,6 +121,7 @@ export const demoSnapshot: DaemonSnapshot = {
       auto_expand: { approvals: true, errors: true, first_diff: true, failed_tests: true },
       group_read_only_tools: true,
       show_expand_all_controls: true,
+      thinking_display: 'auto',
     },
   },
 }

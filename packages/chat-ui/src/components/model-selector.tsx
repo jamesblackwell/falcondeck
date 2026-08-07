@@ -19,19 +19,21 @@ export function ProviderSelector({
   onValueChange: (value: AgentProvider) => void
   disabled?: boolean
 }) {
-  if (providers.length === 0) {
-    return null
-  }
-
   // A dropdown rather than a segmented control: the provider roster keeps
   // growing (Codex, Claude, Grok, Gemini, OpenCode, …) and segments don't scale.
+  // An empty roster greys the control rather than removing it, so the toggle
+  // row keeps its shape while a workspace is still connecting.
   return (
     <Select
       value={value}
       onValueChange={(next) => onValueChange(next as AgentProvider)}
-      disabled={disabled}
+      disabled={disabled || providers.length === 0}
     >
-      <SelectTrigger disabled={disabled} aria-label="Agent">
+      <SelectTrigger
+        variant="quiet"
+        disabled={disabled || providers.length === 0}
+        aria-label="Agent"
+      >
         <SelectValue placeholder="Agent" />
       </SelectTrigger>
       <SelectContent>
@@ -57,8 +59,8 @@ export function ModelSelector({
   disabled?: boolean
 }) {
   return (
-    <Select value={value ?? undefined} onValueChange={onValueChange} disabled={disabled}>
-      <SelectTrigger disabled={disabled}>
+    <Select value={value ?? ''} onValueChange={onValueChange} disabled={disabled}>
+      <SelectTrigger variant="quiet" disabled={disabled} aria-label="Model">
         <SelectValue placeholder="Model" />
       </SelectTrigger>
       <SelectContent>
@@ -84,8 +86,8 @@ export function ReasoningSelector({
   disabled?: boolean
 }) {
   return (
-    <Select value={value ?? undefined} onValueChange={onValueChange} disabled={disabled}>
-      <SelectTrigger disabled={disabled}>
+    <Select value={value ?? ''} onValueChange={onValueChange} disabled={disabled}>
+      <SelectTrigger variant="quiet" disabled={disabled} aria-label="Reasoning effort">
         <SelectValue placeholder="Effort" />
       </SelectTrigger>
       <SelectContent>
@@ -138,21 +140,28 @@ export function PermissionModeSelector({
   onValueChange: (value: string | null) => void
   disabled?: boolean
 }) {
-  if (modes.length === 0) {
-    return null
-  }
-
   // Providers that offer an explicit "default" mode use it as the null state;
   // the rest show the placeholder until a mode is picked.
   const hasDefaultMode = modes.includes('default')
+  // Greyed, not removed: our provider set is open, so hiding the control makes
+  // the composer reflow every time the agent changes.
+  const unavailable = modes.length === 0
 
   return (
     <Select
-      value={value ?? (hasDefaultMode ? 'default' : undefined)}
+      // Always a string, never undefined: these pickers stay mounted while
+      // their options load, and flipping between uncontrolled and controlled
+      // makes React drop the selection.
+      value={value ?? (hasDefaultMode ? 'default' : '')}
       onValueChange={(next) => onValueChange(next === 'default' ? null : next)}
-      disabled={disabled}
+      disabled={disabled || unavailable}
     >
-      <SelectTrigger disabled={disabled} aria-label="Permission mode">
+      <SelectTrigger
+        variant="quiet"
+        disabled={disabled || unavailable}
+        aria-label="Permission mode"
+        title={unavailable ? 'This agent has no permission modes' : undefined}
+      >
         <SelectValue placeholder="Permissions" />
       </SelectTrigger>
       <SelectContent>
@@ -181,17 +190,20 @@ export function SandboxSelector({
   onValueChange: (value: string | null) => void
   disabled?: boolean
 }) {
-  if (modes.length === 0) {
-    return null
-  }
+  const unavailable = modes.length === 0
 
   return (
     <Select
       value={value ?? 'default'}
       onValueChange={(next) => onValueChange(next === 'default' ? null : next)}
-      disabled={disabled}
+      disabled={disabled || unavailable}
     >
-      <SelectTrigger disabled={disabled} aria-label="Sandbox mode">
+      <SelectTrigger
+        variant="quiet"
+        disabled={disabled || unavailable}
+        aria-label="Sandbox mode"
+        title={unavailable ? 'This agent has no sandbox modes' : undefined}
+      >
         <SelectValue placeholder="Sandbox" />
       </SelectTrigger>
       <SelectContent>
@@ -228,7 +240,7 @@ export function IsolationSelector({
       onValueChange={(next) => onValueChange(next as ThreadIsolation)}
       disabled={disabled}
     >
-      <SelectTrigger disabled={disabled} aria-label="Run in">
+      <SelectTrigger variant="quiet" disabled={disabled} aria-label="Run in">
         <SelectValue placeholder="Run in" />
       </SelectTrigger>
       <SelectContent>

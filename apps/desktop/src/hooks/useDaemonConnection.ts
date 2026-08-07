@@ -57,6 +57,10 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const [snapshot, setSnapshot] = useState<DaemonSnapshot | null>(null)
   const [threadDetail, setThreadDetail] = useState<ThreadDetail | null>(null)
+  // A failed detail fetch used to be indistinguishable from an in-flight one,
+  // so the conversation sat on "Loading…" forever with no way back.
+  const [threadDetailError, setThreadDetailError] = useState<string | null>(null)
+  const [threadDetailRetry, setThreadDetailRetry] = useState(0)
   const [remoteStatus, setRemoteStatus] = useState<RemoteStatusResponse | null>(null)
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
     initialSelection?.workspaceId ?? null,
@@ -331,6 +335,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
 
     let cancelled = false
+    setThreadDetailError(null)
     void api
       .threadDetail(selectedWorkspaceId, selectedThreadId)
       .then((detail) => {
@@ -338,11 +343,22 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
         threadDetailCacheRef.current.set(cacheKey, detail)
         setThreadDetail(detail)
       })
-      .catch(() => {
-        if (!cancelled && !cachedDetail) setThreadDetail(null)
+      .catch((error: unknown) => {
+        if (cancelled) return
+        if (!cachedDetail) setThreadDetail(null)
+        setThreadDetailError(
+          error instanceof Error ? error.message : 'Failed to load this conversation',
+        )
     })
     return () => { cancelled = true }
-  }, [api, externalWorkspaceIds, selectedThreadId, selectedWorkspaceId, snapshot?.threads])
+  }, [
+    api,
+    externalWorkspaceIds,
+    selectedThreadId,
+    selectedWorkspaceId,
+    snapshot?.threads,
+    threadDetailRetry,
+  ])
    
 
   // Prefetch likely-next threads so switching can render from memory immediately.
@@ -442,6 +458,8 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     setSnapshot,
     threadDetail,
     setThreadDetail,
+    threadDetailError,
+    retryThreadDetail: () => setThreadDetailRetry((current) => current + 1),
     remoteStatus,
     setRemoteStatus,
     selectedWorkspaceId,

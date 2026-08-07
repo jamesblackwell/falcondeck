@@ -124,6 +124,14 @@ export type ThreadGoal = {
 
 export type ToolDetailsMode = 'collapsed' | 'auto' | 'expanded' | 'compact' | 'hide_read_only_details'
 
+/**
+ * How reasoning/thinking blocks reveal themselves, copied from Zed's four-value
+ * setting. `auto` follows the stream — expanded while the thought arrives, then
+ * collapsed once it ends unless the reader has toggled it. `preview` keeps a
+ * height-capped excerpt visible that a click promotes to the full text.
+ */
+export type ThinkingDisplay = 'auto' | 'preview' | 'always_expanded' | 'always_collapsed'
+
 export type ConversationAutoExpandPreferences = {
   approvals: boolean
   errors: boolean
@@ -136,6 +144,7 @@ export type ConversationPreferences = {
   auto_expand: ConversationAutoExpandPreferences
   group_read_only_tools: boolean
   show_expand_all_controls: boolean
+  thinking_display: ThinkingDisplay
 }
 
 export type FalconDeckPreferences = {
@@ -150,6 +159,7 @@ export type UpdateConversationPreferences = {
   auto_expand?: UpdateConversationAutoExpandPreferences | null
   group_read_only_tools?: boolean | null
   show_expand_all_controls?: boolean | null
+  thinking_display?: ThinkingDisplay | null
 }
 
 export type UpdatePreferencesPayload = {

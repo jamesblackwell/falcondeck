@@ -13,6 +13,7 @@ import {
   ToolCallBlock,
   ToolBurstBlock,
   PlanBlock,
+  ReasoningBlock,
   DiffBlock,
   InteractiveRequestBlock,
   InputToolbar,
@@ -34,6 +35,7 @@ describe('chat barrel exports', () => {
   it('exports ToolCallBlock', () => { expect(ToolCallBlock).toBeDefined() })
   it('exports ToolBurstBlock', () => { expect(ToolBurstBlock).toBeDefined() })
   it('exports PlanBlock', () => { expect(PlanBlock).toBeDefined() })
+  it('exports ReasoningBlock', () => { expect(ReasoningBlock).toBeDefined() })
   it('exports DiffBlock', () => { expect(DiffBlock).toBeDefined() })
   it('exports InteractiveRequestBlock', () => { expect(InteractiveRequestBlock).toBeDefined() })
   it('exports InputToolbar', () => { expect(InputToolbar).toBeDefined() })

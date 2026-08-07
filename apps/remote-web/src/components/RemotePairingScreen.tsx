@@ -1,6 +1,8 @@
+import { useId, useState } from 'react'
+
 import { Button, Input } from '@falcondeck/ui'
 
-import { Lock, Smartphone } from 'lucide-react'
+import { ChevronDown, LoaderCircle, Lock, Smartphone } from 'lucide-react'
 
 import type { ConnectionHelpState } from '../lib/remoteAppUtils'
 import { RemoteConnectionHelpCard } from './RemoteConnectionHelpCard'
@@ -8,6 +10,7 @@ import { RemoteConnectionHelpCard } from './RemoteConnectionHelpCard'
 type RemotePairingScreenProps = {
   relayUrl: string
   pairingCode: string
+  isConnecting: boolean
   connectionHelp: ConnectionHelpState | null
   connectionDebugRows: ReadonlyArray<readonly [string, string]>
   onRelayUrlChange: (value: string) => void
@@ -19,6 +22,7 @@ type RemotePairingScreenProps = {
 export function RemotePairingScreen({
   relayUrl,
   pairingCode,
+  isConnecting,
   connectionHelp,
   connectionDebugRows,
   onRelayUrlChange,
@@ -26,42 +30,102 @@ export function RemotePairingScreen({
   onConnect,
   onResetSavedConnection,
 }: RemotePairingScreenProps) {
+  const relayFieldId = useId()
+  const codeFieldId = useId()
+  // The relay only ever needs changing for a self-hosted deployment, and a
+  // wrong value here is the hardest pairing failure to diagnose. Keep it out
+  // of the way of the one field a first-time user actually fills in.
+  const [showRelayField, setShowRelayField] = useState(false)
+  const canSubmit = Boolean(relayUrl.trim() && pairingCode.trim()) && !isConnecting
+
   return (
-    <div className="flex h-[100dvh] flex-col items-center justify-center bg-surface-0 p-6">
+    <div className="fd-safe-area flex min-h-[100dvh] flex-col items-center justify-center bg-surface-0 p-6">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-surface-2">
-            <Smartphone className="h-7 w-7 text-fg-tertiary" />
+            <Smartphone aria-hidden="true" className="h-7 w-7 text-fg-tertiary" />
           </div>
           <h1 className="text-[length:var(--fd-text-xl)] font-semibold text-fg-primary">
             FalconDeck Remote
           </h1>
           <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-            Connect to your desktop session
+            Enter the pairing code shown by FalconDeck on your desktop.
           </p>
         </div>
 
-        <div className="space-y-3">
-          <Input
-            value={relayUrl}
-            onChange={(event) => onRelayUrlChange(event.target.value)}
-            placeholder="Relay URL"
-          />
-          <Input
-            value={pairingCode}
-            onChange={(event) => onPairingCodeChange(event.target.value.toUpperCase())}
-            placeholder="Pairing code"
-            className="text-center font-mono tracking-widest"
-          />
-          <Button
-            type="button"
-            disabled={!relayUrl.trim() || !pairingCode.trim()}
-            onClick={onConnect}
-            className="w-full"
-          >
-            Connect
+        <form
+          className="space-y-3"
+          onSubmit={(event) => {
+            event.preventDefault()
+            if (!canSubmit) return
+            onConnect()
+          }}
+        >
+          <div className="space-y-1.5">
+            <label
+              htmlFor={codeFieldId}
+              className="block text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.16em] text-fg-muted"
+            >
+              Pairing code
+            </label>
+            <Input
+              id={codeFieldId}
+              value={pairingCode}
+              onChange={(event) => onPairingCodeChange(event.target.value.toUpperCase())}
+              placeholder="ABCD-1234"
+              autoComplete="one-time-code"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
+              // eslint-disable-next-line jsx-a11y/no-autofocus -- the sole
+              // purpose of this screen is entering this one value.
+              autoFocus
+              className="text-center font-mono tracking-widest"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <button
+              type="button"
+              onClick={() => setShowRelayField((value) => !value)}
+              aria-expanded={showRelayField}
+              aria-controls={relayFieldId}
+              className="fd-focus flex items-center gap-1 rounded-[var(--fd-radius-sm)] text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-secondary"
+            >
+              <ChevronDown
+                aria-hidden="true"
+                className={`h-3 w-3 transition-transform ${showRelayField ? '' : '-rotate-90'}`}
+              />
+              Relay server
+            </button>
+            <div id={relayFieldId}>
+              {showRelayField ? (
+                <Input
+                  value={relayUrl}
+                  onChange={(event) => onRelayUrlChange(event.target.value)}
+                  placeholder="https://connect.falcondeck.com"
+                  aria-label="Relay server URL"
+                  inputMode="url"
+                  autoComplete="url"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+              ) : null}
+            </div>
+          </div>
+
+          <Button type="submit" disabled={!canSubmit} className="w-full">
+            {isConnecting ? (
+              <>
+                <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin" />
+                Connecting...
+              </>
+            ) : (
+              'Connect'
+            )}
           </Button>
-        </div>
+        </form>
 
         {connectionHelp ? (
           <RemoteConnectionHelpCard
@@ -73,7 +137,7 @@ export function RemotePairingScreen({
         ) : null}
 
         <div className="flex items-center justify-center gap-2 text-[length:var(--fd-text-xs)] text-fg-muted">
-          <Lock className="h-3 w-3" />
+          <Lock aria-hidden="true" className="h-3 w-3" />
           End-to-end encrypted
         </div>
       </div>

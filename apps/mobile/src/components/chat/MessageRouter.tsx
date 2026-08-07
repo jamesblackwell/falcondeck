@@ -11,6 +11,7 @@ import { ToolCallBlock } from './ToolCallBlock'
 import { ToolBurstBlock } from './ToolBurstBlock'
 import { WorkSessionBlock } from './WorkSessionBlock'
 import { PlanBlock } from './PlanBlock'
+import { ConnectedReasoningBlock } from './ReasoningBlock'
 import { DiffBlock } from './DiffBlock'
 import { InteractiveRequestBlock } from './InteractiveRequestBlock'
 
@@ -69,6 +70,8 @@ export const MessageRouter = memo(function MessageRouter({ item: block }: Messag
           suppressDetail={block.suppress_read_only_detail}
         />
       )
+    case 'reasoning':
+      return <ConnectedReasoningBlock item={item} />
     case 'plan':
       return <PlanBlock item={item} />
     case 'diff':

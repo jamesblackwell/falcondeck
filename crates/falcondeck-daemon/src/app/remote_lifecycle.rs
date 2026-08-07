@@ -17,7 +17,7 @@ use crate::error::DaemonError;
 
 use super::{
     AppState, PersistedRemoteState, RemoteBridgeCommand, RemoteBridgeState, RemotePairingState,
-    decode_fixed_base64, delete_remote_secrets, host_label, load_remote_secrets,
+    decode_fixed_base64, delete_remote_secrets_async, host_label, load_remote_secrets_async,
     normalize_relay_url, remote_secret_storage_key,
 };
 
@@ -146,13 +146,15 @@ impl AppState {
         let mut remote = self.inner.remote.lock().await;
         if let (Some(relay_url), Some(pairing)) =
             (remote.relay_url.as_ref(), remote.pairing.as_ref())
-            && let Err(error) = delete_remote_secrets(remote_secret_storage_key(
+        {
+            let secure_storage_key = remote_secret_storage_key(
                 relay_url,
                 &pairing.pairing_id,
                 pairing.session_id.as_deref(),
-            ))
-        {
-            tracing::warn!("failed to clear remote secure storage: {error}");
+            );
+            if let Err(error) = delete_remote_secrets_async(secure_storage_key).await {
+                tracing::warn!("failed to clear remote secure storage: {error}");
+            }
         }
         if let Some(task) = remote.task.take() {
             task.abort();
@@ -468,13 +470,17 @@ impl AppState {
                     if should_clear_pairing || should_reset_persisted_remote {
                         if let (Some(current_relay_url), Some(current_pairing)) =
                             (remote.relay_url.as_ref(), remote.pairing.as_ref())
-                            && let Err(error) = delete_remote_secrets(remote_secret_storage_key(
+                        {
+                            let secure_storage_key = remote_secret_storage_key(
                                 current_relay_url,
                                 &current_pairing.pairing_id,
                                 current_pairing.session_id.as_deref(),
-                            ))
-                        {
-                            tracing::warn!("failed to clear remote secure storage: {error}");
+                            );
+                            if let Err(error) =
+                                delete_remote_secrets_async(secure_storage_key).await
+                            {
+                                tracing::warn!("failed to clear remote secure storage: {error}");
+                            }
                         }
                         remote.relay_url = None;
                         remote.daemon_token = None;
@@ -872,7 +878,9 @@ impl AppState {
                 remote.session_id.as_deref(),
             )
         });
-        let secrets = load_remote_secrets(&remote, &secure_storage_key)?;
+        let persisted_remote = remote.clone();
+        let storage_key = secure_storage_key.clone();
+        let secrets = load_remote_secrets_async(persisted_remote, storage_key).await?;
         let local_key_pair = LocalBoxKeyPair::from_secret_key_base64(
             &secrets.local_secret_key_base64,
         )

@@ -9,6 +9,7 @@ import {
   canonicalSkillAlias,
   providerSupportsSkill,
   type ActiveSlashQuery,
+  type AgentCapabilitySummary,
   type AgentProvider,
   type ImageInput,
   type ModelSummary,
@@ -47,6 +48,11 @@ interface ChatInputProps {
   isRunning?: boolean
   /** True while an interrupt request is in flight. */
   isStopping?: boolean
+  capabilities?: AgentCapabilitySummary
+  selectedPermissionMode?: string | null
+  selectedSandboxMode?: string | null
+  onSelectPermissionMode?: (mode: string | null) => void
+  onSelectSandboxMode?: (mode: string | null) => void
 }
 
 const MIN_INPUT_HEIGHT = 44
@@ -77,6 +83,11 @@ export const ChatInput = memo(function ChatInput({
   onSelectProvider,
   isRunning = false,
   isStopping = false,
+  capabilities,
+  selectedPermissionMode,
+  selectedSandboxMode,
+  onSelectPermissionMode,
+  onSelectSandboxMode,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
   const [caretIndex, setCaretIndex] = useState(value.length)
@@ -330,6 +341,11 @@ export const ChatInput = memo(function ChatInput({
               onSelectModel={onSelectModel}
               onSelectEffort={onSelectEffort}
               onSelectProvider={onSelectProvider}
+              capabilities={capabilities}
+              selectedPermissionMode={selectedPermissionMode}
+              selectedSandboxMode={selectedSandboxMode}
+              onSelectPermissionMode={onSelectPermissionMode}
+              onSelectSandboxMode={onSelectSandboxMode}
             />
           </View>
           <Pressable

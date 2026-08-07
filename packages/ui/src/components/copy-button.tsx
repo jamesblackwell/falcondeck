@@ -1,5 +1,5 @@
-import { memo, useCallback, useState } from 'react'
-import { Check, Copy } from 'lucide-react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { Check, Copy, X } from 'lucide-react'
 
 import { cn } from '../lib/utils'
 
@@ -18,13 +18,47 @@ export const CopyButton = memo(function CopyButton({
   label = 'Copy',
   copiedLabel = 'Copied',
 }: CopyButtonProps) {
-  const [copied, setCopied] = useState(false)
+  const [result, setResult] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const resetTimerRef = useRef<number | null>(null)
+
+  useEffect(
+    () => () => {
+      if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current)
+    },
+    [],
+  )
 
   const handleCopy = useCallback(() => {
-    void navigator.clipboard.writeText(text)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
+    const settle = (next: 'copied' | 'failed') => {
+      setResult(next)
+      if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current)
+      resetTimerRef.current = window.setTimeout(() => setResult('idle'), 1500)
+    }
+
+    // Confirming before the write resolves is a lie the user only discovers at
+    // the paste — and the clipboard API both rejects routinely in webviews
+    // without a user-gesture chain and is absent outside secure contexts.
+    const write = navigator.clipboard?.writeText(text)
+    if (!write) {
+      settle('failed')
+      return
+    }
+    write.then(
+      () => settle('copied'),
+      () => settle('failed'),
+    )
   }, [text])
+
+  const copied = result === 'copied'
+  const failed = result === 'failed'
+  const currentLabel = copied ? copiedLabel : failed ? 'Copy failed' : label
+  const icon = copied ? (
+    <Check aria-hidden="true" className="h-3 w-3 text-success" />
+  ) : failed ? (
+    <X aria-hidden="true" className="h-3 w-3 text-danger" />
+  ) : (
+    <Copy aria-hidden="true" className="h-3 w-3" />
+  )
 
   if (variant === 'labeled') {
     return (
@@ -36,12 +70,8 @@ export const CopyButton = memo(function CopyButton({
           className,
         )}
       >
-        {copied ? (
-          <Check aria-hidden="true" className="h-3 w-3 text-success" />
-        ) : (
-          <Copy aria-hidden="true" className="h-3 w-3" />
-        )}
-        {copied ? copiedLabel : label}
+        {icon}
+        {currentLabel}
       </button>
     )
   }
@@ -50,17 +80,13 @@ export const CopyButton = memo(function CopyButton({
     <button
       type="button"
       onClick={handleCopy}
-      aria-label={copied ? copiedLabel : label}
+      aria-label={currentLabel}
       className={cn(
         'fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary',
         className,
       )}
     >
-      {copied ? (
-        <Check aria-hidden="true" className="h-3 w-3 text-success" />
-      ) : (
-        <Copy aria-hidden="true" className="h-3 w-3" />
-      )}
+      {icon}
     </button>
   )
 })

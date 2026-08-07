@@ -1,4 +1,9 @@
-import type { RemoteStatusResponse, ToolDetailsMode, TrustedDevice } from '@falcondeck/client-core'
+import type {
+  RemoteStatusResponse,
+  ThinkingDisplay,
+  ToolDetailsMode,
+  TrustedDevice,
+} from '@falcondeck/client-core'
 import { Bot, Palette, Plug, Server, Settings, Wifi } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
@@ -86,6 +91,34 @@ export const TOOL_DETAIL_OPTIONS: Array<{
     value: 'hide_read_only_details',
     label: 'Hide read-only details',
     description: 'Show grouped summaries for read-only inspection without rendering their raw output.',
+  },
+]
+
+export const THINKING_DISPLAY_OPTIONS: Array<{
+  value: ThinkingDisplay
+  label: string
+  description: string
+}> = [
+  {
+    value: 'auto',
+    label: 'Auto',
+    description:
+      'Expand the thought while it streams, then collapse it when it ends — unless you opened it yourself. The default.',
+  },
+  {
+    value: 'preview',
+    label: 'Preview',
+    description: 'Keep a few faded lines of every thought visible; click to read the rest.',
+  },
+  {
+    value: 'always_expanded',
+    label: 'Always expanded',
+    description: 'Show reasoning in full, for following exactly how the agent got there.',
+  },
+  {
+    value: 'always_collapsed',
+    label: 'Always collapsed',
+    description: 'Keep every thought behind its own line until you ask for it.',
   },
 ]
 
