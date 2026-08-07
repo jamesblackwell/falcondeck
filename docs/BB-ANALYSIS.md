@@ -171,7 +171,11 @@ Two separable takeaways.
 - Add `buildThreadDetachedEvents`-style reconciliation so a dead provider
   process can never strand running tool calls in the UI.
 
-### 4b. A FalconDeck plugin system (the user's ask)
+### 4b. A FalconDeck plugin system
+
+> **Status: documented idea, deliberately not scheduled (2026-08-07).** Core
+> functionality (remote hosts, provider polish) comes first. Revisit once the
+> remote-host work settles.
 
 bb proves the model works, and its choices map onto our architecture
 surprisingly well because we share the daemon/clients split:
