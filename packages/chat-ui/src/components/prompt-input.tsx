@@ -1,4 +1,4 @@
-import { ImagePlus, Send, X } from 'lucide-react'
+import { ImagePlus, Plug, Send, X } from 'lucide-react'
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 
 import type {
@@ -16,7 +16,7 @@ import {
   NO_AGENT_CAPABILITIES,
   providerSupportsSkill,
 } from '@falcondeck/client-core'
-import { Button } from '@falcondeck/ui'
+import { Button, cn } from '@falcondeck/ui'
 
 import {
   ModelSelector,
@@ -56,6 +56,9 @@ export type PromptInputProps = {
   disabled?: boolean
   sendDisabled?: boolean
   compact?: boolean
+  /** Enabled MCP servers for this workspace; renders a tools chip when > 0. */
+  connectorCount?: number
+  onConnectorsClick?: () => void
 }
 
 const PROMPT_INPUT_MIN_HEIGHT = 52
@@ -93,6 +96,8 @@ export const PromptInput = memo(function PromptInput({
   disabled = false,
   sendDisabled = false,
   compact = false,
+  connectorCount = 0,
+  onConnectorsClick,
 }: PromptInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
@@ -389,6 +394,22 @@ export const PromptInput = memo(function PromptInput({
                 />
               ) : null}
             </>
+          ) : null}
+
+          {!compact && connectorCount > 0 ? (
+            <button
+              type="button"
+              onClick={onConnectorsClick}
+              disabled={!onConnectorsClick}
+              title={`${connectorCount} MCP server${connectorCount === 1 ? '' : 's'} available to agents in this workspace`}
+              className={cn(
+                'flex items-center gap-1 rounded-full border border-border-subtle px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-muted',
+                onConnectorsClick && 'hover:border-border-emphasis hover:text-fg-secondary',
+              )}
+            >
+              <Plug className="h-3 w-3" aria-hidden="true" />
+              {connectorCount}
+            </button>
           ) : null}
 
           <div className="ml-auto flex items-center gap-2">

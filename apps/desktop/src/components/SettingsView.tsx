@@ -11,6 +11,7 @@ import type {
 import type { AppUpdaterState } from '../hooks/useAppUpdater'
 import type { HostManager, HostView } from '../hosts'
 import { AppearanceSettingsPanel } from './settings/AppearanceSettingsPanel'
+import { ConnectorsPanel } from './settings/ConnectorsPanel'
 import { GeneralSettingsPanel } from './settings/GeneralSettingsPanel'
 import { RemoteAccessPanel } from './settings/RemoteAccessPanel'
 import { ServersPanel, type ServersPanelProps } from './settings/ServersPanel'
@@ -19,6 +20,7 @@ import type { SettingsSectionId } from './settings/settings-utils'
 
 export type SettingsViewProps = {
   workspace?: WorkspaceSummary | null
+  localWorkspaces: WorkspaceSummary[]
   baseUrl: string | null
   hostManager: HostManager
   hosts: HostView[]
@@ -63,6 +65,15 @@ export function SettingsView(props: SettingsViewProps) {
               baseUrl={props.baseUrl}
               manager={props.hostManager}
               hosts={props.hosts}
+              onToast={props.onToast}
+            />
+          ) : activeSection === 'connectors' ? (
+            <ConnectorsPanel
+              baseUrl={props.baseUrl}
+              workspaces={props.localWorkspaces.map((workspace) => ({
+                id: workspace.id,
+                path: workspace.path,
+              }))}
               onToast={props.onToast}
             />
           ) : activeSection === 'general' ? (

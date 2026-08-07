@@ -219,6 +219,31 @@ function AppInner() {
     () => viewSnapshot?.workspaces.find((w) => w.id === selectedWorkspaceId) ?? null,
     [selectedWorkspaceId, viewSnapshot?.workspaces],
   )
+  // Enabled MCP servers for the selected local workspace; feeds the composer's
+  // tools chip. Re-fetched when settings close so panel edits show up.
+  const [connectorCount, setConnectorCount] = useState(0)
+  useEffect(() => {
+    if (!baseUrl || !selectedWorkspaceId || workspaceHostIndex.has(selectedWorkspaceId)) {
+      setConnectorCount(0)
+      return
+    }
+    if (isSettingsOpen) return
+    let cancelled = false
+    void fetch(`${baseUrl}/api/connectors?workspace_id=${encodeURIComponent(selectedWorkspaceId)}`)
+      .then(async (response) => (response.ok ? response.json() : null))
+      .then((overview: { merged?: Array<{ enabled?: boolean }> } | null) => {
+        if (cancelled) return
+        setConnectorCount(
+          overview?.merged?.filter((entry) => entry.enabled !== false).length ?? 0,
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setConnectorCount(0)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [baseUrl, selectedWorkspaceId, workspaceHostIndex, isSettingsOpen])
   const selectedThread = useMemo(
     () => viewSnapshot?.threads.find((t) => t.id === selectedThreadId) ?? null,
     [selectedThreadId, viewSnapshot?.threads],
@@ -1289,6 +1314,7 @@ function AppInner() {
           isSettingsOpen ? (
             <SettingsView
               workspace={selectedWorkspace}
+              localWorkspaces={snapshot?.workspaces ?? []}
               baseUrl={baseUrl}
               hostManager={remoteHosts.manager}
               hosts={remoteHosts.hosts}
@@ -1357,6 +1383,8 @@ function AppInner() {
                 onSandboxModeChange: handleSandboxModeChange,
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
+                connectorCount,
+                onConnectorsClick: () => setIsSettingsOpen(true),
               }}
               headerControls={
                 <>
