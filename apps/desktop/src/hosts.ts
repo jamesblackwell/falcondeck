@@ -96,6 +96,12 @@ export function saveStoredHosts(hosts: StoredHost[]) {
 export type WorkspaceScopedApi = {
   startThread(payload: StartThreadPayload): Promise<ThreadHandle>
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
+  interruptTurn(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
+  removeQueuedTurn(
+    workspaceId: string,
+    threadId: string,
+    queuedId: string,
+  ): Promise<{ ok: boolean; message?: string | null }>
   updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>
   archiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
   unarchiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
@@ -241,6 +247,14 @@ export class HostConnection {
       startThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.start', payload)),
       sendTurn: (payload) => this.rpc('turn.start', payload),
+      interruptTurn: (workspaceId, threadId) =>
+        this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),
+      removeQueuedTurn: (workspaceId, threadId, queuedId) =>
+        this.rpc('thread.queue.remove', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          queued_id: queuedId,
+        }),
       updateThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.update', payload)),
       archiveThread: async (workspaceId, threadId) =>

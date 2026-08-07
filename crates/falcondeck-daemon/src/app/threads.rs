@@ -21,8 +21,8 @@ use uuid::Uuid;
 use super::{
     AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
     agent_helpers::{
-        extract_claude_error, extract_claude_service_message, extract_claude_text_delta,
-        extract_claude_tool_event, merge_claude_assistant_text,
+        append_claude_text_delta, extract_claude_error, extract_claude_service_message,
+        extract_claude_text_chunk, extract_claude_tool_event, merge_claude_assistant_text,
     },
     conversation_helpers::{
         build_ai_thread_title_prompt, is_placeholder_thread_title, is_provisional_thread_title,
@@ -126,6 +126,7 @@ impl AppState {
                     is_archived: false,
                     is_pinned: false,
                     goal: None,
+                    queued_turns: Vec::new(),
                 })
             });
         let before = thread.summary.updated_at;
@@ -407,8 +408,12 @@ impl AppState {
                 }
                 match serde_json::from_str::<Value>(trimmed) {
                     Ok(value) => {
-                        if let Some(delta) = extract_claude_text_delta(&value) {
-                            assistant_text = merge_claude_assistant_text(&assistant_text, &delta);
+                        if let Some(chunk) = extract_claude_text_chunk(&value) {
+                            assistant_text = if chunk.is_delta {
+                                append_claude_text_delta(&assistant_text, &chunk.text)
+                            } else {
+                                merge_claude_assistant_text(&assistant_text, &chunk.text)
+                            };
                             saw_agent_output = true;
                             let item = ConversationItem::AssistantMessage {
                                 id: assistant_id.clone(),
@@ -555,6 +560,7 @@ impl AppState {
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
+        self.dispatch_next_queued_turn(&workspace_id, &thread_id);
         // A user-requested interrupt is not attention-worthy; a finished or
         // failed turn is. The relay only pushes to disconnected devices.
         if !was_interrupted {
@@ -718,6 +724,7 @@ impl ManagedThread {
             ai_title_generated,
             ai_title_in_flight: false,
             requires_resume: false,
+            queued_requests: Vec::new(),
         }
     }
 

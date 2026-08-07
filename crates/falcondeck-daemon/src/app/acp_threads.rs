@@ -479,13 +479,14 @@ pub(super) async fn start_acp_turn(
             .as_deref()
             .filter(|mode| mode_state.available.iter().any(|id| id == mode))
             .filter(|mode| mode_state.current.as_deref() != Some(mode))
-            && let Err(error) = runtime.set_session_mode(&session_id, desired).await {
-                tracing::warn!(
-                    provider = %runtime.config.id,
-                    %error,
-                    "failed to apply ACP session mode; continuing with agent default"
-                );
-            }
+            && let Err(error) = runtime.set_session_mode(&session_id, desired).await
+        {
+            tracing::warn!(
+                provider = %runtime.config.id,
+                %error,
+                "failed to apply ACP session mode; continuing with agent default"
+            );
+        }
     }
 
     let text = inputs
@@ -547,6 +548,7 @@ pub(super) async fn start_acp_turn(
                 UnifiedEvent::ThreadUpdated { thread },
             );
         }
+        app.dispatch_next_queued_turn(&workspace_id, &thread_id);
         app.maybe_schedule_ai_thread_title(workspace_id, thread_id)
             .await;
     });

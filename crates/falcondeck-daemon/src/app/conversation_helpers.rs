@@ -602,8 +602,10 @@ fn unwrap_shell_wrapper(raw: &str) -> String {
     let mut tokens = raw.splitn(3, char::is_whitespace);
     let shell = tokens.next().unwrap_or_default();
     let flags = tokens.next().unwrap_or_default();
-    if matches!(shell, "bash" | "sh" | "zsh" | "/bin/bash" | "/bin/sh" | "/bin/zsh")
-        && flags.starts_with('-')
+    if matches!(
+        shell,
+        "bash" | "sh" | "zsh" | "/bin/bash" | "/bin/sh" | "/bin/zsh"
+    ) && flags.starts_with('-')
         && flags.contains('c')
         && let Some(inner) = tokens.next()
     {
@@ -767,10 +769,7 @@ mod shell_classification_tests {
             Some(ToolActivityKind::Edit),
             "a file redirect is an edit regardless of the program"
         );
-        assert_eq!(
-            classify("cat a.txt > b.txt"),
-            Some(ToolActivityKind::Edit)
-        );
+        assert_eq!(classify("cat a.txt > b.txt"), Some(ToolActivityKind::Edit));
     }
 
     #[test]
@@ -791,10 +790,7 @@ mod shell_classification_tests {
             classify("grep -rn foo src/ 2>/dev/null"),
             Some(ToolActivityKind::Search)
         );
-        assert_eq!(
-            classify("cat a.txt 2>&1"),
-            Some(ToolActivityKind::Read)
-        );
+        assert_eq!(classify("cat a.txt 2>&1"), Some(ToolActivityKind::Read));
         assert_eq!(
             classify("find . -name '*.rs' > /dev/null"),
             Some(ToolActivityKind::Search)
@@ -806,6 +802,9 @@ mod shell_classification_tests {
         assert_eq!(classify("git status"), None);
         assert_eq!(classify("cargo build"), None);
         assert_eq!(classify("Read /path/to/file"), None);
-        assert_eq!(classify("FOO=bar sudo rm -rf target"), Some(ToolActivityKind::Edit));
+        assert_eq!(
+            classify("FOO=bar sudo rm -rf target"),
+            Some(ToolActivityKind::Edit)
+        );
     }
 }

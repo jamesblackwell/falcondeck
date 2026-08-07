@@ -292,7 +292,33 @@ where
     translated
 }
 
-pub(crate) fn extract_claude_text_delta(value: &Value) -> Option<String> {
+/// Assistant text pulled from one Claude stream line.
+pub(crate) struct ClaudeTextChunk {
+    pub text: String,
+    /// True for incremental token deltas, which must be concatenated
+    /// verbatim. Whole-message echoes (complete `assistant` messages and the
+    /// final `result`) instead supersede or dedupe against what is already
+    /// accumulated, and are merged heuristically.
+    pub is_delta: bool,
+}
+
+impl ClaudeTextChunk {
+    fn delta(text: String) -> Self {
+        Self {
+            text,
+            is_delta: true,
+        }
+    }
+
+    fn full(text: String) -> Self {
+        Self {
+            text,
+            is_delta: false,
+        }
+    }
+}
+
+pub(crate) fn extract_claude_text_chunk(value: &Value) -> Option<ClaudeTextChunk> {
     if matches!(extract_string(value, &["type"]).as_deref(), Some("result")) {
         // Error results are surfaced via `extract_claude_error`; folding them
         // into the assistant message would render the failure as agent prose.
@@ -303,32 +329,57 @@ pub(crate) fn extract_claude_text_delta(value: &Value) -> Option<String> {
         {
             return None;
         }
-        return extract_string(value, &["result"]);
+        return extract_string(value, &["result"]).map(ClaudeTextChunk::full);
     }
 
+    // Token deltas are checked first: `content_block_delta` carries its text
+    // under `delta.text`, and treating it as a whole message would re-join
+    // tokens with invented whitespace ("I" + "'ll" -> "I 'll").
     let event = claude_event_value(value);
-    if let Some(text) = extract_string(event, &["text", "completion"]) {
-        return Some(text);
-    }
     if let Some(text) = event
         .get("delta")
         .and_then(|delta| extract_string(delta, &["text"]))
     {
-        return Some(text);
+        return Some(ClaudeTextChunk::delta(text));
+    }
+    if let Some(text) = value
+        .get("delta")
+        .and_then(|delta| extract_string(delta, &["text"]))
+    {
+        return Some(ClaudeTextChunk::delta(text));
+    }
+    // Legacy `completion` streaming is incremental too.
+    if let Some(text) = extract_string(event, &["completion"]) {
+        return Some(ClaudeTextChunk::delta(text));
+    }
+    if let Some(text) = extract_string(event, &["text"]) {
+        return Some(ClaudeTextChunk::full(text));
     }
     if let Some(text) = value
         .get("message")
         .and_then(claude_message_text)
         .filter(|text| !text.is_empty())
     {
-        return Some(text);
+        return Some(ClaudeTextChunk::full(text));
     }
-    if let Some(text) = extract_string(value, &["text", "completion"]) {
-        return Some(text);
+    if let Some(text) = extract_string(value, &["completion"]) {
+        return Some(ClaudeTextChunk::delta(text));
     }
-    value
-        .get("delta")
-        .and_then(|delta| extract_string(delta, &["text"]))
+    extract_string(value, &["text"]).map(ClaudeTextChunk::full)
+}
+
+pub(crate) fn extract_claude_text_delta(value: &Value) -> Option<String> {
+    extract_claude_text_chunk(value).map(|chunk| chunk.text)
+}
+
+/// Appends one streamed token delta verbatim. Whitespace inside deltas is
+/// meaningful — trimming or separator heuristics belong to the whole-message
+/// path in [`merge_claude_assistant_text`], not here.
+pub(crate) fn append_claude_text_delta(current: &str, delta: &str) -> String {
+    if current.is_empty() {
+        return delta.trim_start().to_string();
+    }
+    format!("{current}{delta}")
 }
 
 pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent> {

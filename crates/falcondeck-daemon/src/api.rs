@@ -141,6 +141,10 @@ pub fn router(state: AppState) -> Router {
             post(interrupt_turn),
         )
         .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/{queued_id}",
+            delete(remove_queued_turn),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/review",
             post(start_review),
         )
@@ -425,6 +429,17 @@ async fn git_status(
     Path(workspace_id): Path<String>,
 ) -> Result<Json<falcondeck_core::GitStatusResponse>, DaemonError> {
     Ok(Json(state.git_status(&workspace_id).await?))
+}
+
+async fn remove_queued_turn(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id, queued_id)): Path<(String, String, String)>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .remove_queued_turn(&workspace_id, &thread_id, &queued_id)
+            .await?,
+    ))
 }
 
 #[derive(serde::Deserialize)]

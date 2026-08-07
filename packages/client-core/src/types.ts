@@ -120,7 +120,7 @@ export type ThreadGoal = {
   time_used_seconds?: number | null
 }
 
-export type ToolDetailsMode = 'auto' | 'expanded' | 'compact' | 'hide_read_only_details'
+export type ToolDetailsMode = 'collapsed' | 'auto' | 'expanded' | 'compact' | 'hide_read_only_details'
 
 export type ConversationAutoExpandPreferences = {
   approvals: boolean
@@ -216,6 +216,15 @@ export type ThreadAttention = {
   last_read_seq: number
 }
 
+/** A turn accepted while the thread was busy, dispatching when the active
+ * turn ends. Rendered as a removable chip near the composer. */
+export type QueuedTurnSummary = {
+  id: string
+  preview: string
+  attachment_count?: number
+  queued_at: string
+}
+
 export type ThreadSummary = {
   id: string
   workspace_id: string
@@ -235,6 +244,7 @@ export type ThreadSummary = {
   is_archived: boolean
   is_pinned: boolean
   goal: ThreadGoal | null
+  queued_turns: QueuedTurnSummary[]
 }
 
 export type InteractiveRequestKind = 'approval' | 'question'

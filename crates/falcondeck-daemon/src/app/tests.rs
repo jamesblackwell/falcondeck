@@ -321,6 +321,42 @@ fn merging_claude_text_ignores_repeated_final_result_echo() {
 }
 
 #[test]
+fn streamed_token_deltas_concatenate_verbatim() {
+    // Token deltas carry their own whitespace. Trimming them and re-joining
+    // with a separator produced "I 'll survey" / "Refacto ring done".
+    let deltas = ["I", "'ll", " survey", " the", " codebase", "."];
+    let mut text = String::new();
+    for delta in deltas {
+        let chunk = super::extract_claude_text_chunk(&json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "delta": { "type": "text_delta", "text": delta }
+            }
+        }))
+        .expect("delta chunk");
+        assert!(
+            chunk.is_delta,
+            "content_block_delta must be treated as a delta"
+        );
+        text = super::append_claude_text_delta(&text, &chunk.text);
+    }
+    assert_eq!(text, "I'll survey the codebase.");
+
+    // The full-message echo that follows the deltas must dedupe, not duplicate.
+    let echo = super::extract_claude_text_chunk(&json!({
+        "type": "assistant",
+        "message": { "content": [{ "type": "text", "text": "I'll survey the codebase." }] }
+    }))
+    .expect("full chunk");
+    assert!(!echo.is_delta, "complete assistant messages are not deltas");
+    assert_eq!(
+        super::merge_claude_assistant_text(&text, &echo.text),
+        "I'll survey the codebase."
+    );
+}
+
+#[test]
 fn extracts_nested_claude_tool_use_and_result_events() {
     assert_eq!(
         super::extract_claude_tool_event(&json!({
@@ -461,6 +497,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         is_archived: false,
         is_pinned: false,
         goal: None,
+        queued_turns: Vec::new(),
     };
 
     let new_thread = super::ManagedThread::new(summary.clone());
@@ -564,6 +601,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     is_archived: false,
                     is_pinned: false,
                     goal: None,
+                    queued_turns: Vec::new(),
                 }),
             )]
             .into_iter()
@@ -1182,6 +1220,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         is_archived: false,
         is_pinned: false,
         goal: None,
+        queued_turns: Vec::new(),
     };
     let live_workspace = WorkspaceSummary {
         id: live_workspace_id.clone(),
@@ -1284,6 +1323,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         is_archived: false,
         is_pinned: false,
         goal: None,
+        queued_turns: Vec::new(),
     };
     let workspace = WorkspaceSummary {
         id: workspace_id.clone(),
@@ -1689,6 +1729,7 @@ async fn insert_claude_workspace_with_session(
                     is_archived: false,
                     is_pinned: false,
                     goal: None,
+                    queued_turns: Vec::new(),
                 }),
             )]
             .into_iter()
@@ -2100,6 +2141,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         is_archived: false,
         is_pinned: false,
         goal: None,
+        queued_turns: Vec::new(),
     };
     let archived_thread = ThreadSummary {
         id: "thread-archived".to_string(),
@@ -2120,6 +2162,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         is_archived: true,
         is_pinned: false,
         goal: None,
+        queued_turns: Vec::new(),
     };
 
     app.inner.workspaces.lock().await.insert(
@@ -2291,5 +2334,109 @@ fn rejects_bootstrap_request_with_tampered_bundle_signature() {
             "client_bundle": bundle,
         }))
         .is_none()
+    );
+}
+
+#[tokio::test]
+async fn sends_against_a_running_thread_queue_and_are_removable() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-q");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+
+    let workspace_id = "workspace-q".to_string();
+    let thread = ThreadSummary {
+        id: "thread-q".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Running thread".to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: None,
+        status: ThreadStatus::Running,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        goal: None,
+        queued_turns: Vec::new(),
+    };
+    let workspace = WorkspaceSummary {
+        id: workspace_id.clone(),
+        path: workspace_path.to_string_lossy().to_string(),
+        status: WorkspaceStatus::Busy,
+        agents: Vec::new(),
+        skills: Vec::new(),
+        default_provider: AgentProvider::CODEX,
+        models: Vec::new(),
+        collaboration_modes: Vec::new(),
+        account: falcondeck_core::AccountSummary::default(),
+        current_thread_id: Some("thread-q".to_string()),
+        connected_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_error: None,
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: workspace,
+            codex_session: None,
+            claude_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [("thread-q".to_string(), super::ManagedThread::new(thread))]
+                .into_iter()
+                .collect(),
+        },
+    );
+
+    let request = falcondeck_core::SendTurnRequest {
+        workspace_id: workspace_id.clone(),
+        thread_id: "thread-q".to_string(),
+        inputs: vec![falcondeck_core::TurnInputItem::Text {
+            id: None,
+            text: "queued follow-up".to_string(),
+        }],
+        selected_skills: Vec::new(),
+        provider: None,
+        model_id: None,
+        reasoning_effort: None,
+        approval_policy: None,
+        service_tier: None,
+        permission_mode: None,
+        sandbox_mode: None,
+    };
+
+    // Busy thread: the send queues instead of dispatching (dispatching would
+    // fail here anyway — no Codex session — and would flip the thread to
+    // Error, which the assertions below would catch).
+    let response = app.send_turn(request.clone()).await.unwrap();
+    assert_eq!(response.message.as_deref(), Some("queued"));
+    let snapshot = app.snapshot().await;
+    let summary = &snapshot.threads[0];
+    assert_eq!(summary.status, ThreadStatus::Running);
+    assert_eq!(summary.queued_turns.len(), 1);
+    assert_eq!(summary.queued_turns[0].preview, "queued follow-up");
+
+    // Queued turns are removable before dispatch.
+    let queued_id = summary.queued_turns[0].id.clone();
+    app.remove_queued_turn(&workspace_id, "thread-q", &queued_id)
+        .await
+        .unwrap();
+    let snapshot = app.snapshot().await;
+    assert!(snapshot.threads[0].queued_turns.is_empty());
+    assert!(
+        app.remove_queued_turn(&workspace_id, "thread-q", &queued_id)
+            .await
+            .is_err(),
+        "removing twice reports not found"
     );
 }

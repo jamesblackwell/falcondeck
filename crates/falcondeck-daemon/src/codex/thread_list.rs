@@ -133,6 +133,7 @@ pub(super) fn parse_threads(
                     is_archived: false,
                     is_pinned: false,
                     goal: None,
+                    queued_turns: Vec::new(),
                 },
                 session_path: extract_string(entry, &["path"]),
             })

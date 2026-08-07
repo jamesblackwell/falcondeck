@@ -147,6 +147,7 @@ pub(super) async fn ingest_notification(
                         error: error.clone(),
                     },
                 );
+                app.dispatch_next_queued_turn(workspace_id, &thread_id);
                 // A finished turn means the agent is waiting on the user;
                 // let disconnected devices know. The relay only pushes to
                 // devices without a live connection and dedupes per thread.

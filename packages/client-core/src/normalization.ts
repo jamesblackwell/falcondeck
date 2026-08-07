@@ -292,6 +292,12 @@ export function normalizeThreadSummary(value: ThreadSummary | unknown): ThreadSu
     is_archived: thread.is_archived ?? false,
     is_pinned: thread.is_pinned ?? false,
     goal: thread.goal ?? null,
+    queued_turns: Array.isArray(thread.queued_turns)
+      ? thread.queued_turns.filter(
+          (queued): queued is ThreadSummary['queued_turns'][number] =>
+            typeof queued?.id === 'string' && typeof queued?.preview === 'string',
+        )
+      : [],
   }
 }
 
@@ -480,12 +486,13 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
   >
 
   const toolDetailsMode =
+    conversation.tool_details_mode === 'collapsed' ||
     conversation.tool_details_mode === 'auto' ||
     conversation.tool_details_mode === 'expanded' ||
     conversation.tool_details_mode === 'compact' ||
     conversation.tool_details_mode === 'hide_read_only_details'
       ? conversation.tool_details_mode
-      : 'compact'
+      : 'collapsed'
 
   return {
     version: typeof raw.version === 'number' && Number.isFinite(raw.version) ? raw.version : 1,

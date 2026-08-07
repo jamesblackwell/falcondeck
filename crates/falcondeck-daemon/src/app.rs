@@ -118,6 +118,17 @@ struct ManagedThread {
     ai_title_generated: bool,
     ai_title_in_flight: bool,
     requires_resume: bool,
+    /// Full requests behind `summary.queued_turns`, same order, matched by
+    /// the summary entry's id. In-memory only: a queued turn does not survive
+    /// a daemon restart (neither does the turn it was waiting on).
+    queued_requests: Vec<QueuedTurnRequest>,
+}
+
+/// A send accepted while the thread was busy, held until the active turn ends.
+#[derive(Clone)]
+struct QueuedTurnRequest {
+    id: String,
+    request: SendTurnRequest,
 }
 
 impl AppState {
@@ -531,6 +542,7 @@ impl AppState {
                     .pinned_thread_ids
                     .contains(&state.thread_id),
                 goal: None,
+                queued_turns: Vec::new(),
             };
             let mut thread = ManagedThread::new(summary);
             thread.manual_title = state.manual_title;

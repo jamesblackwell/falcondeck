@@ -64,6 +64,7 @@ export function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     is_archived: false,
     is_pinned: false,
     goal: null,
+    queued_turns: [],
     ...overrides,
   }
 }

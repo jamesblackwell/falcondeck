@@ -26,8 +26,8 @@ use crate::agent_binary::preferred_command_path;
 use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
 use crate::app::agent_helpers::claude_image_reference;
 use crate::app::agent_helpers::{
-    extract_claude_assistant_message_id, extract_claude_text_delta, extract_claude_tool_event,
-    extract_claude_user_message_text, merge_claude_assistant_text,
+    append_claude_text_delta, extract_claude_assistant_message_id, extract_claude_text_chunk,
+    extract_claude_tool_event, extract_claude_user_message_text, merge_claude_assistant_text,
 };
 use crate::app::conversation_helpers::tool_display_metadata;
 use crate::error::DaemonError;
@@ -210,8 +210,14 @@ impl ClaudeRuntime {
         {
             command.arg("--permission-mode").arg(permission_mode);
         }
+        // Claude runs PreToolUse hooks regardless of permission mode, so the
+        // approval-broker hook must not be installed when the user chose
+        // bypassPermissions — otherwise "bypass" still prompts for every tool
+        // call, just from FalconDeck instead of Claude.
+        let bypassing_permissions = permission_mode
+            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("bypasspermissions"));
         if let Some(settings_path) = daemon_base_url
-            .filter(|_| claude_approvals_enabled())
+            .filter(|_| claude_approvals_enabled() && !bypassing_permissions)
             .and_then(|base_url| self.write_hook_settings_file(base_url, settings_dir))
         {
             command.arg("--settings").arg(settings_path);
@@ -1037,10 +1043,16 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         .or(updated_at);
         let created_at = extract_datetime(&value, &["created_at", "createdAt", "timestamp"])
             .unwrap_or_else(Utc::now);
-        if let Some(text) = extract_claude_text_delta(&value) {
+        if let Some(chunk) = extract_claude_text_chunk(&value) {
             let id = extract_claude_assistant_message_id(&value)
                 .unwrap_or_else(|| format!("assistant-{}", created_at.timestamp_millis()));
-            upsert_hydrated_assistant_message(&mut items, &id, created_at, &text);
+            upsert_hydrated_assistant_message(
+                &mut items,
+                &id,
+                created_at,
+                &chunk.text,
+                chunk.is_delta,
+            );
             continue;
         }
         if let Some(tool_event) = extract_claude_tool_event(&value) {
@@ -1128,6 +1140,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         is_archived: false,
         is_pinned: false,
         goal: None,
+        queued_turns: Vec::new(),
     };
 
     Some(HydratedClaudeThread { summary, items })
@@ -1138,12 +1151,17 @@ fn upsert_hydrated_assistant_message(
     id: &str,
     created_at: DateTime<Utc>,
     text: &str,
+    is_delta: bool,
 ) {
     if let Some(ConversationItem::AssistantMessage { text: existing, .. }) = items
         .iter_mut()
         .find(|item| matches!(item, ConversationItem::AssistantMessage { id: existing_id, .. } if existing_id == id))
     {
-        *existing = merge_claude_assistant_text(existing, text);
+        *existing = if is_delta {
+            append_claude_text_delta(existing, text)
+        } else {
+            merge_claude_assistant_text(existing, text)
+        };
         return;
     }
 

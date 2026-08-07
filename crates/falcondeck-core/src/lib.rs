@@ -110,12 +110,14 @@ impl Default for ConversationAutoExpandPreferences {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolDetailsMode {
+    /// Fold contiguous tool runs behind a single "Worked for…" line.
+    #[default]
+    Collapsed,
     /// Group low-signal read-only tool chatter and expand only important artifacts.
     Auto,
     /// Prefer expanded tool details with minimal collapsing.
     Expanded,
     /// Prefer compact grouped tool details; suppress read-only output by default.
-    #[default]
     Compact,
     /// Hide raw read-only tool detail bodies while keeping summary rows visible.
     HideReadOnlyDetails,
@@ -1007,6 +1009,26 @@ pub struct ThreadSummary {
     /// Active goal attached to the thread, if any.
     #[serde(default)]
     pub goal: Option<ThreadGoal>,
+    /// Turns accepted while the thread was busy, waiting to dispatch when the
+    /// active turn ends. Ordered; clients render these as removable chips.
+    #[serde(default)]
+    pub queued_turns: Vec<QueuedTurnSummary>,
+}
+
+/// Client-visible view of one queued turn. The full request (inputs,
+/// attachments, skill selections) stays daemon-side; the wire carries only
+/// what chips need.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QueuedTurnSummary {
+    /// Stable id used to remove the queued turn before it dispatches.
+    pub id: String,
+    /// Short text preview of the queued message.
+    pub preview: String,
+    /// Number of image attachments riding along.
+    #[serde(default)]
+    pub attachment_count: usize,
+    /// When the turn was queued.
+    pub queued_at: chrono::DateTime<Utc>,
 }
 
 /// Attention state derived from thread activity.

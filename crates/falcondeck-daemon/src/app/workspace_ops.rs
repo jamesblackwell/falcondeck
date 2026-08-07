@@ -235,6 +235,7 @@ pub(super) async fn connect_workspace_internal(
                 is_archived: false,
                 is_pinned: false,
                 goal: None,
+                queued_turns: Vec::new(),
             },
             items: Vec::new(),
         });
@@ -495,6 +496,7 @@ pub(super) async fn start_thread(
         is_archived: false,
         is_pinned: false,
         goal: None,
+        queued_turns: Vec::new(),
     };
     workspace.summary.current_thread_id = Some(thread_id.clone());
     workspace.summary.default_provider = provider;
@@ -807,6 +809,181 @@ fn stable_attachment_identifier_hash(value: &str) -> u64 {
     hash
 }
 
+/// Upper bound on messages parked behind one thread's active turn.
+const MAX_QUEUED_TURNS: usize = 20;
+
+/// Queues the request when the thread is busy. Returns `Ok(None)` when the
+/// thread is free (caller dispatches normally). Inputs are the normalized
+/// form so attachments are already materialized to files when queued.
+async fn try_enqueue_turn(
+    app: &AppState,
+    request: &SendTurnRequest,
+    normalized_inputs: &[TurnInputItem],
+) -> Result<Option<CommandResponse>, DaemonError> {
+    let queued_summary = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let Some(workspace) = workspaces.get_mut(&request.workspace_id) else {
+            return Ok(None);
+        };
+        let Some(thread) = workspace.threads.get_mut(&request.thread_id) else {
+            return Ok(None);
+        };
+        if !matches!(
+            thread.summary.status,
+            ThreadStatus::Running | ThreadStatus::WaitingForInput
+        ) {
+            return Ok(None);
+        }
+        if thread.queued_requests.len() >= MAX_QUEUED_TURNS {
+            return Err(DaemonError::BadRequest(
+                "too many queued messages for this thread".to_string(),
+            ));
+        }
+        let id = format!("queued-{}", Uuid::new_v4().simple());
+        let preview = normalized_inputs
+            .iter()
+            .find_map(|input| match input {
+                TurnInputItem::Text { text, .. } => Some(text.trim()),
+                TurnInputItem::Image(_) => None,
+            })
+            .unwrap_or("")
+            .chars()
+            .take(140)
+            .collect::<String>();
+        let attachment_count = normalized_inputs
+            .iter()
+            .filter(|input| matches!(input, TurnInputItem::Image(_)))
+            .count();
+        let mut stored = request.clone();
+        stored.inputs = normalized_inputs.to_vec();
+        thread.queued_requests.push(super::QueuedTurnRequest {
+            id: id.clone(),
+            request: stored,
+        });
+        thread
+            .summary
+            .queued_turns
+            .push(falcondeck_core::QueuedTurnSummary {
+                id,
+                preview,
+                attachment_count,
+                queued_at: Utc::now(),
+            });
+        thread.summary.updated_at = Utc::now();
+        thread.summary.clone()
+    };
+    app.emit(
+        Some(request.workspace_id.clone()),
+        Some(request.thread_id.clone()),
+        UnifiedEvent::ThreadUpdated {
+            thread: queued_summary,
+        },
+    );
+    Ok(Some(CommandResponse {
+        ok: true,
+        message: Some("queued".to_string()),
+    }))
+}
+
+/// Removes a queued turn before it dispatches.
+pub(super) async fn remove_queued_turn(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    queued_id: &str,
+) -> Result<CommandResponse, DaemonError> {
+    let summary = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let before = thread.queued_requests.len();
+        thread
+            .queued_requests
+            .retain(|queued| queued.id != queued_id);
+        if thread.queued_requests.len() == before {
+            return Err(DaemonError::NotFound("queued turn not found".to_string()));
+        }
+        thread
+            .summary
+            .queued_turns
+            .retain(|queued| queued.id != queued_id);
+        thread.summary.updated_at = Utc::now();
+        thread.summary.clone()
+    };
+    app.emit(
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
+        UnifiedEvent::ThreadUpdated { thread: summary },
+    );
+    Ok(CommandResponse {
+        ok: true,
+        message: Some("removed".to_string()),
+    })
+}
+
+impl AppState {
+    /// Removes a queued turn before it dispatches (loopback API + remote RPC).
+    pub(crate) async fn remove_queued_turn(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        queued_id: &str,
+    ) -> Result<CommandResponse, DaemonError> {
+        remove_queued_turn(self, workspace_id, thread_id, queued_id).await
+    }
+
+    /// Dispatches the next queued turn if the thread is no longer busy.
+    /// Called at every turn-end transition; safe to call spuriously — it
+    /// no-ops while a turn is active or when nothing is queued. Runs as its
+    /// own task so turn-end handlers never block on the next dispatch.
+    pub(crate) fn dispatch_next_queued_turn(&self, workspace_id: &str, thread_id: &str) {
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            let next = {
+                let mut workspaces = app.inner.workspaces.lock().await;
+                let Some(workspace) = workspaces.get_mut(&workspace_id) else {
+                    return;
+                };
+                let Some(thread) = workspace.threads.get_mut(&thread_id) else {
+                    return;
+                };
+                if matches!(
+                    thread.summary.status,
+                    ThreadStatus::Running | ThreadStatus::WaitingForInput
+                ) || thread.queued_requests.is_empty()
+                {
+                    return;
+                }
+                let next = thread.queued_requests.remove(0);
+                thread
+                    .summary
+                    .queued_turns
+                    .retain(|queued| queued.id != next.id);
+                thread.summary.updated_at = Utc::now();
+                (next, thread.summary.clone())
+            };
+            let (next, summary) = next;
+            app.emit(
+                Some(workspace_id.clone()),
+                Some(thread_id.clone()),
+                UnifiedEvent::ThreadUpdated { thread: summary },
+            );
+            if let Err(error) = send_turn(&app, next.request).await {
+                // send_turn already marked the thread Error and emitted; the
+                // failure path below dispatches the next queued turn in line.
+                tracing::warn!(%error, thread = %thread_id, "queued turn failed to dispatch");
+            }
+        });
+    }
+}
+
 pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
@@ -831,6 +1008,16 @@ pub(super) async fn send_turn(
     }
     let inputs =
         normalize_turn_inputs(app, &request.workspace_id, &request.thread_id, &inputs).await?;
+
+    // A busy thread queues the send instead of dispatching it. Steering is a
+    // per-harness capability, but "hold this until the agent finishes, then
+    // send" works for every backend — and replaces the old mid-turn behavior
+    // (Claude: silently killing the in-flight turn; ACP: an undefined
+    // concurrent prompt).
+    if let Some(queued) = try_enqueue_turn(app, &request, &inputs).await? {
+        return Ok(queued);
+    }
+
     let approval_policy = request
         .approval_policy
         .unwrap_or_else(|| "on-request".to_string());
@@ -875,6 +1062,7 @@ pub(super) async fn send_turn(
                     is_archived: false,
                     is_pinned: false,
                     goal: None,
+                    queued_turns: Vec::new(),
                 })
             });
         managed.summary.provider = provider.clone();
@@ -970,6 +1158,8 @@ pub(super) async fn send_turn(
                 thread.updated_at = Utc::now();
             })
             .await;
+        // A failed start must not strand messages queued behind it.
+        app.dispatch_next_queued_turn(&request.workspace_id, &request.thread_id);
         if let Ok(thread) = app
             .thread_summary(&request.workspace_id, &request.thread_id)
             .await

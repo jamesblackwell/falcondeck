@@ -946,9 +946,10 @@ impl AcpRuntime {
                 // The agent switched modes on its own (or confirmed ours).
                 "current_mode_update" => {
                     if let Some(mode_id) = update.get("currentModeId").and_then(Value::as_str)
-                        && let Some(state) = self.session_modes.lock().await.get_mut(session_id) {
-                            state.current = Some(mode_id.to_string());
-                        }
+                        && let Some(state) = self.session_modes.lock().await.get_mut(session_id)
+                    {
+                        state.current = Some(mode_id.to_string());
+                    }
                     None
                 }
                 "tool_call" => {

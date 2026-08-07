@@ -83,6 +83,7 @@ const demoThreads: ThreadSummary[] = [
     is_archived: false,
     is_pinned: false,
     goal: null,
+    queued_turns: [],
   },
   {
     id: 'demo-thread-2',
@@ -102,6 +103,7 @@ const demoThreads: ThreadSummary[] = [
     is_archived: false,
     is_pinned: false,
     goal: null,
+    queued_turns: [],
   },
 ]
 

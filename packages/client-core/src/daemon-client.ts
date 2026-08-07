@@ -192,6 +192,22 @@ export function createDaemonApiClient(baseUrl: string) {
         }),
       )
     },
+    async interruptTurn(workspaceId: string, threadId: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/interrupt`,
+          { method: 'POST' },
+        ),
+      )
+    },
+    async removeQueuedTurn(workspaceId: string, threadId: string, queuedId: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/queue/${encodeURIComponent(queuedId)}`,
+          { method: 'DELETE' },
+        ),
+      )
+    },
     async startReview(payload: StartReviewPayload) {
       return parseJson<{ ok: boolean; message?: string | null }>(
         await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/review`, {

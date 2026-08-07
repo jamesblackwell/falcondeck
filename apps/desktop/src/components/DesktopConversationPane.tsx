@@ -9,7 +9,7 @@ import type {
   ThreadSummary,
   WorkspaceSummary,
 } from '@falcondeck/client-core'
-import { Conversation, PromptInput } from '@falcondeck/chat-ui'
+import { Conversation, PromptInput, QueuedTurns } from '@falcondeck/chat-ui'
 
 import { InteractiveRequestBar } from './InteractiveRequestBar'
 import { RemotePairingPopover } from './RemotePairingPopover'
@@ -37,6 +37,7 @@ type DesktopConversationPaneProps = {
     response: InteractiveResponsePayload,
   ) => void
   promptInputProps: ComponentProps<typeof PromptInput>
+  onRemoveQueuedTurn?: (queuedId: string) => void
   headerControls?: ReactNode
 }
 
@@ -59,6 +60,7 @@ export function DesktopConversationPane({
   onStartPairing,
   onInteractiveResponse,
   promptInputProps,
+  onRemoveQueuedTurn,
   headerControls,
 }: DesktopConversationPaneProps) {
   return (
@@ -87,6 +89,12 @@ export function DesktopConversationPane({
         isLoading={isThreadDetailPending}
       />
       <InteractiveRequestBar requests={interactiveRequests} onRespond={onInteractiveResponse} />
+      {selectedThread && onRemoveQueuedTurn ? (
+        <QueuedTurns
+          queuedTurns={selectedThread.queued_turns}
+          onRemove={onRemoveQueuedTurn}
+        />
+      ) : null}
       <PromptInput {...promptInputProps} />
     </section>
   )
