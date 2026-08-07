@@ -5,7 +5,7 @@ import type { ConversationItem, FalconDeckPreferences } from '@falcondeck/client
 import { deriveConversationPresentation, normalizePreferences } from '@falcondeck/client-core'
 import { EmptyState } from '@falcondeck/ui'
 
-import { LiveActivityLane, MessageCard, ToolSummaryCard } from './message'
+import { LiveActivityLane, MessageCard, ToolSummaryCard, WorkSessionCard } from './message'
 
 const AUTO_SCROLL_THRESHOLD = 40
 const JUMP_THRESHOLD = 200
@@ -58,6 +58,11 @@ export const Conversation = memo(function Conversation({
   )
   const renderBlocks = presentation.history_blocks
   const liveActivityGroups = presentation.live_activity_groups
+  // A running work-session block already shows its own "Working…" line, so
+  // the standalone "Thinking…" indicator would be redundant next to it.
+  const hasRunningWorkSession = renderBlocks.some(
+    (block) => block.kind === 'work_session' && block.running,
+  )
   const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
   const showEmptyState =
     renderBlocks.length === 0 && liveActivityGroups.length === 0 && !hasHiddenOnlyItems
@@ -104,6 +109,20 @@ export const Conversation = memo(function Conversation({
     persistScrollPosition()
   }, [persistScrollPosition])
 
+  /// Pins to the bottom before the browser paints. Streaming must use this:
+  /// deferring the scroll by even one frame paints the taller content at the
+  /// old offset first, so every delta shows as a visible upward jump.
+  const pinToBottomNow = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
+    stickyToBottomRef.current = true
+    persistScrollPosition()
+  }, [persistScrollPosition])
+
+  /// Deferred pin, for thread switches only: restored content (images, code
+  /// blocks, fonts) settles its height over the next couple of frames, so the
+  /// final position is not knowable synchronously.
   const schedulePinToBottom = useCallback(() => {
     if (pinToBottomFrameRef.current !== null) {
       window.cancelAnimationFrame(pinToBottomFrameRef.current)
@@ -171,8 +190,8 @@ export const Conversation = memo(function Conversation({
       return
     }
 
-    schedulePinToBottom()
-  }, [isLoading, isThinking, persistScrollPosition, renderBlocks, schedulePinToBottom])
+    pinToBottomNow()
+  }, [isLoading, isThinking, persistScrollPosition, renderBlocks, pinToBottomNow])
 
   useEffect(() => {
     if (!threadKey || isLoading) return
@@ -180,20 +199,23 @@ export const Conversation = memo(function Conversation({
     const content = contentRef.current
     if (!content || typeof ResizeObserver === 'undefined') return
 
+    // Resize callbacks are delivered after layout and before paint, so pin
+    // synchronously here too — scheduling a frame would reintroduce the
+    // paint-then-snap jitter for content that grows while streaming.
     const observer = new ResizeObserver(() => {
       if (!stickyToBottomRef.current) {
         persistScrollPosition()
         return
       }
 
-      schedulePinToBottom()
+      pinToBottomNow()
     })
     observer.observe(content)
 
     return () => {
       observer.disconnect()
     }
-  }, [isLoading, persistScrollPosition, schedulePinToBottom, threadKey])
+  }, [isLoading, persistScrollPosition, pinToBottomNow, threadKey])
 
   useEffect(() => {
     return () => {
@@ -216,7 +238,10 @@ export const Conversation = memo(function Conversation({
           className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
           onScroll={handleScroll}
         >
-          <div ref={contentRef} className="mx-auto flex min-h-full max-w-3xl flex-col gap-3 px-5 py-4">
+          <div
+            ref={contentRef}
+            className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-3 px-3 pt-4 pb-10 md:px-6 md:pb-12"
+          >
             {showEmptyState || (renderBlocks.length === 0 && isThinking && liveActivityGroups.length === 0) ? (
             <div className="flex min-h-full flex-1 flex-col gap-3">
               {showEmptyState
@@ -265,6 +290,14 @@ export const Conversation = memo(function Conversation({
                   expansionMode={expansionMode}
                   suppressReadOnlyDetail={block.suppress_read_only_detail}
                 />
+              ) : block.kind === 'work_session' ? (
+                <WorkSessionCard
+                  items={block.items}
+                  running={block.running}
+                  startedAt={block.started_at}
+                  completedAt={block.completed_at}
+                  expansionMode={expansionMode}
+                />
               ) : (
                 <ToolSummaryCard
                   items={block.items}
@@ -277,12 +310,16 @@ export const Conversation = memo(function Conversation({
             </div>
           ))}
 
-            {renderBlocks.length > 0 && isThinking && liveActivityGroups.length === 0 ? (
+            {renderBlocks.length > 0 && isThinking && liveActivityGroups.length === 0 && !hasRunningWorkSession ? (
             <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
               <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
               Thinking…
             </div>
           ) : null}
+
+            {/* In-flight tool activity renders in the thread flow, where the
+                completed groups it becomes will also live. */}
+            <LiveActivityLane groups={liveActivityGroups} />
           </div>
         </div>
 
@@ -298,8 +335,6 @@ export const Conversation = memo(function Conversation({
           </div>
         ) : null}
       </div>
-
-      <LiveActivityLane groups={liveActivityGroups} />
     </div>
   )
 })
