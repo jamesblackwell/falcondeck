@@ -1,12 +1,19 @@
-# FalconDeck Site
+# FalconDeck marketing site
 
-Public-facing website for FalconDeck.
+The public-facing FalconDeck site. It is intentionally separate from the paired remote control client in `apps/remote-web`.
 
-Planned responsibilities:
-- marketing pages
-- product overview
-- install/download links
-- docs/discovery entry points
+## Run locally
 
-Keep this separate from the paired remote control UI.
+From the monorepo root:
 
+```bash
+npm run dev --workspace falcondeck-site
+```
+
+The site runs at [http://localhost:4175](http://localhost:4175).
+
+## Build
+
+```bash
+npm run build --workspace falcondeck-site
+```

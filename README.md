@@ -1,79 +1,107 @@
-# FalconDeck
+<div align="center">
+  <img src="assets/brand/logomark-mark-light.svg" alt="FalconDeck" width="72" />
+  <h1>FalconDeck</h1>
+  <p><strong>A calm command center for coding agents.</strong></p>
+  <p>Run Codex and Claude close to your code. Follow the work from your desktop, browser, or phone — without making a hosted service the source of truth.</p>
+  <p>
+    <a href="https://falcondeck.com">Website</a> ·
+    <a href="https://app.falcondeck.com">Open the remote client</a> ·
+    <a href="docs/00-architecture-overview.md">Architecture</a>
+  </p>
+</div>
 
-FalconDeck is a control panel for AI coding agents that lets you work with Codex and Claude in one place across desktop, web, and mobile. It is built for staying in flow at your desk and continuing on the go through a secure end-to-end encrypted relay that is also self-hostable.
+<p align="center">
+  <img src="apps/site/public/falcondeck-preview.png" width="1200" alt="FalconDeck desktop app showing a live Claude thread with code, agent controls, and a prompt composer" />
+</p>
 
-Under the hood, FalconDeck is a local daemon-first system that keeps the daemon and native agent storage as the source of truth. That means less glue code, fewer competing state stores, and a cleaner path to remote access, reconnects, approvals, and shared project context.
+FalconDeck is an open-source, daemon-first control plane for AI coding agents. It gives you one place to see workspaces, follow live turns, review diffs, answer questions, and approve actions — then keeps that same context available when you step away from your desk.
 
 ## Why FalconDeck
 
-FalconDeck keeps your main agent workflow local, then layers in remote access without turning a cloud service into the source of truth. The desktop app is a shell around the daemon, while mobile and web connect back through the relay for pairing, replay, reconnects, and remote actions.
+Most agent interfaces make you choose between a local tool that is hard to reach and a hosted dashboard that becomes the center of your workflow. FalconDeck takes a different shape:
 
-The relay transports and stores encrypted payloads, not plaintext conversation content. If you want to run your own infrastructure, the relay is self-hostable and the repo already includes deployment automation for that path.
+- Your local daemon and native agent storage remain the source of truth.
+- The desktop app, browser client, and mobile app are clients of the same daemon contract.
+- The relay handles pairing, encrypted transport, replay, and reconnects — not plaintext conversation storage.
+- You can use the hosted relay or deploy the server-side pieces yourself.
 
-## Core Benefits
+The result is a control surface that feels close to the machine doing the work, while still making remote handoff practical.
 
-- Local-first architecture with the daemon as the product, not just a thin UI wrapper
-- One control plane for multiple agent providers
-- Desktop, mobile, and web clients backed by the same daemon contract
-- Secure remote access through an end-to-end encrypted relay
-- Self-hostable relay and hosted web stack
-- Remote access without turning the relay into the source of truth
-- Better resilience across reconnects, restarts, and device handoff
-- Same-folder workflows by default, without forcing worktrees
+## What you can do
 
-## Features
+- Run Codex and Claude sessions side by side from one control plane.
+- Organize work by workspace and thread, with persistent restoration across launches.
+- Watch streaming responses and tool activity as it happens.
+- Review diffs, permission requests, and interactive questions with context.
+- Pair trusted devices and continue a session from the web or mobile client.
+- Reconnect cleanly after restarts or network changes through the relay event stream.
+- Keep same-folder workflows by default instead of forcing a worktree model.
 
-- Embedded local daemon for desktop with a localhost-first HTTP API
-- Support for Codex and Claude runtimes
-- Persistent workspace and thread restoration
-- Unified event stream for sessions, turns, approvals, and status updates
-- Remote pairing and trusted-device flows through the relay
-- Shared protocol and client types for all frontends
-- Desktop shell, mobile client, remote web client, and public site in one monorepo
-- Git status and diff plumbing for workspace-aware agent flows
+## How it fits together
 
-## How It Works
+```mermaid
+flowchart LR
+    A[Codex / Claude] --> B[Local daemon]
+    B --> C[Desktop shell]
+    B --> D[Encrypted relay]
+    D --> E[Browser client]
+    D --> F[Mobile client]
+    B --> G[Native agent storage]
+```
 
-FalconDeck currently has four main runtime pieces:
+The daemon is the product. The desktop app is one shell around it, and the remote clients use the same protocol over a relay. This keeps the system easier to reason about and avoids adding a second FalconDeck-owned conversation database.
 
-- a local Rust daemon
-- a desktop shell around that daemon
-- a relay for pairing, replay, and reconnect support
-- paired remote web and mobile clients
+## Security model
 
-The daemon is the system of record for runtime state. The relay is a transport and replay layer for encrypted events and RPC traffic, not the long-term source of truth for conversations.
+Remote session payloads are end-to-end encrypted between the paired clients. The relay can bridge devices, retain encrypted replay updates, and help clients recover after reconnects, but it is not intended to read the conversation itself.
 
-## Host Your Own Server
+Pairings are short-lived onboarding state. Trusted devices are the long-lived relationship. When replay is truncated, clients recover from a fresh daemon snapshot rather than assuming the relay contains the complete history.
 
-You can self-host FalconDeck's server-side pieces today.
+## Project shape
 
-The current recommended deployment shape is:
+| Area | Role |
+| --- | --- |
+| `apps/desktop` | Native Tauri shell around the local daemon |
+| `apps/mobile` | Paired mobile client |
+| `apps/remote-web` | Paired browser client |
+| `apps/site` | Public marketing site |
+| `packages/client-core` | Shared TypeScript protocol and client helpers |
+| `packages/ui` / `packages/chat-ui` | Shared web UI primitives |
+| `crates/falcondeck-core` | Shared Rust protocol and types |
+| `crates/falcondeck-daemon` | Local daemon and agent runtime orchestration |
+| `crates/falcondeck-relay` | Pairing, encrypted replay, and reconnect bridge |
+| `ops/ansible` | Deployment and server configuration |
 
-- Ubuntu
-- systemd
-- Caddy
-- PostgreSQL for production relay persistence
-- Ansible from `ops/ansible`
+## Get started
 
-The included Ansible setup can deploy:
+FalconDeck is actively built and the easiest way to explore it is to run the pieces locally.
 
-- the relay at `connect.falcondeck.com`
-- the hosted remote web app at `app.falcondeck.com`
-- the public site at `falcondeck.com`
+```bash
+npm install
 
-For a simple self-hosted setup, start with the examples in [`ops/ansible/README.md`](ops/ansible/README.md). Copy the example inventory, set your host and DNS values, run the bootstrap playbook, then run the relay deploy playbook.
+# Start the desktop development stack
+make desktop-dev
+```
 
-For more background on the production shape and relay persistence model, see [`docs/11-deployment-ops.md`](docs/11-deployment-ops.md).
+For the public site or paired web client:
 
-## Monorepo
+```bash
+make site-dev
+make remote-web-dev
+```
 
-- `apps/desktop` - Tauri desktop shell around the daemon
-- `apps/mobile` - paired mobile client
-- `apps/remote-web` - paired browser client
-- `apps/site` - public marketing site
-- `packages/client-core` - shared TypeScript protocol and client helpers
-- `packages/ui` and `packages/chat-ui` - shared UI primitives
-- `crates/falcondeck-core` - shared Rust protocol and types
-- `crates/falcondeck-daemon` - local daemon and agent runtime orchestration
-- `crates/falcondeck-relay` - relay for pairing, replay, and reconnect support
-- `ops/ansible` - deployment and server configuration
+The mobile app uses Expo and has a dedicated workflow documented in [`docs/14-mobile-app.md`](docs/14-mobile-app.md). For the full architecture and agent integration paths, start with [`docs/00-architecture-overview.md`](docs/00-architecture-overview.md) and [`docs/02-agent-integration-paths.md`](docs/02-agent-integration-paths.md).
+
+## Self-hosting
+
+The relay and hosted web stack can be deployed with the included Ansible setup. The production shape uses Ubuntu, systemd, Caddy, and PostgreSQL for relay persistence.
+
+See [`ops/ansible/README.md`](ops/ansible/README.md) for the example inventory and deployment path, and [`docs/11-deployment-ops.md`](docs/11-deployment-ops.md) for the operational model.
+
+## Status
+
+FalconDeck is early-stage open source software. The core daemon, relay, desktop client, remote web client, mobile client, shared protocol, and marketing site are all in this repository and evolving together.
+
+## License
+
+MIT.

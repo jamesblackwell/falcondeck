@@ -1,115 +1,429 @@
-import { ArrowRight, Github, Monitor, Smartphone, Shield, Terminal, Zap, Radio } from 'lucide-react'
+import type { ReactNode } from 'react'
+
+import {
+  ArrowRight,
+  Check,
+  ChevronRight,
+  CircleDot,
+  Cloud,
+  Code2,
+  Github,
+  LockKeyhole,
+  Monitor,
+  Radio,
+  ShieldCheck,
+  Smartphone,
+  Terminal,
+  Zap,
+} from 'lucide-react'
 import { Button } from '@falcondeck/ui'
 
-function FeatureCard({ icon, title, description }: { icon: React.ReactNode; title: string; description: string }) {
+type FeatureCardProps = {
+  icon: ReactNode
+  eyebrow: string
+  title: string
+  description: string
+}
+
+function FeatureCard({ icon, eyebrow, title, description }: FeatureCardProps) {
   return (
-    <div className="rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-6">
-      <div className="mb-3 flex h-10 w-10 items-center justify-center rounded-[var(--fd-radius-lg)] bg-surface-3 text-fg-tertiary">
+    <article className="feature-card">
+      <div className="feature-card__icon" aria-hidden="true">
         {icon}
       </div>
-      <h3 className="text-[length:var(--fd-text-md)] font-semibold text-fg-primary">{title}</h3>
-      <p className="mt-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-tertiary">{description}</p>
+      <p className="eyebrow eyebrow--small">{eyebrow}</p>
+      <h3>{title}</h3>
+      <p className="feature-card__description">{description}</p>
+    </article>
+  )
+}
+
+function ProductPreview() {
+  return (
+    <div className="product-preview" aria-label="FalconDeck product preview">
+      <div className="product-preview__glow" aria-hidden="true" />
+      <div className="window-frame">
+        <div className="window-frame__bar">
+          <div className="window-frame__dots" aria-hidden="true">
+            <span />
+            <span />
+            <span />
+          </div>
+          <div className="window-frame__title">
+            <img src="/icon-192.png" alt="" />
+            falcondeck / control plane
+          </div>
+          <div className="window-frame__status">
+            <span className="status-dot" />
+            daemon online
+          </div>
+        </div>
+
+        <div className="product-preview__body">
+          <aside className="preview-sidebar">
+            <div className="preview-sidebar__workspace">
+              <span className="preview-avatar">F</span>
+              <span>
+                <strong>FalconDeck</strong>
+                <small>local workspace</small>
+              </span>
+              <ChevronRight className="preview-chevron" aria-hidden="true" />
+            </div>
+            <p className="preview-label">WORKSPACES</p>
+            <div className="preview-project preview-project--active">
+              <span className="preview-project__mark">⌘</span>
+              <span>falcondeck</span>
+              <span className="preview-project__count">2</span>
+            </div>
+            <p className="preview-label preview-label--threads">THREADS</p>
+            <div className="preview-thread preview-thread--active">
+              <CircleDot aria-hidden="true" />
+              <span>
+                <strong>Add user authentication</strong>
+                <small>Claude · just now</small>
+              </span>
+            </div>
+            <div className="preview-thread">
+              <CircleDot aria-hidden="true" />
+              <span>
+                <strong>Fix database migration</strong>
+                <small>Codex · 45 min ago</small>
+              </span>
+            </div>
+            <div className="preview-sidebar__footer">
+              <span className="preview-footer-dot" />
+              <span>2 agents connected</span>
+            </div>
+          </aside>
+
+          <main className="preview-conversation">
+            <div className="preview-conversation__header">
+              <div>
+                <p className="preview-kicker">THREAD · CLAUDE SONNET 4.6</p>
+                <h3>Add user authentication</h3>
+              </div>
+              <span className="preview-pill">LIVE</span>
+            </div>
+            <div className="preview-message preview-message--user">
+              Add JWT authentication to the Express API. Use bcrypt for password hashing.
+            </div>
+            <div className="preview-message preview-message--assistant">
+              I&apos;ll map the existing routes first, then add the auth middleware and run the test suite.
+            </div>
+            <div className="preview-tool-list">
+              <div className="preview-tool preview-tool--done">
+                <Check aria-hidden="true" />
+                <span>Read <code>src/server.ts</code></span>
+                <small>done</small>
+              </div>
+              <div className="preview-tool preview-tool--done">
+                <Check aria-hidden="true" />
+                <span>Edit <code>src/middleware/auth.ts</code></span>
+                <small>done</small>
+              </div>
+              <div className="preview-tool preview-tool--active">
+                <Zap aria-hidden="true" />
+                <span>Run <code>npm test</code></span>
+                <small>running</small>
+              </div>
+            </div>
+            <div className="preview-composer">
+              <span>Ask Claude to continue…</span>
+              <span className="preview-composer__send">↑</span>
+            </div>
+          </main>
+
+          <aside className="preview-inspector">
+            <p className="preview-label">SESSION</p>
+            <div className="preview-inspector__state">
+              <span className="status-dot" />
+              <span>
+                <strong>Desktop online</strong>
+                <small>encrypted connection</small>
+              </span>
+            </div>
+            <div className="preview-inspector__row">
+              <span>Provider</span>
+              <strong>Claude</strong>
+            </div>
+            <div className="preview-inspector__row">
+              <span>Permission mode</span>
+              <strong>On request</strong>
+            </div>
+            <div className="preview-inspector__divider" />
+            <p className="preview-label">WORKSPACE</p>
+            <div className="preview-inspector__path">
+              <Code2 aria-hidden="true" />
+              <code>~/Sites/falcondeck</code>
+            </div>
+            <div className="preview-diff">
+              <div>
+                <span className="preview-diff__bar preview-diff__bar--green" />
+                <strong>+42</strong>
+              </div>
+              <div>
+                <span className="preview-diff__bar preview-diff__bar--red" />
+                <strong>-8</strong>
+              </div>
+              <small>working tree</small>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SurfaceCard({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
+  return (
+    <div className="surface-card">
+      <div className="surface-card__icon" aria-hidden="true">{icon}</div>
+      <div>
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+      <ArrowRight className="surface-card__arrow" aria-hidden="true" />
     </div>
   )
 }
 
 export default function App() {
   return (
-    <div className="min-h-screen bg-surface-0">
-      {/* Nav */}
-      <nav className="mx-auto flex max-w-5xl items-center justify-between px-6 py-6">
-        <div className="flex items-center gap-2">
-          <Terminal className="h-5 w-5 text-accent" />
-          <span className="text-[length:var(--fd-text-md)] font-semibold text-fg-primary">FalconDeck</span>
-        </div>
-        <div className="flex items-center gap-3">
-          <Button variant="ghost" size="sm" asChild>
-            <a href="https://github.com/jamesblackwell/falcondeck">
-              <Github className="h-4 w-4" />
+    <div className="site-shell">
+      <div className="site-grid" aria-hidden="true" />
+
+      <header className="site-header">
+        <nav className="site-nav" aria-label="Main navigation">
+          <a className="brand-lockup" href="#top" aria-label="FalconDeck home">
+            <img src="/icon-192.png" alt="" />
+            <span>FalconDeck</span>
+          </a>
+          <div className="site-nav__links">
+            <a href="#product">Product</a>
+            <a href="#security">Security</a>
+            <a href="#architecture">Architecture</a>
+          </div>
+          <div className="site-nav__actions">
+            <a className="nav-github" href="https://github.com/jamesblackwell/falcondeck">
+              <Github className="icon-xs" aria-hidden="true" />
               GitHub
             </a>
-          </Button>
-          <Button size="sm" asChild>
-            <a href="https://app.falcondeck.com">
-              Open App
-              <ArrowRight className="h-3.5 w-3.5" />
-            </a>
-          </Button>
-        </div>
-      </nav>
-
-      {/* Hero */}
-      <section className="mx-auto max-w-5xl px-6 pt-16 pb-20">
-        <div className="max-w-3xl">
-          <h1 className="text-[length:var(--fd-text-3xl)] font-semibold leading-tight tracking-tight text-fg-primary md:text-5xl md:leading-tight">
-            The open-source control plane for AI coding agents
-          </h1>
-          <p className="mt-4 max-w-2xl text-[length:var(--fd-text-lg)] leading-relaxed text-fg-tertiary">
-            Manage Codex workspaces, review diffs, approve actions, and monitor sessions — from your desktop or remotely from any device.
-          </p>
-          <div className="mt-8 flex flex-wrap gap-3">
-            <Button size="lg" asChild>
-              <a href="https://github.com/jamesblackwell/falcondeck">
-                <Github className="h-4 w-4" />
-                View on GitHub
-              </a>
-            </Button>
-            <Button variant="outline" size="lg" asChild>
+            <Button size="sm" asChild>
               <a href="https://app.falcondeck.com">
-                Open Remote Client
-                <ArrowRight className="h-4 w-4" />
+                Open app
+                <ArrowRight className="icon-xs" aria-hidden="true" />
               </a>
             </Button>
           </div>
-        </div>
-      </section>
+        </nav>
+      </header>
 
-      {/* Features */}
-      <section className="mx-auto max-w-5xl px-6 pb-20">
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          <FeatureCard
-            icon={<Monitor className="h-5 w-5" />}
-            title="Desktop control plane"
-            description="A native Tauri app with grouped project navigation, rich conversation rendering, and real-time streaming."
-          />
-          <FeatureCard
-            icon={<Smartphone className="h-5 w-5" />}
-            title="Remote access"
-            description="Pair your desktop with a phone or browser. Follow live sessions, send prompts, and approve actions from anywhere."
-          />
-          <FeatureCard
-            icon={<Shield className="h-5 w-5" />}
-            title="End-to-end encrypted"
-            description="All remote session content is encrypted client-to-client. The relay server never sees plaintext."
-          />
-          <FeatureCard
-            icon={<Zap className="h-5 w-5" />}
-            title="Approvals & diffs"
-            description="Review Codex permission requests and code changes inline. Approve or deny with a single click."
-          />
-          <FeatureCard
-            icon={<Radio className="h-5 w-5" />}
-            title="Public relay"
-            description="A lightweight relay server handles session bridging, QR pairing, and reconnection by sequence number."
-          />
-          <FeatureCard
-            icon={<Terminal className="h-5 w-5" />}
-            title="Open source"
-            description="MIT licensed. The full stack — daemon, relay, desktop app, remote client — is in a single monorepo."
-          />
-        </div>
-      </section>
+      <main id="top">
+        <section className="hero section-wrap">
+          <div className="hero__copy">
+            <div className="eyebrow">
+              <span className="eyebrow__dot" />
+              LOCAL-FIRST · REMOTE-READY
+            </div>
+            <h1>Keep your coding agents <span>in flow.</span></h1>
+            <p className="hero__lede">
+              FalconDeck is a calm control plane for Codex and Claude. Run close to your code, follow every turn, and pick up from your phone or browser without handing your workspace to a cloud service.
+            </p>
+            <div className="hero__actions">
+              <Button size="lg" asChild>
+                <a href="https://github.com/jamesblackwell/falcondeck">
+                  <Github className="icon-sm" aria-hidden="true" />
+                  Explore the source
+                  <ArrowRight className="icon-sm" aria-hidden="true" />
+                </a>
+              </Button>
+              <Button variant="outline" size="lg" asChild>
+                <a href="https://app.falcondeck.com">
+                  Open remote client
+                  <ChevronRight className="icon-sm" aria-hidden="true" />
+                </a>
+              </Button>
+            </div>
+            <div className="hero__proof">
+              <span><Check className="icon-xs" aria-hidden="true" /> Open source</span>
+              <span><Check className="icon-xs" aria-hidden="true" /> End-to-end encrypted</span>
+              <span><Check className="icon-xs" aria-hidden="true" /> Self-hostable relay</span>
+            </div>
+          </div>
+          <ProductPreview />
+        </section>
 
-      {/* Footer */}
-      <footer className="border-t border-border-subtle">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-6">
-          <p className="text-[length:var(--fd-text-xs)] text-fg-muted">FalconDeck</p>
-          <a
-            href="https://github.com/jamesblackwell/falcondeck"
-            className="text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:text-fg-secondary"
-          >
-            GitHub
-          </a>
+        <section className="signal-strip section-wrap" aria-label="FalconDeck product summary">
+          <div className="signal-strip__item">
+            <span className="signal-strip__icon"><Terminal aria-hidden="true" /></span>
+            <span><strong>One control plane</strong><small>for Codex + Claude</small></span>
+          </div>
+          <div className="signal-strip__item">
+            <span className="signal-strip__icon"><LockKeyhole aria-hidden="true" /></span>
+            <span><strong>Your daemon is the source of truth</strong><small>not a hosted conversation database</small></span>
+          </div>
+          <div className="signal-strip__item">
+            <span className="signal-strip__icon"><Radio aria-hidden="true" /></span>
+            <span><strong>Remote when you need it</strong><small>desktop, web, and mobile surfaces</small></span>
+          </div>
+        </section>
+
+        <section className="section-wrap screenshot-section">
+          <div className="screenshot-heading">
+            <div>
+              <p className="eyebrow">THE REAL INTERFACE</p>
+              <h2>See the surface your agents work inside.</h2>
+            </div>
+            <p>
+              Live conversations, tool activity, model controls, and the next prompt all stay in one focused desktop view.
+            </p>
+          </div>
+          <figure className="real-product-shot">
+            <div className="real-product-shot__bar" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+              <small>FalconDeck desktop · live Claude session</small>
+            </div>
+            <img
+              src="/falcondeck-preview.png"
+              alt="FalconDeck desktop app showing a live Claude thread with code, agent controls, and a prompt composer"
+            />
+            <figcaption>Built around the work itself: a live thread, visible agent activity, and a prompt ready for the next move.</figcaption>
+          </figure>
+        </section>
+
+        <section id="product" className="section-wrap section-block">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">THE PRODUCT</p>
+              <h2>Serious agent work needs a steady cockpit.</h2>
+            </div>
+            <p>
+              FalconDeck keeps the mechanics visible — workspaces, threads, diffs, approvals, and live status — without making the interface feel like another project to manage.
+            </p>
+          </div>
+          <div className="surface-grid">
+            <SurfaceCard
+              icon={<Monitor aria-hidden="true" />}
+              title="Desktop command center"
+              description="A native shell around the local daemon, with rich conversation rendering and a workspace-aware view of your agents."
+            />
+            <SurfaceCard
+              icon={<Smartphone aria-hidden="true" />}
+              title="Remote handoff"
+              description="Pair a phone or browser, follow a live turn, send the next prompt, and keep moving when you leave your desk."
+            />
+            <SurfaceCard
+              icon={<ShieldCheck aria-hidden="true" />}
+              title="Approvals with context"
+              description="Review permission requests and code changes where they happen, then approve or deny without losing the thread."
+            />
+          </div>
+        </section>
+
+        <section id="security" className="section-wrap section-block security-section">
+          <div className="security-panel">
+            <div className="security-panel__copy">
+              <p className="eyebrow">LOCAL BY DEFAULT</p>
+              <h2>Remote access without moving the center of gravity.</h2>
+              <p>
+                The FalconDeck daemon and the native agent storage remain the source of truth. The relay helps devices pair, reconnect, and catch up — it does not become a second conversation database.
+              </p>
+              <div className="security-checks">
+                <span><Check aria-hidden="true" /> End-to-end encrypted remote payloads</span>
+                <span><Check aria-hidden="true" /> Self-hostable relay for your infrastructure</span>
+                <span><Check aria-hidden="true" /> Same-folder workflows by default</span>
+              </div>
+            </div>
+            <div className="security-panel__diagram" aria-label="Local daemon to encrypted relay to remote clients">
+              <div className="diagram-node diagram-node--primary">
+                <Terminal aria-hidden="true" />
+                <strong>Local daemon</strong>
+                <small>source of truth</small>
+              </div>
+              <div className="diagram-line"><span>encrypted events</span></div>
+              <div className="diagram-node">
+                <Radio aria-hidden="true" />
+                <strong>Relay</strong>
+                <small>pair · replay · reconnect</small>
+              </div>
+              <div className="diagram-branches">
+                <span />
+                <span />
+              </div>
+              <div className="diagram-clients">
+                <div><Monitor aria-hidden="true" /><span>desktop</span></div>
+                <div><Smartphone aria-hidden="true" /><span>mobile</span></div>
+                <div><Cloud aria-hidden="true" /><span>browser</span></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="architecture" className="section-wrap section-block architecture-section">
+          <div className="section-heading section-heading--centered">
+            <p className="eyebrow">BUILT TO STAY OUT OF YOUR WAY</p>
+            <h2>One daemon. Every surface.</h2>
+            <p>
+              A shared Rust protocol and client core keep desktop, web, and mobile aligned as the system evolves.
+            </p>
+          </div>
+          <div className="feature-grid">
+            <FeatureCard
+              icon={<Zap aria-hidden="true" />}
+              eyebrow="01 / FLOW"
+              title="Live sessions, not snapshots"
+              description="Stream turns, tool activity, approvals, and status changes as they happen, with reconnect support built into the protocol."
+            />
+            <FeatureCard
+              icon={<LockKeyhole aria-hidden="true" />}
+              eyebrow="02 / TRUST"
+              title="Your infrastructure, your choice"
+              description="Use the hosted relay or deploy the server-side pieces yourself with the included Ansible path and PostgreSQL support."
+            />
+            <FeatureCard
+              icon={<Code2 aria-hidden="true" />}
+              eyebrow="03 / CRAFT"
+              title="Open source end to end"
+              description="The daemon, relay, clients, shared protocol, and public site live together in one MIT-licensed monorepo."
+            />
+          </div>
+        </section>
+
+        <section className="section-wrap cta-section">
+          <div className="cta-card">
+            <div>
+              <p className="eyebrow">READY WHEN YOU ARE</p>
+              <h2>Build locally. Stay connected.</h2>
+              <p>Give your agents a control plane that respects the way you already work.</p>
+            </div>
+            <div className="cta-card__actions">
+              <Button size="lg" asChild>
+                <a href="https://github.com/jamesblackwell/falcondeck">
+                  Start with GitHub
+                  <ArrowRight className="icon-sm" aria-hidden="true" />
+                </a>
+              </Button>
+              <a className="text-link" href="https://app.falcondeck.com">
+                Open the remote client <ChevronRight className="icon-xs" aria-hidden="true" />
+              </a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer className="site-footer">
+        <div className="site-footer__inner">
+          <div className="brand-lockup brand-lockup--footer">
+            <img src="/icon-192.png" alt="" />
+            <span>FalconDeck</span>
+          </div>
+          <p>Open-source infrastructure for people who build with agents.</p>
+          <div className="site-footer__links">
+            <a href="https://github.com/jamesblackwell/falcondeck">GitHub</a>
+            <a href="https://app.falcondeck.com">Remote client</a>
+          </div>
         </div>
       </footer>
     </div>
