@@ -173,6 +173,12 @@ impl AppState {
     }
 
     pub async fn remote_status(&self) -> RemoteStatusResponse {
+        // The bridge is daemon-owned and must survive a task that exits while
+        // the app is restoring state or the network is coming back. Starting
+        // it here also repairs older installs that persisted a trusted
+        // pairing while the in-memory bridge task was lost.
+        self.ensure_remote_bridge_running().await;
+
         let snapshot = {
             let mut remote = self.inner.remote.lock().await;
             reconcile_remote_runtime_state(&mut remote);
@@ -216,7 +222,14 @@ impl AppState {
                 && (matches!(remote.status, RemoteConnectionStatus::PairingPending)
                     || remote.pending_pairing.is_some());
             if should_reuse_pending {
-                return Ok(build_remote_status_response(&remote));
+                let response = build_remote_status_response(&remote);
+                drop(remote);
+                // A previous caller may have disconnected while secure
+                // storage was being written. Do not return a code that only
+                // exists in memory; retrying the pairing request must make
+                // the pending session durable before handing it back.
+                self.persist_local_state().await?;
+                return Ok(response);
             }
             if remote.relay_url.as_deref() == Some(relay_url.as_str()) {
                 remote.pairing.clone().zip(remote.daemon_token.clone())
@@ -347,14 +360,7 @@ impl AppState {
                     remote.trusted_client_bundles.clear();
                 }
                 remote.pairing = Some(remote_pairing.clone());
-                let (command_tx, command_rx) = mpsc::unbounded_channel();
-                let app = self.clone();
-                let task = tokio::spawn(async move {
-                    app.run_remote_bridge(relay_url, pairing.daemon_token, command_rx)
-                        .await;
-                });
-                remote.command_tx = Some(command_tx);
-                remote.task = Some(task);
+                self.spawn_remote_bridge_locked(&mut remote, relay_url, pairing.daemon_token);
             }
             build_remote_status_response(&remote)
         };
@@ -502,6 +508,71 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Start the bridge if a persisted pairing exists but its worker task is
+    /// no longer alive. This is deliberately idempotent: callers may invoke
+    /// it from status polling, startup recovery, and a worker's exit path.
+    async fn ensure_remote_bridge_running(&self) {
+        let mut remote = self.inner.remote.lock().await;
+        reconcile_remote_runtime_state(&mut remote);
+
+        if remote.task.is_some()
+            || remote.pending_pairing.is_some()
+            || matches!(
+                remote.status,
+                RemoteConnectionStatus::Error | RemoteConnectionStatus::Revoked
+            )
+        {
+            return;
+        }
+
+        let (Some(relay_url), Some(daemon_token), Some(pairing)) = (
+            remote.relay_url.clone(),
+            remote.daemon_token.clone(),
+            remote.pairing.as_ref(),
+        ) else {
+            return;
+        };
+
+        if pairing.device_id.is_none() && pairing.expires_at <= Utc::now() {
+            return;
+        }
+
+        tracing::warn!(
+            pairing_id = %pairing.pairing_id,
+            session_id = ?pairing.session_id,
+            "restarting stopped remote relay bridge"
+        );
+        remote.status = if pairing.device_id.is_some() {
+            RemoteConnectionStatus::Connecting
+        } else {
+            RemoteConnectionStatus::PairingPending
+        };
+        remote.last_error = None;
+        self.spawn_remote_bridge_locked(&mut remote, relay_url, daemon_token);
+    }
+
+    fn spawn_remote_bridge_locked(
+        &self,
+        remote: &mut RemoteBridgeState,
+        relay_url: String,
+        daemon_token: String,
+    ) {
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+        let app = self.clone();
+        let task = tokio::spawn(async move {
+            app.run_remote_bridge(relay_url, daemon_token, command_rx)
+                .await;
+
+            // A worker can finish before the next status poll (for example
+            // during early startup). Give the runtime a short chance to
+            // settle, then let the idempotent supervisor recreate it.
+            sleep(Duration::from_secs(1)).await;
+            app.ensure_remote_bridge_running().await;
+        });
+        remote.command_tx = Some(command_tx);
+        remote.task = Some(task);
     }
 
     async fn wait_for_claim_and_connect(
@@ -928,15 +999,7 @@ impl AppState {
             current.pending_pairing = None;
             current.trusted_client_bundles = trusted_client_bundles;
             current.last_error = None;
-
-            let (command_tx, command_rx) = mpsc::unbounded_channel();
-            let app = self.clone();
-            let task = tokio::spawn(async move {
-                app.run_remote_bridge(relay_url, daemon_token, command_rx)
-                    .await;
-            });
-            current.command_tx = Some(command_tx);
-            current.task = Some(task);
+            self.spawn_remote_bridge_locked(&mut current, relay_url, daemon_token);
         }
 
         Ok(())
