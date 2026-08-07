@@ -30,6 +30,34 @@ type RelayWriter = futures_util::stream::SplitSink<
     Message,
 >;
 
+/// Every method the encrypted RPC dispatcher understands must be registered
+/// with the relay or it fails the call without consulting the daemon
+/// (rpc-call routes via the registration table only). The test below binds
+/// this list to `dispatch_remote_rpc`'s match arms.
+pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
+    "snapshot.current",
+    "preferences.read",
+    "preferences.update",
+    "interactive.respond",
+    "approval.respond",
+    "thread.start",
+    "thread.detail",
+    "thread.update",
+    "thread.archive",
+    "thread.unarchive",
+    "thread.mark_read",
+    "thread.goal.set",
+    "thread.goal.clear",
+    "turn.start",
+    "turn.interrupt",
+    "workspace.connect",
+    "workspace.remove",
+    "connectors.read",
+    "connectors.update",
+    "providers.read",
+    "providers.update",
+];
+
 impl AppState {
     pub(super) async fn connect_remote_session(
         &self,
@@ -61,33 +89,7 @@ impl AppState {
         let fence_seq = self.inner.sequence.load(Ordering::Relaxed);
         let snapshot = self.snapshot().await;
 
-        // Every method the encrypted RPC dispatcher understands must be
-        // registered here or the relay fails the call without consulting the
-        // daemon (rpc-call routes via the registration table only).
-        const RPC_METHODS: &[&str] = &[
-            "snapshot.current",
-            "preferences.read",
-            "preferences.update",
-            "interactive.respond",
-            "approval.respond",
-            "thread.start",
-            "thread.detail",
-            "thread.update",
-            "thread.archive",
-            "thread.unarchive",
-            "thread.mark_read",
-            "thread.goal.set",
-            "thread.goal.clear",
-            "turn.start",
-            "turn.interrupt",
-            "workspace.connect",
-            "workspace.remove",
-            "connectors.read",
-            "connectors.update",
-            "providers.read",
-            "providers.update",
-        ];
-        for method in RPC_METHODS {
+        for method in REMOTE_RPC_METHODS {
             send_relay_message(
                 &mut writer,
                 &RelayClientMessage::RpcRegister {
@@ -549,16 +551,32 @@ impl AppState {
                 return Ok(());
             }
         };
+        let rpc_result = self.dispatch_remote_rpc(&method, params).await;
+        self.send_remote_rpc_result(writer, data_key, request_id, rpc_result)
+            .await
+    }
+
+    /// Serves one decrypted remote RPC call. Kept free of transport concerns
+    /// so a test can assert every method in [`REMOTE_RPC_METHODS`] actually
+    /// dispatches: a method registered with the relay but missing an arm here
+    /// fails every call with "unsupported" (this exact bug shipped once, as
+    /// thread.unarchive), while one dispatched but unregistered is rejected
+    /// by the relay without ever consulting the daemon.
+    pub(super) async fn dispatch_remote_rpc(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, String> {
         let required = |keys: &[&str]| {
             extract_string(&params, keys).ok_or_else(|| "invalid remote rpc payload".to_string())
         };
         // The dispatch runs inside its own async block so a `?` on a bad
         // request (unknown workspace, missing field) becomes this call's
-        // rpc-result error. Propagating it out of handle_remote_rpc instead
-        // would tear down the whole relay bridge for every connected device
-        // and leave the caller waiting out the relay's 30s RPC timeout.
-        let rpc_result = async {
-            match method.as_str() {
+        // rpc-result error. Propagating it out instead would tear down the
+        // whole relay bridge for every connected device and leave the caller
+        // waiting out the relay's 30s RPC timeout.
+        async {
+            match method {
                 "snapshot.current" => {
                     let request = SnapshotRequest {
                         include_archived_threads: params
@@ -881,10 +899,7 @@ impl AppState {
                 _ => Err(format!("unsupported remote rpc method `{method}`")),
             }
         }
-        .await;
-
-        self.send_remote_rpc_result(writer, data_key, request_id, rpc_result)
-            .await
+        .await
     }
 
     async fn handle_queued_remote_action(
@@ -1286,4 +1301,33 @@ fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<Stri
     keys.iter()
         .find_map(|key| params.get(key))
         .map(|value| value.as_str().map(ToOwned::to_owned))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guards the registration↔dispatch invariant: a method advertised to the
+    /// relay must have a dispatch arm, or every remote call to it fails with
+    /// "unsupported" (the thread.unarchive bug). Empty params are fine — a
+    /// dispatched method fails validation ("invalid remote rpc payload",
+    /// "workspace not found", …), never the unsupported catch-all.
+    #[tokio::test]
+    async fn every_registered_remote_rpc_method_dispatches() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            std::collections::HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        for method in REMOTE_RPC_METHODS {
+            let result = app.dispatch_remote_rpc(method, serde_json::json!({})).await;
+            if let Err(error) = &result {
+                assert!(
+                    !error.contains("unsupported remote rpc method"),
+                    "`{method}` is registered with the relay but has no dispatch arm"
+                );
+            }
+        }
+    }
 }
