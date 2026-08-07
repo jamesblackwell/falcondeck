@@ -242,14 +242,16 @@ Each phase is independently shippable and each unlocks the next:
   kinds; collapse the four daemon dispatchers into one method table with a
   registration-consistency test; consolidate transport on `RemoteHostClient`;
   begin the SQLite conversation log (system of record, decision §9.2).
-- **Phase 1 — provider agnosticism**: the `ProviderAdapter` trait refactor
-  from `docs/PROVIDERS.md` §5 (collapse the ~55 hardcoded provider branches;
-  per-provider maps replace named fields); ACP made first-class (capability
-  refinement post-handshake, images, `session/load` rehydration, model
-  listing); `providers.json` hot-reload plus a Providers settings panel.
-- **Phase 2 — connectors**: Connectors settings UI over `connectors.json`
-  (the daemon-side materialization already shipped, §5); skills install/enable
-  UI; open availability model.
+- **Phase 1 — provider agnosticism** *(mostly shipped 2026-08-07)*: ACP made
+  first-class (capability refinement post-handshake, images, `session/load`
+  rehydration, model listing) ✓; `providers.json` hot-reload + Agents settings
+  panel ✓; skills availability opened to a per-provider list ✓; the
+  `ProviderAdapter` refactor from `docs/PROVIDERS.md` §5 (collapse the
+  hardcoded provider branches; per-provider maps replace named fields) — in
+  progress.
+- **Phase 2 — connectors** *(shipped 2026-08-07)*: Connectors settings UI
+  over `connectors.json` with paste-JSON import and per-workspace scoping,
+  plus a composer tools chip ✓. Still open: skills install/enable UI.
 - **Phase 3 — extension host**: sidecar + manifest + dynamic RPC + declarative
   cards; automation rules ship as the first first-party extension.
 - **Unscheduled — rooms**: the feature itself (participants, addressing,

@@ -60,5 +60,8 @@ Per-server optional fields:
 - Remote hosts work identically: the files live on the server the daemon runs
   on.
 
-A visual Connectors settings panel over this same file is planned — see
-`docs/PLATFORM.md` §5.
+The desktop app edits this same file visually: **Settings → Connectors** —
+server list with per-scope chips, enable toggles, an add-server form, and
+paste-JSON import. The composer shows a plug chip with the count of servers
+available to the current workspace. Remote daemons expose the same config over
+the encrypted `connectors.read` / `connectors.update` RPCs.
