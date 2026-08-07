@@ -317,12 +317,57 @@ pub(super) fn delete_remote_secrets(secure_storage_key: String) -> Result<(), Da
     delete_remote_secrets_from_secure_storage(&secure_storage_key)
 }
 
+/// Headless hosts (Linux servers under systemd) usually have no secret
+/// service. `FALCONDECK_SECRET_FILE` opts into a plain-file store (0600)
+/// instead of the OS keychain, matching how the CLIs themselves persist
+/// tokens on servers.
+#[cfg(not(test))]
+fn secret_file_path() -> Option<std::path::PathBuf> {
+    std::env::var("FALCONDECK_SECRET_FILE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+#[cfg(not(test))]
+fn read_secret_file(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+#[cfg(not(test))]
+fn write_secret_file(
+    path: &std::path::Path,
+    entries: &std::collections::HashMap<String, String>,
+) -> Result<(), DaemonError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| DaemonError::Process(format!("failed to create secret dir: {error}")))?;
+    }
+    let payload = serde_json::to_string(entries)?;
+    std::fs::write(path, payload)
+        .map_err(|error| DaemonError::Process(format!("failed to write secret file: {error}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
 #[cfg(not(test))]
 pub(super) fn save_remote_secrets_to_secure_storage(
     secure_storage_key: &str,
     secrets: &PersistedRemoteSecrets,
 ) -> Result<(), DaemonError> {
     let payload = serde_json::to_string(secrets)?;
+    if let Some(path) = secret_file_path() {
+        let mut entries = read_secret_file(&path);
+        entries.insert(secure_storage_key.to_string(), payload);
+        return write_secret_file(&path, &entries);
+    }
     let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
         .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
     entry
@@ -334,6 +379,15 @@ pub(super) fn save_remote_secrets_to_secure_storage(
 pub(super) fn load_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<PersistedRemoteSecrets, DaemonError> {
+    if let Some(path) = secret_file_path() {
+        let entries = read_secret_file(&path);
+        let payload = entries.get(secure_storage_key).ok_or_else(|| {
+            DaemonError::NotFound("no persisted remote secrets".to_string())
+        })?;
+        return serde_json::from_str::<PersistedRemoteSecrets>(payload).map_err(|error| {
+            DaemonError::BadRequest(format!("invalid secret file payload: {error}"))
+        });
+    }
     let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
         .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
     let payload = entry
@@ -348,6 +402,13 @@ pub(super) fn load_remote_secrets_from_secure_storage(
 pub(super) fn delete_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<(), DaemonError> {
+    if let Some(path) = secret_file_path() {
+        let mut entries = read_secret_file(&path);
+        if entries.remove(secure_storage_key).is_some() {
+            write_secret_file(&path, &entries)?;
+        }
+        return Ok(());
+    }
     let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
         .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
     match entry.delete_credential() {
