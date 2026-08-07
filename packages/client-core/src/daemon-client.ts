@@ -15,6 +15,7 @@ import type {
   ThreadDetail,
   ThreadDetailRequest,
   ThreadHandle,
+  ThreadIsolation,
   ThreadSummary,
   TurnInputItem,
   UpdatePreferencesPayload,
@@ -61,6 +62,8 @@ export type StartThreadPayload = {
   approval_policy?: string | null
   permission_mode?: string | null
   sandbox_mode?: string | null
+  /** Omitted means the project folder — isolation is always opt-in. */
+  isolation?: ThreadIsolation
 }
 
 export function createDaemonApiClient(baseUrl: string) {
@@ -255,18 +258,37 @@ export function createDaemonApiClient(baseUrl: string) {
         }),
       )
     },
-    async gitStatus(workspaceId: string) {
+    // An isolated thread's changes live in its own checkout, so status and
+    // diffs are asked per thread; omitting it reports the project folder.
+    async gitStatus(workspaceId: string, threadId?: string | null) {
+      const query = new URLSearchParams()
+      if (threadId) query.set('thread_id', threadId)
+      const params = query.toString() ? `?${query.toString()}` : ''
       return parseJson<GitStatusResponse>(
-        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/status`),
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/status${params}`),
       )
     },
-    async gitDiff(workspaceId: string, path?: string, status?: GitFileStatus | null) {
+    async gitDiff(
+      workspaceId: string,
+      path?: string,
+      status?: GitFileStatus | null,
+      threadId?: string | null,
+    ) {
       const query = new URLSearchParams()
       if (path) query.set('path', path)
       if (status) query.set('status', status)
+      if (threadId) query.set('thread_id', threadId)
       const params = query.toString() ? `?${query.toString()}` : ''
       return parseJson<GitDiffResponse>(
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/diff${params}`),
+      )
+    },
+    async deleteThread(workspaceId: string, threadId: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}`,
+          { method: 'DELETE' },
+        ),
       )
     },
     connectEvents(onEvent: (event: EventEnvelope) => void) {

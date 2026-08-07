@@ -17,6 +17,7 @@ import {
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type ThreadHandle,
+  type ThreadIsolation,
   type ThreadSummary,
   type TurnInputItem,
   type UpdatePreferencesPayload,
@@ -172,6 +173,9 @@ function AppInner() {
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null)
   const [selectedSandboxMode, setSelectedSandboxMode] = useState<string | null>(null)
+  // Only ever applies to the next thread this composer creates; a thread's
+  // working directory cannot change after it exists.
+  const [selectedIsolation, setSelectedIsolation] = useState<ThreadIsolation>('project_folder')
   const [persistedComposerSelections, setPersistedComposerSelections] =
     useState<PersistedComposerSelections>(() => readPersistedComposerSelections())
   const [isAddingProject, setIsAddingProject] = useState(false)
@@ -336,6 +340,7 @@ function AppInner() {
       setSelectedEffort('medium')
       setSelectedPermissionMode(null)
       setSelectedSandboxMode(null)
+      setSelectedIsolation('project_folder')
       selectionSeedRef.current = null
       return
     }
@@ -901,6 +906,7 @@ function AppInner() {
           approval_policy: 'on-request',
           permission_mode: selectedPermissionMode,
           sandbox_mode: selectedSandboxMode,
+          isolation: selectedIsolation,
         })
         activeThreadId = handle.thread.id
         setSelectedThreadId(activeThreadId)
@@ -1466,6 +1472,8 @@ function AppInner() {
                 onPermissionModeChange: handlePermissionModeChange,
                 selectedSandboxMode,
                 onSandboxModeChange: handleSandboxModeChange,
+                selectedIsolation,
+                onIsolationChange: selectedThread ? undefined : setSelectedIsolation,
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
                 isRunning: selectedThread?.status === 'running',

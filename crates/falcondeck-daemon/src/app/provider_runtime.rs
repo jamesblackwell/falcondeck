@@ -53,6 +53,10 @@ pub(super) struct StartThreadSpec<'a> {
     pub(super) model_id: Option<&'a str>,
     pub(super) sandbox_mode: Option<&'a str>,
     pub(super) approval_policy: &'a str,
+    /// Directory the thread will run in — its isolated checkout when the
+    /// request asked for one, otherwise the workspace folder. Resolved by the
+    /// caller because the variant is created before the backend thread exists.
+    pub(super) cwd: &'a str,
 }
 
 /// Everything a backend needs to run one turn. The thread summary is the state
@@ -125,12 +129,11 @@ impl ProviderRuntime {
         match self {
             Self::Codex => {
                 let session = app.session_for(spec.workspace_id).await?;
-                let workspace_path = session.workspace_path().to_string();
                 let result = session
                     .send_request(
                         "thread/start",
                         json!({
-                            "cwd": workspace_path,
+                            "cwd": spec.cwd,
                             "model": spec.model_id,
                             "sandbox": spec.sandbox_mode,
                             "approvalPolicy": spec.approval_policy
@@ -169,7 +172,10 @@ impl ProviderRuntime {
         match self {
             Self::Codex => {
                 let session = app.session_for(spec.workspace_id).await?;
-                let workspace_path = session.workspace_path().to_string();
+                let cwd = spec
+                    .thread
+                    .working_directory(session.workspace_path())
+                    .to_string();
                 if spec.requires_resume {
                     session.resume_thread(spec.thread_id).await?;
                     let mut workspaces = app.inner.workspaces.lock().await;
@@ -186,7 +192,7 @@ impl ProviderRuntime {
                         json!({
                             "threadId": spec.thread_id,
                             "input": codex_inputs(spec.inputs, spec.selected_skills),
-                            "cwd": workspace_path,
+                            "cwd": cwd,
                             "model": spec.requested_model_id,
                             "effort": spec.requested_reasoning_effort,
                             "sandboxPolicy": sandbox_policy_payload(
@@ -228,6 +234,7 @@ impl ProviderRuntime {
                         spec.thread.agent.permission_mode.as_deref(),
                         app.local_base_url().as_deref(),
                         &settings_dir,
+                        spec.thread.working_directory(runtime.workspace_path()),
                     )
                     .await?;
                 app.with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {

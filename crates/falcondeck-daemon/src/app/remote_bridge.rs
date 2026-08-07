@@ -21,7 +21,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use super::{
     AppState, RemoteBridgeCommand, RemoteBridgeError, RemotePairingState, extract_string,
-    parse_agent_provider, parse_interactive_response_params, relay_request_error,
+    parse_agent_provider, parse_interactive_response_params, parse_thread_isolation,
+    relay_request_error,
 };
 use crate::error::DaemonError;
 
@@ -45,6 +46,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.update",
     "thread.archive",
     "thread.unarchive",
+    "thread.delete",
     "thread.mark_read",
     "thread.goal.set",
     "thread.goal.clear",
@@ -689,6 +691,7 @@ impl AppState {
                             &params,
                             &["permissionMode", "permission_mode"],
                         ),
+                        isolation: parse_thread_isolation(&params),
                     };
                     self.start_thread(request)
                         .await
@@ -906,6 +909,16 @@ impl AppState {
                         })
                         .map_err(|error| error.to_string())
                 }
+                "thread.delete" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    self.delete_thread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
                 "thread.queue.remove" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
                     let thread_id = required(&["threadId", "thread_id"])?;
@@ -983,6 +996,7 @@ impl AppState {
                             &params,
                             &["permissionMode", "permission_mode"],
                         ),
+                        isolation: parse_thread_isolation(&params),
                     };
                     self.start_thread(request)
                         .await
@@ -1145,6 +1159,22 @@ impl AppState {
                         .await
                         .and_then(|summary| {
                             serde_json::to_value(summary).map_err(DaemonError::from)
+                        })
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "thread.delete" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    self.delete_thread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
                         })
                 } else {
                     Err(DaemonError::BadRequest(

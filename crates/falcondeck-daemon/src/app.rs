@@ -257,6 +257,11 @@ struct PersistedThreadState {
     last_read_seq: u64,
     #[serde(default)]
     last_agent_activity_seq: u64,
+    /// Isolated checkout backing the thread. Persisted so a daemon restart
+    /// keeps running the thread in its own directory — and still knows what to
+    /// clean up when the thread is deleted.
+    #[serde(default)]
+    variant: Option<falcondeck_core::ThreadVariant>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -543,6 +548,7 @@ impl AppState {
                     .contains(&state.thread_id),
                 goal: None,
                 queued_turns: Vec::new(),
+                variant: state.variant.clone(),
             };
             let mut thread = ManagedThread::new(summary);
             thread.manual_title = state.manual_title;
@@ -920,6 +926,18 @@ impl AppState {
         workspace_ops::unarchive_thread(self, workspace_id, thread_id).await
     }
 
+    pub async fn delete_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<CommandResponse, DaemonError> {
+        workspace_ops::delete_thread(self, workspace_id, thread_id).await?;
+        Ok(CommandResponse {
+            ok: true,
+            message: Some("thread deleted".to_string()),
+        })
+    }
+
     pub async fn send_turn(
         &self,
         request: SendTurnRequest,
@@ -1053,6 +1071,7 @@ impl AppState {
                     last_error: thread.summary.last_error.clone(),
                     last_read_seq: thread.summary.attention.last_read_seq,
                     last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
+                    variant: thread.summary.variant.clone(),
                 })
                 .collect::<Vec<_>>();
             thread_states.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
@@ -1174,25 +1193,39 @@ impl AppState {
     pub async fn git_status(
         &self,
         workspace_id: &str,
+        thread_id: Option<&str>,
     ) -> Result<falcondeck_core::GitStatusResponse, DaemonError> {
-        let workspaces = self.inner.workspaces.lock().await;
-        let workspace = workspaces
-            .get(workspace_id)
-            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        crate::git::git_status(&workspace.summary.path).await
+        crate::git::git_status(&self.git_root(workspace_id, thread_id).await?).await
     }
 
     pub async fn git_diff(
         &self,
         workspace_id: &str,
+        thread_id: Option<&str>,
         path: Option<&str>,
         status: Option<&falcondeck_core::GitFileStatus>,
     ) -> Result<falcondeck_core::GitDiffResponse, DaemonError> {
+        crate::git::git_diff(&self.git_root(workspace_id, thread_id).await?, path, status).await
+    }
+
+    /// Directory git status and diffs are read from: an isolated thread's own
+    /// checkout, otherwise the workspace folder. An unknown thread id falls
+    /// back to the workspace rather than failing — clients ask about threads
+    /// the daemon may have already dropped.
+    async fn git_root(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<String, DaemonError> {
         let workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(workspace_id)
             .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-        crate::git::git_diff(&workspace.summary.path, path, status).await
+        Ok(thread_id
+            .and_then(|thread_id| workspace.threads.get(thread_id))
+            .map(|thread| thread.summary.working_directory(&workspace.summary.path))
+            .unwrap_or(&workspace.summary.path)
+            .to_string())
     }
 }
 

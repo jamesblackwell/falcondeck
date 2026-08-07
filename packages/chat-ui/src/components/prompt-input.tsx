@@ -9,6 +9,7 @@ import type {
   ModelSummary,
   ProviderOption,
   SkillSummary,
+  ThreadIsolation,
 } from '@falcondeck/client-core'
 import {
   activeSlashQuery,
@@ -19,6 +20,7 @@ import {
 import { Button, cn } from '@falcondeck/ui'
 
 import {
+  IsolationSelector,
   ModelSelector,
   PermissionModeSelector,
   ProviderSelector,
@@ -55,6 +57,13 @@ export type PromptInputProps = {
   onPermissionModeChange?: (value: string | null) => void
   selectedSandboxMode?: string | null
   onSandboxModeChange?: (value: string | null) => void
+  /**
+   * Isolation for the thread this composer will create. Omitting the handler
+   * hides the control — mid-thread it has nothing to change, because a
+   * thread's working directory is fixed when it is created.
+   */
+  selectedIsolation?: ThreadIsolation
+  onIsolationChange?: (value: ThreadIsolation) => void
   disabled?: boolean
   sendDisabled?: boolean
   /** True while the selected thread has an in-flight turn. */
@@ -100,6 +109,8 @@ export const PromptInput = memo(function PromptInput({
   onPermissionModeChange,
   selectedSandboxMode = null,
   onSandboxModeChange,
+  selectedIsolation = 'project_folder',
+  onIsolationChange,
   disabled = false,
   sendDisabled = false,
   isRunning = false,
@@ -407,6 +418,13 @@ export const PromptInput = memo(function PromptInput({
                   value={selectedSandboxMode}
                   modes={capabilities.sandbox_modes}
                   onValueChange={onSandboxModeChange}
+                  disabled={disabled}
+                />
+              ) : null}
+              {onIsolationChange ? (
+                <IsolationSelector
+                  value={selectedIsolation}
+                  onValueChange={onIsolationChange}
                   disabled={disabled}
                 />
               ) : null}

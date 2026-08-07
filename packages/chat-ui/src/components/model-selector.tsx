@@ -3,6 +3,7 @@ import {
   type AgentProvider,
   type ModelSummary,
   type ProviderOption,
+  type ThreadIsolation,
 } from '@falcondeck/client-core'
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@falcondeck/ui'
@@ -202,6 +203,37 @@ export function SandboxSelector({
               {modeLabel(SANDBOX_MODE_LABELS, mode)}
             </SelectItem>
           ))}
+      </SelectContent>
+    </Select>
+  )
+}
+
+/**
+ * Where a new thread will run. Only meaningful before the thread exists —
+ * isolation is fixed at creation, so the composer hides this once a thread is
+ * selected rather than offering a control that would silently do nothing.
+ */
+export function IsolationSelector({
+  value,
+  onValueChange,
+  disabled = false,
+}: {
+  value: ThreadIsolation
+  onValueChange: (value: ThreadIsolation) => void
+  disabled?: boolean
+}) {
+  return (
+    <Select
+      value={value}
+      onValueChange={(next) => onValueChange(next as ThreadIsolation)}
+      disabled={disabled}
+    >
+      <SelectTrigger disabled={disabled} aria-label="Run in">
+        <SelectValue placeholder="Run in" />
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="project_folder">Project folder</SelectItem>
+        <SelectItem value="isolated">Isolated copy</SelectItem>
       </SelectContent>
     </Select>
   )

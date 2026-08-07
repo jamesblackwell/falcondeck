@@ -114,7 +114,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workspaces/{workspace_id}/threads", post(start_thread))
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}",
-            get(thread_detail).patch(update_thread),
+            get(thread_detail).patch(update_thread).delete(delete_thread),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/archive",
@@ -320,6 +320,13 @@ async fn archive_thread(
     Ok(Json(state.archive_thread(&workspace_id, &thread_id).await?))
 }
 
+async fn delete_thread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(state.delete_thread(&workspace_id, &thread_id).await?))
+}
+
 async fn unarchive_thread(
     State(state): State<AppState>,
     Path((workspace_id, thread_id)): Path<(String, String)>,
@@ -424,11 +431,23 @@ async fn claude_pre_tool_use(
     Json(state.handle_claude_pre_tool_use(payload).await)
 }
 
+/// Isolated threads report the status of their own checkout, so the thread is
+/// part of the question. Absent means the workspace folder.
+#[derive(serde::Deserialize)]
+struct GitStatusQuery {
+    thread_id: Option<String>,
+}
+
 async fn git_status(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<GitStatusQuery>,
 ) -> Result<Json<falcondeck_core::GitStatusResponse>, DaemonError> {
-    Ok(Json(state.git_status(&workspace_id).await?))
+    Ok(Json(
+        state
+            .git_status(&workspace_id, query.thread_id.as_deref())
+            .await?,
+    ))
 }
 
 async fn remove_queued_turn(
@@ -527,6 +546,7 @@ async fn update_connectors(
 struct GitDiffQuery {
     path: Option<String>,
     status: Option<falcondeck_core::GitFileStatus>,
+    thread_id: Option<String>,
 }
 
 async fn git_diff(
@@ -536,7 +556,12 @@ async fn git_diff(
 ) -> Result<Json<falcondeck_core::GitDiffResponse>, DaemonError> {
     Ok(Json(
         state
-            .git_diff(&workspace_id, query.path.as_deref(), query.status.as_ref())
+            .git_diff(
+                &workspace_id,
+                query.thread_id.as_deref(),
+                query.path.as_deref(),
+                query.status.as_ref(),
+            )
             .await?,
     ))
 }

@@ -498,6 +498,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
 
     let new_thread = super::ManagedThread::new(summary.clone());
@@ -602,6 +603,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     is_pinned: false,
                     goal: None,
                     queued_turns: Vec::new(),
+                    variant: None,
                 }),
             )]
             .into_iter()
@@ -1057,6 +1059,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 last_error: None,
                 last_read_seq: 2,
                 last_agent_activity_seq: 7,
+                variant: None,
             }],
         }],
         remote: None,
@@ -1166,6 +1169,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_error: None,
                     last_read_seq: 0,
                     last_agent_activity_seq: 0,
+                    variant: None,
                 }],
             },
         );
@@ -1191,6 +1195,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_error: Some("Still disconnected".to_string()),
                     last_read_seq: 1,
                     last_agent_activity_seq: 3,
+                    variant: None,
                 }],
             },
         );
@@ -1221,6 +1226,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
     let live_workspace = WorkspaceSummary {
         id: live_workspace_id.clone(),
@@ -1324,6 +1330,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
     let workspace = WorkspaceSummary {
         id: workspace_id.clone(),
@@ -1730,6 +1737,7 @@ async fn insert_claude_workspace_with_session(
                     is_pinned: false,
                     goal: None,
                     queued_turns: Vec::new(),
+                    variant: None,
                 }),
             )]
             .into_iter()
@@ -2142,6 +2150,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
     let archived_thread = ThreadSummary {
         id: "thread-archived".to_string(),
@@ -2163,6 +2172,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
 
     app.inner.workspaces.lock().await.insert(
@@ -2369,6 +2379,7 @@ async fn sends_against_a_running_thread_queue_and_are_removable() {
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
     let workspace = WorkspaceSummary {
         id: workspace_id.clone(),
@@ -2477,6 +2488,7 @@ async fn busy_thread_app(
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
     let workspace = WorkspaceSummary {
         id: workspace_id.clone(),

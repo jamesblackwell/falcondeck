@@ -304,6 +304,17 @@ export function normalizeThreadSummary(value: ThreadSummary | unknown): ThreadSu
             typeof queued?.id === 'string' && typeof queued?.preview === 'string',
         )
       : [],
+    // A variant without a path cannot be acted on, so treat it as absent
+    // rather than showing a branch chip for a checkout we cannot locate.
+    variant:
+      thread.variant && typeof thread.variant.path === 'string' && thread.variant.path
+        ? {
+            slug: thread.variant.slug ?? '',
+            path: thread.variant.path,
+            branch: thread.variant.branch ?? '',
+            kind: thread.variant.kind === 'worktree' ? 'worktree' : 'clone',
+          }
+        : null,
   }
 }
 

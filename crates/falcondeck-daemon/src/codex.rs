@@ -1576,6 +1576,7 @@ mod tests {
                 is_pinned: false,
                 goal: None,
                 queued_turns: Vec::new(),
+                variant: None,
             },
             &thread_read,
             &[
@@ -1644,6 +1645,7 @@ mod tests {
                 is_pinned: false,
                 goal: None,
                 queued_turns: Vec::new(),
+                variant: None,
             },
             &json!({ "thread": { "turns": [{ "id": "turn-1", "status": "completed" }] } }),
             &[ConversationItem::AssistantMessage {
@@ -1681,6 +1683,7 @@ mod tests {
                 is_pinned: false,
                 goal: None,
                 queued_turns: Vec::new(),
+                variant: None,
             },
             &json!({ "thread": { "turns": [] } }),
             &[ConversationItem::Service {

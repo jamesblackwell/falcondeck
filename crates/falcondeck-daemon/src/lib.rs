@@ -15,6 +15,7 @@ mod error;
 mod git;
 mod skills;
 mod ssh_config;
+mod variant;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

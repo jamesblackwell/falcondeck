@@ -472,20 +472,26 @@ pub(super) async fn start_acp_turn(
     // that still holds its items (agent process died, daemon alive) would
     // append the entire history a second time. That case takes session/new —
     // the agent loses its context, which is the pre-resume status quo.
-    let (known_native_session, requested_permission_mode) = {
+    let (known_native_session, requested_permission_mode, cwd) = {
         let workspaces = app.inner.workspaces.lock().await;
-        let thread = workspaces
-            .get(workspace_id)
-            .and_then(|workspace| workspace.threads.get(thread_id));
+        let workspace = workspaces.get(workspace_id);
+        let thread = workspace.and_then(|workspace| workspace.threads.get(thread_id));
         (
             thread
                 .filter(|thread| thread.items.is_empty())
                 .and_then(|thread| thread.summary.native_session_id.clone()),
             thread.and_then(|thread| thread.summary.agent.permission_mode.clone()),
+            match (workspace, thread) {
+                (Some(workspace), Some(thread)) => thread
+                    .summary
+                    .working_directory(&workspace.summary.path)
+                    .to_string(),
+                _ => runtime.workspace_path().to_string(),
+            },
         )
     };
     let session_id = runtime
-        .ensure_session(thread_id, known_native_session.as_deref())
+        .ensure_session(thread_id, known_native_session.as_deref(), &cwd)
         .await?;
     app.with_thread_mut(workspace_id, thread_id, |thread| {
         thread.native_session_id = Some(session_id.clone());

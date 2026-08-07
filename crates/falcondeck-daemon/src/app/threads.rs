@@ -127,6 +127,7 @@ impl AppState {
                     is_pinned: false,
                     goal: None,
                     queued_turns: Vec::new(),
+                    variant: None,
                 })
             });
         let before = thread.summary.updated_at;
@@ -230,7 +231,10 @@ impl AppState {
             }
             thread.ai_title_in_flight = true;
             AiThreadTitleInput {
-                workspace_path: workspace.summary.path.clone(),
+                workspace_path: thread
+                    .summary
+                    .working_directory(&workspace.summary.path)
+                    .to_string(),
                 prompt: build_ai_thread_title_prompt(&thread.items),
                 prefer_claude: workspace.summary.agents.iter().any(|agent| {
                     agent.provider == AgentProvider::CLAUDE

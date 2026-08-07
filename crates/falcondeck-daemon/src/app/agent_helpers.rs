@@ -1,5 +1,5 @@
 use falcondeck_core::{
-    AgentProvider, ImageInput, SelectedSkillReference, SkillSummary, TurnInputItem,
+    AgentProvider, ImageInput, SelectedSkillReference, SkillSummary, ThreadIsolation, TurnInputItem,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -859,6 +859,17 @@ pub(super) fn parse_agent_provider(value: String) -> Option<AgentProvider> {
         None
     } else {
         Some(AgentProvider::new(normalized))
+    }
+}
+
+/// Reads the isolation choice off a remote `thread.start` payload. Unlike
+/// provider ids, an unrecognised value falls back to the project folder:
+/// creating a checkout nobody asked for is the costlier mistake, and it is the
+/// one the caller cannot undo.
+pub(super) fn parse_thread_isolation(params: &serde_json::Value) -> ThreadIsolation {
+    match extract_string(params, &["isolation"]).as_deref() {
+        Some("isolated") => ThreadIsolation::Isolated,
+        _ => ThreadIsolation::ProjectFolder,
     }
 }
 

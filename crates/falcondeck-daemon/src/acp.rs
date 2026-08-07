@@ -567,6 +567,12 @@ impl AcpRuntime {
         .await
     }
 
+    /// Folder this runtime's workspace lives in. Threads running in an
+    /// isolated variant pass their own cwd into `ensure_session` instead.
+    pub fn workspace_path(&self) -> &str {
+        &self.workspace_path
+    }
+
     /// Returns the ACP session id for a thread, creating a session on demand.
     ///
     /// When the thread carries a native session id from a previous daemon run
@@ -579,6 +585,7 @@ impl AcpRuntime {
         &self,
         thread_id: &str,
         known_native_session: Option<&str>,
+        cwd: &str,
     ) -> Result<String, DaemonError> {
         if let Some(existing) = self.sessions.lock().await.get(thread_id) {
             return Ok(existing.clone());
@@ -603,7 +610,7 @@ impl AcpRuntime {
                     "session/load",
                     json!({
                         "sessionId": native_session,
-                        "cwd": self.workspace_path,
+                        "cwd": cwd,
                         "mcpServers": mcp_servers.clone()
                     }),
                 )
@@ -629,7 +636,7 @@ impl AcpRuntime {
             .request(
                 "session/new",
                 json!({
-                    "cwd": self.workspace_path,
+                    "cwd": cwd,
                     "mcpServers": mcp_servers
                 }),
             )

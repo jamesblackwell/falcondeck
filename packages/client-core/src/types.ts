@@ -247,6 +247,18 @@ export type ThreadSummary = {
   is_pinned: boolean
   goal: ThreadGoal | null
   queued_turns: QueuedTurnSummary[]
+  variant: ThreadVariant | null
+}
+
+/** Where a new thread's turns run. Fixed when the thread is created. */
+export type ThreadIsolation = 'project_folder' | 'isolated'
+
+/** The isolated checkout backing a thread, when it has one. */
+export type ThreadVariant = {
+  slug: string
+  path: string
+  branch: string
+  kind: 'clone' | 'worktree'
 }
 
 export type InteractiveRequestKind = 'approval' | 'question'

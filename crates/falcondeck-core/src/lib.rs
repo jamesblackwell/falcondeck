@@ -327,6 +327,46 @@ pub struct StartThreadRequest {
     /// Optional Claude permission mode for the new thread.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Where the thread's turns run. Fixed at creation — a thread cannot move
+    /// between the project folder and an isolated copy afterwards.
+    #[serde(default)]
+    pub isolation: ThreadIsolation,
+}
+
+/// Working directory a thread's turns run in.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadIsolation {
+    /// Run in the workspace folder itself, on whatever branch is checked out.
+    #[default]
+    ProjectFolder,
+    /// Run in a private checkout on its own branch.
+    Isolated,
+}
+
+/// How an isolated checkout was materialized. Copy-on-write clones carry the
+/// whole working tree (env files, installed dependencies); worktrees carry
+/// only tracked content plus an allowlist of untracked files.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadVariantKind {
+    /// Copy-on-write copy of the whole working tree.
+    Clone,
+    /// `git worktree` checkout plus an allowlist of untracked files.
+    Worktree,
+}
+
+/// The isolated checkout backing one thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadVariant {
+    /// Short identifier, unique within the project; also the branch suffix.
+    pub slug: String,
+    /// Absolute path to the checkout on the machine owning the workspace.
+    pub path: String,
+    /// Branch the checkout was switched to.
+    pub branch: String,
+    /// Mechanism used to create it.
+    pub kind: ThreadVariantKind,
 }
 
 /// Request payload used to update thread-level agent settings.
@@ -1031,6 +1071,24 @@ pub struct ThreadSummary {
     /// active turn ends. Ordered; clients render these as removable chips.
     #[serde(default)]
     pub queued_turns: Vec<QueuedTurnSummary>,
+    /// Isolated checkout backing the thread, when it was started isolated.
+    /// Absent means the thread runs in the workspace folder.
+    #[serde(default)]
+    pub variant: Option<ThreadVariant>,
+}
+
+impl ThreadSummary {
+    /// Directory this thread's turns, git status, and diffs operate in.
+    ///
+    /// The single answer to "where does this thread run" — every provider
+    /// spawn and git call resolves it through here, because a site that reads
+    /// the workspace path directly would silently run an isolated thread's
+    /// agent in the project folder.
+    pub fn working_directory<'a>(&'a self, workspace_path: &'a str) -> &'a str {
+        self.variant
+            .as_ref()
+            .map_or(workspace_path, |variant| variant.path.as_str())
+    }
 }
 
 /// Client-visible view of one queued turn. The full request (inputs,

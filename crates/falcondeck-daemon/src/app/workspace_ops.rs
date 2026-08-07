@@ -3,7 +3,7 @@ use std::path::Path;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
     ConversationItem, ImageInput, SetThreadGoalRequest, ThreadDetail, ThreadDetailMode,
-    ThreadDetailRequest, ThreadGoal, TurnInputItem,
+    ThreadDetailRequest, ThreadGoal, ThreadIsolation, TurnInputItem,
 };
 use uuid::Uuid;
 
@@ -236,6 +236,7 @@ pub(super) async fn connect_workspace_internal(
                 is_pinned: false,
                 goal: None,
                 queued_turns: Vec::new(),
+                variant: state.variant.clone(),
             },
             items: Vec::new(),
         });
@@ -332,6 +333,9 @@ pub(super) async fn connect_workspace_internal(
                         thread.summary.attention.last_read_seq = state.last_read_seq;
                         thread.summary.attention.last_agent_activity_seq =
                             state.last_agent_activity_seq;
+                        // Provider hydration reports the workspace folder; only
+                        // our own state knows the thread runs somewhere else.
+                        thread.summary.variant = state.variant.clone();
                     }
                     (thread.summary.id.clone(), {
                         let mut managed = ManagedThread::with_items(thread.summary, thread.items);
@@ -417,7 +421,7 @@ pub(super) async fn start_thread(
     app: &AppState,
     request: StartThreadRequest,
 ) -> Result<ThreadHandle, DaemonError> {
-    let (provider, default_model_id) = {
+    let (provider, default_model_id, workspace_path) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get(&request.workspace_id)
@@ -432,6 +436,7 @@ pub(super) async fn start_thread(
             .iter()
             .find(|agent| agent.provider == provider)
             .cloned();
+        let workspace_path = workspace.summary.path.clone();
         (
             provider,
             agent.and_then(|agent| {
@@ -442,17 +447,27 @@ pub(super) async fn start_thread(
                     .or_else(|| agent.models.first())
                     .map(|model| model.id.clone())
             }),
+            workspace_path,
         )
     };
     let approval_policy = request
         .approval_policy
         .unwrap_or_else(|| "on-request".to_string());
     let model_id = request.model_id.clone().or(default_model_id);
-    let StartedThread {
-        thread_id,
-        title,
-        native_session_id,
-    } = ProviderRuntime::for_provider(&provider)
+
+    // The checkout has to exist before the backend opens its thread, because
+    // the cwd is fixed at that point for every provider.
+    let variant = match request.isolation {
+        ThreadIsolation::ProjectFolder => None,
+        ThreadIsolation::Isolated => {
+            Some(crate::variant::create(&workspace_path, &crate::variant::new_slug()).await?)
+        }
+    };
+    let cwd = variant
+        .as_ref()
+        .map_or(workspace_path.as_str(), |variant| variant.path.as_str());
+
+    let started = ProviderRuntime::for_provider(&provider)
         .start_thread(
             app,
             StartThreadSpec {
@@ -460,9 +475,25 @@ pub(super) async fn start_thread(
                 model_id: model_id.as_deref(),
                 sandbox_mode: request.sandbox_mode.as_deref(),
                 approval_policy: &approval_policy,
+                cwd,
             },
         )
-        .await?;
+        .await;
+    let StartedThread {
+        thread_id,
+        title,
+        native_session_id,
+    } = match started {
+        Ok(started) => started,
+        Err(error) => {
+            // Nothing will ever reference this checkout now, so it would be
+            // orphaned on disk with no thread to clean it up.
+            if let Some(variant) = variant.as_ref() {
+                crate::variant::remove(&workspace_path, variant).await;
+            }
+            return Err(error);
+        }
+    };
     let now = Utc::now();
 
     let mut workspaces = app.inner.workspaces.lock().await;
@@ -497,6 +528,7 @@ pub(super) async fn start_thread(
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant,
     };
     workspace.summary.current_thread_id = Some(thread_id.clone());
     workspace.summary.default_provider = provider;
@@ -549,6 +581,47 @@ pub(super) async fn archive_thread(
     );
     let _ = app.persist_local_state().await;
     Ok(summary)
+}
+
+/// Drops a thread and, if it ran in an isolated copy, the checkout behind it.
+///
+/// Archiving deliberately does not do this: it is reversible, and an
+/// unarchived thread whose checkout had been deleted would have nowhere to
+/// run. Deletion is the terminal action, so it is where cleanup belongs.
+pub(super) async fn delete_thread(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<(), DaemonError> {
+    let (variant, workspace_path) = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .remove(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        if workspace.summary.current_thread_id.as_deref() == Some(thread_id) {
+            workspace.summary.current_thread_id =
+                workspace.threads.keys().next().map(ToString::to_string);
+        }
+        (thread.summary.variant, workspace.summary.path.clone())
+    };
+
+    if let Some(variant) = variant.as_ref() {
+        crate::variant::remove(&workspace_path, variant).await;
+    }
+
+    app.emit(
+        Some(workspace_id.to_string()),
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+    let _ = app.persist_local_state().await;
+    Ok(())
 }
 
 pub(super) async fn unarchive_thread(
@@ -1160,6 +1233,7 @@ pub(super) async fn send_turn(
                     is_pinned: false,
                     goal: None,
                     queued_turns: Vec::new(),
+                    variant: None,
                 })
             });
         managed.summary.provider = provider.clone();
@@ -1566,6 +1640,14 @@ pub(super) async fn remove_workspace(
     }
     for (_, runtime) in removed.acp_runtimes {
         runtime.shutdown().await;
+    }
+
+    // Isolated checkouts are only reachable through their thread; dropping the
+    // project without them would strand every one of them on disk.
+    for thread in removed.threads.values() {
+        if let Some(variant) = thread.summary.variant.as_ref() {
+            crate::variant::remove(&removed.summary.path, variant).await;
+        }
     }
 
     let normalized_path = normalize_workspace_path(&removed.summary.path);

@@ -176,6 +176,12 @@ impl ClaudeRuntime {
         })
     }
 
+    /// Folder this runtime's workspace lives in. Threads running in an
+    /// isolated variant override it per turn.
+    pub fn workspace_path(&self) -> &str {
+        &self.workspace_path
+    }
+
     async fn turn_lock(&self, thread_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         self.turn_locks
             .lock()
@@ -197,6 +203,7 @@ impl ClaudeRuntime {
         permission_mode: Option<&str>,
         daemon_base_url: Option<&str>,
         settings_dir: &Path,
+        cwd: &str,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
         // Serialize the whole remove-kill-spawn-insert sequence per thread so
         // concurrent spawns cannot run two CLI processes on one session.
@@ -237,7 +244,7 @@ impl ClaudeRuntime {
             .arg("--include-partial-messages")
             .arg("--include-hook-events")
             .arg("--verbose")
-            .current_dir(PathBuf::from(&self.workspace_path))
+            .current_dir(PathBuf::from(cwd))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -1291,6 +1298,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         is_pinned: false,
         goal: None,
         queued_turns: Vec::new(),
+        variant: None,
     };
 
     Some(HydratedClaudeThread { summary, items })

@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { memo, useMemo } from 'react'
-import { Archive, LoaderCircle, Pin } from 'lucide-react'
+import { Archive, GitBranch, LoaderCircle, Pin } from 'lucide-react'
 
 import { deriveThreadAttentionPresentation, type ThreadSummary } from '@falcondeck/client-core'
 import { Badge, cn } from '@falcondeck/ui'
@@ -84,6 +84,15 @@ export const ThreadItem = memo(
           <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] text-fg-primary">
             {thread.title}
           </span>
+          {thread.variant ? (
+            <span
+              title={`Runs in an isolated copy on ${thread.variant.branch}`}
+              className="flex shrink-0 items-center gap-0.5 text-[length:var(--fd-text-xs)] text-fg-muted"
+            >
+              <GitBranch aria-hidden="true" className="h-3 w-3" />
+              {thread.variant.slug}
+            </span>
+          ) : null}
           {thread.is_pinned ? (
             <Pin role="img" aria-label="Pinned" className="h-3 w-3 shrink-0 rotate-45 text-fg-muted" />
           ) : null}
@@ -134,6 +143,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.updated_at === b.updated_at &&
     a.status === b.status &&
     a.is_pinned === b.is_pinned &&
+    a.variant?.slug === b.variant?.slug &&
     a.attention.unread === b.attention.unread &&
     a.attention.badge_label === b.attention.badge_label &&
     a.attention.pending_approval_count === b.attention.pending_approval_count &&
