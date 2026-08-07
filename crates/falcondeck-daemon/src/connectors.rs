@@ -23,9 +23,10 @@
 //! `AppState`, so edits apply on the next turn with no daemon restart.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 /// One configured MCP server after merging global + workspace files.
@@ -54,7 +55,7 @@ struct ConnectorsFile {
     mcp_servers: BTreeMap<String, ConnectorEntry>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ConnectorEntry {
     #[serde(default)]
     command: Option<String>,
@@ -230,6 +231,113 @@ pub fn codex_config_overrides(servers: &[McpServerConfig]) -> Vec<String> {
     overrides
 }
 
+/// Which connectors file an edit targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorScope {
+    Global,
+    Workspace,
+}
+
+/// Full config view for the settings UI: both raw files plus the merged,
+/// per-server resolution (disabled entries included so they stay editable).
+pub fn connectors_overview(workspace_path: Option<&str>) -> Value {
+    connectors_overview_at(
+        &global_connectors_path(),
+        workspace_path
+            .map(workspace_connectors_path)
+            .as_deref(),
+    )
+}
+
+fn connectors_overview_at(global_path: &Path, workspace_file: Option<&Path>) -> Value {
+    let global = read_connectors_file(global_path);
+    let workspace = workspace_file.map(read_connectors_file);
+
+    let mut merged: BTreeMap<String, (&'static str, &ConnectorEntry)> = BTreeMap::new();
+    for (name, entry) in &global {
+        merged.insert(name.clone(), ("global", entry));
+    }
+    if let Some(workspace) = &workspace {
+        for (name, entry) in workspace {
+            merged.insert(name.clone(), ("workspace", entry));
+        }
+    }
+    let merged = merged
+        .into_iter()
+        .map(|(name, (scope, entry))| {
+            let mut value = serde_json::to_value(entry).unwrap_or_else(|_| json!({}));
+            if let Some(map) = value.as_object_mut() {
+                map.insert("name".to_string(), json!(name));
+                map.insert("scope".to_string(), json!(scope));
+            }
+            value
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "global": to_servers_map(&global),
+        "workspace": workspace.as_ref().map(to_servers_map),
+        "merged": merged,
+    })
+}
+
+fn to_servers_map(entries: &BTreeMap<String, ConnectorEntry>) -> Value {
+    let mut map = serde_json::Map::new();
+    for (name, entry) in entries {
+        if let Ok(value) = serde_json::to_value(entry) {
+            map.insert(name.clone(), value);
+        }
+    }
+    Value::Object(map)
+}
+
+/// Validates and atomically writes one connectors file (`{"mcpServers": …}`).
+/// Env blocks routinely hold API keys, so files are written 0600.
+pub fn write_mcp_servers(
+    scope: ConnectorScope,
+    workspace_path: Option<&str>,
+    mcp_servers: &Value,
+) -> Result<(), String> {
+    // Reject bodies that the loaders would not understand instead of
+    // persisting them and failing at the next spawn.
+    serde_json::from_value::<BTreeMap<String, ConnectorEntry>>(mcp_servers.clone())
+        .map_err(|error| format!("invalid mcpServers payload: {error}"))?;
+
+    let path = match scope {
+        ConnectorScope::Global => global_connectors_path(),
+        ConnectorScope::Workspace => {
+            let workspace_path =
+                workspace_path.ok_or("workspace scope requires a workspace_id")?;
+            workspace_connectors_path(workspace_path)
+        }
+    };
+    write_mcp_servers_at(&path, mcp_servers)
+}
+
+fn write_mcp_servers_at(path: &Path, mcp_servers: &Value) -> Result<(), String> {
+    let parent = path.parent().ok_or("connectors path has no parent")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+
+    let body = serde_json::to_string_pretty(&json!({ "mcpServers": mcp_servers }))
+        .map_err(|error| format!("failed to encode connectors file: {error}"))?;
+    let tmp = path.with_extension("json.tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(&tmp)
+        .and_then(|mut file| file.write_all(body.as_bytes()))
+        .map_err(|error| format!("failed to write {}: {error}", tmp.display()))?;
+    std::fs::rename(&tmp, path)
+        .map_err(|error| format!("failed to replace {}: {error}", path.display()))
+}
+
 /// Quotes a TOML key segment unless it is already a bare key.
 fn toml_quoted_key(key: &str) -> String {
     let bare = !key.is_empty()
@@ -373,6 +481,49 @@ mod tests {
         assert_eq!(list[0]["name"], "local");
         assert_eq!(list[0]["env"][0]["name"], "A");
         assert_eq!(list[0]["env"][0]["value"], "1");
+    }
+
+    #[test]
+    fn overview_merges_scopes_and_keeps_disabled_entries() {
+        let global_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let global = write(
+            global_dir.path(),
+            r#"{"mcpServers":{"shared":{"command":"g"},"parked":{"command":"p","enabled":false}}}"#,
+        );
+        let workspace = write(
+            workspace_dir.path(),
+            r#"{"mcpServers":{"shared":{"command":"w"}}}"#,
+        );
+        let overview = connectors_overview_at(&global, Some(workspace.as_path()));
+        let merged = overview["merged"].as_array().unwrap();
+        assert_eq!(merged.len(), 2);
+        let shared = merged.iter().find(|s| s["name"] == "shared").unwrap();
+        assert_eq!(shared["scope"], "workspace");
+        assert_eq!(shared["command"], "w");
+        let parked = merged.iter().find(|s| s["name"] == "parked").unwrap();
+        assert_eq!(parked["enabled"], false);
+        assert!(overview["global"]["parked"].is_object());
+    }
+
+    #[test]
+    fn write_validates_and_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("connectors.json");
+        let servers = json!({"linear": {"command": "npx", "args": ["-y", "s"]}});
+        write_mcp_servers_at(&path, &servers).unwrap();
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(raw["mcpServers"]["linear"]["command"], "npx");
+
+        let invalid = json!({"bad": {"args": "not-a-list"}});
+        assert!(
+            serde_json::from_value::<BTreeMap<String, ConnectorEntry>>(invalid.clone()).is_err()
+        );
+        assert!(
+            write_mcp_servers(ConnectorScope::Workspace, None, &servers)
+                .unwrap_err()
+                .contains("workspace")
+        );
     }
 
     #[test]

@@ -82,6 +82,8 @@ impl AppState {
             "turn.interrupt",
             "workspace.connect",
             "workspace.remove",
+            "connectors.read",
+            "connectors.update",
         ];
         for method in RPC_METHODS {
             send_relay_message(
@@ -505,6 +507,24 @@ impl AppState {
         }
     }
 
+    /// Resolves an optional workspace id to its filesystem path for the
+    /// connectors RPCs; `None` in → `None` out (global scope).
+    async fn connectors_rpc_workspace_path(
+        &self,
+        workspace_id: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let Some(workspace_id) = workspace_id else {
+            return Ok(None);
+        };
+        let snapshot = self.snapshot().await;
+        snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .map(|workspace| Some(workspace.path.clone()))
+            .ok_or_else(|| "workspace not found".to_string())
+    }
+
     async fn handle_remote_rpc(
         &self,
         writer: &mut RelayWriter,
@@ -544,6 +564,37 @@ impl AppState {
             }
             "preferences.read" => serde_json::to_value(self.preferences().await)
                 .map_err(|error| format!("failed to serialize preferences: {error}")),
+            "connectors.read" => {
+                let workspace_path = self
+                    .connectors_rpc_workspace_path(
+                        extract_string(&params, &["workspaceId", "workspace_id"]).as_deref(),
+                    )
+                    .await?;
+                Ok(crate::connectors::connectors_overview(
+                    workspace_path.as_deref(),
+                ))
+            }
+            "connectors.update" => {
+                let scope = params
+                    .get("scope")
+                    .cloned()
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::connectors::ConnectorScope>(value).ok()
+                    })
+                    .ok_or_else(|| "invalid connectors scope".to_string())?;
+                let workspace_path = self
+                    .connectors_rpc_workspace_path(
+                        extract_string(&params, &["workspaceId", "workspace_id"]).as_deref(),
+                    )
+                    .await?;
+                let servers = params
+                    .get("mcpServers")
+                    .or_else(|| params.get("mcp_servers"))
+                    .cloned()
+                    .ok_or_else(|| "missing mcpServers payload".to_string())?;
+                crate::connectors::write_mcp_servers(scope, workspace_path.as_deref(), &servers)
+                    .map(|()| serde_json::json!({ "ok": true }))
+            }
             "thread.start" => {
                 let request = StartThreadRequest {
                     workspace_id: required(&["workspaceId", "workspace_id"])?,

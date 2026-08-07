@@ -152,6 +152,10 @@ pub fn router(state: AppState) -> Router {
             "/api/workspaces/{workspace_id}/approvals/{request_id}/respond",
             post(respond_approval),
         )
+        .route(
+            "/api/connectors",
+            get(read_connectors).put(update_connectors),
+        )
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
         .route("/api/claude/hooks/pre-tool-use", post(claude_pre_tool_use))
@@ -420,6 +424,59 @@ async fn git_status(
     Path(workspace_id): Path<String>,
 ) -> Result<Json<falcondeck_core::GitStatusResponse>, DaemonError> {
     Ok(Json(state.git_status(&workspace_id).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct ConnectorsQuery {
+    workspace_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdateConnectorsRequest {
+    scope: crate::connectors::ConnectorScope,
+    workspace_id: Option<String>,
+    #[serde(rename = "mcpServers")]
+    mcp_servers: serde_json::Value,
+}
+
+async fn connectors_workspace_path(
+    state: &AppState,
+    workspace_id: Option<&str>,
+) -> Result<Option<String>, DaemonError> {
+    let Some(workspace_id) = workspace_id else {
+        return Ok(None);
+    };
+    let snapshot = state.snapshot().await;
+    snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .map(|workspace| Some(workspace.path.clone()))
+        .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))
+}
+
+async fn read_connectors(
+    State(state): State<AppState>,
+    Query(query): Query<ConnectorsQuery>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    let workspace_path = connectors_workspace_path(&state, query.workspace_id.as_deref()).await?;
+    Ok(Json(crate::connectors::connectors_overview(
+        workspace_path.as_deref(),
+    )))
+}
+
+async fn update_connectors(
+    State(state): State<AppState>,
+    Json(request): Json<UpdateConnectorsRequest>,
+) -> Result<Json<serde_json::Value>, DaemonError> {
+    let workspace_path = connectors_workspace_path(&state, request.workspace_id.as_deref()).await?;
+    crate::connectors::write_mcp_servers(
+        request.scope,
+        workspace_path.as_deref(),
+        &request.mcp_servers,
+    )
+    .map_err(DaemonError::BadRequest)?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 #[derive(serde::Deserialize)]
