@@ -60,7 +60,9 @@ const markdownComponents = {
     return <strong className="font-semibold text-fg-primary">{children}</strong>
   },
   a({ href, children }: { href?: string; children?: React.ReactNode }) {
-    return <a href={href} className="text-accent underline decoration-accent/40 underline-offset-2" target="_blank" rel="noopener noreferrer">{children}</a>
+    // [overflow-wrap:anywhere] lets bare URLs break mid-token instead of
+    // stretching the message bubble past the column edge.
+    return <a href={href} className="[overflow-wrap:anywhere] text-accent underline decoration-accent/40 underline-offset-2" target="_blank" rel="noopener noreferrer">{children}</a>
   },
   hr() {
     return <hr className="my-4 border-border-subtle" />
@@ -79,8 +81,8 @@ function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_m
   const renderedText = useMemo(() => renderMarkdown(item.text), [item.text])
 
   return (
-    <div className="ml-auto max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
-      <div className="max-w-none text-[length:var(--fd-text-md)] text-fg-primary">
+    <div className="ml-auto w-fit min-w-0 max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
+      <div className="max-w-none break-words text-[length:var(--fd-text-md)] text-fg-primary">
         {renderedText}
       </div>
       {item.attachments.length > 0 ? (
@@ -113,8 +115,8 @@ function AssistantMessage({ item }: { item: Extract<ConversationItem, { kind: 'a
   const renderedText = useMemo(() => renderMarkdown(item.text), [item.text])
 
   return (
-    <div className="px-1">
-      <div className="max-w-none text-[length:var(--fd-text-md)] text-fg-primary">
+    <div className="min-w-0 px-1">
+      <div className="max-w-none break-words text-[length:var(--fd-text-md)] text-fg-primary">
         {renderedText}
       </div>
     </div>
@@ -410,6 +412,10 @@ export const MessageCard = memo(function MessageCard({
       return <InteractiveRequestMessage item={item} />
     case 'service':
       return <ServiceMessage item={item} />
+    default:
+      // Item kinds from a newer daemon must degrade gracefully, not crash the
+      // conversation view (returning undefined throws in React).
+      return null
   }
 })
 

@@ -793,10 +793,15 @@ fn claude_message_text(value: &Value) -> Option<String> {
     }
 }
 
+// Provider ids are open-ended (ACP providers arrive via providers.json), so any
+// non-empty id passes through — mapping unknown providers to None would make
+// remote callers silently fall back to the workspace default and run their
+// turns on the wrong agent. Mirrors normalizeProvider in client-core.
 pub(super) fn parse_agent_provider(value: String) -> Option<AgentProvider> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "codex" => Some(AgentProvider::CODEX),
-        "claude" => Some(AgentProvider::CLAUDE),
-        _ => None,
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(AgentProvider::new(normalized))
     }
 }

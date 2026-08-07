@@ -139,6 +139,8 @@ function normalizeThreadAgent(value: unknown): ThreadAgentParams {
     collaboration_mode_id: agent.collaboration_mode_id ?? null,
     approval_policy: agent.approval_policy ?? null,
     service_tier: agent.service_tier ?? null,
+    permission_mode: agent.permission_mode ?? null,
+    sandbox_mode: agent.sandbox_mode ?? null,
   }
 }
 
