@@ -70,6 +70,7 @@ const DEFAULT_CAPABILITIES: AgentCapabilitySummary = {
   supports_images: false,
   supports_skills: false,
   supports_interrupt: false,
+  supports_steering: false,
   sandbox_modes: [],
   permission_modes: [],
 }
@@ -104,6 +105,7 @@ function normalizeCapabilities(value: unknown): AgentCapabilitySummary {
     supports_images: capabilities.supports_images ?? false,
     supports_skills: capabilities.supports_skills ?? false,
     supports_interrupt: capabilities.supports_interrupt ?? false,
+    supports_steering: capabilities.supports_steering ?? false,
     sandbox_modes: normalizeStringList(capabilities.sandbox_modes),
     permission_modes: normalizeStringList(capabilities.permission_modes),
   }
@@ -200,6 +202,7 @@ const LEGACY_CAPABILITIES: Record<string, AgentCapabilitySummary> = {
     supports_images: true,
     supports_skills: true,
     supports_interrupt: true,
+    supports_steering: false,
     sandbox_modes: ['read-only', 'workspace-write', 'danger-full-access'],
     permission_modes: [],
   },
@@ -209,6 +212,9 @@ const LEGACY_CAPABILITIES: Record<string, AgentCapabilitySummary> = {
     supports_images: true,
     supports_skills: true,
     supports_interrupt: true,
+    // Unlike the others, steering postdates this fallback: a daemon old enough
+    // to omit `capabilities` cannot inject into a running turn.
+    supports_steering: false,
     sandbox_modes: [],
     permission_modes: ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions'],
   },

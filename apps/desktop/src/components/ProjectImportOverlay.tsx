@@ -10,7 +10,7 @@ export function ProjectImportOverlay() {
           </div>
           <div className="space-y-1">
             <h2 className="text-[length:var(--fd-text-lg)] font-medium text-fg-primary">
-              Importing existing Claude and Codex sessions
+              Importing existing agent sessions
             </h2>
             <p className="text-[length:var(--fd-text-sm)] text-fg-muted">This might take a moment.</p>
           </div>

@@ -10,8 +10,10 @@
     "@falcondeck/client-core": "file:../client-core",
     "@falcondeck/ui": "file:../ui",
     "lucide-react": "^0.577.0",
+    "parse-diff": "^0.12.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "shiki": "^4.4.2",
     "@radix-ui/react-popover": "^1.1.15"
   },
   "peerDependencies": {

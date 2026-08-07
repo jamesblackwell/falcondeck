@@ -186,6 +186,7 @@ describe('client-core provider normalization', () => {
       supports_images: false,
       supports_skills: false,
       supports_interrupt: false,
+      supports_steering: false,
       sandbox_modes: ['sealed'],
       permission_modes: [],
     })

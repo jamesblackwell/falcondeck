@@ -49,6 +49,10 @@ export function usePanelVisibility() {
     setVisibility((current) => ({ ...current, rail: !current.rail }))
   }, [])
 
+  const showRail = useCallback(() => {
+    setVisibility((current) => (current.rail ? current : { ...current, rail: true }))
+  }, [])
+
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (!event.metaKey || event.ctrlKey || event.key.toLowerCase() !== 'b') return
@@ -68,5 +72,6 @@ export function usePanelVisibility() {
     railVisible: visibility.rail,
     toggleSidebar,
     toggleRail,
+    showRail,
   }
 }

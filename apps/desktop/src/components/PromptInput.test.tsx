@@ -92,7 +92,58 @@ describe('PromptInput', () => {
     )
 
     expect(screen.getByPlaceholderText('Ask anything')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Codex' })).not.toBeDisabled()
+    const providerTrigger = screen.getByRole('combobox', { name: 'Agent' })
+    expect(providerTrigger).not.toBeDisabled()
+    expect(providerTrigger).toHaveTextContent('Codex')
     expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled()
+  })
+
+  it('shows Stop when a turn is running and the draft is empty', () => {
+    const onStop = vi.fn()
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value=""
+        isRunning
+        onStop={onStop}
+        capabilities={{
+          supports_review: false,
+          supports_goals: false,
+          supports_images: true,
+          supports_skills: true,
+          supports_interrupt: true,
+          sandbox_modes: [],
+          permission_modes: [],
+        }}
+      />,
+    )
+
+    const stopButton = screen.getByRole('button', { name: 'Stop generating' })
+    expect(stopButton).toBeEnabled()
+    stopButton.click()
+    expect(onStop).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps Send when a turn is running but the draft has content', () => {
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="Follow up"
+        isRunning
+        onStop={vi.fn()}
+        capabilities={{
+          supports_review: false,
+          supports_goals: false,
+          supports_images: true,
+          supports_skills: true,
+          supports_interrupt: true,
+          sandbox_modes: [],
+          permission_modes: [],
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Stop generating' })).not.toBeInTheDocument()
   })
 })

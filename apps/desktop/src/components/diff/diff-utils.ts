@@ -10,13 +10,6 @@ export function basePart(path: string) {
   return idx >= 0 ? path.slice(idx + 1) : path
 }
 
-export function stripPrefix(content: string) {
-  if (content.length > 0 && (content[0] === '+' || content[0] === '-' || content[0] === ' ')) {
-    return content.slice(1)
-  }
-  return content
-}
-
 export type FileStatusVariant = 'success' | 'danger' | 'info' | 'warning' | 'muted'
 
 export function statusVariant(status: GitFileStatus): FileStatusVariant {

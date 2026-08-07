@@ -9,7 +9,7 @@ import type {
   ThreadSummary,
   WorkspaceSummary,
 } from '@falcondeck/client-core'
-import { Conversation, PromptInput, QueuedTurns } from '@falcondeck/chat-ui'
+import { Conversation, PromptInput, QueuedTurns, type OpenFileDiff } from '@falcondeck/chat-ui'
 
 import { InteractiveRequestBar } from './InteractiveRequestBar'
 import { RemotePairingPopover } from './RemotePairingPopover'
@@ -38,6 +38,7 @@ type DesktopConversationPaneProps = {
   ) => void
   promptInputProps: ComponentProps<typeof PromptInput>
   onRemoveQueuedTurn?: (queuedId: string) => void
+  onOpenFile?: OpenFileDiff | null
   headerControls?: ReactNode
 }
 
@@ -61,6 +62,7 @@ export function DesktopConversationPane({
   onInteractiveResponse,
   promptInputProps,
   onRemoveQueuedTurn,
+  onOpenFile,
   headerControls,
 }: DesktopConversationPaneProps) {
   return (
@@ -87,6 +89,7 @@ export function DesktopConversationPane({
         emptyState={conversationEmptyState}
         isThinking={isSending || selectedThread?.status === 'running'}
         isLoading={isThreadDetailPending}
+        onOpenFile={onOpenFile}
       />
       <InteractiveRequestBar requests={interactiveRequests} onRespond={onInteractiveResponse} />
       {selectedThread && onRemoveQueuedTurn ? (

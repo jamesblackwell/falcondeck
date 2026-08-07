@@ -428,16 +428,24 @@ describe('session-store', () => {
           approval({ request_id: 'a2', thread_id: 'thread-2' }),
         ],
       })
-      const { applyDaemonEvent, selectThread } = useSessionStore.getState()
+      const { applyDaemonEvent, selectThread, selectNewThread } = useSessionStore.getState()
       applyDaemonEvent(snapshotEvent(snap))
       selectThread('workspace-1', 'thread-1')
 
       const s = useSessionStore.getState()
       const filtered = (s.snapshot?.interactive_requests ?? []).filter(
-        (a) => !s.selectedThreadId || a.thread_id === s.selectedThreadId,
+        (a) => s.selectedThreadId != null && a.thread_id === s.selectedThreadId,
       )
       expect(filtered).toHaveLength(1)
       expect(filtered[0].request_id).toBe('a1')
+
+      selectNewThread('workspace-1')
+      const newThreadApprovals = (useSessionStore.getState().snapshot?.interactive_requests ?? []).filter(
+        (a) =>
+          useSessionStore.getState().selectedThreadId != null &&
+          a.thread_id === useSessionStore.getState().selectedThreadId,
+      )
+      expect(newThreadApprovals).toHaveLength(0)
     })
   })
 

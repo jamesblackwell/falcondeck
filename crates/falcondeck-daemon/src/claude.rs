@@ -70,15 +70,68 @@ pub struct ClaudeTurnFinish {
     pub stale: bool,
 }
 
+/// The live stdin of a turn's CLI process. `--input-format stream-json` keeps
+/// reading for the whole life of the turn, so the handle stays open and every
+/// steering message is appended as another line. Closing it delivers EOF,
+/// which is what makes the CLI exit — see [`ClaudeRuntime::complete_turn`].
+struct TurnInput {
+    stdin: Mutex<Option<tokio::process::ChildStdin>>,
+}
+
+impl TurnInput {
+    fn new(stdin: Option<tokio::process::ChildStdin>) -> Self {
+        Self {
+            stdin: Mutex::new(stdin),
+        }
+    }
+
+    async fn write_line(&self, line: &str) -> Result<(), DaemonError> {
+        let mut guard = self.stdin.lock().await;
+        let stdin = guard.as_mut().ok_or_else(|| {
+            DaemonError::BadRequest("claude turn is no longer accepting input".to_string())
+        })?;
+        let write = async {
+            stdin.write_all(line.as_bytes()).await?;
+            stdin.write_all(b"\n").await?;
+            stdin.flush().await
+        };
+        // A CLI that stopped reading stdin would otherwise block this write
+        // forever once the pipe buffer fills, wedging the caller's request.
+        match tokio::time::timeout(WRITE_TIMEOUT, write).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) => Err(DaemonError::Process(format!(
+                "failed to write to claude turn: {error}"
+            ))),
+            Err(_) => Err(DaemonError::Process(
+                "timed out writing to claude turn".to_string(),
+            )),
+        }
+    }
+
+    /// Drops the handle so the CLI reads EOF and exits. Idempotent.
+    async fn close(&self) {
+        self.stdin.lock().await.take();
+    }
+}
+
 struct ActiveTurn {
     generation: u64,
     child: Child,
+    input: Arc<TurnInput>,
 }
 
 /// How long to wait for the CLI to exit cleanly after SIGTERM before
 /// escalating to SIGKILL. Claude Code runs SessionEnd hooks and flushes
 /// session state on SIGTERM; SIGKILL risks losing that state.
 const INTERRUPT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(5);
+
+/// How long to wait for the CLI to exit on its own after its stdin is closed
+/// at turn end, before falling back to SIGTERM and then SIGKILL.
+const EXIT_GRACE: tokio::time::Duration = tokio::time::Duration::from_secs(10);
+
+/// Upper bound on a single stdin write (the initial prompt or a steering
+/// message) before the turn is treated as unable to accept input.
+const WRITE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(10);
 
 pub struct ClaudeRuntime {
     workspace_path: String,
@@ -161,6 +214,7 @@ impl ClaudeRuntime {
         // turn for this thread before spawning a replacement.
         let previous = self.active_turns.lock().await.remove(thread_id);
         if let Some(mut turn) = previous {
+            turn.input.close().await;
             let _ = request_graceful_stop(&mut turn.child);
             if tokio::time::timeout(INTERRUPT_GRACE, turn.child.wait())
                 .await
@@ -240,13 +294,16 @@ impl ClaudeRuntime {
                 }
                 DaemonError::Process(format!("failed to start claude: {error}"))
             })?;
-        if let Some(mut stdin) = child.stdin.take() {
+        // The handle stays open for the whole turn so steering messages can be
+        // appended; it is closed at the terminal `result` event (or when the
+        // turn is torn down), which is what lets the CLI exit.
+        let input = Arc::new(TurnInput::new(child.stdin.take()));
+        {
             // Write off-task so a CLI that never reads stdin cannot wedge
-            // spawn_turn; dropping the handle delivers EOF and starts the turn.
+            // spawn_turn.
+            let input = Arc::clone(&input);
             tokio::spawn(async move {
-                let _ = stdin.write_all(input_line.as_bytes()).await;
-                let _ = stdin.write_all(b"\n").await;
-                let _ = stdin.shutdown().await;
+                let _ = input.write_line(&input_line).await;
             });
         }
         let stdout = child.stdout.take();
@@ -254,10 +311,14 @@ impl ClaudeRuntime {
         let generation = self
             .next_turn_generation
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.active_turns
-            .lock()
-            .await
-            .insert(thread_id.to_string(), ActiveTurn { generation, child });
+        self.active_turns.lock().await.insert(
+            thread_id.to_string(),
+            ActiveTurn {
+                generation,
+                child,
+                input,
+            },
+        );
 
         // An interrupt that raced this spawn found no active entry and left
         // its flag behind; the user's stop wins, so signal the fresh child
@@ -276,6 +337,80 @@ impl ClaudeRuntime {
             stdout,
             stderr,
         })
+    }
+
+    /// Injects another user message into the turn already running on this
+    /// thread. Fails when no turn is active so the caller can fall back to
+    /// queueing rather than silently dropping the message.
+    pub async fn steer_turn(
+        &self,
+        thread_id: &str,
+        prompt: &str,
+        images: &[ImageInput],
+    ) -> Result<(), DaemonError> {
+        // Clone the handle out from under the map lock: the write must not
+        // hold `active_turns`, or a wedged pipe would also block interrupts
+        // and spawns on every other thread.
+        let input = {
+            let active = self.active_turns.lock().await;
+            active
+                .get(thread_id)
+                .map(|turn| Arc::clone(&turn.input))
+                .ok_or_else(|| {
+                    DaemonError::BadRequest("no active claude turn to steer".to_string())
+                })?
+        };
+        let line = build_claude_stream_json_input(prompt, images).await;
+        input.write_line(&line).await
+    }
+
+    /// Ends a turn that reported its terminal `result` event. Closes stdin so
+    /// the CLI exits, and reaps the process off-task so a slow shutdown cannot
+    /// stall the thread's return to idle.
+    pub async fn complete_turn(&self, thread_id: &str, generation: u64) -> ClaudeTurnFinish {
+        let turn = {
+            let mut active = self.active_turns.lock().await;
+            match active.get(thread_id) {
+                Some(turn) if turn.generation == generation => active.remove(thread_id),
+                // Missing or newer entry: this turn was superseded (or the
+                // runtime shut down); the caller must not touch thread state.
+                _ => {
+                    return ClaudeTurnFinish {
+                        status: None,
+                        interrupted: false,
+                        stale: true,
+                    };
+                }
+            }
+        };
+        let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
+        if let Some(mut turn) = turn {
+            // Closed before the reaper is spawned so a steer racing this
+            // completion fails fast instead of writing into a dying process.
+            turn.input.close().await;
+            tokio::spawn(async move {
+                if tokio::time::timeout(EXIT_GRACE, turn.child.wait())
+                    .await
+                    .is_ok()
+                {
+                    return;
+                }
+                tracing::warn!("claude turn did not exit after stdin close; terminating");
+                let _ = request_graceful_stop(&mut turn.child);
+                if tokio::time::timeout(INTERRUPT_GRACE, turn.child.wait())
+                    .await
+                    .is_err()
+                {
+                    let _ = turn.child.start_kill();
+                    let _ = turn.child.wait().await;
+                }
+            });
+        }
+        ClaudeTurnFinish {
+            status: None,
+            interrupted,
+            stale: false,
+        }
     }
 
     pub async fn interrupt_turn(&self, thread_id: &str) -> Result<(), DaemonError> {
@@ -353,12 +488,10 @@ impl ClaudeRuntime {
         thread_id: &str,
         generation: u64,
     ) -> Result<ClaudeTurnFinish, DaemonError> {
-        let child = {
+        let turn = {
             let mut active = self.active_turns.lock().await;
             match active.get(thread_id) {
-                Some(turn) if turn.generation == generation => {
-                    active.remove(thread_id).map(|turn| turn.child)
-                }
+                Some(turn) if turn.generation == generation => active.remove(thread_id),
                 // Missing or newer entry: this turn was superseded (or the
                 // runtime shut down); the caller must not touch thread state.
                 _ => {
@@ -371,10 +504,23 @@ impl ClaudeRuntime {
             }
         };
         let interrupted = self.interrupted_turns.lock().await.remove(thread_id);
-        if let Some(mut child) = child {
-            let status = child.wait().await.map_err(|error| {
-                DaemonError::Process(format!("failed to wait for claude turn: {error}"))
-            })?;
+        if let Some(mut turn) = turn {
+            // Reached when the stream ended without a terminal `result` event
+            // (a crashed or signalled CLI). Stdin is still open, so close it
+            // before waiting or a process that merely closed stdout would hang
+            // this wait forever and strand the thread as Running.
+            turn.input.close().await;
+            let status = match tokio::time::timeout(EXIT_GRACE, turn.child.wait()).await {
+                Ok(status) => status.map_err(|error| {
+                    DaemonError::Process(format!("failed to wait for claude turn: {error}"))
+                })?,
+                Err(_) => {
+                    let _ = turn.child.start_kill();
+                    turn.child.wait().await.map_err(|error| {
+                        DaemonError::Process(format!("failed to wait for claude turn: {error}"))
+                    })?
+                }
+            };
             return Ok(ClaudeTurnFinish {
                 status: Some(status),
                 interrupted,
@@ -391,6 +537,10 @@ impl ClaudeRuntime {
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
         let mut active = self.active_turns.lock().await;
         for turn in active.values_mut() {
+            // EOF and SIGTERM together: the CLI now outlives its stdout, so
+            // the signal alone is what stops a turn mid-flight, and the close
+            // stops it waiting on stdin if it is between turns.
+            turn.input.close().await;
             let _ = request_graceful_stop(&mut turn.child);
         }
         // Give the CLI a moment to flush session state before hard-killing.

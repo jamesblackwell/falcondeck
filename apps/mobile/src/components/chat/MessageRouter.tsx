@@ -9,6 +9,7 @@ import { AssistantMessageBlock } from './AssistantMessageBlock'
 import { ServiceBlock } from './ServiceBlock'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ToolBurstBlock } from './ToolBurstBlock'
+import { WorkSessionBlock } from './WorkSessionBlock'
 import { PlanBlock } from './PlanBlock'
 import { DiffBlock } from './DiffBlock'
 import { InteractiveRequestBlock } from './InteractiveRequestBlock'
@@ -36,6 +37,17 @@ export const MessageRouter = memo(function MessageRouter({ item: block }: Messag
         summary={block.summary}
         defaultOpen={block.default_open}
         suppressDetail={block.suppress_read_only_detail}
+      />
+    )
+  }
+
+  if (block.kind === 'work_session') {
+    return (
+      <WorkSessionBlock
+        items={block.items}
+        running={block.running}
+        startedAt={block.started_at}
+        completedAt={block.completed_at}
       />
     )
   }

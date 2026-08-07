@@ -17,6 +17,7 @@ export const NO_AGENT_CAPABILITIES: AgentCapabilitySummary = {
   supports_images: false,
   supports_skills: false,
   supports_interrupt: false,
+  supports_steering: false,
   sandbox_modes: [],
   permission_modes: [],
 }

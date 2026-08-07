@@ -528,9 +528,11 @@ export function useConversationItems() {
 
 export function useApprovals() {
   return useSessionStore(useShallow((s) =>
-    (s.snapshot?.interactive_requests ?? []).filter(
-      (a) => !s.selectedThreadId || a.thread_id === s.selectedThreadId,
-    ),
+    s.selectedThreadId
+      ? (s.snapshot?.interactive_requests ?? []).filter(
+          (a) => a.thread_id === s.selectedThreadId,
+        )
+      : [],
   ))
 }
 /* v8 ignore stop */

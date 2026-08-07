@@ -142,39 +142,82 @@ fn stop_dev_daemon_process() -> Result<(), String> {
 
     #[cfg(not(windows))]
     {
-        let term_status = Command::new("kill")
+        // The recorded pid may be the `cargo run` wrapper rather than the
+        // daemon itself, and it may already be dead while its orphaned child
+        // still holds the port. A failed TERM is therefore not an error —
+        // the port-based cleanup below is the authoritative fallback.
+        let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .map_err(|error| format!("failed to stop dev daemon: {error}"))?;
-        if !term_status.success() {
-            return Err("failed to stop dev daemon".to_string());
-        }
+            .status();
+        let addr = SocketAddr::from(([127, 0, 0, 1], DEFAULT_DAEMON_PORT));
         for _ in 0..30 {
-            if !daemon_reachable(SocketAddr::from(([127, 0, 0, 1], DEFAULT_DAEMON_PORT))) {
+            if !daemon_reachable(addr) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        if daemon_reachable(SocketAddr::from(([127, 0, 0, 1], DEFAULT_DAEMON_PORT))) {
-            let kill_status = Command::new("kill")
-                .args(["-KILL", &pid.to_string()])
+        if daemon_reachable(addr) {
+            // Kill whichever process actually listens on the daemon port —
+            // this catches orphans the pid file doesn't know about.
+            let listener = Command::new("lsof")
+                .args([
+                    "-ti",
+                    &format!("tcp:{DEFAULT_DAEMON_PORT}"),
+                    "-sTCP:LISTEN",
+                ])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .status()
-                .map_err(|error| format!("failed to force-stop dev daemon: {error}"))?;
-            if !kill_status.success() {
-                return Err("failed to force-stop dev daemon".to_string());
+                .output()
+                .ok()
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+                .filter(|pids| !pids.is_empty());
+            for listener_pid in listener.iter().flat_map(|pids| pids.lines()) {
+                let _ = Command::new("kill")
+                    .args(["-KILL", listener_pid.trim()])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
             }
+            for _ in 0..20 {
+                if !daemon_reachable(addr) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        if daemon_reachable(addr) {
+            return Err("failed to stop dev daemon: port still in use".to_string());
         }
     }
 
     let _ = fs::remove_file(pid_path);
     let _ = fs::remove_file(dev_stamp_path());
     Ok(())
+}
+
+/// True when the pid from the dev daemon pid file refers to a live process
+/// (which may still be `cargo run` compiling the daemon).
+fn dev_daemon_process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        false
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
 }
 
 fn ensure_dev_daemon() -> Result<String, String> {
@@ -189,34 +232,47 @@ fn ensure_dev_daemon() -> Result<String, String> {
     }
 
     if !daemon_reachable(addr) {
-        let _ = std::fs::remove_file(dev_pid_path());
-        let repo_root = repo_root()?;
-        let state_path = dev_state_path();
-        let child = Command::new("cargo")
-            .args([
-                "run",
-                "-p",
-                "falcondeck-daemon",
-                "--",
-                &format!("--port={DEFAULT_DAEMON_PORT}"),
-            ])
-            .env("FALCONDECK_STATE_PATH", state_path)
-            .current_dir(repo_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("failed to spawn dev daemon: {error}"))?;
-        if let Some(parent) = dev_pid_path().parent() {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-        std::fs::write(dev_pid_path(), child.id().to_string())
-            .map_err(|error| error.to_string())?;
-        if let Some(stamp) = expected_stamp.as_deref() {
-            write_dev_stamp(stamp)?;
+        // A previously spawned dev daemon may still be compiling under cargo.
+        // Don't stack another `cargo run` on top of it (they fight over the
+        // build lock and the port) — just fall through and wait for it.
+        let spawn_in_flight = fs::read_to_string(dev_pid_path())
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u32>().ok())
+            .is_some_and(dev_daemon_process_alive);
+        if !spawn_in_flight {
+            let _ = std::fs::remove_file(dev_pid_path());
+            let repo_root = repo_root()?;
+            let state_path = dev_state_path();
+            let child = Command::new("cargo")
+                .args([
+                    "run",
+                    "-p",
+                    "falcondeck-daemon",
+                    "--",
+                    &format!("--port={DEFAULT_DAEMON_PORT}"),
+                ])
+                .env("FALCONDECK_STATE_PATH", state_path)
+                .current_dir(repo_root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|error| format!("failed to spawn dev daemon: {error}"))?;
+            if let Some(parent) = dev_pid_path().parent() {
+                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            }
+            std::fs::write(dev_pid_path(), child.id().to_string())
+                .map_err(|error| error.to_string())?;
+            if let Some(stamp) = expected_stamp.as_deref() {
+                write_dev_stamp(stamp)?;
+            }
         }
 
-        for _ in 0..40 {
+        // `cargo run` may have to recompile the daemon after a source change
+        // (and can be stuck behind the tauri watcher's own build lock), so
+        // give it a realistic window, not seconds. The frontend keeps showing
+        // its connecting state while this blocks.
+        for _ in 0..600 {
             if daemon_reachable(addr) {
                 break;
             }
@@ -225,7 +281,10 @@ fn ensure_dev_daemon() -> Result<String, String> {
     }
 
     if !daemon_reachable(addr) {
-        return Err("dev daemon did not start in time".to_string());
+        return Err(
+            "dev daemon did not start in time (is `cargo run -p falcondeck-daemon` failing to compile?)"
+                .to_string(),
+        );
     }
 
     if let Some(stamp) = expected_stamp.as_deref() {

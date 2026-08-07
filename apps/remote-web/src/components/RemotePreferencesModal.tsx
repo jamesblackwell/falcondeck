@@ -5,6 +5,7 @@ import { AppearanceControls, Badge, Button } from '@falcondeck/ui'
 import { X } from 'lucide-react'
 
 const TOOL_DETAIL_OPTIONS = [
+  { value: 'collapsed', label: 'Hidden' },
   { value: 'auto', label: 'Auto' },
   { value: 'expanded', label: 'Expanded' },
   { value: 'compact', label: 'Compact' },

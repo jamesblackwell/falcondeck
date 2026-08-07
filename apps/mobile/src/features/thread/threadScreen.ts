@@ -18,6 +18,8 @@ export function shouldShowThinkingIndicator(
   const lastBlock = blocks[blocks.length - 1]
   if (!lastBlock) return true
   if (lastBlock.kind === 'tool_summary') return false
+  // A running work session already renders its own "Working…" line.
+  if (lastBlock.kind === 'work_session') return !lastBlock.running
 
   return !(
     lastBlock.item.kind === 'tool_call' &&

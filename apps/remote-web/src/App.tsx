@@ -145,6 +145,7 @@ export default function App() {
   const [selectedSandboxMode, setSelectedSandboxMode] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isStopping, setIsStopping] = useState(false)
   const [showProjects, setShowProjects] = useState(false)
   const [showPreferences, setShowPreferences] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
@@ -501,9 +502,11 @@ export default function App() {
   )
   const interactiveRequests = useMemo(
     () =>
-      (snapshot?.interactive_requests ?? []).filter(
-        (request) => !selectedThreadId || request.thread_id === selectedThreadId,
-      ),
+      selectedThreadId
+        ? (snapshot?.interactive_requests ?? []).filter(
+            (request) => request.thread_id === selectedThreadId,
+          )
+        : [],
     [selectedThreadId, snapshot?.interactive_requests],
   )
   const items = useMemo(
@@ -1328,6 +1331,27 @@ export default function App() {
     }
   }
 
+  async function handleStop() {
+    if (!selectedWorkspace || !selectedThreadId) return
+    if (selectedThread?.status !== 'running') return
+    setIsStopping(true)
+    try {
+      await submitQueuedAction(
+        'turn.interrupt',
+        {
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+        },
+        { awaitCompletion: false },
+      )
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to stop turn')
+    } finally {
+      setIsStopping(false)
+    }
+  }
+
   async function handleSubmit() {
     if (!selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
@@ -2002,6 +2026,7 @@ export default function App() {
               value={draft}
               onValueChange={setDraft}
               onSubmit={() => void handleSubmit()}
+              onStop={() => void handleStop()}
               onPickImages={(files) => void filesToImageInputs(files).then((n) => setAttachments((c) => [...c, ...n]))}
               onRemoveAttachment={handleRemoveAttachment}
               attachments={attachments}
@@ -2023,6 +2048,8 @@ export default function App() {
               selectedSandboxMode={selectedSandboxMode}
               onSandboxModeChange={handleSandboxModeChange}
               disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
+              isRunning={selectedThread?.status === 'running'}
+              isStopping={isStopping}
             />
           </div>
         </div>

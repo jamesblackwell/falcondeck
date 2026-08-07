@@ -55,8 +55,23 @@ export function normalizeMarkdownForStreaming(text: string): string {
   return `${normalized})`
 }
 
+// Machine-readable action markers like `::git-push{cwd="…"}` that Codex
+// appends on their own lines. The desktop renders them as annotations; on
+// mobile they are dropped rather than shown as raw syntax.
+const DIRECTIVE_LINE_RE = /^::[a-z0-9][a-z0-9_-]*\{[^}]*\}\s*$/
+
+export function stripDirectiveLines(text: string): string {
+  if (!text.includes('::')) return text
+  return text
+    .split('\n')
+    .filter((line) => !DIRECTIVE_LINE_RE.test(line.trim()))
+    .join('\n')
+}
+
 function parseMarkdown(text: string): MarkdownRoot {
-  return markdownProcessor.parse(normalizeMarkdownForStreaming(text)) as MarkdownRoot
+  return markdownProcessor.parse(
+    normalizeMarkdownForStreaming(stripDirectiveLines(text)),
+  ) as MarkdownRoot
 }
 
 export function buildMarkdownDefinitions(root: MarkdownRoot): MarkdownDefinitions {

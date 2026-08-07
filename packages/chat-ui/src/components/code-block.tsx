@@ -2,6 +2,10 @@ import { memo, useMemo, useState } from 'react'
 
 import { CopyButton, cn } from '@falcondeck/ui'
 
+import { languageFromPath, normalizeLanguage, useShikiTokens } from '../lib/shiki'
+import { DiffBlock } from './diff-block'
+import { looksLikeUnifiedDiff, useParsedDiff } from './diff-lines'
+
 /**
  * Lines shown before a block is capped. Long command output (a `ps` dump, a
  * whole file read) otherwise pushes the conversation off screen — the cap
@@ -9,45 +13,52 @@ import { CopyButton, cn } from '@falcondeck/ui'
  */
 const DEFAULT_PREVIEW_LINES = 14
 
-function DiffLine({ line }: { line: string }) {
-  if (line.startsWith('+++') || line.startsWith('---')) {
-    return <span className="text-fg-tertiary">{line}</span>
-  }
-  if (line.startsWith('+')) {
-    return <span className="text-success">{line}</span>
-  }
-  if (line.startsWith('-')) {
-    return <span className="text-danger">{line}</span>
-  }
-  if (line.startsWith('@@')) {
-    return <span className="text-info">{line}</span>
-  }
-  return <span>{line}</span>
-}
-
 export const CodeBlock = memo(function CodeBlock({
   code,
   language,
+  filePath = null,
   previewLines = DEFAULT_PREVIEW_LINES,
 }: {
   code: string
   language?: string | null
+  /** File the code came from; its extension picks the grammar when `language` is absent. */
+  filePath?: string | null
   /** Lines shown before capping; pass `0` to never cap (diffs, short output). */
   previewLines?: number
 }) {
-  const isDiff = language === 'diff'
   const [expanded, setExpanded] = useState(false)
+
+  // Agents hand back patches as untagged text, so shape detection matters as
+  // much as the explicit `diff` tag. Parsing is skipped for everything else.
+  const isDiffCandidate =
+    language === 'diff' || language === 'patch' || looksLikeUnifiedDiff(code)
+  const parsedDiff = useParsedDiff(isDiffCandidate ? code : null)
+
+  const resolvedLanguage = useMemo(
+    () => normalizeLanguage(language) ?? languageFromPath(filePath),
+    [filePath, language],
+  )
 
   const lines = useMemo(() => code.split('\n'), [code])
   const hiddenLineCount = previewLines > 0 ? Math.max(0, lines.length - previewLines) : 0
   const isCapped = hiddenLineCount > 0 && !expanded
-  const visibleCode = isCapped ? lines.slice(0, previewLines).join('\n') : code
+  const visibleLines = useMemo(
+    () => (isCapped ? lines.slice(0, previewLines) : lines),
+    [isCapped, lines, previewLines],
+  )
+  // Only the rows on screen are tokenized; expanding re-runs over the whole
+  // block, so a capped 2000-line dump costs 14 lines of highlighting.
+  const tokens = useShikiTokens(visibleLines, resolvedLanguage)
+
+  if (parsedDiff.status !== 'unparsed') {
+    return <DiffBlock diff={code} parsed={parsedDiff} previewRows={previewLines} />
+  }
 
   return (
     <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
       <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
-        <span>{language ?? 'code'}</span>
-        <div className="flex items-center gap-2">
+        <span className="min-w-0 truncate">{filePath ?? language ?? resolvedLanguage ?? 'code'}</span>
+        <div className="flex shrink-0 items-center gap-2">
           {lines.length > previewLines && previewLines > 0 ? (
             <span className="tabular-nums">{lines.length} lines</span>
           ) : null}
@@ -57,14 +68,20 @@ export const CodeBlock = memo(function CodeBlock({
       <div className="relative">
         <pre className="overflow-x-auto p-3 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
           <code>
-            {isDiff
-              ? visibleCode.split('\n').map((line, i) => (
-                  <span key={`${i}-${line.slice(0, 20)}`}>
-                    <DiffLine line={line} />
+            {tokens
+              ? visibleLines.map((line, index) => (
+                  <span key={index}>
+                    {tokens[index]
+                      ? tokens[index].map((token, tokenIndex) => (
+                          <span key={tokenIndex} style={{ color: token.color }}>
+                            {token.content}
+                          </span>
+                        ))
+                      : line}
                     {'\n'}
                   </span>
                 ))
-              : visibleCode}
+              : visibleLines.join('\n')}
           </code>
         </pre>
         {isCapped ? (

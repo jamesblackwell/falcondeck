@@ -53,6 +53,8 @@ export type AgentCapabilitySummary = {
   supports_images: boolean
   supports_skills: boolean
   supports_interrupt: boolean
+  /** Whether a message can be injected into a running turn to redirect it. */
+  supports_steering: boolean
   /** Sandbox modes the provider accepts; empty hides the sandbox picker. */
   sandbox_modes: string[]
   /** Permission modes the provider accepts; empty hides the picker. */

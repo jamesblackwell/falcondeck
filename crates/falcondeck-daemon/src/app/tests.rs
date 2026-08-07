@@ -2413,6 +2413,7 @@ async fn sends_against_a_running_thread_queue_and_are_removable() {
         service_tier: None,
         permission_mode: None,
         sandbox_mode: None,
+        steer: false,
     };
 
     // Busy thread: the send queues instead of dispatching (dispatching would
@@ -2439,4 +2440,205 @@ async fn sends_against_a_running_thread_queue_and_are_removable() {
             .is_err(),
         "removing twice reports not found"
     );
+}
+
+/// Builds a workspace holding one busy thread on `provider`, with that
+/// provider's capabilities as given, for the steer-vs-queue cases below.
+async fn busy_thread_app(
+    temp_dir: &tempfile::TempDir,
+    provider: AgentProvider,
+    capabilities: falcondeck_core::AgentCapabilitySummary,
+) -> (AppState, String) {
+    let workspace_path = temp_dir.path().join("project-steer");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    let workspace_id = "workspace-steer".to_string();
+    let thread = ThreadSummary {
+        id: "thread-steer".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Running thread".to_string(),
+        provider: provider.clone(),
+        native_session_id: None,
+        status: ThreadStatus::Running,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        goal: None,
+        queued_turns: Vec::new(),
+    };
+    let workspace = WorkspaceSummary {
+        id: workspace_id.clone(),
+        path: workspace_path.to_string_lossy().to_string(),
+        status: WorkspaceStatus::Busy,
+        agents: vec![falcondeck_core::WorkspaceAgentSummary {
+            provider: provider.clone(),
+            label: provider.to_string(),
+            account: falcondeck_core::AccountSummary::default(),
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            skills: Vec::new(),
+            capabilities,
+        }],
+        skills: Vec::new(),
+        default_provider: provider,
+        models: Vec::new(),
+        collaboration_modes: Vec::new(),
+        account: falcondeck_core::AccountSummary::default(),
+        current_thread_id: Some("thread-steer".to_string()),
+        connected_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_error: None,
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: workspace,
+            codex_session: None,
+            claude_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [(
+                "thread-steer".to_string(),
+                super::ManagedThread::new(thread),
+            )]
+            .into_iter()
+            .collect(),
+        },
+    );
+    (app, workspace_id)
+}
+
+fn steer_request(workspace_id: &str, steer: bool) -> falcondeck_core::SendTurnRequest {
+    falcondeck_core::SendTurnRequest {
+        workspace_id: workspace_id.to_string(),
+        thread_id: "thread-steer".to_string(),
+        inputs: vec![falcondeck_core::TurnInputItem::Text {
+            id: None,
+            text: "actually, use the other endpoint".to_string(),
+        }],
+        selected_skills: Vec::new(),
+        provider: None,
+        model_id: None,
+        reasoning_effort: None,
+        approval_policy: None,
+        service_tier: None,
+        permission_mode: None,
+        sandbox_mode: None,
+        steer,
+    }
+}
+
+#[tokio::test]
+async fn a_send_without_steer_queues_even_where_the_provider_supports_steering() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::claude(),
+    )
+    .await;
+
+    let response = app
+        .send_turn(steer_request(&workspace_id, false))
+        .await
+        .unwrap();
+
+    assert_eq!(response.message.as_deref(), Some("queued"));
+    assert_eq!(app.snapshot().await.threads[0].queued_turns.len(), 1);
+}
+
+#[tokio::test]
+async fn a_steer_falls_back_to_the_queue_when_the_provider_cannot_steer() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CODEX,
+        falcondeck_core::AgentCapabilitySummary::codex(),
+    )
+    .await;
+
+    // Codex has no steer path; the message must be parked, not rejected and
+    // not silently dropped.
+    let response = app
+        .send_turn(steer_request(&workspace_id, true))
+        .await
+        .unwrap();
+
+    assert_eq!(response.message.as_deref(), Some("queued"));
+    let summary = &app.snapshot().await.threads[0];
+    assert_eq!(summary.queued_turns.len(), 1);
+    assert_eq!(summary.status, ThreadStatus::Running);
+}
+
+#[tokio::test]
+async fn a_steer_against_a_steering_provider_reaches_the_runtime_and_never_queues() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::claude(),
+    )
+    .await;
+
+    // No Claude runtime is attached, so the steer reaches the provider and
+    // fails there. That failure is the assertion: the request took the steer
+    // path rather than being parked in the queue.
+    let error = app
+        .send_turn(steer_request(&workspace_id, true))
+        .await
+        .expect_err("steer must reach the provider");
+
+    assert!(
+        error.to_string().contains("not currently connected to Claude"),
+        "unexpected error: {error}"
+    );
+    let summary = &app.snapshot().await.threads[0];
+    assert!(
+        summary.queued_turns.is_empty(),
+        "a steer must not also queue the message"
+    );
+    // A failed steer leaves the running turn alone.
+    assert_eq!(summary.status, ThreadStatus::Running);
+}
+
+#[tokio::test]
+async fn a_steer_against_an_idle_thread_starts_a_normal_turn() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::claude(),
+    )
+    .await;
+    app.with_thread_mut(&workspace_id, "thread-steer", |thread| {
+        thread.status = ThreadStatus::Idle;
+    })
+    .await
+    .unwrap();
+
+    // Nothing to steer into: the send must fall through to a normal dispatch,
+    // which here fails on the missing runtime and marks the thread Error.
+    let error = app
+        .send_turn(steer_request(&workspace_id, true))
+        .await
+        .expect_err("dispatch must reach the provider");
+
+    assert!(
+        error.to_string().contains("not currently connected to Claude"),
+        "unexpected error: {error}"
+    );
+    let summary = &app.snapshot().await.threads[0];
+    assert!(summary.queued_turns.is_empty());
+    assert_eq!(summary.status, ThreadStatus::Error);
 }

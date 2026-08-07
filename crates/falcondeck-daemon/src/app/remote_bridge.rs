@@ -49,6 +49,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.goal.set",
     "thread.goal.clear",
     "turn.start",
+    "turn.steer",
     "turn.interrupt",
     "thread.queue.remove",
     "workspace.connect",
@@ -805,7 +806,10 @@ impl AppState {
                         .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
-                "turn.start" => {
+                // `turn.steer` is `turn.start` with steering forced on, so a
+                // remote client can ask for it without the daemon having to
+                // know whether that client knows about the `steer` field.
+                "turn.start" | "turn.steer" => {
                     let request = SendTurnRequest {
                         workspace_id: required(&["workspaceId", "workspace_id"])?,
                         thread_id: required(&["threadId", "thread_id"])?,
@@ -837,6 +841,11 @@ impl AppState {
                             &["permissionMode", "permission_mode"],
                         ),
                         sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
+                        steer: method == "turn.steer"
+                            || params
+                                .get("steer")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
                     };
                     self.send_turn(request)
                         .await
@@ -1082,6 +1091,9 @@ impl AppState {
                             &["permissionMode", "permission_mode"],
                         ),
                         sandbox_mode: extract_string(&params, &["sandboxMode", "sandbox_mode"]),
+                        // A queued action replays after a reconnect, long
+                        // after the turn it would have steered ended.
+                        steer: false,
                     };
                     self.send_turn(request).await.and_then(|response| {
                         serde_json::to_value(response).map_err(DaemonError::from)

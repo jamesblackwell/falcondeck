@@ -1,7 +1,8 @@
 import { memo } from 'react'
-import { ChevronDown } from 'lucide-react'
+import { FolderClosed } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@falcondeck/ui'
 
 export type NewThreadStateProps = {
   workspaces: WorkspaceSummary[]
@@ -17,27 +18,32 @@ export const NewThreadState = memo(function NewThreadState({
   const label = selectedWorkspace?.path.split('/').pop() ?? 'Select a project'
 
   return (
-    <div className="flex min-h-full w-full flex-1 flex-col items-center justify-center gap-4">
+    <div className="flex min-h-full w-full flex-1 flex-col items-center justify-center gap-3">
       <p className="text-[length:var(--fd-text-2xl)] font-semibold text-fg-primary">
         Let&apos;s build
       </p>
       {workspaces.length > 1 ? (
-        <div className="relative">
-          <select
-            value={selectedWorkspace?.id ?? ''}
-            onChange={(e) => onSelectWorkspace(e.target.value)}
-            className="appearance-none rounded-[var(--fd-radius-md)] bg-transparent py-1 pl-2 pr-9 text-[length:var(--fd-text-2xl)] font-medium text-fg-muted transition-colors hover:text-fg-secondary focus:outline-none"
+        <Select value={selectedWorkspace?.id ?? undefined} onValueChange={onSelectWorkspace}>
+          <SelectTrigger
+            aria-label="Project"
+            className="h-9 w-fit gap-2 px-3 text-[length:var(--fd-text-sm)]"
           >
+            <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+            <SelectValue placeholder="Select a project" />
+          </SelectTrigger>
+          <SelectContent align="center">
             {workspaces.map((workspace) => (
-              <option key={workspace.id} value={workspace.id}>
+              <SelectItem key={workspace.id} value={workspace.id}>
                 {workspace.path.split('/').pop()}
-              </option>
+              </SelectItem>
             ))}
-          </select>
-          <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-5 w-5 -translate-y-1/2 text-fg-faint" />
-        </div>
+          </SelectContent>
+        </Select>
       ) : (
-        <p className="text-[length:var(--fd-text-2xl)] font-medium text-fg-muted">{label}</p>
+        <p className="flex items-center gap-2 text-[length:var(--fd-text-md)] font-medium text-fg-muted">
+          <FolderClosed aria-hidden="true" className="h-4 w-4" />
+          {label}
+        </p>
       )}
     </div>
   )

@@ -40,7 +40,7 @@ import {
 import { DesktopConversationPane } from './components/DesktopConversationPane'
 import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
-import { DiffPanel } from './components/DiffPanel'
+import { DiffPanel, type DiffPanelSelection } from './components/DiffPanel'
 import { PanelToggles } from './components/PanelToggles'
 import { ProjectImportOverlay } from './components/ProjectImportOverlay'
 import { SettingsView } from './components/SettingsView'
@@ -160,7 +160,7 @@ function AppInner() {
     gitRefreshTrigger,
   } = useDaemonConnection({ externalSnapshots: hostSnapshots })
   const updater = useAppUpdater()
-  const { sidebarVisible, railVisible, toggleSidebar, toggleRail } = usePanelVisibility()
+  const { sidebarVisible, railVisible, toggleSidebar, toggleRail, showRail } = usePanelVisibility()
 
   const [draft, setDraft] = useState('')
   const [relayUrl] = useState(
@@ -179,7 +179,9 @@ function AppInner() {
   const [isStartingRemote, setIsStartingRemote] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general')
+  const [diffSelection, setDiffSelection] = useState<DiffPanelSelection | null>(null)
   const [isSending, setIsSending] = useState(false)
+  const [isStopping, setIsStopping] = useState(false)
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
@@ -227,6 +229,18 @@ function AppInner() {
   // render and would turn every keystroke into a connector fetch.
   const [connectorCount, setConnectorCount] = useState(0)
   const isRemoteWorkspaceSelected = workspaceHostIndex.has(selectedWorkspaceId ?? '')
+
+  // A file named in the transcript opens in the changes rail. There is no
+  // per-item diff endpoint, so this shows the file's *current* working-tree
+  // diff, which is the same view the rail's own file list gives.
+  const handleOpenFileDiff = useCallback(
+    (filePath: string) => {
+      if (!selectedWorkspaceId) return
+      setDiffSelection({ workspaceId: selectedWorkspaceId, filePath })
+      showRail()
+    },
+    [selectedWorkspaceId, showRail],
+  )
   const workspaceProviderIds = (selectedWorkspace?.agents ?? [])
     .map((agent) => agent.provider)
     .sort()
@@ -269,9 +283,11 @@ function AppInner() {
   )
   const interactiveRequests = useMemo(
     () =>
-      (viewSnapshot?.interactive_requests ?? []).filter(
-        (request) => !selectedThreadId || request.thread_id === selectedThreadId,
-      ),
+      selectedThreadId
+        ? (viewSnapshot?.interactive_requests ?? []).filter(
+            (request) => request.thread_id === selectedThreadId,
+          )
+        : [],
     [selectedThreadId, viewSnapshot?.interactive_requests],
   )
   const remoteWebUrl = import.meta.env.VITE_FALCONDECK_REMOTE_WEB_URL ?? 'https://app.falcondeck.com'
@@ -842,6 +858,23 @@ function AppInner() {
     ],
   )
 
+  async function handleStop() {
+    const client = apiFor(selectedWorkspace?.id)
+    if (!client || !selectedWorkspace || !selectedThreadId) return
+    if (selectedThread?.status !== 'running') return
+    setIsStopping(true)
+    try {
+      await client.interruptTurn(selectedWorkspace.id, selectedThreadId)
+      setActionError(null)
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Failed to stop turn'
+      setActionError(msg)
+      toast({ variant: 'danger', title: 'Failed to stop', description: msg })
+    } finally {
+      setIsStopping(false)
+    }
+  }
+
   async function handleSubmit() {
     const client = apiFor(selectedWorkspace?.id)
     if (!client || !selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
@@ -987,6 +1020,18 @@ function AppInner() {
     [api, apiFor, workspaceHostIndex],
   )
 
+  const handleStopCallback = useCallback(() => {
+    void handleStop()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    apiFor,
+    selectedWorkspace,
+    selectedThread,
+    selectedThreadId,
+    setActionError,
+    toast,
+  ])
+
   const handleSubmitCallback = useCallback(() => {
     void handleSubmit()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1129,6 +1174,24 @@ function AppInner() {
         })
     },
     [api, toast, setRemoteStatus],
+  )
+
+  const handleRemoveQueuedTurn = useCallback(
+    async (queuedId: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return
+      const client = apiFor(selectedWorkspaceId)
+      if (!client) return
+      try {
+        await client.removeQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId)
+        if (!workspaceHostIndex.has(selectedWorkspaceId) && api) {
+          setSnapshot(await api.snapshot())
+        }
+      } catch (error: unknown) {
+        const msg = error instanceof Error ? error.message : 'Failed to remove queued message'
+        toast({ variant: 'danger', title: 'Failed to remove queued message', description: msg })
+      }
+    },
+    [api, apiFor, selectedThreadId, selectedWorkspaceId, setSnapshot, toast, workspaceHostIndex],
   )
 
   const handleArchiveThread = useCallback(
@@ -1372,12 +1435,17 @@ function AppInner() {
               isSending={isSending}
               isThreadDetailPending={isThreadDetailPending}
               interactiveRequests={interactiveRequests}
+              onRemoveQueuedTurn={handleRemoveQueuedTurn}
+              // Remote-host workspaces have no local checkout, so the rail has
+              // no diff to show and file paths stay plain text there.
+              onOpenFile={isRemoteWorkspaceSelected ? null : handleOpenFileDiff}
               onStartPairing={handleStartPairingCallback}
               onInteractiveResponse={handleInteractiveResponseCallback}
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,
                 onSubmit: handleSubmitCallback,
+                onStop: handleStopCallback,
                 onPickImages: handlePickImages,
                 onRemoveAttachment: handleRemoveAttachment,
                 attachments,
@@ -1400,6 +1468,8 @@ function AppInner() {
                 onSandboxModeChange: handleSandboxModeChange,
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
+                isRunning: selectedThread?.status === 'running',
+                isStopping,
                 connectorCount,
                 onConnectorsClick: () => {
                   setSettingsSection('connectors')
@@ -1441,6 +1511,8 @@ function AppInner() {
                   reviewThreadId={
                     selectedThread && activeCapabilities.supports_review ? selectedThread.id : null
                   }
+                  selection={diffSelection}
+                  onSelectionChange={setDiffSelection}
                 />
               )
         }

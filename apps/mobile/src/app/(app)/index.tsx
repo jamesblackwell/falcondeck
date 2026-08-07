@@ -28,6 +28,7 @@ import {
   useUIStore,
 } from '@/store'
 import { useSessionActions } from '@/hooks/useSessionActions'
+import { useInterruptTurn } from '@/hooks/useInterruptTurn'
 import { useConversationPresentation } from '@/hooks/useRenderBlocks'
 import { useScrollToBottom } from '@/hooks/useScrollToBottom'
 import { Button, Text, EmptyState } from '@/components/ui'
@@ -48,7 +49,7 @@ const renderBlock = ({ item }: { item: ConversationRenderBlock }) => (
 )
 const keyExtractor = (block: ConversationRenderBlock) => block.id
 const getItemType = (block: ConversationRenderBlock) =>
-  block.kind === 'tool_summary' ? 'tool_summary' : block.item.kind
+  block.kind === 'tool_summary' || block.kind === 'work_session' ? block.kind : block.item.kind
 
 export default function HomeScreen() {
   const insets = useSafeAreaInsets()
@@ -94,11 +95,13 @@ export default function HomeScreen() {
     removeAttachment,
   } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
+  const interruptTurn = useInterruptTurn()
   const { listRef, showJumpButton, onContentSizeChange, onScroll, pauseAutoScrollOnce, resetScrollState, scrollToBottom } =
     useScrollToBottom<ConversationRenderBlock>()
   const [appState, setAppState] = useState(AppState.currentState)
   const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<string | null>(null)
   const [isLoadingOlder, setIsLoadingOlder] = useState(false)
+  const [isStopping, setIsStopping] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
   const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSentReadSeqRef = useRef<{ threadId: string; readSeq: number } | null>(null)
@@ -450,6 +453,7 @@ export default function HomeScreen() {
             onContentSizeChange={onContentSizeChange}
             onScroll={onScroll}
             scrollEventThrottle={16}
+            contentContainerStyle={styles.listContent}
             ListHeaderComponent={
               selectedThreadHistory.hasOlder ? (
                 <View style={styles.loadOlderContainer}>
@@ -463,7 +467,12 @@ export default function HomeScreen() {
                 </View>
               ) : null
             }
-            ListFooterComponent={showThinking ? <ThinkingIndicator /> : null}
+            ListFooterComponent={
+              <>
+                {showThinking ? <ThinkingIndicator /> : null}
+                <View style={styles.listBottomSpacer} />
+              </>
+            }
           />
         )}
         <JumpToBottomFab visible={showJumpButton} onPress={scrollToBottom} />
@@ -476,6 +485,11 @@ export default function HomeScreen() {
           value={draft}
           onChangeText={setDraft}
           onSubmit={() => void submitTurn()}
+          onStop={() => {
+            if (isStopping) return
+            setIsStopping(true)
+            void interruptTurn().finally(() => setIsStopping(false))
+          }}
           onPickImages={handlePickImages}
           onRemoveAttachment={removeAttachment}
           disabled={!workspace || isSubmitting || !isEncrypted}
@@ -491,6 +505,8 @@ export default function HomeScreen() {
           onSelectModel={setSelectedModel}
           onSelectEffort={setSelectedEffort}
           onSelectProvider={handleProviderChange}
+          isRunning={isThreadRunning}
+          isStopping={isStopping}
         />
       </View>
     </KeyboardAvoidingView>
@@ -524,6 +540,12 @@ const styles = StyleSheet.create((theme) => ({
   listContainer: {
     flex: 1,
     minHeight: 2,
+  },
+  listContent: {
+    paddingBottom: theme.spacing[4],
+  },
+  listBottomSpacer: {
+    height: theme.spacing[6],
   },
   syncState: {
     flex: 1,

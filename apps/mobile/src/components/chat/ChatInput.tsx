@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { View, TextInput, Pressable, type NativeSyntheticEvent, type TextInputContentSizeChangeEventData } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ImagePlus, Send } from 'lucide-react-native'
+import { ImagePlus, Send, Square } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import {
@@ -25,6 +25,8 @@ interface ChatInputProps {
   value: string
   onChangeText: (text: string) => void
   onSubmit: () => void
+  /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
+  onStop?: () => void
   onPickImages: () => void
   onRemoveAttachment: (attachmentId: string) => void
   disabled?: boolean
@@ -41,6 +43,10 @@ interface ChatInputProps {
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
+  /** True while the selected thread has an in-flight turn. */
+  isRunning?: boolean
+  /** True while an interrupt request is in flight. */
+  isStopping?: boolean
 }
 
 const MIN_INPUT_HEIGHT = 44
@@ -52,6 +58,7 @@ export const ChatInput = memo(function ChatInput({
   value,
   onChangeText,
   onSubmit,
+  onStop,
   onPickImages,
   onRemoveAttachment,
   disabled,
@@ -68,6 +75,8 @@ export const ChatInput = memo(function ChatInput({
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
+  isRunning = false,
+  isStopping = false,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
   const [caretIndex, setCaretIndex] = useState(value.length)
@@ -75,6 +84,8 @@ export const ChatInput = memo(function ChatInput({
   const [pendingSelection, setPendingSelection] = useState<{ start: number; end: number } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
+  const hasContent = value.trim().length > 0 || attachments.length > 0
+  const showStop = Boolean(onStop) && isRunning && !hasContent
 
   const filteredSkills = useMemo(() => {
     const query = slashQuery?.query.trim().toLowerCase() ?? ''
@@ -153,6 +164,12 @@ export const ChatInput = memo(function ChatInput({
     onSubmit()
   }, [attachments.length, value, disabled, onSubmit])
 
+  const handleStop = useCallback(() => {
+    if (disabled || isStopping || !onStop) return
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium)
+    onStop()
+  }, [disabled, isStopping, onStop])
+
   const handleChangeText = useCallback(
     (nextValue: string) => {
       const { start, end } = selectionRangeRef.current
@@ -195,7 +212,8 @@ export const ChatInput = memo(function ChatInput({
     [],
   )
 
-  const canSend = (value.trim().length > 0 || attachments.length > 0) && !disabled
+  const canSend = hasContent && !disabled
+  const canStop = showStop && !disabled && !isStopping
 
   return (
     <View style={styles.container}>
@@ -315,18 +333,35 @@ export const ChatInput = memo(function ChatInput({
             />
           </View>
           <Pressable
-            style={[styles.sendButton, canSend ? styles.sendActive : styles.sendInactive]}
-            onPress={handleSubmit}
-            disabled={!canSend}
+            style={[
+              styles.sendButton,
+              showStop
+                ? canStop
+                  ? styles.sendActive
+                  : styles.sendInactive
+                : canSend
+                  ? styles.sendActive
+                  : styles.sendInactive,
+            ]}
+            onPress={showStop ? handleStop : handleSubmit}
+            disabled={showStop ? !canStop : !canSend}
             accessibilityRole="button"
-            accessibilityLabel="Send message"
-            accessibilityState={{ disabled: !canSend }}
+            accessibilityLabel={showStop ? (isStopping ? 'Stopping' : 'Stop generating') : 'Send message'}
+            accessibilityState={{ disabled: showStop ? !canStop : !canSend }}
             hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
           >
-            <Send
-              size={theme.iconSize.sm}
-              color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint}
-            />
+            {showStop ? (
+              <Square
+                size={theme.iconSize.sm - 2}
+                color={canStop ? theme.colors.surface[0] : theme.colors.fg.faint}
+                fill={canStop ? theme.colors.surface[0] : theme.colors.fg.faint}
+              />
+            ) : (
+              <Send
+                size={theme.iconSize.sm}
+                color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint}
+              />
+            )}
           </Pressable>
         </View>
       </View>

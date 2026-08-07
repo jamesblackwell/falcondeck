@@ -262,6 +262,39 @@ impl ProviderRuntime {
         }
     }
 
+    /// Injects a message into the thread's running turn. Only providers whose
+    /// capabilities advertise `supports_steering` reach this; the rest queue
+    /// the message instead.
+    pub(super) async fn steer(
+        &self,
+        app: &AppState,
+        spec: TurnSpec<'_>,
+    ) -> Result<(), DaemonError> {
+        match self {
+            Self::Claude => {
+                let runtime = app.claude_runtime_for(spec.workspace_id).await?;
+                let images = spec
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input {
+                        TurnInputItem::Image(image) => Some(image.clone()),
+                        TurnInputItem::Text { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
+                runtime
+                    .steer_turn(
+                        spec.thread_id,
+                        &claude_prompt_from_inputs(spec.inputs, spec.selected_skills),
+                        &images,
+                    )
+                    .await
+            }
+            Self::Codex | Self::Acp(_) => Err(DaemonError::BadRequest(
+                "provider does not support steering a running turn".to_string(),
+            )),
+        }
+    }
+
     pub(super) async fn interrupt(
         &self,
         app: &AppState,
@@ -487,6 +520,7 @@ fn claude_goal_turn(workspace_id: &str, thread_id: &str, text: &str) -> SendTurn
         service_tier: None,
         permission_mode: None,
         sandbox_mode: None,
+        steer: false,
     }
 }
 

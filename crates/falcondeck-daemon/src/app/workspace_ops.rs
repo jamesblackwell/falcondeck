@@ -812,6 +812,99 @@ fn stable_attachment_identifier_hash(value: &str) -> u64 {
 /// Upper bound on messages parked behind one thread's active turn.
 const MAX_QUEUED_TURNS: usize = 20;
 
+/// Whether the thread is mid-turn, and so cannot take a fresh dispatch.
+fn thread_is_busy(status: &ThreadStatus) -> bool {
+    matches!(status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
+}
+
+/// Injects the message into the thread's running turn when the caller asked to
+/// steer and the thread's provider advertises `supports_steering`. Returns
+/// `Ok(None)` for every other case, leaving the send to the queue or to a
+/// normal dispatch — an unsupported steer is downgraded, never rejected.
+async fn try_steer_turn(
+    app: &AppState,
+    request: &SendTurnRequest,
+    normalized_inputs: &[TurnInputItem],
+) -> Result<Option<CommandResponse>, DaemonError> {
+    if !request.steer {
+        return Ok(None);
+    }
+    let Some((thread, provider, selected_skills)) = ({
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get(&request.workspace_id)
+            .and_then(|workspace| {
+                let thread = workspace.threads.get(&request.thread_id)?;
+                if !thread_is_busy(&thread.summary.status) {
+                    return None;
+                }
+                let provider = thread.summary.provider.clone();
+                let supports_steering = workspace
+                    .summary
+                    .agents
+                    .iter()
+                    .find(|agent| agent.provider == provider)
+                    .is_some_and(|agent| agent.capabilities.supports_steering);
+                if !supports_steering {
+                    return None;
+                }
+                let selected_skills = resolve_selected_skills(
+                    &workspace.summary.skills,
+                    &request.selected_skills,
+                    &provider,
+                );
+                Some((thread.summary.clone(), provider, selected_skills))
+            })
+    }) else {
+        return Ok(None);
+    };
+
+    ProviderRuntime::for_provider(&provider)
+        .steer(
+            app,
+            TurnSpec {
+                workspace_id: &request.workspace_id,
+                thread_id: &request.thread_id,
+                thread: &thread,
+                inputs: normalized_inputs,
+                selected_skills: &selected_skills,
+                approval_policy: request
+                    .approval_policy
+                    .as_deref()
+                    .unwrap_or("on-request"),
+                requested_model_id: request.model_id.as_deref(),
+                requested_reasoning_effort: request.reasoning_effort.as_deref(),
+                service_tier: request.service_tier.as_deref(),
+                requires_resume: false,
+            },
+        )
+        .await?;
+
+    // Appended only once the message is actually in the agent's input: a
+    // transcript entry for a write that failed would be a lie.
+    app.push_conversation_item(
+        &request.workspace_id,
+        &request.thread_id,
+        build_user_message_item(normalized_inputs),
+        false,
+    )
+    .await?;
+    let summary = app
+        .upsert_thread(&request.workspace_id, &request.thread_id, |thread| {
+            thread.updated_at = Utc::now();
+        })
+        .await?;
+    app.emit(
+        Some(request.workspace_id.clone()),
+        Some(request.thread_id.clone()),
+        UnifiedEvent::ThreadUpdated { thread: summary },
+    );
+    Ok(Some(CommandResponse {
+        ok: true,
+        message: Some("steered".to_string()),
+    }))
+}
+
 /// Queues the request when the thread is busy. Returns `Ok(None)` when the
 /// thread is free (caller dispatches normally). Inputs are the normalized
 /// form so attachments are already materialized to files when queued.
@@ -828,10 +921,7 @@ async fn try_enqueue_turn(
         let Some(thread) = workspace.threads.get_mut(&request.thread_id) else {
             return Ok(None);
         };
-        if !matches!(
-            thread.summary.status,
-            ThreadStatus::Running | ThreadStatus::WaitingForInput
-        ) {
+        if !thread_is_busy(&thread.summary.status) {
             return Ok(None);
         }
         if thread.queued_requests.len() >= MAX_QUEUED_TURNS {
@@ -1008,6 +1098,13 @@ pub(super) async fn send_turn(
     }
     let inputs =
         normalize_turn_inputs(app, &request.workspace_id, &request.thread_id, &inputs).await?;
+
+    // A caller that asked to steer gets the message injected into the running
+    // turn where the harness supports it; everything else falls through to the
+    // queue below.
+    if let Some(steered) = try_steer_turn(app, &request, &inputs).await? {
+        return Ok(steered);
+    }
 
     // A busy thread queues the send instead of dispatching it. Steering is a
     // per-harness capability, but "hold this until the agent finishes, then

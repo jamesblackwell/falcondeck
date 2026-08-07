@@ -660,6 +660,12 @@ pub struct SendTurnRequest {
     /// Optional Codex sandbox mode for this turn.
     #[serde(default)]
     pub sandbox_mode: Option<String>,
+    /// Ask for this message to be injected into the thread's running turn
+    /// instead of queued behind it. Honoured only when the thread is busy and
+    /// its provider advertises `supports_steering`; otherwise the send falls
+    /// back to the queue.
+    #[serde(default)]
+    pub steer: bool,
 }
 
 /// Request payload used to start a code review flow.
@@ -804,6 +810,11 @@ pub struct AgentCapabilitySummary {
     /// Whether running turns can be interrupted.
     #[serde(default)]
     pub supports_interrupt: bool,
+    /// Whether a message can be injected into a running turn so the agent
+    /// course-corrects without losing its work. Providers without this park
+    /// the message in the thread queue instead.
+    #[serde(default)]
+    pub supports_steering: bool,
     /// Sandbox modes the provider accepts; empty hides the sandbox picker.
     #[serde(default)]
     pub sandbox_modes: Vec<String>,
@@ -821,6 +832,7 @@ impl AgentCapabilitySummary {
             supports_images: true,
             supports_skills: true,
             supports_interrupt: true,
+            supports_steering: false,
             sandbox_modes: vec![
                 "read-only".to_string(),
                 "workspace-write".to_string(),
@@ -838,6 +850,9 @@ impl AgentCapabilitySummary {
             supports_images: true,
             supports_skills: true,
             supports_interrupt: true,
+            // The Claude CLI reads `--input-format stream-json` for the whole
+            // life of a turn, so extra user messages reach the running agent.
+            supports_steering: true,
             sandbox_modes: Vec::new(),
             permission_modes: vec![
                 "default".to_string(),

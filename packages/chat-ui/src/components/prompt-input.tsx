@@ -1,4 +1,4 @@
-import { ImagePlus, Plug, Send, X } from 'lucide-react'
+import { ImagePlus, Plug, Send, Square, X } from 'lucide-react'
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 
 import type {
@@ -31,6 +31,8 @@ export type PromptInputProps = {
   value: string
   onValueChange: (value: string) => void
   onSubmit: () => void
+  /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
+  onStop?: () => void
   onPickImages?: (files: FileList | null) => void
   onRemoveAttachment?: (attachmentId: string) => void
   attachments: ImageInput[]
@@ -55,6 +57,10 @@ export type PromptInputProps = {
   onSandboxModeChange?: (value: string | null) => void
   disabled?: boolean
   sendDisabled?: boolean
+  /** True while the selected thread has an in-flight turn. */
+  isRunning?: boolean
+  /** True while an interrupt request is in flight. */
+  isStopping?: boolean
   compact?: boolean
   /** Enabled MCP servers for this workspace; renders a tools chip when > 0. */
   connectorCount?: number
@@ -73,6 +79,7 @@ export const PromptInput = memo(function PromptInput({
   value,
   onValueChange,
   onSubmit,
+  onStop,
   onPickImages,
   onRemoveAttachment,
   attachments,
@@ -95,6 +102,8 @@ export const PromptInput = memo(function PromptInput({
   onSandboxModeChange,
   disabled = false,
   sendDisabled = false,
+  isRunning = false,
+  isStopping = false,
   compact = false,
   connectorCount = 0,
   onConnectorsClick,
@@ -102,7 +111,15 @@ export const PromptInput = memo(function PromptInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const [activeSkillIndex, setActiveSkillIndex] = useState(0)
-  const canSubmit = (value.trim().length > 0 || attachments.length > 0) && !disabled && !sendDisabled
+  const hasContent = value.trim().length > 0 || attachments.length > 0
+  const canSubmit = hasContent && !disabled && !sendDisabled
+  // Stop when a turn is running and there's nothing to send yet. Typing a follow-up
+  // keeps Send so a later queue/steer path can use it; empty draft is the stop case.
+  const showStop =
+    Boolean(onStop) &&
+    isRunning &&
+    !hasContent &&
+    capabilities.supports_interrupt
 
   const filteredSkills = useMemo(() => {
     const query = slashQuery?.query.trim().toLowerCase() ?? ''
@@ -239,8 +256,8 @@ export const PromptInput = memo(function PromptInput({
   )
 
   return (
-    <div className="mx-auto w-full max-w-3xl px-3 pt-2 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-4 md:px-6 md:pt-0 md:pb-0">
-      <div className="rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2">
+    <div className="mx-auto w-full max-w-3xl px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-4 md:px-6 md:pt-3 md:pb-0">
+      <div className="rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.35)]">
         {/* Attachment previews */}
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-2 border-b border-border-subtle px-4 py-3">
@@ -413,14 +430,28 @@ export const PromptInput = memo(function PromptInput({
           ) : null}
 
           <div className="ml-auto flex items-center gap-2">
-            <Button
-              type="button"
-              onClick={onSubmit}
-              disabled={!canSubmit}
-              className="h-9 w-9 rounded-full p-0"
-            >
-              <Send className="h-4 w-4" />
-            </Button>
+            {showStop ? (
+              <Button
+                type="button"
+                onClick={onStop}
+                disabled={disabled || isStopping}
+                aria-label={isStopping ? 'Stopping' : 'Stop generating'}
+                title={isStopping ? 'Stopping…' : 'Stop'}
+                className="h-9 w-9 rounded-full p-0"
+              >
+                <Square className="h-3.5 w-3.5 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                onClick={onSubmit}
+                disabled={!canSubmit}
+                aria-label="Send message"
+                className="h-9 w-9 rounded-full p-0"
+              >
+                <Send className="h-4 w-4" />
+              </Button>
+            )}
           </div>
         </div>
       </div>

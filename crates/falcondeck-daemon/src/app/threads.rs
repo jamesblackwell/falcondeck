@@ -399,6 +399,13 @@ impl AppState {
             })
         });
 
+        // The CLI's stdin stays open for the whole turn (that is what makes
+        // steering possible), so it no longer exits at turn end and stdout
+        // never reaches EOF on the happy path. The stream's terminal `result`
+        // event is the turn boundary; stdout EOF remains the backstop for a
+        // CLI that died without emitting one.
+        let mut saw_result = false;
+        let mut result_reported_success = false;
         if let Some(stdout) = stdout {
             let mut lines = tokio::io::BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -481,6 +488,11 @@ impl AppState {
                         if let Some(error) = extract_claude_error(&value) {
                             turn_error = Some(error);
                         }
+                        if let Some(is_error) = claude_result_is_error(&value) {
+                            saw_result = true;
+                            result_reported_success = !is_error;
+                            break;
+                        }
                     }
                     Err(_) => {
                         let _ = self.emit_service(
@@ -493,15 +505,30 @@ impl AppState {
                     }
                 }
             }
+            if saw_result {
+                // Nothing reads this pipe once the loop breaks; drain it until
+                // the process exits so a late write cannot fill the buffer or
+                // SIGPIPE the CLI mid-shutdown.
+                tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
+            }
         }
 
-        if let Some(stderr_task) = stderr_task {
+        // Only the backstop path can await stderr: it ends at process exit,
+        // which on the result path happens after the turn is already finished.
+        if let Some(stderr_task) = stderr_task
+            && !saw_result
+        {
             let _ = stderr_task.await;
         }
 
         let mut was_interrupted = false;
         if let Ok(runtime) = self.claude_runtime_for(&workspace_id).await {
-            match runtime.finish_turn(&thread_id, turn_generation).await {
+            let finished = if saw_result {
+                Ok(runtime.complete_turn(&thread_id, turn_generation).await)
+            } else {
+                runtime.finish_turn(&thread_id, turn_generation).await
+            };
+            match finished {
                 Ok(finish) if finish.stale => {
                     // A newer turn owns this thread now; leave its state alone.
                     return;
@@ -531,6 +558,17 @@ impl AppState {
                 },
                 Err(_) => {}
             }
+        }
+        // The result path finalizes before the process exits, so there is no
+        // exit status to judge; the stream's own success flag stands in.
+        if saw_result
+            && result_reported_success
+            && !saw_agent_output
+            && turn_error.is_none()
+            && !was_interrupted
+        {
+            turn_error =
+                Some("Claude turn completed without emitting any assistant output".to_string());
         }
         if was_interrupted {
             let _ = self.emit_service(
@@ -819,4 +857,50 @@ pub(super) fn refresh_thread_attention(
 
 fn marks_agent_activity(item: &ConversationItem) -> bool {
     !matches!(item, ConversationItem::UserMessage { .. })
+}
+
+/// Recognizes the stream-json event that closes a Claude turn, reporting
+/// whether it failed. A steering message folds into the turn it interrupts, so
+/// one turn still ends with exactly one of these.
+fn claude_result_is_error(value: &Value) -> Option<bool> {
+    if value.get("type").and_then(Value::as_str) != Some("result") {
+        return None;
+    }
+    Some(
+        value
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn recognizes_the_terminal_result_event() {
+        assert_eq!(
+            claude_result_is_error(&json!({ "type": "result", "subtype": "success" })),
+            Some(false)
+        );
+        assert_eq!(
+            claude_result_is_error(&json!({ "type": "result", "is_error": true })),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn other_stream_events_are_not_turn_boundaries() {
+        for value in [
+            json!({ "type": "assistant", "message": { "content": [] } }),
+            json!({ "type": "system", "subtype": "init" }),
+            json!({ "type": "user" }),
+            // A nested result field must not be mistaken for the event.
+            json!({ "type": "system", "result": "success" }),
+        ] {
+            assert_eq!(claude_result_is_error(&value), None, "{value}");
+        }
+    }
 }

@@ -115,7 +115,10 @@ export const ThreadItem = memo(
     )
   },
   (prev, next) =>
-    prev.thread === next.thread &&
+    // Snapshot refreshes recreate every thread object, so identity comparison
+    // would re-render the whole sidebar on each message. Compare the fields
+    // this row actually renders instead.
+    threadRenderEqual(prev.thread, next.thread) &&
     prev.workspaceId === next.workspaceId &&
     prev.isSelected === next.isSelected &&
     prev.nowTick === next.nowTick &&
@@ -123,3 +126,19 @@ export const ThreadItem = memo(
     prev.onArchive === next.onArchive &&
     prev.onOpenContextMenu === next.onOpenContextMenu,
 )
+
+function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
+  return (
+    a.id === b.id &&
+    a.title === b.title &&
+    a.updated_at === b.updated_at &&
+    a.status === b.status &&
+    a.is_pinned === b.is_pinned &&
+    a.attention.unread === b.attention.unread &&
+    a.attention.badge_label === b.attention.badge_label &&
+    a.attention.pending_approval_count === b.attention.pending_approval_count &&
+    a.attention.pending_question_count === b.attention.pending_question_count &&
+    a.attention.last_agent_activity_seq === b.attention.last_agent_activity_seq &&
+    a.attention.last_read_seq === b.attention.last_read_seq
+  )
+}

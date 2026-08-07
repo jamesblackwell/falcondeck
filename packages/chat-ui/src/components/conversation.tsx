@@ -5,6 +5,7 @@ import type { ConversationItem, FalconDeckPreferences } from '@falcondeck/client
 import { deriveConversationPresentation, normalizePreferences } from '@falcondeck/client-core'
 import { EmptyState } from '@falcondeck/ui'
 
+import { FileDiffProvider, type OpenFileDiff } from '../lib/file-diff-context'
 import { LiveActivityLane, MessageCard, ToolSummaryCard, WorkSessionCard } from './message'
 
 const AUTO_SCROLL_THRESHOLD = 40
@@ -27,6 +28,7 @@ export const Conversation = memo(function Conversation({
   emptyState,
   isThinking = false,
   isLoading = false,
+  onOpenFile = null,
 }: {
   threadKey?: string | null
   items: ConversationItem[]
@@ -34,6 +36,8 @@ export const Conversation = memo(function Conversation({
   emptyState?: React.ReactNode
   isThinking?: boolean
   isLoading?: boolean
+  /** Opens a file's diff in the host's side panel; omit where there is none. */
+  onOpenFile?: OpenFileDiff | null
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -230,7 +234,8 @@ export const Conversation = memo(function Conversation({
   }, [scrollToBottom])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <FileDiffProvider onOpenFile={onOpenFile}>
+      <div className="flex min-h-0 flex-1 flex-col">
       <div className="relative min-h-0 flex-1">
         <div
           ref={scrollRef}
@@ -335,6 +340,7 @@ export const Conversation = memo(function Conversation({
           </div>
         ) : null}
       </div>
-    </div>
+      </div>
+    </FileDiffProvider>
   )
 })

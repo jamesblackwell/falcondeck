@@ -5,7 +5,7 @@ import {
   type ProviderOption,
 } from '@falcondeck/client-core'
 
-import { Button, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@falcondeck/ui'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@falcondeck/ui'
 
 export function ProviderSelector({
   value,
@@ -22,26 +22,25 @@ export function ProviderSelector({
     return null
   }
 
+  // A dropdown rather than a segmented control: the provider roster keeps
+  // growing (Codex, Claude, Grok, Gemini, OpenCode, …) and segments don't scale.
   return (
-    <div className="inline-flex items-center rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1">
-      {providers.map((option) => {
-        const active = value === option.provider
-        return (
-          <Button
-            key={option.provider}
-            type="button"
-            variant={active ? 'secondary' : 'ghost'}
-            size="sm"
-            disabled={disabled}
-            onClick={() => onValueChange(option.provider)}
-            className={cn('h-7 px-3', !active && 'text-fg-muted')}
-            aria-pressed={active}
-          >
+    <Select
+      value={value}
+      onValueChange={(next) => onValueChange(next as AgentProvider)}
+      disabled={disabled}
+    >
+      <SelectTrigger disabled={disabled} aria-label="Agent">
+        <SelectValue placeholder="Agent" />
+      </SelectTrigger>
+      <SelectContent>
+        {providers.map((option) => (
+          <SelectItem key={option.provider} value={option.provider}>
             {option.label}
-          </Button>
-        )
-      })}
-    </div>
+          </SelectItem>
+        ))}
+      </SelectContent>
+    </Select>
   )
 }
 

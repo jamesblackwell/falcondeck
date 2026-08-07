@@ -8,12 +8,21 @@ import { useGitDiff } from '../hooks/useGitDiff'
 import { FileListView } from './diff/FileListView'
 import { DiffView } from './diff/DiffView'
 
+/** The file whose diff the panel is showing, scoped to the workspace it belongs to. */
+export type DiffPanelSelection = {
+  workspaceId: string
+  filePath: string
+}
+
 export type DiffPanelProps = {
   api: ReturnType<typeof createDaemonApiClient> | null
   workspaceId: string | null
   refreshTrigger: number
   /** Codex thread eligible to run a review over the working tree, if any. */
   reviewThreadId?: string | null
+  /** Controlled by App so the transcript can open a file here too. */
+  selection: DiffPanelSelection | null
+  onSelectionChange: (selection: DiffPanelSelection | null) => void
 }
 
 export const DiffPanel = memo(function DiffPanel({
@@ -21,19 +30,21 @@ export const DiffPanel = memo(function DiffPanel({
   workspaceId,
   refreshTrigger,
   reviewThreadId = null,
+  selection,
+  onSelectionChange,
 }: DiffPanelProps) {
   const { toast } = useToast()
   const [isReviewPending, setIsReviewPending] = useState(false)
-  const [selection, setSelection] = useState<{
-    workspaceId: string
-    filePath: string
-    status: GitFileStatus
-  } | null>(null)
   const selectedFile =
     selection && selection.workspaceId === workspaceId ? selection.filePath : null
-  const selectedStatus =
-    selection && selection.workspaceId === workspaceId ? selection.status : null
   const { status, isLoading, error, refresh } = useGitStatus(api, workspaceId, refreshTrigger)
+  // Resolved from the working-tree listing rather than carried in the
+  // selection: the transcript knows a path but not its git status, and the
+  // daemon needs the status to pick the right diff (untracked files have none).
+  const selectedStatus: GitFileStatus | null =
+    selectedFile
+      ? status?.entries.find((entry) => entry.path === selectedFile)?.status ?? 'modified'
+      : null
   const { diff, content, isLoading: isDiffLoading, error: diffError } = useGitDiff(
     api,
     workspaceId,
@@ -50,7 +61,7 @@ export const DiffPanel = memo(function DiffPanel({
           content={content}
           isLoading={isDiffLoading}
           error={diffError}
-          onBack={() => setSelection(null)}
+          onBack={() => onSelectionChange(null)}
         />
       </div>
     )
@@ -94,7 +105,7 @@ export const DiffPanel = memo(function DiffPanel({
             : null
         }
         onSelectFile={(entry) =>
-          setSelection(workspaceId ? { workspaceId, filePath: entry.path, status: entry.status } : null)
+          onSelectionChange(workspaceId ? { workspaceId, filePath: entry.path } : null)
         }
       />
     </div>

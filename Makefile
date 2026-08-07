@@ -37,7 +37,9 @@ RELAY_BIND_HOST ?= 0.0.0.0
 CODEX_BIN ?= codex
 TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
 DESKTOP_NATIVE_CHECK = cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')" && npm exec -- node -e "import('rolldown').then(() => undefined, (error) => { console.error(error); process.exit(1) })"
-TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
+# The dev overlay keeps watcher-triggered relaunches from stealing focus and
+# labels the window "(dev)" so it is distinguishable from the installed app.
+TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev --config src-tauri/tauri.dev.conf.json
 # Kill anything already listening on the UI port (e.g. a stray Vite left
 # behind by an agent or background session) so dev targets always start
 # cleanly instead of failing with "Port 1420 is already in use".
@@ -72,29 +74,40 @@ help:
 	@printf '%s\n' \
 		'FalconDeck dev commands' \
 		'' \
-		'  make dev            Start relay, remote web, and the desktop app' \
-		'  make mobile-dev     Open Simulator and run the FalconDeck iOS app locally' \
-		'  make mobile-dev-stop Stop the background Expo dev server used by mobile-dev' \
-		'  make dev-mobile     Alias for make mobile-dev' \
-		'  make desktop-dev    Start the Tauri desktop app' \
+		'Run things:' \
+		'  make dev              Start relay, remote web, and the desktop app' \
+		'  make desktop-dev      Start the Tauri desktop app (frees a stuck UI port first)' \
 		'  make desktop-dev-stop Stop the reusable desktop dev daemon' \
-		'  make frontend-dev   Start the Vite frontend only' \
-		'  make remote-web-dev Start the remote web client on the local network' \
-		'  make site-dev       Start the marketing site locally' \
-		'  make daemon         Start the standalone daemon on 127.0.0.1:$(DAEMON_PORT)' \
-		'  make relay          Start the relay on $(RELAY_BIND_HOST):$(RELAY_PORT)' \
-		'  make mobile-build   Build the iOS app via EAS (cloud, ad-hoc distribution)' \
-		'  make mobile-deploy  Push an OTA JS update to the preview channel' \
-		'  make mobile-test    Run mobile unit tests' \
-		'  make install        Install desktop, mobile, and web dependencies' \
-		'  make desktop-install Build the packaged desktop app and install it to /Applications' \
-		'  make test           Run Rust and desktop tests' \
-		'  make lint           Run desktop lint checks' \
-		'  make typecheck      Run desktop TypeScript checks' \
-		'  make check          Run the main validation suite' \
-		'  make fmt            Format Rust code' \
-		'  make build          Build desktop app and Rust workspace' \
-		'  make clean          Remove Rust and desktop build outputs' \
+		'  make mobile-dev       Open Simulator and run the FalconDeck iOS app locally' \
+		'  make mobile-dev-stop  Stop the background Expo dev server used by mobile-dev' \
+		'  make dev-mobile       Alias for make mobile-dev' \
+		'  make frontend-dev     Start the Vite frontend only' \
+		'  make remote-web-dev   Start the remote web client on the local network' \
+		'  make site-dev         Start the marketing site locally' \
+		'  make daemon           Start the standalone daemon on 127.0.0.1:$(DAEMON_PORT)' \
+		'  make relay            Start the relay on $(RELAY_BIND_HOST):$(RELAY_PORT)' \
+		'' \
+		'Build & install:' \
+		'  make install          Install desktop, mobile, and web dependencies' \
+		'  make desktop-install  Build the packaged desktop app and install it to /Applications' \
+		'  make desktop-brand-assets Regenerate desktop icons/brand assets' \
+		'  make build            Build desktop, remote web, and site bundles' \
+		'  make mobile-build     Build the iOS app via EAS (cloud, ad-hoc distribution)' \
+		'  make mobile-deploy    Push an OTA JS update to the preview channel' \
+		'  make clean            Remove Rust and desktop build outputs' \
+		'' \
+		'Validate:' \
+		'  make check            Typecheck + lint + all tests + cargo check' \
+		'  make test             Run Rust and desktop tests' \
+		'  make test-rust        Run the Rust workspace tests only' \
+		'  make test-desktop     Run the desktop (vitest) tests only' \
+		'  make test-mobile      Run mobile unit tests (alias: make mobile-test)' \
+		'  make lint             Run desktop lint checks' \
+		'  make typecheck        Run desktop TypeScript checks' \
+		'  make fmt              Format Rust code' \
+		'' \
+		'Deploy:' \
+		'  ./deploy.sh           Deploy the relay to production via Ansible' \
 		'' \
 		'Overrides:' \
 		'  make daemon DAEMON_PORT=5001 CODEX_BIN=/opt/homebrew/bin/codex' \

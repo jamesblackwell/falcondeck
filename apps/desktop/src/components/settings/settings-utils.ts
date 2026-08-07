@@ -63,6 +63,11 @@ export const TOOL_DETAIL_OPTIONS: Array<{
   description: string
 }> = [
   {
+    value: 'collapsed',
+    label: 'Hidden',
+    description: 'Fold tool activity behind a single "Worked for…" line, expandable on click. The default.',
+  },
+  {
     value: 'auto',
     label: 'Auto',
     description: 'Collapse repeated read-only tool chatter, but auto-open diffs, approvals, and failures.',

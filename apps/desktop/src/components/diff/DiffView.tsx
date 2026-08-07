@@ -1,91 +1,15 @@
 import { memo, useMemo } from 'react'
 import { ArrowLeft, LoaderCircle } from 'lucide-react'
-import parseDiff from 'parse-diff'
-import type { Change } from 'parse-diff'
-import type { ThemedToken } from 'shiki'
 
+import {
+  buildDiffFileRows,
+  DiffFileSection,
+  HighlightedFileLine,
+  languageFromPath,
+  parseUnifiedDiff,
+  useShikiTokens,
+} from '@falcondeck/chat-ui'
 import { Button } from '@falcondeck/ui'
-
-import { useShikiTokens } from '../../hooks/useShiki'
-import { stripPrefix } from './diff-utils'
-
-function HighlightedDiffLine({
-  change,
-  tokens,
-}: {
-  change: Change
-  tokens: ThemedToken[] | null
-}) {
-  const prefix = change.content[0] ?? ' '
-  const bgClass =
-    change.type === 'add'
-      ? 'bg-success-muted/20'
-      : change.type === 'del'
-        ? 'bg-danger-muted/20'
-        : ''
-
-  return (
-    <div className={`flex ${bgClass}`}>
-      <span className="sticky left-0 z-10 w-7 shrink-0 select-none bg-inherit pr-0.5 text-right text-fg-faint">
-        {change.type !== 'add' && 'ln1' in change ? change.ln1 : ''}
-      </span>
-      <span className="w-7 shrink-0 select-none pr-1 text-right text-fg-faint">
-        {change.type !== 'del' && 'ln2' in change ? change.ln2 : ''}
-      </span>
-      <span
-        className={`w-3 shrink-0 select-none text-center ${
-          change.type === 'add'
-            ? 'text-success'
-            : change.type === 'del'
-              ? 'text-danger'
-              : 'text-fg-faint'
-        }`}
-      >
-        {prefix}
-      </span>
-      <span className="whitespace-pre">
-        {tokens ? (
-          tokens.map((token, ti) => (
-            <span key={ti} style={{ color: token.color }}>
-              {token.content}
-            </span>
-          ))
-        ) : (
-          stripPrefix(change.content)
-        )}
-      </span>
-    </div>
-  )
-}
-
-function HighlightedFileLine({
-  lineNumber,
-  tokens,
-  text,
-}: {
-  lineNumber: number
-  tokens: ThemedToken[] | null
-  text: string
-}) {
-  return (
-    <div className="flex">
-      <span className="sticky left-0 z-10 w-12 shrink-0 select-none bg-surface-1 pr-2 text-right text-fg-faint">
-        {lineNumber}
-      </span>
-      <span className="whitespace-pre">
-        {tokens ? (
-          tokens.map((token, ti) => (
-            <span key={ti} style={{ color: token.color }}>
-              {token.content}
-            </span>
-          ))
-        ) : (
-          text
-        )}
-      </span>
-    </div>
-  )
-}
 
 export type DiffViewProps = {
   filePath: string
@@ -104,57 +28,25 @@ export const DiffView = memo(function DiffView({
   error,
   onBack,
 }: DiffViewProps) {
-  const parsed = useMemo(() => {
-    if (!diff) return null
-    if (diff.length > 200_000) return 'too-large' as const
-    try {
-      return parseDiff(diff)
-    } catch {
-      return null
-    }
-  }, [diff])
-
-  const { codeLines, lineIndexMap } = useMemo(() => {
-    if (!parsed || parsed === 'too-large') return { codeLines: [] as string[], lineIndexMap: new Map<number, number>() }
-
-    const lines: string[] = []
-    const indexMap = new Map<number, number>()
-    let globalIndex = 0
-
-    for (const file of parsed) {
-      for (const chunk of file.chunks) {
-        for (const change of chunk.changes) {
-          indexMap.set(globalIndex, lines.length)
-          lines.push(stripPrefix(change.content))
-          globalIndex++
-        }
-      }
-    }
-
-    return { codeLines: lines, lineIndexMap: indexMap }
-  }, [parsed])
+  const parsed = useMemo(() => parseUnifiedDiff(diff), [diff])
+  const fileRows = useMemo(
+    () => (parsed.status === 'ok' ? buildDiffFileRows(parsed.files) : []),
+    [parsed],
+  )
 
   const fileLines = useMemo(() => {
     if (content === null) return [] as string[]
     return content.replace(/\r\n/g, '\n').split('\n')
   }, [content])
 
-  const displayLines = parsed && parsed !== 'too-large' ? codeLines : fileLines
+  // Whole-file view only; the diff path highlights per file inside DiffFileSection.
+  const showWholeFile = parsed.status !== 'ok' && content !== null
+  const fileLanguage = useMemo(() => languageFromPath(filePath), [filePath])
+  const fileTokens = useShikiTokens(showWholeFile ? fileLines : [], fileLanguage)
+
   const isDisplayTooLarge =
-    parsed === 'too-large' || (parsed === null && content !== null && content.length > 200_000)
-
-  const shikiTokens = useShikiTokens(displayLines, filePath)
-
-  const tokenMap = useMemo(() => {
-    if (!shikiTokens) return null
-    const map = new Map<number, ThemedToken[]>()
-    for (const [globalIndex, codeLineIndex] of lineIndexMap.entries()) {
-      if (codeLineIndex < shikiTokens.length) {
-        map.set(globalIndex, shikiTokens[codeLineIndex])
-      }
-    }
-    return map
-  }, [shikiTokens, lineIndexMap])
+    parsed.status === 'too-large' ||
+    (parsed.status !== 'ok' && content !== null && content.length > 200_000)
 
   return (
     <div className="flex h-full flex-col">
@@ -178,30 +70,11 @@ export const DiffView = memo(function DiffView({
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
             File too large to display
           </div>
-        ) : parsed && parsed.length > 0 ? (
+        ) : fileRows.length > 0 ? (
           <div className="font-mono text-[length:var(--fd-text-2xs)] leading-5">
-            {(() => {
-              let globalIndex = 0
-              return parsed.map((file, fi) =>
-                file.chunks.map((chunk, ci) => (
-                  <div key={`${fi}-${ci}`}>
-                    <div className="sticky left-0 border-y border-border-subtle bg-surface-2 px-2 py-0.5 text-fg-muted">
-                      {chunk.content}
-                    </div>
-                    {chunk.changes.map((change, li) => {
-                      const idx = globalIndex++
-                      return (
-                        <HighlightedDiffLine
-                          key={`${fi}-${ci}-${li}`}
-                          change={change}
-                          tokens={tokenMap?.get(idx) ?? null}
-                        />
-                      )
-                    })}
-                  </div>
-                )),
-              )
-            })()}
+            {fileRows.map((file, index) => (
+              <DiffFileSection key={file.path ?? index} path={file.path ?? filePath} rows={file.rows} />
+            ))}
           </div>
         ) : content !== null ? (
           <div className="font-mono text-[length:var(--fd-text-2xs)] leading-5">
@@ -210,7 +83,7 @@ export const DiffView = memo(function DiffView({
                 key={index}
                 lineNumber={index + 1}
                 text={line}
-                tokens={shikiTokens?.[index] ?? null}
+                tokens={fileTokens?.[index] ?? null}
               />
             ))}
           </div>

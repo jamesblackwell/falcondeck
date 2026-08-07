@@ -14,7 +14,7 @@ type InboxEntry = {
   thread: ThreadSummary
   workspaceId: string
   projectLabel: string
-  tone: 'warning' | 'danger' | 'info'
+  tone: 'warning' | 'danger'
   reason: string
   priority: number
 }
@@ -36,6 +36,10 @@ export function collectAttentionEntries(groups: ProjectGroup[]): InboxEntry[] {
           priority: 0,
         })
       } else if (attention.level === 'error') {
+        // Errors are attention-worthy only until seen: viewing the thread
+        // marks it read, which acknowledges the failure. Without this gate a
+        // failed thread would sit in the inbox forever with no way to clear it.
+        if (!attention.unread) continue
         entries.push({
           thread,
           workspaceId: group.workspace.id,
@@ -44,16 +48,9 @@ export function collectAttentionEntries(groups: ProjectGroup[]): InboxEntry[] {
           reason: 'Failed',
           priority: 1,
         })
-      } else if (attention.unread) {
-        entries.push({
-          thread,
-          workspaceId: group.workspace.id,
-          projectLabel,
-          tone: 'info',
-          reason: 'Unread',
-          priority: 2,
-        })
       }
+      // Unread-only threads stay in the project list (unread dot there). They
+      // are not "needs attention" — that section is for action or failure.
     }
   }
   return entries.sort(
@@ -66,13 +63,11 @@ export function collectAttentionEntries(groups: ProjectGroup[]): InboxEntry[] {
 const TONE_DOT: Record<InboxEntry['tone'], string> = {
   warning: 'bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]',
   danger: 'bg-danger',
-  info: 'bg-info',
 }
 
 const TONE_TEXT: Record<InboxEntry['tone'], string> = {
   warning: 'text-warning',
   danger: 'text-danger',
-  info: 'text-info',
 }
 
 export type AttentionInboxProps = {
@@ -83,8 +78,9 @@ export type AttentionInboxProps = {
 
 /**
  * Pinned "Needs attention" section for the sidebar: threads waiting on an
- * approval or answer, failed runs, and unread finishes — across every project.
- * Renders nothing when the user is caught up.
+ * approval or answer, and failed runs that have not been viewed yet — across
+ * every project. Plain unread messages stay in the project list. Renders
+ * nothing when nothing needs action.
  */
 export const AttentionInbox = memo(function AttentionInbox({
   groups,
@@ -92,7 +88,14 @@ export const AttentionInbox = memo(function AttentionInbox({
   onSelectThread,
 }: AttentionInboxProps) {
   const [collapsed, setCollapsed] = useState(false)
-  const entries = useMemo(() => collectAttentionEntries(groups), [groups])
+  // The selected thread is excluded: the user is already looking at it, and
+  // its unread/running churn would pop the inbox in and out on every message,
+  // making the whole sidebar jump.
+  const entries = useMemo(
+    () =>
+      collectAttentionEntries(groups).filter((entry) => entry.thread.id !== selectedThreadId),
+    [groups, selectedThreadId],
+  )
 
   if (entries.length === 0) return null
 

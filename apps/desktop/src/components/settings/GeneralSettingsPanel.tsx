@@ -265,7 +265,7 @@ export function GeneralSettingsPanel({
         <CardHeader>
           <CardTitle>Agent Status</CardTitle>
           <CardDescription>
-            Provider-specific readiness for Codex and Claude now lives here so the new composer toggle has real operational context behind it.
+            Provider-specific readiness for each connected agent lives here so the composer toggle has real operational context behind it.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-2">

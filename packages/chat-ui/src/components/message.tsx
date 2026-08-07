@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useState } from 'react'
-import { ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
+import { ChevronRight, CheckCircle2, Circle, FileDiff, Loader2 } from 'lucide-react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 
 import {
@@ -10,7 +10,11 @@ import {
 } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
+import { FileDiffLink, useOpenFileDiff } from '../lib/file-diff-context'
+import { extractFilePath, fileBaseName } from '../lib/tool-file-path'
 import { CodeBlock } from './code-block'
+import { DiffBlock } from './diff-block'
+import { useParsedDiff } from './diff-lines'
 import { renderMessageContent } from './message-markdown'
 import { attachmentLabel, canRenderAttachmentImage } from './attachment-preview'
 
@@ -132,34 +136,60 @@ function ToolCallMessage({
   suppressReadOnlyDetail?: boolean
 }) {
   const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, item.id)
+  const openFileDiff = useOpenFileDiff()
   const hasOutput = Boolean(item.output)
   const detailAvailable = hasOutput && !suppressReadOnlyDetail
+  const label = toolCallLabel(item.title)
+
+  const activityKind = item.display.activity_kind
+  const touchesFile = activityKind === 'edit' || activityKind === 'diff'
+  const filePath = useMemo(
+    () => (touchesFile || activityKind === 'read' ? extractFilePath(label) : null),
+    [activityKind, label, touchesFile],
+  )
+  // Output highlighting is only safe when the file names the language: a shell
+  // command's output has nothing to do with the path that appears in it.
+  const outputFilePath = activityKind === 'read' || touchesFile ? filePath : null
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
-      <Collapsible.Trigger asChild>
-        <button
-          type="button"
-          aria-expanded={open}
-          aria-label={`Toggle ${item.title}`}
-          className="fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2"
-        >
-          <ToolStatusIcon item={item} />
-          <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
-            {toolCallLabel(item.title)}
+      <div className="flex w-full items-center gap-1 rounded-[var(--fd-radius-md)] pr-2 transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2">
+        <Collapsible.Trigger asChild>
+          <button
+            type="button"
+            aria-expanded={open}
+            aria-label={`Toggle ${item.title}`}
+            className="fd-focus flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted"
+          >
+            <ToolStatusIcon item={item} />
+            <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
+              {label}
+            </span>
+            <ChevronRight
+              className={cn(
+                'h-3 w-3 shrink-0 transition-transform duration-[var(--fd-duration-fast)]',
+                open && 'rotate-90',
+              )}
+            />
+          </button>
+        </Collapsible.Trigger>
+        {/* Sibling of the trigger, not a child: a nested button would be
+            invalid markup and would swallow the toggle. */}
+        {openFileDiff && touchesFile && filePath ? (
+          <span className="flex shrink-0 items-center gap-1 text-fg-faint">
+            <FileDiff aria-hidden="true" className="h-3 w-3" />
+            <FileDiffLink
+              filePath={filePath}
+              label={fileBaseName(filePath)}
+              className="max-w-40 truncate font-mono text-[length:var(--fd-text-2xs)] text-fg-tertiary"
+            />
           </span>
-          <ChevronRight
-            className={cn(
-              'h-3 w-3 shrink-0 transition-transform duration-[var(--fd-duration-fast)]',
-              open && 'rotate-90',
-            )}
-          />
-        </button>
-      </Collapsible.Trigger>
+        ) : null}
+      </div>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
         {detailAvailable ? (
           <div className="mt-1 ml-6">
-            <CodeBlock code={item.output ?? ''} language={null} />
+            <CodeBlock code={item.output ?? ''} language={null} filePath={outputFilePath} />
           </div>
         ) : suppressReadOnlyDetail && hasOutput ? (
           <p className="mt-1 ml-6 text-[length:var(--fd-text-xs)] text-fg-muted">
@@ -214,6 +244,7 @@ function DiffMessage({
   expansionMode?: ExpansionMode
 }) {
   const [open, setOpen] = useExpansionState(defaultOpen, expansionMode, item.id)
+  const parsed = useParsedDiff(item.diff)
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
@@ -236,7 +267,11 @@ function DiffMessage({
         </button>
       </Collapsible.Trigger>
       <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
-        <CodeBlock code={item.diff} language="diff" />
+        {parsed.status === 'unparsed' ? (
+          <CodeBlock code={item.diff} language="diff" />
+        ) : (
+          <DiffBlock diff={item.diff} parsed={parsed} title="Patch" />
+        )}
       </Collapsible.Content>
     </Collapsible.Root>
   )
