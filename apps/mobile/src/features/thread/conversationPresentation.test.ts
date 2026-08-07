@@ -122,3 +122,83 @@ describe('deriveConversationPresentation', () => {
     expect(presentation.history_blocks[1]?.kind).toBe('item')
   })
 })
+
+describe('collapsed mode grouping', () => {
+  const collapsed: FalconDeckPreferences = {
+    ...preferences,
+    conversation: { ...preferences.conversation, tool_details_mode: 'collapsed' },
+  }
+
+  it('keeps one work session when service notices and resolved approvals interleave', () => {
+    // The exact shape that used to shred one run into a column of
+    // "Worked for 1s" rows: hook chatter and approval receipts between tools.
+    const presentation = deriveConversationPresentation(
+      [
+        toolCall({ id: 'tool-1', created_at: '2026-03-16T10:00:00Z' }),
+        {
+          kind: 'service',
+          id: 'service-1',
+          level: 'info',
+          message: 'hook fired',
+          created_at: '2026-03-16T10:00:01Z',
+        },
+        toolCall({ id: 'tool-2', created_at: '2026-03-16T10:00:02Z' }),
+        {
+          kind: 'interactive_request',
+          id: 'approval-1',
+          request: {
+            request_id: 'approval-1',
+            workspace_id: 'workspace-1',
+            thread_id: 'thread-1',
+            method: 'item/commandExecution/requestApproval',
+            kind: 'approval',
+            title: 'Allow Read?',
+            detail: '{"file_path":"/tmp/x"}',
+            command: null,
+            path: null,
+            turn_id: null,
+            item_id: null,
+            questions: [],
+            created_at: '2026-03-16T10:00:03Z',
+          },
+          resolved: true,
+          created_at: '2026-03-16T10:00:03Z',
+        },
+        toolCall({ id: 'tool-3', created_at: '2026-03-16T10:00:04Z' }),
+      ],
+      collapsed,
+    )
+
+    const workSessions = presentation.history_blocks.filter(
+      (block) => block.kind === 'work_session',
+    )
+    expect(workSessions).toHaveLength(1)
+    expect(workSessions[0]?.kind === 'work_session' && workSessions[0].items).toHaveLength(3)
+    // Receipts still render — as quiet rows after the run, not between fragments.
+    expect(
+      presentation.history_blocks.filter((block) => block.kind === 'item'),
+    ).toHaveLength(2)
+  })
+
+  it('still breaks the fold for assistant messages', () => {
+    const presentation = deriveConversationPresentation(
+      [
+        toolCall({ id: 'tool-1', created_at: '2026-03-16T10:00:00Z' }),
+        {
+          kind: 'assistant_message',
+          id: 'assistant-1',
+          text: 'Here is what I found',
+          created_at: '2026-03-16T10:00:01Z',
+        },
+        toolCall({ id: 'tool-2', created_at: '2026-03-16T10:00:02Z' }),
+      ],
+      collapsed,
+    )
+
+    expect(presentation.history_blocks.map((block) => block.kind)).toEqual([
+      'work_session',
+      'item',
+      'work_session',
+    ])
+  })
+})

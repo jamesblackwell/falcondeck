@@ -1,84 +1,21 @@
 import { memo, useEffect, useMemo, useState } from 'react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react'
 import * as Collapsible from '@radix-ui/react-collapsible'
 
-import type {
-  ConversationItem,
-  ConversationLiveActivityGroup,
-  ToolActivitySummary,
+import {
+  formatWorkDuration,
+  type ConversationItem,
+  type ConversationLiveActivityGroup,
+  type ToolActivitySummary,
 } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
 import { CodeBlock } from './code-block'
-import { InteractiveRequestCard } from './interactive-request-card'
+import { renderMessageContent } from './message-markdown'
 import { attachmentLabel, canRenderAttachmentImage } from './attachment-preview'
 
-const remarkPlugins = [remarkGfm]
-
-const markdownComponents = {
-  code(props: { children?: React.ReactNode; className?: string }) {
-    const { children, className } = props
-    const match = /language-(\w+)/.exec(className ?? '')
-    const code = String(children).replace(/\n$/, '')
-    const isBlock = Boolean(match) || code.includes('\n')
-    if (isBlock) {
-      return <CodeBlock code={code} language={match?.[1] ?? null} />
-    }
-    return (
-      <code className="break-all rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-0.5 font-mono text-[0.9em]">
-        {children}
-      </code>
-    )
-  },
-  p({ children }: { children?: React.ReactNode }) {
-    return <p className="mb-3 last:mb-0 leading-relaxed">{children}</p>
-  },
-  ul({ children }: { children?: React.ReactNode }) {
-    return <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
-  },
-  ol({ children }: { children?: React.ReactNode }) {
-    return <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
-  },
-  li({ children }: { children?: React.ReactNode }) {
-    return <li className="leading-relaxed">{children}</li>
-  },
-  h1({ children }: { children?: React.ReactNode }) {
-    return <h1 className="mb-3 mt-5 first:mt-0 text-[1.4em] font-semibold text-fg-primary">{children}</h1>
-  },
-  h2({ children }: { children?: React.ReactNode }) {
-    return <h2 className="mb-2 mt-4 first:mt-0 text-[1.2em] font-semibold text-fg-primary">{children}</h2>
-  },
-  h3({ children }: { children?: React.ReactNode }) {
-    return <h3 className="mb-2 mt-3 first:mt-0 text-[1.1em] font-semibold text-fg-primary">{children}</h3>
-  },
-  blockquote({ children }: { children?: React.ReactNode }) {
-    return <blockquote className="mb-3 border-l-2 border-border-emphasis pl-4 text-fg-secondary italic last:mb-0">{children}</blockquote>
-  },
-  strong({ children }: { children?: React.ReactNode }) {
-    return <strong className="font-semibold text-fg-primary">{children}</strong>
-  },
-  a({ href, children }: { href?: string; children?: React.ReactNode }) {
-    // [overflow-wrap:anywhere] lets bare URLs break mid-token instead of
-    // stretching the message bubble past the column edge.
-    return <a href={href} className="[overflow-wrap:anywhere] text-accent underline decoration-accent/40 underline-offset-2" target="_blank" rel="noopener noreferrer">{children}</a>
-  },
-  hr() {
-    return <hr className="my-4 border-border-subtle" />
-  },
-} as const
-
-function renderMarkdown(text: string) {
-  return (
-    <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>
-      {text}
-    </ReactMarkdown>
-  )
-}
-
 function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_message' }> }) {
-  const renderedText = useMemo(() => renderMarkdown(item.text), [item.text])
+  const renderedText = useMemo(() => renderMessageContent(item.text), [item.text])
 
   return (
     <div className="ml-auto w-fit min-w-0 max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
@@ -112,7 +49,7 @@ function UserMessage({ item }: { item: Extract<ConversationItem, { kind: 'user_m
 }
 
 function AssistantMessage({ item }: { item: Extract<ConversationItem, { kind: 'assistant_message' }> }) {
-  const renderedText = useMemo(() => renderMarkdown(item.text), [item.text])
+  const renderedText = useMemo(() => renderMessageContent(item.text), [item.text])
 
   return (
     <div className="min-w-0 px-1">
@@ -365,8 +302,79 @@ function InteractiveRequestMessage({
 }: {
   item: Extract<ConversationItem, { kind: 'interactive_request' }>
 }) {
+  // Unresolved requests live in the pinned approval bar, not the transcript.
   if (!item.resolved) return null
-  return <InteractiveRequestCard request={item.request} resolved={item.resolved} />
+  // A resolved approval is history: it needs a quiet one-line receipt, not a
+  // warning-coloured card with a raw JSON body. The detail stays one click
+  // away for anyone auditing what was approved.
+  return <ResolvedInteractiveRequestRow item={item} />
+}
+
+function ResolvedInteractiveRequestRow({
+  item,
+}: {
+  item: Extract<ConversationItem, { kind: 'interactive_request' }>
+}) {
+  const [open, setOpen] = useState(false)
+  const request = item.request
+  const summary =
+    request.command?.trim() ||
+    request.path?.trim() ||
+    request.detail?.trim() ||
+    ''
+  const hasDetail = Boolean(request.detail?.trim() || request.command?.trim())
+
+  return (
+    <Collapsible.Root open={open} onOpenChange={setOpen}>
+      <Collapsible.Trigger asChild disabled={!hasDetail}>
+        <button
+          type="button"
+          aria-expanded={open}
+          disabled={!hasDetail}
+          className="fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5 text-left text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-2 disabled:hover:bg-transparent"
+        >
+          <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-success" />
+          <span className="shrink-0 text-[length:var(--fd-text-xs)]">
+            {resolvedApprovalLabel(request.title)}
+          </span>
+          {summary ? (
+            <span className="min-w-0 flex-1 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-tertiary">
+              {summary}
+            </span>
+          ) : (
+            <span className="flex-1" />
+          )}
+          {hasDetail ? (
+            <ChevronRight
+              className={cn(
+                'h-3 w-3 shrink-0 transition-transform duration-[var(--fd-duration-fast)]',
+                open && 'rotate-90',
+              )}
+            />
+          ) : null}
+        </button>
+      </Collapsible.Trigger>
+      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
+        {hasDetail ? (
+          <div className="mt-1 ml-6">
+            <CodeBlock code={request.command?.trim() || request.detail?.trim() || ''} language={null} />
+          </div>
+        ) : null}
+      </Collapsible.Content>
+    </Collapsible.Root>
+  )
+}
+
+/** "Allow Read?" → "Allowed Read"; anything unrecognized passes through. */
+function resolvedApprovalLabel(title: string) {
+  const trimmed = title.trim().replace(/\?$/, '')
+  if (/^allow /i.test(trimmed)) {
+    return `Allowed ${trimmed.slice('allow '.length)}`
+  }
+  if (/^approve /i.test(trimmed)) {
+    return `Approved ${trimmed.slice('approve '.length)}`
+  }
+  return trimmed
 }
 
 function ServiceMessage({ item }: { item: Extract<ConversationItem, { kind: 'service' }> }) {
@@ -429,6 +437,69 @@ export const ToolSummaryCard = memo(function ToolSummaryCard(props: {
   return <ToolSummaryMessage {...props} />
 })
 
+/** One buried run of tool work: a single quiet line ("Working…" while live,
+    "Worked for 2m 14s" when done) that expands to the full tool detail. */
+export const WorkSessionCard = memo(function WorkSessionCard({
+  items,
+  running,
+  startedAt,
+  completedAt,
+  expansionMode = 'default',
+}: {
+  items: Extract<ConversationItem, { kind: 'tool_call' }>[]
+  running: boolean
+  startedAt: string
+  completedAt: string | null
+  expansionMode?: ExpansionMode
+}) {
+  const [open, setOpen] = useExpansionState(false, expansionMode, items[0]?.id ?? 'work')
+  const currentLabel = running
+    ? toolCallLabel(
+        [...items].reverse().find((item) => item.status === 'running' || item.status === 'in_progress')
+          ?.title ?? items[items.length - 1]?.title ?? '',
+      )
+    : null
+
+  return (
+    <Collapsible.Root open={open} onOpenChange={setOpen}>
+      <Collapsible.Trigger asChild>
+        <button
+          type="button"
+          aria-expanded={open}
+          className="fd-focus group flex max-w-full items-center gap-1.5 rounded-[var(--fd-radius-sm)] py-1 text-[length:var(--fd-text-sm)] text-fg-muted transition-colors hover:text-fg-secondary"
+        >
+          {running ? (
+            <>
+              <Loader2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
+              <span className="shrink-0 font-medium">Working…</span>
+              {currentLabel ? (
+                <span className="min-w-0 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-faint">
+                  {currentLabel}
+                </span>
+              ) : null}
+            </>
+          ) : (
+            <span className="font-medium">
+              Worked for {formatWorkDuration(startedAt, completedAt ?? startedAt)}
+            </span>
+          )}
+          <ChevronRight
+            aria-hidden="true"
+            className={cn('h-3.5 w-3.5 shrink-0 transition-transform', open && 'rotate-90')}
+          />
+        </button>
+      </Collapsible.Trigger>
+      <Collapsible.Content className="overflow-hidden data-[state=closed]:animate-collapse data-[state=open]:animate-expand">
+        <div className="mt-1 space-y-0.5 border-l border-border-subtle pl-3">
+          {items.map((item) => (
+            <ToolCallMessage key={item.id} item={item} />
+          ))}
+        </div>
+      </Collapsible.Content>
+    </Collapsible.Root>
+  )
+})
+
 export const LiveActivityLane = memo(function LiveActivityLane({
   groups,
 }: {
@@ -436,10 +507,12 @@ export const LiveActivityLane = memo(function LiveActivityLane({
 }) {
   if (groups.length === 0) return null
 
+  // Rendered in the conversation flow (not a pinned lane), matching where the
+  // resulting tool-summary cards will appear once the work completes.
   return (
-    <div className="shrink-0 border-t border-border-subtle bg-surface-1/95">
-      <div className="mx-auto max-w-3xl px-5 py-3">
-        <div className="max-h-[184px] space-y-3 overflow-y-auto pr-1">
+    <div className="min-w-0">
+      <div>
+        <div className="space-y-3">
           {groups.map((group) => (
             <div
               key={group.id}

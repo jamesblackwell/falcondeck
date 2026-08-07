@@ -131,7 +131,7 @@ describe('useRenderBlocks', () => {
       'item',
     ])
     expect(result[0]?.id).toBe('assistant_message:assistant-1')
-    expect(result[1]?.id).toBe('tool-summary:tool-1:1')
+    expect(result[1]?.id).toBe('tool-summary:tool-1')
     expect(result[2]?.id).toBe('interactive_request:request-2')
   })
 })

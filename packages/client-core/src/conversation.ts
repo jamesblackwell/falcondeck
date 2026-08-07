@@ -136,15 +136,22 @@ export function applyEventToThreadDetail(detail: ThreadDetail | null, event: Eve
       return { ...normalizeThreadDetail(detail), thread: normalizedEvent.event.thread }
     case 'conversation-item-added':
     case 'conversation-item-updated': {
-      const normalizedDetail = normalizeThreadDetail(detail)
+      // Only the incoming item is normalized. Re-normalizing the whole detail
+      // here would rebuild every item object on every streaming delta, which
+      // breaks referential equality for items that did not change — defeating
+      // memoized message rendering and making long threads visibly stutter as
+      // tokens arrive. Details are normalized when fetched (daemon-client and
+      // the remote-host client both do it), and every branch here preserves
+      // that, so the array is already in normalized form.
+      const items = upsertConversationItem(
+        detail.items,
+        normalizeConversationItem(normalizedEvent.event.item),
+      )
       return {
-        ...normalizedDetail,
-        // normalizeEventEnvelope does not normalize conversation-item
-        // payloads, so repair the incoming item here before upserting it.
-        items: upsertConversationItem(
-          normalizedDetail.items,
-          normalizeConversationItem(normalizedEvent.event.item),
-        ),
+        ...detail,
+        items,
+        oldest_item_id: items[0]?.id ?? detail.oldest_item_id,
+        newest_item_id: items.at(-1)?.id ?? detail.newest_item_id,
       }
     }
     default:
@@ -181,6 +188,16 @@ export type ConversationHistoryBlock =
       summary: ToolActivitySummary
       default_open: boolean
       suppress_read_only_detail: boolean
+    }
+  | {
+      /** One contiguous run of tool work, hidden behind a single line
+          ("Working…" / "Worked for 2m 14s") in the collapsed mode. */
+      kind: 'work_session'
+      id: string
+      items: Extract<ConversationItem, { kind: 'tool_call' }>[]
+      running: boolean
+      started_at: string
+      completed_at: string | null
     }
 
 export type ConversationRenderBlock = ConversationHistoryBlock
@@ -355,6 +372,16 @@ function buildToolActivitySummary(
   }
 }
 
+/** "Worked for 2m 14s"-style duration between two ISO timestamps. */
+export function formatWorkDuration(startedAt: string, completedAt: string): string {
+  const seconds = Math.max(1, Math.round((Date.parse(completedAt) - Date.parse(startedAt)) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
 export function deriveConversationPresentation(
   items: ConversationItem[],
   preferencesInput: FalconDeckPreferences | null | undefined,
@@ -371,11 +398,106 @@ export function deriveConversationPresentation(
 
   const suppressReadOnlyDetail = mode === 'hide_read_only_details' || mode === 'compact'
 
+  // ChatGPT-style default: bury contiguous tool runs behind one line. Only
+  // approvals, diffs, errors, and failed tests break out of the fold.
+  if (mode === 'collapsed') {
+    let workBuffer: Extract<ConversationItem, { kind: 'tool_call' }>[] = []
+    // Receipts (resolved approvals, service notices) gathered during a run.
+    // They render as quiet rows after the run they belong to, so they never
+    // interrupt the fold.
+    let buriedReceipts: ConversationItem[] = []
+    const flushReceipts = () => {
+      for (const receipt of buriedReceipts) {
+        historyBlocks.push({
+          kind: 'item',
+          id: `${receipt.kind}:${receipt.id}`,
+          item: receipt,
+          default_open: false,
+          suppress_read_only_detail: false,
+        })
+      }
+      buriedReceipts = []
+    }
+    const flushWork = () => {
+      if (workBuffer.length === 0) {
+        flushReceipts()
+        return
+      }
+      const running = workBuffer.some((entry) => isRunningToolStatus(entry.status))
+      const last = workBuffer[workBuffer.length - 1]!
+      historyBlocks.push({
+        kind: 'work_session',
+        // Keyed by the first item only: these ids are React keys, and folding
+        // the running count in would change the key every time a tool joins
+        // the session, remounting the whole card mid-stream (visible flash,
+        // and its expand state resets).
+        id: `work:${workBuffer[0]!.id}`,
+        items: workBuffer,
+        running,
+        started_at: workBuffer[0]!.created_at,
+        completed_at: running ? null : (last.completed_at ?? last.created_at),
+      })
+      workBuffer = []
+      flushReceipts()
+    }
+
+    for (const item of items) {
+      // Reasoning is part of the buried work; don't let it split a run.
+      if (item.kind === 'reasoning') continue
+      // Neither do the receipts that accompany work: resolved approvals and
+      // service notices. Rendering them between fragments is what turned one
+      // "Worked for 2m" into a column of "Worked for 1s" rows.
+      if (item.kind === 'interactive_request' && item.resolved) {
+        buriedReceipts.push(item)
+        continue
+      }
+      if (item.kind === 'service') {
+        buriedReceipts.push(item)
+        continue
+      }
+      if (isToolCall(item)) {
+        const mustSurface =
+          (item.display.is_error && preferences.conversation.auto_expand.errors) ||
+          (item.display.artifact_kind === 'approval_related' &&
+            preferences.conversation.auto_expand.approvals) ||
+          item.display.artifact_kind === 'diff' ||
+          (item.display.artifact_kind === 'test' && item.display.is_error)
+        if (!mustSurface) {
+          workBuffer.push(item)
+          continue
+        }
+      }
+      flushWork()
+      let defaultOpen = false
+      if (isToolCall(item)) {
+        defaultOpen = isHighSignalTool(item, mode, seenDiff, preferences)
+      } else if (item.kind === 'diff') {
+        defaultOpen = !seenDiff.value && preferences.conversation.auto_expand.first_diff
+        seenDiff.value = true
+      }
+      historyBlocks.push({
+        kind: 'item',
+        id: `${item.kind}:${item.id}`,
+        item,
+        default_open: defaultOpen,
+        suppress_read_only_detail: shouldSuppressReadOnlyDetail(item, mode),
+      })
+    }
+    flushWork()
+
+    // Running work renders as its own "Working…" block, so the pinned live
+    // lane stays empty in this mode.
+    return {
+      live_activity_groups: [],
+      history_blocks: historyBlocks,
+    }
+  }
+
   const flushSummaryBuffer = () => {
     if (summaryBuffer.length === 0 || !summaryFamily) return
     historyBlocks.push({
       kind: 'tool_summary',
-      id: `tool-summary:${summaryBuffer[0]!.id}:${summaryBuffer.length}`,
+      id: `tool-summary:${summaryBuffer[0]!.id}`,
       items: summaryBuffer,
       summary: buildToolActivitySummary(summaryBuffer, summaryFamily, 'history'),
       default_open: mode === 'expanded',
@@ -389,7 +511,7 @@ export function deriveConversationPresentation(
     if (liveBuffer.length === 0 || !liveFamily) return
     liveActivityGroups.push({
       kind: 'live_activity_group',
-      id: `live-activity:${liveBuffer[0]!.id}:${liveBuffer.length}`,
+      id: `live-activity:${liveBuffer[0]!.id}`,
       items: liveBuffer,
       summary: buildToolActivitySummary(liveBuffer, liveFamily, 'live'),
     })
