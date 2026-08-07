@@ -1200,6 +1200,26 @@ function AppInner() {
     [api, apiFor, selectedThreadId, selectedWorkspaceId, setSnapshot, toast, workspaceHostIndex],
   )
 
+  const handleSteerQueuedTurn = useCallback(
+    async (queuedId: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return
+      const client = apiFor(selectedWorkspaceId)
+      if (!client) return
+      try {
+        await client.steerQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId)
+        if (!workspaceHostIndex.has(selectedWorkspaceId) && api) {
+          setSnapshot(await api.snapshot())
+        }
+      } catch (error: unknown) {
+        // The daemon keeps the message queued when a steer fails, so the chip
+        // the user acted on is still there when they read this.
+        const msg = error instanceof Error ? error.message : 'Failed to steer queued message'
+        toast({ variant: 'danger', title: 'Failed to steer queued message', description: msg })
+      }
+    },
+    [api, apiFor, selectedThreadId, selectedWorkspaceId, setSnapshot, toast, workspaceHostIndex],
+  )
+
   const handleArchiveThread = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId)
@@ -1442,6 +1462,8 @@ function AppInner() {
               isThreadDetailPending={isThreadDetailPending}
               interactiveRequests={interactiveRequests}
               onRemoveQueuedTurn={handleRemoveQueuedTurn}
+              onSteerQueuedTurn={handleSteerQueuedTurn}
+              canSteerQueuedTurn={activeCapabilities.supports_steering}
               // Remote-host workspaces have no local checkout, so the rail has
               // no diff to show and file paths stay plain text there.
               onOpenFile={isRemoteWorkspaceSelected ? null : handleOpenFileDiff}

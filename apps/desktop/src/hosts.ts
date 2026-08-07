@@ -102,6 +102,11 @@ export type WorkspaceScopedApi = {
     threadId: string,
     queuedId: string,
   ): Promise<{ ok: boolean; message?: string | null }>
+  steerQueuedTurn(
+    workspaceId: string,
+    threadId: string,
+    queuedId: string,
+  ): Promise<{ ok: boolean; message?: string | null }>
   updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>
   archiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
   unarchiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
@@ -251,6 +256,12 @@ export class HostConnection {
         this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),
       removeQueuedTurn: (workspaceId, threadId, queuedId) =>
         this.rpc('thread.queue.remove', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          queued_id: queuedId,
+        }),
+      steerQueuedTurn: (workspaceId, threadId, queuedId) =>
+        this.rpc('thread.queue.steer', {
           workspace_id: workspaceId,
           thread_id: threadId,
           queued_id: queuedId,

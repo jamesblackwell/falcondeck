@@ -1,0 +1,17 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "FalconDeck (dev)",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "width": 1520,
+        "height": 980,
+        "minWidth": 1120,
+        "minHeight": 760,
+        "focus": false
+      }
+    ]
+  }
+}

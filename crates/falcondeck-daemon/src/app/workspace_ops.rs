@@ -1089,6 +1089,113 @@ pub(super) async fn remove_queued_turn(
     })
 }
 
+/// Promotes an already-queued message into the running turn ("steer instead").
+///
+/// The promotion has to happen daemon-side: the stored request carries the real
+/// inputs and the attachments materialized at queue time, while a client only
+/// ever sees the preview string — so a client-side remove-then-resend would
+/// lose attachments and race the queue drain.
+pub(super) async fn steer_queued_turn(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    queued_id: &str,
+) -> Result<CommandResponse, DaemonError> {
+    // Taken out of the queue before the steer rather than after, so a turn
+    // ending mid-steer cannot drain the same entry into a second send. The pop
+    // is provisional: every failure path below puts it back where it was.
+    let (queued, queue_index, summary_entry) = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        if !thread_is_busy(&thread.summary.status) {
+            return Err(DaemonError::BadRequest(
+                "this thread has no running turn to steer into".to_string(),
+            ));
+        }
+        let provider = thread.summary.provider.clone();
+        let supports_steering = workspace
+            .summary
+            .agents
+            .iter()
+            .find(|agent| agent.provider == provider)
+            .is_some_and(|agent| agent.capabilities.supports_steering);
+        if !supports_steering {
+            return Err(DaemonError::BadRequest(format!(
+                "{provider} cannot steer a running turn"
+            )));
+        }
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let queue_index = thread
+            .queued_requests
+            .iter()
+            .position(|queued| queued.id == queued_id)
+            .ok_or_else(|| DaemonError::NotFound("queued turn not found".to_string()))?;
+        let queued = thread.queued_requests.remove(queue_index);
+        let summary_entry = thread
+            .summary
+            .queued_turns
+            .iter()
+            .position(|entry| entry.id == queued_id)
+            .map(|index| (index, thread.summary.queued_turns.remove(index)));
+        (queued, queue_index, summary_entry)
+    };
+
+    let mut request = queued.request.clone();
+    request.steer = true;
+    // Already normalized at queue time — re-normalizing would re-materialize
+    // attachments that are on disk.
+    let inputs = request.inputs.clone();
+
+    let outcome = try_steer_turn(app, &request, &inputs).await;
+    let error = match outcome {
+        Ok(Some(response)) => return Ok(response),
+        // `Ok(None)` is the shared steer path declining between the checks
+        // above and the injection — the turn ended, say. Restore, don't drop.
+        Ok(None) => DaemonError::BadRequest(
+            "the running turn ended before the message could be steered".to_string(),
+        ),
+        Err(error) => error,
+    };
+
+    // Restores on any error, including the narrow window where the text did
+    // reach the agent but recording it in the transcript failed: leaving the
+    // message queued risks it being sent twice, dropping it loses the user's
+    // words outright, and only the first is recoverable by hand.
+    let restored = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get_mut(workspace_id)
+            .and_then(|workspace| workspace.threads.get_mut(thread_id))
+            .map(|thread| {
+                let index = queue_index.min(thread.queued_requests.len());
+                thread.queued_requests.insert(index, queued);
+                if let Some((index, entry)) = summary_entry {
+                    let index = index.min(thread.summary.queued_turns.len());
+                    thread.summary.queued_turns.insert(index, entry);
+                }
+                thread.summary.updated_at = Utc::now();
+                thread.summary.clone()
+            })
+    };
+    if let Some(summary) = restored {
+        app.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::ThreadUpdated { thread: summary },
+        );
+    }
+    Err(error)
+}
+
 impl AppState {
     /// Removes a queued turn before it dispatches (loopback API + remote RPC).
     pub(crate) async fn remove_queued_turn(
@@ -1098,6 +1205,16 @@ impl AppState {
         queued_id: &str,
     ) -> Result<CommandResponse, DaemonError> {
         remove_queued_turn(self, workspace_id, thread_id, queued_id).await
+    }
+
+    /// Promotes a queued turn into the running turn (loopback API + remote RPC).
+    pub(crate) async fn steer_queued_turn(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        queued_id: &str,
+    ) -> Result<CommandResponse, DaemonError> {
+        steer_queued_turn(self, workspace_id, thread_id, queued_id).await
     }
 
     /// Dispatches the next queued turn if the thread is no longer busy.

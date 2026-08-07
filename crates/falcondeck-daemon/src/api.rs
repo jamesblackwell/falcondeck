@@ -145,6 +145,10 @@ pub fn router(state: AppState) -> Router {
             delete(remove_queued_turn),
         )
         .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/{queued_id}/steer",
+            post(steer_queued_turn),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/review",
             post(start_review),
         )
@@ -457,6 +461,17 @@ async fn remove_queued_turn(
     Ok(Json(
         state
             .remove_queued_turn(&workspace_id, &thread_id, &queued_id)
+            .await?,
+    ))
+}
+
+async fn steer_queued_turn(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id, queued_id)): Path<(String, String, String)>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .steer_queued_turn(&workspace_id, &thread_id, &queued_id)
             .await?,
     ))
 }

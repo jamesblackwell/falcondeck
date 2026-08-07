@@ -2654,3 +2654,130 @@ async fn a_steer_against_an_idle_thread_starts_a_normal_turn() {
     assert!(summary.queued_turns.is_empty());
     assert_eq!(summary.status, ThreadStatus::Error);
 }
+
+/// Queues `count` messages on the busy steer thread and returns their ids in
+/// queue order.
+async fn queue_messages(app: &AppState, workspace_id: &str, count: usize) -> Vec<String> {
+    for index in 0..count {
+        let mut request = steer_request(workspace_id, false);
+        request.inputs = vec![falcondeck_core::TurnInputItem::Text {
+            id: None,
+            text: format!("queued {index}"),
+        }];
+        assert_eq!(
+            app.send_turn(request).await.unwrap().message.as_deref(),
+            Some("queued")
+        );
+    }
+    app.snapshot().await.threads[0]
+        .queued_turns
+        .iter()
+        .map(|queued| queued.id.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_failed_steer_of_a_queued_turn_puts_it_back_in_its_original_slot() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::claude(),
+    )
+    .await;
+    let queued_ids = queue_messages(&app, &workspace_id, 3).await;
+
+    // No Claude runtime is attached, so the steer reaches the provider and
+    // fails there — the failure the restore path exists for.
+    let error = app
+        .steer_queued_turn(&workspace_id, "thread-steer", &queued_ids[1])
+        .await
+        .expect_err("steer must reach the provider and fail");
+    assert!(
+        error.to_string().contains("not currently connected to Claude"),
+        "unexpected error: {error}"
+    );
+
+    let summary = &app.snapshot().await.threads[0];
+    assert_eq!(
+        summary
+            .queued_turns
+            .iter()
+            .map(|queued| queued.preview.as_str())
+            .collect::<Vec<_>>(),
+        vec!["queued 0", "queued 1", "queued 2"],
+        "a failed steer must restore the message at its original position"
+    );
+    assert_eq!(summary.status, ThreadStatus::Running);
+}
+
+#[tokio::test]
+async fn a_queued_turn_cannot_be_steered_into_an_idle_thread() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::claude(),
+    )
+    .await;
+    let queued_ids = queue_messages(&app, &workspace_id, 1).await;
+    app.with_thread_mut(&workspace_id, "thread-steer", |thread| {
+        thread.status = ThreadStatus::Idle;
+    })
+    .await
+    .unwrap();
+
+    let error = app
+        .steer_queued_turn(&workspace_id, "thread-steer", &queued_ids[0])
+        .await
+        .expect_err("there is no running turn to steer into");
+    assert!(
+        error.to_string().contains("no running turn"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(app.snapshot().await.threads[0].queued_turns.len(), 1);
+}
+
+#[tokio::test]
+async fn a_queued_turn_cannot_be_steered_on_a_provider_without_steering() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CODEX,
+        falcondeck_core::AgentCapabilitySummary::codex(),
+    )
+    .await;
+    let queued_ids = queue_messages(&app, &workspace_id, 1).await;
+
+    let error = app
+        .steer_queued_turn(&workspace_id, "thread-steer", &queued_ids[0])
+        .await
+        .expect_err("codex cannot steer");
+    assert!(
+        error.to_string().contains("cannot steer"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(app.snapshot().await.threads[0].queued_turns.len(), 1);
+}
+
+#[tokio::test]
+async fn steering_an_unknown_queued_id_reports_not_found() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::claude(),
+    )
+    .await;
+    queue_messages(&app, &workspace_id, 1).await;
+
+    let error = app
+        .steer_queued_turn(&workspace_id, "thread-steer", "queued-nope")
+        .await
+        .expect_err("unknown queued id");
+    assert!(
+        error.to_string().contains("queued turn not found"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(app.snapshot().await.threads[0].queued_turns.len(), 1);
+}

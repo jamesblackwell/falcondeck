@@ -38,6 +38,8 @@ type DesktopConversationPaneProps = {
   ) => void
   promptInputProps: ComponentProps<typeof PromptInput>
   onRemoveQueuedTurn?: (queuedId: string) => void
+  onSteerQueuedTurn?: (queuedId: string) => void
+  canSteerQueuedTurn?: boolean
   onOpenFile?: OpenFileDiff | null
   headerControls?: ReactNode
 }
@@ -62,6 +64,8 @@ export function DesktopConversationPane({
   onInteractiveResponse,
   promptInputProps,
   onRemoveQueuedTurn,
+  onSteerQueuedTurn,
+  canSteerQueuedTurn,
   onOpenFile,
   headerControls,
 }: DesktopConversationPaneProps) {
@@ -92,10 +96,12 @@ export function DesktopConversationPane({
         onOpenFile={onOpenFile}
       />
       <InteractiveRequestBar requests={interactiveRequests} onRespond={onInteractiveResponse} />
-      {selectedThread && onRemoveQueuedTurn ? (
+      {selectedThread && onRemoveQueuedTurn && onSteerQueuedTurn ? (
         <QueuedTurns
           queuedTurns={selectedThread.queued_turns}
+          canSteer={canSteerQueuedTurn}
           onRemove={onRemoveQueuedTurn}
+          onSteer={onSteerQueuedTurn}
         />
       ) : null}
       <PromptInput {...promptInputProps} />

@@ -54,6 +54,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "turn.steer",
     "turn.interrupt",
     "thread.queue.remove",
+    "thread.queue.steer",
     "workspace.connect",
     "workspace.remove",
     "connectors.read",
@@ -924,6 +925,17 @@ impl AppState {
                     let thread_id = required(&["threadId", "thread_id"])?;
                     let queued_id = required(&["queuedId", "queued_id"])?;
                     self.remove_queued_turn(&workspace_id, &thread_id, &queued_id)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
+                "thread.queue.steer" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    let queued_id = required(&["queuedId", "queued_id"])?;
+                    self.steer_queued_turn(&workspace_id, &thread_id, &queued_id)
                         .await
                         .and_then(|response| {
                             serde_json::to_value(response).map_err(DaemonError::from)
