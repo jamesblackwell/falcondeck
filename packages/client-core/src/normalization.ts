@@ -152,6 +152,14 @@ function normalizeSkillSourceKind(value: unknown): SkillSummary['source_kind'] {
   return value === 'project_file' || value === 'home_file' ? value : 'provider_native'
 }
 
+/** Expands the legacy availability lattice into an open provider list. */
+function skillProvidersFromAvailability(
+  availability: SkillSummary['availability'],
+): AgentProvider[] {
+  if (availability === 'both') return ['codex', 'claude']
+  return [availability]
+}
+
 function normalizeSkill(value: unknown): SkillSummary {
   const skill = (value ?? {}) as Partial<SkillSummary>
   const alias =
@@ -160,6 +168,8 @@ function normalizeSkill(value: unknown): SkillSummary {
         ? skill.alias
         : `/${skill.alias}`
       : '/'
+  const availability = normalizeSkillAvailability(skill.availability)
+  const providers = normalizeStringList(skill.providers)
   return {
     id: skill.id ?? alias,
     label:
@@ -167,7 +177,8 @@ function normalizeSkill(value: unknown): SkillSummary {
         ? skill.label
         : alias.slice(1) || 'skill',
     alias,
-    availability: normalizeSkillAvailability(skill.availability),
+    availability,
+    providers: providers.length > 0 ? providers : skillProvidersFromAvailability(availability),
     source_kind: normalizeSkillSourceKind(skill.source_kind),
     source_path: skill.source_path ?? null,
     description: skill.description ?? null,

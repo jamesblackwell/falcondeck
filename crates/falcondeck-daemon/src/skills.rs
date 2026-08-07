@@ -5,8 +5,8 @@ use std::{
 };
 
 use falcondeck_core::{
-    AgentProvider, ClaudeSkillTranslation, CodexSkillTranslation, SkillAvailability,
-    SkillProviderTranslations, SkillSourceKind, SkillSummary,
+    AgentProvider, ClaudeSkillTranslation, CodexSkillTranslation, SkillProviderTranslations,
+    SkillSourceKind, SkillSummary, skill_availability_from_providers,
 };
 use serde_json::Value;
 
@@ -43,40 +43,64 @@ pub fn canonical_skill_alias(raw: &str) -> String {
     }
 }
 
+/// File-backed skill locations, per provider. `.agents/skills` is the shared
+/// convention every provider reads; the others are provider-native dirs.
+/// Extending a provider's skill surface means adding a row here, not code.
+fn skill_scan_roots(root: &Path, source_kind: SkillSourceKind) -> Vec<SkillScanRoot> {
+    vec![
+        SkillScanRoot {
+            dir: root.join(".agents/skills"),
+            source_kind: source_kind.clone(),
+            providers: vec![AgentProvider::CODEX, AgentProvider::CLAUDE],
+            layout: SkillDirLayout::AgentsSkills,
+        },
+        SkillScanRoot {
+            dir: root.join(".codex/skills"),
+            source_kind: source_kind.clone(),
+            providers: vec![AgentProvider::CODEX],
+            layout: SkillDirLayout::AgentsSkills,
+        },
+        SkillScanRoot {
+            dir: root.join(".claude/commands"),
+            source_kind,
+            providers: vec![AgentProvider::CLAUDE],
+            layout: SkillDirLayout::ClaudeCommands,
+        },
+    ]
+}
+
+struct SkillScanRoot {
+    dir: PathBuf,
+    source_kind: SkillSourceKind,
+    providers: Vec<AgentProvider>,
+    layout: SkillDirLayout,
+}
+
+enum SkillDirLayout {
+    /// `<dir>/<name>/SKILL.md` or `<dir>/<name>.md`.
+    AgentsSkills,
+    /// Flat `<dir>/<name>.md` slash commands.
+    ClaudeCommands,
+}
+
 pub fn discover_file_backed_skills(workspace_path: &str) -> Vec<SkillSummary> {
     let mut entries = Vec::new();
-    let workspace_root = Path::new(workspace_path);
 
-    entries.extend(scan_agents_skill_dir(
-        &workspace_root.join(".agents/skills"),
-        SkillSourceKind::ProjectFile,
-        SkillAvailability::Both,
-    ));
-    entries.extend(scan_agents_skill_dir(
-        &workspace_root.join(".codex/skills"),
-        SkillSourceKind::ProjectFile,
-        SkillAvailability::Codex,
-    ));
-    entries.extend(scan_claude_command_dir(
-        &workspace_root.join(".claude/commands"),
-        SkillSourceKind::ProjectFile,
-    ));
-
+    let mut roots = skill_scan_roots(Path::new(workspace_path), SkillSourceKind::ProjectFile);
     if let Some(home) = home_dir() {
-        entries.extend(scan_agents_skill_dir(
-            &home.join(".agents/skills"),
-            SkillSourceKind::HomeFile,
-            SkillAvailability::Both,
-        ));
-        entries.extend(scan_agents_skill_dir(
-            &home.join(".codex/skills"),
-            SkillSourceKind::HomeFile,
-            SkillAvailability::Codex,
-        ));
-        entries.extend(scan_claude_command_dir(
-            &home.join(".claude/commands"),
-            SkillSourceKind::HomeFile,
-        ));
+        roots.extend(skill_scan_roots(&home, SkillSourceKind::HomeFile));
+    }
+    for root in roots {
+        match root.layout {
+            SkillDirLayout::AgentsSkills => entries.extend(scan_agents_skill_dir(
+                &root.dir,
+                root.source_kind,
+                &root.providers,
+            )),
+            SkillDirLayout::ClaudeCommands => {
+                entries.extend(scan_claude_command_dir(&root.dir, root.source_kind));
+            }
+        }
     }
 
     entries
@@ -102,7 +126,8 @@ pub fn parse_codex_provider_skills(value: &Value) -> Vec<SkillSummary> {
                 label: extract_string(entry, &["title", "label", "displayName", "name"])
                     .unwrap_or_else(|| alias.trim_start_matches('/').to_string()),
                 alias,
-                availability: SkillAvailability::Codex,
+                availability: skill_availability_from_providers(&[AgentProvider::CODEX]),
+                providers: vec![AgentProvider::CODEX],
                 source_kind: SkillSourceKind::ProviderNative,
                 source_path: None,
                 description: extract_string(entry, &["description", "summary"]),
@@ -140,7 +165,13 @@ pub fn merge_skills(skills: Vec<SkillSummary>) -> Vec<SkillSummary> {
             existing.description = incoming.description.clone();
         }
 
-        existing.availability = merge_availability(&existing.availability, &incoming.availability);
+        for provider in &incoming.providers {
+            if !existing.providers.contains(provider) {
+                existing.providers.push(provider.clone());
+            }
+        }
+        existing.providers.sort();
+        existing.availability = skill_availability_from_providers(&existing.providers);
         if existing.provider_translations.codex.is_none() {
             existing.provider_translations.codex = incoming.provider_translations.codex.clone();
         }
@@ -157,22 +188,7 @@ pub fn merge_skills(skills: Vec<SkillSummary>) -> Vec<SkillSummary> {
 pub fn skills_for_provider(skills: &[SkillSummary], provider: AgentProvider) -> Vec<SkillSummary> {
     skills
         .iter()
-        .filter(|skill| {
-            if provider == AgentProvider::CODEX {
-                matches!(
-                    skill.availability,
-                    SkillAvailability::Codex | SkillAvailability::Both
-                )
-            } else if provider == AgentProvider::CLAUDE {
-                matches!(
-                    skill.availability,
-                    SkillAvailability::Claude | SkillAvailability::Both
-                )
-            } else {
-                // Providers without a skill catalog expose no skills.
-                false
-            }
-        })
+        .filter(|skill| skill.supports_provider(&provider))
         .cloned()
         .collect()
 }
@@ -180,7 +196,7 @@ pub fn skills_for_provider(skills: &[SkillSummary], provider: AgentProvider) -> 
 fn scan_agents_skill_dir(
     dir: &Path,
     source_kind: SkillSourceKind,
-    availability: SkillAvailability,
+    providers: &[AgentProvider],
 ) -> Vec<SkillSummary> {
     let mut results = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {
@@ -197,7 +213,7 @@ fn scan_agents_skill_dir(
             if let Some(skill) = parse_markdown_skill(
                 &skill_path,
                 source_kind.clone(),
-                availability.clone(),
+                providers,
                 path.file_name().and_then(|name| name.to_str()),
             ) {
                 results.push(skill);
@@ -208,9 +224,7 @@ fn scan_agents_skill_dir(
         if !is_markdown_file(&path) {
             continue;
         }
-        if let Some(skill) =
-            parse_markdown_skill(&path, source_kind.clone(), availability.clone(), None)
-        {
+        if let Some(skill) = parse_markdown_skill(&path, source_kind.clone(), providers, None) {
             results.push(skill);
         }
     }
@@ -230,7 +244,7 @@ fn scan_claude_command_dir(dir: &Path, source_kind: SkillSourceKind) -> Vec<Skil
             continue;
         }
         let Some(skill) =
-            parse_markdown_skill(&path, source_kind.clone(), SkillAvailability::Claude, None)
+            parse_markdown_skill(&path, source_kind.clone(), &[AgentProvider::CLAUDE], None)
         else {
             continue;
         };
@@ -252,7 +266,7 @@ fn scan_claude_command_dir(dir: &Path, source_kind: SkillSourceKind) -> Vec<Skil
 fn parse_markdown_skill(
     path: &Path,
     source_kind: SkillSourceKind,
-    availability: SkillAvailability,
+    providers: &[AgentProvider],
     explicit_name: Option<&str>,
 ) -> Option<SkillSummary> {
     let content = fs::read_to_string(path).ok()?;
@@ -267,38 +281,27 @@ fn parse_markdown_skill(
         })?;
     let alias = canonical_skill_alias(&raw_name);
     let source_path = Some(path.to_string_lossy().to_string());
-    let provider_translations = match availability {
-        SkillAvailability::Codex => SkillProviderTranslations {
-            codex: Some(CodexSkillTranslation {
+    let provider_translations = SkillProviderTranslations {
+        codex: providers
+            .contains(&AgentProvider::CODEX)
+            .then(|| CodexSkillTranslation {
                 native_id: None,
                 native_name: Some(alias.trim_start_matches('/').to_string()),
             }),
-            claude: None,
-        },
-        SkillAvailability::Claude => SkillProviderTranslations {
-            codex: None,
-            claude: Some(ClaudeSkillTranslation {
+        claude: providers
+            .contains(&AgentProvider::CLAUDE)
+            .then(|| ClaudeSkillTranslation {
                 command_name: None,
                 prompt_reference_path: source_path.clone(),
             }),
-        },
-        SkillAvailability::Both => SkillProviderTranslations {
-            codex: Some(CodexSkillTranslation {
-                native_id: None,
-                native_name: Some(alias.trim_start_matches('/').to_string()),
-            }),
-            claude: Some(ClaudeSkillTranslation {
-                command_name: None,
-                prompt_reference_path: source_path.clone(),
-            }),
-        },
     };
 
     Some(SkillSummary {
         id: alias_to_skill_id(&alias),
         label: raw_name.replace(['-', '_'], " "),
         alias,
-        availability,
+        availability: skill_availability_from_providers(providers),
+        providers: providers.to_vec(),
         source_kind,
         source_path,
         description: parsed.description,
@@ -312,17 +315,21 @@ fn normalize_skill_summary(mut skill: SkillSummary) -> SkillSummary {
     if skill.label.trim().is_empty() {
         skill.label = skill.alias.trim_start_matches('/').to_string();
     }
-    skill
-}
-
-fn merge_availability(left: &SkillAvailability, right: &SkillAvailability) -> SkillAvailability {
-    match (left, right) {
-        (SkillAvailability::Both, _) | (_, SkillAvailability::Both) => SkillAvailability::Both,
-        (SkillAvailability::Codex, SkillAvailability::Claude)
-        | (SkillAvailability::Claude, SkillAvailability::Codex) => SkillAvailability::Both,
-        (SkillAvailability::Codex, _) => SkillAvailability::Codex,
-        (SkillAvailability::Claude, _) => SkillAvailability::Claude,
+    if skill.providers.is_empty() {
+        // Legacy input predating the open list: expand the lattice.
+        skill.providers = match skill.availability {
+            falcondeck_core::SkillAvailability::Codex => vec![AgentProvider::CODEX],
+            falcondeck_core::SkillAvailability::Claude => vec![AgentProvider::CLAUDE],
+            falcondeck_core::SkillAvailability::Both => {
+                vec![AgentProvider::CODEX, AgentProvider::CLAUDE]
+            }
+        };
+    } else {
+        skill.providers.sort();
+        skill.providers.dedup();
+        skill.availability = skill_availability_from_providers(&skill.providers);
     }
+    skill
 }
 
 fn source_priority(source_kind: &SkillSourceKind) -> usize {
@@ -434,6 +441,7 @@ fn parse_markdown_metadata(content: &str) -> MarkdownMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use falcondeck_core::SkillAvailability;
 
     #[test]
     fn canonical_alias_collapses_separators() {
@@ -449,6 +457,7 @@ mod tests {
                 label: "Search Web".to_string(),
                 alias: "/search-web".to_string(),
                 availability: SkillAvailability::Both,
+                providers: vec![AgentProvider::CODEX, AgentProvider::CLAUDE],
                 source_kind: SkillSourceKind::ProjectFile,
                 source_path: Some("/tmp/project/SKILL.md".to_string()),
                 description: Some("Project file".to_string()),
@@ -459,6 +468,7 @@ mod tests {
                 label: "Search Web Native".to_string(),
                 alias: "/search-web".to_string(),
                 availability: SkillAvailability::Codex,
+                providers: vec![AgentProvider::CODEX],
                 source_kind: SkillSourceKind::ProviderNative,
                 source_path: None,
                 description: Some("Native".to_string()),

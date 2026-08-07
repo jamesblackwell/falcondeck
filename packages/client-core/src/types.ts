@@ -81,7 +81,10 @@ export type SkillSummary = {
   id: string
   label: string
   alias: string
+  /** Legacy two-provider projection; prefer `providers`. */
   availability: SkillAvailability
+  /** Open list of provider ids that can use this skill. */
+  providers: AgentProvider[]
   source_kind: SkillSourceKind
   source_path?: string | null
   description?: string | null

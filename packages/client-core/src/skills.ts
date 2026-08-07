@@ -14,6 +14,11 @@ export function canonicalSkillAlias(raw: string): string {
 }
 
 export function providerSupportsSkill(skill: SkillSummary, provider: AgentProvider): boolean {
+  // The open providers list is authoritative; the availability lattice only
+  // covers payloads from daemons that predate it.
+  if (skill.providers && skill.providers.length > 0) {
+    return skill.providers.includes(provider)
+  }
   return skill.availability === 'both' || skill.availability === provider
 }
 

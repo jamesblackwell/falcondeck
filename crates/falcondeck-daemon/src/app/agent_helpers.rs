@@ -28,25 +28,7 @@ pub(super) fn resolve_selected_skills(
                         || canonical_skill_alias(&skill.alias)
                             == canonical_skill_alias(&selection.alias)
                 })
-                .filter(|skill| {
-                    let shared =
-                        matches!(skill.availability, falcondeck_core::SkillAvailability::Both);
-                    if *provider == AgentProvider::CODEX {
-                        shared
-                            || matches!(
-                                skill.availability,
-                                falcondeck_core::SkillAvailability::Codex
-                            )
-                    } else if *provider == AgentProvider::CLAUDE {
-                        shared
-                            || matches!(
-                                skill.availability,
-                                falcondeck_core::SkillAvailability::Claude
-                            )
-                    } else {
-                        false
-                    }
-                })
+                .filter(|skill| skill.supports_provider(provider))
                 .cloned()
                 .map(|summary| ResolvedSelectedSkill {
                     alias: selection.alias.clone(),

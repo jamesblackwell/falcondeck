@@ -218,6 +218,7 @@ describe('submitTurn guards', () => {
               label: 'Lint',
               alias: '/lint',
               availability: 'both',
+              providers: ['codex', 'claude'],
               source_kind: 'project_file',
               description: 'Run lint fixes',
             },

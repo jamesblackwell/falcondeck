@@ -422,6 +422,10 @@ pub struct ImageInput {
 }
 
 /// Normalized provider availability for a skill entry.
+///
+/// Legacy two-provider projection kept for wire compatibility; the open
+/// `SkillSummary::providers` list is the authoritative field. Derive this
+/// with [`skill_availability_from_providers`] rather than choosing by hand.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillAvailability {
@@ -431,6 +435,19 @@ pub enum SkillAvailability {
     Claude,
     /// The skill can be translated for both providers.
     Both,
+}
+
+/// Projects an open provider list onto the legacy availability lattice.
+/// Lists outside the codex/claude pair collapse to `Both` — the least-wrong
+/// value for old clients, which treat it as "offer everywhere".
+pub fn skill_availability_from_providers(providers: &[AgentProvider]) -> SkillAvailability {
+    let codex = providers.contains(&AgentProvider::CODEX);
+    let claude = providers.contains(&AgentProvider::CLAUDE);
+    match (codex, claude) {
+        (true, false) => SkillAvailability::Codex,
+        (false, true) => SkillAvailability::Claude,
+        _ => SkillAvailability::Both,
+    }
 }
 
 /// Source classification used when merging skill catalogs.
@@ -481,8 +498,13 @@ pub struct SkillSummary {
     pub label: String,
     /// Canonical slash alias including the leading slash.
     pub alias: String,
-    /// Which providers can use this skill.
+    /// Which providers can use this skill (legacy two-provider projection;
+    /// prefer `providers`).
     pub availability: SkillAvailability,
+    /// Open list of provider ids that can use this skill. Authoritative;
+    /// empty only in payloads from daemons that predate the field.
+    #[serde(default)]
+    pub providers: Vec<AgentProvider>,
     /// Winning merged source for this entry.
     pub source_kind: SkillSourceKind,
     /// Optional source file path when the entry is file-backed.
@@ -492,6 +514,23 @@ pub struct SkillSummary {
     /// Provider-specific translation metadata.
     #[serde(default)]
     pub provider_translations: SkillProviderTranslations,
+}
+
+impl SkillSummary {
+    /// Whether a provider can use this skill. Falls back to the legacy
+    /// availability lattice when the open list is absent (old daemons).
+    pub fn supports_provider(&self, provider: &AgentProvider) -> bool {
+        if !self.providers.is_empty() {
+            return self.providers.contains(provider);
+        }
+        match self.availability {
+            SkillAvailability::Codex => *provider == AgentProvider::CODEX,
+            SkillAvailability::Claude => *provider == AgentProvider::CLAUDE,
+            SkillAvailability::Both => {
+                *provider == AgentProvider::CODEX || *provider == AgentProvider::CLAUDE
+            }
+        }
+    }
 }
 
 /// Structured skill selection carried alongside a turn payload.
