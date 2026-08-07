@@ -116,6 +116,11 @@ not a platform. Six principles reverse it:
 
 ## 4. Multi-agent rooms
 
+> **Status (2026-08-07): design only — deliberately not scheduled.** We are
+> not building rooms now. This section is kept as the reference design so the
+> foundational work (§4a) is shaped correctly. Revisit when the foundations
+> are in and the product pull is real.
+
 The product idea: a thread grows into a **room** — several agents and (later)
 several humans, shared context, agents addressable and able to respond to each
 other. Brainstorm with three models at once; have one agent implement while
@@ -154,6 +159,36 @@ What the audit says this collides with, and the design that resolves it:
 Non-goals for v1: multi-human presence in one room (the relay/E2E model
 supports multiple devices of one user; multi-*user* needs identity work),
 agents spontaneously initiating without a rule, and cross-thread agent memory.
+
+### 4a. Foundations we DO build now (rooms-enabling, feature-free)
+
+Nearly everything rooms needs is already planned for other reasons; the rest
+is two cheap schema decisions that are far more expensive retrofitted later:
+
+1. **`author` on `ConversationItem`** — a `#[serde(default)]`
+   `Option<String>` carrying the producing provider id, stamped by each
+   ingestion pipeline (which already knows it). Additive on the wire, ignored
+   by renderers today. Retrofitting authorship onto years of persisted
+   anonymous items later is the single most painful migration rooms would
+   force — take it now, while it's one field.
+2. **Item dedup keyed `(source, native_id)`** instead of native id alone, so
+   two agents emitting the same native id can never collide. One-line change
+   at the dedup maps once ingestion converges.
+3. **SQLite conversation log** (Phase 0, decision §9.2) — the room transcript
+   must be FalconDeck-owned; also fixes ACP history loss today.
+4. **One event sink** (Phase 1 ProviderAdapter work) — three ingestion
+   pipelines converging on one sink means authorship stamping and log writes
+   live in exactly one place.
+5. **Runtimes in maps, not named fields** (Phase 1) — per-provider named
+   fields (`codex_session`, `claude_runtime`) become keyed maps, which is
+   also what concurrent per-participant runtimes need.
+6. **Tolerant readers + versioning** (Phase 0) — lets `turn.start` grow a
+   `participant_id` later without a breaking protocol change.
+
+And the discipline while rooms stays unbuilt — don't deepen the hole: no new
+code should assume thread ≡ provider beyond the existing `thread_provider()`
+choke point, no new scalar per-thread agent state (prefer shapes that could
+become per-participant), and no new provider-pair hardcoding anywhere.
 
 ## 5. Connectors: first-party MCP and skills UI
 
@@ -215,10 +250,11 @@ Each phase is independently shippable and each unlocks the next:
 - **Phase 2 — connectors**: Connectors settings UI over `connectors.json`
   (the daemon-side materialization already shipped, §5); skills install/enable
   UI; open availability model.
-- **Phase 3 — rooms**: participants, authorship, addressing, per-participant
-  runtimes, built on the SQLite item log from Phase 0/1.
-- **Phase 4 — extension host**: sidecar + manifest + dynamic RPC + declarative
+- **Phase 3 — extension host**: sidecar + manifest + dynamic RPC + declarative
   cards; automation rules ship as the first first-party extension.
+- **Unscheduled — rooms**: the feature itself (participants, addressing,
+  per-participant status/UI) waits; its foundations ship inside Phases 0–1
+  per §4a. Revisit once those land.
 
 Worktrees (`docs/WORKTREES.md`) are orthogonal daemon-side work and can
 interleave anywhere; rooms make them *more* valuable (one participant per
@@ -237,10 +273,11 @@ variant reviewing another's diff).
 
 ## 9. Decisions (locked 2026-08-07)
 
-1. **Rooms v1 scope: one human + N agents.** Multi-human chat drags in
-   identity, auth, and presence work that would delay the novel part
-   (multiple agents collaborating in one thread); solopreneurs get full value
-   without it. Multi-human lands when a real team asks.
+1. **Rooms: foundations now, feature later.** We build the rooms-enabling
+   structure (§4a — item authorship, `(source, native_id)` dedup, SQLite log,
+   single event sink, map-keyed runtimes, tolerant readers) inside Phases
+   0–1, but do not implement rooms themselves. When rooms do land, v1 scope
+   is one human + N agents — multi-human waits for real team demand.
 2. **System of record: FalconDeck owns the conversation log — SQLite per
    daemon.** Rehydrating from provider session files already fails for ACP
    and cannot support authorship or rooms. Pulled forward into Phase 0/1
