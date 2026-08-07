@@ -110,6 +110,22 @@ pub async fn acp_image_content_block(image: &ImageInput, encoded_budget: &mut us
     })
 }
 
+/// Folds one `agent_message_chunk` into a session's accumulated text.
+///
+/// ACP specifies chunks as deltas, but agents in the wild (Grok CLI) re-send
+/// the whole message so far on every chunk. Appending those duplicates the
+/// prefix and grows quadratically — the transcript shows each block repeating
+/// everything before it. A chunk that already contains the accumulated text is
+/// a snapshot, so replace rather than append.
+fn merge_assistant_chunk(accumulated: &mut String, chunk: &str) {
+    if !accumulated.is_empty() && chunk.len() >= accumulated.len() && chunk.starts_with(&*accumulated)
+    {
+        *accumulated = chunk.to_string();
+    } else {
+        accumulated.push_str(chunk);
+    }
+}
+
 /// One configured ACP provider, loaded from `providers.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AcpProviderConfig {
@@ -745,7 +761,7 @@ impl AcpRuntime {
 
     /// Appends assistant text for the session's current turn, creating the
     /// turn's item on first delta. Returns the item id and full text so far.
-    pub async fn append_assistant_text(&self, session_id: &str, delta: &str) -> (String, String) {
+    pub async fn append_assistant_text(&self, session_id: &str, chunk: &str) -> (String, String) {
         let mut items = self.current_items.lock().await;
         let entry = items.entry(session_id.to_string()).or_insert_with(|| {
             (
@@ -753,7 +769,7 @@ impl AcpRuntime {
                 String::new(),
             )
         });
-        entry.1.push_str(delta);
+        merge_assistant_chunk(&mut entry.1, chunk);
         (entry.0.clone(), entry.1.clone())
     }
 
@@ -1140,5 +1156,37 @@ mod tests {
     fn missing_config_file_yields_no_providers() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_acp_provider_configs(dir.path()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod assistant_text_tests {
+    use super::merge_assistant_chunk;
+
+    #[test]
+    fn snapshot_chunks_replace_instead_of_duplicating() {
+        // Agents that re-send the whole message so far (Grok CLI).
+        let mut text = String::new();
+        merge_assistant_chunk(&mut text, "I'll inspect the screenshot.");
+        merge_assistant_chunk(
+            &mut text,
+            "I'll inspect the screenshot. Unread-only threads are promoted.",
+        );
+        assert_eq!(
+            text,
+            "I'll inspect the screenshot. Unread-only threads are promoted."
+        );
+    }
+
+    #[test]
+    fn true_deltas_still_append() {
+        let mut text = String::new();
+        merge_assistant_chunk(&mut text, "Hello");
+        merge_assistant_chunk(&mut text, " world");
+        assert_eq!(text, "Hello world");
+        // A repeated delta is not a snapshot of itself: appending is correct.
+        merge_assistant_chunk(&mut text, "!");
+        merge_assistant_chunk(&mut text, "!");
+        assert_eq!(text, "Hello world!!");
     }
 }

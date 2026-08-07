@@ -314,6 +314,9 @@ impl AppState {
                 );
             }
             AcpEvent::TurnEnded { session_id } => {
+                if let Some(thread_id) = runtime.thread_for_session(&session_id).await {
+                    self.settle_running_tool_calls(workspace_id, &thread_id).await;
+                }
                 runtime.end_turn(&session_id).await;
             }
             AcpEvent::Fatal { message } => {
@@ -344,6 +347,55 @@ impl AppState {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Marks tool calls still flagged running as completed once the turn is
+    /// over. Nothing can still be executing at that point, and an agent that
+    /// never sends a terminal `tool_call_update` (Grok CLI omits it for some
+    /// tools) would otherwise leave spinners turning forever.
+    async fn settle_running_tool_calls(&self, workspace_id: &str, thread_id: &str) {
+        let updated = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(thread) = workspaces
+                .get_mut(workspace_id)
+                .and_then(|workspace| workspace.threads.get_mut(thread_id))
+            else {
+                return;
+            };
+            let mut updated = Vec::new();
+            for item in &mut thread.items {
+                if let ConversationItem::ToolCall {
+                    status,
+                    completed_at,
+                    title,
+                    tool_kind,
+                    output,
+                    display,
+                    ..
+                } = item
+                    && matches!(status.as_str(), "running" | "in_progress" | "pending")
+                {
+                    *status = "completed".to_string();
+                    *completed_at = Some(Utc::now());
+                    *display = tool_display_metadata(
+                        title,
+                        tool_kind,
+                        status,
+                        None,
+                        output.as_deref(),
+                    );
+                    updated.push(item.clone());
+                }
+            }
+            updated
+        };
+        for item in updated {
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ConversationItemUpdated { item },
+            );
+        }
+    }
+
     async fn push_acp_tool_item(
         &self,
         workspace_id: &str,
