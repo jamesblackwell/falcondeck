@@ -20,6 +20,9 @@ import { SettingsSidebar } from './settings/SettingsSidebar'
 import type { SettingsSectionId } from './settings/settings-utils'
 
 export type SettingsViewProps = {
+  /** Section shown when the view mounts; deep-links like the composer's
+   * connectors chip land directly on their panel. */
+  initialSection?: SettingsSectionId
   workspace?: WorkspaceSummary | null
   localWorkspaces: WorkspaceSummary[]
   baseUrl: string | null
@@ -47,7 +50,9 @@ export type SettingsViewProps = {
 }
 
 export function SettingsView(props: SettingsViewProps) {
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>('general')
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>(
+    props.initialSection ?? 'general',
+  )
 
   return (
     <section className="flex h-full min-h-0 bg-surface-1">

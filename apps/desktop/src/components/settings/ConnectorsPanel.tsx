@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   Badge,
@@ -81,31 +81,48 @@ function parseKeyValueLines(text: string, separator: '=' | ':'): Record<string, 
 
 export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPanelProps) {
   const [scope, setScope] = useState<string>('global')
-  const [overview, setOverview] = useState<ConnectorsOverview | null>(null)
+  // The overview remembers which scope it was loaded for: writes replace a
+  // whole file on the daemon, so a body built from one scope's data must
+  // never be addressed to another (stale-scope writes wipe real config).
+  const [overview, setOverview] = useState<{
+    forScope: string
+    data: ConnectorsOverview
+  } | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isWriting, setIsWriting] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [isAdding, setIsAdding] = useState(false)
   const [isImporting, setIsImporting] = useState(false)
+  const loadGeneration = useRef(0)
 
   const isWorkspaceScope = scope !== 'global'
+  const ready = overview !== null && overview.forScope === scope && !loadError
 
   const load = useCallback(async () => {
     if (!baseUrl) return
+    const generation = ++loadGeneration.current
     setIsLoading(true)
     setLoadError(null)
     try {
       const query = scope === 'global' ? '' : `?workspace_id=${encodeURIComponent(scope)}`
       const response = await fetch(`${baseUrl}/api/connectors${query}`)
       if (!response.ok) throw new Error(`daemon returned ${response.status}`)
-      setOverview((await response.json()) as ConnectorsOverview)
+      const data = (await response.json()) as ConnectorsOverview
+      if (generation !== loadGeneration.current) return
+      setOverview({ forScope: scope, data })
     } catch (error) {
+      if (generation !== loadGeneration.current) return
       setLoadError(error instanceof Error ? error.message : String(error))
     } finally {
-      setIsLoading(false)
+      if (generation === loadGeneration.current) setIsLoading(false)
     }
   }, [baseUrl, scope])
 
   useEffect(() => {
+    // Stale rows from the previous scope must not stay actionable while the
+    // new scope loads.
+    setOverview(null)
+    setLoadError(null)
     void load()
   }, [load])
 
@@ -114,16 +131,25 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
       targetScope: 'global' | 'workspace',
       mutate: (servers: Record<string, ConnectorEntry>) => Record<string, ConnectorEntry>,
     ) => {
-      if (!baseUrl || !overview) return false
+      if (!baseUrl) return false
+      if (!overview || overview.forScope !== scope) {
+        onToast({
+          variant: 'warning',
+          title: 'Connectors not loaded yet',
+          description: 'Wait for the list to load (or retry), then make the change again.',
+        })
+        return false
+      }
       const current =
-        targetScope === 'global' ? overview.global : (overview.workspace ?? {})
+        targetScope === 'global' ? overview.data.global : (overview.data.workspace ?? {})
+      setIsWriting(true)
       try {
         const response = await fetch(`${baseUrl}/api/connectors`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             scope: targetScope,
-            workspace_id: targetScope === 'workspace' ? scope : undefined,
+            workspace_id: targetScope === 'workspace' ? overview.forScope : undefined,
             mcpServers: mutate({ ...current }),
           }),
         })
@@ -140,22 +166,24 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
           description: error instanceof Error ? error.message : String(error),
         })
         return false
+      } finally {
+        setIsWriting(false)
       }
     },
     [baseUrl, load, onToast, overview, scope],
   )
 
   const rows = useMemo(() => {
-    if (!overview) return []
+    if (!ready || !overview) return []
     if (!isWorkspaceScope) {
-      return Object.entries(overview.global).map(([name, entry]) => ({
+      return Object.entries(overview.data.global).map(([name, entry]) => ({
         ...entry,
         name,
         scope: 'global' as const,
       }))
     }
-    return overview.merged
-  }, [overview, isWorkspaceScope])
+    return overview.data.merged
+  }, [overview, isWorkspaceScope, ready])
 
   return (
     <div className="space-y-6">
@@ -180,11 +208,16 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
             </CardDescription>
           </div>
           <div className="flex items-center gap-2">
-            <Button size="sm" variant="secondary" onClick={() => setIsImporting((value) => !value)}>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!ready}
+              onClick={() => setIsImporting((value) => !value)}
+            >
               <ClipboardPaste className="h-4 w-4" />
               Paste JSON
             </Button>
-            <Button size="sm" onClick={() => setIsAdding((value) => !value)}>
+            <Button size="sm" disabled={!ready} onClick={() => setIsAdding((value) => !value)}>
               {isAdding ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
               {isAdding ? 'Close' : 'Add server'}
             </Button>
@@ -238,12 +271,17 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
             />
           ) : null}
 
-          {isLoading && !overview ? (
+          {isLoading && !ready ? (
             <div className="flex items-center gap-2 px-2 py-6 text-[length:var(--fd-text-sm)] text-fg-muted">
               <LoaderCircle className="h-4 w-4 animate-spin" /> Loading connectors…
             </div>
           ) : loadError ? (
-            <p className="px-2 py-4 text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
+            <div className="flex items-center gap-3 px-2 py-4">
+              <p className="text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
+              <Button size="sm" variant="secondary" onClick={() => void load()}>
+                Retry
+              </Button>
+            </div>
           ) : rows.length === 0 && !isAdding && !isImporting ? (
             <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">
               <Plug className="h-6 w-6 text-fg-muted" />
@@ -256,14 +294,30 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
               <ConnectorRow
                 key={`${row.scope}:${row.name}`}
                 row={row}
-                onToggle={() =>
-                  writeScope(row.scope, (current) => ({
+                disabled={isWriting}
+                onToggle={() => {
+                  const { name, scope: rowScope, ...entry } = row
+                  if (isWorkspaceScope && rowScope === 'global') {
+                    // Toggling a global server from a workspace view must not
+                    // change it machine-wide; a workspace override (same name
+                    // wins the merge) scopes the flip to this workspace.
+                    void writeScope('workspace', (current) => ({
+                      ...current,
+                      [name]: { ...entry, enabled: row.enabled === false },
+                    }))
+                    return
+                  }
+                  void writeScope(rowScope, (current) => ({
                     ...current,
-                    [row.name]: { ...current[row.name], enabled: row.enabled === false },
+                    [name]: { ...current[name], enabled: row.enabled === false },
                   }))
-                }
+                }}
                 onRemove={() => {
-                  if (!window.confirm(`Remove the "${row.name}" MCP server?`)) return
+                  const machineWide = isWorkspaceScope && row.scope === 'global'
+                  const prompt = machineWide
+                    ? `Remove the "${row.name}" MCP server for every workspace on this machine?`
+                    : `Remove the "${row.name}" MCP server?`
+                  if (!window.confirm(prompt)) return
                   void writeScope(row.scope, (current) => {
                     const next = { ...current }
                     delete next[row.name]
@@ -312,10 +366,12 @@ function ScopeChip({
 
 function ConnectorRow({
   row,
+  disabled = false,
   onToggle,
   onRemove,
 }: {
   row: ConnectorEntry & { name: string; scope: 'global' | 'workspace' }
+  disabled?: boolean
   onToggle: () => void
   onRemove: () => void
 }) {
@@ -350,9 +406,10 @@ function ConnectorRow({
         role="switch"
         aria-checked={enabled}
         aria-label={`${enabled ? 'Disable' : 'Enable'} ${row.name}`}
+        disabled={disabled}
         onClick={onToggle}
         className={cn(
-          'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+          'relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-50',
           enabled ? 'bg-accent' : 'bg-surface-4',
         )}
       >
@@ -363,7 +420,13 @@ function ConnectorRow({
           )}
         />
       </button>
-      <Button size="icon" variant="ghost" aria-label={`Remove ${row.name}`} onClick={onRemove}>
+      <Button
+        size="icon"
+        variant="ghost"
+        aria-label={`Remove ${row.name}`}
+        disabled={disabled}
+        onClick={onRemove}
+      >
         <Trash2 className="h-4 w-4" />
       </Button>
     </div>

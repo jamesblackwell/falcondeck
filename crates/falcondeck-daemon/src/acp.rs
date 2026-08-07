@@ -86,7 +86,10 @@ pub struct AcpProviderConfig {
     /// Stable provider id, e.g. "grok".
     #[serde(skip)]
     pub id: String,
-    /// Human-readable label for pickers.
+    /// Human-readable label for pickers. Optional in the file — the loader
+    /// falls back to the id, and requiring it here would make every write
+    /// through the settings panel fail on hand-edited label-less entries.
+    #[serde(default)]
     pub label: String,
     /// Command line to spawn, e.g. ["grok", "agent", "stdio"].
     pub command: Vec<String>,
@@ -139,15 +142,22 @@ pub fn providers_overview(state_dir: &Path) -> Value {
 
 /// Validates and atomically writes `providers.json` (`{"providers": …}`).
 pub fn write_providers_file(state_dir: &Path, providers: &Value) -> Result<(), String> {
-    let parsed = serde_json::from_value::<HashMap<String, AcpProviderConfig>>(providers.clone())
-        .map_err(|error| format!("invalid providers payload: {error}"))?;
-    for (id, config) in &parsed {
+    let entries = providers
+        .as_object()
+        .ok_or("invalid providers payload: expected an object of provider entries")?;
+    for (id, entry) in entries {
         if id == "codex" || id == "claude" {
             return Err(format!(
                 "'{id}' is a built-in provider and cannot be overridden"
             ));
         }
-        if config.command.is_empty() || config.command[0].trim().is_empty() {
+        // Entries that parse get their command validated. Ones that do not are
+        // passed through untouched: the read path already tolerates (and
+        // hides) malformed hand-edits, and rejecting them here would wedge
+        // every save — including the delete that removes them.
+        if let Ok(config) = serde_json::from_value::<AcpProviderConfig>(entry.clone())
+            && (config.command.is_empty() || config.command[0].trim().is_empty())
+        {
             return Err(format!("provider '{id}' needs a non-empty command"));
         }
     }

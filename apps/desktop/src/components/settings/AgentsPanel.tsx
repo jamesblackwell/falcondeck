@@ -67,7 +67,15 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
     async (
       mutate: (providers: Record<string, ProviderEntry>) => Record<string, ProviderEntry>,
     ) => {
-      if (!baseUrl || !overview) return false
+      if (!baseUrl) return false
+      if (!overview) {
+        onToast({
+          variant: 'warning',
+          title: 'Agents not loaded yet',
+          description: 'Wait for the list to load (or retry), then make the change again.',
+        })
+        return false
+      }
       try {
         const response = await fetch(`${baseUrl}/api/providers`, {
           method: 'PUT',
@@ -136,7 +144,7 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
               installed stay hidden from pickers until it appears.
             </CardDescription>
           </div>
-          <Button size="sm" onClick={() => setIsAdding((value) => !value)}>
+          <Button size="sm" disabled={!overview} onClick={() => setIsAdding((value) => !value)}>
             {isAdding ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {isAdding ? 'Close' : 'Add agent'}
           </Button>
@@ -155,7 +163,12 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
             />
           ) : null}
           {loadError ? (
-            <p className="px-2 py-4 text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
+            <div className="flex items-center gap-3 px-2 py-4">
+              <p className="text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
+              <Button size="sm" variant="secondary" onClick={() => void load()}>
+                Retry
+              </Button>
+            </div>
           ) : !overview || overview.resolved.length === 0 ? (
             !isAdding ? (
               <div className="flex flex-col items-center gap-2 rounded-[var(--fd-radius-lg)] border border-dashed border-border-subtle px-6 py-10 text-center">

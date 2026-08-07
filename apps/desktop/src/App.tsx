@@ -44,6 +44,7 @@ import { DiffPanel } from './components/DiffPanel'
 import { PanelToggles } from './components/PanelToggles'
 import { ProjectImportOverlay } from './components/ProjectImportOverlay'
 import { SettingsView } from './components/SettingsView'
+import type { SettingsSectionId } from './components/settings/settings-utils'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
 import { usePanelVisibility } from './hooks/usePanelVisibility'
@@ -177,6 +178,7 @@ function AppInner() {
   const [isImportingProjectSessions, setIsImportingProjectSessions] = useState(false)
   const [isStartingRemote, setIsStartingRemote] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general')
   const [isSending, setIsSending] = useState(false)
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -219,22 +221,35 @@ function AppInner() {
     () => viewSnapshot?.workspaces.find((w) => w.id === selectedWorkspaceId) ?? null,
     [selectedWorkspaceId, viewSnapshot?.workspaces],
   )
-  // Enabled MCP servers for the selected local workspace; feeds the composer's
-  // tools chip. Re-fetched when settings close so panel edits show up.
+  // Enabled MCP servers usable by the selected local workspace's agents; feeds
+  // the composer's tools chip. Re-fetched when settings close so panel edits
+  // show up. Depends on scalar keys only — object/map identities churn per
+  // render and would turn every keystroke into a connector fetch.
   const [connectorCount, setConnectorCount] = useState(0)
+  const isRemoteWorkspaceSelected = workspaceHostIndex.has(selectedWorkspaceId ?? '')
+  const workspaceProviderIds = (selectedWorkspace?.agents ?? [])
+    .map((agent) => agent.provider)
+    .sort()
+    .join(',')
   useEffect(() => {
-    if (!baseUrl || !selectedWorkspaceId || workspaceHostIndex.has(selectedWorkspaceId)) {
+    if (!baseUrl || !selectedWorkspaceId || isRemoteWorkspaceSelected) {
       setConnectorCount(0)
       return
     }
     if (isSettingsOpen) return
+    const workspaceProviders = new Set(workspaceProviderIds.split(',').filter(Boolean))
     let cancelled = false
     void fetch(`${baseUrl}/api/connectors?workspace_id=${encodeURIComponent(selectedWorkspaceId)}`)
       .then(async (response) => (response.ok ? response.json() : null))
-      .then((overview: { merged?: Array<{ enabled?: boolean }> } | null) => {
+      .then((overview: { merged?: Array<{ enabled?: boolean; providers?: string[] }> } | null) => {
         if (cancelled) return
         setConnectorCount(
-          overview?.merged?.filter((entry) => entry.enabled !== false).length ?? 0,
+          overview?.merged?.filter(
+            (entry) =>
+              entry.enabled !== false &&
+              (!entry.providers?.length ||
+                entry.providers.some((provider) => workspaceProviders.has(provider))),
+          ).length ?? 0,
         )
       })
       .catch(() => {
@@ -243,7 +258,7 @@ function AppInner() {
     return () => {
       cancelled = true
     }
-  }, [baseUrl, selectedWorkspaceId, workspaceHostIndex, isSettingsOpen])
+  }, [baseUrl, selectedWorkspaceId, isRemoteWorkspaceSelected, isSettingsOpen, workspaceProviderIds])
   const selectedThread = useMemo(
     () => viewSnapshot?.threads.find((t) => t.id === selectedThreadId) ?? null,
     [selectedThreadId, viewSnapshot?.threads],
@@ -1042,6 +1057,7 @@ function AppInner() {
   )
 
   const handleOpenSettings = useCallback(() => {
+    setSettingsSection('general')
     setIsSettingsOpen(true)
   }, [])
 
@@ -1313,6 +1329,7 @@ function AppInner() {
         main={
           isSettingsOpen ? (
             <SettingsView
+              initialSection={settingsSection}
               workspace={selectedWorkspace}
               localWorkspaces={snapshot?.workspaces ?? []}
               baseUrl={baseUrl}
@@ -1384,7 +1401,10 @@ function AppInner() {
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
                 connectorCount,
-                onConnectorsClick: () => setIsSettingsOpen(true),
+                onConnectorsClick: () => {
+                  setSettingsSection('connectors')
+                  setIsSettingsOpen(true)
+                },
               }}
               headerControls={
                 <>

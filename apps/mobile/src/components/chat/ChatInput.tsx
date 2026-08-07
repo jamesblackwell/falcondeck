@@ -260,7 +260,7 @@ export const ChatInput = memo(function ChatInput({
                           </Text>
                         </View>
                         <Text variant="caption" size="2xs" color="muted">
-                          {skill.availability}
+                          {skill.providers.join(' / ')}
                         </Text>
                       </View>
                       <Text color={supported ? 'primary' : 'muted'} size="sm" weight="medium">

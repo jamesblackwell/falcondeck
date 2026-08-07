@@ -72,6 +72,10 @@ struct ConnectorEntry {
     /// Provider ids this server is offered to; empty = all providers.
     #[serde(default)]
     providers: Vec<String>,
+    /// Fields we do not model (hand-edits, future keys). Carried so the
+    /// settings UI's read-modify-write cycle cannot strip them from the file.
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
 }
 
 fn default_enabled() -> bool {

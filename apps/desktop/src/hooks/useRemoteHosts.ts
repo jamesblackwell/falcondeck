@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { HostManager, type HostView } from '../hosts'
 
@@ -13,7 +13,7 @@ function getManager(): HostManager {
 
 export function useRemoteHosts() {
   const manager = useRef(getManager()).current
-  const [, setTick] = useState(0)
+  const [tick, setTick] = useState(0)
 
   useEffect(() => {
     const unsubscribe = manager.subscribe(() => setTick((value) => value + 1))
@@ -21,8 +21,10 @@ export function useRemoteHosts() {
     return unsubscribe
   }, [manager])
 
-  // Fresh views every render; renders are driven by manager notifications.
-  const hosts: HostView[] = manager.views()
+  // Views change only when the manager notifies (tick), so memoizing on it
+  // keeps the array identity stable across unrelated renders — effects and
+  // memos downstream (e.g. workspaceHostIndex) must not churn per keystroke.
+  const hosts: HostView[] = useMemo(() => manager.views(), [manager, tick])
 
   const hostForWorkspace = useCallback(
     (workspaceId: string | null | undefined) =>

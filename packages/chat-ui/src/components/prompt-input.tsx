@@ -319,7 +319,7 @@ export const PromptInput = memo(function PromptInput({
                         <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)]">
                           <span className="font-medium">{skill.alias}</span>
                           <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
-                            {skill.availability}
+                            {skill.providers.join(' / ')}
                           </span>
                           <span className="rounded-full border border-border-subtle px-2 py-0.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
                             {skill.source_kind.replace('_', ' ')}
