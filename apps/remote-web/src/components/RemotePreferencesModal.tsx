@@ -1,6 +1,6 @@
 import type { FalconDeckPreferences, UpdatePreferencesPayload } from '@falcondeck/client-core'
 import { normalizePreferences } from '@falcondeck/client-core'
-import { Badge, Button } from '@falcondeck/ui'
+import { AppearanceControls, Badge, Button } from '@falcondeck/ui'
 
 import { X } from 'lucide-react'
 
@@ -53,22 +53,35 @@ export function RemotePreferencesModal({
         aria-label="Close preferences"
         onClick={onClose}
       />
-      <div className="absolute inset-x-4 top-20 mx-auto w-full max-w-xl rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-2xl">
+      <div className="absolute inset-x-4 top-10 mx-auto max-h-[calc(100dvh-5rem)] w-full max-w-xl overflow-y-auto rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
             <p className="text-[length:var(--fd-text-xs)] uppercase tracking-[0.24em] text-fg-muted">
               Preferences
             </p>
             <h2 className="mt-1 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
-              Conversation density
+              Appearance
             </h2>
             <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
-              These settings are stored in FalconDeck&apos;s shared `falcondeck.json`.
+              Theme, fonts, and text size are stored on this device.
             </p>
           </div>
           <Button type="button" variant="ghost" size="icon" onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
+        </div>
+
+        <div className="mt-4">
+          <AppearanceControls />
+        </div>
+
+        <div className="mt-6 border-t border-border-subtle pt-5">
+          <h2 className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
+            Conversation density
+          </h2>
+          <p className="mt-1 text-[length:var(--fd-text-sm)] text-fg-tertiary">
+            These settings are stored in FalconDeck&apos;s shared `falcondeck.json`.
+          </p>
         </div>
 
         <div className="mt-4 grid gap-3 md:grid-cols-2">

@@ -1,0 +1,171 @@
+import { memo, useMemo, useState } from 'react'
+import { Bell, ChevronDown } from 'lucide-react'
+
+import {
+  deriveThreadAttentionPresentation,
+  type ProjectGroup,
+  type ThreadSummary,
+} from '@falcondeck/client-core'
+import { cn } from '@falcondeck/ui'
+
+const MAX_INBOX_ITEMS = 8
+
+type InboxEntry = {
+  thread: ThreadSummary
+  workspaceId: string
+  projectLabel: string
+  tone: 'warning' | 'danger' | 'info'
+  reason: string
+  priority: number
+}
+
+export function collectAttentionEntries(groups: ProjectGroup[]): InboxEntry[] {
+  const entries: InboxEntry[] = []
+  for (const group of groups) {
+    const projectLabel = group.workspace.path.split('/').pop() ?? group.workspace.path
+    for (const thread of group.threads) {
+      if (thread.is_archived) continue
+      const attention = deriveThreadAttentionPresentation(thread)
+      if (attention.level === 'awaiting_response') {
+        entries.push({
+          thread,
+          workspaceId: group.workspace.id,
+          projectLabel,
+          tone: 'warning',
+          reason: attention.badgeLabel ?? 'Awaiting response',
+          priority: 0,
+        })
+      } else if (attention.level === 'error') {
+        entries.push({
+          thread,
+          workspaceId: group.workspace.id,
+          projectLabel,
+          tone: 'danger',
+          reason: 'Failed',
+          priority: 1,
+        })
+      } else if (attention.unread) {
+        entries.push({
+          thread,
+          workspaceId: group.workspace.id,
+          projectLabel,
+          tone: 'info',
+          reason: 'Unread',
+          priority: 2,
+        })
+      }
+    }
+  }
+  return entries.sort(
+    (a, b) =>
+      a.priority - b.priority ||
+      Date.parse(b.thread.updated_at) - Date.parse(a.thread.updated_at),
+  )
+}
+
+const TONE_DOT: Record<InboxEntry['tone'], string> = {
+  warning: 'bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]',
+  danger: 'bg-danger',
+  info: 'bg-info',
+}
+
+const TONE_TEXT: Record<InboxEntry['tone'], string> = {
+  warning: 'text-warning',
+  danger: 'text-danger',
+  info: 'text-info',
+}
+
+export type AttentionInboxProps = {
+  groups: ProjectGroup[]
+  selectedThreadId: string | null
+  onSelectThread: (workspaceId: string, threadId: string) => void
+}
+
+/**
+ * Pinned "Needs attention" section for the sidebar: threads waiting on an
+ * approval or answer, failed runs, and unread finishes — across every project.
+ * Renders nothing when the user is caught up.
+ */
+export const AttentionInbox = memo(function AttentionInbox({
+  groups,
+  selectedThreadId,
+  onSelectThread,
+}: AttentionInboxProps) {
+  const [collapsed, setCollapsed] = useState(false)
+  const entries = useMemo(() => collectAttentionEntries(groups), [groups])
+
+  if (entries.length === 0) return null
+
+  const visible = entries.slice(0, MAX_INBOX_ITEMS)
+  const overflow = entries.length - visible.length
+
+  return (
+    <section
+      aria-label={`Needs attention: ${entries.length} threads`}
+      className="mb-4 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-2 p-1"
+    >
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed(!collapsed)}
+        className="fd-focus-inset flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-1.5 py-1.5 text-left"
+      >
+        <Bell aria-hidden="true" className="h-3.5 w-3.5 text-warning" />
+        <span className="flex-1 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-secondary">
+          Needs attention
+        </span>
+        <span className="rounded-full bg-warning-muted px-1.5 py-0.5 text-[length:var(--fd-text-2xs)] font-semibold text-warning">
+          {entries.length}
+        </span>
+        <ChevronDown
+          aria-hidden="true"
+          className={cn('h-3 w-3 text-fg-muted transition-transform', collapsed && '-rotate-90')}
+        />
+      </button>
+
+      {!collapsed ? (
+        <div className="mt-0.5">
+          {visible.map((entry) => (
+            <button
+              key={entry.thread.id}
+              type="button"
+              onClick={() => onSelectThread(entry.workspaceId, entry.thread.id)}
+              className={cn(
+                'fd-focus-inset flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-1.5 py-1.5 text-left',
+                selectedThreadId === entry.thread.id
+                  ? 'bg-accent-dim'
+                  : 'hover:bg-surface-3 active:bg-surface-4',
+              )}
+            >
+              <span
+                aria-hidden="true"
+                className={cn('h-2 w-2 shrink-0 rounded-full', TONE_DOT[entry.tone])}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[length:var(--fd-text-sm)] text-fg-primary">
+                  {entry.thread.title}
+                </span>
+                <span className="block truncate text-[length:var(--fd-text-2xs)] text-fg-muted">
+                  {entry.projectLabel}
+                </span>
+              </span>
+              <span
+                className={cn(
+                  'shrink-0 text-[length:var(--fd-text-2xs)] font-medium',
+                  TONE_TEXT[entry.tone],
+                )}
+              >
+                {entry.reason}
+              </span>
+            </button>
+          ))}
+          {overflow > 0 ? (
+            <p className="px-1.5 py-1 text-[length:var(--fd-text-2xs)] text-fg-muted">
+              +{overflow} more below
+            </p>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  )
+})

@@ -61,48 +61,37 @@ impl AppState {
         let fence_seq = self.inner.sequence.load(Ordering::Relaxed);
         let snapshot = self.snapshot().await;
 
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::RpcRegister {
-                method: "snapshot.current".to_string(),
-            },
-        )
-        .await?;
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::RpcRegister {
-                method: "interactive.respond".to_string(),
-            },
-        )
-        .await?;
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::RpcRegister {
-                method: "thread.start".to_string(),
-            },
-        )
-        .await?;
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::RpcRegister {
-                method: "thread.detail".to_string(),
-            },
-        )
-        .await?;
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::RpcRegister {
-                method: "turn.start".to_string(),
-            },
-        )
-        .await?;
-        send_relay_message(
-            &mut writer,
-            &RelayClientMessage::RpcRegister {
-                method: "turn.interrupt".to_string(),
-            },
-        )
-        .await?;
+        // Every method the encrypted RPC dispatcher understands must be
+        // registered here or the relay fails the call without consulting the
+        // daemon (rpc-call routes via the registration table only).
+        const RPC_METHODS: &[&str] = &[
+            "snapshot.current",
+            "preferences.read",
+            "preferences.update",
+            "interactive.respond",
+            "approval.respond",
+            "thread.start",
+            "thread.detail",
+            "thread.update",
+            "thread.archive",
+            "thread.unarchive",
+            "thread.mark_read",
+            "thread.goal.set",
+            "thread.goal.clear",
+            "turn.start",
+            "turn.interrupt",
+            "workspace.connect",
+            "workspace.remove",
+        ];
+        for method in RPC_METHODS {
+            send_relay_message(
+                &mut writer,
+                &RelayClientMessage::RpcRegister {
+                    method: (*method).to_string(),
+                },
+            )
+            .await?;
+        }
         if let Some(client_bundle) = client_bundle.as_ref() {
             self.publish_session_bootstrap(&mut writer, &pairing, client_bundle)
                 .await?;
@@ -619,6 +608,17 @@ impl AppState {
                 self.update_thread(request)
                     .await
                     .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
+            "workspace.connect" => {
+                let request = falcondeck_core::ConnectWorkspaceRequest {
+                    path: required(&["path"])?,
+                };
+                self.connect_workspace(request)
+                    .await
+                    .and_then(|workspace| {
+                        serde_json::to_value(workspace).map_err(DaemonError::from)
+                    })
                     .map_err(|error| error.to_string())
             }
             "workspace.remove" => {

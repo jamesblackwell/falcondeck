@@ -85,13 +85,12 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginLeft: theme.spacing[2],
     paddingLeft: theme.spacing[2],
     paddingRight: theme.spacing[3],
     paddingVertical: theme.spacing[2],
     borderRadius: theme.radius.md,
     borderCurve: 'continuous',
-    gap: theme.spacing[2],
+    gap: theme.spacing[1.5],
   },
   selected: {
     backgroundColor: theme.colors.accent.dim,

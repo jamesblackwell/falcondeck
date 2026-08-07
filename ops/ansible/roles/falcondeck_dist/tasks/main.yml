@@ -1,0 +1,41 @@
+---
+- name: Create dist directory
+  ansible.builtin.file:
+    path: "{{ falcondeck_dist_dir }}"
+    state: directory
+    owner: falcondeck
+    group: falcondeck
+    mode: "0755"
+
+- name: Build Linux daemon binary on the server
+  ansible.builtin.shell: |
+    set -euo pipefail
+    . "$HOME/.cargo/env"
+    cargo build --release -p falcondeck-daemon
+  args:
+    chdir: "{{ falcondeck_repo_dest }}"
+    executable: /bin/bash
+
+- name: Publish daemon binary to dist directory
+  ansible.builtin.copy:
+    src: "{{ falcondeck_repo_dest }}/target/release/falcondeck-daemon"
+    dest: "{{ falcondeck_dist_dir }}/{{ falcondeck_dist_daemon_name }}"
+    remote_src: true
+    owner: falcondeck
+    group: falcondeck
+    mode: "0644"
+
+- name: Read published daemon checksum
+  ansible.builtin.stat:
+    path: "{{ falcondeck_dist_dir }}/{{ falcondeck_dist_daemon_name }}"
+    checksum_algorithm: sha256
+    get_checksum: true
+  register: falcondeck_dist_daemon_stat
+
+- name: Publish daemon checksum file
+  ansible.builtin.copy:
+    content: "{{ falcondeck_dist_daemon_stat.stat.checksum }}  {{ falcondeck_dist_daemon_name }}\n"
+    dest: "{{ falcondeck_dist_dir }}/{{ falcondeck_dist_daemon_name }}.sha256"
+    owner: falcondeck
+    group: falcondeck
+    mode: "0644"

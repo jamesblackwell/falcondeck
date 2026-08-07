@@ -7,6 +7,12 @@ import { ChevronLeft } from 'lucide-react-native'
 
 import { clearPushToken, isPushEnabled, registerPushToken, setPushEnabled } from '@/lib/push-notifications'
 import { useRelayStore } from '@/store'
+import {
+  FONT_SCALE_OPTIONS,
+  PALETTE_OPTIONS,
+  THEME_MODE_OPTIONS,
+  useAppearanceStore,
+} from '@/theme/appearance'
 import { Text, Button, Card, CardContent } from '@/components/ui'
 
 function connectionSummary(
@@ -55,6 +61,13 @@ export default function SettingsScreen() {
   }
 
   const [pushEnabled, setPushEnabledState] = useState(isPushEnabled)
+
+  const themeMode = useAppearanceStore((s) => s.themeMode)
+  const palette = useAppearanceStore((s) => s.palette)
+  const fontScale = useAppearanceStore((s) => s.fontScale)
+  const setThemeMode = useAppearanceStore((s) => s.setThemeMode)
+  const setPalette = useAppearanceStore((s) => s.setPalette)
+  const setFontScale = useAppearanceStore((s) => s.setFontScale)
 
   const handlePushToggle = (enabled: boolean) => {
     setPushEnabledState(enabled)
@@ -122,6 +135,86 @@ export default function SettingsScreen() {
 
       <Card variant="flat" style={styles.card}>
         <CardContent>
+          <View style={styles.settingBlock}>
+            <Text variant="label" color="muted">Theme</Text>
+            <View style={styles.segmentRow}>
+              {THEME_MODE_OPTIONS.map((option) => {
+                const selected = themeMode === option.value
+                return (
+                  <Pressable
+                    key={option.value}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    onPress={() => setThemeMode(option.value)}
+                    style={[styles.segment, selected && styles.segmentSelected]}
+                  >
+                    <Text
+                      variant="label"
+                      color={selected ? 'accent' : 'secondary'}
+                    >
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                )
+              })}
+            </View>
+          </View>
+          <View style={styles.settingBlock}>
+            <Text variant="label" color="muted">Color theme</Text>
+            <View style={styles.segmentRow}>
+              {PALETTE_OPTIONS.map((option) => {
+                const selected = palette === option.value
+                return (
+                  <Pressable
+                    key={option.value}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    onPress={() => setPalette(option.value)}
+                    style={[styles.segment, selected && styles.segmentSelected]}
+                  >
+                    <Text
+                      variant="label"
+                      color={selected ? 'accent' : 'secondary'}
+                    >
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                )
+              })}
+            </View>
+          </View>
+          <View style={styles.settingBlock}>
+            <Text variant="label" color="muted">Text size</Text>
+            <View style={styles.segmentRow}>
+              {FONT_SCALE_OPTIONS.map((option) => {
+                const selected = fontScale === option.value
+                return (
+                  <Pressable
+                    key={option.value}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected }}
+                    onPress={() => setFontScale(option.value)}
+                    style={[styles.segment, selected && styles.segmentSelected]}
+                  >
+                    <Text
+                      variant="label"
+                      color={selected ? 'accent' : 'secondary'}
+                    >
+                      {option.label}
+                    </Text>
+                  </Pressable>
+                )
+              })}
+            </View>
+          </View>
+          <Text variant="caption" color="muted" style={styles.rowCaption}>
+            System follows this device’s light or dark appearance.
+          </Text>
+        </CardContent>
+      </Card>
+
+      <Card variant="flat" style={styles.card}>
+        <CardContent>
           <View style={styles.row}>
             <Text variant="label" color="muted">Push notifications</Text>
             <Switch
@@ -131,7 +224,7 @@ export default function SettingsScreen() {
               thumbColor={theme.colors.white}
             />
           </View>
-          <Text variant="caption" color="faint" style={styles.rowCaption}>
+          <Text variant="caption" color="muted" style={styles.rowCaption}>
             Get alerted when an agent needs attention while you are away.
           </Text>
         </CardContent>
@@ -184,6 +277,27 @@ const styles = StyleSheet.create((theme) => ({
   },
   rowCaption: {
     paddingVertical: theme.spacing[2],
+  },
+  settingBlock: {
+    gap: theme.spacing[2],
+    paddingVertical: theme.spacing[2],
+  },
+  segmentRow: {
+    flexDirection: 'row',
+    gap: theme.spacing[2],
+  },
+  segment: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: theme.spacing[2],
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border.default,
+    backgroundColor: theme.colors.surface[2],
+  },
+  segmentSelected: {
+    borderColor: theme.colors.accent.default,
+    backgroundColor: theme.colors.accent.muted,
   },
   disconnect: {
     marginTop: theme.spacing[4],

@@ -20,7 +20,17 @@ use falcondeck_core::{
     ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
 };
 
-use crate::{app::AppState, error::DaemonError};
+use crate::{
+    app::{
+        AppState,
+        host_provisioning::{
+            HostCommandRequest, HostCommandResponse, ProvisionHostRequest, ProvisionJob,
+            StartProvisionResponse,
+        },
+    },
+    error::DaemonError,
+    ssh_config::SshHostsResponse,
+};
 
 /// Browser origins allowed to call the daemon API: the Tauri webview only
 /// (dev server plus the prod webview origins). The API is unauthenticated and
@@ -90,6 +100,10 @@ pub fn router(state: AppState) -> Router {
             "/api/remote/devices/{device_id}",
             delete(revoke_remote_device),
         )
+        .route("/api/ssh/hosts", get(ssh_hosts))
+        .route("/api/hosts/provision", post(provision_host))
+        .route("/api/hosts/provision/{job_id}", get(provision_host_status))
+        .route("/api/hosts/command", post(host_command))
         .route("/api/events", get(events))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
@@ -195,6 +209,31 @@ async fn revoke_remote_device(
     Path(device_id): Path<String>,
 ) -> Result<Json<falcondeck_core::RemoteStatusResponse>, DaemonError> {
     Ok(Json(state.revoke_remote_device(&device_id).await?))
+}
+
+async fn ssh_hosts() -> Json<SshHostsResponse> {
+    Json(crate::ssh_config::list_ssh_hosts().await)
+}
+
+async fn provision_host(
+    State(state): State<AppState>,
+    Json(request): Json<ProvisionHostRequest>,
+) -> Result<Json<StartProvisionResponse>, DaemonError> {
+    Ok(Json(state.start_host_provision(request).await?))
+}
+
+async fn provision_host_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<ProvisionJob>, DaemonError> {
+    Ok(Json(state.host_provision_job(&job_id).await?))
+}
+
+async fn host_command(
+    State(state): State<AppState>,
+    Json(request): Json<HostCommandRequest>,
+) -> Result<Json<HostCommandResponse>, DaemonError> {
+    Ok(Json(state.run_host_command(request).await?))
 }
 
 async fn remove_workspace(

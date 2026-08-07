@@ -7,7 +7,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   version: '0.1.0',
   scheme: 'falcondeck',
   orientation: 'default',
-  userInterfaceStyle: 'dark',
+  userInterfaceStyle: 'automatic',
   newArchEnabled: true,
   runtimeVersion: {
     policy: 'appVersion',

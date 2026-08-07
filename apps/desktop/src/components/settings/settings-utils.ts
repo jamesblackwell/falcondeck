@@ -1,9 +1,9 @@
 import type { RemoteStatusResponse, ToolDetailsMode, TrustedDevice } from '@falcondeck/client-core'
-import { Settings, Wifi } from 'lucide-react'
+import { Palette, Settings, Wifi } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 
-export type SettingsSectionId = 'general' | 'remote'
+export type SettingsSectionId = 'general' | 'appearance' | 'remote'
 
 export type SettingsNavItem = {
   id: SettingsSectionId
@@ -18,6 +18,12 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: 'General',
     description: 'Core app behavior and future defaults',
     icon: Settings,
+  },
+  {
+    id: 'appearance',
+    label: 'Appearance',
+    description: 'Theme, fonts, and text size',
+    icon: Palette,
   },
   {
     id: 'remote',

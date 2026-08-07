@@ -25,10 +25,12 @@ import {
   cn,
 } from '@falcondeck/ui'
 
+import { AttentionInbox } from './attention-inbox'
 import { ThreadItem, type ThreadItemArchiveHandler } from './thread-item'
 import { WorkspaceGroup } from './workspace-group'
 
 const VISIBLE_THREAD_LIMIT = 5
+const SHOW_MORE_STEP = 10
 const RELATIVE_TIME_TICK_MS = 60_000
 const OPTIMISTIC_SELECTION_TTL_MS = 1_500
 // Must match the rendered menu width below (`w-52`), or the viewport clamp
@@ -111,27 +113,28 @@ const ThreadList = memo(function ThreadList({
   onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void
   nowTick: number
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT)
   const orderedThreads = useMemo(() => {
     const pinned = group.threads.filter((thread) => thread.is_pinned)
     if (pinned.length === 0) return group.threads
     return [...pinned, ...group.threads.filter((thread) => !thread.is_pinned)]
   }, [group.threads])
-  const hasOverflow = orderedThreads.length > VISIBLE_THREAD_LIMIT
-  const selectedIsHidden =
-    hasOverflow &&
-    !expanded &&
-    selectedThreadId != null &&
-    orderedThreads.findIndex((thread) => thread.id === selectedThreadId) >= VISIBLE_THREAD_LIMIT
 
-  const showAll = expanded || selectedIsHidden
-  const visible = showAll ? orderedThreads : orderedThreads.slice(0, VISIBLE_THREAD_LIMIT)
-  const hiddenCount = orderedThreads.length - VISIBLE_THREAD_LIMIT
+  // Reveal just enough to keep the selected thread visible, without jumping
+  // straight to the full list.
+  const selectedIndex =
+    selectedThreadId != null
+      ? orderedThreads.findIndex((thread) => thread.id === selectedThreadId)
+      : -1
+  const effectiveCount = selectedIndex >= visibleCount ? selectedIndex + 1 : visibleCount
+  const visible = orderedThreads.slice(0, effectiveCount)
+  const hiddenCount = Math.max(0, orderedThreads.length - visible.length)
+  const canCollapse = hiddenCount === 0 && orderedThreads.length > VISIBLE_THREAD_LIMIT
 
   return (
     <>
       {group.threads.length === 0 ? (
-        <p className="py-2 pl-2 text-[length:var(--fd-text-xs)] text-fg-muted">No threads yet</p>
+        <p className="py-2 pl-2.5 text-[length:var(--fd-text-xs)] text-fg-muted">No threads yet</p>
       ) : null}
       {visible.map((thread) => (
         <ThreadItem
@@ -145,15 +148,17 @@ const ThreadList = memo(function ThreadList({
           nowTick={nowTick}
         />
       ))}
-      {hasOverflow ? (
+      {hiddenCount > 0 || canCollapse ? (
         <button
           type="button"
-          onClick={() => setExpanded(!showAll)}
-          aria-expanded={showAll}
+          onClick={() =>
+            setVisibleCount(canCollapse ? VISIBLE_THREAD_LIMIT : effectiveCount + SHOW_MORE_STEP)
+          }
+          aria-expanded={canCollapse}
           className="fd-focus flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
         >
-          <ChevronDown aria-hidden="true" className={cn('h-3 w-3', showAll && 'rotate-180')} />
-          {showAll ? 'Show less' : `${hiddenCount} older threads`}
+          <ChevronDown aria-hidden="true" className={cn('h-3 w-3', canCollapse && 'rotate-180')} />
+          {canCollapse ? 'Show less' : 'Show more'}
         </button>
       ) : null}
     </>
@@ -558,6 +563,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       </SidebarHeader>
 
       <SidebarContent className={contentClassName}>
+        <AttentionInbox
+          groups={groups}
+          selectedThreadId={visualSelectedThreadId}
+          onSelectThread={handleSelectThread}
+        />
         <div className="space-y-4">
           {groups.map((group) => (
             <WorkspaceGroup

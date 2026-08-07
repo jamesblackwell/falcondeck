@@ -23,6 +23,9 @@ falcondeck_repo_src: ~/src/falcondeck
 # Remote checkout/build path used by Ansible
 falcondeck_repo_dest: /usr/local/src/falcondeck
 
+# Directory of prebuilt artifacts served at {{ falcondeck_relay_public_url }}/dist/
+falcondeck_dist_dir: /var/lib/falcondeck/dist
+
 # Optional PostgreSQL-backed relay storage (recommended for production)
 falcondeck_relay_postgres_enabled: false
 falcondeck_relay_postgres_managed: false

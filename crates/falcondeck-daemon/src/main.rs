@@ -5,6 +5,13 @@ use falcondeck_daemon::{DaemonConfig, run};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Provisioning probes an installed binary before replacing it, so
+    // `--version` has to answer and exit rather than start a daemon.
+    if std::env::args().skip(1).any(|arg| arg == "--version") {
+        println!("falcondeck-daemon {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let port = std::env::args()
         .skip(1)
         .find_map(|arg| arg.strip_prefix("--port=").map(str::to_string))

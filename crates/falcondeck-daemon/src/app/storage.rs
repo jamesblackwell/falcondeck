@@ -343,8 +343,9 @@ fn write_secret_file(
     entries: &std::collections::HashMap<String, String>,
 ) -> Result<(), DaemonError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| DaemonError::Process(format!("failed to create secret dir: {error}")))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            DaemonError::Process(format!("failed to create secret dir: {error}"))
+        })?;
     }
     let payload = serde_json::to_string(entries)?;
     std::fs::write(path, payload)
@@ -381,9 +382,9 @@ pub(super) fn load_remote_secrets_from_secure_storage(
 ) -> Result<PersistedRemoteSecrets, DaemonError> {
     if let Some(path) = secret_file_path() {
         let entries = read_secret_file(&path);
-        let payload = entries.get(secure_storage_key).ok_or_else(|| {
-            DaemonError::NotFound("no persisted remote secrets".to_string())
-        })?;
+        let payload = entries
+            .get(secure_storage_key)
+            .ok_or_else(|| DaemonError::NotFound("no persisted remote secrets".to_string()))?;
         return serde_json::from_str::<PersistedRemoteSecrets>(payload).map_err(|error| {
             DaemonError::BadRequest(format!("invalid secret file payload: {error}"))
         });

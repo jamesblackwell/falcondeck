@@ -1,13 +1,13 @@
 import { Stack } from 'expo-router'
-
-import { colors } from '@/theme/tokens'
+import { useUnistyles } from 'react-native-unistyles'
 
 export default function AuthLayout() {
+  const { theme } = useUnistyles()
   return (
     <Stack
       screenOptions={{
         headerShown: false,
-        contentStyle: { backgroundColor: colors.surface[0] },
+        contentStyle: { backgroundColor: theme.colors.surface[0] },
       }}
     />
   )

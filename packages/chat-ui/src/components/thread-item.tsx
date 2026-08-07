@@ -67,7 +67,7 @@ export const ThreadItem = memo(
       >
         <button
           type="button"
-          className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] text-left"
+          className="fd-focus-inset flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--fd-radius-sm)] text-left"
           onClick={() => onSelect(workspaceId, thread.id)}
         >
           <span className="flex h-4 w-4 shrink-0 items-center justify-center">

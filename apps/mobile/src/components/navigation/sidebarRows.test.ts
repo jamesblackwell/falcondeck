@@ -5,7 +5,7 @@ import { workspace, thread } from '@/test/factories'
 import { buildSidebarRows, VISIBLE_THREAD_LIMIT } from './sidebarRows'
 
 const emptyCollapsed = new Set<string>()
-const emptyExpanded = new Set<string>()
+const defaultCounts = new Map<string, number>()
 
 describe('buildSidebarRows', () => {
   it('creates workspace and thread rows in order', () => {
@@ -20,7 +20,7 @@ describe('buildSidebarRows', () => {
         },
       ],
       emptyCollapsed,
-      emptyExpanded,
+      defaultCounts,
       null,
     )
 
@@ -55,7 +55,7 @@ describe('buildSidebarRows', () => {
         },
       ],
       emptyCollapsed,
-      emptyExpanded,
+      defaultCounts,
       null,
     )
 
@@ -79,7 +79,7 @@ describe('buildSidebarRows', () => {
         },
       ],
       collapsed,
-      emptyExpanded,
+      defaultCounts,
       null,
     )
 
@@ -95,7 +95,7 @@ describe('buildSidebarRows', () => {
     const rows = buildSidebarRows(
       [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
       emptyCollapsed,
-      emptyExpanded,
+      defaultCounts,
       null,
     )
 
@@ -108,15 +108,36 @@ describe('buildSidebarRows', () => {
     expect((overflow as any).isExpanded).toBe(false)
   })
 
-  it('expands thread list when requested', () => {
-    const threads = Array.from({ length: 8 }, (_, i) =>
+  it('shows more threads incrementally when a larger count is requested', () => {
+    const threads = Array.from({ length: 20 }, (_, i) =>
       thread({ id: `t${i}`, workspace_id: 'w1' }),
     )
-    const expanded = new Set(['w1'])
+    const counts = new Map([['w1', VISIBLE_THREAD_LIMIT + 10]])
     const rows = buildSidebarRows(
       [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
       emptyCollapsed,
-      expanded,
+      counts,
+      null,
+    )
+
+    const threadRows = rows.filter((r) => r.type === 'thread')
+    expect(threadRows).toHaveLength(15)
+
+    const overflow = rows.find((r) => r.type === 'overflow')
+    expect((overflow as any).hiddenCount).toBe(5)
+    expect((overflow as any).visibleCount).toBe(15)
+    expect((overflow as any).isExpanded).toBe(false)
+  })
+
+  it('offers Show less once every thread is visible', () => {
+    const threads = Array.from({ length: 8 }, (_, i) =>
+      thread({ id: `t${i}`, workspace_id: 'w1' }),
+    )
+    const counts = new Map([['w1', 15]])
+    const rows = buildSidebarRows(
+      [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
+      emptyCollapsed,
+      counts,
       null,
     )
 
@@ -124,21 +145,25 @@ describe('buildSidebarRows', () => {
     expect(threadRows).toHaveLength(8)
 
     const overflow = rows.find((r) => r.type === 'overflow')
+    expect((overflow as any).hiddenCount).toBe(0)
     expect((overflow as any).isExpanded).toBe(true)
   })
 
-  it('auto-expands when selected thread is hidden', () => {
+  it('extends the visible range just enough to include a hidden selected thread', () => {
     const threads = Array.from({ length: 8 }, (_, i) =>
       thread({ id: `t${i}`, workspace_id: 'w1' }),
     )
     const rows = buildSidebarRows(
       [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
       emptyCollapsed,
-      emptyExpanded,
+      defaultCounts,
       't6', // beyond the visible limit
     )
 
     const threadRows = rows.filter((r) => r.type === 'thread')
-    expect(threadRows).toHaveLength(8) // all shown because selected is hidden
+    expect(threadRows).toHaveLength(7) // t0..t6 shown so the selection stays visible
+
+    const overflow = rows.find((r) => r.type === 'overflow')
+    expect((overflow as any).hiddenCount).toBe(1)
   })
 })

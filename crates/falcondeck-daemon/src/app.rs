@@ -44,6 +44,7 @@ use crate::{
 mod acp_threads;
 pub(crate) mod agent_helpers;
 pub(crate) mod conversation_helpers;
+pub(crate) mod host_provisioning;
 mod notifications;
 mod remote_bridge;
 mod remote_lifecycle;
@@ -88,6 +89,10 @@ struct InnerState {
     local_base_url: OnceLock<String>,
     preferences: Mutex<FalconDeckPreferences>,
     remote: Mutex<RemoteBridgeState>,
+    /// SSH provisioning jobs keyed by job id. Progress lives only in memory:
+    /// a job is meaningless across a daemon restart, since the background task
+    /// driving it is gone.
+    provision_jobs: Mutex<HashMap<String, host_provisioning::ProvisionJob>>,
     /// Set at the start of `shutdown` so respawn/reconnect paths cannot race
     /// the teardown with fresh agent processes.
     shutting_down: AtomicBool,
@@ -336,6 +341,7 @@ impl AppState {
                     command_tx: None,
                     trusted_client_bundles: Vec::new(),
                 }),
+                provision_jobs: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
             }),
         }

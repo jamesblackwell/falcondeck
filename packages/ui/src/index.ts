@@ -1,5 +1,7 @@
 export * from './lib/utils'
+export * from './lib/appearance'
 export * from './components/app-shell'
+export * from './components/appearance-controls'
 export * from './components/badge'
 export * from './components/button'
 export * from './components/card'

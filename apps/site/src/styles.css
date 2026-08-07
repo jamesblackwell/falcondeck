@@ -103,6 +103,7 @@ a {
 
 .site-nav__links a,
 .nav-github,
+.nav-download,
 .site-footer__links a {
   color: var(--fd-fg-2);
   font-size: 12px;
@@ -112,11 +113,18 @@ a {
 
 .site-nav__links a:hover,
 .nav-github:hover,
+.nav-download:hover,
 .site-footer__links a:hover {
   color: var(--fd-fg-0);
 }
 
 .nav-github {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.nav-download {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -233,6 +241,20 @@ a {
 .hero__proof svg,
 .security-checks svg {
   color: var(--fd-accent);
+}
+
+.release-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 20px;
+  color: var(--fd-accent-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.release-link:hover {
+  color: var(--fd-fg-0);
 }
 
 .product-preview {
@@ -1317,7 +1339,8 @@ a {
 }
 
 @media (max-width: 620px) {
-  .site-nav__actions .nav-github {
+  .site-nav__actions .nav-github,
+  .site-nav__actions .nav-download {
     display: none;
   }
 

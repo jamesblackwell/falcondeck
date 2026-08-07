@@ -31,7 +31,16 @@ function delay(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
-export function useDaemonConnection() {
+export type DaemonConnectionOptions = {
+  // Snapshots of remote host daemons (enrolled servers). They participate in
+  // selection reconciliation so picking a remote workspace is not undone by
+  // the local-snapshot reconcile pass, and their workspaces are excluded from
+  // local thread-detail fetching (their details arrive over the relay).
+  externalSnapshots?: (DaemonSnapshot | null)[]
+}
+
+export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
+  const { externalSnapshots } = options
   const initialSelection =
     typeof window === 'undefined'
       ? null
@@ -208,10 +217,37 @@ export function useDaemonConnection() {
     }
   }, [handleEvent])
 
+  const externalWorkspaceIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const external of externalSnapshots ?? []) {
+      for (const workspace of external?.workspaces ?? []) {
+        ids.add(workspace.id)
+      }
+    }
+    return ids
+  }, [externalSnapshots])
+
+  const selectionSnapshot = useMemo(() => {
+    const externals = (externalSnapshots ?? []).filter(
+      (entry): entry is DaemonSnapshot => entry !== null,
+    )
+    if (externals.length === 0) return snapshot
+    const base = snapshot ?? externals[0]
+    if (!base) return snapshot
+    return {
+      ...base,
+      workspaces: [
+        ...(snapshot?.workspaces ?? []),
+        ...externals.flatMap((entry) => entry.workspaces),
+      ],
+      threads: [...(snapshot?.threads ?? []), ...externals.flatMap((entry) => entry.threads)],
+    }
+  }, [externalSnapshots, snapshot])
+
   // Reconcile selection when snapshot changes
-   
+
   useEffect(() => {
-    const nextSelection = reconcileSnapshotSelection(snapshot, selectedWorkspaceId, selectedThreadId, {
+    const nextSelection = reconcileSnapshotSelection(selectionSnapshot, selectedWorkspaceId, selectedThreadId, {
       preserveEmptyThreadSelection: true,
     })
     if (nextSelection.workspaceId !== selectedWorkspaceId) {
@@ -220,7 +256,7 @@ export function useDaemonConnection() {
     if (nextSelection.threadId !== selectedThreadId) {
       setSelectedThreadId(nextSelection.threadId)
     }
-  }, [snapshot, selectedThreadId, selectedWorkspaceId])
+  }, [selectionSnapshot, selectedThreadId, selectedWorkspaceId])
    
 
   useEffect(() => {
@@ -237,12 +273,18 @@ export function useDaemonConnection() {
     }
   }, [selectedThreadId, selectedWorkspaceId])
 
-   
+
   useLayoutEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId) {
       if (threadDetail !== null) {
         setThreadDetail(null)
       }
+      return
+    }
+
+    // Remote-host thread details are loaded and kept fresh by the host
+    // connection layer; do not fight it from the local cache.
+    if (externalWorkspaceIds.has(selectedWorkspaceId)) {
       return
     }
 
@@ -262,12 +304,15 @@ export function useDaemonConnection() {
     } else if (threadDetail !== null) {
       setThreadDetail(null)
     }
-  }, [selectedThreadId, selectedWorkspaceId, threadDetail])
+  }, [externalWorkspaceIds, selectedThreadId, selectedWorkspaceId, threadDetail])
    
 
   // Fetch thread detail on selection change
    
   useEffect(() => {
+    if (externalWorkspaceIds.has(selectedWorkspaceId ?? '')) {
+      return
+    }
     if (!api || !selectedWorkspaceId || !selectedThreadId) {
       setThreadDetail(null)
       return
@@ -297,7 +342,7 @@ export function useDaemonConnection() {
         if (!cancelled && !cachedDetail) setThreadDetail(null)
     })
     return () => { cancelled = true }
-  }, [api, selectedThreadId, selectedWorkspaceId, snapshot?.threads])
+  }, [api, externalWorkspaceIds, selectedThreadId, selectedWorkspaceId, snapshot?.threads])
    
 
   // Prefetch likely-next threads so switching can render from memory immediately.
@@ -390,6 +435,7 @@ export function useDaemonConnection() {
 
   return {
     api,
+    baseUrl,
     connectionState,
     connectionError,
     snapshot,

@@ -1,32 +1,14 @@
 import { StyleSheet } from 'react-native-unistyles'
 
-import {
-  colors,
-  spacing,
-  radius,
-  fontSize,
-  lineHeight,
-  fontFamily,
-  shadow,
-  duration,
-  iconSize,
-  minTouchTarget,
-} from './tokens'
+import { buildTheme, readAppearance } from './appearance'
 
-const darkTheme = {
-  colors,
-  spacing,
-  radius,
-  fontSize,
-  lineHeight,
-  fontFamily,
-  shadow,
-  duration,
-  iconSize,
-  minTouchTarget,
-} as const
+const appearance = readAppearance()
+
+const darkTheme = buildTheme('dark', appearance.fontScale, appearance.palette)
+const lightTheme = buildTheme('light', appearance.fontScale, appearance.palette)
 
 type AppThemes = {
+  light: typeof lightTheme
   dark: typeof darkTheme
 }
 
@@ -37,9 +19,11 @@ declare module 'react-native-unistyles' {
 
 StyleSheet.configure({
   themes: {
+    light: lightTheme,
     dark: darkTheme,
   },
-  settings: {
-    initialTheme: 'dark',
-  },
+  settings:
+    appearance.themeMode === 'system'
+      ? { adaptiveThemes: true }
+      : { initialTheme: appearance.themeMode },
 })

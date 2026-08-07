@@ -17,7 +17,16 @@
 
   tls {{ falcondeck_tls_email }}
 
-  reverse_proxy 127.0.0.1:{{ falcondeck_relay_port }}
+  handle_path /dist/* {
+    root * {{ falcondeck_dist_dir }}
+    @dist_binary not path *.sha256
+    header @dist_binary Content-Type application/octet-stream
+    file_server
+  }
+
+  handle {
+    reverse_proxy 127.0.0.1:{{ falcondeck_relay_port }}
+  }
 }
 
 {{ falcondeck_site_domain }} {

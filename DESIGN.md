@@ -33,9 +33,22 @@ Avoid:
 
 ## Color System
 
-FalconDeck uses a dark-first layered surface scale.
+FalconDeck is dark-first but fully themeable. All color flows through the
+`--fd-*` tokens in `packages/ui/src/styles.css`; the dark Falcon palette on
+`:root` is the default, a light variant lives under `:root[data-theme="light"]`,
+and preset palettes (Gruvbox- and Tokyo Night-inspired, each with dark and
+light variants) live under `:root[data-palette="…"]`. The appearance module in
+`packages/ui/src/lib/appearance.ts` resolves the user's theme mode
+(system/light/dark), palette, fonts, and text scale, and stamps
+`data-theme`/`data-palette` plus CSS variable overrides on `<html>`. Mobile
+mirrors the same palettes in `apps/mobile/src/theme/tokens.ts` with unistyles
+`light`/`dark` themes. Never hardcode a hex in a component — it will break in
+at least one theme.
 
-Backgrounds:
+Contrast floors for every palette: `fg-0`–`fg-3` carry real copy and must hold
+≥ 4.5:1 on `bg-1`; `fg-4` is decorative-only and must hold ≥ 3:1.
+
+Default (Falcon dark) backgrounds:
 
 - `--fd-bg-0`: `#09090b`
 - `--fd-bg-1`: `#111113`
@@ -47,9 +60,9 @@ Foreground:
 
 - `--fd-fg-0`: `#f4f4f6`
 - `--fd-fg-1`: `#c4c4cc`
-- `--fd-fg-2`: `#8e8e99`
-- `--fd-fg-3`: `#62626d`
-- `--fd-fg-4`: `#42424a`
+- `--fd-fg-2`: `#9d9da8`
+- `--fd-fg-3`: `#84848f`
+- `--fd-fg-4`: `#6d6d78`
 
 Borders:
 
@@ -83,8 +96,13 @@ Rules:
 
 Web:
 
-- Sans: Geist, then Inter/system fallbacks
-- Mono: Geist Mono, then SF Mono/JetBrains Mono/system fallbacks
+- Sans: Geist, then Inter/system fallbacks (user-overridable via the
+  appearance settings — always reference `--font-sans` / `--fd-font-sans`,
+  never a family name)
+- Mono: Geist Mono, then SF Mono/JetBrains Mono/system fallbacks (same rule
+  via `--font-mono` / `--fd-font-mono`)
+- The `--fd-text-*` sizes multiply by `--fd-font-scale`, which the text-size
+  setting overrides; size text with the tokens so user scaling keeps working.
 
 Mobile:
 

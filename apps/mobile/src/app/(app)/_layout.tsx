@@ -2,14 +2,16 @@ import { useCallback, useMemo } from 'react'
 import { Drawer } from 'expo-router/drawer'
 import { Redirect, useRouter } from 'expo-router'
 
+import { useUnistyles } from 'react-native-unistyles'
+
 import { buildProjectGroups } from '@falcondeck/client-core'
 
-import { colors } from '@/theme/tokens'
 import { useRelayStore, useSessionStore, useUIStore } from '@/store'
 import { SidebarView } from '@/components/navigation'
 
 export default function AppLayout() {
   const router = useRouter()
+  const { theme } = useUnistyles()
   const sessionId = useRelayStore((s) => s.sessionId)
   const snapshot = useSessionStore((s) => s.snapshot)
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
@@ -61,11 +63,11 @@ export default function AppLayout() {
       screenOptions={{
         headerShown: false,
         drawerStyle: {
-          backgroundColor: colors.surface[1],
+          backgroundColor: theme.colors.surface[1],
           width: 300,
         },
         sceneStyle: {
-          backgroundColor: colors.surface[0],
+          backgroundColor: theme.colors.surface[0],
         },
       }}
       drawerContent={renderDrawerContent}

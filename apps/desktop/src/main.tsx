@@ -1,7 +1,11 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { initAppearance } from '@falcondeck/ui'
 import './index.css'
 import App from './App.tsx'
+
+// Theme + font preferences must land on <html> before first paint.
+initAppearance()
 
 // Cmd+/- zoom support (persisted across sessions)
 const ZOOM_KEY = 'fd-zoom-level'

@@ -1,0 +1,5 @@
+---
+falcondeck_repo_dest: /usr/local/src/falcondeck
+falcondeck_dist_dir: /var/lib/falcondeck/dist
+falcondeck_dist_daemon_arch: "{{ ansible_facts['architecture'] }}"
+falcondeck_dist_daemon_name: "falcondeck-daemon-{{ falcondeck_dist_daemon_arch }}-linux"

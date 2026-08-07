@@ -8,7 +8,7 @@
  */
 import { Platform } from 'react-native'
 
-export const colors = {
+export const darkColors = {
   // Background depth scale
   surface: {
     0: '#09090b',
@@ -18,13 +18,14 @@ export const colors = {
     4: '#2c2c34',
   },
 
-  // Foreground / text contrast scale
+  // Foreground / text contrast scale. tertiary and muted carry real copy, so
+  // they clear WCAG AA (≥4.5:1) on surface 1; faint is decorative-only.
   fg: {
     primary: '#f4f4f6',
     secondary: '#c4c4cc',
-    tertiary: '#8e8e99',
-    muted: '#62626d',
-    faint: '#42424a',
+    tertiary: '#9d9da8',
+    muted: '#84848f',
+    faint: '#6d6d78',
   },
 
   // Borders (solid approximations of rgba on dark bg)
@@ -66,7 +67,202 @@ export const colors = {
   transparent: 'transparent',
   white: '#ffffff',
   black: '#000000',
-} as const
+}
+
+// Light palette — mirrors the light theme in packages/ui/src/styles.css.
+// Same shape as darkColors so unistyles themes stay interchangeable.
+export const lightColors: typeof darkColors = {
+  surface: {
+    0: '#f4f4f5',
+    1: '#fbfbfc',
+    2: '#ffffff',
+    3: '#ececef',
+    4: '#e1e1e5',
+  },
+
+  fg: {
+    primary: '#17171c',
+    secondary: '#3c3c44',
+    tertiary: '#5a5a64',
+    muted: '#71717c',
+    faint: '#8f8f9a',
+  },
+
+  // Solid approximations of rgba(17,17,20,…) over the light surfaces
+  border: {
+    subtle: '#ebebec',
+    default: '#e3e3e5',
+    emphasis: '#d8d8da',
+    strong: '#c8c8cb',
+  },
+
+  // Emerald deepens on light surfaces to keep contrast
+  accent: {
+    default: '#059669',
+    muted: 'rgba(5, 150, 105, 0.12)',
+    strong: '#047857',
+    dim: 'rgba(5, 150, 105, 0.06)',
+  },
+
+  success: { default: '#059669', muted: 'rgba(5, 150, 105, 0.10)' },
+  warning: { default: '#b45309', muted: 'rgba(180, 83, 9, 0.10)' },
+  danger: { default: '#dc2626', muted: 'rgba(220, 38, 38, 0.08)' },
+  info: { default: '#2563eb', muted: 'rgba(37, 99, 235, 0.08)' },
+
+  diff: {
+    added: 'rgba(5, 150, 105, 0.10)',
+    removed: 'rgba(220, 38, 38, 0.08)',
+    addedText: '#047857',
+    removedText: '#b91c1c',
+  },
+
+  overlay: 'rgba(23, 23, 28, 0.32)',
+  overlayStrong: 'rgba(250, 250, 251, 0.85)',
+
+  transparent: 'transparent',
+  white: '#ffffff',
+  black: '#000000',
+}
+
+// --- Gruvbox-inspired palettes — mirror packages/ui/src/styles.css ---
+
+export const gruvboxDarkColors: typeof darkColors = {
+  surface: { 0: '#1d2021', 1: '#282828', 2: '#32302f', 3: '#3c3836', 4: '#504945' },
+  fg: {
+    primary: '#fbf1c7',
+    secondary: '#ebdbb2',
+    tertiary: '#c8b998',
+    muted: '#b0a184',
+    faint: '#8f8371',
+  },
+  border: { subtle: '#32302f', default: '#3c3836', emphasis: '#504945', strong: '#665c54' },
+  accent: {
+    default: '#8ec07c',
+    muted: 'rgba(142, 192, 124, 0.14)',
+    strong: '#a5d18f',
+    dim: 'rgba(142, 192, 124, 0.07)',
+  },
+  success: { default: '#b8bb26', muted: 'rgba(184, 187, 38, 0.12)' },
+  warning: { default: '#fabd2f', muted: 'rgba(250, 189, 47, 0.12)' },
+  danger: { default: '#fb4934', muted: 'rgba(251, 73, 52, 0.12)' },
+  info: { default: '#83a598', muted: 'rgba(131, 165, 152, 0.12)' },
+  diff: {
+    added: 'rgba(184, 187, 38, 0.12)',
+    removed: 'rgba(251, 73, 52, 0.12)',
+    addedText: '#b8bb26',
+    removedText: '#fb4934',
+  },
+  overlay: 'rgba(0, 0, 0, 0.45)',
+  overlayStrong: 'rgba(29, 32, 33, 0.8)',
+  transparent: 'transparent',
+  white: '#ffffff',
+  black: '#000000',
+}
+
+export const gruvboxLightColors: typeof darkColors = {
+  surface: { 0: '#f2e5bc', 1: '#f9efc6', 2: '#fbf1c7', 3: '#e7d8ac', 4: '#d5c4a1' },
+  fg: {
+    primary: '#282828',
+    secondary: '#3c3836',
+    tertiary: '#504945',
+    muted: '#665c54',
+    faint: '#857a6e',
+  },
+  border: { subtle: '#e5d7ae', default: '#dccfa6', emphasis: '#cfc19a', strong: '#bcae89' },
+  accent: {
+    default: '#427b58',
+    muted: 'rgba(66, 123, 88, 0.14)',
+    strong: '#356449',
+    dim: 'rgba(66, 123, 88, 0.07)',
+  },
+  success: { default: '#79740e', muted: 'rgba(121, 116, 14, 0.12)' },
+  warning: { default: '#b57614', muted: 'rgba(181, 118, 20, 0.12)' },
+  danger: { default: '#cc241d', muted: 'rgba(204, 36, 29, 0.10)' },
+  info: { default: '#076678', muted: 'rgba(7, 102, 120, 0.10)' },
+  diff: {
+    added: 'rgba(121, 116, 14, 0.12)',
+    removed: 'rgba(204, 36, 29, 0.10)',
+    addedText: '#79740e',
+    removedText: '#9d0006',
+  },
+  overlay: 'rgba(40, 40, 40, 0.32)',
+  overlayStrong: 'rgba(251, 241, 199, 0.85)',
+  transparent: 'transparent',
+  white: '#ffffff',
+  black: '#000000',
+}
+
+// --- Tokyo Night-inspired palettes — mirror packages/ui/src/styles.css ---
+
+export const tokyoNightDarkColors: typeof darkColors = {
+  surface: { 0: '#16161e', 1: '#1a1b26', 2: '#24283b', 3: '#292e42', 4: '#3b4261' },
+  fg: {
+    primary: '#c0caf5',
+    secondary: '#a9b1d6',
+    tertiary: '#939bc4',
+    muted: '#8189af',
+    faint: '#666d92',
+  },
+  border: { subtle: '#24283b', default: '#292e42', emphasis: '#3b4261', strong: '#4a5378' },
+  accent: {
+    default: '#7aa2f7',
+    muted: 'rgba(122, 162, 247, 0.15)',
+    strong: '#94b6fa',
+    dim: 'rgba(122, 162, 247, 0.07)',
+  },
+  success: { default: '#9ece6a', muted: 'rgba(158, 206, 106, 0.12)' },
+  warning: { default: '#e0af68', muted: 'rgba(224, 175, 104, 0.12)' },
+  danger: { default: '#f7768e', muted: 'rgba(247, 118, 142, 0.12)' },
+  info: { default: '#7dcfff', muted: 'rgba(125, 207, 255, 0.12)' },
+  diff: {
+    added: 'rgba(158, 206, 106, 0.12)',
+    removed: 'rgba(247, 118, 142, 0.12)',
+    addedText: '#9ece6a',
+    removedText: '#f7768e',
+  },
+  overlay: 'rgba(0, 0, 0, 0.45)',
+  overlayStrong: 'rgba(22, 22, 30, 0.8)',
+  transparent: 'transparent',
+  white: '#ffffff',
+  black: '#000000',
+}
+
+export const tokyoNightLightColors: typeof darkColors = {
+  surface: { 0: '#d6d8e3', 1: '#e4e6ee', 2: '#eff1f7', 3: '#ced2e0', 4: '#bfc4d6' },
+  fg: {
+    primary: '#2e3350',
+    secondary: '#40456b',
+    tertiary: '#545a80',
+    muted: '#616894',
+    faint: '#7d84a8',
+  },
+  border: { subtle: '#d4d7e2', default: '#c9cdda', emphasis: '#bbc0d0', strong: '#a6acc1' },
+  accent: {
+    default: '#2e7de9',
+    muted: 'rgba(46, 125, 233, 0.13)',
+    strong: '#1a63cf',
+    dim: 'rgba(46, 125, 233, 0.06)',
+  },
+  success: { default: '#587539', muted: 'rgba(88, 117, 57, 0.12)' },
+  warning: { default: '#8f5e15', muted: 'rgba(143, 94, 21, 0.12)' },
+  danger: { default: '#c53963', muted: 'rgba(197, 57, 99, 0.10)' },
+  info: { default: '#007197', muted: 'rgba(0, 113, 151, 0.10)' },
+  diff: {
+    added: 'rgba(88, 117, 57, 0.12)',
+    removed: 'rgba(197, 57, 99, 0.10)',
+    addedText: '#587539',
+    removedText: '#c53963',
+  },
+  overlay: 'rgba(46, 51, 80, 0.32)',
+  overlayStrong: 'rgba(228, 230, 238, 0.85)',
+  transparent: 'transparent',
+  white: '#ffffff',
+  black: '#000000',
+}
+
+// Back-compat alias — prefer reading colors from the active unistyles theme
+// (`useUnistyles().theme.colors`) so light mode is respected.
+export const colors = darkColors
 
 export const spacing = {
   0: 0,
@@ -143,7 +339,7 @@ export const shadow = {
     shadowRadius: 40,
     elevation: 12,
   },
-} as const
+}
 
 export const duration = {
   fast: 100,

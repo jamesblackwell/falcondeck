@@ -7,6 +7,7 @@ import {
   CircleDot,
   Cloud,
   Code2,
+  Download,
   Github,
   LockKeyhole,
   Monitor,
@@ -204,6 +205,10 @@ export default function App() {
             <a href="#architecture">Architecture</a>
           </div>
           <div className="site-nav__actions">
+            <a className="nav-download" href="https://github.com/jamesblackwell/falcondeck/releases">
+              <Download className="icon-xs" aria-hidden="true" />
+              Downloads
+            </a>
             <a className="nav-github" href="https://github.com/jamesblackwell/falcondeck">
               <Github className="icon-xs" aria-hidden="true" />
               GitHub
@@ -223,11 +228,11 @@ export default function App() {
           <div className="hero__copy">
             <div className="eyebrow">
               <span className="eyebrow__dot" />
-              LOCAL-FIRST · REMOTE-READY
+              AI-FIRST WORK · LOCAL-FIRST CORE
             </div>
-            <h1>Keep your coding agents <span>in flow.</span></h1>
+            <h1>One control plane for <span>AI-first work.</span></h1>
             <p className="hero__lede">
-              FalconDeck is a calm control plane for Codex and Claude. Run close to your code, follow every turn, and pick up from your phone or browser without handing your workspace to a cloud service.
+              FalconDeck starts with coding agents. Run Codex and Claude close to your code, follow their work from your Mac, browser, or iPhone, and keep people in the loop as more of the company runs in the background.
             </p>
             <div className="hero__actions">
               <Button size="lg" asChild>
@@ -249,6 +254,11 @@ export default function App() {
               <span><Check className="icon-xs" aria-hidden="true" /> End-to-end encrypted</span>
               <span><Check className="icon-xs" aria-hidden="true" /> Self-hostable relay</span>
             </div>
+            <a className="release-link" href="https://github.com/jamesblackwell/falcondeck/releases">
+              <Download className="icon-xs" aria-hidden="true" />
+              Download desktop builds from Releases
+              <ChevronRight className="icon-xs" aria-hidden="true" />
+            </a>
           </div>
           <ProductPreview />
         </section>
@@ -297,10 +307,10 @@ export default function App() {
           <div className="section-heading">
             <div>
               <p className="eyebrow">THE PRODUCT</p>
-              <h2>Serious agent work needs a steady cockpit.</h2>
+              <h2>Start with coding agents. Build toward a wider system.</h2>
             </div>
             <p>
-              FalconDeck keeps the mechanics visible — workspaces, threads, diffs, approvals, and live status — without making the interface feel like another project to manage.
+              The first use case is coding because it is where teams already run agents every day. The architecture is designed for a wider future, with agents from different harnesses and environments brought into one place.
             </p>
           </div>
           <div className="surface-grid">
@@ -328,7 +338,7 @@ export default function App() {
               <p className="eyebrow">LOCAL BY DEFAULT</p>
               <h2>Remote access without moving the center of gravity.</h2>
               <p>
-                The FalconDeck daemon and the native agent storage remain the source of truth. The relay helps devices pair, reconnect, and catch up — it does not become a second conversation database.
+                The FalconDeck daemon and the native agent storage remain the source of truth. The relay helps devices pair, reconnect, and catch up. It does not become a second conversation database.
               </p>
               <div className="security-checks">
                 <span><Check aria-hidden="true" /> End-to-end encrypted remote payloads</span>
@@ -394,19 +404,22 @@ export default function App() {
         <section className="section-wrap cta-section">
           <div className="cta-card">
             <div>
-              <p className="eyebrow">READY WHEN YOU ARE</p>
-              <h2>Build locally. Stay connected.</h2>
-              <p>Give your agents a control plane that respects the way you already work.</p>
+              <p className="eyebrow">OPEN SOURCE, ON PURPOSE</p>
+              <h2>It will take a community to build this.</h2>
+              <p>FalconDeck is an ambitious project. We are starting with coding agents, but the destination is a control plane for AI-first companies. Contributors will help shape the daemon, clients, integrations, and experience along the way.</p>
             </div>
             <div className="cta-card__actions">
               <Button size="lg" asChild>
                 <a href="https://github.com/jamesblackwell/falcondeck">
-                  Start with GitHub
+                  Join the project
                   <ArrowRight className="icon-sm" aria-hidden="true" />
                 </a>
               </Button>
               <a className="text-link" href="https://app.falcondeck.com">
                 Open the remote client <ChevronRight className="icon-xs" aria-hidden="true" />
+              </a>
+              <a className="text-link" href="https://github.com/jamesblackwell/falcondeck/releases">
+                Download desktop builds <Download className="icon-xs" aria-hidden="true" />
               </a>
             </div>
           </div>
@@ -423,6 +436,7 @@ export default function App() {
           <div className="site-footer__links">
             <a href="https://github.com/jamesblackwell/falcondeck">GitHub</a>
             <a href="https://app.falcondeck.com">Remote client</a>
+            <a href="https://github.com/jamesblackwell/falcondeck/releases">Releases</a>
           </div>
         </div>
       </footer>

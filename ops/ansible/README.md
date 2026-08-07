@@ -11,6 +11,7 @@ Ansible lives in-repo so deployment stays reviewable and reproducible, but real 
 - `roles/common` handles base packages and directories
 - `roles/caddy` installs and configures Caddy
 - `roles/falcondeck_relay` syncs the repo, builds the Linux relay on the server, and installs the systemd unit
+- `roles/falcondeck_dist` builds the Linux daemon on the server and publishes it (plus a `.sha256`) to the `/dist/` download directory
 - `roles/falcondeck_remote_web` installs workspace dependencies at the repo root, then builds and publishes the hosted remote web client
 - `roles/falcondeck_site` builds and publishes the marketing site
 
@@ -87,3 +88,10 @@ The deploy playbook syncs your current checkout to the server, builds the Linux 
 - `connect.falcondeck.com` -> relay
 - `app.falcondeck.com` -> hosted remote web app
 - `falcondeck.com` -> public site
+
+It also builds the Linux daemon on the server and publishes it for remote provisioning:
+
+- `https://connect.falcondeck.com/dist/falcondeck-daemon-x86_64-linux`
+- `https://connect.falcondeck.com/dist/falcondeck-daemon-x86_64-linux.sha256`
+
+The naming contract is `{relay_url}/dist/falcondeck-daemon-{arch}-linux`, where `arch` is `uname -m` on the target machine.

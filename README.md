@@ -1,11 +1,12 @@
 <div align="center">
   <img src="assets/brand/logomark-mark-light.svg" alt="FalconDeck" width="72" />
   <h1>FalconDeck</h1>
-  <p><strong>A calm command center for coding agents.</strong></p>
-  <p>Run Codex and Claude close to your code. Follow the work from your desktop, browser, or phone — without making a hosted service the source of truth.</p>
+  <p><strong>The control plane for AI-first companies.</strong></p>
+  <p>Start with Codex and Claude close to your code. Run agents from your Mac, browser, or iPhone, and keep the work in one place as more of the company runs in the background.</p>
   <p>
     <a href="https://falcondeck.com">Website</a> ·
     <a href="https://app.falcondeck.com">Open the remote client</a> ·
+    <a href="https://github.com/jamesblackwell/falcondeck/releases">Download desktop builds</a> ·
     <a href="docs/00-architecture-overview.md">Architecture</a>
   </p>
 </div>
@@ -14,7 +15,7 @@
   <img src="apps/site/public/falcondeck-preview.png" width="1200" alt="FalconDeck desktop app showing a live Claude thread with code, agent controls, and a prompt composer" />
 </p>
 
-FalconDeck is an open-source, daemon-first control plane for AI coding agents. It gives you one place to see workspaces, follow live turns, review diffs, answer questions, and approve actions — then keeps that same context available when you step away from your desk.
+FalconDeck is open-source infrastructure for companies that run with AI. It starts with coding agents and gives you one place to see workspaces, follow live turns, review diffs, answer questions, and approve actions. The same context stays available when you step away from your desk.
 
 ## Why FalconDeck
 
@@ -22,14 +23,24 @@ Most agent interfaces make you choose between a local tool that is hard to reach
 
 - Your local daemon and native agent storage remain the source of truth.
 - The desktop app, browser client, and mobile app are clients of the same daemon contract.
-- The relay handles pairing, encrypted transport, replay, and reconnects — not plaintext conversation storage.
+- The relay handles pairing, encrypted transport, replay, and reconnects. It is not a plaintext conversation store.
 - You can use the hosted relay or deploy the server-side pieces yourself.
 
 The result is a control surface that feels close to the machine doing the work, while still making remote handoff practical.
 
+## The bigger goal
+
+FalconDeck starts with coding agents because they are the first place where this control problem is becoming real. The longer-term goal is broader: a control plane for AI-first companies that run agents from different harnesses and environments. One place to see what those agents are doing, bring the work together, and involve people when judgment is needed.
+
+That is an ambitious project, and we will need many more contributors to get there. The codebase has room for people interested in Rust daemon work, TypeScript clients, Tauri, React Native, agent integrations, relay infrastructure, product design, documentation, and testing. If that future sounds useful, [join the project on GitHub](https://github.com/jamesblackwell/falcondeck).
+
+## Download
+
+Packaged desktop builds will be published on the [GitHub Releases page](https://github.com/jamesblackwell/falcondeck/releases). Until the first release is available, you can run FalconDeck from source using the local development instructions below.
+
 ## What you can do
 
-- Run Codex and Claude sessions side by side from one control plane.
+- Run Codex and Claude sessions side by side from one control plane, with more harnesses to come.
 - Organize work by workspace and thread, with persistent restoration across launches.
 - Watch streaming responses and tool activity as it happens.
 - Review diffs, permission requests, and interactive questions with context.
@@ -98,9 +109,13 @@ The relay and hosted web stack can be deployed with the included Ansible setup. 
 
 See [`ops/ansible/README.md`](ops/ansible/README.md) for the example inventory and deployment path, and [`docs/11-deployment-ops.md`](docs/11-deployment-ops.md) for the operational model.
 
+## Help build it
+
+FalconDeck is early-stage open source software. The first focus is a reliable control plane for coding agents. The ambition is bigger, and the project will depend on contributors to make it real. See the [open issues](https://github.com/jamesblackwell/falcondeck/issues) or start a conversation in [GitHub Discussions](https://github.com/jamesblackwell/falcondeck/discussions).
+
 ## Status
 
-FalconDeck is early-stage open source software. The core daemon, relay, desktop client, remote web client, mobile client, shared protocol, and marketing site are all in this repository and evolving together.
+The core daemon, relay, desktop client, remote web client, mobile client, shared protocol, and marketing site are all in this repository and evolving together.
 
 ## License
 

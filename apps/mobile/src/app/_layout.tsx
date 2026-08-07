@@ -3,6 +3,7 @@ import '@/theme/unistyles'
 import { useEffect, useState } from 'react'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { SafeAreaProvider } from 'react-native-safe-area-context'
+import { useUnistyles } from 'react-native-unistyles'
 import { Slot } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import * as SplashScreen from 'expo-splash-screen'
@@ -27,6 +28,7 @@ void ensureAndroidNotificationChannel()
 
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false)
+  const { rt } = useUnistyles()
   useRelayConnection()
 
   useEffect(() => {
@@ -75,7 +77,7 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <StatusBar style="light" />
+        <StatusBar style={rt.themeName === 'light' ? 'dark' : 'light'} />
         <Slot />
       </SafeAreaProvider>
     </GestureHandlerRootView>

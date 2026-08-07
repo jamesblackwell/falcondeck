@@ -948,6 +948,8 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
     let mut session_id = None;
     let mut cwd = None;
     let mut title = None;
+    let mut custom_title = None;
+    let mut ai_title = None;
     let mut updated_at = None;
     let mut items = Vec::new();
     let mut tool_identity = HashMap::<String, (String, String)>::new();
@@ -960,6 +962,22 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
             session_id.or_else(|| extract_string(&value, &["session_id", "sessionId", "id"]));
         cwd = cwd
             .or_else(|| extract_string(&value, &["cwd", "working_directory", "workingDirectory"]));
+        // Claude Code appends `custom-title` (user-assigned via /rename) and
+        // `ai-title` (auto-generated, refreshed as the session evolves) lines.
+        // Later lines supersede earlier ones, so overwrite rather than keep-first.
+        match value.get("type").and_then(Value::as_str) {
+            Some("custom-title") => {
+                if let Some(value) = extract_string(&value, &["customTitle", "custom_title"]) {
+                    custom_title = Some(value);
+                }
+            }
+            Some("ai-title") => {
+                if let Some(value) = extract_string(&value, &["aiTitle", "ai_title"]) {
+                    ai_title = Some(value);
+                }
+            }
+            _ => {}
+        }
         title = title.or_else(|| extract_string(&value, &["title", "name"]));
         updated_at = extract_datetime(
             &value,
@@ -1036,10 +1054,20 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         | ConversationItem::UserMessage { text, .. } => Some(truncate_preview(text)),
         _ => None,
     });
+    // Title precedence: the user's own name, then Claude's auto-title, then any
+    // legacy top-level field, then the first prompt, then the placeholder.
+    let first_user_message_title = items.iter().find_map(|item| match item {
+        ConversationItem::UserMessage { text, .. } => provisional_title_from_text(text),
+        _ => None,
+    });
     let summary = ThreadSummary {
         id: session_id.clone(),
         workspace_id: String::new(),
-        title: title.unwrap_or_else(|| "Claude thread".to_string()),
+        title: custom_title
+            .or(ai_title)
+            .or(title)
+            .or(first_user_message_title)
+            .unwrap_or_else(|| "Claude thread".to_string()),
         provider: AgentProvider::CLAUDE,
         native_session_id: Some(session_id),
         status: ThreadStatus::Idle,
@@ -1164,6 +1192,17 @@ fn truncate_preview(input: &str) -> String {
         return trimmed.to_string();
     }
     format!("{}...", trimmed.chars().take(80).collect::<String>())
+}
+
+/// Derive a sidebar-worthy title from a prompt: first non-empty line, capped
+/// at 60 chars. Used when a session has no ai-title yet.
+fn provisional_title_from_text(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    if line.chars().count() <= 60 {
+        return Some(line.to_string());
+    }
+    let truncated: String = line.chars().take(60).collect();
+    Some(format!("{}…", truncated.trim_end()))
 }
 
 trait StringExt {
@@ -1313,6 +1352,55 @@ mod tests {
                     && status == "completed"
                     && output.as_deref() == Some("line 1")
         ));
+    }
+
+    #[test]
+    fn hydrates_titles_from_ai_title_and_custom_title_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir
+            .path()
+            .join("33333333-3333-4333-8333-333333333333.jsonl");
+        let user_line = json!({
+            "sessionId": "33333333-3333-4333-8333-333333333333",
+            "cwd": "/tmp/project",
+            "type": "user",
+            "message": { "role": "user", "content": "please fix the login timeout bug" },
+            "created_at": "2026-03-19T10:00:00Z"
+        })
+        .to_string();
+
+        // ai-title lines refresh over time: the LAST one wins.
+        fs::write(
+            &session_path,
+            [
+                user_line.clone(),
+                json!({"type": "ai-title", "aiTitle": "Early title", "sessionId": "33333333-3333-4333-8333-333333333333"}).to_string(),
+                json!({"type": "ai-title", "aiTitle": "Fix login timeout bug", "sessionId": "33333333-3333-4333-8333-333333333333"}).to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.summary.title, "Fix login timeout bug");
+
+        // custom-title (user-assigned) beats ai-title.
+        fs::write(
+            &session_path,
+            [
+                user_line.clone(),
+                json!({"type": "ai-title", "aiTitle": "Fix login timeout bug", "sessionId": "33333333-3333-4333-8333-333333333333"}).to_string(),
+                json!({"type": "custom-title", "customTitle": "login-fix", "sessionId": "33333333-3333-4333-8333-333333333333"}).to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.summary.title, "login-fix");
+
+        // With no title lines at all, fall back to the first prompt.
+        fs::write(&session_path, user_line).unwrap();
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.summary.title, "please fix the login timeout bug");
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod codex;
 mod error;
 mod git;
 mod skills;
+mod ssh_config;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;

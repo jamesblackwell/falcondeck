@@ -21,7 +21,7 @@ import {
   type TurnInputItem,
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
-import { GoalControl, NewThreadState } from '@falcondeck/chat-ui'
+import { CommandPalette, GoalControl, NewThreadState } from '@falcondeck/chat-ui'
 import { ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
@@ -47,6 +47,8 @@ import { SettingsView } from './components/SettingsView'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
 import { usePanelVisibility } from './hooks/usePanelVisibility'
+import { useRemoteHosts } from './hooks/useRemoteHosts'
+import { hostLabelByWorkspaceId, mergeSnapshots } from './hosts'
 
 const COMPOSER_SELECTIONS_STORAGE_KEY = 'falcondeck.desktop.composer-selections.v1'
 
@@ -135,8 +137,14 @@ export default function App() {
 
 function AppInner() {
   const { toast } = useToast()
+  const remoteHosts = useRemoteHosts()
+  const hostSnapshots = useMemo(
+    () => remoteHosts.hosts.map((host) => host.snapshot),
+    [remoteHosts.hosts],
+  )
   const {
     api,
+    baseUrl,
     connectionError,
     snapshot,
     setSnapshot,
@@ -149,7 +157,7 @@ function AppInner() {
     selectedThreadId,
     setSelectedThreadId,
     gitRefreshTrigger,
-  } = useDaemonConnection()
+  } = useDaemonConnection({ externalSnapshots: hostSnapshots })
   const updater = useAppUpdater()
   const { sidebarVisible, railVisible, toggleSidebar, toggleRail } = usePanelVisibility()
 
@@ -179,24 +187,42 @@ function AppInner() {
   const announcedUpdateVersionRef = useRef<string | null>(null)
   const announcedDownloadedVersionRef = useRef<string | null>(null)
 
+  // Local daemon snapshot merged with enrolled remote-host snapshots: the
+  // sidebar, selection, and composer all see one world; writes route back to
+  // the owning daemon via apiFor.
+  const viewSnapshot = useMemo(
+    () => mergeSnapshots(snapshot, remoteHosts.hosts),
+    [remoteHosts.hosts, snapshot],
+  )
+  const workspaceHostIndex = useMemo(
+    () => hostLabelByWorkspaceId(remoteHosts.hosts),
+    [remoteHosts.hosts],
+  )
+  const apiFor = useCallback(
+    (workspaceId: string | null | undefined) => {
+      const host = remoteHosts.hostForWorkspace(workspaceId)
+      return host ? host.api() : api
+    },
+    [api, remoteHosts.hostForWorkspace],
+  )
   const selectedWorkspace = useMemo(
-    () => snapshot?.workspaces.find((w) => w.id === selectedWorkspaceId) ?? null,
-    [selectedWorkspaceId, snapshot?.workspaces],
+    () => viewSnapshot?.workspaces.find((w) => w.id === selectedWorkspaceId) ?? null,
+    [selectedWorkspaceId, viewSnapshot?.workspaces],
   )
   const selectedThread = useMemo(
-    () => snapshot?.threads.find((t) => t.id === selectedThreadId) ?? null,
-    [selectedThreadId, snapshot?.threads],
+    () => viewSnapshot?.threads.find((t) => t.id === selectedThreadId) ?? null,
+    [selectedThreadId, viewSnapshot?.threads],
   )
   const groups = useMemo(
-    () => buildProjectGroups(snapshot?.workspaces ?? [], snapshot?.threads ?? []),
-    [snapshot?.threads, snapshot?.workspaces],
+    () => buildProjectGroups(viewSnapshot?.workspaces ?? [], viewSnapshot?.threads ?? []),
+    [viewSnapshot?.threads, viewSnapshot?.workspaces],
   )
   const interactiveRequests = useMemo(
     () =>
-      (snapshot?.interactive_requests ?? []).filter(
+      (viewSnapshot?.interactive_requests ?? []).filter(
         (request) => !selectedThreadId || request.thread_id === selectedThreadId,
       ),
-    [selectedThreadId, snapshot?.interactive_requests],
+    [selectedThreadId, viewSnapshot?.interactive_requests],
   )
   const remoteWebUrl = import.meta.env.VITE_FALCONDECK_REMOTE_WEB_URL ?? 'https://app.falcondeck.com'
   const defaultRelayUrl = 'https://connect.falcondeck.com'
@@ -341,6 +367,40 @@ function AppInner() {
     selectedWorkspace,
   ])
 
+  // Load and keep fresh the thread detail for remote-host selections. Fetch
+  // once per selection; on every host notification re-read the cache so
+  // streaming updates applied by the host connection reach the open thread.
+  const remoteDetailFetchedRef = useRef<string | null>(null)
+  useEffect(() => {
+    const host = remoteHosts.hostForWorkspace(selectedWorkspaceId)
+    if (!host || !selectedWorkspaceId || !selectedThreadId) {
+      remoteDetailFetchedRef.current = null
+      return
+    }
+    const key = `${selectedWorkspaceId}:${selectedThreadId}`
+    const cached = host.cachedThreadDetail(selectedWorkspaceId, selectedThreadId)
+    if (cached) {
+      setThreadDetail((current) => (current === cached ? current : cached))
+    }
+    if (remoteDetailFetchedRef.current === key) return
+    remoteDetailFetchedRef.current = key
+    if (!cached) setThreadDetail(null)
+    let cancelled = false
+    void host
+      .threadDetail(selectedWorkspaceId, selectedThreadId)
+      .then((detail) => {
+        if (!cancelled) setThreadDetail(detail)
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return
+        const msg = error instanceof Error ? error.message : 'Failed to load remote thread'
+        setActionError(msg)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [remoteHosts.hosts, remoteHosts.hostForWorkspace, selectedThreadId, selectedWorkspaceId, setThreadDetail])
+
   useEffect(() => {
     const handleFocus = () => setWindowFocused(true)
     const handleBlur = () => setWindowFocused(false)
@@ -359,12 +419,13 @@ function AppInner() {
   }, [])
 
   useEffect(() => {
-    if (!api || !selectedWorkspaceId || !selectedThread) return
+    const client = apiFor(selectedWorkspaceId)
+    if (!client || !selectedWorkspaceId || !selectedThread) return
     if (!windowFocused) return
     const readSeq = selectedThread.attention.last_agent_activity_seq
     if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return
 
-    void api
+    void client
       .markThreadRead({
         workspace_id: selectedWorkspaceId,
         thread_id: selectedThread.id,
@@ -381,23 +442,23 @@ function AppInner() {
         )
       })
       .catch(() => {})
-  }, [api, selectedThread, selectedWorkspaceId, setSnapshot, windowFocused])
+  }, [apiFor, selectedThread, selectedWorkspaceId, setSnapshot, windowFocused])
 
   useEffect(() => {
-    const count = countAwaitingResponseThreads(snapshot?.threads ?? [])
+    const count = countAwaitingResponseThreads(viewSnapshot?.threads ?? [])
     document.title = count > 0 ? `(${count}) FalconDeck` : 'FalconDeck'
 
     if (!window.__TAURI_INTERNALS__) return
     void import('@tauri-apps/api/window')
       .then(({ getCurrentWindow }) => getCurrentWindow().setBadgeCount(count || undefined))
       .catch(() => {})
-  }, [snapshot?.threads])
+  }, [viewSnapshot?.threads])
 
   useEffect(() => {
-    if (!snapshot?.threads?.length) return
+    if (!viewSnapshot?.threads?.length) return
 
-    for (const thread of snapshot.threads) {
-      const attention = deriveThreadAttentionPresentation(thread, snapshot.interactive_requests)
+    for (const thread of viewSnapshot.threads) {
+      const attention = deriveThreadAttentionPresentation(thread, viewSnapshot.interactive_requests)
       if (
         attention.level === 'none' ||
         (windowFocused && selectedThreadId === thread.id)
@@ -425,7 +486,7 @@ function AppInner() {
             : 'New activity in this thread.'
       new Notification(thread.title || 'FalconDeck thread', { body })
     }
-  }, [selectedThreadId, snapshot?.interactive_requests, snapshot?.threads, windowFocused])
+  }, [selectedThreadId, viewSnapshot?.interactive_requests, viewSnapshot?.threads, windowFocused])
 
   // Surface connection errors as toasts
   useEffect(() => {
@@ -485,10 +546,11 @@ function AppInner() {
       modelId: string | null
       effort: string | null
     }) => {
-      if (!api || !selectedWorkspace || !selectedThreadId) return
+      const client = apiFor(selectedWorkspace?.id)
+      if (!client || !selectedWorkspace || !selectedThreadId) return
       const requestId = ++threadSettingsRequestRef.current
       try {
-        const handle = await api.updateThread({
+        const handle = await client.updateThread({
           workspace_id: selectedWorkspace.id,
           thread_id: selectedThreadId,
           provider: selectedThread?.provider ?? selectedProvider,
@@ -505,7 +567,7 @@ function AppInner() {
         toast({ variant: 'danger', title: 'Failed to update settings', description: msg })
       }
     },
-    [api, applyThreadHandle, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace, toast],
+    [apiFor, applyThreadHandle, selectedProvider, selectedThread, selectedThreadId, selectedWorkspace, toast],
   )
 
   const handleModelChange = useCallback(
@@ -550,8 +612,9 @@ function AppInner() {
   const handlePermissionModeChange = useCallback(
     (mode: string | null) => {
       setSelectedPermissionMode(mode)
-      if (!api || !selectedWorkspace || !selectedThreadId) return
-      void api
+      const client = apiFor(selectedWorkspace?.id)
+      if (!client || !selectedWorkspace || !selectedThreadId) return
+      void client
         .updateThread({
           workspace_id: selectedWorkspace.id,
           thread_id: selectedThreadId,
@@ -563,14 +626,15 @@ function AppInner() {
           setActionError(msg)
         })
     },
-    [api, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
+    [apiFor, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
   )
 
   const handleSandboxModeChange = useCallback(
     (mode: string | null) => {
       setSelectedSandboxMode(mode)
-      if (!api || !selectedWorkspace || !selectedThreadId) return
-      void api
+      const client = apiFor(selectedWorkspace?.id)
+      if (!client || !selectedWorkspace || !selectedThreadId) return
+      void client
         .updateThread({
           workspace_id: selectedWorkspace.id,
           thread_id: selectedThreadId,
@@ -582,7 +646,7 @@ function AppInner() {
           setActionError(msg)
         })
     },
-    [api, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
+    [apiFor, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
   )
 
   const applyThreadSummary = useCallback(
@@ -601,10 +665,11 @@ function AppInner() {
 
   const handleSetGoal = useCallback(
     async (objective: string, tokenBudget: number | null) => {
-      if (!api || !selectedWorkspace || !selectedThreadId) {
+      const client = apiFor(selectedWorkspace?.id)
+      if (!client || !selectedWorkspace || !selectedThreadId) {
         throw new Error('Select a thread first')
       }
-      const thread = await api.setThreadGoal({
+      const thread = await client.setThreadGoal({
         workspace_id: selectedWorkspace.id,
         thread_id: selectedThreadId,
         objective,
@@ -612,26 +677,28 @@ function AppInner() {
       })
       applyThreadSummary(thread)
     },
-    [api, applyThreadSummary, selectedThreadId, selectedWorkspace],
+    [apiFor, applyThreadSummary, selectedThreadId, selectedWorkspace],
   )
 
   const handleClearGoal = useCallback(async () => {
-    if (!api || !selectedWorkspace || !selectedThreadId) return
-    const thread = await api.clearThreadGoal(selectedWorkspace.id, selectedThreadId)
+    const client = apiFor(selectedWorkspace?.id)
+    if (!client || !selectedWorkspace || !selectedThreadId) return
+    const thread = await client.clearThreadGoal(selectedWorkspace.id, selectedThreadId)
     applyThreadSummary(thread)
-  }, [api, applyThreadSummary, selectedThreadId, selectedWorkspace])
+  }, [apiFor, applyThreadSummary, selectedThreadId, selectedWorkspace])
 
   const handleSetGoalStatus = useCallback(
     async (status: 'active' | 'paused') => {
-      if (!api || !selectedWorkspace || !selectedThreadId) return
-      const thread = await api.setThreadGoal({
+      const client = apiFor(selectedWorkspace?.id)
+      if (!client || !selectedWorkspace || !selectedThreadId) return
+      const thread = await client.setThreadGoal({
         workspace_id: selectedWorkspace.id,
         thread_id: selectedThreadId,
         status,
       })
       applyThreadSummary(thread)
     },
-    [api, applyThreadSummary, selectedThreadId, selectedWorkspace],
+    [apiFor, applyThreadSummary, selectedThreadId, selectedWorkspace],
   )
 
   const handleProviderChange = useCallback(
@@ -698,10 +765,13 @@ function AppInner() {
 
   const handleRemoveWorkspace = useCallback(
     async (workspaceId: string) => {
-      if (!api) return
-      await api.removeWorkspace(workspaceId)
-      const nextSnapshot = await api.snapshot()
-      setSnapshot(nextSnapshot)
+      const client = apiFor(workspaceId)
+      if (!client) return
+      await client.removeWorkspace(workspaceId)
+      if (!workspaceHostIndex.has(workspaceId) && api) {
+        const nextSnapshot = await api.snapshot()
+        setSnapshot(nextSnapshot)
+      }
       if (selectedWorkspaceId === workspaceId) {
         setSelectedWorkspaceId(null)
         setSelectedThreadId(null)
@@ -711,17 +781,20 @@ function AppInner() {
     },
     [
       api,
+      apiFor,
       selectedWorkspaceId,
       setActionError,
       setSelectedThreadId,
       setSelectedWorkspaceId,
       setSnapshot,
       setThreadDetail,
+      workspaceHostIndex,
     ],
   )
 
   async function handleSubmit() {
-    if (!api || !selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
+    const client = apiFor(selectedWorkspace?.id)
+    if (!client || !selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
     const submittedAttachments = attachments
     const submittedSkills = selectedSkillsFromText(submittedDraft, selectedWorkspace.skills ?? [])
@@ -738,7 +811,7 @@ function AppInner() {
     try {
       let activeThreadId = selectedThreadId
       if (!activeThreadId) {
-        const handle = await api.startThread({
+        const handle = await client.startThread({
           workspace_id: selectedWorkspace.id,
           provider: activeProvider,
           model_id: selectedModel,
@@ -756,7 +829,7 @@ function AppInner() {
         ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft } satisfies TurnInputItem] : []),
         ...submittedAttachments,
       ]
-      await api.sendTurn({
+      await client.sendTurn({
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
         inputs,
@@ -810,9 +883,11 @@ function AppInner() {
     requestId: string,
     response: InteractiveResponsePayload,
   ) {
-    if (!api) return
+    const client = apiFor(workspaceId)
+    if (!client) return
+    const isRemoteWorkspace = workspaceHostIndex.has(workspaceId)
     try {
-      await api.respondInteractive(workspaceId, requestId, response)
+      await client.respondInteractive(workspaceId, requestId, response)
       setThreadDetail((current) =>
         current && current.workspace.id === workspaceId
           ? {
@@ -821,8 +896,12 @@ function AppInner() {
             }
           : current,
       )
-      const nextSnapshot = await api.snapshot()
-      setSnapshot(nextSnapshot)
+      // Remote host snapshots refresh through their event streams; only the
+      // local daemon needs the explicit refetch.
+      if (!isRemoteWorkspace && api) {
+        const nextSnapshot = await api.snapshot()
+        setSnapshot(nextSnapshot)
+      }
       setActionError(null)
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Failed to respond to request'
@@ -855,7 +934,7 @@ function AppInner() {
       void handleInteractiveResponse(request.workspace_id, request.request_id, response)
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [api],
+    [api, apiFor, workspaceHostIndex],
   )
 
   const handleSubmitCallback = useCallback(() => {
@@ -863,6 +942,7 @@ function AppInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     api,
+    apiFor,
     selectedWorkspace,
     selectedThread,
     selectedThreadId,
@@ -1002,14 +1082,17 @@ function AppInner() {
 
   const handleArchiveThread = useCallback(
     async (workspaceId: string, threadId: string) => {
-      if (!api) throw new Error('FalconDeck is still connecting')
+      const client = apiFor(workspaceId)
+      if (!client) throw new Error('FalconDeck is still connecting')
       try {
-        await api.archiveThread(workspaceId, threadId)
+        await client.archiveThread(workspaceId, threadId)
         if (selectedThreadId === threadId) {
           setSelectedThreadId(null)
         }
-        const nextSnapshot = await api.snapshot()
-        setSnapshot(nextSnapshot)
+        if (!workspaceHostIndex.has(workspaceId) && api) {
+          const nextSnapshot = await api.snapshot()
+          setSnapshot(nextSnapshot)
+        }
         setActionError(null)
       } catch (error: unknown) {
         const msg = error instanceof Error ? error.message : 'Failed to archive thread'
@@ -1017,14 +1100,15 @@ function AppInner() {
         toast({ variant: 'danger', title: 'Failed to archive thread', description: msg })
       }
     },
-    [api, selectedThreadId, setActionError, setSelectedThreadId, setSnapshot, toast],
+    [api, apiFor, selectedThreadId, setActionError, setSelectedThreadId, setSnapshot, toast, workspaceHostIndex],
   )
 
   const handleRenameThread = useCallback(
     async (workspaceId: string, threadId: string, title: string) => {
-      if (!api) throw new Error('FalconDeck is still connecting')
+      const client = apiFor(workspaceId)
+      if (!client) throw new Error('FalconDeck is still connecting')
       try {
-        const handle = await api.updateThread({
+        const handle = await client.updateThread({
           workspace_id: workspaceId,
           thread_id: threadId,
           title,
@@ -1038,14 +1122,15 @@ function AppInner() {
         throw error instanceof Error ? error : new Error(msg)
       }
     },
-    [api, applyThreadHandle, setActionError, toast],
+    [apiFor, applyThreadHandle, setActionError, toast],
   )
 
   const handleTogglePinThread = useCallback(
     async (workspaceId: string, threadId: string, pinned: boolean) => {
-      if (!api) throw new Error('FalconDeck is still connecting')
+      const client = apiFor(workspaceId)
+      if (!client) throw new Error('FalconDeck is still connecting')
       try {
-        const handle = await api.updateThread({
+        const handle = await client.updateThread({
           workspace_id: workspaceId,
           thread_id: threadId,
           pinned,
@@ -1058,18 +1143,19 @@ function AppInner() {
         toast({ variant: 'danger', title: 'Failed to update pin', description: msg })
       }
     },
-    [api, applyThreadHandle, setActionError, toast],
+    [apiFor, applyThreadHandle, setActionError, toast],
   )
 
   const handleMarkThreadRead = useCallback(
     async (workspaceId: string, threadId: string) => {
-      if (!api) return
-      const thread = snapshot?.threads.find(
+      const client = apiFor(workspaceId)
+      if (!client) return
+      const thread = viewSnapshot?.threads.find(
         (entry) => entry.workspace_id === workspaceId && entry.id === threadId,
       )
       const readSeq = thread?.attention.last_agent_activity_seq ?? 0
       try {
-        const updated = await api.markThreadRead({
+        const updated = await client.markThreadRead({
           workspace_id: workspaceId,
           thread_id: threadId,
           read_seq: readSeq,
@@ -1089,7 +1175,7 @@ function AppInner() {
         setActionError(msg)
       }
     },
-    [api, setActionError, setSnapshot, snapshot?.threads],
+    [apiFor, setActionError, setSnapshot, viewSnapshot?.threads],
   )
 
   // Memoized derived values
@@ -1128,7 +1214,7 @@ function AppInner() {
   )
   const sendBlockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
   const isComposerDisabled = isSending || workspaceComposerDisabled(selectedWorkspace)
-  const workspaces = useMemo(() => snapshot?.workspaces ?? [], [snapshot?.workspaces])
+  const workspaces = useMemo(() => viewSnapshot?.workspaces ?? [], [viewSnapshot?.workspaces])
 
   const newThreadEmptyState = useMemo(
     () => (
@@ -1161,6 +1247,12 @@ function AppInner() {
 
   return (
     <>
+      <CommandPalette
+        groups={groups}
+        onSelectThread={handleSelectThread}
+        onNewThread={handleNewThread}
+        onOpenSettings={handleOpenSettings}
+      />
       <DesktopShell
         sidebar={
           <DesktopSidebar
@@ -1278,7 +1370,9 @@ function AppInner() {
             ? undefined
             : (
                 <DiffPanel
-                  api={api}
+                  // Git status/diff runs against the local daemon; remote-host
+                  // workspaces have no local checkout to inspect.
+                  api={workspaceHostIndex.has(selectedWorkspaceId ?? '') ? null : api}
                   workspaceId={selectedWorkspaceId}
                   refreshTrigger={gitRefreshTrigger}
                   reviewThreadId={

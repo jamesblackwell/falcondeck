@@ -81,7 +81,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
         ) : null}
       </div>
       {isOpen ? (
-        <div className="min-w-0 pl-2">
+        <div className="min-w-0">
           {children}
         </div>
       ) : null}

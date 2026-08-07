@@ -9,6 +9,7 @@ import type {
 } from '@falcondeck/client-core'
 
 import type { AppUpdaterState } from '../hooks/useAppUpdater'
+import { AppearanceSettingsPanel } from './settings/AppearanceSettingsPanel'
 import { GeneralSettingsPanel } from './settings/GeneralSettingsPanel'
 import { RemoteAccessPanel } from './settings/RemoteAccessPanel'
 import { SettingsSidebar } from './settings/SettingsSidebar'
@@ -49,7 +50,9 @@ export function SettingsView(props: SettingsViewProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-10">
         <div className="mx-auto w-full max-w-4xl">
-          {activeSection === 'general' ? (
+          {activeSection === 'appearance' ? (
+            <AppearanceSettingsPanel />
+          ) : activeSection === 'general' ? (
             <GeneralSettingsPanel
               workspace={props.workspace}
               preferences={props.preferences}

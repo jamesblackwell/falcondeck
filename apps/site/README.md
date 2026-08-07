@@ -2,6 +2,8 @@
 
 The public-facing FalconDeck site. It is intentionally separate from the paired remote control client in `apps/remote-web`.
 
+The site links visitors to the [GitHub Releases page](https://github.com/jamesblackwell/falcondeck/releases) for packaged desktop downloads as releases become available.
+
 ## Run locally
 
 From the monorepo root:

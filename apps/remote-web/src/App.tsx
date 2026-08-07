@@ -61,6 +61,7 @@ import {
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
 import {
+  CommandPalette,
   Conversation,
   InteractiveRequestBar,
   PromptInput,
@@ -1946,6 +1947,13 @@ export default function App() {
           </div>
         </div>
       ) : null}
+
+      <CommandPalette
+        groups={groups}
+        onSelectThread={handleSelectThread}
+        onNewThread={handleNewThread}
+        onOpenSettings={() => setShowPreferences(true)}
+      />
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <WorkspaceSidebar

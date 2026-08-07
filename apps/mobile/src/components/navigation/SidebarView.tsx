@@ -11,7 +11,7 @@ import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
 import { Text, Button, EmptyState, Input } from '@/components/ui'
 import { SessionListItem } from '@/components/chat'
 import { useThreadActions } from '@/hooks/useThreadActions'
-import { buildSidebarRows, type SidebarRow } from './sidebarRows'
+import { buildSidebarRows, SHOW_MORE_STEP, type SidebarRow } from './sidebarRows'
 
 interface SidebarViewProps {
   groups: ProjectGroup[]
@@ -31,7 +31,9 @@ export const SidebarView = memo(function SidebarView({
   const { archiveThread, renameThread, setThreadPinned } = useThreadActions()
 
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set())
-  const [expandedThreadLists, setExpandedThreadLists] = useState<Set<string>>(() => new Set())
+  const [visibleThreadCounts, setVisibleThreadCounts] = useState<Map<string, number>>(
+    () => new Map(),
+  )
   const [optionsTarget, setOptionsTarget] = useState<{
     workspaceId: string
     thread: ThreadSummary
@@ -42,8 +44,8 @@ export const SidebarView = memo(function SidebarView({
   const [actionError, setActionError] = useState<string | null>(null)
 
   const rows = useMemo(
-    () => buildSidebarRows(groups, collapsedWorkspaces, expandedThreadLists, selectedThreadId),
-    [groups, collapsedWorkspaces, expandedThreadLists, selectedThreadId],
+    () => buildSidebarRows(groups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId),
+    [groups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId],
   )
 
 
@@ -59,17 +61,20 @@ export const SidebarView = memo(function SidebarView({
     })
   }, [])
 
-  const toggleThreadListExpanded = useCallback((workspaceId: string) => {
-    setExpandedThreadLists((prev) => {
-      const next = new Set(prev)
-      if (next.has(workspaceId)) {
-        next.delete(workspaceId)
-      } else {
-        next.add(workspaceId)
-      }
-      return next
-    })
-  }, [])
+  const handleOverflowPress = useCallback(
+    (workspaceId: string, visibleCount: number, isExpanded: boolean) => {
+      setVisibleThreadCounts((prev) => {
+        const next = new Map(prev)
+        if (isExpanded) {
+          next.delete(workspaceId)
+        } else {
+          next.set(workspaceId, visibleCount + SHOW_MORE_STEP)
+        }
+        return next
+      })
+    },
+    [],
+  )
 
   const openThreadOptions = useCallback((workspaceId: string, thread: ThreadSummary) => {
     void Haptics.selectionAsync()
@@ -181,7 +186,7 @@ export const SidebarView = memo(function SidebarView({
         return (
           <Pressable
             style={styles.overflowRow}
-            onPress={() => toggleThreadListExpanded(item.workspaceId)}
+            onPress={() => handleOverflowPress(item.workspaceId, item.visibleCount, item.isExpanded)}
             accessibilityRole="button"
             accessibilityState={{ expanded: item.isExpanded }}
           >
@@ -191,7 +196,7 @@ export const SidebarView = memo(function SidebarView({
               style={item.isExpanded ? styles.chevronFlipped : undefined}
             />
             <Text variant="caption" color="muted">
-              {item.isExpanded ? 'Show less' : `${item.hiddenCount} older threads`}
+              {item.isExpanded ? 'Show less' : 'Show more'}
             </Text>
           </Pressable>
         )
@@ -207,7 +212,7 @@ export const SidebarView = memo(function SidebarView({
         />
       )
     },
-    [onNewThread, onSelectThread, openThreadOptions, selectedThreadId, theme.colors.fg.muted, toggleWorkspaceCollapse, toggleThreadListExpanded],
+    [onNewThread, onSelectThread, openThreadOptions, selectedThreadId, theme.colors.fg.muted, toggleWorkspaceCollapse, handleOverflowPress],
   )
 
   const renderSheetContent = () => {

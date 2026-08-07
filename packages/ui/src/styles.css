@@ -5,8 +5,10 @@
    ================================================================ */
 
 @theme {
-  --font-sans: "Geist", "Inter", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
-  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+  /* Indirection through --fd-font-* lets the appearance settings override the
+     family at runtime (inline style on <html>) without fighting Tailwind. */
+  --font-sans: var(--fd-font-sans);
+  --font-mono: var(--fd-font-mono);
 
   /* Tailwind v4 color aliases — enables bg-surface-0, text-fg-primary, etc. */
   --color-surface-0: var(--fd-bg-0);
@@ -44,6 +46,10 @@
 :root {
   color-scheme: dark;
 
+  /* === Font Stacks (overridable via appearance settings) === */
+  --fd-font-sans: "Geist", "Inter", "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  --fd-font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", "Cascadia Code", ui-monospace, monospace;
+
   /* === Background Scale === */
   /* bg-0: app canvas, deepest layer */
   /* bg-1: panels, sidebar, rail — the primary "surface" tone */
@@ -57,11 +63,14 @@
   --fd-bg-4: #2c2c34;
 
   /* === Foreground Scale === */
+  /* fg-2 and below carry real copy (labels, helper text), so every step
+     through fg-3 clears WCAG AA (≥4.5:1) on bg-1. fg-4 is decorative-only
+     (dividers, ornament) and still holds ≥3:1. */
   --fd-fg-0: #f4f4f6;
   --fd-fg-1: #c4c4cc;
-  --fd-fg-2: #8e8e99;
-  --fd-fg-3: #62626d;
-  --fd-fg-4: #42424a;
+  --fd-fg-2: #9d9da8;
+  --fd-fg-3: #84848f;
+  --fd-fg-4: #6d6d78;
 
   /* === Border Scale === */
   --fd-border-0: rgba(255, 255, 255, 0.06);
@@ -126,15 +135,18 @@
   --fd-space-16: 64px;
 
   /* === Typography Scale === */
-  --fd-text-2xs: 11px;
-  --fd-text-xs: 12px;
-  --fd-text-sm: 14px;
-  --fd-text-base: 15px;
-  --fd-text-md: 16px;
-  --fd-text-lg: 18px;
-  --fd-text-xl: 22px;
-  --fd-text-2xl: 26px;
-  --fd-text-3xl: 32px;
+  /* Every step multiplies by --fd-font-scale so the appearance settings can
+     resize all UI text with a single override on <html>. */
+  --fd-font-scale: 1;
+  --fd-text-2xs: calc(11px * var(--fd-font-scale));
+  --fd-text-xs: calc(12px * var(--fd-font-scale));
+  --fd-text-sm: calc(14px * var(--fd-font-scale));
+  --fd-text-base: calc(15px * var(--fd-font-scale));
+  --fd-text-md: calc(16px * var(--fd-font-scale));
+  --fd-text-lg: calc(18px * var(--fd-font-scale));
+  --fd-text-xl: calc(22px * var(--fd-font-scale));
+  --fd-text-2xl: calc(26px * var(--fd-font-scale));
+  --fd-text-3xl: calc(32px * var(--fd-font-scale));
 
   --fd-leading-tight: 1.25;
   --fd-leading-normal: 1.5;
@@ -162,6 +174,210 @@
   --fd-rail-width: 320px;
   --fd-gap: 12px;
   --fd-shell-padding: 12px;
+}
+
+/* ================================================================
+   Light theme — same "Precision Instrument" hierarchy inverted.
+   Activated by data-theme="light" on <html>; the appearance module
+   resolves "system" to light/dark and stamps the attribute.
+   ================================================================ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* Panels sit lighter than the canvas; cards go to white so inputs and
+     composer read as the most elevated layer, mirroring dark's bg-2 lift. */
+  --fd-bg-0: #f4f4f5;
+  --fd-bg-1: #fbfbfc;
+  --fd-bg-2: #ffffff;
+  --fd-bg-3: #ececef;
+  --fd-bg-4: #e1e1e5;
+
+  --fd-fg-0: #17171c;
+  --fd-fg-1: #3c3c44;
+  --fd-fg-2: #5a5a64;
+  --fd-fg-3: #71717c;
+  --fd-fg-4: #8f8f9a;
+
+  --fd-border-0: rgba(17, 17, 20, 0.07);
+  --fd-border-1: rgba(17, 17, 20, 0.11);
+  --fd-border-2: rgba(17, 17, 20, 0.17);
+  --fd-border-3: rgba(17, 17, 20, 0.26);
+
+  /* Emerald deepens for light surfaces so accent text/controls keep contrast. */
+  --fd-accent: #059669;
+  --fd-accent-muted: rgba(5, 150, 105, 0.12);
+  --fd-accent-strong: #047857;
+  --fd-accent-dim: rgba(5, 150, 105, 0.06);
+
+  --fd-overlay: rgba(23, 23, 28, 0.32);
+  --fd-overlay-strong: rgba(250, 250, 251, 0.85);
+
+  --fd-success: #059669;
+  --fd-success-muted: rgba(5, 150, 105, 0.1);
+  --fd-warning: #b45309;
+  --fd-warning-muted: rgba(180, 83, 9, 0.1);
+  --fd-danger: #dc2626;
+  --fd-danger-muted: rgba(220, 38, 38, 0.08);
+  --fd-info: #2563eb;
+  --fd-info-muted: rgba(37, 99, 235, 0.08);
+
+  --fd-shadow-sm: 0 1px 2px rgba(23, 23, 28, 0.08);
+  --fd-shadow-md: 0 4px 12px rgba(23, 23, 28, 0.1);
+  --fd-shadow-lg: 0 12px 40px rgba(23, 23, 28, 0.14);
+  --fd-shadow-xl: 0 24px 64px rgba(23, 23, 28, 0.18);
+  --fd-shadow-glow: 0 0 24px rgba(5, 150, 105, 0.08);
+}
+
+/* ================================================================
+   Color palettes — data-palette on <html> swaps the whole scheme.
+   Each palette ships a dark block and a light override, so palette
+   and light/dark mode compose freely. Palettes are "inspired by"
+   the classics, tuned to FalconDeck's contrast floors (fg-3 ≥ 4.5:1
+   on bg-1, fg-4 ≥ 3:1).
+   ================================================================ */
+
+/* --- Gruvbox-inspired --- */
+:root[data-palette="gruvbox"] {
+  --fd-bg-0: #1d2021;
+  --fd-bg-1: #282828;
+  --fd-bg-2: #32302f;
+  --fd-bg-3: #3c3836;
+  --fd-bg-4: #504945;
+
+  --fd-fg-0: #fbf1c7;
+  --fd-fg-1: #ebdbb2;
+  --fd-fg-2: #c8b998;
+  --fd-fg-3: #b0a184;
+  --fd-fg-4: #8f8371;
+
+  --fd-border-0: rgba(235, 219, 178, 0.07);
+  --fd-border-1: rgba(235, 219, 178, 0.11);
+  --fd-border-2: rgba(235, 219, 178, 0.17);
+  --fd-border-3: rgba(235, 219, 178, 0.26);
+
+  --fd-accent: #8ec07c;
+  --fd-accent-muted: rgba(142, 192, 124, 0.14);
+  --fd-accent-strong: #a5d18f;
+  --fd-accent-dim: rgba(142, 192, 124, 0.07);
+
+  --fd-success: #b8bb26;
+  --fd-success-muted: rgba(184, 187, 38, 0.12);
+  --fd-warning: #fabd2f;
+  --fd-warning-muted: rgba(250, 189, 47, 0.12);
+  --fd-danger: #fb4934;
+  --fd-danger-muted: rgba(251, 73, 52, 0.12);
+  --fd-info: #83a598;
+  --fd-info-muted: rgba(131, 165, 152, 0.12);
+
+  --fd-focus-ring-color: var(--fd-accent);
+  --fd-shadow-glow: 0 0 24px rgba(142, 192, 124, 0.06);
+}
+
+:root[data-palette="gruvbox"][data-theme="light"] {
+  --fd-bg-0: #f2e5bc;
+  --fd-bg-1: #f9efc6;
+  --fd-bg-2: #fbf1c7;
+  --fd-bg-3: #e7d8ac;
+  --fd-bg-4: #d5c4a1;
+
+  --fd-fg-0: #282828;
+  --fd-fg-1: #3c3836;
+  --fd-fg-2: #504945;
+  --fd-fg-3: #665c54;
+  --fd-fg-4: #857a6e;
+
+  --fd-border-0: rgba(60, 56, 54, 0.09);
+  --fd-border-1: rgba(60, 56, 54, 0.14);
+  --fd-border-2: rgba(60, 56, 54, 0.2);
+  --fd-border-3: rgba(60, 56, 54, 0.3);
+
+  --fd-accent: #427b58;
+  --fd-accent-muted: rgba(66, 123, 88, 0.14);
+  --fd-accent-strong: #356449;
+  --fd-accent-dim: rgba(66, 123, 88, 0.07);
+
+  --fd-success: #79740e;
+  --fd-success-muted: rgba(121, 116, 14, 0.12);
+  --fd-warning: #b57614;
+  --fd-warning-muted: rgba(181, 118, 20, 0.12);
+  --fd-danger: #cc241d;
+  --fd-danger-muted: rgba(204, 36, 29, 0.1);
+  --fd-info: #076678;
+  --fd-info-muted: rgba(7, 102, 120, 0.1);
+
+  --fd-shadow-glow: 0 0 24px rgba(66, 123, 88, 0.08);
+}
+
+/* --- Tokyo Night-inspired --- */
+:root[data-palette="tokyo-night"] {
+  --fd-bg-0: #16161e;
+  --fd-bg-1: #1a1b26;
+  --fd-bg-2: #24283b;
+  --fd-bg-3: #292e42;
+  --fd-bg-4: #3b4261;
+
+  --fd-fg-0: #c0caf5;
+  --fd-fg-1: #a9b1d6;
+  --fd-fg-2: #939bc4;
+  --fd-fg-3: #8189af;
+  --fd-fg-4: #666d92;
+
+  --fd-border-0: rgba(169, 177, 214, 0.07);
+  --fd-border-1: rgba(169, 177, 214, 0.11);
+  --fd-border-2: rgba(169, 177, 214, 0.17);
+  --fd-border-3: rgba(169, 177, 214, 0.26);
+
+  --fd-accent: #7aa2f7;
+  --fd-accent-muted: rgba(122, 162, 247, 0.15);
+  --fd-accent-strong: #94b6fa;
+  --fd-accent-dim: rgba(122, 162, 247, 0.07);
+
+  --fd-success: #9ece6a;
+  --fd-success-muted: rgba(158, 206, 106, 0.12);
+  --fd-warning: #e0af68;
+  --fd-warning-muted: rgba(224, 175, 104, 0.12);
+  --fd-danger: #f7768e;
+  --fd-danger-muted: rgba(247, 118, 142, 0.12);
+  --fd-info: #7dcfff;
+  --fd-info-muted: rgba(125, 207, 255, 0.12);
+
+  --fd-focus-ring-color: var(--fd-accent);
+  --fd-shadow-glow: 0 0 24px rgba(122, 162, 247, 0.06);
+}
+
+:root[data-palette="tokyo-night"][data-theme="light"] {
+  --fd-bg-0: #d6d8e3;
+  --fd-bg-1: #e4e6ee;
+  --fd-bg-2: #eff1f7;
+  --fd-bg-3: #ced2e0;
+  --fd-bg-4: #bfc4d6;
+
+  --fd-fg-0: #2e3350;
+  --fd-fg-1: #40456b;
+  --fd-fg-2: #545a80;
+  --fd-fg-3: #616894;
+  --fd-fg-4: #7d84a8;
+
+  --fd-border-0: rgba(52, 59, 88, 0.09);
+  --fd-border-1: rgba(52, 59, 88, 0.14);
+  --fd-border-2: rgba(52, 59, 88, 0.2);
+  --fd-border-3: rgba(52, 59, 88, 0.3);
+
+  --fd-accent: #2e7de9;
+  --fd-accent-muted: rgba(46, 125, 233, 0.13);
+  --fd-accent-strong: #1a63cf;
+  --fd-accent-dim: rgba(46, 125, 233, 0.06);
+
+  --fd-success: #587539;
+  --fd-success-muted: rgba(88, 117, 57, 0.12);
+  --fd-warning: #8f5e15;
+  --fd-warning-muted: rgba(143, 94, 21, 0.12);
+  --fd-danger: #c53963;
+  --fd-danger-muted: rgba(197, 57, 99, 0.1);
+  --fd-info: #007197;
+  --fd-info-muted: rgba(0, 113, 151, 0.1);
+
+  --fd-shadow-glow: 0 0 24px rgba(46, 125, 233, 0.08);
 }
 
 body {

@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const originalConsoleError = console.error
 
-const { routerMock, useRelayStore } = vi.hoisted(() => {
+const { routerMock, useRelayStore, useAppearanceStore } = vi.hoisted(() => {
   ;(globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false
 
   const relayState = {
@@ -39,7 +39,22 @@ const { routerMock, useRelayStore } = vi.hoisted(() => {
     back: vi.fn(),
   }
 
-  return { routerMock, useRelayStore: store }
+  // Plain-selector stand-in for the zustand appearance store — the hoisted
+  // zustand copy binds to the wrong React instance under react-test-renderer.
+  const appearanceState = {
+    themeMode: 'system' as const,
+    palette: 'falcon' as const,
+    fontScale: 1,
+    setThemeMode: vi.fn(),
+    setPalette: vi.fn(),
+    setFontScale: vi.fn(),
+  }
+  const appearanceStore = Object.assign(
+    <T,>(selector: (state: typeof appearanceState) => T) => selector(appearanceState),
+    { getState: () => appearanceState },
+  )
+
+  return { routerMock, useRelayStore: store, useAppearanceStore: appearanceStore }
 })
 
 vi.mock('expo-router', () => {
@@ -60,6 +75,10 @@ vi.mock('expo-camera', () => ({
 
 vi.mock('@/store', () => ({ useRelayStore }))
 vi.mock('@/store/relay-store', () => ({ useRelayStore }))
+vi.mock('@/theme/appearance', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/theme/appearance')>()),
+  useAppearanceStore,
+}))
 
 import { cleanup, renderComponent, textOf } from '@/test/render'
 

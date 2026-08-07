@@ -1,6 +1,7 @@
 import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
 
 export const VISIBLE_THREAD_LIMIT = 5
+export const SHOW_MORE_STEP = 10
 
 export type SidebarRow =
   | {
@@ -22,13 +23,15 @@ export type SidebarRow =
       type: 'overflow'
       workspaceId: string
       hiddenCount: number
+      /** The count currently shown — "Show more" advances from here. */
+      visibleCount: number
       isExpanded: boolean
     }
 
 export function buildSidebarRows(
   groups: ProjectGroup[],
   collapsedWorkspaces: Set<string>,
-  expandedThreadLists: Set<string>,
+  visibleThreadCounts: ReadonlyMap<string, number>,
   selectedThreadId: string | null,
 ): SidebarRow[] {
   return groups.flatMap((group) => {
@@ -52,18 +55,18 @@ export function buildSidebarRows(
         ? [...pinned, ...group.threads.filter((thread) => !thread.is_pinned)]
         : group.threads
 
-    const hasOverflow = orderedThreads.length > VISIBLE_THREAD_LIMIT
-    const isExpanded = expandedThreadLists.has(group.workspace.id)
+    const requestedCount = visibleThreadCounts.get(group.workspace.id) ?? VISIBLE_THREAD_LIMIT
 
-    // Auto-expand if the selected thread is beyond the visible limit
-    const selectedIsHidden =
-      hasOverflow &&
-      !isExpanded &&
-      selectedThreadId != null &&
-      orderedThreads.findIndex((t) => t.id === selectedThreadId) >= VISIBLE_THREAD_LIMIT
-
-    const showAll = isExpanded || selectedIsHidden
-    const visible = hasOverflow && !showAll ? orderedThreads.slice(0, VISIBLE_THREAD_LIMIT) : orderedThreads
+    // Reveal just enough to keep the selected thread visible, without jumping
+    // straight to the full list.
+    const selectedIndex =
+      selectedThreadId != null
+        ? orderedThreads.findIndex((t) => t.id === selectedThreadId)
+        : -1
+    const effectiveCount = selectedIndex >= requestedCount ? selectedIndex + 1 : requestedCount
+    const visible = orderedThreads.slice(0, effectiveCount)
+    const hiddenCount = Math.max(0, orderedThreads.length - visible.length)
+    const canCollapse = hiddenCount === 0 && orderedThreads.length > VISIBLE_THREAD_LIMIT
 
     const threadRows: SidebarRow[] = visible.map((thread) => ({
       key: `thread:${thread.id}`,
@@ -74,13 +77,14 @@ export function buildSidebarRows(
 
     const rows: SidebarRow[] = [workspaceRow, ...threadRows]
 
-    if (hasOverflow) {
+    if (hiddenCount > 0 || canCollapse) {
       rows.push({
         key: `overflow:${group.workspace.id}`,
         type: 'overflow',
         workspaceId: group.workspace.id,
-        hiddenCount: orderedThreads.length - VISIBLE_THREAD_LIMIT,
-        isExpanded: showAll,
+        hiddenCount,
+        visibleCount: visible.length,
+        isExpanded: canCollapse,
       })
     }
 

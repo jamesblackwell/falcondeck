@@ -46,7 +46,7 @@ function PairingCard({ link, code }: { link: string; code: string }) {
       </p>
 
       <div className="flex justify-center rounded-[var(--fd-radius-lg)] bg-surface-0 p-5">
-        <QRCodeSVG value={link} size={160} bgColor="transparent" fgColor="#f0f5f1" />
+        <QRCodeSVG value={link} size={160} bgColor="transparent" fgColor="var(--fd-fg-0)" />
       </div>
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -176,14 +176,14 @@ export function RemotePairingPopover({
                 <RadioTower className="h-4 w-4" />
                 Remote Pairing
               </div>
-              <span className="text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-faint">
+              <span className="text-[length:var(--fd-text-2xs)] uppercase tracking-[0.18em] text-fg-muted">
                 End-to-end encrypted
               </span>
             </div>
 
             {needsFreshPairing && !isPairing ? (
               <>
-                <p className="text-[length:var(--fd-text-sm)] text-fg-muted">
+                <p className="text-[length:var(--fd-text-sm)] text-fg-secondary">
                   Connect another device to use FalconDeck remotely.
                 </p>
                 {remoteControlsDisabled && remoteControlsUnavailableReason ? (
@@ -271,7 +271,7 @@ export function RemotePairingPopover({
               </div>
             ) : null}
 
-            <div className="flex items-center gap-1.5 pt-1 text-[length:var(--fd-text-2xs)] text-fg-faint">
+            <div className="flex items-center gap-1.5 pt-1 text-[length:var(--fd-text-2xs)] text-fg-muted">
               <Lock className="h-3 w-3" />
               Share pairing links and codes only with your own devices.
             </div>

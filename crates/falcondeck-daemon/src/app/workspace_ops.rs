@@ -334,6 +334,13 @@ pub(super) async fn connect_workspace_internal(
                         let mut managed = ManagedThread::with_items(thread.summary, thread.items);
                         if let Some(state) = persisted_thread_states.get(&managed.summary.id) {
                             managed.manual_title = state.manual_title;
+                            // A rename made in FalconDeck outlives whatever the
+                            // provider's session file says the title is.
+                            if state.manual_title
+                                && let Some(title) = state.title.clone()
+                            {
+                                managed.summary.title = title;
+                            }
                             managed.ai_title_generated = state.ai_title_generated
                                 || (!is_placeholder_thread_title(&managed.summary.title)
                                     && !is_provisional_thread_title(&managed.summary.title));
