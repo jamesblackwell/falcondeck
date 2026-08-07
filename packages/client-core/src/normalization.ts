@@ -46,7 +46,7 @@ const DEFAULT_TOOL_CALL_DISPLAY: ToolCallDisplay = {
 }
 
 const DEFAULT_CONVERSATION_PREFERENCES: ConversationPreferences = {
-  tool_details_mode: 'compact',
+  tool_details_mode: 'collapsed',
   auto_expand: {
     approvals: true,
     errors: true,

@@ -497,9 +497,32 @@ pub(super) fn extract_claude_service_message(value: &Value) -> Option<String> {
         .or_else(|| extract_string(value, &["type"]))?;
     if matches!(event_type.as_str(), "system" | "status" | "result") {
         return extract_string(claude_event_value(value), &["message", "status", "summary"])
-            .or_else(|| extract_string(value, &["message", "status", "summary"]));
+            .or_else(|| extract_string(value, &["message", "status", "summary"]))
+            .filter(|message| !is_low_signal_service_message(message));
     }
     None
+}
+
+/// Bare lifecycle words the stream emits around hooks and turn results
+/// ("requesting", "completed", …). They carry nothing the tool cards and
+/// approval cards don't already show — and as conversation items they split
+/// the collapsed work-session runs into one-second fragments.
+fn is_low_signal_service_message(message: &str) -> bool {
+    matches!(
+        message.trim().to_ascii_lowercase().as_str(),
+        "" | "requesting"
+            | "completed"
+            | "complete"
+            | "in_progress"
+            | "in progress"
+            | "pending"
+            | "running"
+            | "started"
+            | "starting"
+            | "success"
+            | "ok"
+            | "done"
+    )
 }
 
 pub(super) fn extract_claude_error(value: &Value) -> Option<String> {
@@ -836,5 +859,35 @@ pub(super) fn parse_agent_provider(value: String) -> Option<AgentProvider> {
         None
     } else {
         Some(AgentProvider::new(normalized))
+    }
+}
+
+#[cfg(test)]
+mod service_message_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn hook_lifecycle_chatter_is_filtered_from_service_messages() {
+        for noise in ["requesting", "completed", "Success", " in_progress "] {
+            let event = json!({ "type": "status", "status": noise });
+            assert_eq!(
+                extract_claude_service_message(&event),
+                None,
+                "bare '{noise}' must not become a conversation item"
+            );
+        }
+    }
+
+    #[test]
+    fn informative_service_messages_still_pass() {
+        let event = json!({
+            "type": "system",
+            "message": "Context low — auto-compacting the conversation"
+        });
+        assert_eq!(
+            extract_claude_service_message(&event).as_deref(),
+            Some("Context low — auto-compacting the conversation")
+        );
     }
 }

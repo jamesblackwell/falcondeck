@@ -70,7 +70,10 @@ pub struct ConversationPreferences {
 impl Default for ConversationPreferences {
     fn default() -> Self {
         Self {
-            tool_details_mode: ToolDetailsMode::Compact,
+            // Collapsed is the shipped default (every surveyed product landed
+            // on collapsed-by-default; docs/ADAPTERS.md §7): tool activity
+            // folds behind a single "Worked for…" line, expanded on demand.
+            tool_details_mode: ToolDetailsMode::Collapsed,
             auto_expand: ConversationAutoExpandPreferences::default(),
             group_read_only_tools: true,
             show_expand_all_controls: true,
