@@ -703,9 +703,13 @@ impl AppState {
             remote.last_error = None;
         }
 
-        self.persist_local_state()
-            .await
-            .map_err(|error| format!("failed to persist remote pairing state: {error}"))?;
+        // Persistence is required for reconnecting after a restart, but a
+        // storage outage must never prevent an otherwise valid live pairing
+        // from reaching the relay. The next supervised attempt will retry the
+        // write while this attempt proceeds with the in-memory keys.
+        if let Err(error) = self.persist_local_state().await {
+            tracing::warn!(%error, "failed to persist remote pairing state before connecting");
+        }
 
         self.connect_remote_session(
             relay_url,

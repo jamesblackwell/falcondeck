@@ -25,6 +25,14 @@ fn test_config() -> DaemonConfig {
     }
 }
 
+fn test_config_with_state_path(state_path: PathBuf) -> DaemonConfig {
+    DaemonConfig {
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        state_path: Some(state_path),
+        ..DaemonConfig::default()
+    }
+}
+
 async fn spawn_relay(temp_dir: &TempDir) -> String {
     let state = RelayState::load(
         "test".to_string(),
@@ -272,6 +280,67 @@ async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
     );
 
     daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
+    let relay_dir = tempfile::tempdir().unwrap();
+    let daemon_dir = tempfile::tempdir().unwrap();
+    let state_path = daemon_dir.path().join("daemon-state.json");
+    let relay_base = spawn_relay(&relay_dir).await;
+    let client = reqwest::Client::new();
+
+    let daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
+        .await
+        .unwrap();
+    let remote = client
+        .post(format!("{}/api/remote/pairing", daemon.base_url()))
+        .json(&StartRemotePairingRequest {
+            relay_url: relay_base.clone(),
+        })
+        .send()
+        .await
+        .unwrap()
+        .json::<RemoteStatusResponse>()
+        .await
+        .unwrap();
+    let pairing = remote.pairing.unwrap();
+    let claim = claim_pairing_with_challenge(
+        &client,
+        &relay_base,
+        &pairing.pairing_code,
+        "restart-test-phone",
+        &LocalBoxKeyPair::generate(),
+    )
+    .await;
+    let first_status = wait_for_connected(&client, &daemon.base_url()).await;
+    assert_eq!(
+        first_status
+            .pairing
+            .as_ref()
+            .and_then(|pairing| pairing.session_id.as_deref()),
+        Some(claim.session_id.as_str())
+    );
+    daemon.shutdown().await.unwrap();
+
+    let restarted = spawn_embedded(test_config_with_state_path(state_path))
+        .await
+        .unwrap();
+    let restored_status = wait_for_connected(&client, &restarted.base_url()).await;
+    let restored_pairing = restored_status
+        .pairing
+        .expect("trusted pairing should restore");
+    assert_eq!(
+        restored_pairing.session_id.as_deref(),
+        Some(claim.session_id.as_str())
+    );
+    assert_eq!(restored_status.trusted_devices.len(), 1);
+    assert_eq!(
+        restored_status.trusted_devices[0].device_id,
+        claim.device_id
+    );
+
+    restarted.shutdown().await.unwrap();
 }
 
 #[tokio::test]

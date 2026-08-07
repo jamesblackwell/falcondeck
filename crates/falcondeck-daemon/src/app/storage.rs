@@ -1,5 +1,8 @@
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::{
     env,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -16,6 +19,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::{
     fs,
+    io::AsyncWriteExt,
     task::spawn_blocking,
     time::{Duration, timeout},
 };
@@ -129,11 +133,28 @@ async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result<(), Daemon
         fs::create_dir_all(parent).await?;
     }
     let tmp_path = path.with_extension(format!("json.tmp.{}", uuid::Uuid::new_v4().simple()));
-    fs::write(&tmp_path, payload).await?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&tmp_path).await?;
+    if let Err(error) = async {
+        file.write_all(&payload).await?;
+        file.sync_all().await
+    }
+    .await
+    {
+        drop(file);
+        let _ = fs::remove_file(&tmp_path).await;
+        return Err(error.into());
+    }
+    drop(file);
     if let Err(error) = fs::rename(&tmp_path, path).await {
         let _ = fs::remove_file(&tmp_path).await;
         return Err(error.into());
     }
+    #[cfg(unix)]
+    fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     Ok(())
 }
 
@@ -366,27 +387,53 @@ pub(super) async fn delete_remote_secrets_async(
     .map_err(|error| DaemonError::Process(format!("secure storage task failed: {error}")))?
 }
 
-/// Headless hosts (Linux servers under systemd) usually have no secret
-/// service. `FALCONDECK_SECRET_FILE` opts into a plain-file store (0600)
-/// instead of the OS keychain, matching how the CLIs themselves persist
-/// tokens on servers.
+/// macOS Keychain access can block indefinitely when the app signature or ACL
+/// changes between builds. Remote connectivity must not depend on an
+/// interactive credential-store prompt, so the desktop defaults to an atomic
+/// owner-only file beside the daemon state. Headless hosts can opt into the
+/// same backend with `FALCONDECK_SECRET_FILE`.
 #[cfg(not(test))]
 fn secret_file_path() -> Option<std::path::PathBuf> {
-    std::env::var("FALCONDECK_SECRET_FILE")
+    let configured = std::env::var("FALCONDECK_SECRET_FILE")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .map(std::path::PathBuf::from)
+        .map(std::path::PathBuf::from);
+    if configured.is_some() {
+        return configured;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return Some(
+            default_state_path()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("remote-secrets.json"),
+        );
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
-#[cfg(not(test))]
-fn read_secret_file(path: &std::path::Path) -> std::collections::HashMap<String, String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok())
-        .unwrap_or_default()
+fn read_secret_file(
+    path: &std::path::Path,
+) -> Result<std::collections::HashMap<String, String>, DaemonError> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(std::collections::HashMap::new());
+        }
+        Err(error) => {
+            return Err(DaemonError::Process(format!(
+                "failed to read secret file: {error}"
+            )));
+        }
+    };
+    serde_json::from_str(&raw)
+        .map_err(|error| DaemonError::BadRequest(format!("invalid secret file: {error}")))
 }
 
-#[cfg(not(test))]
 fn write_secret_file(
     path: &std::path::Path,
     entries: &std::collections::HashMap<String, String>,
@@ -397,13 +444,34 @@ fn write_secret_file(
         })?;
     }
     let payload = serde_json::to_string(entries)?;
-    std::fs::write(path, payload)
-        .map_err(|error| DaemonError::Process(format!("failed to write secret file: {error}")))?;
+    let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4().simple()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&tmp_path)
+        .map_err(|error| DaemonError::Process(format!("failed to create secret file: {error}")))?;
+    if let Err(error) = file
+        .write_all(payload.as_bytes())
+        .and_then(|()| file.sync_all())
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        drop(file);
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(DaemonError::Process(format!(
+            "failed to write secret file: {error}"
+        )));
     }
+    drop(file);
+    if let Err(error) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(DaemonError::Process(format!(
+            "failed to publish secret file: {error}"
+        )));
+    }
+    #[cfg(unix)]
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| DaemonError::Process(format!("failed to secure secret file: {error}")))?;
     Ok(())
 }
 
@@ -414,7 +482,7 @@ pub(super) fn save_remote_secrets_to_secure_storage(
 ) -> Result<(), DaemonError> {
     let payload = serde_json::to_string(secrets)?;
     if let Some(path) = secret_file_path() {
-        let mut entries = read_secret_file(&path);
+        let mut entries = read_secret_file(&path)?;
         entries.insert(secure_storage_key.to_string(), payload);
         return write_secret_file(&path, &entries);
     }
@@ -444,7 +512,7 @@ pub(super) fn load_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<PersistedRemoteSecrets, DaemonError> {
     if let Some(path) = secret_file_path() {
-        let entries = read_secret_file(&path);
+        let entries = read_secret_file(&path)?;
         let payload = entries
             .get(secure_storage_key)
             .ok_or_else(|| DaemonError::NotFound("no persisted remote secrets".to_string()))?;
@@ -467,7 +535,7 @@ pub(super) fn delete_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<(), DaemonError> {
     if let Some(path) = secret_file_path() {
-        let mut entries = read_secret_file(&path);
+        let mut entries = read_secret_file(&path)?;
         if entries.remove(secure_storage_key).is_some() {
             write_secret_file(&path, &entries)?;
         }
@@ -543,6 +611,47 @@ mod tests {
     use serde_json::json;
 
     use crate::app::PersistedWorkspaceState;
+
+    #[tokio::test]
+    async fn atomic_state_files_are_owner_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("daemon-state.json");
+
+        write_atomically(&path, b"{\"ok\":true}".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"ok\":true}");
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn secret_file_writes_are_atomic_and_owner_only() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("remote-secrets.json");
+        let entries = std::collections::HashMap::from([
+            ("session-a".to_string(), "secret-a".to_string()),
+            ("session-b".to_string(), "secret-b".to_string()),
+        ]);
+
+        write_secret_file(&path, &entries).unwrap();
+
+        assert_eq!(read_secret_file(&path).unwrap(), entries);
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::read_dir(temp_dir.path()).unwrap().count(),
+            1,
+            "atomic write should not leave a temporary file behind"
+        );
+    }
 
     #[test]
     fn derives_preferences_path_next_to_state_file() {

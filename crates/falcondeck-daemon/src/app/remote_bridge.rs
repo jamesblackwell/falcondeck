@@ -134,9 +134,13 @@ impl AppState {
             remote.last_error = None;
         }
 
-        self.persist_local_state()
-            .await
-            .map_err(|error| format!("failed to persist connected remote state: {error}"))?;
+        // Once the transport is live, persistence failures are durability
+        // warnings rather than connection failures. Tearing down a healthy
+        // socket here made a transient credential-store problem look like a
+        // network outage and trapped the supervisor in a reconnect loop.
+        if let Err(error) = self.persist_local_state().await {
+            tracing::warn!(%error, "failed to persist connected remote state");
+        }
 
         let min_forward_seq: u64 = fence_seq;
         // A trusted client that lost its persisted data key cannot use the
