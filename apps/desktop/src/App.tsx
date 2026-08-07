@@ -198,6 +198,16 @@ function AppInner() {
     () => hostLabelByWorkspaceId(remoteHosts.hosts),
     [remoteHosts.hosts],
   )
+  const workspaceHostBadges = useMemo(() => {
+    const badges: Record<string, { name: string; connected: boolean }> = {}
+    for (const [workspaceId, host] of workspaceHostIndex) {
+      badges[workspaceId] = {
+        name: host.name,
+        connected: host.status === 'encrypted' && (host.presence?.daemon_connected ?? false),
+      }
+    }
+    return badges
+  }, [workspaceHostIndex])
   const apiFor = useCallback(
     (workspaceId: string | null | undefined) => {
       const host = remoteHosts.hostForWorkspace(workspaceId)
@@ -1257,6 +1267,7 @@ function AppInner() {
         sidebar={
           <DesktopSidebar
             groups={groups}
+            workspaceHosts={workspaceHostBadges}
             selectedWorkspaceId={selectedWorkspaceId}
             selectedThreadId={selectedThreadId}
             onSelectWorkspace={handleSelectWorkspace}
@@ -1278,6 +1289,10 @@ function AppInner() {
           isSettingsOpen ? (
             <SettingsView
               workspace={selectedWorkspace}
+              baseUrl={baseUrl}
+              hostManager={remoteHosts.manager}
+              hosts={remoteHosts.hosts}
+              onToast={toast}
               preferences={snapshot?.preferences ?? null}
               remoteStatus={remoteStatus}
               pairingLink={pairingLink}

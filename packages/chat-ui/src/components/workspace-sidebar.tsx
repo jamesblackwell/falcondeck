@@ -27,7 +27,7 @@ import {
 
 import { AttentionInbox } from './attention-inbox'
 import { ThreadItem, type ThreadItemArchiveHandler } from './thread-item'
-import { WorkspaceGroup } from './workspace-group'
+import { WorkspaceGroup, type WorkspaceHostBadge } from './workspace-group'
 
 const VISIBLE_THREAD_LIMIT = 5
 const SHOW_MORE_STEP = 10
@@ -77,6 +77,9 @@ type SidebarEmptyState = {
 
 export type WorkspaceSidebarProps = {
   groups: ProjectGroup[]
+  // Host badges for workspaces that live on enrolled remote servers,
+  // keyed by workspace id.
+  workspaceHosts?: Record<string, WorkspaceHostBadge>
   selectedWorkspaceId: string | null
   selectedThreadId: string | null
   onSelectWorkspace: (workspaceId: string, threadId: string | null) => void
@@ -167,6 +170,7 @@ const ThreadList = memo(function ThreadList({
 
 export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   groups,
+  workspaceHosts,
   selectedWorkspaceId,
   selectedThreadId,
   onSelectWorkspace,
@@ -573,6 +577,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             <WorkspaceGroup
               key={group.workspace.id}
               workspace={group.workspace}
+              host={workspaceHosts?.[group.workspace.id] ?? null}
               isSelected={visualSelectedWorkspaceId === group.workspace.id}
               onSelect={() =>
                 handleSelectWorkspace(

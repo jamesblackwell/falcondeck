@@ -1,12 +1,20 @@
 import * as React from 'react'
 import { memo, useState } from 'react'
-import { ChevronDown, ChevronRight, FolderClosed, SquarePen } from 'lucide-react'
+import { ChevronDown, ChevronRight, FolderClosed, Globe, SquarePen } from 'lucide-react'
 
 import type { WorkspaceSummary } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
+// Present when the workspace lives on an enrolled remote server rather than
+// this machine; rendered as a host subtitle with a connection dot.
+export type WorkspaceHostBadge = {
+  name: string
+  connected: boolean
+}
+
 export type WorkspaceGroupProps = {
   workspace: WorkspaceSummary
+  host?: WorkspaceHostBadge | null
   isSelected: boolean
   onSelect: () => void
   onNewThread?: () => void
@@ -16,6 +24,7 @@ export type WorkspaceGroupProps = {
 
 export const WorkspaceGroup = memo(function WorkspaceGroup({
   workspace,
+  host,
   isSelected,
   onSelect,
   onNewThread,
@@ -59,14 +68,36 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
           <span className="relative h-4 w-4 shrink-0">
             {isOpen ? (
               <>
-                <FolderClosed className="h-4 w-4 text-fg-muted group-hover:hidden" />
+                {host ? (
+                  <Globe className="h-4 w-4 text-fg-muted group-hover:hidden" />
+                ) : (
+                  <FolderClosed className="h-4 w-4 text-fg-muted group-hover:hidden" />
+                )}
                 <ChevronDown className="hidden h-4 w-4 text-fg-muted group-hover:block" />
               </>
             ) : (
               <ChevronRight className="h-4 w-4 text-fg-muted" />
             )}
           </span>
-          <span className="truncate text-[length:var(--fd-text-sm)] font-medium">{pathLabel}</span>
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[length:var(--fd-text-sm)] font-medium">
+              {pathLabel}
+            </span>
+            {host ? (
+              <span className="mt-0.5 flex items-center gap-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+                <span
+                  aria-hidden="true"
+                  className={cn(
+                    'h-1.5 w-1.5 shrink-0 rounded-full',
+                    host.connected ? 'bg-[var(--color-success,#30a46c)]' : 'bg-fg-muted',
+                  )}
+                />
+                <span className="truncate">
+                  {host.name} · {host.connected ? 'Connected' : 'Offline'}
+                </span>
+              </span>
+            ) : null}
+          </span>
         </button>
         {onNewThread ? (
           <button

@@ -38,6 +38,17 @@ CODEX_BIN ?= codex
 TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
 DESKTOP_NATIVE_CHECK = cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')" && npm exec -- node -e "import('rolldown').then(() => undefined, (error) => { console.error(error); process.exit(1) })"
 TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev
+# Kill anything already listening on the UI port (e.g. a stray Vite left
+# behind by an agent or background session) so dev targets always start
+# cleanly instead of failing with "Port 1420 is already in use".
+FREE_UI_PORT = pids=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true); \
+	if [ -n "$$pids" ]; then \
+		echo "Freeing UI port $(UI_PORT) (killing pid(s): $$pids)"; \
+		kill $$pids 2>/dev/null || true; \
+		sleep 1; \
+		leftover=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true); \
+		if [ -n "$$leftover" ]; then kill -9 $$leftover 2>/dev/null || true; sleep 1; fi; \
+	fi
 ifeq ($(strip $(DESKTOP_TAURI_TARGET)),)
 TAURI_BUILD = cd "$(DESKTOP_DIR)" && npm exec tauri -- build
 TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --bundles app --config src-tauri/tauri.local.conf.json
@@ -141,10 +152,7 @@ site-prepare:
 dev: desktop-prepare remote-web-prepare
 	@set -e; \
 		$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true; \
-		if lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
-			echo "Port $(UI_PORT) is already in use. Stop the existing FalconDeck frontend or choose another UI_PORT."; \
-			exit 1; \
-		fi; \
+		$(FREE_UI_PORT); \
 		if lsof -ti tcp:$(REMOTE_WEB_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 			echo "Using existing remote web client on port $(REMOTE_WEB_PORT)"; \
 			remote_web_pid=""; \
@@ -275,6 +283,7 @@ test-mobile: mobile-test
 
 desktop-dev: desktop-prepare
 	@$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true
+	@$(FREE_UI_PORT)
 	@$(TAURI_DEV)
 
 desktop-dev-stop: desktop-prepare

@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use falcondeck_core::DEFAULT_DAEMON_PORT;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, sleep, timeout};
 use uuid::Uuid;
 
 use super::AppState;
@@ -28,6 +28,10 @@ const REMOTE_DAEMON_PORT: u16 = DEFAULT_DAEMON_PORT;
 const UNIT_NAME: &str = "falcondeck-daemon";
 /// Seconds `ssh` waits for the TCP connection before giving up.
 const SSH_CONNECT_TIMEOUT_SECS: u32 = 10;
+/// Ceiling on an ordinary remote command, so a wedged host cannot strand a job.
+const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(90);
+/// Ceiling on the install step, which downloads ~25 MB with its own 300s budget.
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(360);
 /// Attempts made while waiting for the freshly started daemon to answer.
 const HEALTH_ATTEMPTS: usize = 6;
 /// Delay between health-check attempts (6 x 2s covers the ~10s budget).
@@ -411,17 +415,33 @@ async fn install_daemon_binary(
     let download_url = daemon_binary_url(relay_url, &arch);
     app.append_provision_log(job_id, format!("downloading {download_url}"))
         .await;
-    let install = ssh_exec(target, port, &install_script(&download_url)).await?;
+    let install = ssh_exec_with_timeout(
+        target,
+        port,
+        &install_script(&download_url),
+        INSTALL_TIMEOUT,
+    )
+    .await?;
     if install.success {
         app.append_provision_log(
             job_id,
             "daemon binary installed at ~/.local/bin/falcondeck-daemon",
         )
         .await;
+        // The script reports checksum verification and the installed version
+        // on stdout; both are worth keeping in the job log.
+        let details = install.stdout.trim();
+        if !details.is_empty() {
+            app.append_provision_log(job_id, details.to_string()).await;
+        }
         return Ok(());
     }
 
     if has_existing_binary {
+        // A failed *update* must not take a working server down, so the host
+        // keeps the binary it already has. The bad download never replaced it:
+        // the script writes to a temp path and only moves it into place after
+        // the checksum passes.
         app.append_provision_log(
             job_id,
             format!(
@@ -436,6 +456,15 @@ async fn install_daemon_binary(
     if install.mentions_http_not_found() {
         return Err(DaemonError::Process(format!(
             "no prebuilt daemon binary for {arch}; build one on the server or update the relay dist"
+        )));
+    }
+
+    if install.mentions_checksum_mismatch() {
+        return Err(DaemonError::Process(format!(
+            "the downloaded daemon binary did not match its published sha256 checksum: {}. \
+             The relay artifact may be mid-deploy or corrupted; retry, and if it persists \
+             republish the dist artifact.",
+            install.failure_detail()
         )));
     }
     Err(DaemonError::Process(format!(
@@ -562,16 +591,40 @@ fn daemon_binary_url(relay_url: &str, arch: &str) -> String {
 
 fn install_script(download_url: &str) -> String {
     let url = shell_quote(download_url);
+    let checksum_url = shell_quote(&format!("{download_url}.sha256"));
+    // `curl -f` reports a 404 as a bare "error: 404" on some builds and with a
+    // reason phrase on others, so the HTTP status is captured explicitly
+    // rather than pattern-matched out of curl's message.
     format!(
         r#"set -eu
 mkdir -p "$HOME/.local/bin"
 tmp="$HOME/.local/bin/falcondeck-daemon.tmp"
-if ! curl -fL --max-time 300 -o "$tmp" {url}; then
+if ! http_code="$(curl -fsSL --max-time 300 -o "$tmp" -w '%{{http_code}}' {url})"; then
   rm -f "$tmp"
+  echo "download failed with http status ${{http_code:-unknown}}" >&2
   exit 1
+fi
+# The published checksum is best-effort: a host without sha256sum, or an
+# architecture published without one, must still be able to provision.
+if expected="$(curl -fsSL --max-time 30 {checksum_url} 2>/dev/null)"; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmp" | cut -d' ' -f1)"
+    expected="${{expected%% *}}"
+    if [ "$actual" != "$expected" ]; then
+      rm -f "$tmp"
+      echo "checksum mismatch: expected $expected, got $actual" >&2
+      exit 1
+    fi
+    echo "checksum verified ($actual)"
+  else
+    echo "sha256sum not available on the host; skipping checksum verification"
+  fi
+else
+  echo "no published checksum for this build; skipping verification"
 fi
 chmod +x "$tmp"
 mv -f "$tmp" "$HOME/.local/bin/falcondeck-daemon"
+"$HOME/.local/bin/falcondeck-daemon" --version 2>/dev/null || true
 "#
     )
 }
@@ -686,10 +739,14 @@ impl SshOutput {
         truncate(&output, MAX_LOG_ENTRY_CHARS)
     }
 
-    /// True when curl reported an HTTP 404 for the binary download.
+    /// True when the download failed because the relay has no such artifact.
     fn mentions_http_not_found(&self) -> bool {
-        let stderr = self.stderr.to_ascii_lowercase();
-        stderr.contains("404") && stderr.contains("not found")
+        self.stderr.contains("download failed with http status 404")
+    }
+
+    /// True when the downloaded artifact did not match its published digest.
+    fn mentions_checksum_mismatch(&self) -> bool {
+        self.stderr.contains("checksum mismatch")
     }
 
     fn mentions_missing_bus(&self) -> bool {
@@ -702,6 +759,31 @@ impl SshOutput {
 /// The target and script are separate argv entries, so nothing here is
 /// interpreted by a local shell.
 async fn ssh_exec(target: &str, port: Option<u16>, script: &str) -> Result<SshOutput, DaemonError> {
+    ssh_exec_with_timeout(target, port, script, SSH_COMMAND_TIMEOUT).await
+}
+
+/// As [`ssh_exec`], but with an explicit ceiling on how long the remote
+/// command may run.
+///
+/// `ConnectTimeout` only bounds the TCP handshake. Without a ceiling on the
+/// command itself, one wedged remote process would leave the job stuck on
+/// `running` forever with no way for the user to tell what happened.
+async fn ssh_exec_with_timeout(
+    target: &str,
+    port: Option<u16>,
+    script: &str,
+    limit: Duration,
+) -> Result<SshOutput, DaemonError> {
+    match timeout(limit, run_ssh(target, port, script)).await {
+        Ok(result) => result,
+        Err(_) => Err(DaemonError::Process(format!(
+            "remote command on {target} timed out after {} seconds",
+            limit.as_secs()
+        ))),
+    }
+}
+
+async fn run_ssh(target: &str, port: Option<u16>, script: &str) -> Result<SshOutput, DaemonError> {
     let mut command = Command::new("ssh");
     command
         .arg("-o")
@@ -711,7 +793,12 @@ async fn ssh_exec(target: &str, port: Option<u16>, script: &str) -> Result<SshOu
     if let Some(port) = port {
         command.arg("-p").arg(port.to_string());
     }
-    command.arg(target).arg(script);
+    command
+        .arg(target)
+        .arg(script)
+        // Without this, a timeout would drop the future and leave the ssh
+        // client running as an orphan.
+        .kill_on_drop(true);
 
     let output = command
         .output()
@@ -829,6 +916,28 @@ mod tests {
     }
 
     #[test]
+    fn install_script_verifies_the_published_checksum_and_reports_http_status() {
+        let script = install_script(&daemon_binary_url(
+            "https://connect.falcondeck.com",
+            "x86_64",
+        ));
+        assert!(script.contains(
+            "'https://connect.falcondeck.com/dist/falcondeck-daemon-x86_64-linux.sha256'"
+        ));
+        assert!(script.contains("sha256sum \"$tmp\""));
+        // sha256sum output is "<hex>  <name>", so only the first field is the
+        // digest we compare against.
+        assert!(script.contains(r#"expected="${expected%% *}""#));
+        assert!(script.contains("download failed with http status"));
+        // The artifact is served mode 0644, so it is not executable as fetched.
+        assert!(script.contains("chmod +x \"$tmp\""));
+        // Nothing is moved into place until the digest matches.
+        let checksum_at = script.find("checksum mismatch").expect("checksum guard");
+        let move_at = script.find("mv -f").expect("install move");
+        assert!(checksum_at < move_at);
+    }
+
+    #[test]
     fn builds_the_hosted_binary_url_from_the_relay_and_architecture() {
         assert_eq!(
             daemon_binary_url("https://connect.falcondeck.com", "x86_64"),
@@ -887,12 +996,36 @@ mod tests {
     fn detects_a_missing_binary_and_a_missing_systemd_bus() {
         let not_found = SshOutput {
             success: false,
-            exit_code: Some(22),
+            exit_code: Some(1),
             stdout: String::new(),
-            stderr: "curl: (22) The requested URL returned error: 404 Not Found".to_string(),
+            // What the install script emits; curl's own wording varies by
+            // build (some omit the "Not Found" reason phrase entirely).
+            stderr: "curl: (22) The requested URL returned error: 404\n\
+                     download failed with http status 404"
+                .to_string(),
         };
         assert!(not_found.mentions_http_not_found());
+        assert!(!not_found.mentions_checksum_mismatch());
         assert!(!not_found.mentions_missing_bus());
+
+        // A transport failure with no HTTP status must not be mistaken for a
+        // missing artifact, which would send the user hunting the wrong bug.
+        let unreachable = SshOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: "curl: (7) Failed to connect\ndownload failed with http status 000".to_string(),
+        };
+        assert!(!unreachable.mentions_http_not_found());
+
+        let corrupt = SshOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: "checksum mismatch: expected abc123, got def456".to_string(),
+        };
+        assert!(corrupt.mentions_checksum_mismatch());
+        assert!(!corrupt.mentions_http_not_found());
 
         let no_bus = SshOutput {
             success: false,

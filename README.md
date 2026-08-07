@@ -45,6 +45,7 @@ Packaged desktop builds will be published on the [GitHub Releases page](https://
 - Watch streaming responses and tool activity as it happens.
 - Review diffs, permission requests, and interactive questions with context.
 - Pair trusted devices and continue a session from the web or mobile client.
+- Run agents on remote servers: FalconDeck installs its daemon over SSH, the server enrolls through the relay like a paired phone, and sessions keep running when your laptop sleeps.
 - Reconnect cleanly after restarts or network changes through the relay event stream.
 - Keep same-folder workflows by default instead of forcing a worktree model.
 
@@ -105,9 +106,9 @@ The mobile app uses Expo and has a dedicated workflow documented in [`docs/14-mo
 
 ## Self-hosting
 
-The relay and hosted web stack can be deployed with the included Ansible setup. The production shape uses Ubuntu, systemd, Caddy, and PostgreSQL for relay persistence.
+FalconDeck defaults to the hosted relay at `connect.falcondeck.com`, but running your own relay is fully supported: every client and server daemon accepts a custom relay URL (desktop exposes it under Settings → Servers → Advanced), and because sessions are end-to-end encrypted, the relay — hosted or yours — never sees plaintext either way.
 
-See [`ops/ansible/README.md`](ops/ansible/README.md) for the example inventory and deployment path, and [`docs/11-deployment-ops.md`](docs/11-deployment-ops.md) for the operational model.
+See [`docs/SELF-HOSTING.md`](docs/SELF-HOSTING.md) for running the relay, pointing clients at it, and serving provisioning binaries. The relay and hosted web stack can also be deployed with the included Ansible setup ([`ops/ansible/README.md`](ops/ansible/README.md), [`docs/11-deployment-ops.md`](docs/11-deployment-ops.md)).
 
 ## Help build it
 

@@ -9,14 +9,20 @@ import type {
 } from '@falcondeck/client-core'
 
 import type { AppUpdaterState } from '../hooks/useAppUpdater'
+import type { HostManager, HostView } from '../hosts'
 import { AppearanceSettingsPanel } from './settings/AppearanceSettingsPanel'
 import { GeneralSettingsPanel } from './settings/GeneralSettingsPanel'
 import { RemoteAccessPanel } from './settings/RemoteAccessPanel'
+import { ServersPanel, type ServersPanelProps } from './settings/ServersPanel'
 import { SettingsSidebar } from './settings/SettingsSidebar'
 import type { SettingsSectionId } from './settings/settings-utils'
 
 export type SettingsViewProps = {
   workspace?: WorkspaceSummary | null
+  baseUrl: string | null
+  hostManager: HostManager
+  hosts: HostView[]
+  onToast: ServersPanelProps['onToast']
   preferences: FalconDeckPreferences | null
   remoteStatus: RemoteStatusResponse | null
   pairingLink: string | null
@@ -52,6 +58,13 @@ export function SettingsView(props: SettingsViewProps) {
         <div className="mx-auto w-full max-w-4xl">
           {activeSection === 'appearance' ? (
             <AppearanceSettingsPanel />
+          ) : activeSection === 'servers' ? (
+            <ServersPanel
+              baseUrl={props.baseUrl}
+              manager={props.hostManager}
+              hosts={props.hosts}
+              onToast={props.onToast}
+            />
           ) : activeSection === 'general' ? (
             <GeneralSettingsPanel
               workspace={props.workspace}
