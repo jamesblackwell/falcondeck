@@ -240,8 +240,14 @@ Each phase is independently shippable and each unlocks the next:
   Rust + schema publication; snapshot/handshake `version` field; tolerant
   normalizers (pass-through unknown fields); renderer fallbacks for unknown
   kinds; collapse the four daemon dispatchers into one method table with a
-  registration-consistency test; consolidate transport on `RemoteHostClient`;
-  begin the SQLite conversation log (system of record, decision §9.2).
+  registration-consistency test *(remote RPC half shipped 2026-08-07)*;
+  consolidate transport on `RemoteHostClient`; begin the SQLite conversation
+  log (system of record, decision §9.2, storing raw provider output alongside
+  the projection so parser fixes replay instead of corrupting). Fold in the
+  survey-backed schema moves from `docs/ADAPTERS.md` prior-art §1–5 while the
+  wire is open: intent-normalized tool calls (`ActionType`), approval state
+  on the tool call itself, RFC-6902 patch streaming, capabilities-as-data,
+  and ACP-style forward-compat serde hygiene.
 - **Phase 1 — provider agnosticism** *(mostly shipped 2026-08-07)*: ACP made
   first-class (capability refinement post-handshake, images, `session/load`
   rehydration, model listing) ✓; `providers.json` hot-reload + Agents settings

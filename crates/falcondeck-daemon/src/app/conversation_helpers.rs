@@ -519,6 +519,11 @@ fn classify_tool_activity_kind(
         || normalized_title.contains("context compaction")
     {
         ToolActivityKind::Context
+    } else if let Some(shell_kind) = classify_shell_command(normalized_title) {
+        // Shell-first agents (Codex) surface most work as raw commands;
+        // parsing the command line is what lets `grep`/`cat`/`sed -i` group
+        // and collapse as richly as native Read/Search/Edit tools do.
+        shell_kind
     } else if normalized_kind.contains("edit")
         || normalized_kind.contains("write")
         || normalized_kind.contains("patch")
@@ -559,6 +564,125 @@ fn classify_tool_activity_kind(
     } else {
         ToolActivityKind::Other
     }
+}
+
+/// Classifies a raw shell command line by what it does. Unwraps `bash -c`
+/// style wrappers, walks pipeline/`&&`/`;` segments, and takes the
+/// highest-impact classification across them (an edit anywhere makes the
+/// whole line an edit). Returns `None` for lines that don't start with a
+/// recognized command, so non-shell tool titles fall through untouched.
+fn classify_shell_command(raw: &str) -> Option<ToolActivityKind> {
+    let command_line = unwrap_shell_wrapper(raw.trim());
+    let mut result: Option<ToolActivityKind> = None;
+    for segment in split_shell_segments(&command_line) {
+        let kind = classify_shell_segment(segment)?;
+        result = Some(match (result, kind) {
+            // Impact order: an edit taints the pipeline; a search outranks
+            // plain reads/lists (`cat x | grep y` is a search).
+            (Some(ToolActivityKind::Edit), _) | (_, ToolActivityKind::Edit) => {
+                ToolActivityKind::Edit
+            }
+            (Some(ToolActivityKind::WebSearch), _) | (_, ToolActivityKind::WebSearch) => {
+                ToolActivityKind::WebSearch
+            }
+            (Some(ToolActivityKind::Search), _) | (_, ToolActivityKind::Search) => {
+                ToolActivityKind::Search
+            }
+            (Some(ToolActivityKind::Read), _) | (_, ToolActivityKind::Read) => {
+                ToolActivityKind::Read
+            }
+            (_, kind) => kind,
+        });
+    }
+    result
+}
+
+/// Strips `bash -lc "…"` / `sh -c '…'` wrappers down to the inner command.
+fn unwrap_shell_wrapper(raw: &str) -> String {
+    let mut tokens = raw.splitn(3, char::is_whitespace);
+    let shell = tokens.next().unwrap_or_default();
+    let flags = tokens.next().unwrap_or_default();
+    if matches!(shell, "bash" | "sh" | "zsh" | "/bin/bash" | "/bin/sh" | "/bin/zsh")
+        && flags.starts_with('-')
+        && flags.contains('c')
+        && let Some(inner) = tokens.next()
+    {
+        return inner
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .to_string();
+    }
+    raw.to_string()
+}
+
+/// Splits a command line at pipeline and sequencing operators. Quote-blind on
+/// purpose: a false split only yields an unrecognized segment, which aborts
+/// classification rather than misclassifying.
+fn split_shell_segments(command_line: &str) -> impl Iterator<Item = &str> {
+    command_line
+        .split(['|', ';'])
+        .flat_map(|part| part.split("&&"))
+        .map(str::trim)
+        .filter(|part| !part.is_empty() && !part.starts_with('&'))
+}
+
+fn classify_shell_segment(segment: &str) -> Option<ToolActivityKind> {
+    // `FOO=bar cmd` and `sudo cmd` classify by the real command.
+    let mut words = segment
+        .split_whitespace()
+        .skip_while(|word| word.contains('=') && !word.starts_with('-'));
+    let mut program = words.next()?;
+    if matches!(program, "sudo" | "command" | "xargs" | "time") {
+        program = words.next()?;
+    }
+    let program = program.rsplit('/').next().unwrap_or(program);
+
+    if has_file_write_redirect(segment) {
+        return Some(ToolActivityKind::Edit);
+    }
+    Some(match program {
+        "cat" | "head" | "tail" | "less" | "more" | "bat" | "wc" | "stat" | "file" | "readlink" => {
+            ToolActivityKind::Read
+        }
+        "sed" => {
+            if segment.contains(" -i") {
+                ToolActivityKind::Edit
+            } else {
+                ToolActivityKind::Read
+            }
+        }
+        "grep" | "rg" | "ag" | "ack" | "fgrep" | "egrep" | "awk" | "fd" | "which" | "whereis" => {
+            ToolActivityKind::Search
+        }
+        "find" => ToolActivityKind::Search,
+        "ls" | "tree" | "pwd" | "du" | "df" => ToolActivityKind::List,
+        "curl" | "wget" => ToolActivityKind::WebSearch,
+        "tee" | "chmod" | "chown" | "rm" | "mv" | "cp" | "mkdir" | "touch" | "ln" | "rmdir"
+        | "install" | "patch" | "truncate" => ToolActivityKind::Edit,
+        _ => return None,
+    })
+}
+
+/// Whether a segment redirects stdout/stderr into a real file (`>`/`>>` to
+/// anything but /dev/null or another descriptor).
+fn has_file_write_redirect(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    for (index, _) in segment.match_indices('>') {
+        // `2>&1`, `>&2` redirect between descriptors; `<` handled by skip.
+        if index > 0 && bytes[index - 1] == b'<' {
+            continue;
+        }
+        let rest = segment[index + 1..].trim_start_matches('>').trim_start();
+        if rest.starts_with('&') {
+            continue;
+        }
+        let target = rest.split_whitespace().next().unwrap_or_default();
+        if target.is_empty() || target == "/dev/null" {
+            continue;
+        }
+        return true;
+    }
+    false
 }
 
 fn summarize_tool_title(title: &str, activity_kind: ToolActivityKind) -> Option<String> {
@@ -603,5 +727,85 @@ fn summarize_tool_title(title: &str, activity_kind: ToolActivityKind) -> Option<
         ToolActivityKind::Test => Some("Run tests".to_string()),
         ToolActivityKind::Approval => Some("Request approval".to_string()),
         ToolActivityKind::Command | ToolActivityKind::Other => None,
+    }
+}
+
+#[cfg(test)]
+mod shell_classification_tests {
+    use super::*;
+
+    fn classify(raw: &str) -> Option<ToolActivityKind> {
+        classify_shell_command(raw)
+    }
+
+    #[test]
+    fn unwraps_bash_wrappers_and_classifies_by_intent() {
+        assert_eq!(
+            classify("bash -lc 'grep -rn foo src/'"),
+            Some(ToolActivityKind::Search)
+        );
+        assert_eq!(classify("cat Cargo.toml"), Some(ToolActivityKind::Read));
+        assert_eq!(classify("ls -la crates/"), Some(ToolActivityKind::List));
+        assert_eq!(
+            classify("curl -s https://example.com"),
+            Some(ToolActivityKind::WebSearch)
+        );
+    }
+
+    #[test]
+    fn edits_taint_the_whole_pipeline() {
+        assert_eq!(
+            classify("cat notes.md | tee out.md"),
+            Some(ToolActivityKind::Edit)
+        );
+        assert_eq!(
+            classify("sed -i '' 's/a/b/' src/lib.rs"),
+            Some(ToolActivityKind::Edit)
+        );
+        assert_eq!(
+            classify("echo hi > file.txt"),
+            Some(ToolActivityKind::Edit),
+            "a file redirect is an edit regardless of the program"
+        );
+        assert_eq!(
+            classify("cat a.txt > b.txt"),
+            Some(ToolActivityKind::Edit)
+        );
+    }
+
+    #[test]
+    fn searches_outrank_reads_in_pipelines() {
+        assert_eq!(
+            classify("cat error.log | grep -i panic"),
+            Some(ToolActivityKind::Search)
+        );
+        assert_eq!(
+            classify("head -50 a.rs && tail -50 a.rs"),
+            Some(ToolActivityKind::Read)
+        );
+    }
+
+    #[test]
+    fn stderr_and_null_redirects_are_not_edits() {
+        assert_eq!(
+            classify("grep -rn foo src/ 2>/dev/null"),
+            Some(ToolActivityKind::Search)
+        );
+        assert_eq!(
+            classify("cat a.txt 2>&1"),
+            Some(ToolActivityKind::Read)
+        );
+        assert_eq!(
+            classify("find . -name '*.rs' > /dev/null"),
+            Some(ToolActivityKind::Search)
+        );
+    }
+
+    #[test]
+    fn unrecognized_commands_fall_through() {
+        assert_eq!(classify("git status"), None);
+        assert_eq!(classify("cargo build"), None);
+        assert_eq!(classify("Read /path/to/file"), None);
+        assert_eq!(classify("FOO=bar sudo rm -rf target"), Some(ToolActivityKind::Edit));
     }
 }

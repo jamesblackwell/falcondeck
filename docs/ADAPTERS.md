@@ -85,6 +85,61 @@ adapters are reserved for harnesses whose extra surface earns the maintenance
   pre-multi-provider clients; retire at the typegen/versioning phase.
 - TS types are hand-mirrored from Rust until Phase 0 typegen lands.
 
+## Prior art (surveyed 2026-08-07)
+
+We surveyed vibe-kanban, Crystal→Nimbalyst, claude-squad, OpenHands, Goose,
+and Zed/ACP. Verdict: FalconDeck's shape — normalized item enum + one dispatch
+seam + capability-gated UI + ACP as the generic tier — matches where the
+field converged, with two of our choices ahead of it (open provider ids,
+which vibe-kanban paid three schema migrations for closing; and ACP-native
+generic agents, where OpenHands' bolted-on ACP path renders second-class).
+Borrowed ideas, in adoption order:
+
+1. **Normalize tool calls by intent, not name** (vibe-kanban's `ActionType`):
+   `FileEdit{unified_diff}` / `FileRead` / `CommandRun{category}` / `Search` /
+   … with a `Tool{name,args}` escape hatch, so Claude's `Edit`, Codex's
+   `apply_patch`, and ACP `fs/write_text_file` hit ONE diff renderer. The
+   shell-command intent classifier (bash → read/search/edit/fetch, unwrapping
+   `bash -c`) shipped 2026-08-07 into `ToolCallDisplay.activity_kind`; the
+   full `ActionType` item schema rides the Phase 0 typegen change.
+2. **Approvals as a status on the tool call**, not a side channel — Zed,
+   vibe-kanban, and Nimbalyst converged on this independently; it is also
+   what makes approvals replayable on mobile reconnect. Embed the tool-call
+   view in the request (ACP does); keep option ids free-form over a closed
+   `kind` enum.
+3. **Stream items as RFC-6902 patches** with vibe-kanban's `fix_patch_ops`
+   (rewrite add↔replace against a sent-paths set) — one mechanism for
+   streaming text, late tool results, and relay reconnect, no separate
+   snapshot-vs-delta protocol.
+4. **Capabilities-as-data over capability flags**: keep flags only for what
+   changes UI *shape*; model/mode/setting *choices* stream as data (ACP's
+   `SessionConfigOption` is the general form — one generic picker renders
+   any provider's settings). With open provider ids we can't enumerate flags
+   ahead of time, so this matters more for us than for anyone surveyed.
+5. **Forward-compat serde hygiene** (ACP's recipe): `#[serde(other)]`
+   catch-alls, default-on-error optionals, skip-invalid array items, `_meta`
+   as the typed escape valve. Do at typegen time.
+6. **Store raw provider output + replayable projection** (Nimbalyst):
+   parser fixes re-derive history instead of corrupting it. Belongs to the
+   SQLite system-of-record work. Two traps they hit that we will too:
+   tool-call pairing across streaming batches/resume, and Codex reusing
+   short item ids across sessions (synthetic composite ids).
+7. **Thinking UX** (Zed, verbatim): `Auto | Preview | AlwaysExpanded |
+   AlwaysCollapsed`, Auto expands the streaming thought then auto-collapses
+   unless user-toggled, Preview height-caps with a fade; expansion state
+   keyed by item id, never list index. Presentation defaults across all
+   five products: collapsed by default, expanded only for what needs a
+   decision, one global setting.
+8. **Protocol inspector** (Zed's acp_tools): an in-app incoming/outgoing
+   log with request↔response correlation pays for itself the first time a
+   provider misbehaves across daemon + relay + three clients.
+
+Anti-patterns confirmed by the survey: routing the generic tier around your
+own renderer registry (OpenHands' ACP events get no diffs/grouping/
+confirmations); matching agent behavior on English strings (claude-squad's
+state machine breaks on a copy change); building the plugin registry before
+the second real integration (Crystal's dead `CliToolRegistry`).
+
 ## Adding a provider: the checklist
 
 1. `providers.json` entry (or Settings → Agents). Done — for most agents,
