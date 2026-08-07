@@ -163,6 +163,8 @@ function ServerRow({
           ssh_target: host.sshTarget,
           port: host.sshPort,
           action,
+          // Required by the daemon for the pair action; harmless otherwise.
+          relay_url: host.relayUrl,
         }),
       })
       if (!response.ok) {
