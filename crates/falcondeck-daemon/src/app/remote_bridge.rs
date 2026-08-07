@@ -621,6 +621,13 @@ impl AppState {
                     .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
                     .map_err(|error| error.to_string())
             }
+            "workspace.remove" => {
+                let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                self.remove_workspace(&workspace_id)
+                    .await
+                    .and_then(|response| serde_json::to_value(response).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
+            }
             "thread.goal.set" => {
                 let request = falcondeck_core::SetThreadGoalRequest {
                     workspace_id: required(&["workspaceId", "workspace_id"])?,

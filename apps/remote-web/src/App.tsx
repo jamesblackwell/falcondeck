@@ -34,7 +34,9 @@ import {
   upsertConversationItem,
   verifyPairingPublicKeyBundle,
   verifySessionKeyMaterial,
+  workspaceAgentCapabilities,
   workspaceModels,
+  workspaceProviderOptions,
   type AgentProvider,
   type ClaimPairingRequest,
   type ClaimPairingResponse,
@@ -1630,6 +1632,14 @@ export default function App() {
     () => workspaceModels(selectedWorkspace, activeProvider),
     [activeProvider, selectedWorkspace],
   )
+  const providerOptions = useMemo(
+    () => workspaceProviderOptions(selectedWorkspace),
+    [selectedWorkspace],
+  )
+  const activeCapabilities = useMemo(
+    () => workspaceAgentCapabilities(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
+  )
   const handleSelectWorkspace = useCallback((workspaceId: string, threadId: string | null) => {
     setThreadDetail(null)
     setSelectedWorkspaceId(workspaceId)
@@ -1648,6 +1658,14 @@ export default function App() {
     setSelectedThreadId(null)
     setShowProjects(false)
   }, [])
+  async function handleRemoveWorkspace(workspaceId: string) {
+    await submitQueuedAction('workspace.remove', { workspace_id: workspaceId })
+    if (selectedWorkspaceId === workspaceId) {
+      setThreadDetail(null)
+      setSelectedWorkspaceId(null)
+      setSelectedThreadId(null)
+    }
+  }
   const isThreadDetailPending = useMemo(
     () =>
       Boolean(
@@ -1913,6 +1931,7 @@ export default function App() {
                 onSelectThread={handleSelectThread}
                 onNewThread={handleNewThread}
                 onTogglePinThread={handleTogglePinThread}
+                onRemoveWorkspace={handleRemoveWorkspace}
                 title="Projects"
                 errors={error ? [error] : []}
                 emptyState={{
@@ -1937,6 +1956,7 @@ export default function App() {
           onSelectThread={handleSelectThread}
           onNewThread={handleNewThread}
           onTogglePinThread={handleTogglePinThread}
+          onRemoveWorkspace={handleRemoveWorkspace}
           title="Projects"
           errors={error ? [error] : []}
           emptyState={{
@@ -1980,6 +2000,8 @@ export default function App() {
               skills={selectedWorkspace?.skills ?? []}
               selectedProvider={activeProvider}
               onProviderChange={handleProviderChange}
+              providers={providerOptions}
+              capabilities={activeCapabilities}
               providerLocked={Boolean(selectedThread)}
               showProviderSelector={!selectedThread}
               models={models}

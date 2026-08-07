@@ -30,6 +30,7 @@ describe('workspaceSendBlockReason', () => {
           agents: [
             {
               provider: 'claude',
+              label: 'Claude',
               account: { status: 'needs_auth', label: 'Sign in' },
               models: [],
               collaboration_modes: [],
@@ -59,6 +60,7 @@ describe('workspaceSendBlockReason', () => {
           agents: [
             {
               provider: 'claude',
+              label: 'Claude',
               account: { status: 'needs_auth', label: 'Sign in' },
               models: [],
               collaboration_modes: [],

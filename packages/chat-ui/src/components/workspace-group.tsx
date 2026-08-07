@@ -10,16 +10,32 @@ export type WorkspaceGroupProps = {
   isSelected: boolean
   onSelect: () => void
   onNewThread?: () => void
+  onOpenContextMenu?: (position: { x: number; y: number }) => void
   children: React.ReactNode
 }
 
-export const WorkspaceGroup = memo(function WorkspaceGroup({ workspace, isSelected, onSelect, onNewThread, children }: WorkspaceGroupProps) {
+export const WorkspaceGroup = memo(function WorkspaceGroup({
+  workspace,
+  isSelected,
+  onSelect,
+  onNewThread,
+  onOpenContextMenu,
+  children,
+}: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
   const [isOpen, setIsOpen] = useState(true)
 
   return (
     <section className="min-w-0 overflow-hidden">
       <div
+        onContextMenu={
+          onOpenContextMenu
+            ? (event) => {
+                event.preventDefault()
+                onOpenContextMenu({ x: event.clientX, y: event.clientY })
+              }
+            : undefined
+        }
         className={cn(
           'group flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5',
           isSelected

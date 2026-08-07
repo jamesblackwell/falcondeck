@@ -539,15 +539,52 @@ pub struct ThreadAgentParams {
     pub sandbox_mode: Option<String>,
 }
 
-/// Supported agent providers.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentProvider {
+/// Agent provider identifier.
+///
+/// An open, nominal string id rather than a closed enum so new providers
+/// (opencode, grok, any ACP-speaking CLI) can be added without protocol
+/// changes. `#[serde(transparent)]` keeps the wire format byte-identical to
+/// the previous snake_case enum ("codex" / "claude").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(transparent)]
+pub struct AgentProvider(std::borrow::Cow<'static, str>);
+
+impl AgentProvider {
     /// `OpenAI` Codex-backed agent sessions.
-    #[default]
-    Codex,
+    pub const CODEX: Self = Self(std::borrow::Cow::Borrowed("codex"));
     /// Claude CLI-backed agent sessions.
-    Claude,
+    pub const CLAUDE: Self = Self(std::borrow::Cow::Borrowed("claude"));
+
+    /// Creates a provider id from an arbitrary string.
+    pub fn new(id: impl Into<String>) -> Self {
+        Self(std::borrow::Cow::Owned(id.into()))
+    }
+
+    /// The provider id as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+// Deriving Default on the newtype would produce an empty string and silently
+// strip providers from persisted state where the field is absent; the
+// long-standing default is Codex.
+impl Default for AgentProvider {
+    fn default() -> Self {
+        Self::CODEX
+    }
+}
+
+impl std::fmt::Display for AgentProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for AgentProvider {
+    fn from(value: &str) -> Self {
+        Self::new(value)
+    }
 }
 
 /// Request payload used to send a turn to an existing thread.
@@ -701,11 +738,81 @@ pub struct WorkspaceSummary {
 }
 
 /// Provider capability flags exposed in workspace summaries.
+///
+/// Every field defaults so old clients and old daemons interoperate with the
+/// fields they know. `sandbox_modes` and `permission_modes` are enumerated as
+/// lists so the UI can render each provider's real options without a
+/// client-side table.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentCapabilitySummary {
     /// Whether the provider can start review flows.
     #[serde(default)]
     pub supports_review: bool,
+    /// Whether the provider supports thread goals.
+    #[serde(default)]
+    pub supports_goals: bool,
+    /// Whether the provider accepts image inputs.
+    #[serde(default)]
+    pub supports_images: bool,
+    /// Whether the provider exposes skills.
+    #[serde(default)]
+    pub supports_skills: bool,
+    /// Whether running turns can be interrupted.
+    #[serde(default)]
+    pub supports_interrupt: bool,
+    /// Sandbox modes the provider accepts; empty hides the sandbox picker.
+    #[serde(default)]
+    pub sandbox_modes: Vec<String>,
+    /// Permission modes the provider accepts; empty hides the picker.
+    #[serde(default)]
+    pub permission_modes: Vec<String>,
+}
+
+impl AgentCapabilitySummary {
+    /// Capability set for the Codex app-server provider.
+    pub fn codex() -> Self {
+        Self {
+            supports_review: true,
+            supports_goals: true,
+            supports_images: true,
+            supports_skills: true,
+            supports_interrupt: true,
+            sandbox_modes: vec![
+                "read-only".to_string(),
+                "workspace-write".to_string(),
+                "danger-full-access".to_string(),
+            ],
+            permission_modes: Vec::new(),
+        }
+    }
+
+    /// Capability set for the Claude CLI provider.
+    pub fn claude() -> Self {
+        Self {
+            supports_review: false,
+            supports_goals: true,
+            supports_images: true,
+            supports_skills: true,
+            supports_interrupt: true,
+            sandbox_modes: Vec::new(),
+            permission_modes: vec![
+                "default".to_string(),
+                "acceptEdits".to_string(),
+                "auto".to_string(),
+                "dontAsk".to_string(),
+                "bypassPermissions".to_string(),
+            ],
+        }
+    }
+
+    /// Conservative capability set for a generic ACP provider; refined after
+    /// the initialize handshake where the agent advertises more.
+    pub fn acp_minimal() -> Self {
+        Self {
+            supports_interrupt: true,
+            ..Self::default()
+        }
+    }
 }
 
 /// Per-provider summary for a workspace.
@@ -713,6 +820,9 @@ pub struct AgentCapabilitySummary {
 pub struct WorkspaceAgentSummary {
     /// Provider represented by this summary.
     pub provider: AgentProvider,
+    /// Human-readable provider label for pickers.
+    #[serde(default)]
+    pub label: String,
     /// Account state reported by the provider.
     pub account: AccountSummary,
     /// Models available for the provider.

@@ -8,7 +8,9 @@ import {
   filesToImageInputs,
   providerForThread,
   selectedSkillsFromText,
+  workspaceAgentCapabilities,
   workspaceModels,
+  workspaceProviderOptions,
   type AgentProvider,
   type ConversationItem,
   type ImageInput,
@@ -694,6 +696,30 @@ function AppInner() {
     }
   }, [api, setSnapshot, setSelectedThreadId, setSelectedWorkspaceId, toast])
 
+  const handleRemoveWorkspace = useCallback(
+    async (workspaceId: string) => {
+      if (!api) return
+      await api.removeWorkspace(workspaceId)
+      const nextSnapshot = await api.snapshot()
+      setSnapshot(nextSnapshot)
+      if (selectedWorkspaceId === workspaceId) {
+        setSelectedWorkspaceId(null)
+        setSelectedThreadId(null)
+        setThreadDetail(null)
+      }
+      setActionError(null)
+    },
+    [
+      api,
+      selectedWorkspaceId,
+      setActionError,
+      setSelectedThreadId,
+      setSelectedWorkspaceId,
+      setSnapshot,
+      setThreadDetail,
+    ],
+  )
+
   async function handleSubmit() {
     if (!api || !selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
@@ -1092,6 +1118,14 @@ function AppInner() {
     () => workspaceModels(selectedWorkspace, activeProvider),
     [activeProvider, selectedWorkspace],
   )
+  const providerOptions = useMemo(
+    () => workspaceProviderOptions(selectedWorkspace),
+    [selectedWorkspace],
+  )
+  const activeCapabilities = useMemo(
+    () => workspaceAgentCapabilities(selectedWorkspace, activeProvider),
+    [activeProvider, selectedWorkspace],
+  )
   const sendBlockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
   const isComposerDisabled = isSending || workspaceComposerDisabled(selectedWorkspace)
   const workspaces = useMemo(() => snapshot?.workspaces ?? [], [snapshot?.workspaces])
@@ -1141,6 +1175,7 @@ function AppInner() {
             onTogglePinThread={handleTogglePinThread}
             onMarkThreadRead={handleMarkThreadRead}
             onAddProject={handleAddProject}
+            onRemoveWorkspace={handleRemoveWorkspace}
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
@@ -1199,6 +1234,8 @@ function AppInner() {
                 skills: selectedWorkspace?.skills ?? [],
                 selectedProvider,
                 onProviderChange: handleProviderChange,
+                providers: providerOptions,
+                capabilities: activeCapabilities,
                 providerLocked: Boolean(selectedThread),
                 showProviderSelector: !selectedThread,
                 models,
@@ -1216,7 +1253,7 @@ function AppInner() {
               }}
               headerControls={
                 <>
-                  {selectedThread ? (
+                  {selectedThread && activeCapabilities.supports_goals ? (
                     <GoalControl
                       goal={selectedThread.goal}
                       provider={activeProvider}
@@ -1245,7 +1282,7 @@ function AppInner() {
                   workspaceId={selectedWorkspaceId}
                   refreshTrigger={gitRefreshTrigger}
                   reviewThreadId={
-                    selectedThread?.provider === 'codex' ? selectedThread.id : null
+                    selectedThread && activeCapabilities.supports_review ? selectedThread.id : null
                   }
                 />
               )

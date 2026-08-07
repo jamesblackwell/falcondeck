@@ -1,9 +1,19 @@
 # Multi-Provider Architecture
 
 Research date: 2026-08-06
-Last updated: 2026-08-06
+Last updated: 2026-08-07
 
-Status: Proposed. No code changes yet.
+Status: Partially implemented. Shipped 2026-08-07: the open `AgentProvider`
+string id (wire-compatible newtype, §6), extended capability flags (§7),
+client-side provider passthrough and dynamic pickers, and the generic
+`AcpAdapter` of §4/§9 (`crates/falcondeck-daemon/src/acp.rs` +
+`app/acp_threads.rs`) with `providers.json` configuration — verified
+end-to-end against `opencode acp` (streamed text, tool calls, interrupt).
+Configured providers whose binary is missing stay hidden until installed, so
+a Grok entry activates the moment `npm install -g @xai-official/grok` runs.
+Still open: the Tier-1 native OpenCode adapter (§8, richer than its ACP mode),
+skill-type reshaping (§6), per-provider bin maps (§1 obstacle 3), and ACP
+`session/load` for resuming sessions across daemon restarts.
 
 FalconDeck supports exactly two agent CLIs today, both hardcoded: OpenAI Codex
 (`codex app-server`, long-lived JSON-RPC session) and Claude Code (`claude -p`,

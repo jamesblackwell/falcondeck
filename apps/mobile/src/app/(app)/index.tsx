@@ -11,6 +11,7 @@ import {
   encryptJson,
   providerForThread,
   workspaceModels,
+  workspaceProviderOptions,
   type AgentProvider,
   type ConversationPresentation,
   type ConversationRenderBlock,
@@ -106,6 +107,8 @@ export default function HomeScreen() {
   const activeProvider: AgentProvider = selectedThread
     ? selectedThread.provider
     : (selectedProvider ?? defaultProvider(workspace))
+
+  const providerOptions = useMemo(() => workspaceProviderOptions(workspace), [workspace])
 
   // Filter models by active provider (matches desktop behavior)
   const models = useMemo(
@@ -483,6 +486,7 @@ export default function HomeScreen() {
           selectedEffort={selectedEffort}
           effortOptions={effortOptions}
           selectedProvider={activeProvider}
+          providers={providerOptions}
           showProviderSelector={!selectedThread}
           onSelectModel={setSelectedModel}
           onSelectEffort={setSelectedEffort}

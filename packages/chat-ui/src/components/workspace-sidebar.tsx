@@ -11,6 +11,7 @@ import {
   Pin,
   PinOff,
   SquarePen,
+  Trash2,
 } from 'lucide-react'
 
 import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
@@ -40,6 +41,13 @@ const THREAD_MENU_SEPARATOR_HEIGHT_PX = 9
 type ThreadContextMenuState = {
   workspaceId: string
   thread: ThreadSummary
+  x: number
+  y: number
+}
+
+type WorkspaceContextMenuState = {
+  workspaceId: string
+  path: string
   x: number
   y: number
 }
@@ -77,6 +85,7 @@ export type WorkspaceSidebarProps = {
   onTogglePinThread?: (workspaceId: string, threadId: string, pinned: boolean) => Promise<void> | void
   onMarkThreadRead?: (workspaceId: string, threadId: string) => Promise<void> | void
   onAddProject?: () => void
+  onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void
   isAddingProject?: boolean
   title?: string
   errors?: string[]
@@ -163,6 +172,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onTogglePinThread,
   onMarkThreadRead,
   onAddProject,
+  onRemoveWorkspace,
   isAddingProject = false,
   title = 'Threads',
   errors = [],
@@ -188,7 +198,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [renameValue, setRenameValue] = useState('')
   const [renameError, setRenameError] = useState<string | null>(null)
   const [isRenamingThread, setIsRenamingThread] = useState(false)
+  const [workspaceContextMenu, setWorkspaceContextMenu] =
+    useState<WorkspaceContextMenuState | null>(null)
+  const [removeTarget, setRemoveTarget] = useState<{ workspaceId: string; path: string } | null>(
+    null,
+  )
+  const [removeError, setRemoveError] = useState<string | null>(null)
+  const [isRemovingWorkspace, setIsRemovingWorkspace] = useState(false)
   const threadContextMenuRef = useRef<HTMLDivElement | null>(null)
+  const workspaceContextMenuRef = useRef<HTMLDivElement | null>(null)
   const pendingSelection =
     optimisticSelection &&
     (optimisticSelection.workspaceId !== selectedWorkspaceId ||
@@ -336,6 +354,44 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     void Promise.resolve(onMarkThreadRead(workspaceId, thread.id)).catch(() => {})
   }, [onMarkThreadRead, threadContextMenu])
 
+  const handleOpenWorkspaceContextMenu = useCallback(
+    (workspaceId: string, path: string, position: { x: number; y: number }) => {
+      if (!onRemoveWorkspace) return
+      setThreadContextMenu(null)
+      setWorkspaceContextMenu({ workspaceId, path, x: position.x, y: position.y })
+    },
+    [onRemoveWorkspace],
+  )
+
+  const openRemoveDialog = useCallback(() => {
+    if (!workspaceContextMenu) return
+    const { workspaceId, path } = workspaceContextMenu
+    setWorkspaceContextMenu(null)
+    setRemoveError(null)
+    setRemoveTarget({ workspaceId, path })
+  }, [workspaceContextMenu])
+
+  const closeRemoveDialog = useCallback(() => {
+    if (isRemovingWorkspace) return
+    setRemoveTarget(null)
+    setRemoveError(null)
+  }, [isRemovingWorkspace])
+
+  const handleConfirmRemoveWorkspace = useCallback(async () => {
+    if (!removeTarget || !onRemoveWorkspace) return
+
+    setIsRemovingWorkspace(true)
+    setRemoveError(null)
+    try {
+      await onRemoveWorkspace(removeTarget.workspaceId)
+      setRemoveTarget(null)
+    } catch (error) {
+      setRemoveError(error instanceof Error ? error.message : 'Failed to remove project')
+    } finally {
+      setIsRemovingWorkspace(false)
+    }
+  }, [onRemoveWorkspace, removeTarget])
+
   const workspacePathById = useMemo(
     () => new Map(groups.map((group) => [group.workspace.id, group.workspace.path])),
     [groups],
@@ -397,6 +453,36 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   }, [threadContextMenu])
 
   useEffect(() => {
+    if (!workspaceContextMenu) return
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (workspaceContextMenuRef.current?.contains(event.target as Node)) return
+      setWorkspaceContextMenu(null)
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      setWorkspaceContextMenu(null)
+    }
+
+    const handleViewportChange = () => {
+      setWorkspaceContextMenu(null)
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('scroll', handleViewportChange, true)
+    window.addEventListener('resize', handleViewportChange)
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('scroll', handleViewportChange, true)
+      window.removeEventListener('resize', handleViewportChange)
+    }
+  }, [workspaceContextMenu])
+
+  useEffect(() => {
     if (!renameTarget) return
 
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -409,6 +495,21 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       document.removeEventListener('keydown', handleKeyDown)
     }
   }, [isRenamingThread, renameTarget, resetRenameDialog])
+
+  useEffect(() => {
+    if (!removeTarget) return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || isRemovingWorkspace) return
+      setRemoveTarget(null)
+      setRemoveError(null)
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [isRemovingWorkspace, removeTarget])
 
   return (
     <SidebarShell className={className}>
@@ -470,6 +571,16 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                 )
               }
               onNewThread={onNewThread ? () => handleNewThread(group.workspace.id) : undefined}
+              onOpenContextMenu={
+                onRemoveWorkspace
+                  ? (position) =>
+                      handleOpenWorkspaceContextMenu(
+                        group.workspace.id,
+                        group.workspace.path,
+                        position,
+                      )
+                  : undefined
+              }
             >
               <ThreadList
                 group={group}
@@ -515,6 +626,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         onChange={setRenameValue}
         onClose={closeRenameDialog}
         onSubmit={handleRenameSubmit}
+      />
+      <WorkspaceContextMenu
+        menuRef={workspaceContextMenuRef}
+        target={workspaceContextMenu}
+        onRemove={openRemoveDialog}
+      />
+      <RemoveWorkspaceDialog
+        target={removeTarget}
+        error={removeError}
+        pending={isRemovingWorkspace}
+        onClose={closeRemoveDialog}
+        onConfirm={handleConfirmRemoveWorkspace}
       />
     </SidebarShell>
   )
@@ -711,6 +834,115 @@ const ThreadContextMenu = memo(
     )
   },
 )
+
+const WorkspaceContextMenu = memo(function WorkspaceContextMenu({
+  target,
+  onRemove,
+  menuRef,
+}: {
+  target: WorkspaceContextMenuState | null
+  onRemove: () => void
+  menuRef: React.RefObject<HTMLDivElement | null>
+}) {
+  if (!target || typeof document === 'undefined') {
+    return null
+  }
+
+  const projectLabel = target.path.split('/').pop() || target.path
+  const menuHeight = THREAD_MENU_VIEWPORT_PADDING_PX * 2 + THREAD_MENU_ROW_HEIGHT_PX
+  const left = Math.max(
+    THREAD_MENU_VIEWPORT_PADDING_PX,
+    Math.min(target.x, window.innerWidth - THREAD_MENU_WIDTH_PX - THREAD_MENU_VIEWPORT_PADDING_PX),
+  )
+  const top = Math.max(
+    THREAD_MENU_VIEWPORT_PADDING_PX,
+    Math.min(target.y, window.innerHeight - menuHeight - THREAD_MENU_VIEWPORT_PADDING_PX),
+  )
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      role="menu"
+      aria-label={`Actions for ${projectLabel}`}
+      className="fixed z-50 w-52 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+      style={{ left, top }}
+    >
+      <ThreadMenuItem
+        icon={<Trash2 className="h-3.5 w-3.5" />}
+        label="Remove project"
+        destructive
+        onClick={onRemove}
+      />
+    </div>,
+    document.body,
+  )
+})
+
+const RemoveWorkspaceDialog = memo(function RemoveWorkspaceDialog({
+  target,
+  error,
+  pending,
+  onClose,
+  onConfirm,
+}: {
+  target: { workspaceId: string; path: string } | null
+  error: string | null
+  pending: boolean
+  onClose: () => void
+  onConfirm: () => void
+}) {
+  if (!target || typeof document === 'undefined') {
+    return null
+  }
+
+  const projectLabel = target.path.split('/').pop() || target.path
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        onClose()
+      }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fd-remove-workspace-title"
+        className="w-full max-w-sm rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-[var(--fd-shadow-lg)]"
+      >
+        <div className="space-y-1">
+          <h2
+            id="fd-remove-workspace-title"
+            className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
+          >
+            Remove {projectLabel}?
+          </h2>
+          <p className="truncate text-[length:var(--fd-text-sm)] text-fg-muted" title={target.path}>
+            {target.path}
+          </p>
+        </div>
+
+        <p className="mt-4 text-[length:var(--fd-text-sm)] text-fg-secondary">
+          Threads stay in the provider&rsquo;s own history; re-add the folder to restore them.
+        </p>
+        {error ? (
+          <p className="mt-2 text-[length:var(--fd-text-xs)] text-danger">{error}</p>
+        ) : null}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button type="button" variant="ghost" onClick={onClose} disabled={pending}>
+            Cancel
+          </Button>
+          <Button type="button" variant="danger" onClick={onConfirm} aria-busy={pending} disabled={pending}>
+            {pending ? 'Removing…' : 'Remove'}
+          </Button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+})
 
 const RenameThreadDialog = memo(function RenameThreadDialog({
   target,

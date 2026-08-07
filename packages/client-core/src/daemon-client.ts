@@ -121,6 +121,13 @@ export function createDaemonApiClient(baseUrl: string) {
         }),
       )
     },
+    async removeWorkspace(workspaceId: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(`${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+          method: 'DELETE',
+        }),
+      )
+    },
     async startThread(payload: StartThreadPayload) {
       return normalizeThreadHandle(
         await parseJson<ThreadHandle>(await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads`, {

@@ -92,7 +92,7 @@ describe('PromptInput', () => {
     )
 
     expect(screen.getByPlaceholderText('Ask anything')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'codex' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Codex' })).not.toBeDisabled()
     expect(screen.getAllByRole('combobox')[0]).not.toBeDisabled()
   })
 })

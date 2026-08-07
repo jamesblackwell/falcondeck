@@ -4,7 +4,12 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { ChevronDown, Check } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
-import { formatModelLabel, type AgentProvider, type ModelSummary } from '@falcondeck/client-core'
+import {
+  formatModelLabel,
+  type AgentProvider,
+  type ModelSummary,
+  type ProviderOption,
+} from '@falcondeck/client-core'
 
 import { Text } from '@/components/ui'
 
@@ -14,6 +19,8 @@ interface InputToolbarProps {
   selectedEffort: string | null
   effortOptions: string[]
   selectedProvider: AgentProvider
+  /** Providers the active workspace offers; defaults to the built-in pair. */
+  providers?: ProviderOption[]
   showProviderSelector: boolean
   disabled?: boolean
   onSelectModel: (modelId: string | null) => void
@@ -25,9 +32,9 @@ function capitalize(s: string) {
   return s.charAt(0).toUpperCase() + s.slice(1)
 }
 
-const PROVIDERS: { value: AgentProvider; label: string }[] = [
-  { value: 'codex', label: 'Codex' },
-  { value: 'claude', label: 'Claude' },
+const DEFAULT_PROVIDERS: ProviderOption[] = [
+  { provider: 'codex', label: 'Codex' },
+  { provider: 'claude', label: 'Claude' },
 ]
 
 type SheetConfig = {
@@ -43,6 +50,7 @@ export const InputToolbar = memo(function InputToolbar({
   selectedEffort,
   effortOptions,
   selectedProvider,
+  providers = DEFAULT_PROVIDERS,
   showProviderSelector,
   disabled = false,
   onSelectModel,
@@ -105,21 +113,21 @@ export const InputToolbar = memo(function InputToolbar({
   return (
     <>
       <View style={styles.container}>
-        {showProviderSelector ? (
+        {showProviderSelector && providers.length > 0 ? (
           <View style={[styles.providerToggle, disabled && styles.controlDisabled]}>
-            {PROVIDERS.map((p) => {
-              const active = p.value === selectedProvider
+            {providers.map((p) => {
+              const active = p.provider === selectedProvider
               return (
                 <Pressable
                   accessibilityRole="button"
                   accessibilityState={{ selected: active }}
-                  key={p.value}
+                  key={p.provider}
                   style={[styles.providerSegment, active && styles.providerSegmentActive]}
                   disabled={disabled}
                   onPress={() => {
                     if (!active) {
                       void Haptics.selectionAsync()
-                      onSelectProvider(p.value)
+                      onSelectProvider(p.provider)
                     }
                   }}
                 >

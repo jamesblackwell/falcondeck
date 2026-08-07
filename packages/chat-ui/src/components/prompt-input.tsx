@@ -3,12 +3,19 @@ import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, 
 
 import type {
   ActiveSlashQuery,
+  AgentCapabilitySummary,
   AgentProvider,
   ImageInput,
   ModelSummary,
+  ProviderOption,
   SkillSummary,
 } from '@falcondeck/client-core'
-import { activeSlashQuery, canonicalSkillAlias, providerSupportsSkill } from '@falcondeck/client-core'
+import {
+  activeSlashQuery,
+  canonicalSkillAlias,
+  NO_AGENT_CAPABILITIES,
+  providerSupportsSkill,
+} from '@falcondeck/client-core'
 import { Button } from '@falcondeck/ui'
 
 import {
@@ -30,6 +37,10 @@ export type PromptInputProps = {
   skills?: SkillSummary[]
   selectedProvider: AgentProvider
   onProviderChange: (value: AgentProvider) => void
+  /** Providers the active workspace offers; defaults to the built-in pair. */
+  providers?: ProviderOption[]
+  /** Capabilities of the active provider; gates the mode pickers. */
+  capabilities?: AgentCapabilitySummary
   providerLocked?: boolean
   showProviderSelector?: boolean
   models: ModelSummary[]
@@ -50,6 +61,11 @@ export type PromptInputProps = {
 const PROMPT_INPUT_MIN_HEIGHT = 52
 const PROMPT_INPUT_MAX_HEIGHT = 200
 
+const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
+  { provider: 'codex', label: 'Codex' },
+  { provider: 'claude', label: 'Claude' },
+]
+
 export const PromptInput = memo(function PromptInput({
   value,
   onValueChange,
@@ -60,6 +76,8 @@ export const PromptInput = memo(function PromptInput({
   skills = [],
   selectedProvider,
   onProviderChange,
+  providers = DEFAULT_PROVIDER_OPTIONS,
+  capabilities = NO_AGENT_CAPABILITIES,
   providerLocked = false,
   showProviderSelector = true,
   models,
@@ -337,6 +355,7 @@ export const PromptInput = memo(function PromptInput({
               {showProviderSelector ? (
                 <ProviderSelector
                   value={selectedProvider}
+                  providers={providers}
                   onValueChange={onProviderChange}
                   disabled={disabled || providerLocked}
                 />
@@ -353,16 +372,18 @@ export const PromptInput = memo(function PromptInput({
                 onValueChange={onEffortChange}
                 disabled={disabled || reasoningOptions.length === 0}
               />
-              {selectedProvider === 'claude' && onPermissionModeChange ? (
+              {onPermissionModeChange ? (
                 <PermissionModeSelector
                   value={selectedPermissionMode}
+                  modes={capabilities.permission_modes}
                   onValueChange={onPermissionModeChange}
                   disabled={disabled}
                 />
               ) : null}
-              {selectedProvider === 'codex' && onSandboxModeChange ? (
+              {onSandboxModeChange ? (
                 <SandboxSelector
                   value={selectedSandboxMode}
+                  modes={capabilities.sandbox_modes}
                   onValueChange={onSandboxModeChange}
                   disabled={disabled}
                 />

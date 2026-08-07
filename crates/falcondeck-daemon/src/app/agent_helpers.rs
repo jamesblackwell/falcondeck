@@ -29,22 +29,23 @@ pub(super) fn resolve_selected_skills(
                             == canonical_skill_alias(&selection.alias)
                 })
                 .filter(|skill| {
-                    matches!(
-                        (provider, &skill.availability),
-                        (
-                            AgentProvider::Codex,
-                            falcondeck_core::SkillAvailability::Codex
-                        ) | (
-                            AgentProvider::Codex,
-                            falcondeck_core::SkillAvailability::Both
-                        ) | (
-                            AgentProvider::Claude,
-                            falcondeck_core::SkillAvailability::Claude
-                        ) | (
-                            AgentProvider::Claude,
-                            falcondeck_core::SkillAvailability::Both
-                        )
-                    )
+                    let shared =
+                        matches!(skill.availability, falcondeck_core::SkillAvailability::Both);
+                    if *provider == AgentProvider::CODEX {
+                        shared
+                            || matches!(
+                                skill.availability,
+                                falcondeck_core::SkillAvailability::Codex
+                            )
+                    } else if *provider == AgentProvider::CLAUDE {
+                        shared
+                            || matches!(
+                                skill.availability,
+                                falcondeck_core::SkillAvailability::Claude
+                            )
+                    } else {
+                        false
+                    }
                 })
                 .cloned()
                 .map(|summary| ResolvedSelectedSkill {
@@ -794,8 +795,8 @@ fn claude_message_text(value: &Value) -> Option<String> {
 
 pub(super) fn parse_agent_provider(value: String) -> Option<AgentProvider> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "codex" => Some(AgentProvider::Codex),
-        "claude" => Some(AgentProvider::Claude),
+        "codex" => Some(AgentProvider::CODEX),
+        "claude" => Some(AgentProvider::CLAUDE),
         _ => None,
     }
 }

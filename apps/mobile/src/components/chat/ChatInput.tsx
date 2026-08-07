@@ -12,6 +12,7 @@ import {
   type AgentProvider,
   type ImageInput,
   type ModelSummary,
+  type ProviderOption,
   type SkillSummary,
 } from '@falcondeck/client-core'
 
@@ -35,6 +36,7 @@ interface ChatInputProps {
   selectedEffort: string | null
   effortOptions: string[]
   selectedProvider: AgentProvider
+  providers?: ProviderOption[]
   showProviderSelector: boolean
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
@@ -61,6 +63,7 @@ export const ChatInput = memo(function ChatInput({
   selectedEffort,
   effortOptions,
   selectedProvider,
+  providers,
   showProviderSelector,
   onSelectModel,
   onSelectEffort,
@@ -303,6 +306,7 @@ export const ChatInput = memo(function ChatInput({
               selectedEffort={selectedEffort}
               effortOptions={effortOptions}
               selectedProvider={selectedProvider}
+              providers={providers}
               showProviderSelector={showProviderSelector}
               disabled={disabled}
               onSelectModel={onSelectModel}

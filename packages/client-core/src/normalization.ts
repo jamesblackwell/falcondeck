@@ -1,5 +1,6 @@
 import type {
   AccountSummary,
+  AgentCapabilitySummary,
   AgentProvider,
   ConversationItem,
   ConversationPreferences,
@@ -61,8 +62,51 @@ const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
 }
 
+const FALLBACK_PROVIDER: AgentProvider = 'codex'
+
+const DEFAULT_CAPABILITIES: AgentCapabilitySummary = {
+  supports_review: false,
+  supports_goals: false,
+  supports_images: false,
+  supports_skills: false,
+  supports_interrupt: false,
+  sandbox_modes: [],
+  permission_modes: [],
+}
+
+/**
+ * Provider ids are open-ended, so anything non-empty passes through untouched —
+ * relabelling an unknown provider as codex would silently route its threads to
+ * the wrong agent. Only missing/blank values fall back.
+ */
 function normalizeProvider(value: unknown): AgentProvider {
-  return value === 'claude' ? 'claude' : 'codex'
+  return typeof value === 'string' && value.trim().length > 0 ? value : FALLBACK_PROVIDER
+}
+
+/** Title-cased provider id, used when the daemon sends no label. */
+export function defaultProviderLabel(provider: AgentProvider): string {
+  if (!provider) return ''
+  return provider.charAt(0).toUpperCase() + provider.slice(1)
+}
+
+function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value.filter(
+    (entry): entry is string => typeof entry === 'string' && entry.trim().length > 0,
+  )
+}
+
+function normalizeCapabilities(value: unknown): AgentCapabilitySummary {
+  const capabilities = (value ?? {}) as Partial<AgentCapabilitySummary>
+  return {
+    supports_review: capabilities.supports_review ?? false,
+    supports_goals: capabilities.supports_goals ?? false,
+    supports_images: capabilities.supports_images ?? false,
+    supports_skills: capabilities.supports_skills ?? false,
+    supports_interrupt: capabilities.supports_interrupt ?? false,
+    sandbox_modes: normalizeStringList(capabilities.sandbox_modes),
+    permission_modes: normalizeStringList(capabilities.permission_modes),
+  }
 }
 
 function normalizeAccount(value: unknown): AccountSummary {
@@ -132,14 +176,50 @@ function normalizeSkill(value: unknown): SkillSummary {
   }
 }
 
+// Daemons older than the multi-provider rollout omit `capabilities`. Falling
+// back to all-false there would strip the sandbox picker and goal control from
+// providers that have always supported them, so the two providers that predate
+// the field keep their known capability sets when it is absent entirely.
+const LEGACY_CAPABILITIES: Record<string, AgentCapabilitySummary> = {
+  codex: {
+    supports_review: true,
+    supports_goals: true,
+    supports_images: true,
+    supports_skills: true,
+    supports_interrupt: true,
+    sandbox_modes: ['read-only', 'workspace-write', 'danger-full-access'],
+    permission_modes: [],
+  },
+  claude: {
+    supports_review: false,
+    supports_goals: true,
+    supports_images: true,
+    supports_skills: true,
+    supports_interrupt: true,
+    sandbox_modes: [],
+    permission_modes: ['default', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions'],
+  },
+}
+
+function capabilitiesForAgent(
+  provider: AgentProvider,
+  value: unknown,
+): AgentCapabilitySummary {
+  if (value == null) {
+    return LEGACY_CAPABILITIES[provider] ?? { ...DEFAULT_CAPABILITIES }
+  }
+  return normalizeCapabilities(value)
+}
+
 function fallbackWorkspaceAgent(workspace: Partial<WorkspaceSummary>): WorkspaceAgentSummary {
   return {
-    provider: 'codex',
+    provider: FALLBACK_PROVIDER,
+    label: defaultProviderLabel(FALLBACK_PROVIDER),
     account: normalizeAccount(workspace.account),
     models: workspace.models ?? [],
     collaboration_modes: workspace.collaboration_modes ?? [],
     skills: (workspace.skills ?? []).map((skill) => normalizeSkill(skill)),
-    capabilities: { supports_review: true },
+    capabilities: capabilitiesForAgent(FALLBACK_PROVIDER, null),
   }
 }
 
@@ -152,15 +232,18 @@ function normalizeWorkspaceAgent(
   }
 
   const agent = value as Partial<WorkspaceAgentSummary>
+  const provider = normalizeProvider(agent.provider)
   return {
-    provider: normalizeProvider(agent.provider),
+    provider,
+    label:
+      typeof agent.label === 'string' && agent.label.trim().length > 0
+        ? agent.label
+        : defaultProviderLabel(provider),
     account: normalizeAccount(agent.account),
     models: agent.models ?? [],
     collaboration_modes: agent.collaboration_modes ?? [],
     skills: (agent.skills ?? []).map((skill) => normalizeSkill(skill)),
-    capabilities: {
-      supports_review: agent.capabilities?.supports_review ?? false,
-    },
+    capabilities: capabilitiesForAgent(provider, agent.capabilities),
   }
 }
 

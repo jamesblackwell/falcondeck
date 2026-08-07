@@ -589,7 +589,7 @@ pub(super) async fn ingest_notification(
                     .summary
                     .agents
                     .iter_mut()
-                    .find(|agent| agent.provider == AgentProvider::Codex)
+                    .find(|agent| agent.provider == AgentProvider::CODEX)
                 {
                     agent.account = workspace.summary.account.clone();
                 }
@@ -760,7 +760,7 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
                 .threads
                 .values()
                 .find(|thread| {
-                    thread.summary.provider == AgentProvider::Claude
+                    thread.summary.provider == AgentProvider::CLAUDE
                         && thread.summary.native_session_id.as_deref() == Some(&session_id)
                 })
                 .map(|thread| (workspace_id.clone(), thread.summary.id.clone()))

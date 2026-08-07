@@ -1,4 +1,11 @@
-import { workspaceAccount, type AgentProvider, type ConversationItem, type WorkspaceSummary } from '@falcondeck/client-core'
+import {
+  defaultProviderLabel,
+  workspaceAccount,
+  workspaceProviderLabel,
+  type AgentProvider,
+  type ConversationItem,
+  type WorkspaceSummary,
+} from '@falcondeck/client-core'
 
 export function markInteractiveRequestResolved(
   items: ConversationItem[],
@@ -11,8 +18,9 @@ export function markInteractiveRequestResolved(
   )
 }
 
+/** Provider display name when no workspace is on hand to supply its label. */
 export function providerLabel(provider: AgentProvider) {
-  return provider === 'claude' ? 'Claude' : 'Codex'
+  return defaultProviderLabel(provider)
 }
 
 export function workspaceComposerDisabled(workspace: WorkspaceSummary | null | undefined) {
@@ -43,14 +51,14 @@ export function workspaceSendBlockReason(
     case 'error':
       return workspace.last_error ?? `${workspace.path.split('/').pop() ?? 'This project'} is unavailable right now.`
     case 'needs_auth':
-      return `Finish authentication for this project before using ${providerLabel(provider)}.`
+      return `Finish authentication for this project before using ${workspaceProviderLabel(workspace, provider)}.`
     default:
       break
   }
 
   const account = workspaceAccount(workspace, provider)
   if (account?.status === 'needs_auth') {
-    return `${providerLabel(provider)} needs authentication in this project before you can send messages.`
+    return `${workspaceProviderLabel(workspace, provider)} needs authentication in this project before you can send messages.`
   }
 
   return null

@@ -14,6 +14,8 @@ import {
   generateBoxKeyPair,
   identityPublicKeyToBase64,
   normalizePreferences,
+  normalizeThreadSummary,
+  normalizeWorkspaceSummary,
   projectLabel,
   publicKeyToBase64,
   reconcileSnapshotSelection,
@@ -25,6 +27,8 @@ import {
   upsertConversationItem,
   verifyPairingClaimChallenge,
   formatModelLabel,
+  workspaceAgentCapabilities,
+  workspaceProviderOptions,
   type ConversationItem,
   type EventEnvelope,
   type PersistedRemoteSession,
@@ -124,6 +128,69 @@ describe('client-core grouping', () => {
   it('extracts a friendly project label from a path', () => {
     expect(projectLabel('/Users/james/work/falcondeck')).toBe('falcondeck')
     expect(projectLabel('falcondeck')).toBe('falcondeck')
+  })
+})
+
+describe('client-core provider normalization', () => {
+  it('keeps unknown provider ids instead of relabelling them as codex', () => {
+    const normalized = normalizeWorkspaceSummary({
+      id: 'workspace-1',
+      path: '/tmp/alpha',
+      agents: [{ provider: 'grok', account: { status: 'ready', label: 'ready' } }],
+      default_provider: 'grok',
+    })
+
+    expect(normalized.agents.map((agent) => agent.provider)).toEqual(['grok'])
+    expect(normalized.default_provider).toBe('grok')
+    expect(normalizeThreadSummary({ id: 't1', provider: 'grok' }).provider).toBe('grok')
+  })
+
+  it('falls back to codex only when the provider is missing or blank', () => {
+    expect(normalizeThreadSummary({ id: 't1' }).provider).toBe('codex')
+    expect(normalizeThreadSummary({ id: 't1', provider: '' }).provider).toBe('codex')
+    expect(normalizeThreadSummary({ id: 't1', provider: null }).provider).toBe('codex')
+  })
+
+  it('derives a label for providers the daemon does not name', () => {
+    const normalized = normalizeWorkspaceSummary({
+      id: 'workspace-1',
+      path: '/tmp/alpha',
+      agents: [
+        { provider: 'grok', account: { status: 'ready', label: 'ready' } },
+        { provider: 'claude', label: 'Claude Code', account: { status: 'ready', label: 'ready' } },
+      ],
+    })
+
+    expect(workspaceProviderOptions(normalized)).toEqual([
+      { provider: 'grok', label: 'Grok' },
+      { provider: 'claude', label: 'Claude Code' },
+    ])
+  })
+
+  it('defaults unreported capabilities to off and empty mode lists', () => {
+    const normalized = normalizeWorkspaceSummary({
+      id: 'workspace-1',
+      path: '/tmp/alpha',
+      agents: [
+        {
+          provider: 'grok',
+          account: { status: 'ready', label: 'ready' },
+          capabilities: { supports_goals: true, sandbox_modes: ['sealed', 42] },
+        },
+      ],
+    })
+
+    expect(workspaceAgentCapabilities(normalized, 'grok')).toEqual({
+      supports_review: false,
+      supports_goals: true,
+      supports_images: false,
+      supports_skills: false,
+      supports_interrupt: false,
+      sandbox_modes: ['sealed'],
+      permission_modes: [],
+    })
+    // A provider the workspace never mentions reports nothing.
+    expect(workspaceAgentCapabilities(normalized, 'codex').supports_goals).toBe(false)
   })
 })
 

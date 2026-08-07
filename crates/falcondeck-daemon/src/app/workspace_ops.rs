@@ -7,6 +7,7 @@ use falcondeck_core::{
 };
 use uuid::Uuid;
 
+use super::acp_threads::start_acp_turn;
 use super::*;
 
 pub(super) async fn connect_workspace(
@@ -169,8 +170,8 @@ pub(super) async fn connect_workspace_internal(
             .chain(codex_provider_skills)
             .collect(),
     );
-    let codex_skills = skills_for_provider(&merged_skills, AgentProvider::Codex);
-    let claude_skills = skills_for_provider(&merged_skills, AgentProvider::Claude);
+    let codex_skills = skills_for_provider(&merged_skills, AgentProvider::CODEX);
+    let claude_skills = skills_for_provider(&merged_skills, AgentProvider::CLAUDE);
 
     let now = Utc::now();
     let mut threads = codex_threads;
@@ -214,7 +215,7 @@ pub(super) async fn connect_workspace_internal(
                     .title
                     .clone()
                     .unwrap_or_else(|| "Restored thread".to_string()),
-                provider: state.provider.clone().unwrap_or(AgentProvider::Codex),
+                provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
                 native_session_id: state.native_session_id.clone(),
                 status: restored_status,
                 updated_at: state
@@ -245,19 +246,19 @@ pub(super) async fn connect_workspace_internal(
                 .map(|thread| thread.summary.id.clone())
         })
         .or_else(|| threads.first().map(|thread| thread.summary.id.clone()));
-    let agents = vec![
+    let mut agents = vec![
         WorkspaceAgentSummary {
-            provider: AgentProvider::Codex,
+            provider: AgentProvider::CODEX,
+            label: "Codex".to_string(),
             account: codex_account.clone(),
             models: codex_models.clone(),
             collaboration_modes: codex_collaboration_modes.clone(),
             skills: codex_skills.clone(),
-            capabilities: AgentCapabilitySummary {
-                supports_review: true,
-            },
+            capabilities: AgentCapabilitySummary::codex(),
         },
         WorkspaceAgentSummary {
-            provider: AgentProvider::Claude,
+            provider: AgentProvider::CLAUDE,
+            label: "Claude".to_string(),
             account: claude_account.clone(),
             models: claude_models.clone(),
             collaboration_modes: claude_collaboration_modes.clone(),
@@ -265,9 +266,10 @@ pub(super) async fn connect_workspace_internal(
             capabilities: claude_capabilities,
         },
     ];
+    agents.extend(app.acp_agent_summaries());
     let default_provider = persisted_workspace_ref
         .and_then(|workspace| workspace.default_provider.clone())
-        .unwrap_or(AgentProvider::Codex);
+        .unwrap_or(AgentProvider::CODEX);
     let summary = WorkspaceSummary {
         id: workspace_id.clone(),
         path: path_string.clone(),
@@ -301,6 +303,7 @@ pub(super) async fn connect_workspace_internal(
             summary: summary.clone(),
             codex_session,
             claude_runtime: Some(claude_runtime),
+            acp_runtimes: HashMap::new(),
             threads: threads
                 .into_iter()
                 .map(|mut thread| {
@@ -435,34 +438,41 @@ pub(super) async fn start_thread(
         .approval_policy
         .unwrap_or_else(|| "on-request".to_string());
     let model_id = request.model_id.clone().or(default_model_id);
-    let (thread_id, title, native_session_id) = match provider {
-        AgentProvider::Codex => {
-            let session = app.session_for(&request.workspace_id).await?;
-            let workspace_path = session.workspace_path().to_string();
-            let result = session
-                .send_request(
-                    "thread/start",
-                    json!({
-                        "cwd": workspace_path,
-                        "model": model_id,
-                        "sandbox": request.sandbox_mode,
-                        "approvalPolicy": approval_policy
-                    }),
-                )
-                .await?;
-            (
-                extract_thread_id(&result).ok_or_else(|| {
-                    DaemonError::Rpc("thread/start did not return a thread id".to_string())
-                })?,
-                extract_thread_title(&result).unwrap_or_else(|| "New thread".to_string()),
-                extract_thread_id(&result),
+    let (thread_id, title, native_session_id) = if provider == AgentProvider::CODEX {
+        let session = app.session_for(&request.workspace_id).await?;
+        let workspace_path = session.workspace_path().to_string();
+        let result = session
+            .send_request(
+                "thread/start",
+                json!({
+                    "cwd": workspace_path,
+                    "model": model_id,
+                    "sandbox": request.sandbox_mode,
+                    "approvalPolicy": approval_policy
+                }),
             )
-        }
-        AgentProvider::Claude => (
+            .await?;
+        (
+            extract_thread_id(&result).ok_or_else(|| {
+                DaemonError::Rpc("thread/start did not return a thread id".to_string())
+            })?,
+            extract_thread_title(&result).unwrap_or_else(|| "New thread".to_string()),
+            extract_thread_id(&result),
+        )
+    } else if provider == AgentProvider::CLAUDE {
+        (
             format!("claude-thread-{}", Uuid::new_v4().simple()),
             "New Claude thread".to_string(),
             None,
-        ),
+        )
+    } else {
+        // ACP providers open their session lazily on the first turn; the
+        // thread exists daemon-side immediately.
+        (
+            format!("{}-thread-{}", provider.as_str(), Uuid::new_v4().simple()),
+            "New thread".to_string(),
+            None,
+        )
     };
     let now = Utc::now();
 
@@ -966,8 +976,8 @@ pub(super) async fn send_turn(
         },
     );
 
-    let start_result: Result<(), DaemonError> = match provider {
-        AgentProvider::Codex => {
+    let start_result: Result<(), DaemonError> = if provider == AgentProvider::CODEX {
+        {
             let session = app.session_for(&request.workspace_id).await?;
             let workspace_path = session.workspace_path().to_string();
             if requires_resume {
@@ -997,7 +1007,8 @@ pub(super) async fn send_turn(
                 .await?;
             Ok(())
         }
-        AgentProvider::Claude => {
+    } else if provider == AgentProvider::CLAUDE {
+        {
             let runtime = app.claude_runtime_for(&request.workspace_id).await?;
             let session_id = thread.native_session_id.clone();
             let images = inputs
@@ -1046,6 +1057,15 @@ pub(super) async fn send_turn(
             });
             Ok(())
         }
+    } else {
+        start_acp_turn(
+            app,
+            &request.workspace_id,
+            &request.thread_id,
+            &provider,
+            &inputs,
+        )
+        .await
     };
 
     if let Err(error) = start_result {
@@ -1188,8 +1208,8 @@ pub(super) async fn set_thread_goal(
         .thread_provider(&request.workspace_id, &request.thread_id)
         .await?;
 
-    match provider {
-        AgentProvider::Codex => {
+    if provider == AgentProvider::CODEX {
+        {
             let session = app.session_for(&request.workspace_id).await?;
             session
                 .send_request(
@@ -1203,7 +1223,8 @@ pub(super) async fn set_thread_goal(
                 )
                 .await?;
         }
-        AgentProvider::Claude => {
+    } else if provider == AgentProvider::CLAUDE {
+        {
             // Claude's goal support is the `/goal` slash command; drive it
             // through a normal turn so the session-scoped Stop hook engages.
             let Some(objective) = objective.clone() else {
@@ -1221,7 +1242,7 @@ pub(super) async fn set_thread_goal(
                         text: format!("/goal {objective}"),
                     }],
                     selected_skills: Vec::new(),
-                    provider: Some(AgentProvider::Claude),
+                    provider: Some(AgentProvider::CLAUDE),
                     model_id: None,
                     reasoning_effort: None,
                     approval_policy: None,
@@ -1232,6 +1253,11 @@ pub(super) async fn set_thread_goal(
             )
             .await?;
         }
+    } else {
+        return Err(DaemonError::BadRequest(format!(
+            "goals are not supported by the {} provider",
+            provider.as_str()
+        )));
     }
 
     // Reflect the goal locally right away; Codex refines it via
@@ -1283,14 +1309,13 @@ pub(super) async fn clear_thread_goal(
     thread_id: &str,
 ) -> Result<ThreadSummary, DaemonError> {
     let provider = app.thread_provider(workspace_id, thread_id).await?;
-    match provider {
-        AgentProvider::Codex => {
-            let session = app.session_for(workspace_id).await?;
-            session
-                .send_request("thread/goal/clear", json!({ "threadId": thread_id }))
-                .await?;
-        }
-        AgentProvider::Claude => {
+    if provider == AgentProvider::CODEX {
+        let session = app.session_for(workspace_id).await?;
+        session
+            .send_request("thread/goal/clear", json!({ "threadId": thread_id }))
+            .await?;
+    } else if provider == AgentProvider::CLAUDE {
+        {
             send_turn(
                 app,
                 falcondeck_core::SendTurnRequest {
@@ -1301,7 +1326,7 @@ pub(super) async fn clear_thread_goal(
                         text: "/goal clear".to_string(),
                     }],
                     selected_skills: Vec::new(),
-                    provider: Some(AgentProvider::Claude),
+                    provider: Some(AgentProvider::CLAUDE),
                     model_id: None,
                     reasoning_effort: None,
                     approval_policy: None,
@@ -1312,6 +1337,11 @@ pub(super) async fn clear_thread_goal(
             )
             .await?;
         }
+    } else {
+        return Err(DaemonError::BadRequest(format!(
+            "goals are not supported by the {} provider",
+            provider.as_str()
+        )));
     }
 
     app.with_thread_mut(workspace_id, thread_id, |thread| {
@@ -1337,7 +1367,7 @@ pub(super) async fn start_review(
     let provider = app
         .thread_provider(&request.workspace_id, &request.thread_id)
         .await?;
-    if provider != AgentProvider::Codex {
+    if provider != AgentProvider::CODEX {
         return Err(DaemonError::BadRequest(
             "code review is only available for Codex threads in this milestone".to_string(),
         ));
@@ -1365,9 +1395,25 @@ pub(super) async fn interrupt_turn(
     thread_id: String,
 ) -> Result<CommandResponse, DaemonError> {
     let provider = app.thread_provider(&workspace_id, &thread_id).await?;
-    if provider == AgentProvider::Claude {
+    if provider == AgentProvider::CLAUDE {
         let runtime = app.claude_runtime_for(&workspace_id).await?;
         runtime.interrupt_turn(&thread_id).await?;
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("interrupt requested".to_string()),
+        });
+    }
+    if provider != AgentProvider::CODEX {
+        let runtime = app.acp_runtime_for(&workspace_id, &provider).await?;
+        if let Some(session_id) = {
+            let workspaces = app.inner.workspaces.lock().await;
+            workspaces
+                .get(&workspace_id)
+                .and_then(|workspace| workspace.threads.get(&thread_id))
+                .and_then(|thread| thread.summary.native_session_id.clone())
+        } {
+            runtime.cancel(&session_id).await?;
+        }
         return Ok(CommandResponse {
             ok: true,
             message: Some("interrupt requested".to_string()),
@@ -1400,6 +1446,57 @@ pub(super) async fn interrupt_turn(
     Ok(CommandResponse {
         ok: true,
         message: Some("interrupt requested".to_string()),
+    })
+}
+
+/// Disconnects a project: shuts down its agent processes, drops it from the
+/// live set and from persisted state. Thread history stored by the providers
+/// themselves (Codex/Claude session files) is untouched, so re-adding the
+/// folder restores those threads.
+pub(super) async fn remove_workspace(
+    app: &AppState,
+    workspace_id: &str,
+) -> Result<CommandResponse, DaemonError> {
+    let removed = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        workspaces.remove(workspace_id)
+    };
+    let Some(removed) = removed else {
+        return Err(DaemonError::NotFound("workspace not found".to_string()));
+    };
+
+    if let Some(session) = removed.codex_session {
+        let _ = session.shutdown().await;
+    }
+    if let Some(runtime) = removed.claude_runtime {
+        let _ = runtime.shutdown().await;
+    }
+    for (_, runtime) in removed.acp_runtimes {
+        runtime.shutdown().await;
+    }
+
+    let normalized_path = normalize_workspace_path(&removed.summary.path);
+    app.inner
+        .saved_workspaces
+        .lock()
+        .await
+        .remove(&normalized_path);
+    app.inner
+        .interactive_requests
+        .lock()
+        .await
+        .retain(|(request_workspace, _), _| request_workspace != workspace_id);
+    let _ = app.persist_local_state().await;
+    app.emit(
+        None,
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+    Ok(CommandResponse {
+        ok: true,
+        message: Some("workspace removed".to_string()),
     })
 }
 
@@ -1464,9 +1561,49 @@ pub(super) async fn respond_to_interactive_request(
             message: Some("response sent".to_string()),
         });
     }
+    if pending.request.method == "session/request_permission" {
+        let InteractiveResponsePayload::Approval { decision } = response else {
+            return Err(DaemonError::BadRequest(
+                "ACP permission requests require an approval response".to_string(),
+            ));
+        };
+        app.respond_acp_permission(
+            &workspace_id,
+            pending.request.thread_id.as_deref(),
+            &request_id,
+            decision,
+        )
+        .await?;
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&request_key);
+        if let Some(thread_id) = pending.request.thread_id {
+            app.with_thread_mut(&workspace_id, &thread_id, |thread| {
+                if matches!(thread.status, ThreadStatus::WaitingForInput) {
+                    thread.status = ThreadStatus::Running;
+                }
+            })
+            .await?;
+            app.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
+                .await?;
+        }
+        app.emit(
+            Some(workspace_id),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: app.snapshot().await,
+            },
+        );
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("response sent".to_string()),
+        });
+    }
     if let Some(thread_id) = pending.request.thread_id.as_deref() {
         let provider = app.thread_provider(&workspace_id, thread_id).await?;
-        if provider != AgentProvider::Codex {
+        if provider != AgentProvider::CODEX {
             return Err(DaemonError::BadRequest(
                 "Claude interactive requests are not yet routable through FalconDeck".to_string(),
             ));
@@ -1608,8 +1745,8 @@ pub(super) async fn refresh_connected_workspace_metadata(
             .chain(codex_provider_skills)
             .collect(),
     );
-    let codex_skills = skills_for_provider(&merged_skills, AgentProvider::Codex);
-    let claude_skills = skills_for_provider(&merged_skills, AgentProvider::Claude);
+    let codex_skills = skills_for_provider(&merged_skills, AgentProvider::CODEX);
+    let claude_skills = skills_for_provider(&merged_skills, AgentProvider::CLAUDE);
 
     let summary = {
         let mut workspaces = app.inner.workspaces.lock().await;
@@ -1621,7 +1758,7 @@ pub(super) async fn refresh_connected_workspace_metadata(
         if let Some(metadata) = codex_metadata {
             update_workspace_agent_summary(
                 &mut workspace.summary.agents,
-                AgentProvider::Codex,
+                AgentProvider::CODEX,
                 metadata,
                 codex_skills,
             );
@@ -1629,7 +1766,7 @@ pub(super) async fn refresh_connected_workspace_metadata(
         if let Some(metadata) = claude_metadata {
             update_workspace_agent_summary(
                 &mut workspace.summary.agents,
-                AgentProvider::Claude,
+                AgentProvider::CLAUDE,
                 metadata,
                 claude_skills,
             );
@@ -1714,7 +1851,7 @@ pub(super) async fn run_codex_reconnect(app: &AppState, workspace_id: &str) {
                 .summary
                 .agents
                 .iter_mut()
-                .find(|agent| agent.provider == AgentProvider::Codex)
+                .find(|agent| agent.provider == AgentProvider::CODEX)
         {
             agent.account = falcondeck_core::AccountSummary {
                 status: falcondeck_core::AccountStatus::Unknown,
@@ -1801,12 +1938,12 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
         .summary
         .agents
         .iter()
-        .find(|agent| agent.provider == AgentProvider::Codex)
+        .find(|agent| agent.provider == AgentProvider::CODEX)
         .map(|agent| agent.skills.clone())
         .unwrap_or_default();
     update_workspace_agent_summary(
         &mut workspace.summary.agents,
-        AgentProvider::Codex,
+        AgentProvider::CODEX,
         CodexProviderMetadata {
             account,
             models,
@@ -1815,7 +1952,7 @@ async fn try_codex_reconnect(app: &AppState, workspace_id: &str) -> CodexReconne
         codex_skills,
     );
     for thread in workspace.threads.values_mut() {
-        if thread.summary.provider == AgentProvider::Codex {
+        if thread.summary.provider == AgentProvider::CODEX {
             thread.requires_resume = true;
         }
     }
@@ -2198,7 +2335,7 @@ mod tests {
                     status: WorkspaceStatus::Ready,
                     agents: Vec::new(),
                     skills: Vec::new(),
-                    default_provider: AgentProvider::Codex,
+                    default_provider: AgentProvider::CODEX,
                     models: Vec::new(),
                     collaboration_modes: Vec::new(),
                     account: falcondeck_core::AccountSummary::default(),
@@ -2209,6 +2346,7 @@ mod tests {
                 },
                 codex_session: None,
                 claude_runtime: None,
+                acp_runtimes: HashMap::new(),
                 threads: HashMap::new(),
             },
         );

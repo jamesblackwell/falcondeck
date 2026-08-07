@@ -127,6 +127,7 @@ describe('desktop selection utils', () => {
       agents: [
         {
           provider: 'codex',
+          label: 'Codex',
           account: { status: 'ready', label: 'ready' },
           models: [
             {

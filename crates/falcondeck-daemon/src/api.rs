@@ -92,6 +92,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/events", get(events))
         .route("/api/workspaces/connect", post(connect_workspace))
+        .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
         .route(
             "/api/workspaces/{workspace_id}/collaboration-modes",
             get(collaboration_modes),
@@ -194,6 +195,13 @@ async fn revoke_remote_device(
     Path(device_id): Path<String>,
 ) -> Result<Json<falcondeck_core::RemoteStatusResponse>, DaemonError> {
     Ok(Json(state.revoke_remote_device(&device_id).await?))
+}
+
+async fn remove_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(state.remove_workspace(&workspace_id).await?))
 }
 
 async fn connect_workspace(

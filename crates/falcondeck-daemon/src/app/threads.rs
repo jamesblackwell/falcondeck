@@ -113,7 +113,7 @@ impl AppState {
                     id: thread_id.to_string(),
                     workspace_id: workspace_id.to_string(),
                     title: "Untitled thread".to_string(),
-                    provider: AgentProvider::Codex,
+                    provider: AgentProvider::CODEX,
                     native_session_id: None,
                     status: ThreadStatus::Idle,
                     updated_at: now,
@@ -234,7 +234,7 @@ impl AppState {
                 workspace_path: workspace.summary.path.clone(),
                 prompt: build_ai_thread_title_prompt(&thread.items),
                 prefer_claude: workspace.summary.agents.iter().any(|agent| {
-                    agent.provider == AgentProvider::Claude
+                    agent.provider == AgentProvider::CLAUDE
                         && matches!(agent.account.status, falcondeck_core::AccountStatus::Ready)
                 }),
             }

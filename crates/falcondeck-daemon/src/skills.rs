@@ -157,15 +157,21 @@ pub fn merge_skills(skills: Vec<SkillSummary>) -> Vec<SkillSummary> {
 pub fn skills_for_provider(skills: &[SkillSummary], provider: AgentProvider) -> Vec<SkillSummary> {
     skills
         .iter()
-        .filter(|skill| match provider {
-            AgentProvider::Codex => matches!(
-                skill.availability,
-                SkillAvailability::Codex | SkillAvailability::Both
-            ),
-            AgentProvider::Claude => matches!(
-                skill.availability,
-                SkillAvailability::Claude | SkillAvailability::Both
-            ),
+        .filter(|skill| {
+            if provider == AgentProvider::CODEX {
+                matches!(
+                    skill.availability,
+                    SkillAvailability::Codex | SkillAvailability::Both
+                )
+            } else if provider == AgentProvider::CLAUDE {
+                matches!(
+                    skill.availability,
+                    SkillAvailability::Claude | SkillAvailability::Both
+                )
+            } else {
+                // Providers without a skill catalog expose no skills.
+                false
+            }
         })
         .cloned()
         .collect()

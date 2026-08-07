@@ -6,7 +6,16 @@ export type WorkspaceStatus =
   | 'disconnected'
   | 'error'
 
-export type AgentProvider = 'codex' | 'claude'
+/**
+ * Provider id as sent by the daemon. Open-ended on purpose: the daemon can
+ * register providers we have never heard of (ACP-configured CLIs), so this is a
+ * plain string and unknown ids must survive round-tripping.
+ */
+export type AgentProvider = string
+
+/** Providers with first-class support in the clients (icons, copy, defaults). */
+export const KNOWN_PROVIDERS = ['codex', 'claude'] as const
+export type KnownProvider = (typeof KNOWN_PROVIDERS)[number]
 export type ThreadStatus = 'idle' | 'running' | 'waiting_for_input' | 'error'
 export type ServiceLevel = 'info' | 'warning' | 'error'
 export type ThreadAttentionLevel = 'none' | 'unread' | 'running' | 'awaiting_response' | 'error'
@@ -39,7 +48,15 @@ export type AccountSummary = {
 }
 
 export type AgentCapabilitySummary = {
-  supports_review?: boolean
+  supports_review: boolean
+  supports_goals: boolean
+  supports_images: boolean
+  supports_skills: boolean
+  supports_interrupt: boolean
+  /** Sandbox modes the provider accepts; empty hides the sandbox picker. */
+  sandbox_modes: string[]
+  /** Permission modes the provider accepts; empty hides the picker. */
+  permission_modes: string[]
 }
 
 export type SkillAvailability = 'codex' | 'claude' | 'both'
@@ -73,6 +90,8 @@ export type SkillSummary = {
 
 export type WorkspaceAgentSummary = {
   provider: AgentProvider
+  /** Human-readable provider name for pickers. */
+  label: string
   account: AccountSummary
   models: ModelSummary[]
   collaboration_modes: CollaborationModeSummary[]

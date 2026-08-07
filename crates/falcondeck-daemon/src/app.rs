@@ -41,6 +41,7 @@ use crate::{
     },
 };
 
+mod acp_threads;
 pub(crate) mod agent_helpers;
 pub(crate) mod conversation_helpers;
 mod notifications;
@@ -73,6 +74,8 @@ struct InnerState {
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
+    /// ACP providers declared in providers.json, loaded at startup.
+    acp_provider_configs: Vec<crate::acp::AcpProviderConfig>,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
     /// Pending Claude PreToolUse approvals keyed by (workspace_id, request_id);
@@ -94,6 +97,8 @@ struct ManagedWorkspace {
     summary: WorkspaceSummary,
     codex_session: Option<Arc<CodexSession>>,
     claude_runtime: Option<Arc<ClaudeRuntime>>,
+    /// Live ACP agent processes keyed by provider id; spawned lazily.
+    acp_runtimes: HashMap<AgentProvider, Arc<crate::acp::AcpRuntime>>,
     threads: HashMap<String, ManagedThread>,
 }
 
@@ -107,6 +112,41 @@ struct ManagedThread {
     ai_title_generated: bool,
     ai_title_in_flight: bool,
     requires_resume: bool,
+}
+
+impl AppState {
+    /// Workspace agent entries for every configured ACP provider. Accounts
+    /// start Unknown and flip to Ready after the first successful handshake.
+    pub(crate) fn acp_agent_summaries(&self) -> Vec<WorkspaceAgentSummary> {
+        self.inner
+            .acp_provider_configs
+            .iter()
+            .map(|config| WorkspaceAgentSummary {
+                provider: AgentProvider::new(config.id.clone()),
+                label: config.label.clone(),
+                account: falcondeck_core::AccountSummary {
+                    status: falcondeck_core::AccountStatus::Unknown,
+                    label: format!("{} not started", config.label),
+                },
+                models: Vec::new(),
+                collaboration_modes: Vec::new(),
+                skills: Vec::new(),
+                capabilities: AgentCapabilitySummary::acp_minimal(),
+            })
+            .collect()
+    }
+}
+
+/// Display label for built-in providers; ACP providers carry their configured
+/// label on the workspace agent entry instead.
+fn provider_label(provider: &AgentProvider) -> String {
+    if *provider == AgentProvider::CODEX {
+        "Codex".to_string()
+    } else if *provider == AgentProvider::CLAUDE {
+        "Claude".to_string()
+    } else {
+        provider.as_str().to_string()
+    }
 }
 
 #[derive(Clone)]
@@ -260,6 +300,10 @@ impl AppState {
     ) -> Self {
         let (broadcaster, _) = broadcast::channel(2048);
         let preferences_path = default_preferences_path(&state_path);
+        let acp_provider_configs = state_path
+            .parent()
+            .map(crate::acp::load_acp_provider_configs)
+            .unwrap_or_default();
         Self {
             inner: Arc::new(InnerState {
                 daemon: DaemonInfo {
@@ -273,6 +317,7 @@ impl AppState {
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
+                acp_provider_configs,
                 saved_workspaces: Mutex::new(HashMap::new()),
                 interactive_requests: Mutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
@@ -452,7 +497,7 @@ impl AppState {
                     .title
                     .clone()
                     .unwrap_or_else(|| "Restored thread".to_string()),
-                provider: state.provider.clone().unwrap_or(AgentProvider::Codex),
+                provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
                 native_session_id: state.native_session_id.clone(),
                 status,
                 updated_at: state
@@ -490,39 +535,41 @@ impl AppState {
             id: workspace_id.clone(),
             path: path_string.clone(),
             status,
-            agents: vec![
-                WorkspaceAgentSummary {
-                    provider: AgentProvider::Codex,
-                    account: falcondeck_core::AccountSummary {
-                        status: falcondeck_core::AccountStatus::Unknown,
-                        label: "Codex reconnecting".to_string(),
+            agents: {
+                let mut agents = vec![
+                    WorkspaceAgentSummary {
+                        provider: AgentProvider::CODEX,
+                        label: "Codex".to_string(),
+                        account: falcondeck_core::AccountSummary {
+                            status: falcondeck_core::AccountStatus::Unknown,
+                            label: "Codex reconnecting".to_string(),
+                        },
+                        models: Vec::new(),
+                        collaboration_modes: Vec::new(),
+                        skills: Vec::new(),
+                        capabilities: AgentCapabilitySummary::codex(),
                     },
-                    models: Vec::new(),
-                    collaboration_modes: Vec::new(),
-                    skills: Vec::new(),
-                    capabilities: AgentCapabilitySummary {
-                        supports_review: true,
+                    WorkspaceAgentSummary {
+                        provider: AgentProvider::CLAUDE,
+                        label: "Claude".to_string(),
+                        account: falcondeck_core::AccountSummary {
+                            status: falcondeck_core::AccountStatus::Unknown,
+                            label: "Claude reconnecting".to_string(),
+                        },
+                        models: Vec::new(),
+                        collaboration_modes: Vec::new(),
+                        skills: Vec::new(),
+                        capabilities: AgentCapabilitySummary::claude(),
                     },
-                },
-                WorkspaceAgentSummary {
-                    provider: AgentProvider::Claude,
-                    account: falcondeck_core::AccountSummary {
-                        status: falcondeck_core::AccountStatus::Unknown,
-                        label: "Claude reconnecting".to_string(),
-                    },
-                    models: Vec::new(),
-                    collaboration_modes: Vec::new(),
-                    skills: Vec::new(),
-                    capabilities: AgentCapabilitySummary {
-                        supports_review: false,
-                    },
-                },
-            ],
+                ];
+                agents.extend(self.acp_agent_summaries());
+                agents
+            },
             skills: Vec::new(),
             default_provider: persisted_workspace
                 .default_provider
                 .clone()
-                .unwrap_or(AgentProvider::Codex),
+                .unwrap_or(AgentProvider::CODEX),
             models: Vec::new(),
             collaboration_modes: Vec::new(),
             account: falcondeck_core::AccountSummary {
@@ -551,6 +598,7 @@ impl AppState {
                 summary: summary.clone(),
                 codex_session: None,
                 claude_runtime: None,
+                acp_runtimes: HashMap::new(),
                 threads,
             },
         );
@@ -776,6 +824,13 @@ impl AppState {
         request: ConnectWorkspaceRequest,
     ) -> Result<WorkspaceSummary, DaemonError> {
         workspace_ops::connect_workspace(self, request).await
+    }
+
+    pub async fn remove_workspace(
+        &self,
+        workspace_id: &str,
+    ) -> Result<falcondeck_core::CommandResponse, DaemonError> {
+        workspace_ops::remove_workspace(self, workspace_id).await
     }
 
     async fn connect_workspace_internal(
@@ -1100,14 +1155,13 @@ impl IntoWorkspaceAgentUpdate for CodexProviderMetadata {
         skills: Vec<SkillSummary>,
     ) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
+            label: provider_label(&provider),
             provider,
             account: self.account,
             models: self.models,
             collaboration_modes: self.collaboration_modes,
             skills,
-            capabilities: AgentCapabilitySummary {
-                supports_review: true,
-            },
+            capabilities: AgentCapabilitySummary::codex(),
         }
     }
 }
@@ -1119,6 +1173,7 @@ impl IntoWorkspaceAgentUpdate for ClaudeProviderMetadata {
         skills: Vec<SkillSummary>,
     ) -> WorkspaceAgentSummary {
         WorkspaceAgentSummary {
+            label: provider_label(&provider),
             provider,
             account: self.account,
             models: self.models,

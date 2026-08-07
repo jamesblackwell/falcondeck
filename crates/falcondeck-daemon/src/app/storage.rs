@@ -38,7 +38,7 @@ pub(super) fn default_preferences_path(state_path: &Path) -> PathBuf {
 }
 
 pub(super) fn default_persisted_provider() -> Option<AgentProvider> {
-    Some(AgentProvider::Codex)
+    Some(AgentProvider::CODEX)
 }
 
 pub(super) async fn load_persisted_app_state(
@@ -88,7 +88,7 @@ where
                 path,
                 current_thread_id: None,
                 updated_at: None,
-                default_provider: Some(AgentProvider::Codex),
+                default_provider: Some(AgentProvider::CODEX),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
@@ -443,7 +443,7 @@ mod tests {
                     path: "/tmp/project-a".to_string(),
                     current_thread_id: None,
                     updated_at: None,
-                    default_provider: Some(AgentProvider::Codex),
+                    default_provider: Some(AgentProvider::CODEX),
                     last_error: None,
                     archived_thread_ids: Vec::new(),
                     pinned_thread_ids: Vec::new(),
@@ -453,7 +453,7 @@ mod tests {
                     path: "/tmp/project-b".to_string(),
                     current_thread_id: None,
                     updated_at: None,
-                    default_provider: Some(AgentProvider::Codex),
+                    default_provider: Some(AgentProvider::CODEX),
                     last_error: None,
                     archived_thread_ids: Vec::new(),
                     pinned_thread_ids: Vec::new(),

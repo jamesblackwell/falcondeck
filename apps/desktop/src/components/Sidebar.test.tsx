@@ -73,6 +73,7 @@ function renderSidebar(overrides: Partial<ComponentProps<typeof DesktopSidebar>>
 
   const onRenameThread = vi.fn().mockResolvedValue(undefined)
   const onArchiveThread = vi.fn().mockResolvedValue(undefined)
+  const onRemoveWorkspace = vi.fn().mockResolvedValue(undefined)
 
   render(
     <DesktopSidebar
@@ -83,11 +84,12 @@ function renderSidebar(overrides: Partial<ComponentProps<typeof DesktopSidebar>>
       onSelectThread={() => {}}
       onRenameThread={onRenameThread}
       onArchiveThread={onArchiveThread}
+      onRemoveWorkspace={onRemoveWorkspace}
       {...overrides}
     />,
   )
 
-  return { onRenameThread, onArchiveThread }
+  return { onRenameThread, onArchiveThread, onRemoveWorkspace }
 }
 
 describe('DesktopSidebar', () => {
@@ -115,5 +117,30 @@ describe('DesktopSidebar', () => {
     await waitFor(() => {
       expect(onArchiveThread).toHaveBeenCalledWith('workspace-1', 'thread-1')
     })
+  })
+
+  it('removes a project from the right-click menu after confirmation', async () => {
+    const { onRemoveWorkspace } = renderSidebar()
+
+    fireEvent.contextMenu(screen.getByText('falcondeck'))
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove project' }))
+
+    const dialog = await screen.findByRole('dialog')
+    expect(dialog).toHaveTextContent('Threads stay in the provider’s own history')
+    expect(onRemoveWorkspace).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() => {
+      expect(onRemoveWorkspace).toHaveBeenCalledWith('workspace-1')
+    })
+  })
+
+  it('leaves the project menu out when removal is unavailable', () => {
+    renderSidebar({ onRemoveWorkspace: undefined })
+
+    fireEvent.contextMenu(screen.getByText('falcondeck'))
+
+    expect(screen.queryByRole('menuitem', { name: 'Remove project' })).not.toBeInTheDocument()
   })
 })

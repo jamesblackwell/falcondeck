@@ -88,7 +88,7 @@ pub(super) fn parse_threads(
                         .or(preview.clone())
                         .map(|title| truncate_preview(&title))
                         .unwrap_or_else(|| "Untitled thread".to_string()),
-                    provider: AgentProvider::Codex,
+                    provider: AgentProvider::CODEX,
                     native_session_id: None,
                     status: ThreadStatus::Idle,
                     updated_at: extract_datetime_or_timestamp(

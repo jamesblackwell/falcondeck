@@ -654,9 +654,7 @@ fn request_graceful_stop(child: &mut Child) -> std::io::Result<bool> {
 }
 
 fn default_capabilities() -> AgentCapabilitySummary {
-    AgentCapabilitySummary {
-        supports_review: false,
-    }
+    AgentCapabilitySummary::claude()
 }
 
 pub fn curated_models() -> Vec<ModelSummary> {
@@ -1042,7 +1040,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         id: session_id.clone(),
         workspace_id: String::new(),
         title: title.unwrap_or_else(|| "Claude thread".to_string()),
-        provider: AgentProvider::Claude,
+        provider: AgentProvider::CLAUDE,
         native_session_id: Some(session_id),
         status: ThreadStatus::Idle,
         updated_at: updated_at.or(file_updated_at).unwrap_or(now),
@@ -1298,7 +1296,7 @@ mod tests {
         .unwrap();
 
         let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
-        assert_eq!(hydrated.summary.provider, AgentProvider::Claude);
+        assert_eq!(hydrated.summary.provider, AgentProvider::CLAUDE);
         assert_eq!(
             hydrated.summary.native_session_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")

@@ -4,6 +4,7 @@
 //! agent sessions, remote pairing, and the HTTP API consumed by the desktop,
 //! mobile, and remote web shells.
 
+pub mod acp;
 mod agent_binary;
 mod api;
 mod app;

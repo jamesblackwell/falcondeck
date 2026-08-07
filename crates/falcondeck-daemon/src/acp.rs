@@ -1,0 +1,773 @@
+//! Generic Agent Client Protocol (ACP) adapter.
+//!
+//! ACP is JSON-RPC 2.0 over stdio, spoken by Grok Build (`grok agent stdio`),
+//! OpenCode (`opencode acp`), Gemini CLI, and others. FalconDeck acts as the
+//! ACP *client*: it spawns the configured agent command once per workspace,
+//! negotiates capabilities via `initialize`, opens one ACP session per thread,
+//! and streams `session/update` notifications into the daemon's unified
+//! conversation model.
+//!
+//! Providers are configured by data, not code: a `providers.json` next to the
+//! daemon state file declares `{ id: { command: [...], label: "..." } }` and
+//! each entry becomes a selectable provider with no Rust changes.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::{Mutex, mpsc, oneshot};
+
+use falcondeck_core::{AgentProvider, ApprovalDecision, PlanStep, ThreadPlan};
+
+use crate::agent_binary::resolve_agent_binary;
+use crate::error::DaemonError;
+
+/// One configured ACP provider, loaded from `providers.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AcpProviderConfig {
+    /// Stable provider id, e.g. "grok".
+    #[serde(skip)]
+    pub id: String,
+    /// Human-readable label for pickers.
+    pub label: String,
+    /// Command line to spawn, e.g. ["grok", "agent", "stdio"].
+    pub command: Vec<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ProvidersFile {
+    #[serde(default)]
+    providers: HashMap<String, AcpProviderConfig>,
+}
+
+/// Loads ACP provider configs from `<state_dir>/providers.json`.
+///
+/// A missing file means no extra providers; a malformed file is surfaced in
+/// the log rather than taking the daemon down.
+pub fn load_acp_provider_configs(state_dir: &Path) -> Vec<AcpProviderConfig> {
+    let path = state_dir.join("providers.json");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return Vec::new(),
+    };
+    match serde_json::from_str::<ProvidersFile>(&raw) {
+        Ok(file) => {
+            let mut configs = file
+                .providers
+                .into_iter()
+                .filter(|(id, config)| {
+                    let reserved = id == "codex" || id == "claude";
+                    let valid = !config.command.is_empty();
+                    if reserved {
+                        tracing::warn!(provider = %id, "providers.json cannot override built-in providers");
+                    }
+                    if !valid {
+                        tracing::warn!(provider = %id, "providers.json entry has an empty command");
+                    }
+                    !reserved && valid
+                })
+                .map(|(id, mut config)| {
+                    if config.label.trim().is_empty() {
+                        config.label = id.clone();
+                    }
+                    config.id = id;
+                    config
+                })
+                .filter(|config| {
+                    // A configured provider whose binary is absent stays
+                    // dormant instead of surfacing a dead picker entry; it
+                    // appears automatically once the CLI is installed.
+                    let executable =
+                        resolve_agent_binary(&config.command[0], &config.command[0]).executable;
+                    let available = std::path::Path::new(&executable).is_file();
+                    if !available {
+                        tracing::info!(
+                            provider = %config.id,
+                            binary = %config.command[0],
+                            "ACP provider configured but binary not found; hidden until installed"
+                        );
+                    }
+                    available
+                })
+                .collect::<Vec<_>>();
+            configs.sort_by(|left, right| left.id.cmp(&right.id));
+            configs
+        }
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "failed to parse providers.json");
+            Vec::new()
+        }
+    }
+}
+
+/// A permission option offered by the agent in `session/request_permission`.
+#[derive(Debug, Clone)]
+pub struct AcpPermissionOption {
+    pub option_id: String,
+    pub kind: String,
+}
+
+/// Normalized events the runtime emits toward the app layer.
+#[derive(Debug)]
+pub enum AcpEvent {
+    /// Streaming assistant text for a session.
+    MessageDelta { session_id: String, text: String },
+    /// A tool call started or was announced.
+    ToolCall {
+        session_id: String,
+        call_id: String,
+        title: String,
+        kind: String,
+        status: String,
+    },
+    /// A tool call changed status or produced output.
+    ToolCallUpdate {
+        session_id: String,
+        call_id: String,
+        title: Option<String>,
+        status: Option<String>,
+        output: Option<String>,
+    },
+    /// The agent published or updated its plan.
+    Plan {
+        session_id: String,
+        plan: ThreadPlan,
+    },
+    /// The agent asks the user to approve a tool call.
+    PermissionRequest {
+        session_id: String,
+        request_id: String,
+        title: String,
+        detail: Option<String>,
+        options: Vec<AcpPermissionOption>,
+    },
+    /// The agent finished a prompt turn; ordered after that turn's deltas.
+    TurnEnded { session_id: String },
+    /// The agent process died or the stream broke.
+    Fatal { message: String },
+}
+
+struct PendingPermission {
+    raw_id: Value,
+    options: Vec<AcpPermissionOption>,
+}
+
+/// A live ACP agent process serving one workspace.
+pub struct AcpRuntime {
+    pub provider: AgentProvider,
+    pub config: AcpProviderConfig,
+    workspace_path: String,
+    child: Mutex<Child>,
+    stdin: Mutex<ChildStdin>,
+    next_id: AtomicI64,
+    pending: Mutex<HashMap<i64, oneshot::Sender<Result<Value, DaemonError>>>>,
+    /// thread id -> ACP session id
+    sessions: Mutex<HashMap<String, String>>,
+    /// ACP session id -> thread id
+    threads_by_session: Mutex<HashMap<String, String>>,
+    permission_requests: Mutex<HashMap<String, PendingPermission>>,
+    /// Per-session accumulating assistant item for the current turn.
+    current_items: Mutex<HashMap<String, (String, String)>>,
+    /// Tool titles/kinds by call id, for enriching status updates.
+    current_tools: Mutex<HashMap<String, (String, String)>>,
+    initialize_result: Mutex<Option<Value>>,
+    closed: AtomicBool,
+    events: mpsc::UnboundedSender<AcpEvent>,
+}
+
+impl AcpRuntime {
+    /// Spawns the agent command and completes the `initialize` handshake.
+    pub async fn connect(
+        config: AcpProviderConfig,
+        workspace_path: &str,
+        events: mpsc::UnboundedSender<AcpEvent>,
+    ) -> Result<Arc<Self>, DaemonError> {
+        let executable = resolve_agent_binary(&config.command[0], &config.command[0]).executable;
+        let mut command = Command::new(&executable);
+        command
+            .args(&config.command[1..])
+            .current_dir(workspace_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+
+        let mut child = command.spawn().map_err(|error| {
+            DaemonError::Process(format!(
+                "failed to start ACP provider '{}' ({}): {error}",
+                config.id, executable
+            ))
+        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| DaemonError::Process("ACP child process has no stdin".to_string()))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| DaemonError::Process("ACP child process has no stdout".to_string()))?;
+
+        let runtime = Arc::new(Self {
+            provider: AgentProvider::new(config.id.clone()),
+            config,
+            workspace_path: workspace_path.to_string(),
+            child: Mutex::new(child),
+            stdin: Mutex::new(stdin),
+            next_id: AtomicI64::new(1),
+            pending: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
+            threads_by_session: Mutex::new(HashMap::new()),
+            permission_requests: Mutex::new(HashMap::new()),
+            current_items: Mutex::new(HashMap::new()),
+            current_tools: Mutex::new(HashMap::new()),
+            initialize_result: Mutex::new(None),
+            closed: AtomicBool::new(false),
+            events,
+        });
+
+        tokio::spawn(Self::read_loop(Arc::clone(&runtime), stdout));
+
+        let init = runtime
+            .request(
+                "initialize",
+                json!({
+                    "protocolVersion": 1,
+                    "clientCapabilities": {
+                        "fs": { "readTextFile": false, "writeTextFile": false },
+                        "terminal": false
+                    }
+                }),
+            )
+            .await?;
+        *runtime.initialize_result.lock().await = Some(init);
+        Ok(runtime)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Whether the agent negotiated `loadSession` support.
+    pub async fn supports_load_session(&self) -> bool {
+        self.initialize_result
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|init| init.pointer("/agentCapabilities/loadSession"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    async fn write_message(&self, message: &Value) -> Result<(), DaemonError> {
+        let mut line = serde_json::to_string(message)
+            .map_err(|error| DaemonError::Process(format!("ACP encode failed: {error}")))?;
+        line.push('\n');
+        let mut stdin = self.stdin.lock().await;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|error| DaemonError::Process(format!("ACP write failed: {error}")))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|error| DaemonError::Process(format!("ACP flush failed: {error}")))
+    }
+
+    /// Sends a JSON-RPC request and awaits its response.
+    pub async fn request(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
+        if self.is_closed() {
+            return Err(DaemonError::Process(format!(
+                "ACP provider '{}' is not running",
+                self.config.id
+            )));
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = oneshot::channel();
+        self.pending.lock().await.insert(id, sender);
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .await?;
+        receiver.await.map_err(|_| {
+            DaemonError::Process(format!(
+                "ACP provider '{}' closed mid-request",
+                self.config.id
+            ))
+        })?
+    }
+
+    /// Sends a JSON-RPC notification (no response expected).
+    pub async fn notify(&self, method: &str, params: Value) -> Result<(), DaemonError> {
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }))
+        .await
+    }
+
+    /// Returns the ACP session id for a thread, creating a session on demand.
+    pub async fn ensure_session(&self, thread_id: &str) -> Result<String, DaemonError> {
+        if let Some(existing) = self.sessions.lock().await.get(thread_id) {
+            return Ok(existing.clone());
+        }
+        let result = self
+            .request(
+                "session/new",
+                json!({
+                    "cwd": self.workspace_path,
+                    "mcpServers": []
+                }),
+            )
+            .await?;
+        let session_id = result
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| DaemonError::Rpc("ACP session/new returned no sessionId".to_string()))?
+            .to_string();
+        self.sessions
+            .lock()
+            .await
+            .insert(thread_id.to_string(), session_id.clone());
+        self.threads_by_session
+            .lock()
+            .await
+            .insert(session_id.clone(), thread_id.to_string());
+        Ok(session_id)
+    }
+
+    /// Resolves the FalconDeck thread owning an ACP session id.
+    pub async fn thread_for_session(&self, session_id: &str) -> Option<String> {
+        self.threads_by_session
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+    }
+
+    /// Runs one prompt turn; resolves when the agent reports a stop reason.
+    ///
+    /// The turn-ended marker is delivered through the event channel rather
+    /// than handled here: the channel already holds every delta the agent
+    /// wrote before its response, so ordering the reset behind them prevents
+    /// a late chunk from starting a fresh assistant item.
+    pub async fn prompt(&self, session_id: &str, text: &str) -> Result<String, DaemonError> {
+        let result = self
+            .request(
+                "session/prompt",
+                json!({
+                    "sessionId": session_id,
+                    "prompt": [ { "type": "text", "text": text } ]
+                }),
+            )
+            .await;
+        let _ = self.events.send(AcpEvent::TurnEnded {
+            session_id: session_id.to_string(),
+        });
+        let result = result?;
+        Ok(result
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or("end_turn")
+            .to_string())
+    }
+
+    /// Appends assistant text for the session's current turn, creating the
+    /// turn's item on first delta. Returns the item id and full text so far.
+    pub async fn append_assistant_text(&self, session_id: &str, delta: &str) -> (String, String) {
+        let mut items = self.current_items.lock().await;
+        let entry = items.entry(session_id.to_string()).or_insert_with(|| {
+            (
+                format!("acp-msg-{}", uuid::Uuid::new_v4().simple()),
+                String::new(),
+            )
+        });
+        entry.1.push_str(delta);
+        (entry.0.clone(), entry.1.clone())
+    }
+
+    /// Ends the current turn for a session so the next one gets a fresh item.
+    pub async fn end_turn(&self, session_id: &str) {
+        self.current_items.lock().await.remove(session_id);
+    }
+
+    /// Records a tool call's identity for later status updates.
+    pub async fn remember_tool(&self, call_id: &str, title: &str, kind: &str) {
+        self.current_tools
+            .lock()
+            .await
+            .insert(call_id.to_string(), (title.to_string(), kind.to_string()));
+    }
+
+    /// Looks up a previously announced tool call's identity.
+    pub async fn tool_identity(&self, call_id: &str) -> Option<(String, String)> {
+        self.current_tools.lock().await.get(call_id).cloned()
+    }
+
+    /// All thread ids with live sessions on this runtime.
+    pub async fn active_thread_ids(&self) -> Vec<String> {
+        self.sessions.lock().await.keys().cloned().collect()
+    }
+
+    /// Cancels the in-flight turn for a session.
+    pub async fn cancel(&self, session_id: &str) -> Result<(), DaemonError> {
+        self.notify("session/cancel", json!({ "sessionId": session_id }))
+            .await
+    }
+
+    /// Answers a pending `session/request_permission` with a user decision.
+    pub async fn respond_permission(
+        &self,
+        request_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<(), DaemonError> {
+        let pending = self
+            .permission_requests
+            .lock()
+            .await
+            .remove(request_id)
+            .ok_or_else(|| DaemonError::NotFound("ACP permission request not found".to_string()))?;
+        let wanted = match decision {
+            ApprovalDecision::Allow => "allow_once",
+            ApprovalDecision::AlwaysAllow => "allow_always",
+            ApprovalDecision::Deny => "reject_once",
+        };
+        let fallback_prefix = match decision {
+            ApprovalDecision::Deny => "reject",
+            _ => "allow",
+        };
+        let option = pending
+            .options
+            .iter()
+            .find(|option| option.kind == wanted)
+            .or_else(|| {
+                pending
+                    .options
+                    .iter()
+                    .find(|option| option.kind.starts_with(fallback_prefix))
+            })
+            .or(pending.options.first());
+        let Some(option) = option else {
+            return Err(DaemonError::Rpc(
+                "ACP permission request offered no options".to_string(),
+            ));
+        };
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": pending.raw_id,
+            "result": {
+                "outcome": { "outcome": "selected", "optionId": option.option_id }
+            }
+        }))
+        .await
+    }
+
+    /// Terminates the agent process.
+    pub async fn shutdown(&self) {
+        self.closed.store(true, Ordering::Release);
+        let mut child = self.child.lock().await;
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+    }
+
+    async fn read_loop(runtime: Arc<Self>, stdout: tokio::process::ChildStdout) {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
+                tracing::debug!(provider = %runtime.config.id, "non-JSON ACP output ignored");
+                continue;
+            };
+            runtime.handle_message(message).await;
+        }
+        runtime.closed.store(true, Ordering::Release);
+        let mut pending = runtime.pending.lock().await;
+        for (_, sender) in pending.drain() {
+            let _ = sender.send(Err(DaemonError::Process(format!(
+                "ACP provider '{}' exited",
+                runtime.config.id
+            ))));
+        }
+        let _ = runtime.events.send(AcpEvent::Fatal {
+            message: format!("{} agent process exited", runtime.config.label),
+        });
+    }
+
+    async fn handle_message(&self, message: Value) {
+        let has_id = message.get("id").is_some();
+        let has_method = message.get("method").is_some();
+        if has_id && !has_method {
+            // Response to one of our requests.
+            let Some(id) = message.get("id").and_then(Value::as_i64) else {
+                return;
+            };
+            let Some(sender) = self.pending.lock().await.remove(&id) else {
+                return;
+            };
+            if let Some(error) = message.get("error") {
+                let text = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("ACP request failed");
+                let _ = sender.send(Err(DaemonError::Rpc(format!(
+                    "{} ({})",
+                    text, self.config.id
+                ))));
+            } else {
+                let result = message.get("result").cloned().unwrap_or(Value::Null);
+                let _ = sender.send(Ok(result));
+            }
+            return;
+        }
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let params = message.get("params").cloned().unwrap_or(Value::Null);
+        match method.as_str() {
+            "session/update" => self.handle_session_update(&params).await,
+            "session/request_permission" => {
+                let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
+                self.handle_permission_request(raw_id, &params).await;
+            }
+            // Filesystem and terminal capabilities are declined during
+            // initialize; refuse politely if an agent tries anyway.
+            _ if has_id => {
+                let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
+                let _ = self
+                    .write_message(&json!({
+                        "jsonrpc": "2.0",
+                        "id": raw_id,
+                        "error": { "code": -32601, "message": "method not supported by this client" }
+                    }))
+                    .await;
+            }
+            _ => {}
+        }
+    }
+
+    async fn handle_session_update(&self, params: &Value) {
+        let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(update) = params.get("update") else {
+            return;
+        };
+        let kind = update
+            .get("sessionUpdate")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let event =
+            match kind {
+                "agent_message_chunk" => update
+                    .pointer("/content/text")
+                    .and_then(Value::as_str)
+                    .map(|text| AcpEvent::MessageDelta {
+                        session_id: session_id.to_string(),
+                        text: text.to_string(),
+                    }),
+                // Thought chunks are internal reasoning; fold them away for now.
+                "agent_thought_chunk" => None,
+                "tool_call" => {
+                    let call_id = update
+                        .get("toolCallId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    Some(AcpEvent::ToolCall {
+                        session_id: session_id.to_string(),
+                        call_id,
+                        title: update
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Tool call")
+                            .to_string(),
+                        kind: update
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or("other")
+                            .to_string(),
+                        status: update
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("pending")
+                            .to_string(),
+                    })
+                }
+                "tool_call_update" => {
+                    let call_id = update
+                        .get("toolCallId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let output = update
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| {
+                                    item.pointer("/content/text")
+                                        .or_else(|| item.get("text"))
+                                        .and_then(Value::as_str)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
+                        .filter(|text| !text.is_empty());
+                    Some(AcpEvent::ToolCallUpdate {
+                        session_id: session_id.to_string(),
+                        call_id,
+                        title: update
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        status: update
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        output,
+                    })
+                }
+                "plan" => {
+                    let steps = update
+                        .get("entries")
+                        .and_then(Value::as_array)
+                        .map(|entries| {
+                            entries
+                                .iter()
+                                .filter_map(|entry| {
+                                    let content =
+                                        entry.get("content").and_then(Value::as_str)?.to_string();
+                                    let status = entry
+                                        .get("status")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("pending")
+                                        .to_string();
+                                    Some(PlanStep {
+                                        step: content,
+                                        status,
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    Some(AcpEvent::Plan {
+                        session_id: session_id.to_string(),
+                        plan: ThreadPlan {
+                            explanation: None,
+                            steps,
+                        },
+                    })
+                }
+                _ => None,
+            };
+        if let Some(event) = event {
+            let _ = self.events.send(event);
+        }
+    }
+
+    async fn handle_permission_request(&self, raw_id: Value, params: &Value) {
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let request_id = format!("acp-perm-{}", uuid::Uuid::new_v4().simple());
+        let options = params
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|options| {
+                options
+                    .iter()
+                    .filter_map(|option| {
+                        Some(AcpPermissionOption {
+                            option_id: option.get("optionId").and_then(Value::as_str)?.to_string(),
+                            kind: option
+                                .get("kind")
+                                .and_then(Value::as_str)
+                                .unwrap_or("allow_once")
+                                .to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let title = params
+            .pointer("/toolCall/title")
+            .and_then(Value::as_str)
+            .unwrap_or("Tool approval requested")
+            .to_string();
+        let detail = params
+            .pointer("/toolCall/kind")
+            .and_then(Value::as_str)
+            .map(|kind| format!("{} tool call from {}", kind, self.config.label));
+        self.permission_requests.lock().await.insert(
+            request_id.clone(),
+            PendingPermission {
+                raw_id,
+                options: options.clone(),
+            },
+        );
+        let _ = self.events.send(AcpEvent::PermissionRequest {
+            session_id,
+            request_id,
+            title,
+            detail,
+            options,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loads_and_filters_provider_configs() {
+        let dir = tempfile::tempdir().unwrap();
+        // `echo` and `sh` stand in for installed agent CLIs; the filter
+        // requires the binary to actually resolve on this machine.
+        std::fs::write(
+            dir.path().join("providers.json"),
+            serde_json::to_string(&json!({
+                "providers": {
+                    "mockagent": { "command": ["echo", "agent", "stdio"], "label": "Mock" },
+                    "codex": { "command": ["sh"], "label": "Nope" },
+                    "empty": { "command": [], "label": "Empty" },
+                    "unlabeled": { "command": ["sh", "acp"], "label": "  " },
+                    "notinstalled": { "command": ["definitely-not-a-real-binary-xyz"], "label": "Ghost" }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let configs = load_acp_provider_configs(dir.path());
+        assert_eq!(configs.len(), 2);
+        assert_eq!(configs[0].id, "mockagent");
+        assert_eq!(configs[0].label, "Mock");
+        assert_eq!(configs[0].command, vec!["echo", "agent", "stdio"]);
+        assert_eq!(configs[1].id, "unlabeled");
+        assert_eq!(configs[1].label, "unlabeled");
+    }
+
+    #[test]
+    fn missing_config_file_yields_no_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_acp_provider_configs(dir.path()).is_empty());
+    }
+}

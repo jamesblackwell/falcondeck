@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
@@ -321,7 +322,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 path: "/tmp/project-a".to_string(),
                 current_thread_id: None,
                 updated_at: None,
-                default_provider: Some(AgentProvider::Codex),
+                default_provider: Some(AgentProvider::CODEX),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
@@ -331,7 +332,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
                 path: "/tmp/project-b".to_string(),
                 current_thread_id: None,
                 updated_at: None,
-                default_provider: Some(AgentProvider::Codex),
+                default_provider: Some(AgentProvider::CODEX),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
@@ -359,7 +360,7 @@ fn persisted_state_reads_workspace_thread_selection() {
             path: "/tmp/project-a".to_string(),
             current_thread_id: Some("thread-123".to_string()),
             updated_at: None,
-            default_provider: Some(AgentProvider::Codex),
+            default_provider: Some(AgentProvider::CODEX),
             last_error: None,
             archived_thread_ids: Vec::new(),
             pinned_thread_ids: Vec::new(),
@@ -374,7 +375,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         id: "thread-1".to_string(),
         workspace_id: "workspace-1".to_string(),
         title: "Thread".to_string(),
-        provider: AgentProvider::Codex,
+        provider: AgentProvider::CODEX,
         native_session_id: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -460,7 +461,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                 status: WorkspaceStatus::Ready,
                 agents: Vec::new(),
                 skills: Vec::new(),
-                default_provider: AgentProvider::Codex,
+                default_provider: AgentProvider::CODEX,
                 models: Vec::new(),
                 collaboration_modes: Vec::new(),
                 account: falcondeck_core::AccountSummary::default(),
@@ -471,13 +472,14 @@ async fn update_thread_title_marks_thread_as_manual() {
             },
             codex_session: None,
             claude_runtime: None,
+            acp_runtimes: HashMap::new(),
             threads: [(
                 thread_id.clone(),
                 super::ManagedThread::new(ThreadSummary {
                     id: thread_id.clone(),
                     workspace_id: workspace_id.clone(),
                     title: "Untitled thread".to_string(),
-                    provider: AgentProvider::Codex,
+                    provider: AgentProvider::CODEX,
                     native_session_id: None,
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
@@ -932,14 +934,14 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
             path: workspace_path.to_string_lossy().to_string(),
             current_thread_id: Some("thread-1".to_string()),
             updated_at: Some(Utc::now() - Duration::minutes(5)),
-            default_provider: Some(AgentProvider::Claude),
+            default_provider: Some(AgentProvider::CLAUDE),
             last_error: Some("Previous reconnect failed".to_string()),
             archived_thread_ids: vec!["thread-1".to_string()],
             pinned_thread_ids: Vec::new(),
             thread_states: vec![super::PersistedThreadState {
                 thread_id: "thread-1".to_string(),
                 updated_at: Some(thread_updated_at),
-                provider: Some(AgentProvider::Claude),
+                provider: Some(AgentProvider::CLAUDE),
                 native_session_id: Some("native-session-1".to_string()),
                 title: Some("Recovered thread".to_string()),
                 manual_title: false,
@@ -992,12 +994,12 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     let workspace = &final_snapshot.workspaces[0];
     assert_eq!(workspace.status, WorkspaceStatus::Disconnected);
     assert!(workspace.last_error.is_some());
-    assert_eq!(workspace.default_provider, AgentProvider::Claude);
+    assert_eq!(workspace.default_provider, AgentProvider::CLAUDE);
     assert_eq!(workspace.current_thread_id.as_deref(), Some("thread-1"));
 
     let thread = &final_snapshot.threads[0];
     assert_eq!(thread.title, "Recovered thread");
-    assert_eq!(thread.provider, AgentProvider::Claude);
+    assert_eq!(thread.provider, AgentProvider::CLAUDE);
     assert_eq!(
         thread.native_session_id.as_deref(),
         Some("native-session-1")
@@ -1040,14 +1042,14 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 path: workspace_a.to_string_lossy().to_string(),
                 current_thread_id: Some("thread-a".to_string()),
                 updated_at: Some(Utc::now() - Duration::minutes(2)),
-                default_provider: Some(AgentProvider::Codex),
+                default_provider: Some(AgentProvider::CODEX),
                 last_error: None,
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-a".to_string(),
                     updated_at: None,
-                    provider: Some(AgentProvider::Codex),
+                    provider: Some(AgentProvider::CODEX),
                     native_session_id: Some("native-a".to_string()),
                     title: Some("Thread A".to_string()),
                     manual_title: false,
@@ -1065,14 +1067,14 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                 path: workspace_b.to_string_lossy().to_string(),
                 current_thread_id: Some("thread-b".to_string()),
                 updated_at: Some(Utc::now() - Duration::minutes(1)),
-                default_provider: Some(AgentProvider::Claude),
+                default_provider: Some(AgentProvider::CLAUDE),
                 last_error: Some("Still disconnected".to_string()),
                 archived_thread_ids: Vec::new(),
                 pinned_thread_ids: Vec::new(),
                 thread_states: vec![super::PersistedThreadState {
                     thread_id: "thread-b".to_string(),
                     updated_at: None,
-                    provider: Some(AgentProvider::Claude),
+                    provider: Some(AgentProvider::CLAUDE),
                     native_session_id: Some("native-b".to_string()),
                     title: Some("Thread B".to_string()),
                     manual_title: false,
@@ -1091,7 +1093,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         id: "thread-a".to_string(),
         workspace_id: live_workspace_id.clone(),
         title: "Thread A renamed".to_string(),
-        provider: AgentProvider::Codex,
+        provider: AgentProvider::CODEX,
         native_session_id: Some("native-a-2".to_string()),
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -1117,7 +1119,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         status: WorkspaceStatus::Ready,
         agents: Vec::new(),
         skills: Vec::new(),
-        default_provider: AgentProvider::Codex,
+        default_provider: AgentProvider::CODEX,
         models: Vec::new(),
         collaboration_modes: Vec::new(),
         account: falcondeck_core::AccountSummary::default(),
@@ -1132,6 +1134,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
             summary: live_workspace,
             codex_session: None,
             claude_runtime: None,
+            acp_runtimes: HashMap::new(),
             threads: [(
                 "thread-a".to_string(),
                 super::ManagedThread::new(live_thread),
@@ -1197,7 +1200,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         id: "thread-1".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Running thread".to_string(),
-        provider: AgentProvider::Codex,
+        provider: AgentProvider::CODEX,
         native_session_id: Some("native-session-1".to_string()),
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
@@ -1219,7 +1222,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         status: WorkspaceStatus::Busy,
         agents: Vec::new(),
         skills: Vec::new(),
-        default_provider: AgentProvider::Codex,
+        default_provider: AgentProvider::CODEX,
         models: Vec::new(),
         collaboration_modes: Vec::new(),
         account: falcondeck_core::AccountSummary::default(),
@@ -1234,6 +1237,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            acp_runtimes: HashMap::new(),
             threads: [("thread-1".to_string(), super::ManagedThread::new(thread))]
                 .into_iter()
                 .collect(),
@@ -1588,7 +1592,7 @@ async fn insert_claude_workspace_with_session(
                 status: WorkspaceStatus::Ready,
                 agents: Vec::new(),
                 skills: Vec::new(),
-                default_provider: AgentProvider::Claude,
+                default_provider: AgentProvider::CLAUDE,
                 models: Vec::new(),
                 collaboration_modes: Vec::new(),
                 account: falcondeck_core::AccountSummary::default(),
@@ -1599,13 +1603,14 @@ async fn insert_claude_workspace_with_session(
             },
             codex_session: None,
             claude_runtime: None,
+            acp_runtimes: HashMap::new(),
             threads: [(
                 thread_id.to_string(),
                 super::ManagedThread::new(ThreadSummary {
                     id: thread_id.to_string(),
                     workspace_id: workspace_id.to_string(),
                     title: "Claude thread".to_string(),
-                    provider: AgentProvider::Claude,
+                    provider: AgentProvider::CLAUDE,
                     native_session_id: Some(native_session_id.to_string()),
                     status: ThreadStatus::Running,
                     updated_at: Utc::now(),
@@ -2022,7 +2027,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         id: "thread-active".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Active thread".to_string(),
-        provider: AgentProvider::Codex,
+        provider: AgentProvider::CODEX,
         native_session_id: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -2042,7 +2047,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         id: "thread-archived".to_string(),
         workspace_id: workspace_id.clone(),
         title: "Archived thread".to_string(),
-        provider: AgentProvider::Codex,
+        provider: AgentProvider::CODEX,
         native_session_id: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -2068,7 +2073,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
                 status: WorkspaceStatus::Ready,
                 agents: Vec::new(),
                 skills: Vec::new(),
-                default_provider: AgentProvider::Codex,
+                default_provider: AgentProvider::CODEX,
                 models: Vec::new(),
                 collaboration_modes: Vec::new(),
                 account: falcondeck_core::AccountSummary::default(),
@@ -2079,6 +2084,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
             },
             codex_session: None,
             claude_runtime: None,
+            acp_runtimes: HashMap::new(),
             threads: [
                 (
                     active_thread.id.clone(),
