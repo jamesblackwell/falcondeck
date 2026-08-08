@@ -6,6 +6,7 @@ import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitl
 import { ExternalLink, LaptopMinimal, LoaderCircle, Radio, RefreshCw, Smartphone, Trash2 } from 'lucide-react'
 
 import type { SettingsViewProps } from '../SettingsView'
+import { useMillisUntil } from '../../pairing-expiry'
 import { formatDateTime, formatRelative, isMobileDeviceLabel, statusLabel, statusVariant } from './settings-utils'
 
 type RemoteAccessPanelProps = Pick<
@@ -96,6 +97,8 @@ export function RemoteAccessPanel({
 }: RemoteAccessPanelProps) {
   const devices = useMemo(() => remoteStatus?.trusted_devices ?? [], [remoteStatus?.trusted_devices])
   const hasActivePairing = Boolean(remoteStatus?.pairing)
+  const remainingMs = useMillisUntil(remoteStatus?.pairing?.expires_at)
+  const isPairingExpired = remainingMs !== null && remainingMs <= 0
   const isRemovingDevice = revokingDeviceId !== null
   const activeDevices = useMemo(
     () => devices.filter((device) => device.status === 'active'),
@@ -178,9 +181,14 @@ export function RemoteAccessPanel({
                   <CopyButton text={remoteStatus.pairing.pairing_code} />
                 ) : null}
               </div>
-              {hasActivePairing ? (
+              {hasActivePairing && isPairingExpired ? (
+                <p className="mt-3 text-[length:var(--fd-text-xs)] text-warning">
+                  Expired — generate a new code to connect another device.
+                </p>
+              ) : hasActivePairing ? (
                 <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-muted">
-                  Expires {formatRelative(remoteStatus?.pairing?.expires_at ?? null)}
+                  Expires {formatRelative(remoteStatus?.pairing?.expires_at ?? null)} · connects one
+                  device
                 </p>
               ) : (
                 <p className="mt-3 text-[length:var(--fd-text-xs)] text-fg-muted">

@@ -563,6 +563,10 @@ export function isClaimedPairingError(message: string | null) {
   return !!message && /pairing has already been claimed/i.test(message)
 }
 
+export function isExpiredPairingError(message: string | null) {
+  return !!message && /pairing has expired/i.test(message)
+}
+
 /**
  * Matches only the relay's own structured error strings (exact, anchored) for
  * conditions that permanently invalidate the saved session. Substring or
@@ -601,6 +605,24 @@ export function deriveConnectionHelpState({
         'If this is the same browser you paired earlier, reset the saved browser connection and reopen the pairing link.',
         'If this is a different device, generate a fresh pairing code from FalconDeck on desktop.',
         'Avoid sharing screenshots of this screen while the pairing code is active.',
+      ],
+    }
+  }
+
+  // Codes are short-lived and bound to one device, so an expired code is the
+  // normal outcome of reusing a link that has been sitting around — not a
+  // fault to debug. Say that plainly instead of falling through to the generic
+  // "needs attention" banner.
+  if (isExpiredPairingError(error)) {
+    return {
+      tone: 'warning',
+      title: 'This pairing code has expired',
+      description:
+        'Pairing codes are valid for a short window and each one connects a single device, so a link you opened earlier will not work again.',
+      steps: [
+        'In FalconDeck on desktop, choose "Pair another device" to generate a fresh code.',
+        'Open the new link or scan the new QR code straight away.',
+        'Pairing this browser does not disconnect devices you have already paired.',
       ],
     }
   }

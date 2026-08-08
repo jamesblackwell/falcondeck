@@ -749,6 +749,79 @@ fn reconnect_attempt_uses_current_trusted_pairing_state() {
     );
 }
 
+#[tokio::test]
+async fn remote_status_stops_offering_a_claimed_pairing_code() {
+    let claimed_pairing = super::RemotePairingState {
+        pairing_id: "pairing-1".to_string(),
+        pairing_code: "ABCDEFGHJKLM".to_string(),
+        session_id: Some("session-1".to_string()),
+        device_id: Some("device-1".to_string()),
+        trusted_at: Some(Utc::now()),
+        expires_at: Utc::now() + Duration::minutes(10),
+        client_bundle: Some(build_pairing_public_key_bundle(&LocalBoxKeyPair::generate())),
+        local_key_pair: LocalBoxKeyPair::generate(),
+        data_key: generate_data_key(),
+    };
+    let remote = super::RemoteBridgeState {
+        status: falcondeck_core::RemoteConnectionStatus::Connected,
+        relay_url: Some("https://connect.falcondeck.com".to_string()),
+        pairing: Some(claimed_pairing),
+        pending_pairing: None,
+        daemon_token: Some("daemon-token".to_string()),
+        last_error: None,
+        task: Some(tokio::spawn(std::future::pending::<()>())),
+        pairing_watch_task: None,
+        command_tx: None,
+        trusted_client_bundles: Vec::new(),
+    };
+
+    let status = super::build_remote_status_response(&remote);
+
+    // The code is spent: the relay only lets the identity key that claimed it
+    // re-claim it, so showing it to a second device is a guaranteed dead end.
+    assert!(status.pairing.is_none());
+    // Retiring the code must not disturb the device that claimed it.
+    assert_eq!(status.trusted_devices.len(), 1);
+    assert_eq!(status.trusted_devices[0].device_id, "device-1");
+    assert!(matches!(
+        status.trusted_devices[0].status,
+        falcondeck_core::TrustedDeviceStatus::Active
+    ));
+    assert!(status.presence.is_some());
+}
+
+#[tokio::test]
+async fn remote_status_still_offers_an_unclaimed_pairing_code() {
+    let unclaimed_pairing = super::RemotePairingState {
+        pairing_id: "pairing-1".to_string(),
+        pairing_code: "ABCDEFGHJKLM".to_string(),
+        session_id: None,
+        device_id: None,
+        trusted_at: None,
+        expires_at: Utc::now() + Duration::minutes(10),
+        client_bundle: None,
+        local_key_pair: LocalBoxKeyPair::generate(),
+        data_key: generate_data_key(),
+    };
+    let remote = super::RemoteBridgeState {
+        status: falcondeck_core::RemoteConnectionStatus::PairingPending,
+        relay_url: Some("https://connect.falcondeck.com".to_string()),
+        pairing: Some(unclaimed_pairing),
+        pending_pairing: None,
+        daemon_token: Some("daemon-token".to_string()),
+        last_error: None,
+        task: Some(tokio::spawn(std::future::pending::<()>())),
+        pairing_watch_task: None,
+        command_tx: None,
+        trusted_client_bundles: Vec::new(),
+    };
+
+    let status = super::build_remote_status_response(&remote);
+
+    let pairing = status.pairing.expect("unclaimed pairing stays offerable");
+    assert_eq!(pairing.pairing_code, "ABCDEFGHJKLM");
+}
+
 #[test]
 fn reconnect_attempt_ignores_pending_additional_pairing_state() {
     let active_pairing = super::RemotePairingState {

@@ -232,6 +232,30 @@ describe('deriveConnectionHelpState', () => {
       }),
     ).toBeNull()
   })
+
+  it('explains an expired code instead of falling through to the generic banner', () => {
+    const help = deriveConnectionHelpState({
+      ...base,
+      error: 'pairing has expired',
+      isConnected: false,
+      hasSessionKey: false,
+    })
+
+    expect(help?.title).toBe('This pairing code has expired')
+    expect(help?.tone).toBe('warning')
+    expect(help?.steps[0]).toMatch(/pair another device/i)
+  })
+
+  it('keeps expiry distinct from an already-claimed code', () => {
+    const claimed = deriveConnectionHelpState({
+      ...base,
+      error: 'pairing has already been claimed',
+      isConnected: false,
+      hasSessionKey: false,
+    })
+
+    expect(claimed?.title).toBe('This pairing code has already been used')
+  })
 })
 
 describe('connectionBadgeState', () => {

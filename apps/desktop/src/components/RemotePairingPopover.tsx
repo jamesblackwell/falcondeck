@@ -7,6 +7,7 @@ import {
   Monitor,
   RadioTower,
   RefreshCw,
+  TimerOff,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import * as Popover from '@radix-ui/react-popover'
@@ -15,12 +16,21 @@ import type { RemoteStatusResponse } from '@falcondeck/client-core'
 import { Button, CopyButton, StatusIndicator, useToast } from '@falcondeck/ui'
 
 import { openExternalUrl } from '../api'
+import { formatCountdown, useMillisUntil } from '../pairing-expiry'
 
 /* ------------------------------------------------------------------ */
 /*  Pairing QR card — shown when a pairing session is active          */
 /* ------------------------------------------------------------------ */
 
-function PairingCard({ link, code }: { link: string; code: string }) {
+function PairingCard({
+  link,
+  code,
+  remainingMs,
+}: {
+  link: string
+  code: string
+  remainingMs: number | null
+}) {
   const { toast } = useToast()
 
   async function handleOpenLink() {
@@ -85,6 +95,55 @@ function PairingCard({ link, code }: { link: string; code: string }) {
           </div>
         </div>
       </div>
+
+      {remainingMs !== null ? (
+        <p className="text-center text-[length:var(--fd-text-2xs)] text-fg-muted">
+          Expires in {formatCountdown(remainingMs)} · connects one device
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Expired pairing code                                              */
+/* ------------------------------------------------------------------ */
+
+function ExpiredPairingCard({
+  onStartPairing,
+  isStartingRemote,
+  remoteControlsDisabled,
+}: {
+  onStartPairing: () => void
+  isStartingRemote: boolean
+  remoteControlsDisabled: boolean
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="rounded-[var(--fd-radius-md)] border border-warning/25 bg-warning-muted px-3 py-2.5">
+        <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)] font-medium text-warning">
+          <TimerOff className="h-3.5 w-3.5" />
+          This pairing code expired
+        </div>
+        <p className="mt-1.5 text-[length:var(--fd-text-xs)] text-fg-secondary">
+          Codes are short-lived and each one connects a single device. Generate a fresh code to add
+          another — devices you have already paired stay connected.
+        </p>
+      </div>
+      <Button
+        type="button"
+        size="sm"
+        onClick={onStartPairing}
+        disabled={isStartingRemote || remoteControlsDisabled}
+        className="w-full"
+      >
+        {isStartingRemote ? (
+          <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <RefreshCw className="h-3.5 w-3.5" />
+        )}
+        Generate new code
+      </Button>
     </div>
   )
 }
@@ -141,6 +200,8 @@ export function RemotePairingPopover({
   const isConnected = status === 'connected'
   const isPairing = status === 'pairing_pending'
   const isActive = isConnected || status === 'device_trusted' || status === 'connecting'
+  const remainingMs = useMillisUntil(remoteStatus?.pairing?.expires_at)
+  const isPairingExpired = remainingMs !== null && remainingMs <= 0
   const hasPendingPairing = !!pairingLink
   const needsFreshPairing = !status || status === 'inactive' || status === 'revoked' || status === 'error' || status === 'offline'
   const activeDevices = remoteStatus?.trusted_devices?.filter((d) => d.status === 'active') ?? []
@@ -208,8 +269,20 @@ export function RemotePairingPopover({
               </>
             ) : null}
 
-            {hasPendingPairing ? (
-              <PairingCard link={pairingLink} code={remoteStatus?.pairing?.pairing_code ?? ''} />
+            {hasPendingPairing && isPairingExpired ? (
+              <ExpiredPairingCard
+                onStartPairing={onStartPairing}
+                isStartingRemote={isStartingRemote}
+                remoteControlsDisabled={remoteControlsDisabled}
+              />
+            ) : null}
+
+            {hasPendingPairing && !isPairingExpired ? (
+              <PairingCard
+                link={pairingLink}
+                code={remoteStatus?.pairing?.pairing_code ?? ''}
+                remainingMs={remainingMs}
+              />
             ) : null}
 
             {isActive ? (
@@ -246,7 +319,7 @@ export function RemotePairingPopover({
               </div>
             ) : null}
 
-            {(isActive || isPairing) ? (
+            {(isActive || isPairing) && !isPairingExpired ? (
               <button
                 type="button"
                 onClick={onStartPairing}

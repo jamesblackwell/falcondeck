@@ -316,24 +316,25 @@ async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
     let first_status = wait_for_connected(&client, &daemon.base_url()).await;
     assert_eq!(
         first_status
-            .pairing
+            .presence
             .as_ref()
-            .and_then(|pairing| pairing.session_id.as_deref()),
+            .map(|presence| presence.session_id.as_str()),
         Some(claim.session_id.as_str())
     );
+    // The code is spent once a device claims it, so it must stop being offered.
+    assert!(first_status.pairing.is_none());
     daemon.shutdown().await.unwrap();
 
     let restarted = spawn_embedded(test_config_with_state_path(state_path))
         .await
         .unwrap();
     let restored_status = wait_for_connected(&client, &restarted.base_url()).await;
-    let restored_pairing = restored_status
-        .pairing
-        .expect("trusted pairing should restore");
-    assert_eq!(
-        restored_pairing.session_id.as_deref(),
-        Some(claim.session_id.as_str())
-    );
+    let restored_presence = restored_status
+        .presence
+        .as_ref()
+        .expect("trusted session should restore");
+    assert_eq!(restored_presence.session_id, claim.session_id);
+    assert!(restored_status.pairing.is_none());
     assert_eq!(restored_status.trusted_devices.len(), 1);
     assert_eq!(
         restored_status.trusted_devices[0].device_id,

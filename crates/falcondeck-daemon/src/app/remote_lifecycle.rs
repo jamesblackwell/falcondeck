@@ -1160,10 +1160,17 @@ fn effective_remote_status(remote: &RemoteBridgeState) -> RemoteConnectionStatus
     }
 }
 
+/// The pairing advertised to clients as a code another device could still use.
+/// A claimed pairing is spent: the relay only lets the original identity key
+/// re-claim it, so a second device is always rejected. Advertising one anyway
+/// is what kept the desktop showing a live-looking QR long after a phone had
+/// finished pairing. Expired-but-unclaimed pairings stay visible so the UI can
+/// say they expired rather than have the card vanish mid-scan.
 fn response_pairing(remote: &RemoteBridgeState) -> Option<&RemotePairingState> {
     has_live_remote_task(remote)
         .then(|| status_pairing(remote))
         .flatten()
+        .filter(|pairing| pairing.device_id.is_none())
 }
 
 pub(super) fn current_pairing_for_remote_attempt(
