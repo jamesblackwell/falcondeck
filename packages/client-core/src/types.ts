@@ -25,12 +25,26 @@ export type ReasoningEffortOption = {
   description: string
 }
 
+/**
+ * A service tier a model can run on beyond the provider's standard tier
+ * (Codex fast mode advertises `{id: "priority", name: "Fast"}`). `id` is what
+ * turn requests carry back; `name`/`description` are display copy.
+ */
+export type ServiceTierOption = {
+  id: string
+  name: string
+  description: string
+}
+
 export type ModelSummary = {
   id: string
   label: string
   is_default: boolean
   default_reasoning_effort: string | null
   supported_reasoning_efforts: ReasoningEffortOption[]
+  /** Extra service tiers; absent/empty hides the speed toggle. Optional because older daemons omit it. */
+  service_tiers?: ServiceTierOption[]
+  default_service_tier?: string | null
 }
 
 export type CollaborationModeSummary = {
@@ -479,6 +493,8 @@ export type UpdateThreadPayload = {
   provider?: AgentProvider | null
   model_id?: string | null
   reasoning_effort?: string | null
+  /** Tier id for future turns; `"default"` is the provider's standard tier. */
+  service_tier?: string | null
   pinned?: boolean
   permission_mode?: string | null
   sandbox_mode?: string | null

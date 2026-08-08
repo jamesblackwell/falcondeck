@@ -30,8 +30,11 @@ import {
   reconcileSnapshotSelection,
   resolvePersistedMode,
   resolvePermissionMode,
+  resolveServiceTier,
   restoreBoxKeyPair,
   selectedSkillsFromText,
+  serviceTierForTurn,
+  STANDARD_SERVICE_TIER,
   upsertComposerDraft,
   withComposerProvider,
   withComposerSelection,
@@ -197,6 +200,8 @@ function RemoteApp() {
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
+  // Tier id while fast mode is on; null is the provider's standard tier.
+  const [selectedServiceTier, setSelectedServiceTier] = useState<string | null>(null)
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null)
   const [selectedSandboxMode, setSelectedSandboxMode] = useState<string | null>(null)
   const [persistedComposerSelections, setPersistedComposerSelections] =
@@ -1593,6 +1598,17 @@ function RemoteApp() {
         setSelectedWorkspaceId(handle.workspace.id)
         setSelectedThreadId(handle.thread.id)
       }
+      // Tier-capable models get their tier stated on every turn — "fast off"
+      // must reach the provider as an explicit standard-tier request, because
+      // an omitted field means "keep the session's current tier".
+      const activeModels = workspaceModels(
+        selectedWorkspace,
+        selectedThread?.provider ?? selectedProvider,
+      )
+      const activeModel =
+        activeModels.find((model) => model.id === selectedModel) ??
+        activeModels.find((model) => model.is_default) ??
+        null
       await submitQueuedAction('turn.start', {
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
@@ -1605,6 +1621,7 @@ function RemoteApp() {
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         approval_policy: 'on-request',
+        service_tier: serviceTierForTurn(selectedServiceTier, activeModel),
         permission_mode: selectedPermissionMode,
         sandbox_mode: selectedSandboxMode,
       }, { awaitCompletion: false })
@@ -1681,6 +1698,7 @@ function RemoteApp() {
       setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
+      setSelectedServiceTier(null)
       setSelectedPermissionMode(null)
       setSelectedSandboxMode(null)
       selectionSeedRef.current = null
@@ -1739,6 +1757,12 @@ function RemoteApp() {
           reasoningOptions(snapshot, selectedWorkspace.id, nextProvider, nextModelId)[0] ??
           'medium',
       )
+      setSelectedServiceTier(
+        resolveServiceTier(
+          selectedThread.agent.service_tier,
+          providerModels.find((model) => model.id === nextModelId) ?? null,
+        ),
+      )
       return
     }
     setSelectedModel(fallbackModelId)
@@ -1752,6 +1776,15 @@ function RemoteApp() {
       preferredSelection?.effort && effortOptions.includes(preferredSelection.effort)
         ? preferredSelection.effort
         : effortOptions[0] ?? 'medium',
+    )
+    // Threads keep the tier they last ran with; new conversations take the
+    // remembered choice, falling back to the model catalog's default tier.
+    const fallbackModel = providerModels.find((model) => model.id === fallbackModelId) ?? null
+    setSelectedServiceTier(
+      resolveServiceTier(
+        preferredSelection?.serviceTier ?? fallbackModel?.default_service_tier,
+        fallbackModel,
+      ),
     )
   }, [persistedComposerSelections, selectedThread, selectedWorkspace, snapshot])
 
@@ -1915,6 +1948,34 @@ function RemoteApp() {
     ],
   )
 
+  const handleServiceTierChange = useCallback(
+    (tier: string | null) => {
+      setSelectedServiceTier(tier)
+      // Turning fast off is an explicit choice, distinct from never having
+      // touched the toggle — only the latter follows the catalog default.
+      rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
+        serviceTier: tier ?? STANDARD_SERVICE_TIER,
+      })
+      if (!selectedWorkspace || !selectedThreadId) return
+      void submitQueuedAction<ThreadHandle>('thread.update', {
+        workspace_id: selectedWorkspace.id,
+        thread_id: selectedThreadId,
+        service_tier: tier ?? STANDARD_SERVICE_TIER,
+      })
+        .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
+        .catch((e) => reportError(e, 'Failed to update speed'))
+    },
+    [
+      applyThreadHandle,
+      rememberComposerSelection,
+      reportError,
+      selectedProvider,
+      selectedThread,
+      selectedThreadId,
+      selectedWorkspace,
+    ],
+  )
+
   const handleUpdatePreferences = useCallback(
     async (payload: UpdatePreferencesPayload) => {
       try {
@@ -2026,6 +2087,13 @@ function RemoteApp() {
       )
       setSelectedSandboxMode(
         resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),
+      )
+      const fallbackModel = models.find((model) => model.id === fallbackModelId) ?? null
+      setSelectedServiceTier(
+        resolveServiceTier(
+          preferredSelection?.serviceTier ?? fallbackModel?.default_service_tier,
+          fallbackModel,
+        ),
       )
     },
     [
@@ -2678,6 +2746,8 @@ function RemoteApp() {
               reasoningOptions={currentReasoningOptions}
               selectedEffort={selectedEffort}
               onEffortChange={handleEffortChange}
+              selectedServiceTier={selectedServiceTier}
+              onServiceTierChange={handleServiceTierChange}
               selectedPermissionMode={selectedPermissionMode}
               onPermissionModeChange={handlePermissionModeChange}
               selectedSandboxMode={selectedSandboxMode}

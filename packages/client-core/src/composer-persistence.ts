@@ -91,6 +91,8 @@ export type PersistedComposerSelection = {
   effort: string | null
   permissionMode: string | null
   sandboxMode: string | null
+  /** Service tier id when the user left fast mode on; null means standard. */
+  serviceTier: string | null
 }
 
 export type WorkspaceComposerState = {
@@ -107,6 +109,7 @@ const EMPTY_COMPOSER_SELECTION: PersistedComposerSelection = {
   effort: null,
   permissionMode: null,
   sandboxMode: null,
+  serviceTier: null,
 }
 
 function normalizeSelection(value: Record<string, unknown>): PersistedComposerSelection {
@@ -115,6 +118,7 @@ function normalizeSelection(value: Record<string, unknown>): PersistedComposerSe
     effort: typeof value.effort === 'string' ? value.effort : null,
     permissionMode: typeof value.permissionMode === 'string' ? value.permissionMode : null,
     sandboxMode: typeof value.sandboxMode === 'string' ? value.sandboxMode : null,
+    serviceTier: typeof value.serviceTier === 'string' ? value.serviceTier : null,
   }
 }
 
@@ -213,6 +217,7 @@ export function withComposerSelection(
     permissionMode:
       patch.permissionMode !== undefined ? patch.permissionMode : existing.permissionMode,
     sandboxMode: patch.sandboxMode !== undefined ? patch.sandboxMode : existing.sandboxMode,
+    serviceTier: patch.serviceTier !== undefined ? patch.serviceTier : existing.serviceTier,
   }
   return {
     ...state,

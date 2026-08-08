@@ -170,6 +170,7 @@ describe('ui-store', () => {
       effort: null,
       permissionMode: 'bypassPermissions',
       sandboxMode: null,
+      serviceTier: null,
     })
     expect(storage.getString('falcondeck.mobile.composer-selections.v1')).toContain(
       'bypassPermissions',

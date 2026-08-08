@@ -51,14 +51,14 @@ export function useThreadActions() {
     [],
   )
 
-  // `permission_mode` / `sandbox_mode` are explicit-optional on the wire:
-  // omitting the key leaves the thread unchanged, sending null clears the
-  // override. Always sending the key is what makes "back to default" work.
+  // These fields are explicit-optional on the wire: omitting the key leaves
+  // the thread unchanged, sending null clears the override. Always sending
+  // the key is what makes "back to default" work.
   const setThreadMode = useCallback(
     async (
       workspaceId: string,
       threadId: string,
-      field: 'permission_mode' | 'sandbox_mode',
+      field: 'permission_mode' | 'sandbox_mode' | 'service_tier',
       mode: string | null,
     ) => {
       const relay = useRelayStore.getState()
@@ -75,7 +75,9 @@ export function useThreadActions() {
             ? e.message
             : field === 'permission_mode'
               ? 'Failed to update permission mode'
-              : 'Failed to update sandbox mode',
+              : field === 'service_tier'
+                ? 'Failed to update speed'
+                : 'Failed to update sandbox mode',
         )
         throw e
       }

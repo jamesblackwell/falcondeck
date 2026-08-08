@@ -12,7 +12,10 @@ import {
   providerForThread,
   resolvePersistedMode,
   resolvePermissionMode,
+  resolveServiceTier,
   selectedSkillsFromText,
+  serviceTierForTurn,
+  STANDARD_SERVICE_TIER,
   upsertComposerDraft,
   withComposerProvider,
   withComposerSelection,
@@ -144,6 +147,8 @@ function AppInner() {
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
+  // Tier id while fast mode is on; null is the provider's standard tier.
+  const [selectedServiceTier, setSelectedServiceTier] = useState<string | null>(null)
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null)
   const [selectedSandboxMode, setSelectedSandboxMode] = useState<string | null>(null)
   // Only ever applies to the next thread this composer creates; a thread's
@@ -384,6 +389,7 @@ function AppInner() {
       setSelectedProvider('codex')
       setSelectedModel(null)
       setSelectedEffort('medium')
+      setSelectedServiceTier(null)
       setSelectedPermissionMode(null)
       setSelectedSandboxMode(null)
       setSelectedIsolation('project_folder')
@@ -426,6 +432,20 @@ function AppInner() {
         preferredSelection?.effort,
         nextProvider,
       ) ?? 'medium',
+    )
+    // Threads keep the tier they last ran with; new conversations take the
+    // remembered choice, falling back to the model catalog's default tier for
+    // accounts where the provider turns fast on by default.
+    const nextModel =
+      workspaceModels(selectedWorkspace, nextProvider).find((model) => model.id === nextModelId) ??
+      null
+    setSelectedServiceTier(
+      selectedThread
+        ? resolveServiceTier(selectedThread.agent.service_tier, nextModel)
+        : resolveServiceTier(
+            preferredSelection?.serviceTier ?? nextModel?.default_service_tier,
+            nextModel,
+          ),
     )
     // Same idea for the modes: threads keep their own, new conversations get
     // the remembered choice as long as the provider still offers it.
@@ -680,9 +700,12 @@ function AppInner() {
     async ({
       modelId,
       effort,
+      serviceTier,
     }: {
       modelId: string | null
       effort: string | null
+      /** Omitted leaves the thread's tier alone (providers without tiers never send one). */
+      serviceTier?: string | null
     }) => {
       const client = apiFor(selectedWorkspace?.id)
       if (!client || !selectedWorkspace || !selectedThreadId) return
@@ -694,6 +717,7 @@ function AppInner() {
           provider: selectedThread?.provider ?? selectedProvider,
           model_id: modelId,
           reasoning_effort: effort,
+          ...(serviceTier !== undefined ? { service_tier: serviceTier } : {}),
         })
         if (requestId !== threadSettingsRequestRef.current) return
         applyThreadHandle(handle)
@@ -728,6 +752,39 @@ function AppInner() {
       selectedProvider,
       selectedThread,
       selectedWorkspace,
+    ],
+  )
+
+  const handleServiceTierChange = useCallback(
+    (tier: string | null) => {
+      const provider = selectedThread?.provider ?? selectedProvider
+      setSelectedServiceTier(tier)
+      // Turning fast off is an explicit choice, distinct from never having
+      // touched the toggle — only the latter follows the catalog default.
+      rememberComposerSelection(provider, { serviceTier: tier ?? STANDARD_SERVICE_TIER })
+      const client = apiFor(selectedWorkspace?.id)
+      if (!client || !selectedWorkspace || !selectedThreadId) return
+      void client
+        .updateThread({
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          service_tier: tier ?? STANDARD_SERVICE_TIER,
+        })
+        .then(applyThreadHandle)
+        .catch((error: unknown) => {
+          const msg = error instanceof Error ? error.message : 'Failed to update speed'
+          setActionError(msg)
+        })
+    },
+    [
+      apiFor,
+      applyThreadHandle,
+      rememberComposerSelection,
+      selectedProvider,
+      selectedThread,
+      selectedThreadId,
+      selectedWorkspace,
+      setActionError,
     ],
   )
 
@@ -901,6 +958,16 @@ function AppInner() {
       setSelectedSandboxMode(
         resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),
       )
+      const fallbackModel =
+        workspaceModels(selectedWorkspace, provider).find(
+          (model) => model.id === fallbackModelId,
+        ) ?? null
+      setSelectedServiceTier(
+        resolveServiceTier(
+          preferredSelection?.serviceTier ?? fallbackModel?.default_service_tier,
+          fallbackModel,
+        ),
+      )
     },
     [persistedComposerSelections, rememberWorkspaceProvider, selectedThread, selectedWorkspace],
   )
@@ -1044,6 +1111,14 @@ function AppInner() {
         ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft } satisfies TurnInputItem] : []),
         ...submittedAttachments,
       ]
+      // Tier-capable models get their tier stated on every turn — "fast off"
+      // must reach the provider as an explicit standard-tier request, because
+      // an omitted field means "keep the session's current tier".
+      const activeModels = workspaceModels(selectedWorkspace, activeProvider)
+      const activeModel =
+        activeModels.find((model) => model.id === selectedModel) ??
+        activeModels.find((model) => model.is_default) ??
+        null
       await client.sendTurn({
         workspace_id: selectedWorkspace.id,
         thread_id: activeThreadId,
@@ -1053,6 +1128,7 @@ function AppInner() {
         model_id: selectedModel,
         reasoning_effort: selectedEffort,
         approval_policy: 'on-request',
+        service_tier: serviceTierForTurn(selectedServiceTier, activeModel),
         permission_mode: selectedPermissionMode,
         sandbox_mode: selectedSandboxMode,
       })
@@ -1787,6 +1863,8 @@ function AppInner() {
                 reasoningOptions: currentReasoningOptions,
                 selectedEffort,
                 onEffortChange: handleEffortChange,
+                selectedServiceTier,
+                onServiceTierChange: handleServiceTierChange,
                 selectedPermissionMode,
                 onPermissionModeChange: handlePermissionModeChange,
                 selectedSandboxMode,

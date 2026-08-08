@@ -54,6 +54,8 @@ interface UIState {
   selectedProvider: AgentProvider | null
   selectedModel: string | null
   selectedEffort: string | null
+  /** Tier id while fast mode is on; null is the provider's standard tier. */
+  selectedServiceTier: string | null
   /** null means "no override" — the daemon keeps whatever the thread already has. */
   selectedPermissionMode: string | null
   selectedSandboxMode: string | null
@@ -71,6 +73,7 @@ interface UIActions {
   setSelectedProvider: (provider: AgentProvider | null) => void
   setSelectedModel: (modelId: string | null) => void
   setSelectedEffort: (effort: string | null) => void
+  setSelectedServiceTier: (tier: string | null) => void
   setSelectedPermissionMode: (mode: string | null) => void
   setSelectedSandboxMode: (mode: string | null) => void
   rememberComposerSelection: (
@@ -98,6 +101,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   selectedProvider: null,
   selectedModel: null,
   selectedEffort: 'medium',
+  selectedServiceTier: null,
   selectedPermissionMode: null,
   selectedSandboxMode: null,
   persistedComposerSelections: parsePersistedComposerState(
@@ -136,6 +140,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setSelectedProvider: (provider) => set({ selectedProvider: provider }),
   setSelectedModel: (modelId) => set({ selectedModel: modelId }),
   setSelectedEffort: (effort) => set({ selectedEffort: effort }),
+  setSelectedServiceTier: (tier) => set({ selectedServiceTier: tier }),
   setSelectedPermissionMode: (mode) => set({ selectedPermissionMode: mode }),
   setSelectedSandboxMode: (mode) => set({ selectedSandboxMode: mode }),
   rememberComposerSelection: (workspacePath, provider, patch) =>

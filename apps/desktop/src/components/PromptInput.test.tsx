@@ -189,6 +189,81 @@ describe('PromptInput', () => {
       .toEqual(['Agent', 'Permission mode', 'Sandbox mode', 'Model', 'Reasoning effort'])
   })
 
+  describe('fast mode toggle', () => {
+    const fastModel = {
+      id: 'gpt-5.6-sol',
+      label: 'GPT-5.6-Sol',
+      is_default: true,
+      default_reasoning_effort: 'medium',
+      supported_reasoning_efforts: [],
+      service_tiers: [{ id: 'priority', name: 'Fast', description: '1.5x speed, increased usage' }],
+      default_service_tier: null,
+    }
+    const plainModel = {
+      id: 'gpt-5.6-luna',
+      label: 'GPT-5.6-Luna',
+      is_default: false,
+      default_reasoning_effort: 'medium',
+      supported_reasoning_efforts: [],
+    }
+
+    it('stays hidden while no model of the provider advertises a tier', () => {
+      render(
+        <PromptInput
+          {...promptInputProps}
+          models={[plainModel]}
+          selectedModelId={plainModel.id}
+          onServiceTierChange={noop}
+        />,
+      )
+      expect(screen.queryByRole('button', { name: 'Fast mode' })).not.toBeInTheDocument()
+    })
+
+    it('greys out for a model without a tier instead of unmounting', () => {
+      render(
+        <PromptInput
+          {...promptInputProps}
+          models={[fastModel, plainModel]}
+          selectedModelId={plainModel.id}
+          onServiceTierChange={noop}
+        />,
+      )
+      expect(screen.getByRole('button', { name: 'Fast mode' })).toBeDisabled()
+    })
+
+    it('reports the advertised tier id on toggle and null on toggle-off', () => {
+      const onServiceTierChange = vi.fn()
+      const { rerender } = render(
+        <PromptInput
+          {...promptInputProps}
+          models={[fastModel]}
+          selectedModelId={fastModel.id}
+          selectedServiceTier={null}
+          onServiceTierChange={onServiceTierChange}
+        />,
+      )
+
+      const toggle = screen.getByRole('button', { name: 'Fast mode' })
+      expect(toggle).toHaveAttribute('aria-pressed', 'false')
+      expect(toggle).toHaveTextContent('Fast')
+      toggle.click()
+      expect(onServiceTierChange).toHaveBeenLastCalledWith('priority')
+
+      rerender(
+        <PromptInput
+          {...promptInputProps}
+          models={[fastModel]}
+          selectedModelId={fastModel.id}
+          selectedServiceTier="priority"
+          onServiceTierChange={onServiceTierChange}
+        />,
+      )
+      expect(toggle).toHaveAttribute('aria-pressed', 'true')
+      toggle.click()
+      expect(onServiceTierChange).toHaveBeenLastCalledWith(null)
+    })
+  })
+
   it('keeps Send when a turn is running but the draft has content', () => {
     render(
       <PromptInput

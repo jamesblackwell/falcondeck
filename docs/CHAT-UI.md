@@ -23,7 +23,11 @@ What to copy:
   first (it is the one with consequences), then behaviour mode, then model,
   then reasoning effort, then boolean switches last.
 - **A real toggle for booleans** (Zed's "Fast mode"), not a dropdown with two
-  options.
+  options. Built (2026-08-08) as the composer's `FastModeToggle`: models
+  advertise `service_tiers` (Codex fast mode is tier id `priority`), the
+  toggle mounts when any model of the provider has one, greys when the
+  selected model doesn't, and turns send the tier — or the explicit
+  `default` reset — on every request.
 - **Disable rather than hide** when a provider lacks a capability — Zed keeps
   the affordance and greys it (`thread_view.rs:5640`), so the composer does not
   reflow between providers. This matters more for us than for Zed: our provider

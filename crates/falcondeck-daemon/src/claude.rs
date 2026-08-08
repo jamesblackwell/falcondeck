@@ -866,111 +866,50 @@ fn default_capabilities() -> AgentCapabilitySummary {
 }
 
 pub fn curated_models() -> Vec<ModelSummary> {
+    fn effort(reasoning_effort: &str, description: &str) -> ReasoningEffortSummary {
+        ReasoningEffortSummary {
+            reasoning_effort: reasoning_effort.to_string(),
+            description: description.to_string(),
+        }
+    }
+    fn model(
+        id: &str,
+        label: &str,
+        is_default: bool,
+        default_reasoning_effort: &str,
+        efforts: Vec<ReasoningEffortSummary>,
+    ) -> ModelSummary {
+        ModelSummary {
+            id: id.to_string(),
+            label: label.to_string(),
+            is_default,
+            default_reasoning_effort: Some(default_reasoning_effort.to_string()),
+            supported_reasoning_efforts: efforts,
+            // The Claude CLI has no headless fast-mode control yet, so no
+            // curated model advertises a service tier.
+            service_tiers: Vec::new(),
+            default_service_tier: None,
+        }
+    }
+    let base_efforts = || {
+        vec![
+            effort("low", "Fastest responses"),
+            effort("medium", "Balanced reasoning"),
+            effort("high", "Deeper reasoning"),
+            effort("xhigh", "Extended reasoning"),
+        ]
+    };
+    let max_efforts = || {
+        let mut efforts = base_efforts();
+        efforts.push(effort("max", "Maximum effort"));
+        efforts
+    };
+
     vec![
-        ModelSummary {
-            id: "haiku".to_string(),
-            label: "Haiku 4.5".to_string(),
-            is_default: false,
-            default_reasoning_effort: Some("medium".to_string()),
-            supported_reasoning_efforts: vec![
-                ReasoningEffortSummary {
-                    reasoning_effort: "low".to_string(),
-                    description: "Fastest responses".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "medium".to_string(),
-                    description: "Balanced reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "high".to_string(),
-                    description: "Deeper reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "xhigh".to_string(),
-                    description: "Extended reasoning".to_string(),
-                },
-            ],
-        },
-        ModelSummary {
-            id: "sonnet".to_string(),
-            label: "Sonnet 5".to_string(),
-            is_default: true,
-            default_reasoning_effort: Some("medium".to_string()),
-            supported_reasoning_efforts: vec![
-                ReasoningEffortSummary {
-                    reasoning_effort: "low".to_string(),
-                    description: "Fastest responses".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "medium".to_string(),
-                    description: "Balanced reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "high".to_string(),
-                    description: "Deeper reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "xhigh".to_string(),
-                    description: "Extended reasoning".to_string(),
-                },
-            ],
-        },
-        ModelSummary {
-            id: "opus".to_string(),
-            label: "Opus 5".to_string(),
-            is_default: false,
-            default_reasoning_effort: Some("high".to_string()),
-            supported_reasoning_efforts: vec![
-                ReasoningEffortSummary {
-                    reasoning_effort: "low".to_string(),
-                    description: "Fastest responses".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "medium".to_string(),
-                    description: "Balanced reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "high".to_string(),
-                    description: "Deeper reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "xhigh".to_string(),
-                    description: "Extended reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "max".to_string(),
-                    description: "Maximum effort".to_string(),
-                },
-            ],
-        },
-        ModelSummary {
-            id: "fable".to_string(),
-            label: "Fable 5".to_string(),
-            is_default: false,
-            default_reasoning_effort: Some("high".to_string()),
-            supported_reasoning_efforts: vec![
-                ReasoningEffortSummary {
-                    reasoning_effort: "low".to_string(),
-                    description: "Fastest responses".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "medium".to_string(),
-                    description: "Balanced reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "high".to_string(),
-                    description: "Deeper reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "xhigh".to_string(),
-                    description: "Extended reasoning".to_string(),
-                },
-                ReasoningEffortSummary {
-                    reasoning_effort: "max".to_string(),
-                    description: "Maximum effort".to_string(),
-                },
-            ],
-        },
+        model("haiku", "Haiku 4.5", false, "medium", base_efforts()),
+        model("sonnet", "Sonnet 5", true, "medium", base_efforts()),
+        model("opus", "Opus 5", false, "high", max_efforts()),
+        model("fable", "Fable 5", false, "high", max_efforts()),
     ]
 }
 

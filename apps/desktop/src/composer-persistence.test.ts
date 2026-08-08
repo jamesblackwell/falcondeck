@@ -102,6 +102,7 @@ describe('persisted composer state', () => {
       effort: 'max',
       permissionMode: 'bypassPermissions',
       sandboxMode: null,
+      serviceTier: null,
     })
   })
 
@@ -118,6 +119,7 @@ describe('persisted composer state', () => {
       effort: 'medium',
       permissionMode: 'bypassPermissions',
       sandboxMode: null,
+      serviceTier: null,
     })
   })
 
@@ -145,6 +147,7 @@ describe('persisted composer state', () => {
       effort: 'max',
       permissionMode: null,
       sandboxMode: null,
+      serviceTier: null,
     })
   })
 

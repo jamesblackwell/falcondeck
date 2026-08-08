@@ -13,13 +13,17 @@ import type {
 } from '@falcondeck/client-core'
 import {
   activeSlashQuery,
+  anyModelHasFastTier,
   canonicalSkillAlias,
+  modelFastTier,
   NO_AGENT_CAPABILITIES,
   providerSupportsSkill,
+  resolveServiceTier,
 } from '@falcondeck/client-core'
 import { Button, cn } from '@falcondeck/ui'
 
 import {
+  FastModeToggle,
   IsolationSelector,
   ModelSelector,
   PermissionModeSelector,
@@ -53,6 +57,13 @@ export type PromptInputProps = {
   reasoningOptions: string[]
   selectedEffort: string | null
   onEffortChange: (value: string) => void
+  /**
+   * Service tier id when fast mode is on; null runs the standard tier. The
+   * toggle only mounts when a model of the current provider advertises a tier
+   * and a handler is passed, so providers without the concept keep a clean row.
+   */
+  selectedServiceTier?: string | null
+  onServiceTierChange?: (value: string | null) => void
   selectedPermissionMode?: string | null
   onPermissionModeChange?: (value: string | null) => void
   selectedSandboxMode?: string | null
@@ -108,6 +119,8 @@ export const PromptInput = memo(function PromptInput({
   reasoningOptions,
   selectedEffort,
   onEffortChange,
+  selectedServiceTier = null,
+  onServiceTierChange,
   selectedPermissionMode = null,
   onPermissionModeChange,
   selectedSandboxMode = null,
@@ -134,6 +147,12 @@ export const PromptInput = memo(function PromptInput({
     isRunning &&
     !hasContent &&
     capabilities.supports_interrupt
+  // Fast mode reads the tier off whichever model a send would actually use —
+  // the explicit pick, or the provider default while nothing is picked yet.
+  const selectedModel =
+    models.find((model) => model.id === selectedModelId) ??
+    models.find((model) => model.is_default) ??
+    null
 
   const filteredSkills = useMemo(() => {
     const query = slashQuery?.query.trim().toLowerCase() ?? ''
@@ -422,6 +441,16 @@ export const PromptInput = memo(function PromptInput({
                 onValueChange={onEffortChange}
                 disabled={disabled || reasoningOptions.length === 0}
               />
+              {onServiceTierChange && anyModelHasFastTier(models) ? (
+                <FastModeToggle
+                  tier={modelFastTier(selectedModel)}
+                  active={resolveServiceTier(selectedServiceTier, selectedModel) !== null}
+                  onActiveChange={(active) =>
+                    onServiceTierChange(active ? (modelFastTier(selectedModel)?.id ?? null) : null)
+                  }
+                  disabled={disabled}
+                />
+              ) : null}
               {onIsolationChange ? (
                 <IsolationSelector
                   value={selectedIsolation}

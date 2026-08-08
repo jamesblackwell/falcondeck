@@ -743,6 +743,10 @@ impl AppState {
                             &params,
                             &["reasoningEffort", "reasoning_effort"],
                         ),
+                        service_tier: explicit_optional_string(
+                            &params,
+                            &["serviceTier", "service_tier"],
+                        ),
                         pinned: params.get("pinned").and_then(Value::as_bool),
                         permission_mode: explicit_optional_string(
                             &params,
@@ -1051,6 +1055,10 @@ impl AppState {
                         reasoning_effort: explicit_optional_string(
                             &params,
                             &["reasoningEffort", "reasoning_effort"],
+                        ),
+                        service_tier: explicit_optional_string(
+                            &params,
+                            &["serviceTier", "service_tier"],
                         ),
                         pinned: params.get("pinned").and_then(Value::as_bool),
                         permission_mode: explicit_optional_string(

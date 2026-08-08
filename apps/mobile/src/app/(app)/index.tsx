@@ -14,6 +14,8 @@ import {
   providerForThread,
   resolvePersistedMode,
   resolvePermissionMode,
+  resolveServiceTier,
+  STANDARD_SERVICE_TIER,
   workspaceAgentCapabilities,
   workspaceModels,
   workspaceProviderOptions,
@@ -103,6 +105,7 @@ export default function HomeScreen() {
     selectedPermissionMode,
     selectedProvider,
     selectedSandboxMode,
+    selectedServiceTier,
   } = useUIStore(
     useShallow((s) => ({
       attachments: s.attachments,
@@ -114,6 +117,7 @@ export default function HomeScreen() {
       selectedPermissionMode: s.selectedPermissionMode,
       selectedProvider: s.selectedProvider,
       selectedSandboxMode: s.selectedSandboxMode,
+      selectedServiceTier: s.selectedServiceTier,
     })),
   )
   const {
@@ -126,6 +130,7 @@ export default function HomeScreen() {
     setSelectedPermissionMode,
     setSelectedProvider,
     setSelectedSandboxMode,
+    setSelectedServiceTier,
     removeAttachment,
   } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
@@ -193,6 +198,7 @@ export default function HomeScreen() {
       setSelectedProvider(null)
       setSelectedModel(null)
       setSelectedEffort('medium')
+      setSelectedServiceTier(null)
       setSelectedPermissionMode(null)
       setSelectedSandboxMode(null)
       return
@@ -261,6 +267,9 @@ export default function HomeScreen() {
           supportedEfforts[0] ??
           'medium',
       )
+      setSelectedServiceTier(
+        resolveServiceTier(selectedThread.agent.service_tier, nextModelSummary),
+      )
       return
     }
 
@@ -278,6 +287,14 @@ export default function HomeScreen() {
         supportedEfforts[0] ??
         'medium',
     )
+    // Threads keep the tier they last ran with; new conversations take the
+    // remembered choice, falling back to the model catalog's default tier.
+    setSelectedServiceTier(
+      resolveServiceTier(
+        preferredSelection?.serviceTier ?? fallbackModelSummary?.default_service_tier,
+        fallbackModelSummary,
+      ),
+    )
   }, [
     persistedComposerSelections,
     selectedThread,
@@ -286,6 +303,7 @@ export default function HomeScreen() {
     setSelectedPermissionMode,
     setSelectedProvider,
     setSelectedSandboxMode,
+    setSelectedServiceTier,
     workspace,
   ])
 
@@ -328,6 +346,17 @@ export default function HomeScreen() {
       setSelectedSandboxMode(
         resolvePersistedMode(preferredSelection?.sandboxMode, providerCapabilities.sandbox_modes),
       )
+      const providerDefaultModel =
+        providerModels.find((model) => model.id === preferredSelection?.modelId) ??
+        providerModels.find((model) => model.is_default) ??
+        providerModels[0] ??
+        null
+      setSelectedServiceTier(
+        resolveServiceTier(
+          preferredSelection?.serviceTier ?? providerDefaultModel?.default_service_tier,
+          providerDefaultModel,
+        ),
+      )
     },
     [
       persistedComposerSelections,
@@ -338,6 +367,7 @@ export default function HomeScreen() {
       setSelectedPermissionMode,
       setSelectedProvider,
       setSelectedSandboxMode,
+      setSelectedServiceTier,
       workspace,
     ],
   )
@@ -404,6 +434,35 @@ export default function HomeScreen() {
       selectedThreadId,
       selectedWorkspaceId,
       setSelectedSandboxMode,
+      setThreadMode,
+      workspace,
+    ],
+  )
+
+  const handleServiceTierChange = useCallback(
+    (tier: string | null) => {
+      setSelectedServiceTier(tier)
+      if (workspace) {
+        // Turning fast off is an explicit choice, distinct from never having
+        // touched the toggle — only the latter follows the catalog default.
+        rememberComposerSelection(workspace.path, activeProvider, {
+          serviceTier: tier ?? STANDARD_SERVICE_TIER,
+        })
+      }
+      if (!selectedWorkspaceId || !selectedThreadId) return
+      void setThreadMode(
+        selectedWorkspaceId,
+        selectedThreadId,
+        'service_tier',
+        tier ?? STANDARD_SERVICE_TIER,
+      ).catch(() => {})
+    },
+    [
+      activeProvider,
+      rememberComposerSelection,
+      selectedThreadId,
+      selectedWorkspaceId,
+      setSelectedServiceTier,
       setThreadMode,
       workspace,
     ],
@@ -824,6 +883,8 @@ export default function HomeScreen() {
           showProviderSelector={!selectedThread}
           onSelectModel={handleModelChange}
           onSelectEffort={handleEffortChange}
+          selectedServiceTier={selectedServiceTier}
+          onSelectServiceTier={handleServiceTierChange}
           onSelectProvider={handleProviderChange}
           isRunning={isThreadRunning}
           isStopping={isStopping}

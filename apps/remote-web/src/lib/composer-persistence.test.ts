@@ -25,6 +25,7 @@ describe('remote composer permission persistence', () => {
       effort: null,
       permissionMode: 'bypassPermissions',
       sandboxMode: null,
+      serviceTier: null,
     })
   })
 

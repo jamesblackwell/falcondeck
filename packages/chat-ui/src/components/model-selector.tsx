@@ -1,12 +1,15 @@
+import { Zap } from 'lucide-react'
+
 import {
   formatModelLabel,
   type AgentProvider,
   type ModelSummary,
   type ProviderOption,
+  type ServiceTierOption,
   type ThreadIsolation,
 } from '@falcondeck/client-core'
 
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@falcondeck/ui'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@falcondeck/ui'
 
 export function ProviderSelector({
   value,
@@ -71,6 +74,52 @@ export function ModelSelector({
         ))}
       </SelectContent>
     </Select>
+  )
+}
+
+/**
+ * The boolean speed switch from the composer spec: a pressed toggle, not a
+ * two-item dropdown. Callers mount it when any of the provider's models
+ * advertise a service tier and pass `tier: null` while the *selected* model
+ * lacks one, so the control greys out instead of vanishing (same rule as the
+ * mode pickers).
+ */
+export function FastModeToggle({
+  tier,
+  active,
+  onActiveChange,
+  disabled = false,
+}: {
+  tier: ServiceTierOption | null
+  active: boolean
+  onActiveChange: (active: boolean) => void
+  disabled?: boolean
+}) {
+  const unavailable = tier === null
+  const isOn = active && !unavailable
+  return (
+    <button
+      type="button"
+      aria-pressed={isOn}
+      aria-label="Fast mode"
+      disabled={disabled || unavailable}
+      title={
+        unavailable
+          ? 'This model has one speed'
+          : tier.description || `Run on the ${tier.name} tier`
+      }
+      onClick={() => onActiveChange(!isOn)}
+      className={cn(
+        'fd-focus inline-flex h-7 max-w-full items-center gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] transition-colors duration-[var(--fd-duration-fast)] disabled:cursor-not-allowed disabled:opacity-50',
+        isOn
+          ? 'bg-accent-dim text-accent'
+          : 'text-fg-muted hover:bg-surface-3 hover:text-fg-secondary',
+      )}
+    >
+      {/* The bolt fills in when the tier is on, so state survives without color. */}
+      <Zap className="h-3 w-3 shrink-0" fill={isOn ? 'currentColor' : 'none'} />
+      {tier?.name ?? 'Fast'}
+    </button>
   )
 }
 

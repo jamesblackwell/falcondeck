@@ -53,6 +53,9 @@ interface ChatInputProps {
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
+  /** Tier id while fast mode is on; null is the provider's standard tier. */
+  selectedServiceTier?: string | null
+  onSelectServiceTier?: (tier: string | null) => void
   /** True while the selected thread has an in-flight turn. */
   isRunning?: boolean
   /** True while an interrupt request is in flight. */
@@ -95,6 +98,8 @@ export const ChatInput = memo(function ChatInput({
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
+  selectedServiceTier = null,
+  onSelectServiceTier,
   isRunning = false,
   isStopping = false,
   capabilities = NO_AGENT_CAPABILITIES,
@@ -425,6 +430,8 @@ export const ChatInput = memo(function ChatInput({
               onSelectModel={onSelectModel}
               onSelectEffort={onSelectEffort}
               onSelectProvider={onSelectProvider}
+              selectedServiceTier={selectedServiceTier}
+              onSelectServiceTier={onSelectServiceTier}
               capabilities={capabilities}
               selectedPermissionMode={selectedPermissionMode}
               selectedSandboxMode={selectedSandboxMode}

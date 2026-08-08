@@ -391,6 +391,9 @@ pub struct UpdateThreadRequest {
     /// Reasoning effort override for future turns; absent leaves it unchanged.
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     pub reasoning_effort: Option<Option<String>>,
+    /// Service tier override for future turns; explicit `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub service_tier: Option<Option<String>>,
     /// Optional pin state override for the thread.
     #[serde(default)]
     pub pinned: Option<bool>,
@@ -978,6 +981,25 @@ pub struct ModelSummary {
     pub default_reasoning_effort: Option<String>,
     /// Reasoning efforts supported by the model.
     pub supported_reasoning_efforts: Vec<ReasoningEffortSummary>,
+    /// Service tiers the model can run on beyond the provider's standard
+    /// tier (e.g. Codex "Fast"); empty hides the speed picker.
+    #[serde(default)]
+    pub service_tiers: Vec<ServiceTierSummary>,
+    /// Catalog default service tier id, when the provider configures one.
+    #[serde(default)]
+    pub default_service_tier: Option<String>,
+}
+
+/// Description of a service tier a model can run on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceTierSummary {
+    /// Provider-specific tier identifier sent back on turn requests
+    /// (Codex fast mode is `"priority"`).
+    pub id: String,
+    /// Human-readable tier name displayed to users (e.g. "Fast").
+    pub name: String,
+    /// Human-readable explanation of the tier's trade-off.
+    pub description: String,
 }
 
 /// Summary of an available collaboration mode.

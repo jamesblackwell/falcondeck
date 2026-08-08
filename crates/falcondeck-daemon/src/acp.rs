@@ -511,6 +511,8 @@ impl AcpRuntime {
                         .unwrap_or(false),
                     default_reasoning_effort: None,
                     supported_reasoning_efforts: Vec::new(),
+                    service_tiers: Vec::new(),
+                    default_service_tier: None,
                 })
             })
             .collect()

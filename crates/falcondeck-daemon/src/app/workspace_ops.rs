@@ -1682,6 +1682,9 @@ pub(super) async fn update_thread(
         if let Some(reasoning_effort) = request.reasoning_effort.clone() {
             thread.summary.agent.reasoning_effort = reasoning_effort;
         }
+        if let Some(service_tier) = request.service_tier.clone() {
+            thread.summary.agent.service_tier = service_tier;
+        }
         if let Some(pinned) = request.pinned {
             thread.summary.is_pinned = pinned;
         }
@@ -1697,6 +1700,7 @@ pub(super) async fn update_thread(
         let is_pin_only_update = request.title.is_none()
             && request.model_id.is_none()
             && request.reasoning_effort.is_none()
+            && request.service_tier.is_none()
             && request.permission_mode.is_none()
             && request.sandbox_mode.is_none()
             && request.pinned.is_some();

@@ -40,6 +40,33 @@ pub(super) fn parse_models(value: &Value) -> Vec<ModelSummary> {
                     &["defaultReasoningEffort", "default_reasoning_effort"],
                 ),
                 supported_reasoning_efforts: parse_reasoning_efforts(entry),
+                service_tiers: parse_service_tiers(entry),
+                default_service_tier: extract_string(
+                    entry,
+                    &["defaultServiceTier", "default_service_tier"],
+                ),
+            })
+        })
+        .collect()
+}
+
+/// Service tiers a model can run on beyond the standard tier. The app-server
+/// names each tier for display ("Fast") and keys it by the id the turn request
+/// takes back ("priority"); `additionalSpeedTiers` is its deprecated
+/// predecessor and carries no display data, so it is ignored.
+fn parse_service_tiers(value: &Value) -> Vec<ServiceTierSummary> {
+    value
+        .get("serviceTiers")
+        .or_else(|| value.get("service_tiers"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let id = extract_string(entry, &["id"])?;
+            Some(ServiceTierSummary {
+                name: extract_string(entry, &["name"]).unwrap_or_else(|| id.clone()),
+                description: extract_string(entry, &["description"]).unwrap_or_default(),
+                id,
             })
         })
         .collect()

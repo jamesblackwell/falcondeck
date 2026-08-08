@@ -1,6 +1,12 @@
 import { useCallback, useRef } from 'react'
 
-import { normalizeThreadDetail, normalizeThreadHandle, selectedSkillsFromText } from '@falcondeck/client-core'
+import {
+  normalizeThreadDetail,
+  normalizeThreadHandle,
+  selectedSkillsFromText,
+  serviceTierForTurn,
+  workspaceModels,
+} from '@falcondeck/client-core'
 import type { ThreadDetail, ThreadHandle } from '@falcondeck/client-core'
 
 import { useRelayStore, useSessionStore, useUIStore } from '@/store'
@@ -48,6 +54,15 @@ export function useSessionActions() {
         useSessionStore.getState().selectThread(handle.workspace.id, handle.thread.id)
       }
 
+      // Tier-capable models get their tier stated on every turn — "fast off"
+      // must reach the provider as an explicit standard-tier request, because
+      // an omitted field means "keep the session's current tier".
+      const provider = ui.selectedProvider ?? workspace.default_provider
+      const models = workspaceModels(workspace, provider ?? 'codex')
+      const activeModel =
+        models.find((model) => model.id === ui.selectedModel) ??
+        models.find((model) => model.is_default) ??
+        null
       await relay._callRpc(
         'turn.start',
         {
@@ -58,10 +73,11 @@ export function useSessionActions() {
             ...submittedAttachments,
           ],
           selected_skills: submittedSkills,
-          provider: ui.selectedProvider ?? workspace.default_provider,
+          provider,
           model_id: ui.selectedModel,
           reasoning_effort: ui.selectedEffort,
           approval_policy: 'on-request',
+          service_tier: serviceTierForTurn(ui.selectedServiceTier, activeModel),
           permission_mode: ui.selectedPermissionMode,
           sandbox_mode: ui.selectedSandboxMode,
         },

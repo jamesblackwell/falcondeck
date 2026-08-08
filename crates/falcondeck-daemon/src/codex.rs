@@ -13,8 +13,8 @@ use std::{
 use chrono::Utc;
 use falcondeck_core::{
     AccountStatus, AccountSummary, AgentProvider, CollaborationModeSummary, ConversationItem,
-    ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams, ThreadAttention,
-    ThreadPlan, ThreadStatus, ThreadSummary,
+    ImageInput, ModelSummary, ReasoningEffortSummary, ServiceTierSummary, ThreadAgentParams,
+    ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -1192,6 +1192,29 @@ mod tests {
             Some("medium")
         );
         assert_eq!(models[0].supported_reasoning_efforts.len(), 2);
+        assert!(models[0].service_tiers.is_empty());
+        assert_eq!(models[0].default_service_tier, None);
+    }
+
+    #[test]
+    fn parses_model_service_tiers() {
+        let models = parse_models(&json!([{
+            "id": "gpt-5.6-sol",
+            "displayName": "GPT-5.6-Sol",
+            "supportedReasoningEfforts": [],
+            "additionalSpeedTiers": ["fast"],
+            "serviceTiers": [
+                {"id": "priority", "name": "Fast", "description": "1.5x speed, increased usage"}
+            ],
+            "defaultServiceTier": "priority"
+        }]));
+        assert_eq!(models.len(), 1);
+        let tiers = &models[0].service_tiers;
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].id, "priority");
+        assert_eq!(tiers[0].name, "Fast");
+        assert_eq!(tiers[0].description, "1.5x speed, increased usage");
+        assert_eq!(models[0].default_service_tier.as_deref(), Some("priority"));
     }
 
     #[test]

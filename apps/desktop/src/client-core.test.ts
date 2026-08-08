@@ -27,9 +27,15 @@ import {
   upsertConversationItem,
   verifyPairingClaimChallenge,
   formatModelLabel,
+  modelFastTier,
+  anyModelHasFastTier,
+  resolveServiceTier,
+  serviceTierForTurn,
+  STANDARD_SERVICE_TIER,
   workspaceAgentCapabilities,
   workspaceProviderOptions,
   type ConversationItem,
+  type ModelSummary,
   type EventEnvelope,
   type PersistedRemoteSession,
   type SessionKeyMaterial,
@@ -818,6 +824,49 @@ describe('client-core remote session persistence', () => {
     } as unknown as Parameters<typeof shouldReusePersistedRemoteSession>[1]
 
     expect(shouldReusePersistedRemoteSession(new URLSearchParams(), persisted)).toBeNull()
+  })
+})
+
+describe('client-core service tier helpers', () => {
+  const fastModel: ModelSummary = {
+    id: 'gpt-5.6-sol',
+    label: 'GPT-5.6-Sol',
+    is_default: true,
+    default_reasoning_effort: 'medium',
+    supported_reasoning_efforts: [],
+    service_tiers: [{ id: 'priority', name: 'Fast', description: '1.5x speed' }],
+    default_service_tier: null,
+  }
+  const plainModel: ModelSummary = {
+    id: 'sonnet',
+    label: 'Sonnet 5',
+    is_default: true,
+    default_reasoning_effort: 'medium',
+    supported_reasoning_efforts: [],
+  }
+
+  it('finds the fast tier only on models that advertise one', () => {
+    expect(modelFastTier(fastModel)?.id).toBe('priority')
+    expect(modelFastTier(plainModel)).toBeNull()
+    expect(anyModelHasFastTier([plainModel, fastModel])).toBe(true)
+    expect(anyModelHasFastTier([plainModel])).toBe(false)
+  })
+
+  it('validates tiers against the model catalog and treats the standard tier as off', () => {
+    expect(resolveServiceTier('priority', fastModel)).toBe('priority')
+    expect(resolveServiceTier(STANDARD_SERVICE_TIER, fastModel)).toBeNull()
+    expect(resolveServiceTier('priority', plainModel)).toBeNull()
+    expect(resolveServiceTier('retired-tier', fastModel)).toBeNull()
+    expect(resolveServiceTier(null, fastModel)).toBeNull()
+  })
+
+  it('states the tier explicitly on turns for tier-capable models and omits it otherwise', () => {
+    expect(serviceTierForTurn('priority', fastModel)).toBe('priority')
+    // Off must reach the provider as an explicit standard-tier request, not
+    // an absent field, because absent means "keep the session's tier".
+    expect(serviceTierForTurn(null, fastModel)).toBe(STANDARD_SERVICE_TIER)
+    expect(serviceTierForTurn('priority', plainModel)).toBeNull()
+    expect(serviceTierForTurn(null, plainModel)).toBeNull()
   })
 })
 

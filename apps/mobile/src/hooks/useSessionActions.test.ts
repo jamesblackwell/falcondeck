@@ -209,6 +209,68 @@ describe('submitTurn guards', () => {
     )
   })
 
+  it('states the advertised tier on turns when fast mode is on', async () => {
+    useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
+      workspaces: [
+        workspace({
+          id: 'w1',
+          current_thread_id: 't1',
+          agents: [
+            {
+              provider: 'codex',
+              label: 'Codex',
+              account: { status: 'ready', label: 'ready' },
+              models: [
+                {
+                  id: 'gpt-5.6-sol',
+                  label: 'GPT-5.6-Sol',
+                  is_default: true,
+                  default_reasoning_effort: 'medium',
+                  supported_reasoning_efforts: [],
+                  service_tiers: [
+                    { id: 'priority', name: 'Fast', description: '1.5x speed' },
+                  ],
+                  default_service_tier: null,
+                },
+              ],
+              collaboration_modes: [],
+            },
+          ],
+        }),
+      ],
+      threads: [thread({ id: 't1', workspace_id: 'w1' })],
+    })))
+    useSessionStore.getState().selectThread('w1', 't1')
+    useUIStore.setState({
+      draft: 'Quick one',
+      selectedProvider: 'codex',
+      selectedModel: 'gpt-5.6-sol',
+      selectedServiceTier: 'priority',
+      isSubmitting: false,
+    })
+
+    const rpc = vi.fn().mockResolvedValue({})
+    useRelayStore.setState({
+      _callRpc: rpc as RelayStoreState['_callRpc'],
+      _setError: vi.fn() as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>)
+
+    const harness = mountSessionActions()
+    try {
+      await act(async () => {
+        await harness.getActions().submitTurn()
+      })
+    } finally {
+      harness.unmount()
+    }
+
+    expect(rpc).toHaveBeenCalledWith(
+      'turn.start',
+      expect.objectContaining({ service_tier: 'priority' }),
+      { requestIdPrefix: 'mobile-turn' },
+    )
+  })
+
   it('submits selected skills and restores attachments on failure', async () => {
     useSessionStore.getState().applyDaemonEvent(snapshotEvent(snapshot({
       workspaces: [
@@ -284,6 +346,7 @@ describe('submitTurn guards', () => {
         model_id: 'gpt-5',
         reasoning_effort: 'high',
         approval_policy: 'on-request',
+        service_tier: null,
         permission_mode: null,
         sandbox_mode: null,
       },

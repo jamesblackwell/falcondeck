@@ -2,6 +2,8 @@ import { defaultProviderLabel } from './normalization'
 import type {
   AgentCapabilitySummary,
   AgentProvider,
+  ModelSummary,
+  ServiceTierOption,
   ThreadSummary,
   WorkspaceAgentSummary,
   WorkspaceSummary,
@@ -92,6 +94,52 @@ export function workspaceModels(
 
 export function formatModelLabel(label: string) {
   return label.toLowerCase()
+}
+
+/**
+ * Wire value that explicitly resets a provider to its standard service tier.
+ * Sending it (rather than omitting the field) matters because an absent tier
+ * means "keep whatever the session already has" all the way down to the CLI.
+ */
+export const STANDARD_SERVICE_TIER = 'default'
+
+/**
+ * The tier the fast-mode toggle switches a model onto: its first advertised
+ * extra service tier (Codex advertises exactly one, `priority`/"Fast").
+ */
+export function modelFastTier(model: ModelSummary | null | undefined): ServiceTierOption | null {
+  return model?.service_tiers?.[0] ?? null
+}
+
+/** Whether any of the models can run on an extra service tier. */
+export function anyModelHasFastTier(models: ModelSummary[]): boolean {
+  return models.some((model) => modelFastTier(model) !== null)
+}
+
+/**
+ * Validates a remembered/thread tier id against what the model actually
+ * advertises, so the toggle never resurrects a tier the catalog dropped.
+ * The standard tier normalizes to null (toggle off).
+ */
+export function resolveServiceTier(
+  tier: string | null | undefined,
+  model: ModelSummary | null | undefined,
+): string | null {
+  if (!tier || tier === STANDARD_SERVICE_TIER) return null
+  return model?.service_tiers?.some((option) => option.id === tier) ? tier : null
+}
+
+/**
+ * The service tier a turn should request for a model, stated explicitly when
+ * the model supports tiers (see STANDARD_SERVICE_TIER for why), and omitted
+ * entirely for models without tiers so their providers never see the field.
+ */
+export function serviceTierForTurn(
+  selectedTier: string | null,
+  model: ModelSummary | null | undefined,
+): string | null {
+  if (modelFastTier(model) === null) return null
+  return resolveServiceTier(selectedTier, model) ?? STANDARD_SERVICE_TIER
 }
 
 export function workspaceAccount(

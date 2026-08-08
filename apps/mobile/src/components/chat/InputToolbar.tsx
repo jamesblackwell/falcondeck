@@ -1,12 +1,14 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
 import { View, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ChevronDown } from 'lucide-react-native'
+import { ChevronDown, Zap } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import {
   formatModelLabel,
+  modelFastTier,
   NO_AGENT_CAPABILITIES,
+  resolveServiceTier,
   type AgentCapabilitySummary,
   type AgentProvider,
   type ModelSummary,
@@ -36,6 +38,9 @@ interface InputToolbarProps {
   onSelectModel: (modelId: string | null) => void
   onSelectEffort: (effort: string | null) => void
   onSelectProvider: (provider: AgentProvider) => void
+  /** Tier id while fast mode is on; null is the provider's standard tier. */
+  selectedServiceTier?: string | null
+  onSelectServiceTier?: (tier: string | null) => void
   /** Drives which mode pickers appear; an agent with no modes shows none. */
   capabilities?: AgentCapabilitySummary
   selectedPermissionMode?: string | null
@@ -76,6 +81,8 @@ export const InputToolbar = memo(function InputToolbar({
   onSelectModel,
   onSelectEffort,
   onSelectProvider,
+  selectedServiceTier = null,
+  onSelectServiceTier,
   capabilities = NO_AGENT_CAPABILITIES,
   selectedPermissionMode = null,
   selectedSandboxMode = null,
@@ -167,6 +174,18 @@ export const InputToolbar = memo(function InputToolbar({
 
   const currentEffortLabel = capitalize(selectedEffort ?? 'medium')
 
+  // Fast mode reads the tier off whichever model a send would actually use —
+  // the explicit pick, or the provider default while the chip says "Default".
+  const effectiveModel =
+    currentModel ?? models.find((m) => m.is_default) ?? models[0] ?? null
+  const fastTier = modelFastTier(effectiveModel)
+  const fastActive = resolveServiceTier(selectedServiceTier, effectiveModel) !== null
+  const handleFastPress = useCallback(() => {
+    if (!onSelectServiceTier || !fastTier) return
+    void Haptics.selectionAsync()
+    onSelectServiceTier(fastActive ? null : fastTier.id)
+  }, [fastActive, fastTier, onSelectServiceTier])
+
   return (
     <>
       <View style={styles.container}>
@@ -238,6 +257,18 @@ export const InputToolbar = memo(function InputToolbar({
           disabled={disabled}
           onPress={openEffortSheet}
         />
+
+        {/* A press-toggle, not a sheet: fast mode is boolean, and the chip's
+            fill is its state. Hidden (not greyed) when the model has one
+            speed — mobile chips already come and go per provider. */}
+        {onSelectServiceTier && fastTier ? (
+          <FastChip
+            label={fastTier.name}
+            active={fastActive}
+            disabled={disabled}
+            onPress={handleFastPress}
+          />
+        ) : null}
       </View>
 
       {sheet ? (
@@ -284,6 +315,45 @@ const Chip = memo(function Chip({
   )
 })
 
+const FastChip = memo(function FastChip({
+  label,
+  active,
+  disabled,
+  onPress,
+}: {
+  label: string
+  active: boolean
+  disabled: boolean
+  onPress: () => void
+}) {
+  const { theme } = useUnistyles()
+  const color = active ? theme.colors.accent.default : theme.colors.fg.muted
+
+  return (
+    <Pressable
+      style={[styles.chip, active && styles.fastChipActive, disabled && styles.controlDisabled]}
+      accessibilityRole="switch"
+      accessibilityLabel="Fast mode"
+      accessibilityState={{ disabled, checked: active }}
+      hitSlop={12}
+      onPress={onPress}
+      disabled={disabled}
+    >
+      {/* The bolt fills in when the tier is on, so state survives without color. */}
+      <Zap size={10} color={color} fill={active ? color : 'none'} />
+      <Text
+        variant="caption"
+        color={active ? 'primary' : 'secondary'}
+        size="2xs"
+        numberOfLines={1}
+        style={active ? { color } : undefined}
+      >
+        {label}
+      </Text>
+    </Pressable>
+  )
+})
+
 const styles = StyleSheet.create((theme) => ({
   container: {
     flexDirection: 'row',
@@ -318,6 +388,9 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
     // Chips shrink so a long mode label never pushes the send button off-row.
     flexShrink: 1,
+  },
+  fastChipActive: {
+    backgroundColor: theme.colors.accent.muted,
   },
   controlDisabled: {
     opacity: 0.55,
