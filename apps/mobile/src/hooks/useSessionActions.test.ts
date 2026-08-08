@@ -32,6 +32,9 @@ function resetAll() {
     isEncrypted: false,
   })
   useUIStore.setState({
+    conversationKey: 'none:new',
+    drafts: {},
+    attachmentsByConversation: {},
     draft: '',
     attachments: [],
     selectedProvider: null,

@@ -7,9 +7,12 @@ import { ChevronLeft, Target } from 'lucide-react-native'
 import { DrawerActions } from '@react-navigation/native'
 import { useNavigation, useRouter } from 'expo-router'
 import {
+  composerProviderFor,
+  composerSelectionFor,
   defaultProvider,
   encryptJson,
   providerForThread,
+  resolvePersistedMode,
   workspaceAgentCapabilities,
   workspaceModels,
   workspaceProviderOptions,
@@ -90,6 +93,7 @@ export default function HomeScreen() {
     attachments,
     draft,
     isSubmitting,
+    persistedComposerSelections,
     selectedEffort,
     selectedModel,
     selectedPermissionMode,
@@ -100,6 +104,7 @@ export default function HomeScreen() {
       attachments: s.attachments,
       draft: s.draft,
       isSubmitting: s.isSubmitting,
+      persistedComposerSelections: s.persistedComposerSelections,
       selectedEffort: s.selectedEffort,
       selectedModel: s.selectedModel,
       selectedPermissionMode: s.selectedPermissionMode,
@@ -109,6 +114,8 @@ export default function HomeScreen() {
   )
   const {
     addAttachments,
+    rememberComposerSelection,
+    rememberWorkspaceProvider,
     setDraft,
     setSelectedModel,
     setSelectedEffort,
@@ -119,9 +126,9 @@ export default function HomeScreen() {
   } = useUIStore.getState()
   const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
   const interruptTurn = useInterruptTurn()
-  const { clearThreadGoal, removeQueuedTurn, setThreadGoal, setThreadMode, steerQueuedTurn } =
+  const { clearThreadGoal, editQueuedTurn, removeQueuedTurn, setThreadGoal, setThreadMode, steerQueuedTurn } =
     useThreadActions()
-  const { listRef, showJumpButton, onContentSizeChange, onScroll, pauseAutoScrollOnce, resetScrollState, scrollToBottom } =
+  const { listRef, showJumpButton, onScroll, resetScrollState, scrollToBottom } =
     useScrollToBottom<ConversationRenderBlock>()
   const isKeyboardVisible = useKeyboardVisible()
   const [appState, setAppState] = useState(AppState.currentState)
@@ -191,15 +198,50 @@ export default function HomeScreen() {
     if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
 
-    // A thread owns its modes; a not-yet-created one starts with no override.
-    setSelectedPermissionMode(selectedThread?.agent.permission_mode ?? null)
-    setSelectedSandboxMode(selectedThread?.agent.sandbox_mode ?? null)
+    // An existing thread dictates its own provider; a new conversation starts
+    // from the provider the user last picked here, so that choice sticks.
+    const stickyProvider = composerProviderFor(persistedComposerSelections, workspace.path)
+    const nextProvider =
+      !selectedThread &&
+      stickyProvider &&
+      workspaceProviderOptions(workspace).some((option) => option.provider === stickyProvider)
+        ? stickyProvider
+        : providerForThread(selectedThread, workspace)
+    const preferredSelection = composerSelectionFor(
+      persistedComposerSelections,
+      workspace.path,
+      nextProvider,
+    )
 
-    const nextProvider = providerForThread(selectedThread, workspace)
+    // A thread owns its modes; a new conversation gets the remembered choice
+    // as long as the provider still offers it.
+    const seededCapabilities = workspaceAgentCapabilities(workspace, nextProvider)
+    setSelectedPermissionMode(
+      selectedThread
+        ? selectedThread.agent.permission_mode ?? null
+        : resolvePersistedMode(
+            preferredSelection?.permissionMode,
+            seededCapabilities.permission_modes,
+          ),
+    )
+    setSelectedSandboxMode(
+      selectedThread
+        ? selectedThread.agent.sandbox_mode ?? null
+        : resolvePersistedMode(preferredSelection?.sandboxMode, seededCapabilities.sandbox_modes),
+    )
+
     setSelectedProvider(nextProvider)
     const providerModels = workspaceModels(workspace, nextProvider)
+    const preferredModel =
+      preferredSelection?.modelId &&
+      providerModels.some((model) => model.id === preferredSelection.modelId)
+        ? preferredSelection.modelId
+        : null
     const fallbackModel =
-      providerModels.find((model) => model.is_default)?.id ?? providerModels[0]?.id ?? null
+      preferredModel ??
+      providerModels.find((model) => model.is_default)?.id ??
+      providerModels[0]?.id ??
+      null
 
     if (selectedThread) {
       const nextModel = selectedThread.agent.model_id ?? fallbackModel
@@ -225,11 +267,15 @@ export default function HomeScreen() {
       fallbackModelSummary?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
     setSelectedModel(fallbackModel)
     setSelectedEffort(
-      fallbackModelSummary?.default_reasoning_effort ??
+      (preferredSelection?.effort && supportedEfforts.includes(preferredSelection.effort)
+        ? preferredSelection.effort
+        : null) ??
+        fallbackModelSummary?.default_reasoning_effort ??
         supportedEfforts[0] ??
         'medium',
     )
   }, [
+    persistedComposerSelections,
     selectedThread,
     setSelectedEffort,
     setSelectedModel,
@@ -252,11 +298,64 @@ export default function HomeScreen() {
     (provider: AgentProvider) => {
       if (selectedThread) return // locked
       setSelectedProvider(provider)
-      // Reset model and effort for the new provider
-      setSelectedModel(null)
-      setSelectedEffort(null)
+      if (workspace) rememberWorkspaceProvider(workspace.path, provider)
+      // Swap in the new provider's remembered model/effort/modes rather than
+      // resetting; the seed and validity effects clean up anything stale.
+      const preferredSelection = composerSelectionFor(
+        persistedComposerSelections,
+        workspace?.path,
+        provider,
+      )
+      const providerModels = workspaceModels(workspace, provider)
+      setSelectedModel(
+        preferredSelection?.modelId &&
+          providerModels.some((model) => model.id === preferredSelection.modelId)
+          ? preferredSelection.modelId
+          : null,
+      )
+      setSelectedEffort(preferredSelection?.effort ?? null)
+      const providerCapabilities = workspaceAgentCapabilities(workspace, provider)
+      setSelectedPermissionMode(
+        resolvePersistedMode(
+          preferredSelection?.permissionMode,
+          providerCapabilities.permission_modes,
+        ),
+      )
+      setSelectedSandboxMode(
+        resolvePersistedMode(preferredSelection?.sandboxMode, providerCapabilities.sandbox_modes),
+      )
     },
-    [selectedThread, setSelectedProvider, setSelectedModel, setSelectedEffort],
+    [
+      persistedComposerSelections,
+      rememberWorkspaceProvider,
+      selectedThread,
+      setSelectedEffort,
+      setSelectedModel,
+      setSelectedPermissionMode,
+      setSelectedProvider,
+      setSelectedSandboxMode,
+      workspace,
+    ],
+  )
+
+  const handleModelChange = useCallback(
+    (modelId: string | null) => {
+      setSelectedModel(modelId)
+      if (workspace && modelId) {
+        rememberComposerSelection(workspace.path, activeProvider, { modelId })
+      }
+    },
+    [activeProvider, rememberComposerSelection, setSelectedModel, workspace],
+  )
+
+  const handleEffortChange = useCallback(
+    (effort: string | null) => {
+      setSelectedEffort(effort)
+      if (workspace && effort) {
+        rememberComposerSelection(workspace.path, activeProvider, { effort })
+      }
+    },
+    [activeProvider, rememberComposerSelection, setSelectedEffort, workspace],
   )
 
   // Local state moves first so the chip responds to the tap; with a thread
@@ -265,21 +364,43 @@ export default function HomeScreen() {
   const handlePermissionModeChange = useCallback(
     (mode: string | null) => {
       setSelectedPermissionMode(mode)
+      if (workspace) {
+        rememberComposerSelection(workspace.path, activeProvider, { permissionMode: mode })
+      }
       if (!selectedWorkspaceId || !selectedThreadId) return
       void setThreadMode(selectedWorkspaceId, selectedThreadId, 'permission_mode', mode).catch(
         () => {},
       )
     },
-    [selectedThreadId, selectedWorkspaceId, setSelectedPermissionMode, setThreadMode],
+    [
+      activeProvider,
+      rememberComposerSelection,
+      selectedThreadId,
+      selectedWorkspaceId,
+      setSelectedPermissionMode,
+      setThreadMode,
+      workspace,
+    ],
   )
 
   const handleSandboxModeChange = useCallback(
     (mode: string | null) => {
       setSelectedSandboxMode(mode)
+      if (workspace) {
+        rememberComposerSelection(workspace.path, activeProvider, { sandboxMode: mode })
+      }
       if (!selectedWorkspaceId || !selectedThreadId) return
       void setThreadMode(selectedWorkspaceId, selectedThreadId, 'sandbox_mode', mode).catch(() => {})
     },
-    [selectedThreadId, selectedWorkspaceId, setSelectedSandboxMode, setThreadMode],
+    [
+      activeProvider,
+      rememberComposerSelection,
+      selectedThreadId,
+      selectedWorkspaceId,
+      setSelectedSandboxMode,
+      setThreadMode,
+      workspace,
+    ],
   )
 
   const handleRemoveQueuedTurn = useCallback(
@@ -296,6 +417,14 @@ export default function HomeScreen() {
       return steerQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId)
     },
     [selectedThreadId, selectedWorkspaceId, steerQueuedTurn],
+  )
+
+  const handleEditQueuedTurn = useCallback(
+    (queuedId: string, text: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
+      return editQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId, text)
+    },
+    [editQueuedTurn, selectedThreadId, selectedWorkspaceId],
   )
 
   const handleSetGoal = useCallback(
@@ -353,7 +482,8 @@ export default function HomeScreen() {
       return
     }
 
-    pauseAutoScrollOnce()
+    // maintainVisibleContentPosition keeps the viewport anchored while the
+    // older page prepends above it; no scroll bookkeeping needed here.
     setIsLoadingOlder(true)
     void loadThreadDetail(selectedWorkspaceId, selectedThreadId, { older: true }).finally(() => {
       setIsLoadingOlder(false)
@@ -361,7 +491,6 @@ export default function HomeScreen() {
   }, [
     isLoadingOlder,
     loadThreadDetail,
-    pauseAutoScrollOnce,
     selectedThreadHistory.hasOlder,
     selectedThreadId,
     selectedWorkspaceId,
@@ -414,33 +543,11 @@ export default function HomeScreen() {
     }
   }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedWorkspaceId])
 
+  // Opening a thread starts at the bottom via the list's
+  // startRenderingFromBottom; only the jump-button state needs resetting.
   useEffect(() => {
-    if (!selectedThreadId) {
-      resetScrollState()
-      return
-    }
-
     resetScrollState()
-    const frame =
-      globalThis.requestAnimationFrame?.(() => {
-        scrollToBottom(false)
-      }) ?? null
-    const timeoutId =
-      frame === null
-        ? globalThis.setTimeout(() => {
-            scrollToBottom(false)
-          }, 0)
-        : null
-
-    return () => {
-      if (typeof frame === 'number' && globalThis.cancelAnimationFrame) {
-        globalThis.cancelAnimationFrame(frame)
-      }
-      if (typeof timeoutId === 'number') {
-        globalThis.clearTimeout(timeoutId)
-      }
-    }
-  }, [resetScrollState, scrollToBottom, selectedThreadId])
+  }, [resetScrollState, selectedThreadId])
 
   useEffect(() => {
     // The cleanup below cancels any pending debounce whenever the deps change
@@ -588,7 +695,15 @@ export default function HomeScreen() {
             keyExtractor={keyExtractor}
             getItemType={getItemType}
             showsVerticalScrollIndicator={false}
-            onContentSizeChange={onContentSizeChange}
+            // Native bottom-pinning: chat opens at the bottom, follows
+            // streaming output only while the user is near the bottom, and
+            // stays anchored when reading older messages or loading a page
+            // above. Replaces a manual scrollToEnd-on-content-size handler
+            // that teleported the list whenever recycled cells re-measured.
+            maintainVisibleContentPosition={{
+              autoscrollToBottomThreshold: 0.2,
+              startRenderingFromBottom: true,
+            }}
             onScroll={onScroll}
             scrollEventThrottle={16}
             contentContainerStyle={styles.listContent}
@@ -625,6 +740,7 @@ export default function HomeScreen() {
         canSteer={capabilities.supports_steering}
         onRemove={handleRemoveQueuedTurn}
         onSteer={handleSteerQueuedTurn}
+        onEdit={handleEditQueuedTurn}
       />
 
       {/* The keyboard already covers the home indicator, so keeping the inset
@@ -651,8 +767,8 @@ export default function HomeScreen() {
           selectedProvider={activeProvider}
           providers={providerOptions}
           showProviderSelector={!selectedThread}
-          onSelectModel={setSelectedModel}
-          onSelectEffort={setSelectedEffort}
+          onSelectModel={handleModelChange}
+          onSelectEffort={handleEffortChange}
           onSelectProvider={handleProviderChange}
           isRunning={isThreadRunning}
           isStopping={isStopping}

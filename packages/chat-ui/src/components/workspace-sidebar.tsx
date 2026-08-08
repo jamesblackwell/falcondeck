@@ -2,7 +2,8 @@ import * as React from 'react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ChevronDown, FolderPlus, LoaderCircle, SquarePen } from 'lucide-react'
 
-import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
+import { compareThreads } from '@falcondeck/client-core'
+import type { ProjectGroup, ThreadSortMode, ThreadSummary } from '@falcondeck/client-core'
 import {
   Button,
   EmptyState,
@@ -13,6 +14,7 @@ import {
 } from '@falcondeck/ui'
 
 import { AttentionInbox } from './attention-inbox'
+import { ThreadSortMenu } from './thread-sort-menu'
 import {
   DeleteThreadDialog,
   RemoveWorkspaceDialog,
@@ -57,6 +59,10 @@ export type WorkspaceSidebarProps = {
   onMarkThreadRead?: (workspaceId: string, threadId: string) => Promise<void> | void
   onAddProject?: () => void
   onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void
+  /** How chats order within each project; also applies to the pinned list. */
+  threadSort?: ThreadSortMode
+  /** Enables the sort menu on the Projects heading. */
+  onThreadSortChange?: (mode: ThreadSortMode) => void
   isAddingProject?: boolean
   title?: string
   errors?: string[]
@@ -69,6 +75,7 @@ export type WorkspaceSidebarProps = {
 
 const ThreadList = memo(function ThreadList({
   group,
+  sortMode,
   selectedThreadId,
   onSelectThread,
   onArchiveThread,
@@ -76,6 +83,7 @@ const ThreadList = memo(function ThreadList({
   nowTick,
 }: {
   group: ProjectGroup
+  sortMode: ThreadSortMode
   selectedThreadId: string | null
   onSelectThread: (workspaceId: string, threadId: string) => void
   onArchiveThread?: ThreadItemArchiveHandler
@@ -84,8 +92,9 @@ const ThreadList = memo(function ThreadList({
 }) {
   const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT)
   const unpinnedThreads = useMemo(
-    () => group.threads.filter((thread) => !thread.is_pinned),
-    [group.threads],
+    () =>
+      group.threads.filter((thread) => !thread.is_pinned).sort(compareThreads(sortMode)),
+    [group.threads, sortMode],
   )
 
   // Reveal just enough to keep the selected thread visible, without jumping
@@ -202,6 +211,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onMarkThreadRead,
   onAddProject,
   onRemoveWorkspace,
+  threadSort = 'last_updated',
+  onThreadSortChange,
   isAddingProject = false,
   title = 'Threads',
   errors = [],
@@ -474,15 +485,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     () => new Map(groups.map((group) => [group.workspace.id, group.workspace.path])),
     [groups],
   )
-  const pinnedThreads = useMemo(
-    () =>
-      groups.flatMap((group) =>
+  // Pinned chats come from every project, so they get a single global sort
+  // rather than the per-project ordering below.
+  const pinnedThreads = useMemo(() => {
+    const compare = compareThreads(threadSort)
+    return groups
+      .flatMap((group) =>
         group.threads
           .filter((thread) => thread.is_pinned)
           .map((thread) => ({ workspaceId: group.workspace.id, thread })),
-      ),
-    [groups],
-  )
+      )
+      .sort((left, right) => compare(left.thread, right.thread))
+  }, [groups, threadSort])
 
   const handleRenameSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -672,12 +686,17 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           onSelectThread={handleSelectThread}
         />
         <section aria-labelledby="fd-projects-heading">
-          <h2
-            id="fd-projects-heading"
-            className="px-2.5 pb-1.5 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted"
-          >
-            Projects
-          </h2>
+          <div className="flex items-center justify-between px-2.5 pb-1.5">
+            <h2
+              id="fd-projects-heading"
+              className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted"
+            >
+              Projects
+            </h2>
+            {onThreadSortChange ? (
+              <ThreadSortMenu value={threadSort} onChange={onThreadSortChange} />
+            ) : null}
+          </div>
           <div className="space-y-4">
             {groups.map((group) => (
               <WorkspaceGroup
@@ -705,6 +724,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               >
                 <ThreadList
                   group={group}
+                  sortMode={threadSort}
                   selectedThreadId={visualSelectedThreadId}
                   onSelectThread={handleSelectThread}
                   onArchiveThread={onArchiveThread}

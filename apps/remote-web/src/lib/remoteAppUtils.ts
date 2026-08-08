@@ -15,13 +15,16 @@ import {
   type PersistedRemoteSession,
   type RelayClientMessage,
   type ThreadDetail,
+  type ThreadSortMode,
 } from '@falcondeck/client-core'
+import { isThreadSortMode } from '@falcondeck/client-core'
 
 export const STORAGE_KEY = 'falcondeck.remote.session.v1'
 export const PENDING_ACTIONS_KEY = 'falcondeck.remote.pending-actions.v1'
 export const CLIENT_KEYPAIR_STORAGE_KEY = 'falcondeck.remote.client-keypair.v1'
 export const SELECTION_STORAGE_KEY = 'falcondeck.remote.selection.v1'
 export const NOTIFICATIONS_STORAGE_KEY = 'falcondeck.remote.notifications.v1'
+export const THREAD_SORT_STORAGE_KEY = 'falcondeck.remote.thread-sort.v1'
 
 /**
  * How long an awaited queued action may stay unfinished before the UI gives
@@ -314,6 +317,7 @@ export function clearStoredRemoteState() {
     CLIENT_KEYPAIR_STORAGE_KEY,
     SELECTION_STORAGE_KEY,
     NOTIFICATIONS_STORAGE_KEY,
+    THREAD_SORT_STORAGE_KEY,
   ]) {
     try {
       window.localStorage.removeItem(key)
@@ -494,6 +498,27 @@ export function persistNotificationPreference(value: NotificationPreference) {
       return
     }
     window.localStorage.setItem(NOTIFICATIONS_STORAGE_KEY, value)
+  } catch {
+    // Ignore local persistence failures.
+  }
+}
+
+export function loadThreadSortMode(): ThreadSortMode {
+  try {
+    const raw = window.localStorage.getItem(THREAD_SORT_STORAGE_KEY)
+    return isThreadSortMode(raw) ? raw : 'last_updated'
+  } catch {
+    return 'last_updated'
+  }
+}
+
+export function persistThreadSortMode(value: ThreadSortMode) {
+  try {
+    if (value === 'last_updated') {
+      window.localStorage.removeItem(THREAD_SORT_STORAGE_KEY)
+      return
+    }
+    window.localStorage.setItem(THREAD_SORT_STORAGE_KEY, value)
   } catch {
     // Ignore local persistence failures.
   }

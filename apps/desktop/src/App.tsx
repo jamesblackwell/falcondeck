@@ -2,23 +2,34 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   buildProjectGroups,
+  composerProviderFor,
+  composerSelectionFor,
   countAwaitingResponseThreads,
   conversationItemsForSelection,
   deriveThreadAttentionPresentation,
+  draftKeyFor,
   filesToImageInputs,
   providerForThread,
+  resolvePersistedMode,
   selectedSkillsFromText,
+  upsertComposerDraft,
+  withComposerProvider,
+  withComposerSelection,
   workspaceAgentCapabilities,
   workspaceModels,
   workspaceProviderOptions,
   type AgentProvider,
+  type ComposerDrafts,
   type ConversationItem,
   type ImageInput,
+  type PersistedComposerSelection,
+  type PersistedComposerState,
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type ThreadHandle,
   type ThreadIsolation,
   type ThinkingDisplay,
+  type ThreadSortMode,
   type ThreadSummary,
   type TurnInputItem,
   type UpdatePreferencesPayload,
@@ -34,10 +45,18 @@ import {
   workspaceSendBlockReason,
 } from './app-utils'
 import {
+  readPersistedComposerState,
+  readStoredDrafts,
+  writePersistedComposerState,
+  writeStoredDrafts,
+} from './composer-persistence'
+import {
   preferencesWithThinkingDisplay,
   readStoredThinkingDisplay,
+  readStoredThreadSort,
   splitPreferencesUpdate,
   writeStoredThinkingDisplay,
+  writeStoredThreadSort,
 } from './preferences'
 import {
   defaultReasoningEffort,
@@ -59,82 +78,9 @@ import { usePanelVisibility } from './hooks/usePanelVisibility'
 import { useRemoteHosts } from './hooks/useRemoteHosts'
 import { hostLabelByWorkspaceId, mergeSnapshots } from './hosts'
 
-const COMPOSER_SELECTIONS_STORAGE_KEY = 'falcondeck.desktop.composer-selections.v1'
-
-type PersistedComposerSelection = {
-  modelId: string | null
-  effort: string | null
-}
-
-type PersistedComposerSelections = Record<
-  string,
-  Partial<Record<AgentProvider, PersistedComposerSelection>>
->
-
-function readPersistedComposerSelections(): PersistedComposerSelections {
-  if (typeof window === 'undefined') {
-    return {}
-  }
-
-  try {
-    const raw = window.localStorage.getItem(COMPOSER_SELECTIONS_STORAGE_KEY)
-    if (!raw) {
-      return {}
-    }
-    const parsed = JSON.parse(raw) as Record<string, Record<string, PersistedComposerSelection>>
-    const next: PersistedComposerSelections = {}
-
-    for (const [workspacePath, selections] of Object.entries(parsed)) {
-      if (!selections || typeof selections !== 'object') {
-        continue
-      }
-      const workspaceSelections: Partial<Record<AgentProvider, PersistedComposerSelection>> = {}
-      for (const provider of ['codex', 'claude'] as const) {
-        const selection = selections[provider]
-        if (!selection || typeof selection !== 'object') {
-          continue
-        }
-        workspaceSelections[provider] = {
-          modelId: typeof selection.modelId === 'string' ? selection.modelId : null,
-          effort: typeof selection.effort === 'string' ? selection.effort : null,
-        }
-      }
-      if (Object.keys(workspaceSelections).length > 0) {
-        next[workspacePath] = workspaceSelections
-      }
-    }
-
-    return next
-  } catch {
-    return {}
-  }
-}
-
-function writePersistedComposerSelections(selections: PersistedComposerSelections) {
-  if (typeof window === 'undefined') {
-    return
-  }
-
-  try {
-    window.localStorage.setItem(
-      COMPOSER_SELECTIONS_STORAGE_KEY,
-      JSON.stringify(selections),
-    )
-  } catch {
-    // Ignore storage failures and keep the in-memory selection authoritative.
-  }
-}
-
-function selectionForWorkspace(
-  selections: PersistedComposerSelections,
-  workspacePath: string | null | undefined,
-  provider: AgentProvider,
-) {
-  if (!workspacePath) {
-    return null
-  }
-  return selections[workspacePath]?.[provider] ?? null
-}
+// Stable empty array so conversations without attachments don't bust the
+// memoized PromptInput on every render.
+const NO_ATTACHMENTS: ImageInput[] = []
 
 export default function App() {
   return (
@@ -172,11 +118,13 @@ function AppInner() {
   const updater = useAppUpdater()
   const { sidebarVisible, railVisible, toggleSidebar, toggleRail, showRail } = usePanelVisibility()
 
-  const [draft, setDraft] = useState('')
+  const [drafts, setDrafts] = useState<ComposerDrafts>(() => readStoredDrafts())
   const [relayUrl] = useState(
     import.meta.env.VITE_FALCONDECK_RELAY_URL ?? 'https://connect.falcondeck.com',
   )
-  const [attachments, setAttachments] = useState<ImageInput[]>([])
+  const [attachmentsByConversation, setAttachmentsByConversation] = useState<
+    Record<string, ImageInput[]>
+  >({})
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
@@ -186,7 +134,7 @@ function AppInner() {
   // working directory cannot change after it exists.
   const [selectedIsolation, setSelectedIsolation] = useState<ThreadIsolation>('project_folder')
   const [persistedComposerSelections, setPersistedComposerSelections] =
-    useState<PersistedComposerSelections>(() => readPersistedComposerSelections())
+    useState<PersistedComposerState>(() => readPersistedComposerState())
   const [isAddingProject, setIsAddingProject] = useState(false)
   const [isImportingProjectSessions, setIsImportingProjectSessions] = useState(false)
   const [isStartingRemote, setIsStartingRemote] = useState(false)
@@ -199,11 +147,49 @@ function AppInner() {
   const [actionError, setActionError] = useState<string | null>(null)
   const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
   const [thinkingDisplay, setThinkingDisplay] = useState<ThinkingDisplay>(readStoredThinkingDisplay)
+  const [threadSort, setThreadSort] = useState<ThreadSortMode>(readStoredThreadSort)
   const selectionSeedRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
   const notifiedAttentionRef = useRef(new Map<string, string>())
   const announcedUpdateVersionRef = useRef<string | null>(null)
   const announcedDownloadedVersionRef = useRef<string | null>(null)
+
+  // Each conversation keeps its own unsent input, keyed by workspace + thread
+  // ('new' for a thread not yet created), so navigating never carries text or
+  // attachments across. Draft text is device-local persistent; attachments
+  // follow their conversation for the session only.
+  const conversationKey = draftKeyFor(selectedWorkspaceId, selectedThreadId)
+  const draft = drafts[conversationKey]?.text ?? ''
+  const attachments = attachmentsByConversation[conversationKey] ?? NO_ATTACHMENTS
+
+  const setDraftForConversation = useCallback((key: string, value: string) => {
+    setDrafts((current) => {
+      const next = upsertComposerDraft(current, key, value)
+      if (next !== current) writeStoredDrafts(next)
+      return next
+    })
+  }, [])
+
+  const setDraft = useCallback(
+    (value: string) => setDraftForConversation(conversationKey, value),
+    [conversationKey, setDraftForConversation],
+  )
+
+  const setAttachmentsForConversation = useCallback(
+    (key: string, updater: (current: ImageInput[]) => ImageInput[]) => {
+      setAttachmentsByConversation((current) => {
+        const next = updater(current[key] ?? NO_ATTACHMENTS)
+        if (next.length === 0) {
+          if (!(key in current)) return current
+          const rest = { ...current }
+          delete rest[key]
+          return rest
+        }
+        return { ...current, [key]: next }
+      })
+    },
+    [],
+  )
 
   // Local daemon snapshot merged with enrolled remote-host snapshots: the
   // sidebar, selection, and composer all see one world; writes route back to
@@ -322,20 +308,30 @@ function AppInner() {
       : null
 
   const rememberComposerSelection = useCallback(
-    (provider: AgentProvider, selection: PersistedComposerSelection) => {
+    (provider: AgentProvider, patch: Partial<PersistedComposerSelection>) => {
       if (!selectedWorkspace) {
         return
       }
 
       setPersistedComposerSelections((current) => {
-        const next = {
-          ...current,
-          [selectedWorkspace.path]: {
-            ...(current[selectedWorkspace.path] ?? {}),
-            [provider]: selection,
-          },
-        }
-        writePersistedComposerSelections(next)
+        const next = withComposerSelection(current, selectedWorkspace.path, provider, patch)
+        writePersistedComposerState(next)
+        return next
+      })
+    },
+    [selectedWorkspace],
+  )
+
+  const rememberWorkspaceProvider = useCallback(
+    (provider: AgentProvider) => {
+      if (!selectedWorkspace) {
+        return
+      }
+
+      setPersistedComposerSelections((current) => {
+        const next = withComposerProvider(current, selectedWorkspace.path, provider)
+        if (next === current) return current
+        writePersistedComposerState(next)
         return next
       })
     },
@@ -358,8 +354,18 @@ function AppInner() {
     if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
 
-    const nextProvider = providerForThread(selectedThread, selectedWorkspace)
-    const preferredSelection = selectionForWorkspace(
+    // An existing thread dictates its own provider; a new conversation starts
+    // from the provider the user last picked here, so that choice sticks.
+    const stickyProvider = composerProviderFor(persistedComposerSelections, selectedWorkspace.path)
+    const nextProvider =
+      !selectedThread &&
+      stickyProvider &&
+      workspaceProviderOptions(selectedWorkspace).some(
+        (option) => option.provider === stickyProvider,
+      )
+        ? stickyProvider
+        : providerForThread(selectedThread, selectedWorkspace)
+    const preferredSelection = composerSelectionFor(
       persistedComposerSelections,
       selectedWorkspace.path,
       nextProvider,
@@ -381,8 +387,19 @@ function AppInner() {
         nextProvider,
       ) ?? 'medium',
     )
-    setSelectedPermissionMode(selectedThread?.agent.permission_mode ?? null)
-    setSelectedSandboxMode(selectedThread?.agent.sandbox_mode ?? null)
+    // Same idea for the modes: threads keep their own, new conversations get
+    // the remembered choice as long as the provider still offers it.
+    const capabilities = workspaceAgentCapabilities(selectedWorkspace, nextProvider)
+    setSelectedPermissionMode(
+      selectedThread
+        ? selectedThread.agent.permission_mode ?? null
+        : resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+    )
+    setSelectedSandboxMode(
+      selectedThread
+        ? selectedThread.agent.sandbox_mode ?? null
+        : resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),
+    )
   }, [persistedComposerSelections, selectedThread, selectedWorkspace])
 
   useEffect(() => {
@@ -396,7 +413,7 @@ function AppInner() {
       return
     }
     if (!selectedModel || !models.some((model) => model.id === selectedModel)) {
-      const preferredSelection = selectionForWorkspace(
+      const preferredSelection = composerSelectionFor(
         persistedComposerSelections,
         selectedWorkspace.path,
         provider,
@@ -424,7 +441,7 @@ function AppInner() {
     const options = reasoningOptions(selectedThread, selectedWorkspace, selectedModel, provider)
     if (options.length === 0) return
     if (!selectedEffort || !options.includes(selectedEffort)) {
-      const preferredSelection = selectionForWorkspace(
+      const preferredSelection = composerSelectionFor(
         persistedComposerSelections,
         selectedWorkspace.path,
         provider,
@@ -693,6 +710,9 @@ function AppInner() {
   const handlePermissionModeChange = useCallback(
     (mode: string | null) => {
       setSelectedPermissionMode(mode)
+      rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
+        permissionMode: mode,
+      })
       const client = apiFor(selectedWorkspace?.id)
       if (!client || !selectedWorkspace || !selectedThreadId) return
       void client
@@ -707,12 +727,24 @@ function AppInner() {
           setActionError(msg)
         })
     },
-    [apiFor, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
+    [
+      apiFor,
+      applyThreadHandle,
+      rememberComposerSelection,
+      selectedProvider,
+      selectedThread,
+      selectedThreadId,
+      selectedWorkspace,
+      setActionError,
+    ],
   )
 
   const handleSandboxModeChange = useCallback(
     (mode: string | null) => {
       setSelectedSandboxMode(mode)
+      rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
+        sandboxMode: mode,
+      })
       const client = apiFor(selectedWorkspace?.id)
       if (!client || !selectedWorkspace || !selectedThreadId) return
       void client
@@ -727,7 +759,16 @@ function AppInner() {
           setActionError(msg)
         })
     },
-    [apiFor, applyThreadHandle, selectedThreadId, selectedWorkspace, setActionError],
+    [
+      apiFor,
+      applyThreadHandle,
+      rememberComposerSelection,
+      selectedProvider,
+      selectedThread,
+      selectedThreadId,
+      selectedWorkspace,
+      setActionError,
+    ],
   )
 
   const applyThreadSummary = useCallback(
@@ -785,12 +826,13 @@ function AppInner() {
   const handleProviderChange = useCallback(
     (provider: AgentProvider) => {
       if (selectedThread) return
-      const preferredSelection = selectionForWorkspace(
+      const preferredSelection = composerSelectionFor(
         persistedComposerSelections,
         selectedWorkspace?.path,
         provider,
       )
       setSelectedProvider(provider)
+      rememberWorkspaceProvider(provider)
       const fallbackModelId = resolveThreadModelId(
         null,
         selectedWorkspace,
@@ -807,10 +849,17 @@ function AppInner() {
           provider,
         ) ?? 'medium',
       )
-      setSelectedPermissionMode(null)
-      setSelectedSandboxMode(null)
+      // Switching provider swaps in that provider's remembered modes rather
+      // than losing the choice every time.
+      const capabilities = workspaceAgentCapabilities(selectedWorkspace, provider)
+      setSelectedPermissionMode(
+        resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+      )
+      setSelectedSandboxMode(
+        resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),
+      )
     },
-    [persistedComposerSelections, selectedThread, selectedWorkspace],
+    [persistedComposerSelections, rememberWorkspaceProvider, selectedThread, selectedWorkspace],
   )
 
   const handleAddProject = useCallback(async () => {
@@ -903,11 +952,12 @@ function AppInner() {
       toast({ variant: 'danger', title: 'Project not ready', description: blockReason })
       return
     }
-    setDraft('')
-    setAttachments([])
+    const submittedKey = conversationKey
+    setDraftForConversation(submittedKey, '')
+    setAttachmentsForConversation(submittedKey, () => [])
     setIsSending(true)
+    let activeThreadId = selectedThreadId
     try {
-      let activeThreadId = selectedThreadId
       if (!activeThreadId) {
         const handle = await client.startThread({
           workspace_id: selectedWorkspace.id,
@@ -942,8 +992,13 @@ function AppInner() {
       })
       setActionError(null)
     } catch (error) {
-      setDraft(submittedDraft)
-      setAttachments(submittedAttachments)
+      // Put the unsent input back where the user now is: the thread that was
+      // created before the send failed, or the conversation they sent from.
+      const restoreKey = activeThreadId
+        ? draftKeyFor(selectedWorkspace.id, activeThreadId)
+        : submittedKey
+      setDraftForConversation(restoreKey, submittedDraft)
+      setAttachmentsForConversation(restoreKey, () => submittedAttachments)
       const rawMessage = error instanceof Error ? error.message : 'Failed to send turn'
       const msg = normalizeSendError(rawMessage, activeProvider)
       setActionError(msg)
@@ -1068,14 +1123,24 @@ function AppInner() {
 
   const handlePickImages = useCallback(
     (files: FileList | null) => {
-      void filesToImageInputs(files).then((next) => setAttachments((c) => [...c, ...next]))
+      // Bind to the conversation the user picked in; file reading is async and
+      // they may have navigated away by the time it resolves.
+      const key = conversationKey
+      void filesToImageInputs(files).then((next) =>
+        setAttachmentsForConversation(key, (current) => [...current, ...next]),
+      )
     },
-    [],
+    [conversationKey, setAttachmentsForConversation],
   )
 
-  const handleRemoveAttachment = useCallback((attachmentId: string) => {
-    setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId))
-  }, [])
+  const handleRemoveAttachment = useCallback(
+    (attachmentId: string) => {
+      setAttachmentsForConversation(conversationKey, (current) =>
+        current.filter((attachment) => attachment.id !== attachmentId),
+      )
+    },
+    [conversationKey, setAttachmentsForConversation],
+  )
 
   const handleStartPairingCallback = useCallback(() => {
     void handleStartRemotePairing()
@@ -1239,6 +1304,25 @@ function AppInner() {
     [api, apiFor, selectedThreadId, selectedWorkspaceId, setSnapshot, toast, workspaceHostIndex],
   )
 
+  const handleEditQueuedTurn = useCallback(
+    async (queuedId: string, text: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return
+      const client = apiFor(selectedWorkspaceId)
+      if (!client) return
+      try {
+        await client.editQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId, text)
+        if (!workspaceHostIndex.has(selectedWorkspaceId) && api) {
+          setSnapshot(await api.snapshot())
+        }
+      } catch (error: unknown) {
+        // A failed edit leaves the original message queued, so nothing is lost.
+        const msg = error instanceof Error ? error.message : 'Failed to edit queued message'
+        toast({ variant: 'danger', title: 'Failed to edit queued message', description: msg })
+      }
+    },
+    [api, apiFor, selectedThreadId, selectedWorkspaceId, setSnapshot, toast, workspaceHostIndex],
+  )
+
   const handleArchiveThread = useCallback(
     async (workspaceId: string, threadId: string) => {
       const client = apiFor(workspaceId)
@@ -1372,6 +1456,11 @@ function AppInner() {
     [apiFor, setActionError, setSnapshot, viewSnapshot?.threads],
   )
 
+  const handleThreadSortChange = useCallback((mode: ThreadSortMode) => {
+    setThreadSort(mode)
+    writeStoredThreadSort(mode)
+  }, [])
+
   // Memoized derived values
   const isThreadDetailPending = Boolean(
     selectedThreadId &&
@@ -1495,6 +1584,8 @@ function AppInner() {
             onMarkThreadRead={handleMarkThreadRead}
             onAddProject={handleAddProject}
             onRemoveWorkspace={handleRemoveWorkspace}
+            threadSort={threadSort}
+            onThreadSortChange={handleThreadSortChange}
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
@@ -1549,6 +1640,7 @@ function AppInner() {
               interactiveRequests={interactiveRequests}
               onRemoveQueuedTurn={handleRemoveQueuedTurn}
               onSteerQueuedTurn={handleSteerQueuedTurn}
+              onEditQueuedTurn={handleEditQueuedTurn}
               canSteerQueuedTurn={activeCapabilities.supports_steering}
               // Remote-host workspaces have no local checkout, so the rail has
               // no diff to show and file paths stay plain text there.

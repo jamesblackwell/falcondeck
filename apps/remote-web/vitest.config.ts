@@ -10,5 +10,12 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: './src/test/setup.ts',
+    // Node 26 ships an experimental localStorage global that is undefined
+    // without --localstorage-file; it shadows jsdom's real localStorage when
+    // vitest populates globals. Turn it off so window.localStorage works.
+    poolOptions: {
+      threads: { execArgv: ['--no-experimental-webstorage'] },
+      forks: { execArgv: ['--no-experimental-webstorage'] },
+    },
   },
 })

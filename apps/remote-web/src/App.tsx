@@ -22,11 +22,18 @@ import {
   normalizeThreadDetail,
   normalizeThreadHandle,
   normalizeThreadSummary,
+  composerProviderFor,
+  composerSelectionFor,
+  draftKeyFor,
   providerForThread,
   publicKeyToBase64,
   reconcileSnapshotSelection,
+  resolvePersistedMode,
   restoreBoxKeyPair,
   selectedSkillsFromText,
+  upsertComposerDraft,
+  withComposerProvider,
+  withComposerSelection,
   secretKeyToBase64,
   shouldReusePersistedRemoteSession,
   signPairingClaimChallenge,
@@ -40,6 +47,7 @@ import {
   type AgentProvider,
   type ClaimPairingRequest,
   type ClaimPairingResponse,
+  type ComposerDrafts,
   type ConversationItem,
   type DaemonSnapshot,
   type EncryptedEnvelope,
@@ -49,6 +57,8 @@ import {
   type MachinePresence,
   type PairingChallengeRequest,
   type PairingChallengeResponse,
+  type PersistedComposerSelection,
+  type PersistedComposerState,
   type PersistedRemoteSession,
   type QueuedRemoteAction,
   type RelayServerMessage,
@@ -57,6 +67,7 @@ import {
   type SessionCryptoState,
   type ThreadDetail,
   type ThreadHandle,
+  type ThreadSortMode,
   type ThreadSummary,
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
@@ -99,6 +110,7 @@ import {
   loadPendingActionIds,
   loadPersistedRemoteSession,
   loadPersistedSelection,
+  loadThreadSortMode,
   markInteractiveRequestResolved,
   maskIdentifier,
   parseDaemonEvent,
@@ -106,6 +118,7 @@ import {
   persistPendingActionIds,
   persistRemoteSession,
   persistSelection,
+  persistThreadSortMode,
   postThreadNotification,
   reasoningOptions,
   relayHostLabel,
@@ -116,6 +129,12 @@ import {
   waitForPollInterval,
   type NotificationPreference,
 } from './lib/remoteAppUtils'
+import {
+  readPersistedComposerState,
+  readStoredDrafts,
+  writePersistedComposerState,
+  writeStoredDrafts,
+} from './lib/composer-persistence'
 
 const DEFAULT_RELAY_URL = DEFAULT_REMOTE_RELAY_URL
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
@@ -124,6 +143,9 @@ const RELAY_PING_INTERVAL_MS = 15_000
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
 const MAX_PENDING_SNAPSHOT_EVENTS = 1_000
+// Stable empty array so conversations without attachments don't bust the
+// memoized PromptInput on every render.
+const NO_ATTACHMENTS: ImageInput[] = []
 // Retry cadence for asking the daemon to republish the session bootstrap
 // while the connection is up but the session data key is missing.
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
@@ -159,13 +181,54 @@ function RemoteApp() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null)
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null)
   const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
-  const [draft, setDraft] = useState('')
-  const [attachments, setAttachments] = useState<ImageInput[]>([])
+  const [drafts, setDrafts] = useState<ComposerDrafts>(() => readStoredDrafts())
+  const [attachmentsByConversation, setAttachmentsByConversation] = useState<
+    Record<string, ImageInput[]>
+  >({})
   const [selectedProvider, setSelectedProvider] = useState<AgentProvider>('codex')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
   const [selectedEffort, setSelectedEffort] = useState<string | null>('medium')
   const [selectedPermissionMode, setSelectedPermissionMode] = useState<string | null>(null)
   const [selectedSandboxMode, setSelectedSandboxMode] = useState<string | null>(null)
+  const [persistedComposerSelections, setPersistedComposerSelections] =
+    useState<PersistedComposerState>(() => readPersistedComposerState())
+
+  // Each conversation keeps its own unsent input, keyed by workspace + thread
+  // ('new' for a thread not yet created), so navigating never carries text or
+  // attachments across. Draft text is device-local persistent; attachments
+  // follow their conversation for the session only.
+  const conversationKey = draftKeyFor(selectedWorkspaceId, selectedThreadId)
+  const draft = drafts[conversationKey]?.text ?? ''
+  const attachments = attachmentsByConversation[conversationKey] ?? NO_ATTACHMENTS
+
+  const setDraftForConversation = useCallback((key: string, value: string) => {
+    setDrafts((current) => {
+      const next = upsertComposerDraft(current, key, value)
+      if (next !== current) writeStoredDrafts(next)
+      return next
+    })
+  }, [])
+
+  const setDraft = useCallback(
+    (value: string) => setDraftForConversation(conversationKey, value),
+    [conversationKey, setDraftForConversation],
+  )
+
+  const setAttachmentsForConversation = useCallback(
+    (key: string, updater: (current: ImageInput[]) => ImageInput[]) => {
+      setAttachmentsByConversation((current) => {
+        const next = updater(current[key] ?? NO_ATTACHMENTS)
+        if (next.length === 0) {
+          if (!(key in current)) return current
+          const rest = { ...current }
+          delete rest[key]
+          return rest
+        }
+        return { ...current, [key]: next }
+      })
+    },
+    [],
+  )
   const [error, setError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
@@ -175,6 +238,7 @@ function RemoteApp() {
   const [notificationPreference, setNotificationPreference] = useState<NotificationPreference>(
     () => loadNotificationPreference(),
   )
+  const [threadSort, setThreadSort] = useState<ThreadSortMode>(() => loadThreadSortMode())
   // Distinguishes the very first connect from a retry after a drop so the
   // offline banner can stay put across the whole backoff cycle.
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false)
@@ -1471,11 +1535,12 @@ function RemoteApp() {
     const submittedDraft = draft
     const submittedAttachments = attachments
     const submittedSkills = selectedSkillsFromText(submittedDraft, selectedWorkspace.skills ?? [])
-    setDraft('')
-    setAttachments([])
+    const submittedKey = conversationKey
+    setDraftForConversation(submittedKey, '')
+    setAttachmentsForConversation(submittedKey, () => [])
     setIsSubmitting(true)
+    let activeThreadId = selectedThreadId
     try {
-      let activeThreadId = selectedThreadId
       if (!activeThreadId) {
         const handle = normalizeThreadHandle(
           await submitQueuedAction<ThreadHandle>('thread.start', {
@@ -1508,8 +1573,13 @@ function RemoteApp() {
       }, { awaitCompletion: false })
       setError(null)
     } catch (e) {
-      setDraft(submittedDraft)
-      setAttachments(submittedAttachments)
+      // Put the unsent input back where the user now is: the thread that was
+      // created before the send failed, or the conversation they sent from.
+      const restoreKey = activeThreadId
+        ? draftKeyFor(selectedWorkspace.id, activeThreadId)
+        : submittedKey
+      setDraftForConversation(restoreKey, submittedDraft)
+      setAttachmentsForConversation(restoreKey, () => submittedAttachments)
       reportError(e, 'Failed to send message')
     } finally {
       setIsSubmitting(false)
@@ -1544,6 +1614,31 @@ function RemoteApp() {
 
   // ── Sync model/effort/mode ─────────────────────────────────────────
 
+  const rememberComposerSelection = useCallback(
+    (provider: AgentProvider, patch: Partial<PersistedComposerSelection>) => {
+      if (!selectedWorkspace) return
+      setPersistedComposerSelections((current) => {
+        const next = withComposerSelection(current, selectedWorkspace.path, provider, patch)
+        writePersistedComposerState(next)
+        return next
+      })
+    },
+    [selectedWorkspace],
+  )
+
+  const rememberWorkspaceProvider = useCallback(
+    (provider: AgentProvider) => {
+      if (!selectedWorkspace) return
+      setPersistedComposerSelections((current) => {
+        const next = withComposerProvider(current, selectedWorkspace.path, provider)
+        if (next === current) return current
+        writePersistedComposerState(next)
+        return next
+      })
+    },
+    [selectedWorkspace],
+  )
+
   useEffect(() => {
     if (!selectedWorkspace) {
       setSelectedProvider('codex')
@@ -1558,13 +1653,47 @@ function RemoteApp() {
     if (selectionSeedRef.current === seedKey) return
     selectionSeedRef.current = seedKey
 
-    const nextProvider = providerForThread(selectedThread, selectedWorkspace)
+    // An existing thread dictates its own provider; a new conversation starts
+    // from the provider the user last picked here, so that choice sticks.
+    const stickyProvider = composerProviderFor(persistedComposerSelections, selectedWorkspace.path)
+    const nextProvider =
+      !selectedThread &&
+      stickyProvider &&
+      workspaceProviderOptions(selectedWorkspace).some(
+        (option) => option.provider === stickyProvider,
+      )
+        ? stickyProvider
+        : providerForThread(selectedThread, selectedWorkspace)
     setSelectedProvider(nextProvider)
-    setSelectedPermissionMode(selectedThread?.agent.permission_mode ?? null)
-    setSelectedSandboxMode(selectedThread?.agent.sandbox_mode ?? null)
+    const preferredSelection = composerSelectionFor(
+      persistedComposerSelections,
+      selectedWorkspace.path,
+      nextProvider,
+    )
+    // Same idea for the modes: threads keep their own, new conversations get
+    // the remembered choice as long as the provider still offers it.
+    const capabilities = workspaceAgentCapabilities(selectedWorkspace, nextProvider)
+    setSelectedPermissionMode(
+      selectedThread
+        ? selectedThread.agent.permission_mode ?? null
+        : resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+    )
+    setSelectedSandboxMode(
+      selectedThread
+        ? selectedThread.agent.sandbox_mode ?? null
+        : resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),
+    )
     const providerModels = workspaceModels(selectedWorkspace, nextProvider)
+    const preferredModelId =
+      preferredSelection?.modelId &&
+      providerModels.some((model) => model.id === preferredSelection.modelId)
+        ? preferredSelection.modelId
+        : null
     const fallbackModelId =
-      providerModels.find((m) => m.is_default)?.id ?? providerModels[0]?.id ?? null
+      preferredModelId ??
+      providerModels.find((m) => m.is_default)?.id ??
+      providerModels[0]?.id ??
+      null
     if (selectedThread) {
       const nextModelId = selectedThread.agent.model_id ?? fallbackModelId
       setSelectedModel(nextModelId)
@@ -1576,10 +1705,18 @@ function RemoteApp() {
       return
     }
     setSelectedModel(fallbackModelId)
-    setSelectedEffort(
-      reasoningOptions(snapshot, selectedWorkspace.id, nextProvider, fallbackModelId)[0] ?? 'medium',
+    const effortOptions = reasoningOptions(
+      snapshot,
+      selectedWorkspace.id,
+      nextProvider,
+      fallbackModelId,
     )
-  }, [selectedThread, selectedWorkspace, snapshot])
+    setSelectedEffort(
+      preferredSelection?.effort && effortOptions.includes(preferredSelection.effort)
+        ? preferredSelection.effort
+        : effortOptions[0] ?? 'medium',
+    )
+  }, [persistedComposerSelections, selectedThread, selectedWorkspace, snapshot])
 
   useEffect(() => {
     if (!selectedWorkspace) return
@@ -1692,6 +1829,9 @@ function RemoteApp() {
   const handlePermissionModeChange = useCallback(
     (mode: string | null) => {
       setSelectedPermissionMode(mode)
+      rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
+        permissionMode: mode,
+      })
       if (!selectedWorkspace || !selectedThreadId) return
       void submitQueuedAction<ThreadHandle>('thread.update', {
         workspace_id: selectedWorkspace.id,
@@ -1701,12 +1841,23 @@ function RemoteApp() {
         .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
         .catch((e) => reportError(e, 'Failed to update permission mode'))
     },
-    [applyThreadHandle, reportError, selectedThreadId, selectedWorkspace],
+    [
+      applyThreadHandle,
+      rememberComposerSelection,
+      reportError,
+      selectedProvider,
+      selectedThread,
+      selectedThreadId,
+      selectedWorkspace,
+    ],
   )
 
   const handleSandboxModeChange = useCallback(
     (mode: string | null) => {
       setSelectedSandboxMode(mode)
+      rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
+        sandboxMode: mode,
+      })
       if (!selectedWorkspace || !selectedThreadId) return
       void submitQueuedAction<ThreadHandle>('thread.update', {
         workspace_id: selectedWorkspace.id,
@@ -1716,7 +1867,15 @@ function RemoteApp() {
         .then((handle) => applyThreadHandle(normalizeThreadHandle(handle)))
         .catch((e) => reportError(e, 'Failed to update sandbox mode'))
     },
-    [applyThreadHandle, reportError, selectedThreadId, selectedWorkspace],
+    [
+      applyThreadHandle,
+      rememberComposerSelection,
+      reportError,
+      selectedProvider,
+      selectedThread,
+      selectedThreadId,
+      selectedWorkspace,
+    ],
   )
 
   const handleUpdatePreferences = useCallback(
@@ -1748,6 +1907,10 @@ function RemoteApp() {
           ? selectedEffort
           : (nextOptions[0] ?? 'medium')
       setSelectedEffort(nextEffort)
+      rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
+        modelId,
+        effort: nextEffort,
+      })
       void persistThreadSettings({
         modelId,
         effort: nextEffort,
@@ -1755,7 +1918,9 @@ function RemoteApp() {
     },
     [
       persistThreadSettings,
+      rememberComposerSelection,
       selectedEffort,
+      selectedThread,
       selectedWorkspace?.id,
       snapshot,
       selectedProvider,
@@ -1765,26 +1930,74 @@ function RemoteApp() {
   const handleEffortChange = useCallback(
     (effort: string) => {
       setSelectedEffort(effort)
+      rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
+        modelId: selectedModel,
+        effort,
+      })
       void persistThreadSettings({
         modelId: selectedModel,
         effort,
       })
     },
-    [persistThreadSettings, selectedModel],
+    [
+      persistThreadSettings,
+      rememberComposerSelection,
+      selectedModel,
+      selectedProvider,
+      selectedThread,
+    ],
   )
 
   const handleProviderChange = useCallback(
     (provider: AgentProvider) => {
       if (selectedThread) return
       setSelectedProvider(provider)
+      rememberWorkspaceProvider(provider)
+      const preferredSelection = composerSelectionFor(
+        persistedComposerSelections,
+        selectedWorkspace?.path,
+        provider,
+      )
       const models = workspaceModels(selectedWorkspace, provider)
-      const fallbackModelId = models.find((model) => model.is_default)?.id ?? models[0]?.id ?? null
+      const preferredModelId =
+        preferredSelection?.modelId &&
+        models.some((model) => model.id === preferredSelection.modelId)
+          ? preferredSelection.modelId
+          : null
+      const fallbackModelId =
+        preferredModelId ??
+        models.find((model) => model.is_default)?.id ??
+        models[0]?.id ??
+        null
       setSelectedModel(fallbackModelId)
+      const effortOptions = reasoningOptions(
+        snapshot,
+        selectedWorkspace?.id ?? null,
+        provider,
+        fallbackModelId,
+      )
       setSelectedEffort(
-        reasoningOptions(snapshot, selectedWorkspace?.id ?? null, provider, fallbackModelId)[0] ?? 'medium',
+        preferredSelection?.effort && effortOptions.includes(preferredSelection.effort)
+          ? preferredSelection.effort
+          : effortOptions[0] ?? 'medium',
+      )
+      // Switching provider swaps in that provider's remembered modes rather
+      // than losing the choice every time.
+      const capabilities = workspaceAgentCapabilities(selectedWorkspace, provider)
+      setSelectedPermissionMode(
+        resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+      )
+      setSelectedSandboxMode(
+        resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),
       )
     },
-    [selectedThread, selectedWorkspace, snapshot],
+    [
+      persistedComposerSelections,
+      rememberWorkspaceProvider,
+      selectedThread,
+      selectedWorkspace,
+      snapshot,
+    ],
   )
 
   const activeProvider = useMemo(
@@ -1923,6 +2136,21 @@ function RemoteApp() {
     }
   }
 
+  async function handleEditQueuedTurn(queuedId: string, text: string) {
+    if (!selectedWorkspaceId || !selectedThreadId) return
+    try {
+      await callRpc('thread.queue.edit', {
+        workspace_id: selectedWorkspaceId,
+        thread_id: selectedThreadId,
+        queued_id: queuedId,
+        text,
+      })
+    } catch (e) {
+      // A failed edit leaves the original message queued, so nothing is lost.
+      reportError(e, 'Failed to edit queued message')
+    }
+  }
+
   async function handleSetGoal(objective: string, tokenBudget: number | null) {
     if (!selectedWorkspaceId || !selectedThreadId) throw new Error('Select a thread first')
     applyThreadSummary(
@@ -2026,16 +2254,24 @@ function RemoteApp() {
     selectedWorkspace,
     snapshot?.workspaces,
   ])
-  const handleRemoveAttachment = useCallback((attachmentId: string) => {
-    setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId))
-  }, [])
+  const handleRemoveAttachment = useCallback(
+    (attachmentId: string) => {
+      setAttachmentsForConversation(conversationKey, (current) =>
+        current.filter((attachment) => attachment.id !== attachmentId),
+      )
+    },
+    [conversationKey, setAttachmentsForConversation],
+  )
   const handlePickImages = useCallback(
     (files: FileList | null) => {
+      // Bind to the conversation the user picked in; file reading is async and
+      // they may have navigated away by the time it resolves.
+      const key = conversationKey
       void filesToImageInputs(files)
-        .then((next) => setAttachments((current) => [...current, ...next]))
+        .then((next) => setAttachmentsForConversation(key, (current) => [...current, ...next]))
         .catch((cause) => reportError(cause, 'Could not attach that image'))
     },
-    [reportError],
+    [conversationKey, reportError, setAttachmentsForConversation],
   )
 
   useEffect(() => {
@@ -2119,6 +2355,11 @@ function RemoteApp() {
   const handleNotificationPreferenceChange = useCallback((value: NotificationPreference) => {
     setNotificationPreference(value)
     persistNotificationPreference(value)
+  }, [])
+
+  const handleThreadSortChange = useCallback((mode: ThreadSortMode) => {
+    setThreadSort(mode)
+    persistThreadSortMode(mode)
   }, [])
 
   useEffect(() => {
@@ -2273,6 +2514,8 @@ function RemoteApp() {
                 onTogglePinThread={handleTogglePinThread}
                 onMarkThreadRead={handleMarkThreadRead}
                 onRemoveWorkspace={handleRemoveWorkspace}
+                threadSort={threadSort}
+                onThreadSortChange={handleThreadSortChange}
                 title="Projects"
                 errors={error ? [error] : []}
                 emptyState={{
@@ -2308,6 +2551,8 @@ function RemoteApp() {
           onTogglePinThread={handleTogglePinThread}
           onMarkThreadRead={handleMarkThreadRead}
           onRemoveWorkspace={handleRemoveWorkspace}
+          threadSort={threadSort}
+          onThreadSortChange={handleThreadSortChange}
           title="Projects"
           errors={error ? [error] : []}
           emptyState={{
@@ -2347,6 +2592,7 @@ function RemoteApp() {
                 canSteer={activeCapabilities.supports_steering}
                 onRemove={(queuedId) => void handleRemoveQueuedTurn(queuedId)}
                 onSteer={(queuedId) => void handleSteerQueuedTurn(queuedId)}
+                onEdit={(queuedId, text) => void handleEditQueuedTurn(queuedId, text)}
               />
             ) : null}
             <PromptInput

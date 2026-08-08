@@ -6,7 +6,7 @@ import { useUnistyles } from 'react-native-unistyles'
 
 import { buildProjectGroups } from '@falcondeck/client-core'
 
-import { useRelayStore, useSessionStore, useUIStore } from '@/store'
+import { useRelayStore, useSessionStore } from '@/store'
 import { SidebarView } from '@/components/navigation'
 
 export default function AppLayout() {
@@ -30,13 +30,10 @@ export default function AppLayout() {
 
   const handleNewThread = useCallback(
     (wId: string) => {
+      // The composer seed effect reacts to this selection change and applies
+      // the workspace's remembered provider/model/effort/modes, so nothing is
+      // inherited from the previously viewed thread.
       useSessionStore.getState().selectNewThread(wId)
-      // Reset provider/model/effort so the new thread uses workspace defaults
-      // instead of inheriting from the previously viewed thread
-      const ui = useUIStore.getState()
-      ui.setSelectedProvider(null)
-      ui.setSelectedModel(null)
-      ui.setSelectedEffort(null)
       router.navigate('/(app)')
     },
     [router],
@@ -62,6 +59,10 @@ export default function AppLayout() {
     <Drawer
       screenOptions={{
         headerShown: false,
+        // Keep the native drawer gesture available on iOS and give users a
+        // forgiving edge target for opening the sidebar.
+        swipeEnabled: true,
+        swipeEdgeWidth: 80,
         drawerStyle: {
           backgroundColor: theme.colors.surface[1],
           width: 300,

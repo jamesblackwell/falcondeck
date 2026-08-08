@@ -1,16 +1,24 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { draftKeyFor } from '@falcondeck/client-core'
+
+import { storage } from '@/storage/mmkv'
 
 import { useUIStore } from './ui-store'
 
 describe('ui-store', () => {
   beforeEach(() => {
+    vi.restoreAllMocks()
     // Reset to initial state
     useUIStore.setState({
+      conversationKey: draftKeyFor(null, null),
+      drafts: {},
+      attachmentsByConversation: {},
       draft: '',
       attachments: [],
       selectedProvider: null,
       selectedModel: null,
       selectedEffort: 'medium',
+      persistedComposerSelections: {},
       isSubmitting: false,
     })
   })
@@ -78,5 +86,111 @@ describe('ui-store', () => {
 
     useUIStore.getState().setSelectedProvider(null)
     expect(useUIStore.getState().selectedProvider).toBeNull()
+  })
+
+  it('keeps a separate draft per conversation', () => {
+    const { setDraft, setConversation } = useUIStore.getState()
+
+    setConversation('w1', null)
+    setDraft('new thread text')
+
+    setConversation('w1', 't1')
+    expect(useUIStore.getState().draft).toBe('')
+    setDraft('thread one text')
+
+    setConversation('w1', null)
+    expect(useUIStore.getState().draft).toBe('new thread text')
+
+    setConversation('w1', 't1')
+    expect(useUIStore.getState().draft).toBe('thread one text')
+  })
+
+  it('ignores a conversation change to the same key', () => {
+    const { setConversation, setDraft } = useUIStore.getState()
+    setConversation('w1', 't1')
+    setDraft('text')
+    setConversation('w1', 't1')
+    expect(useUIStore.getState().draft).toBe('text')
+  })
+
+  it('clears only the current conversation draft', () => {
+    const { clearDraft, setConversation, setDraft } = useUIStore.getState()
+
+    setConversation('w1', 't1')
+    setDraft('one')
+    setConversation('w1', 't2')
+    setDraft('two')
+
+    clearDraft()
+    expect(useUIStore.getState().draft).toBe('')
+    expect(useUIStore.getState().drafts[draftKeyFor('w1', 't2')]).toBeUndefined()
+
+    setConversation('w1', 't1')
+    expect(useUIStore.getState().draft).toBe('one')
+  })
+
+  it('keeps attachments with their conversation', () => {
+    const image = { type: 'image', id: 'img-1', name: 'one.png', mime_type: 'image/png', url: 'data:image/png;base64,one' } as const
+    const { addAttachments, setConversation } = useUIStore.getState()
+
+    setConversation('w1', 't1')
+    addAttachments([image])
+
+    setConversation('w1', 't2')
+    expect(useUIStore.getState().attachments).toEqual([])
+
+    setConversation('w1', 't1')
+    expect(useUIStore.getState().attachments).toEqual([image])
+  })
+
+  it('persists drafts to storage and tolerates write failures', () => {
+    const { setDraft } = useUIStore.getState()
+
+    setDraft('saved text')
+    expect(storage.getString('falcondeck.mobile.composer-drafts.v1')).toContain('saved text')
+
+    vi.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+    setDraft('still works in memory')
+    expect(useUIStore.getState().draft).toBe('still works in memory')
+  })
+
+  it('remembers picker selections per workspace and provider', () => {
+    const { rememberComposerSelection, rememberWorkspaceProvider } = useUIStore.getState()
+
+    rememberWorkspaceProvider('/repo', 'claude')
+    rememberComposerSelection('/repo', 'claude', { permissionMode: 'bypassPermissions' })
+    rememberComposerSelection('/repo', 'claude', { modelId: 'claude-fable-5' })
+
+    const state = useUIStore.getState().persistedComposerSelections
+    expect(state['/repo'].provider).toBe('claude')
+    expect(state['/repo'].selections.claude).toEqual({
+      modelId: 'claude-fable-5',
+      effort: null,
+      permissionMode: 'bypassPermissions',
+      sandboxMode: null,
+    })
+    expect(storage.getString('falcondeck.mobile.composer-selections.v1')).toContain(
+      'bypassPermissions',
+    )
+  })
+
+  it('skips re-remembering the same workspace provider', () => {
+    const { rememberWorkspaceProvider } = useUIStore.getState()
+    rememberWorkspaceProvider('/repo', 'claude')
+    const before = useUIStore.getState().persistedComposerSelections
+    rememberWorkspaceProvider('/repo', 'claude')
+    expect(useUIStore.getState().persistedComposerSelections).toBe(before)
+  })
+
+  it('tolerates selection write failures', () => {
+    vi.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+    useUIStore.getState().rememberComposerSelection('/repo', 'codex', { effort: 'high' })
+    expect(
+      useUIStore.getState().persistedComposerSelections['/repo'].selections.codex?.effort,
+    ).toBe('high')
   })
 })

@@ -133,6 +133,87 @@ describe('DesktopSidebar', () => {
     expect(onSelectThread).toHaveBeenCalledWith('workspace-1', 'pinned-thread')
   })
 
+  it('sorts each project’s chats by name when asked', () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [
+            thread({ id: 'thread-b', title: 'Beta chat', updated_at: '2026-03-15T12:00:00Z' }),
+            thread({ id: 'thread-a', title: 'Alpha chat', updated_at: '2026-03-15T09:00:00Z' }),
+          ],
+        },
+      ],
+      threadSort: 'alphabetical',
+      onThreadSortChange: vi.fn(),
+    })
+
+    const projectsSection = screen.getByRole('region', { name: 'Projects' })
+    const alpha = within(projectsSection).getByText('Alpha chat')
+    const beta = within(projectsSection).getByText('Beta chat')
+    expect(alpha.compareDocumentPosition(beta)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  it('puts chats waiting on the user first when sorting by priority', () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [
+            thread({ id: 'thread-idle', title: 'Idle chat', updated_at: '2026-03-15T12:00:00Z' }),
+            thread({
+              id: 'thread-waiting',
+              title: 'Waiting chat',
+              updated_at: '2026-03-15T09:00:00Z',
+              attention: {
+                level: 'awaiting_response',
+                badge_label: 'Awaiting response',
+                unread: false,
+                pending_approval_count: 1,
+                pending_question_count: 0,
+                last_agent_activity_seq: 0,
+                last_read_seq: 0,
+              },
+            }),
+          ],
+        },
+      ],
+      threadSort: 'priority',
+      onThreadSortChange: vi.fn(),
+    })
+
+    const projectsSection = screen.getByRole('region', { name: 'Projects' })
+    const waiting = within(projectsSection).getByText('Waiting chat')
+    const idle = within(projectsSection).getByText('Idle chat')
+    expect(waiting.compareDocumentPosition(idle)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  it('changes the chat sort from the Projects heading menu', async () => {
+    const onThreadSortChange = vi.fn()
+    renderSidebar({ threadSort: 'last_updated', onThreadSortChange })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sort chats' }))
+
+    const menu = await screen.findByRole('menu', { name: 'Sort chats by' })
+    expect(within(menu).getByRole('menuitemradio', { name: 'Last updated' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    )
+    expect(within(menu).getByRole('menuitemradio', { name: 'Name' })).toHaveAttribute(
+      'aria-checked',
+      'false',
+    )
+
+    fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'Name' }))
+    expect(onThreadSortChange).toHaveBeenCalledWith('alphabetical')
+  })
+
+  it('leaves the sort menu out when no sort handler is provided', () => {
+    renderSidebar()
+
+    expect(screen.queryByRole('button', { name: 'Sort chats' })).not.toBeInTheDocument()
+  })
+
   it('collapses a project to hide its threads, and selects it on the way back open', () => {
     const onSelectWorkspace = vi.fn()
     renderSidebar({ onSelectWorkspace })

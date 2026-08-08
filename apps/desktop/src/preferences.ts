@@ -1,11 +1,13 @@
 import type {
   FalconDeckPreferences,
   ThinkingDisplay,
+  ThreadSortMode,
   UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
-import { normalizePreferences } from '@falcondeck/client-core'
+import { isThreadSortMode, normalizePreferences } from '@falcondeck/client-core'
 
 const THINKING_DISPLAY_STORAGE_KEY = 'falcondeck.desktop.thinking-display.v1'
+const THREAD_SORT_STORAGE_KEY = 'falcondeck.desktop.thread-sort.v1'
 
 const THINKING_DISPLAY_VALUES: ThinkingDisplay[] = [
   'auto',
@@ -39,6 +41,27 @@ export function writeStoredThinkingDisplay(value: ThinkingDisplay) {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(THINKING_DISPLAY_STORAGE_KEY, value)
+  } catch {
+    // Storage can be unavailable (private mode, quota); the in-memory value
+    // stays authoritative for this session.
+  }
+}
+
+/** Sidebar chat ordering is a per-device view preference, like zoom. */
+export function readStoredThreadSort(): ThreadSortMode {
+  if (typeof window === 'undefined') return 'last_updated'
+  try {
+    const raw = window.localStorage.getItem(THREAD_SORT_STORAGE_KEY)
+    return isThreadSortMode(raw) ? raw : 'last_updated'
+  } catch {
+    return 'last_updated'
+  }
+}
+
+export function writeStoredThreadSort(value: ThreadSortMode) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(THREAD_SORT_STORAGE_KEY, value)
   } catch {
     // Storage can be unavailable (private mode, quota); the in-memory value
     // stays authoritative for this session.
