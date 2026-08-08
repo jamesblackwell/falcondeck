@@ -94,8 +94,17 @@ export const Conversation = memo(function Conversation({
     return last?.kind === 'reasoning' ? last.id : null
   }, [isThinking, renderableItems])
   const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
+  // "Ready for instructions" claims the thread is idle and empty, so any busy
+  // signal outranks it: a just-submitted prompt hasn't echoed into `items` yet
+  // (isThinking covers that gap), a blocked turn is waiting on the user, and a
+  // hydrating thread hasn't revealed whether it is empty at all.
   const showEmptyState =
-    renderBlocks.length === 0 && liveActivityGroups.length === 0 && !hasHiddenOnlyItems
+    renderBlocks.length === 0 &&
+    liveActivityGroups.length === 0 &&
+    !hasHiddenOnlyItems &&
+    !isThinking &&
+    !isWaitingForInput &&
+    !isLoading
 
   useEffect(() => {
     if (!threadKey) return
