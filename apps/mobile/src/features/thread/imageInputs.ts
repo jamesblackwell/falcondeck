@@ -13,14 +13,17 @@ export function imagePickerAssetsToImageInputs(
     if (!asset.base64) return []
 
     const mimeType = asset.mimeType ?? 'image/jpeg'
+    const fallbackName = asset.uri?.split('/').pop()?.trim() || null
 
     return [{
       type: 'image',
       id: imageInputId(index),
-      name: asset.fileName ?? null,
+      name: asset.fileName ?? fallbackName,
       mime_type: mimeType,
       url: `data:${mimeType};base64,${asset.base64}`,
-      local_path: asset.uri,
+      // The picker URI only exists on this device; the daemon materializes
+      // the data URL into a host-local file instead.
+      local_path: null,
     }]
   })
 }

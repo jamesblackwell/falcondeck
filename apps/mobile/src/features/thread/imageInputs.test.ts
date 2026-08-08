@@ -45,7 +45,25 @@ describe('imageInputs', () => {
         name: 'diagram.png',
         mime_type: 'image/png',
         url: 'data:image/png;base64,abc123',
-        local_path: 'file:///tmp/diagram.png',
+        local_path: null,
+      }),
+    ])
+  })
+
+  it('falls back to the picker URI filename when the asset has no name', () => {
+    expect(
+      imagePickerAssetsToImageInputs([
+        {
+          uri: 'file:///var/mobile/Caches/ImagePicker/52CD892F.jpg',
+          fileName: null,
+          mimeType: 'image/jpeg',
+          base64: 'abc123',
+        } as any,
+      ]),
+    ).toEqual([
+      expect.objectContaining({
+        name: '52CD892F.jpg',
+        local_path: null,
       }),
     ])
   })
@@ -97,7 +115,7 @@ describe('imageInputs', () => {
         name: 'whiteboard.jpg',
         mime_type: 'image/jpeg',
         url: 'data:image/jpeg;base64,encoded',
-        local_path: 'file:///tmp/whiteboard.jpg',
+        local_path: null,
       }),
     ])
 

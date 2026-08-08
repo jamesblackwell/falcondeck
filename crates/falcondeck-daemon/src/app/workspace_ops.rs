@@ -756,9 +756,14 @@ async fn normalize_image_input(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        let mut normalized = image.clone();
-        normalized.url = compact_image_reference_url(image, local_path);
-        return Ok(normalized);
+        // Only trust a local_path that exists on this host; remote clients
+        // (e.g. the iOS app) send their own device paths alongside an inline
+        // payload, and those must fall through to be materialized here.
+        if tokio::fs::try_exists(local_path).await.unwrap_or(false) {
+            let mut normalized = image.clone();
+            normalized.url = compact_image_reference_url(image, local_path);
+            return Ok(normalized);
+        }
     }
 
     if image_url.starts_with("data:") {
@@ -2875,6 +2880,69 @@ mod tests {
         assert_eq!(tokio::fs::read(local_path).await.unwrap(), b"hello");
     }
 
+    #[tokio::test]
+    async fn materializes_data_url_when_local_path_does_not_exist_on_this_host() {
+        // The iOS app sends its on-device picker path alongside the inline
+        // payload; that path must not be trusted on the daemon host.
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let app = AppState::new_with_state_path("0.1.0".to_string(), HashMap::new(), state_path);
+        let inputs = vec![TurnInputItem::Image(ImageInput {
+            id: "img-1".to_string(),
+            name: Some("photo.jpg".to_string()),
+            mime_type: Some("image/jpeg".to_string()),
+            url: "data:image/jpeg;base64,aGVsbG8=".to_string(),
+            local_path: Some(
+                "file:///var/mobile/Containers/Data/Application/ABC/Library/Caches/ImagePicker/photo.jpg"
+                    .to_string(),
+            ),
+        })];
+
+        let normalized = normalize_turn_inputs(&app, "workspace-1", "thread-1", &inputs)
+            .await
+            .unwrap();
+
+        let TurnInputItem::Image(image) = &normalized[0] else {
+            panic!("expected image input");
+        };
+        let local_path = image
+            .local_path
+            .as_deref()
+            .expect("expected normalized local path");
+        assert!(local_path.ends_with("img-1.jpg"));
+        assert_eq!(image.url, local_path);
+        assert_eq!(tokio::fs::read(local_path).await.unwrap(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn keeps_local_path_that_exists_on_this_host() {
+        let temp_dir = tempdir().unwrap();
+        let state_path = temp_dir.path().join("daemon-state.json");
+        let existing = temp_dir.path().join("img.png");
+        tokio::fs::write(&existing, b"png-bytes").await.unwrap();
+        let app = AppState::new_with_state_path("0.1.0".to_string(), HashMap::new(), state_path);
+        let inputs = vec![TurnInputItem::Image(ImageInput {
+            id: "img-1".to_string(),
+            name: None,
+            mime_type: Some("image/png".to_string()),
+            url: "data:image/png;base64,aGVsbG8=".to_string(),
+            local_path: Some(existing.to_string_lossy().to_string()),
+        })];
+
+        let normalized = normalize_turn_inputs(&app, "workspace-1", "thread-1", &inputs)
+            .await
+            .unwrap();
+
+        let TurnInputItem::Image(image) = &normalized[0] else {
+            panic!("expected image input");
+        };
+        assert_eq!(
+            image.local_path.as_deref(),
+            Some(existing.to_string_lossy().as_ref())
+        );
+        assert_eq!(image.url, existing.to_string_lossy());
+    }
+
     #[test]
     fn parses_image_data_urls_strictly() {
         let parsed =
@@ -2899,19 +2967,23 @@ mod tests {
 
     #[tokio::test]
     async fn compacts_inline_preview_urls_when_local_file_exists() {
+        let temp_dir = tempdir().unwrap();
+        let diagram_path = temp_dir.path().join("diagram.png");
+        tokio::fs::write(&diagram_path, b"png-bytes").await.unwrap();
+        let diagram_path = diagram_path.to_string_lossy().to_string();
         let image = ImageInput {
             id: "img-1".to_string(),
             name: Some("diagram.png".to_string()),
             mime_type: Some("image/png".to_string()),
             url: "data:image/png;base64,aGVsbG8=".to_string(),
-            local_path: Some("/tmp/diagram.png".to_string()),
+            local_path: Some(diagram_path.clone()),
         };
 
         let normalized = normalize_image_input(
             &AppState::new_with_state_path(
                 "0.1.0".to_string(),
                 HashMap::new(),
-                Path::new("/tmp/falcondeck-daemon-state.json").to_path_buf(),
+                temp_dir.path().join("falcondeck-daemon-state.json"),
             ),
             "workspace-1",
             "thread-1",
@@ -2920,8 +2992,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(normalized.url, "/tmp/diagram.png");
-        assert_eq!(normalized.local_path.as_deref(), Some("/tmp/diagram.png"));
+        assert_eq!(normalized.url, diagram_path);
+        assert_eq!(normalized.local_path.as_deref(), Some(diagram_path.as_str()));
     }
 
     #[tokio::test]
