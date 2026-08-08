@@ -1,11 +1,97 @@
+use std::path::Path;
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use chrono::Utc;
 use falcondeck_core::{
     ApprovalDecision, ConversationItem, InteractiveQuestion, InteractiveQuestionOption,
     InteractiveResponsePayload, ToolActivityKind, ToolArtifactKind, ToolCallDisplay,
     ToolHistoryMode, TurnInputItem,
 };
+use futures_util::future::join_all;
 use serde_json::Value;
 use uuid::Uuid;
+
+const RENDERABLE_IMAGE_URL_PREFIXES: [&str; 5] =
+    ["data:", "http://", "https://", "blob:", "asset:"];
+
+/// Rehydrates compact on-disk image references for clients that cannot load
+/// daemon-local paths directly (notably remote web and mobile clients).
+///
+/// The stored conversation item remains compact; this clone is only used at
+/// the transport boundary.
+pub(super) async fn with_renderable_attachment_previews(
+    mut item: ConversationItem,
+) -> ConversationItem {
+    let ConversationItem::UserMessage { attachments, .. } = &mut item else {
+        return item;
+    };
+
+    for attachment in attachments {
+        if RENDERABLE_IMAGE_URL_PREFIXES
+            .iter()
+            .any(|prefix| attachment.url.trim().starts_with(prefix))
+        {
+            continue;
+        }
+
+        let Some(local_path) = attachment
+            .local_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            continue;
+        };
+        let Some(mime_type) =
+            attachment_preview_mime_type(attachment.mime_type.as_deref(), local_path)
+        else {
+            continue;
+        };
+        let Ok(bytes) = tokio::fs::read(local_path).await else {
+            continue;
+        };
+
+        attachment.url = format!("data:{mime_type};base64,{}", BASE64.encode(bytes));
+    }
+
+    item
+}
+
+pub(super) async fn with_renderable_attachment_previews_for_items(
+    items: Vec<ConversationItem>,
+) -> Vec<ConversationItem> {
+    join_all(items.into_iter().map(with_renderable_attachment_previews)).await
+}
+
+fn attachment_preview_mime_type(
+    declared_mime_type: Option<&str>,
+    local_path: &str,
+) -> Option<String> {
+    if let Some(mime_type) = declared_mime_type
+        .map(str::trim)
+        .filter(|mime_type| mime_type.starts_with("image/"))
+    {
+        return Some(mime_type.to_string());
+    }
+
+    match Path::new(local_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png".to_string()),
+        Some("jpg" | "jpeg") => Some("image/jpeg".to_string()),
+        Some("gif") => Some("image/gif".to_string()),
+        Some("webp") => Some("image/webp".to_string()),
+        Some("bmp") => Some("image/bmp".to_string()),
+        Some("tif" | "tiff") => Some("image/tiff".to_string()),
+        Some("svg") => Some("image/svg+xml".to_string()),
+        Some("heic") => Some("image/heic".to_string()),
+        Some("heif") => Some("image/heif".to_string()),
+        _ => None,
+    }
+}
 
 use super::ManagedThread;
 use crate::codex::{extract_datetime_or_timestamp, extract_string};
@@ -729,6 +815,67 @@ fn summarize_tool_title(title: &str, activity_kind: ToolActivityKind) -> Option<
         ToolActivityKind::Test => Some("Run tests".to_string()),
         ToolActivityKind::Approval => Some("Request approval".to_string()),
         ToolActivityKind::Command | ToolActivityKind::Other => None,
+    }
+}
+
+#[cfg(test)]
+mod attachment_preview_tests {
+    use super::*;
+    use falcondeck_core::ImageInput;
+
+    #[tokio::test]
+    async fn rehydrates_local_images_without_changing_the_stored_path() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let image_path = temp_dir.path().join("preview.png");
+        std::fs::write(&image_path, b"png-bytes").unwrap();
+        let local_path = image_path.to_string_lossy().to_string();
+        let item = ConversationItem::UserMessage {
+            id: "message-1".to_string(),
+            text: "See screenshot".to_string(),
+            attachments: vec![ImageInput {
+                id: "image-1".to_string(),
+                name: Some("preview.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: local_path.clone(),
+                local_path: Some(local_path.clone()),
+            }],
+            created_at: Utc::now(),
+        };
+
+        let rendered = with_renderable_attachment_previews(item).await;
+        let ConversationItem::UserMessage { attachments, .. } = rendered else {
+            panic!("expected user message");
+        };
+
+        assert_eq!(
+            attachments[0].local_path.as_deref(),
+            Some(local_path.as_str())
+        );
+        assert_eq!(attachments[0].url, "data:image/png;base64,cG5nLWJ5dGVz");
+    }
+
+    #[tokio::test]
+    async fn leaves_remote_image_urls_unchanged() {
+        let url = "https://example.com/preview.png";
+        let item = ConversationItem::UserMessage {
+            id: "message-1".to_string(),
+            text: String::new(),
+            attachments: vec![ImageInput {
+                id: "image-1".to_string(),
+                name: None,
+                mime_type: Some("image/png".to_string()),
+                url: url.to_string(),
+                local_path: Some("/path/that/should/not/be/read.png".to_string()),
+            }],
+            created_at: Utc::now(),
+        };
+
+        let rendered = with_renderable_attachment_previews(item).await;
+        let ConversationItem::UserMessage { attachments, .. } = rendered else {
+            panic!("expected user message");
+        };
+
+        assert_eq!(attachments[0].url, url);
     }
 }
 

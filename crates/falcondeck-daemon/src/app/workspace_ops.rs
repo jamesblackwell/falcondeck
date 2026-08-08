@@ -2266,11 +2266,12 @@ pub(super) async fn thread_detail(
     let thread_summary = thread.summary.clone();
     let detail = thread_detail_window(&thread.items, request)?;
     drop(workspaces);
+    let items = with_renderable_attachment_previews_for_items(detail.items).await;
 
     Ok(ThreadDetail {
         workspace: workspace_summary,
         thread: app.build_thread_summary_from_clone(thread_summary).await,
-        items: detail.items,
+        items,
         has_older: detail.has_older,
         oldest_item_id: detail.oldest_item_id,
         newest_item_id: detail.newest_item_id,

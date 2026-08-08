@@ -27,6 +27,7 @@ use super::{
     conversation_helpers::{
         build_ai_thread_title_prompt, is_placeholder_thread_title, is_provisional_thread_title,
         normalize_generated_thread_title, should_generate_ai_thread_title, tool_display_metadata,
+        with_renderable_attachment_previews,
     },
 };
 use crate::{
@@ -661,10 +662,11 @@ impl AppState {
                     .max(self.inner.sequence.load(Ordering::Relaxed));
             }
             drop(workspaces);
+            let emitted_item = with_renderable_attachment_previews(item).await;
             self.emit(
                 Some(workspace_id.to_string()),
                 Some(thread_id.to_string()),
-                UnifiedEvent::ConversationItemUpdated { item },
+                UnifiedEvent::ConversationItemUpdated { item: emitted_item },
             );
             if track_attention {
                 let thread = self.thread_summary(workspace_id, thread_id).await?;
@@ -701,10 +703,11 @@ impl AppState {
                 .max(self.inner.sequence.load(Ordering::Relaxed));
         }
         drop(workspaces);
+        let emitted_item = with_renderable_attachment_previews(item).await;
         self.emit(
             Some(workspace_id.to_string()),
             Some(thread_id.to_string()),
-            UnifiedEvent::ConversationItemAdded { item },
+            UnifiedEvent::ConversationItemAdded { item: emitted_item },
         );
         if track_attention {
             let thread = self.thread_summary(workspace_id, thread_id).await?;
