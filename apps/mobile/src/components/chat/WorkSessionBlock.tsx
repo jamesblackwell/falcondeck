@@ -44,12 +44,12 @@ export const WorkSessionBlock = memo(function WorkSessionBlock({
         onPress={() => setOpen((current) => !current)}
         style={styles.row}
       >
-        {running ? <Spinner size={14} color={theme.colors.accent.default} /> : null}
+        {running ? <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} /> : null}
         <Text variant="label" color="muted">
           {running ? 'Working…' : `Worked for ${formatWorkDuration(startedAt, completedAt ?? startedAt)}`}
         </Text>
         <ChevronRight
-          size={14}
+          size={theme.iconSize.xs}
           style={open ? styles.chevronOpen : undefined}
           color={theme.colors.fg.muted}
         />
@@ -60,7 +60,13 @@ export const WorkSessionBlock = memo(function WorkSessionBlock({
             item.kind === 'reasoning' ? (
               <ConnectedReasoningBlock key={item.id} item={item} nested />
             ) : (
-              <ToolCallBlock key={item.id} item={item} defaultOpen={false} suppressDetail={false} />
+              <ToolCallBlock
+                key={item.id}
+                item={item}
+                defaultOpen={false}
+                suppressDetail={false}
+                nested
+              />
             ),
           )}
         </View>
@@ -74,12 +80,20 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[1.5],
+    // Sits on the transcript's content column, in line with message text
+    // and the thinking indicator it trades places with.
+    paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[1],
+    // The painted row is short; keep the tap target at the HIG minimum.
+    minHeight: theme.minTouchTarget,
   },
   chevronOpen: {
     transform: [{ rotate: '90deg' }],
   },
   detail: {
+    // The rail sits on the content edge, like a reasoning block's rule;
+    // nested rows hang from it instead of the screen edge.
+    marginHorizontal: theme.spacing[4],
     marginTop: theme.spacing[1],
     borderLeftWidth: 1,
     borderLeftColor: theme.colors.border.subtle,

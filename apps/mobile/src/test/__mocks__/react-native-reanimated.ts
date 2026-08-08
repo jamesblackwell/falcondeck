@@ -23,6 +23,7 @@ export function withDelay(_delay: any, val: any) { return val }
 export const Easing = {
   out: (fn: any) => fn,
   cubic: (t: any) => t,
+  linear: (t: any) => t,
 }
 export const KeyboardState = { OPEN: 1, CLOSED: 0 }
 const Animated = {

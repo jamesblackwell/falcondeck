@@ -1,63 +1,35 @@
-import { memo, useEffect } from 'react'
+import { memo } from 'react'
 import { View } from 'react-native'
-import { StyleSheet } from 'react-native-unistyles'
-import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withRepeat,
-  withSequence,
-  withTiming,
-  withDelay,
-} from 'react-native-reanimated'
+import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
+import { Spinner, Text } from '@/components/ui'
+
+/** Liveness row for a running turn with nothing else on screen to say so.
+    It shares the work-session header's geometry and spinner: the two swap
+    in the same slot under the transcript, and matching metrics keep that
+    handoff from moving a pixel. */
 export const ThinkingIndicator = memo(function ThinkingIndicator() {
-  const dot1 = useSharedValue(0.3)
-  const dot2 = useSharedValue(0.3)
-  const dot3 = useSharedValue(0.3)
-
-  useEffect(() => {
-    const duration = 400
-    const pulse = (delay: number) =>
-      withDelay(
-        delay,
-        withRepeat(
-          withSequence(withTiming(1, { duration }), withTiming(0.3, { duration })),
-          -1,
-        ),
-      )
-    dot1.value = pulse(0)
-    dot2.value = pulse(150)
-    dot3.value = pulse(300)
-  }, [dot1, dot2, dot3])
-
-  const style1 = useAnimatedStyle(() => ({ opacity: dot1.value }))
-  const style2 = useAnimatedStyle(() => ({ opacity: dot2.value }))
-  const style3 = useAnimatedStyle(() => ({ opacity: dot3.value }))
+  const { theme } = useUnistyles()
 
   return (
-    <View style={styles.container}>
-      <View style={styles.dotRow}>
-        <Animated.View style={[styles.dot, style1]} />
-        <Animated.View style={[styles.dot, style2]} />
-        <Animated.View style={[styles.dot, style3]} />
-      </View>
+    <View style={styles.row}>
+      <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} />
+      <Text variant="label" color="muted">
+        Thinking…
+      </Text>
     </View>
   )
 })
 
 const styles = StyleSheet.create((theme) => ({
-  container: {
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[4],
-  },
-  dotRow: {
+  row: {
     flexDirection: 'row',
-    gap: theme.spacing[1],
-  },
-  dot: {
-    width: theme.spacing[2],
-    height: theme.spacing[2],
-    borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.fg.muted,
+    alignItems: 'center',
+    gap: theme.spacing[1.5],
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[1],
+    // Same height as the (touch-target-sized) work-session row, so the
+    // transcript's bottom edge doesn't hop when one replaces the other.
+    minHeight: theme.minTouchTarget,
   },
 }))

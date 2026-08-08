@@ -22,6 +22,8 @@ interface ToolCallBlockProps {
   defaultOpen: boolean
   suppressDetail: boolean
   variant?: 'card' | 'row'
+  /** Set when the card renders inside a work session, which owns the inset. */
+  nested?: boolean
 }
 
 export const ToolCallBlock = memo(function ToolCallBlock({
@@ -29,6 +31,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   defaultOpen,
   suppressDetail,
   variant = 'card',
+  nested = false,
 }: ToolCallBlockProps) {
   const { theme } = useUnistyles()
   const { bodyStyle, chevronStyle, isOpen, onContentLayout, toggle } = useCollapsible(
@@ -65,7 +68,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, nested ? styles.containerNested : null]}>
       <Pressable style={styles.header} onPress={hasContent ? toggle : undefined}>
         {statusIcon}
         <Text variant="mono" color="tertiary" size="xs" style={styles.title} numberOfLines={1}>
@@ -102,6 +105,9 @@ const styles = StyleSheet.create((theme) => ({
     marginHorizontal: theme.spacing[4],
     marginVertical: theme.spacing[1],
     overflow: 'hidden',
+  },
+  containerNested: {
+    marginHorizontal: 0,
   },
   header: {
     flexDirection: 'row',

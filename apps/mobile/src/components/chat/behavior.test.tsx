@@ -15,9 +15,11 @@ vi.mock('react-native-reanimated', () => ({
   withRepeat: (value: any) => value,
   withSequence: (...values: any[]) => values[0],
   withDelay: (_delay: any, value: any) => value,
+  cancelAnimation: () => {},
   Easing: {
     out: (fn: any) => fn,
     cubic: (t: any) => t,
+    linear: (t: any) => t,
   },
   default: {
     View: 'Animated.View',
@@ -98,7 +100,7 @@ describe('chat behavior components', () => {
     const thinking = renderComponent(<ThinkingIndicator />)
 
     expect(textOf(service)).toContain('Background sync')
-    expect(thinking.toJSON()).toBeTruthy()
+    expect(textOf(thinking)).toContain('Thinking…')
   })
 
   it('renders model and effort chips in the toolbar', () => {
