@@ -162,6 +162,24 @@ export function useThreadActions() {
     [],
   )
 
+  const editQueuedTurn = useCallback(
+    async (workspaceId: string, threadId: string, queuedId: string, text: string) => {
+      const relay = useRelayStore.getState()
+      try {
+        await relay._callRpc(
+          'thread.queue.edit',
+          { workspace_id: workspaceId, thread_id: threadId, queued_id: queuedId, text },
+          { requestIdPrefix: 'mobile-queue' },
+        )
+        relay._setError(null)
+      } catch (e) {
+        relay._setError(e instanceof Error ? e.message : 'Failed to edit queued message')
+        throw e
+      }
+    },
+    [],
+  )
+
   return {
     archiveThread,
     renameThread,
@@ -171,5 +189,6 @@ export function useThreadActions() {
     clearThreadGoal,
     removeQueuedTurn,
     steerQueuedTurn,
+    editQueuedTurn,
   }
 }

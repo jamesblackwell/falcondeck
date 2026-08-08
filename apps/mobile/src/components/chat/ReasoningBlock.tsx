@@ -29,6 +29,14 @@ export const ReasoningBlock = memo(function ReasoningBlock({
   const { theme } = useUnistyles()
   const { collapsedLines, defaultOpen } = resolveReasoningReveal(display)
   const [isOpen, setIsOpen] = useState(defaultOpen)
+  // FlashList recycles instances across blocks; without this render-phase
+  // reset a thought the user expanded leaks its open state into whichever
+  // reasoning row the cell renders next, flickering rows during scroll.
+  const [appliedItemId, setAppliedItemId] = useState(item.id)
+  if (appliedItemId !== item.id) {
+    setAppliedItemId(item.id)
+    setIsOpen(defaultOpen)
+  }
 
   const label = reasoningHeaderLabel(item.summary)
   const hasBody = item.content.trim().length > 0

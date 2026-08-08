@@ -19,7 +19,10 @@ interface DiffBlockProps {
 
 export const DiffBlock = memo(function DiffBlock({ item, defaultOpen }: DiffBlockProps) {
   const { theme } = useUnistyles()
-  const { bodyStyle, chevronStyle, onContentLayout, toggle } = useCollapsible(defaultOpen)
+  const { bodyStyle, chevronStyle, onContentLayout, toggle } = useCollapsible(
+    defaultOpen,
+    item.id,
+  )
 
   return (
     <View style={styles.container}>

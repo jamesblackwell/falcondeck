@@ -219,6 +219,18 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       )
     },
+    async editQueuedTurn(workspaceId: string, threadId: string, queuedId: string, text: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/queue/${encodeURIComponent(queuedId)}`,
+          {
+            method: 'PATCH',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text }),
+          },
+        ),
+      )
+    },
     async startReview(payload: StartReviewPayload) {
       return parseJson<{ ok: boolean; message?: string | null }>(
         await fetch(`${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/review`, {

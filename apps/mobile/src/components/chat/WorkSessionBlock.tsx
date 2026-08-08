@@ -1,11 +1,11 @@
 import { memo, useState } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ChevronRight, Loader2 } from 'lucide-react-native'
+import { ChevronRight } from 'lucide-react-native'
 
 import { formatWorkDuration, type WorkSessionEntry } from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { Spinner, Text } from '@/components/ui'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ConnectedReasoningBlock } from './ReasoningBlock'
 
@@ -25,6 +25,15 @@ export const WorkSessionBlock = memo(function WorkSessionBlock({
   completedAt,
 }: WorkSessionBlockProps) {
   const [open, setOpen] = useState(false)
+  // FlashList recycles instances across blocks; without this render-phase
+  // reset an expanded session stays expanded when the cell is reused for a
+  // different one, so rows change height and flicker while scrolling.
+  const sessionKey = items[0]?.id
+  const [appliedSessionKey, setAppliedSessionKey] = useState(sessionKey)
+  if (appliedSessionKey !== sessionKey) {
+    setAppliedSessionKey(sessionKey)
+    setOpen(false)
+  }
   const { theme } = useUnistyles()
 
   return (
@@ -35,7 +44,7 @@ export const WorkSessionBlock = memo(function WorkSessionBlock({
         onPress={() => setOpen((current) => !current)}
         style={styles.row}
       >
-        {running ? <Loader2 size={14} color={theme.colors.accent.default} /> : null}
+        {running ? <Spinner size={14} color={theme.colors.accent.default} /> : null}
         <Text variant="label" color="muted">
           {running ? 'Working…' : `Worked for ${formatWorkDuration(startedAt, completedAt ?? startedAt)}`}
         </Text>

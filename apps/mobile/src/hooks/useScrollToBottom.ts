@@ -4,11 +4,20 @@ import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native'
 
 const SHOW_JUMP_OFFSET = 200
 
+/**
+ * Jump-to-bottom affordance for the transcript list.
+ *
+ * Keeping the view pinned to the bottom while content streams in is NOT done
+ * here: FlashList v2's `maintainVisibleContentPosition.autoscrollToBottomThreshold`
+ * owns that natively. The previous manual `scrollToEnd` on every content size
+ * change raced the scroll handler while cells re-measured during recycling,
+ * teleporting the list mid-scroll — which read as messages randomly
+ * disappearing and flickering.
+ */
 export function useScrollToBottom<T>() {
   const listRef = useRef<FlashListRef<T>>(null)
   const [showJumpButton, setShowJumpButton] = useState(false)
   const showJumpButtonRef = useRef(false)
-  const pauseAutoScrollRef = useRef(false)
 
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent
@@ -31,25 +40,10 @@ export function useScrollToBottom<T>() {
     setShowJumpButton(false)
   }, [])
 
-  const pauseAutoScrollOnce = useCallback(() => {
-    pauseAutoScrollRef.current = true
-  }, [])
-
-  const onContentSizeChange = useCallback(() => {
-    if (pauseAutoScrollRef.current) {
-      pauseAutoScrollRef.current = false
-      return
-    }
-    if (showJumpButtonRef.current) return
-    listRef.current?.scrollToEnd({ animated: false })
-  }, [])
-
   return {
     listRef,
     showJumpButton,
-    onContentSizeChange,
     onScroll,
-    pauseAutoScrollOnce,
     resetScrollState,
     scrollToBottom,
   }

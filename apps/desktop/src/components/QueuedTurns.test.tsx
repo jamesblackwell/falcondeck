@@ -64,6 +64,66 @@ describe('QueuedTurns', () => {
     expect(screen.getByRole('menuitem', { name: 'Remove' })).not.toBeDisabled()
   })
 
+  it('hides Edit message unless an edit handler is wired up', () => {
+    render(<QueuedTurns queuedTurns={queuedTurns} canSteer onSteer={vi.fn()} onRemove={vi.fn()} />)
+    openMenu()
+    expect(screen.queryByRole('menuitem', { name: 'Edit message' })).toBeNull()
+  })
+
+  it('edits the full message text in place', () => {
+    const onEdit = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          {
+            ...queuedTurns[0]!,
+            preview: 'also update the changelog',
+            text: 'also update the changelog and the release notes',
+          },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onEdit={onEdit}
+      />,
+    )
+
+    openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit message' }))
+
+    // Seeded with the untruncated text, not the preview.
+    const editor = screen.getByRole('textbox', { name: 'Edit queued message' })
+    expect(editor).toHaveValue('also update the changelog and the release notes')
+
+    fireEvent.change(editor, { target: { value: 'ship it instead' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(onEdit).toHaveBeenCalledWith('queued-1', 'ship it instead')
+    // Editor closes back into the chip after saving.
+    expect(screen.queryByRole('textbox', { name: 'Edit queued message' })).toBeNull()
+  })
+
+  it('cancels an edit with Escape without saving', () => {
+    const onEdit = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={queuedTurns}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onEdit={onEdit}
+      />,
+    )
+
+    openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit message' }))
+    const editor = screen.getByRole('textbox', { name: 'Edit queued message' })
+    fireEvent.change(editor, { target: { value: 'discarded' } })
+    fireEvent.keyDown(editor, { key: 'Escape' })
+
+    expect(onEdit).not.toHaveBeenCalled()
+    expect(screen.queryByRole('textbox', { name: 'Edit queued message' })).toBeNull()
+  })
+
   // Outside-click dismissal is Radix's own concern and does not fire reliably
   // under jsdom; Escape covers that the menu is a real dismissable layer.
   it('closes the menu on Escape', () => {

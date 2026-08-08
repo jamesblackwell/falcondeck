@@ -5,6 +5,8 @@
  * maintains the same state shape as the desktop/remote-web apps,
  * plus a mobile-only cache of recent thread history windows.
  */
+import { useMemo } from 'react'
+
 import { create } from 'zustand'
 import { useShallow } from 'zustand/react/shallow'
 
@@ -25,6 +27,8 @@ import {
 } from '@falcondeck/client-core'
 
 import { clearMobileSessionCache, persistMobileSessionCache } from '@/storage/mobile-session-cache'
+
+import { useUIStore } from './ui-store'
 
 const MAX_CACHED_THREADS = 5
 const MAX_CACHED_ITEMS = 150
@@ -323,10 +327,14 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     }
   }
 
+  // preserveEmptyThreadSelection: a null thread id here is the new-conversation
+  // draft. Without it, every streamed event from a busy thread re-selects that
+  // thread and its transcript takes over the draft screen.
   const nextSelection = reconcileSnapshotSelection(
     nextSnapshot ?? state.snapshot,
     state.selectedWorkspaceId,
     state.selectedThreadId,
+    { preserveEmptyThreadSelection: true },
   )
   const reconciledThreadDetail =
     nextThreadDetail?.thread.id === nextSelection.threadId ? nextThreadDetail : null
@@ -382,6 +390,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       snapshot,
       cache.selectedWorkspaceId,
       cache.selectedThreadId,
+      { preserveEmptyThreadSelection: true },
     )
 
     set({
@@ -467,6 +476,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         state.snapshot,
         state.selectedWorkspaceId,
         state.selectedThreadId,
+        { preserveEmptyThreadSelection: true },
       )
       return {
         selectedWorkspaceId: next.workspaceId,
@@ -493,11 +503,32 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 }))
 
+// The composer keys unsent drafts/attachments by conversation; follow every
+// selection change (taps, snapshot reconciles, cache hydration) so its
+// current-draft mirror always matches the thread on screen.
+useSessionStore.subscribe((state, previous) => {
+  if (
+    state.selectedWorkspaceId !== previous.selectedWorkspaceId ||
+    state.selectedThreadId !== previous.selectedThreadId
+  ) {
+    useUIStore.getState().setConversation(state.selectedWorkspaceId, state.selectedThreadId)
+  }
+})
+
+const EMPTY_WORKSPACES: DaemonSnapshot['workspaces'] = []
+const EMPTY_THREADS: DaemonSnapshot['threads'] = []
+
 /* v8 ignore start */
 export function useGroups() {
-  return useSessionStore((s) =>
-    buildProjectGroups(s.snapshot?.workspaces ?? [], s.snapshot?.threads ?? []),
+  // Narrow, shallow subscriptions: conversation-item events change the store
+  // on every streamed chunk but leave these arrays' elements alone, and
+  // re-deriving groups for each chunk made the whole sidebar re-render and
+  // flicker while any thread was working.
+  const workspaces = useSessionStore(
+    useShallow((s) => s.snapshot?.workspaces ?? EMPTY_WORKSPACES),
   )
+  const threads = useSessionStore(useShallow((s) => s.snapshot?.threads ?? EMPTY_THREADS))
+  return useMemo(() => buildProjectGroups(workspaces, threads), [threads, workspaces])
 }
 
 export function useSelectedWorkspace() {

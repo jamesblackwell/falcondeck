@@ -40,14 +40,9 @@ describe('useScrollToBottom', () => {
     })
     expect(scrollToEnd).toHaveBeenCalledWith({ animated: false })
     expect(value!.showJumpButton).toBe(false)
-
-    act(() => {
-      value!.onContentSizeChange()
-    })
-    expect(scrollToEnd).toHaveBeenLastCalledWith({ animated: false })
   })
 
-  it('does not auto-scroll new content when the user is away from the bottom', () => {
+  it('resets the jump button without touching scroll position', () => {
     let value: ReturnType<typeof useScrollToBottom<string>> | null = null
 
     function Harness() {
@@ -71,13 +66,16 @@ describe('useScrollToBottom', () => {
         },
       } as any)
     })
-
     expect(value!.showJumpButton).toBe(true)
 
     act(() => {
-      value!.onContentSizeChange()
+      value!.resetScrollState()
     })
 
+    // Pinning to the bottom while content streams is FlashList's
+    // maintainVisibleContentPosition job now; the hook must never scroll on
+    // its own except for the explicit jump button.
+    expect(value!.showJumpButton).toBe(false)
     expect(scrollToEnd).not.toHaveBeenCalled()
   })
 })

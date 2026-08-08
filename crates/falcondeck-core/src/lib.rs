@@ -1100,6 +1100,10 @@ pub struct QueuedTurnSummary {
     pub id: String,
     /// Short text preview of the queued message.
     pub preview: String,
+    /// Full text of the queued message; what in-place editing starts from
+    /// (the preview is truncated, so editing from it would lose the tail).
+    #[serde(default)]
+    pub text: String,
     /// Number of image attachments riding along.
     #[serde(default)]
     pub attachment_count: usize,

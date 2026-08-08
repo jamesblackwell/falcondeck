@@ -1,5 +1,5 @@
 import { memo, useCallback, useState } from 'react'
-import { ActivityIndicator, Pressable, View } from 'react-native'
+import { ActivityIndicator, Alert, Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Clock, Paperclip } from 'lucide-react-native'
 
@@ -17,6 +17,11 @@ export function queuedTurnLabel(queued: QueuedTurnSummary): string {
 export function queuedTurnActions(canSteer: boolean): OptionSheetItem[] {
   return [
     {
+      value: 'edit',
+      label: 'Edit message',
+      description: 'Change the text before it sends.',
+    },
+    {
       value: 'steer',
       label: 'Steer instead',
       description: 'Send it into the running turn instead of waiting.',
@@ -33,15 +38,18 @@ interface QueuedTurnsProps {
   canSteer: boolean
   onRemove: (queuedId: string) => Promise<void>
   onSteer: (queuedId: string) => Promise<void>
+  onEdit: (queuedId: string, text: string) => Promise<void>
 }
 
 /** Messages accepted while the thread was busy, waiting their turn. Each is
-    removable, and steerable into the running turn where the agent allows it. */
+    editable in place, removable, and steerable into the running turn where
+    the agent allows it. */
 export const QueuedTurns = memo(function QueuedTurns({
   queuedTurns,
   canSteer,
   onRemove,
   onSteer,
+  onEdit,
 }: QueuedTurnsProps) {
   const { theme } = useUnistyles()
   const [openId, setOpenId] = useState<string | null>(null)
@@ -49,18 +57,43 @@ export const QueuedTurns = memo(function QueuedTurns({
 
   const open = queuedTurns.find((queued) => queued.id === openId) ?? null
 
+  const trackAction = useCallback((queuedId: string, action: Promise<void>) => {
+    setPendingId(queuedId)
+    // A failed action leaves the message queued daemon-side, so the chip
+    // stays put either way; the error surfaces through the relay banner.
+    void action.catch(() => {}).finally(() => {
+      setPendingId((current) => (current === queuedId ? null : current))
+    })
+  }, [])
+
   const runAction = useCallback(
-    (queuedId: string, value: string) => {
+    (queued: QueuedTurnSummary, value: string) => {
       setOpenId(null)
-      setPendingId(queuedId)
-      const action = value === 'steer' ? onSteer(queuedId) : onRemove(queuedId)
-      // A failed steer leaves the message queued daemon-side, so the chip
-      // stays put either way; the error surfaces through the relay banner.
-      void action.catch(() => {}).finally(() => {
-        setPendingId((current) => (current === queuedId ? null : current))
-      })
+      if (value === 'edit') {
+        // Prompt with the full text, not the truncated preview — saving a
+        // preview-truncated draft would chop long messages.
+        Alert.prompt(
+          'Edit message',
+          undefined,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Save',
+              onPress: (text?: string) => {
+                const next = text?.trim()
+                if (!next) return
+                trackAction(queued.id, onEdit(queued.id, next))
+              },
+            },
+          ],
+          'plain-text',
+          queued.text ?? queued.preview,
+        )
+        return
+      }
+      trackAction(queued.id, value === 'steer' ? onSteer(queued.id) : onRemove(queued.id))
     },
-    [onRemove, onSteer],
+    [onEdit, onRemove, onSteer, trackAction],
   )
 
   if (queuedTurns.length === 0) return null
@@ -110,7 +143,7 @@ export const QueuedTurns = memo(function QueuedTurns({
         <OptionSheet
           title={queuedTurnLabel(open)}
           items={queuedTurnActions(canSteer)}
-          onSelect={(value) => runAction(open.id, value)}
+          onSelect={(value) => runAction(open, value)}
           onClose={() => setOpenId(null)}
         />
       ) : null}

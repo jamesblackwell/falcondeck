@@ -233,6 +233,9 @@ export type ThreadAttention = {
 export type QueuedTurnSummary = {
   id: string
   preview: string
+  /** Full message text; editing starts from this, not the truncated preview.
+      Optional because older daemons don't send it. */
+  text?: string
   attachment_count?: number
   queued_at: string
 }

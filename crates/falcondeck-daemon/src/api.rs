@@ -142,7 +142,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/{queued_id}",
-            delete(remove_queued_turn),
+            delete(remove_queued_turn).patch(edit_queued_turn),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/{queued_id}/steer",
@@ -472,6 +472,23 @@ async fn steer_queued_turn(
     Ok(Json(
         state
             .steer_queued_turn(&workspace_id, &thread_id, &queued_id)
+            .await?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct EditQueuedTurnRequest {
+    text: String,
+}
+
+async fn edit_queued_turn(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id, queued_id)): Path<(String, String, String)>,
+    Json(request): Json<EditQueuedTurnRequest>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .edit_queued_turn(&workspace_id, &thread_id, &queued_id, &request.text)
             .await?,
     ))
 }

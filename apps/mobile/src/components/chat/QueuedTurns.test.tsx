@@ -46,23 +46,23 @@ describe('queuedTurnLabel', () => {
 })
 
 describe('queuedTurnActions', () => {
-  it('offers steer and remove', () => {
-    expect(queuedTurnActions(true).map((item) => item.value)).toEqual(['steer', 'remove'])
+  it('offers edit, steer and remove', () => {
+    expect(queuedTurnActions(true).map((item) => item.value)).toEqual(['edit', 'steer', 'remove'])
   })
 
   it('disables steering with a reason rather than hiding it', () => {
-    const steer = queuedTurnActions(false)[0]!
+    const steer = queuedTurnActions(false)[1]!
     expect(steer.disabled).toBe(true)
     expect(steer.disabledReason).toBe(STEER_UNAVAILABLE_REASON)
     // Remove stays available — the daemon never refuses it.
-    expect(queuedTurnActions(false)[1]!.disabled).toBeUndefined()
+    expect(queuedTurnActions(false)[2]!.disabled).toBeUndefined()
   })
 })
 
 describe('QueuedTurns', () => {
   it('renders nothing when the queue is empty', () => {
     const r = renderComponent(
-      <QueuedTurns queuedTurns={[]} canSteer onRemove={noop} onSteer={noop} />,
+      <QueuedTurns queuedTurns={[]} canSteer onRemove={noop} onSteer={noop} onEdit={noop} />,
     )
     expect(r.toJSON()).toBeNull()
   })
@@ -74,6 +74,7 @@ describe('QueuedTurns', () => {
         canSteer
         onRemove={noop}
         onSteer={noop}
+        onEdit={noop}
       />,
     )
     expect(chipsOf(r)).toHaveLength(2)
@@ -83,7 +84,7 @@ describe('QueuedTurns', () => {
 
   it('shows the attachment count only when there are attachments', () => {
     const without = renderComponent(
-      <QueuedTurns queuedTurns={[queued()]} canSteer onRemove={noop} onSteer={noop} />,
+      <QueuedTurns queuedTurns={[queued()]} canSteer onRemove={noop} onSteer={noop} onEdit={noop} />,
     )
     expect(textOf(without)).not.toContain('2')
 
@@ -93,6 +94,7 @@ describe('QueuedTurns', () => {
         canSteer
         onRemove={noop}
         onSteer={noop}
+        onEdit={noop}
       />,
     )
     expect(textOf(with2)).toContain('2')
@@ -106,6 +108,7 @@ describe('QueuedTurns', () => {
         canSteer
         onRemove={noop}
         onSteer={onSteer}
+        onEdit={noop}
       />,
     )
 
@@ -122,7 +125,7 @@ describe('QueuedTurns', () => {
   it('removes the tapped message', async () => {
     const onRemove = vi.fn(async () => {})
     const r = renderComponent(
-      <QueuedTurns queuedTurns={[queued()]} canSteer onRemove={onRemove} onSteer={noop} />,
+      <QueuedTurns queuedTurns={[queued()]} canSteer onRemove={onRemove} onSteer={noop} onEdit={noop} />,
     )
 
     act(() => {
@@ -135,12 +138,57 @@ describe('QueuedTurns', () => {
     expect(onRemove).toHaveBeenCalledWith('queued-1')
   })
 
+  it('prompts with the full text and saves the edited message', async () => {
+    const { Alert } = await import('react-native')
+    const prompt = vi.spyOn(Alert, 'prompt')
+    const onEdit = vi.fn(async () => {})
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued({ text: 'Also update the changelog and the docs' })]}
+        canSteer
+        onRemove={noop}
+        onSteer={noop}
+        onEdit={onEdit}
+      />,
+    )
+
+    act(() => {
+      chipsOf(r)[0]!.props.onPress()
+    })
+    await act(async () => {
+      pressSheetAction(r, 'Edit message')
+    })
+
+    // Prefilled with the untruncated text, not the preview.
+    expect(prompt).toHaveBeenCalled()
+    const [, , buttons, type, defaultValue] = prompt.mock.calls[0]! as unknown as [
+      string,
+      string | undefined,
+      { text: string; onPress?: (text?: string) => void }[],
+      string,
+      string,
+    ]
+    expect(type).toBe('plain-text')
+    expect(defaultValue).toBe('Also update the changelog and the docs')
+
+    await act(async () => {
+      buttons.find((button) => button.text === 'Save')!.onPress!('  Ship it instead  ')
+    })
+    expect(onEdit).toHaveBeenCalledWith('queued-1', 'Ship it instead')
+
+    // A blank edit is dropped rather than sent.
+    await act(async () => {
+      buttons.find((button) => button.text === 'Save')!.onPress!('   ')
+    })
+    expect(onEdit).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the chip after a failed action instead of dropping it', async () => {
     const onSteer = vi.fn(async () => {
       throw new Error('the running turn ended before the message could be steered')
     })
     const r = renderComponent(
-      <QueuedTurns queuedTurns={[queued()]} canSteer onRemove={noop} onSteer={onSteer} />,
+      <QueuedTurns queuedTurns={[queued()]} canSteer onRemove={noop} onSteer={onSteer} onEdit={noop} />,
     )
 
     act(() => {

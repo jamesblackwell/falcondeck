@@ -1,12 +1,11 @@
 import { memo, useCallback, useMemo } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Loader } from 'lucide-react-native'
 
 import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
 import type { ThreadSummary } from '@falcondeck/client-core'
 
-import { Badge, Text } from '@/components/ui'
+import { Badge, Spinner, Text } from '@/components/ui'
 import { formatRelativeTime } from './sessionListItem.utils'
 
 interface SessionListItemProps {
@@ -53,7 +52,7 @@ function SessionListItemInner({
     >
       <View style={styles.indicatorSlot}>
         {presentation.showSpinner ? (
-          <Loader size={14} color={theme.colors.accent.default} />
+          <Spinner size={14} color={theme.colors.accent.default} />
         ) : presentation.level === 'error' ? (
           <View style={[styles.dot, { backgroundColor: theme.colors.danger.default }]} />
         ) : presentation.level === 'awaiting_response' ? (

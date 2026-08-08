@@ -1074,16 +1074,15 @@ async fn try_enqueue_turn(
             ));
         }
         let id = format!("queued-{}", Uuid::new_v4().simple());
-        let preview = normalized_inputs
+        let text = normalized_inputs
             .iter()
             .find_map(|input| match input {
                 TurnInputItem::Text { text, .. } => Some(text.trim()),
                 TurnInputItem::Image(_) => None,
             })
             .unwrap_or("")
-            .chars()
-            .take(140)
-            .collect::<String>();
+            .to_string();
+        let preview = text.chars().take(140).collect::<String>();
         let attachment_count = normalized_inputs
             .iter()
             .filter(|input| matches!(input, TurnInputItem::Image(_)))
@@ -1100,6 +1099,7 @@ async fn try_enqueue_turn(
             .push(falcondeck_core::QueuedTurnSummary {
                 id,
                 preview,
+                text,
                 attachment_count,
                 queued_at: Utc::now(),
             });
@@ -1267,6 +1267,82 @@ pub(super) async fn steer_queued_turn(
     Err(error)
 }
 
+/// Rewrites the text of a message waiting in the queue.
+///
+/// Editing happens daemon-side for the same reason steering does: the stored
+/// request carries the real inputs with attachments materialized at queue
+/// time, while clients only hold the preview string — a client-side
+/// remove-and-resend would drop attachments and race the queue drain.
+pub(super) async fn edit_queued_turn(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    queued_id: &str,
+    text: &str,
+) -> Result<CommandResponse, DaemonError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(DaemonError::BadRequest(
+            "queued message text cannot be empty".to_string(),
+        ));
+    }
+    let summary = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let queued = thread
+            .queued_requests
+            .iter_mut()
+            .find(|queued| queued.id == queued_id)
+            .ok_or_else(|| DaemonError::NotFound("queued turn not found".to_string()))?;
+        let existing_text = queued
+            .request
+            .inputs
+            .iter_mut()
+            .find_map(|input| match input {
+                TurnInputItem::Text { text, .. } => Some(text),
+                TurnInputItem::Image(_) => None,
+            });
+        match existing_text {
+            Some(existing) => *existing = text.to_string(),
+            // An attachment-only queued message gains a text item; the front
+            // matches where composers put text relative to attachments.
+            None => queued.request.inputs.insert(
+                0,
+                TurnInputItem::Text {
+                    id: None,
+                    text: text.to_string(),
+                },
+            ),
+        }
+        if let Some(entry) = thread
+            .summary
+            .queued_turns
+            .iter_mut()
+            .find(|entry| entry.id == queued_id)
+        {
+            entry.preview = text.chars().take(140).collect::<String>();
+            entry.text = text.to_string();
+        }
+        thread.summary.updated_at = Utc::now();
+        thread.summary.clone()
+    };
+    app.emit(
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
+        UnifiedEvent::ThreadUpdated { thread: summary },
+    );
+    Ok(CommandResponse {
+        ok: true,
+        message: Some("edited".to_string()),
+    })
+}
+
 impl AppState {
     /// Removes a queued turn before it dispatches (loopback API + remote RPC).
     pub(crate) async fn remove_queued_turn(
@@ -1286,6 +1362,18 @@ impl AppState {
         queued_id: &str,
     ) -> Result<CommandResponse, DaemonError> {
         steer_queued_turn(self, workspace_id, thread_id, queued_id).await
+    }
+
+    /// Rewrites a queued turn's text before it dispatches (loopback API +
+    /// remote RPC).
+    pub(crate) async fn edit_queued_turn(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        queued_id: &str,
+        text: &str,
+    ) -> Result<CommandResponse, DaemonError> {
+        edit_queued_turn(self, workspace_id, thread_id, queued_id, text).await
     }
 
     /// Dispatches the next queued turn if the thread is no longer busy.
@@ -2581,6 +2669,145 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].summary.id, "claude-thread-x");
         assert_eq!(merged[0].items.len(), 1);
+    }
+
+    async fn seed_workspace_with_thread(app: &AppState, workspace_id: &str, thread_id: &str) {
+        let now = Utc::now();
+        let thread = ThreadSummary {
+            id: thread_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            title: "Thread".to_string(),
+            provider: AgentProvider::CLAUDE,
+            native_session_id: None,
+            status: ThreadStatus::Running,
+            updated_at: now,
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention::default(),
+            is_archived: false,
+            is_pinned: false,
+            goal: None,
+            queued_turns: Vec::new(),
+            variant: None,
+        };
+        let workspace = WorkspaceSummary {
+            id: workspace_id.to_string(),
+            path: "/tmp/project".to_string(),
+            status: WorkspaceStatus::Ready,
+            agents: Vec::new(),
+            skills: Vec::new(),
+            default_provider: AgentProvider::CLAUDE,
+            models: Vec::new(),
+            collaboration_modes: Vec::new(),
+            account: falcondeck_core::AccountSummary::default(),
+            current_thread_id: Some(thread_id.to_string()),
+            connected_at: now,
+            updated_at: now,
+            last_error: None,
+        };
+        app.inner.workspaces.lock().await.insert(
+            workspace_id.to_string(),
+            ManagedWorkspace {
+                summary: workspace,
+                codex_session: None,
+                claude_runtime: None,
+                acp_runtimes: HashMap::new(),
+                threads: [(thread_id.to_string(), ManagedThread::new(thread))]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn edits_a_queued_turn_in_place_preserving_attachments() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+        {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            let thread = workspaces
+                .get_mut("workspace-1")
+                .unwrap()
+                .threads
+                .get_mut("thread-1")
+                .unwrap();
+            thread.queued_requests.push(super::super::QueuedTurnRequest {
+                id: "queued-1".to_string(),
+                request: SendTurnRequest {
+                    workspace_id: "workspace-1".to_string(),
+                    thread_id: "thread-1".to_string(),
+                    inputs: vec![
+                        TurnInputItem::Text {
+                            id: None,
+                            text: "original words".to_string(),
+                        },
+                        TurnInputItem::Image(ImageInput {
+                            id: "img-1".to_string(),
+                            name: None,
+                            mime_type: Some("image/png".to_string()),
+                            url: "file:///tmp/img.png".to_string(),
+                            local_path: Some("/tmp/img.png".to_string()),
+                        }),
+                    ],
+                    selected_skills: Vec::new(),
+                    provider: None,
+                    model_id: None,
+                    reasoning_effort: None,
+                    approval_policy: None,
+                    service_tier: None,
+                    permission_mode: None,
+                    sandbox_mode: None,
+                    steer: false,
+                },
+            });
+            thread
+                .summary
+                .queued_turns
+                .push(falcondeck_core::QueuedTurnSummary {
+                    id: "queued-1".to_string(),
+                    preview: "original words".to_string(),
+                    text: "original words".to_string(),
+                    attachment_count: 1,
+                    queued_at: Utc::now(),
+                });
+        }
+
+        edit_queued_turn(&app, "workspace-1", "thread-1", "queued-1", "  new words  ")
+            .await
+            .unwrap();
+
+        let workspaces = app.inner.workspaces.lock().await;
+        let thread = workspaces
+            .get("workspace-1")
+            .unwrap()
+            .threads
+            .get("thread-1")
+            .unwrap();
+        let queued = &thread.queued_requests[0];
+        assert!(matches!(
+            &queued.request.inputs[0],
+            TurnInputItem::Text { text, .. } if text == "new words"
+        ));
+        // The attachment materialized at queue time must ride along untouched.
+        assert!(matches!(&queued.request.inputs[1], TurnInputItem::Image(_)));
+        let entry = &thread.summary.queued_turns[0];
+        assert_eq!((entry.preview.as_str(), entry.text.as_str()), ("new words", "new words"));
+
+        drop(workspaces);
+        let missing = edit_queued_turn(&app, "workspace-1", "thread-1", "queued-2", "x").await;
+        assert!(missing.is_err());
+        let empty = edit_queued_turn(&app, "workspace-1", "thread-1", "queued-1", "   ").await;
+        assert!(empty.is_err());
     }
 
     #[test]

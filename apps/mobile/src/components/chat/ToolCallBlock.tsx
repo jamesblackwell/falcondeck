@@ -2,11 +2,11 @@ import { memo } from 'react'
 import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import Animated from 'react-native-reanimated'
-import { ChevronRight, CheckCircle2, Circle, Loader2 } from 'lucide-react-native'
+import { ChevronRight, CheckCircle2, Circle } from 'lucide-react-native'
 
 import type { ConversationItem } from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { Spinner, Text } from '@/components/ui'
 import { useCollapsible } from './useCollapsible'
 
 type ToolCall = Extract<ConversationItem, { kind: 'tool_call' }>
@@ -31,23 +31,32 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   variant = 'card',
 }: ToolCallBlockProps) {
   const { theme } = useUnistyles()
-  const { bodyStyle, chevronStyle, isOpen, onContentLayout, toggle } = useCollapsible(defaultOpen)
+  const { bodyStyle, chevronStyle, isOpen, onContentLayout, toggle } = useCollapsible(
+    defaultOpen,
+    item.id,
+  )
 
   const isRunning = item.status === 'running' || item.status === 'in_progress'
   const isCompleted = item.status === 'completed' || item.status === 'success'
-  const StatusIcon = isRunning ? Loader2 : isCompleted ? CheckCircle2 : Circle
   const statusColor = isRunning
     ? theme.colors.accent.default
     : isCompleted
       ? theme.colors.success.default
       : theme.colors.fg.faint
+  const statusIcon = isRunning ? (
+    <Spinner size={14} color={statusColor} />
+  ) : isCompleted ? (
+    <CheckCircle2 size={14} color={statusColor} />
+  ) : (
+    <Circle size={14} color={statusColor} />
+  )
 
   const hasContent = item.output && !suppressDetail
 
   if (variant === 'row') {
     return (
       <View style={styles.rowHeader}>
-        <StatusIcon size={14} color={statusColor} />
+        {statusIcon}
         <Text variant="mono" color="tertiary" size="xs" style={styles.title} numberOfLines={1}>
           {toolCallLabel(item.title)}
         </Text>
@@ -58,7 +67,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   return (
     <View style={styles.container}>
       <Pressable style={styles.header} onPress={hasContent ? toggle : undefined}>
-        <StatusIcon size={14} color={statusColor} />
+        {statusIcon}
         <Text variant="mono" color="tertiary" size="xs" style={styles.title} numberOfLines={1}>
           {toolCallLabel(item.title)}
         </Text>

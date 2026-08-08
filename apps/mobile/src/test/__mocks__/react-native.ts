@@ -15,5 +15,9 @@ export const AppState = {
   addEventListener: () => ({ remove: () => {} }),
 }
 export const Keyboard = { addListener: () => ({ remove: () => {} }) }
+export const Alert = {
+  alert: () => {},
+  prompt: () => {},
+}
 export const Linking = { openURL: async () => {} }
 export const StyleSheet = { create: (styles: any) => styles }

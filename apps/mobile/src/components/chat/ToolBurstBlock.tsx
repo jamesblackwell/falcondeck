@@ -26,7 +26,10 @@ export const ToolSummaryBlock = memo(function ToolSummaryBlock({
   suppressDetail,
 }: ToolBurstBlockProps) {
   const { theme } = useUnistyles()
-  const { bodyStyle, chevronStyle, onContentLayout, toggle } = useCollapsible(defaultOpen)
+  const { bodyStyle, chevronStyle, onContentLayout, toggle } = useCollapsible(
+    defaultOpen,
+    items[0]?.id,
+  )
 
   return (
     <View style={styles.container}>
