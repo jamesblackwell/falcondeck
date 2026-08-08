@@ -78,6 +78,18 @@ export default function HomeScreen() {
   const blocks = presentation.history_blocks
   const liveActivityGroups = presentation.live_activity_groups
   const approvals = useApprovals()
+  const approvalQueue = useMemo(() => {
+    const unique = new Map(
+      approvals
+        .filter((request) => request.kind === 'approval')
+        .map((request) => [request.request_id, request]),
+    )
+    return [...unique.values()].sort((left, right) => {
+      const byCreatedAt = Date.parse(left.created_at) - Date.parse(right.created_at)
+      return byCreatedAt || left.request_id.localeCompare(right.request_id)
+    })
+  }, [approvals])
+  const activeApproval = approvalQueue[0] ?? null
   const selectedThread = useSelectedThread()
   const selectedThreadHistory = useSelectedThreadHistory()
   const workspace = useSelectedWorkspace()
@@ -553,16 +565,12 @@ export default function HomeScreen() {
   ])
 
   const handleAllowApproval = useCallback(
-    (id: string) => {
-      void respondApproval(id, 'allow')
-    },
+    (id: string) => respondApproval(id, 'allow'),
     [respondApproval],
   )
 
   const handleDenyApproval = useCallback(
-    (id: string) => {
-      void respondApproval(id, 'deny')
-    },
+    (id: string) => respondApproval(id, 'deny'),
     [respondApproval],
   )
 
@@ -764,14 +772,15 @@ export default function HomeScreen() {
 
       <ErrorBanner message={error} onDismiss={handleDismissError} />
 
-      {approvals.map((a) => (
+      {activeApproval ? (
         <ApprovalBanner
-          key={a.request_id}
-          approval={a}
+          key={activeApproval.request_id}
+          approval={activeApproval}
+          pendingCount={approvalQueue.length}
           onAllow={handleAllowApproval}
           onDeny={handleDenyApproval}
         />
-      ))}
+      ) : null}
 
       <View style={styles.listContainer}>
         {isSyncing ? (

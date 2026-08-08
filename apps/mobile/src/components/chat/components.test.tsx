@@ -2,7 +2,7 @@ import React from 'react'
 import { act } from 'react-test-renderer'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { renderComponent, cleanup, textOf } from '../../test/render'
-import { ApprovalBanner } from './ApprovalBanner'
+import { ApprovalBanner, approvalDetail } from './ApprovalBanner'
 import { ChatInput } from './ChatInput'
 import { CodeBlock } from './CodeBlock'
 import { SessionListItem } from './SessionListItem'
@@ -36,6 +36,28 @@ describe('ApprovalBanner component', () => {
   it('renders with both null', () => {
     const r = renderComponent(<ApprovalBanner approval={approval({ command: null, detail: null })} onAllow={vi.fn()} onDeny={vi.fn()} />)
     expect(r.toJSON()).toBeTruthy()
+  })
+
+  it('shows one queue position without rendering duplicated raw JSON', () => {
+    const item = approval({
+      detail: '{"command":"rm -rf node_modules","description":"Clean dependencies"}',
+    })
+    const r = renderComponent(
+      <ApprovalBanner
+        approval={item}
+        pendingCount={3}
+        onAllow={vi.fn()}
+        onDeny={vi.fn()}
+      />,
+    )
+
+    expect(textOf(r)).toContain('1 of 3')
+    expect(textOf(r)).toContain('Clean dependencies')
+    expect(textOf(r)).not.toContain('{"command"')
+  })
+
+  it('drops a JSON detail that only repeats promoted fields', () => {
+    expect(approvalDetail(approval({ detail: '{"command":"rm -rf node_modules"}' }))).toBeNull()
   })
 })
 

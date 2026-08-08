@@ -15,10 +15,12 @@ export function useConversationPresentation(): ConversationPresentation {
   return useMemo(() => {
     // Reasoning stays in: the presentation layer folds it into the work
     // session it interleaves with, and ReasoningBlock renders the rest.
-    // Unresolved approvals are dropped because ApprovalBanner already pins
-    // them above the transcript.
+    // Permission requests live in one consistent, queued surface above the
+    // transcript. Keeping resolved copies here made the same prompt appear to
+    // jump between two parts of the screen. Question requests remain in the
+    // conversation until their dedicated response UI is consolidated too.
     const filteredItems = items.filter((item) => {
-      if (item.kind === 'interactive_request' && !item.resolved) return false
+      if (item.kind === 'interactive_request' && item.request.kind === 'approval') return false
       return true
     })
     return deriveConversationPresentation(filteredItems, preferences)
