@@ -96,6 +96,11 @@ impl EmbeddedDaemonHandle {
         format!("http://{}", self.local_addr)
     }
 
+    /// Returns the number of local threads whose turns have not yet ended.
+    pub async fn active_thread_count(&self) -> usize {
+        self.state.active_thread_count().await
+    }
+
     /// Stops the daemon and waits for the server task to exit.
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
         if let Some(restore_task) = self.restore_task.take() {

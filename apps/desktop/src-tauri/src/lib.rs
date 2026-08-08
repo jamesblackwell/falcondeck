@@ -5,6 +5,7 @@ use std::{
     net::{SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -12,15 +13,18 @@ use falcondeck_core::DEFAULT_DAEMON_PORT;
 use falcondeck_daemon::{resolve_agent_binary, spawn_embedded, DaemonConfig, EmbeddedDaemonHandle};
 use serde::Serialize;
 use tauri::{async_runtime::Mutex, AppHandle, Manager, RunEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 struct DesktopState {
     daemon: Mutex<Option<EmbeddedDaemonHandle>>,
+    exit_prompt_open: AtomicBool,
 }
 
 impl Default for DesktopState {
     fn default() -> Self {
         Self {
             daemon: Mutex::new(None),
+            exit_prompt_open: AtomicBool::new(false),
         }
     }
 }
@@ -387,6 +391,28 @@ async fn shutdown_embedded_daemon(state: tauri::State<'_, DesktopState>) {
     }
 }
 
+async fn active_thread_count(state: &DesktopState) -> usize {
+    let daemon = state.daemon.lock().await;
+    match daemon.as_ref() {
+        Some(handle) => handle.active_thread_count().await,
+        None => 0,
+    }
+}
+
+fn quit_warning_message(active_thread_count: usize) -> String {
+    let (active_turns, pronoun) = if active_thread_count == 1 {
+        ("1 thread has an active turn".to_string(), "it")
+    } else {
+        (
+            format!("{active_thread_count} threads have active turns"),
+            "them",
+        )
+    };
+    format!(
+        "{active_turns}. Quitting FalconDeck will stop {pronoun}. You can resume {pronoun} after reopening the app."
+    )
+}
+
 #[tauri::command]
 async fn restart_app(app: AppHandle, state: tauri::State<'_, DesktopState>) -> Result<(), String> {
     if !cfg!(debug_assertions) {
@@ -435,13 +461,73 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build FalconDeck desktop");
 
-    app.run(|app_handle, event| {
-        if let RunEvent::Exit = event {
-            if cfg!(debug_assertions) {
+    app.run(|app_handle, event| match event {
+        RunEvent::ExitRequested { api, code, .. } => {
+            if cfg!(debug_assertions) || code.is_some() {
                 return;
             }
+
             let state = app_handle.state::<DesktopState>();
-            tauri::async_runtime::block_on(async move { shutdown_embedded_daemon(state).await });
+            let active_thread_count =
+                tauri::async_runtime::block_on(active_thread_count(&state));
+            if active_thread_count == 0 {
+                return;
+            }
+
+            api.prevent_exit();
+            if state.exit_prompt_open.swap(true, Ordering::AcqRel) {
+                return;
+            }
+
+            let handle = app_handle.clone();
+            app_handle
+                .dialog()
+                .message(quit_warning_message(active_thread_count))
+                .title("Stop active threads and quit?")
+                .kind(MessageDialogKind::Warning)
+                .buttons(MessageDialogButtons::OkCancelCustom(
+                    "Quit and stop threads".to_string(),
+                    "Keep FalconDeck open".to_string(),
+                ))
+                .show(move |should_quit| {
+                    handle
+                        .state::<DesktopState>()
+                        .exit_prompt_open
+                        .store(false, Ordering::Release);
+                    if should_quit {
+                        handle.exit(0);
+                    }
+                });
         }
+        RunEvent::Exit => {
+            if !cfg!(debug_assertions) {
+                let state = app_handle.state::<DesktopState>();
+                tauri::async_runtime::block_on(async move {
+                    shutdown_embedded_daemon(state).await
+                });
+            }
+        }
+        _ => {}
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::quit_warning_message;
+
+    #[test]
+    fn quit_warning_uses_singular_copy_for_one_active_thread() {
+        assert_eq!(
+            quit_warning_message(1),
+            "1 thread has an active turn. Quitting FalconDeck will stop it. You can resume it after reopening the app."
+        );
+    }
+
+    #[test]
+    fn quit_warning_uses_plural_copy_for_multiple_active_threads() {
+        assert_eq!(
+            quit_warning_message(2),
+            "2 threads have active turns. Quitting FalconDeck will stop them. You can resume them after reopening the app."
+        );
+    }
 }

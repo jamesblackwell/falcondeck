@@ -684,6 +684,23 @@ impl AppState {
         self.inner.shutting_down.load(Ordering::Acquire)
     }
 
+    /// Counts local threads whose current turns have not reached a terminal state.
+    pub async fn active_thread_count(&self) -> usize {
+        self.inner
+            .workspaces
+            .lock()
+            .await
+            .values()
+            .flat_map(|workspace| workspace.threads.values())
+            .filter(|thread| {
+                matches!(
+                    thread.summary.status,
+                    ThreadStatus::Running | ThreadStatus::WaitingForInput
+                )
+            })
+            .count()
+    }
+
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
         // Flag first: reconnect/respawn paths check this before spawning new
         // agent processes, so nothing new starts while we tear down.
@@ -704,7 +721,10 @@ impl AppState {
                             .map(|thread| {
                                 (
                                     thread.summary.id.clone(),
-                                    matches!(thread.summary.status, ThreadStatus::Running),
+                                    matches!(
+                                        thread.summary.status,
+                                        ThreadStatus::Running | ThreadStatus::WaitingForInput
+                                    ),
                                 )
                             })
                             .collect::<Vec<_>>(),
