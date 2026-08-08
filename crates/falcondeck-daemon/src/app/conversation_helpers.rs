@@ -524,8 +524,11 @@ pub(crate) fn tool_display_metadata(
     let normalized_title = title.to_ascii_lowercase();
     let normalized_kind = kind.to_ascii_lowercase();
     let normalized_output = output.unwrap_or_default().to_ascii_lowercase();
+    let errored = status.eq_ignore_ascii_case("failed")
+        || status.eq_ignore_ascii_case("error")
+        || exit_code.unwrap_or_default() != 0;
     let activity_kind =
-        classify_tool_activity_kind(&normalized_title, &normalized_kind, &normalized_output);
+        classify_tool_activity_kind(&normalized_title, &normalized_kind, &normalized_output, errored);
 
     let is_read_only = matches!(
         activity_kind,
@@ -602,13 +605,16 @@ fn classify_tool_activity_kind(
     normalized_title: &str,
     normalized_kind: &str,
     normalized_output: &str,
+    errored: bool,
 ) -> ToolActivityKind {
-    // Only the CLI's own "requested permissions" phrasing marks approval
-    // traffic. Matching the bare word "permission" in outputs or titles turned
-    // every `Read` of a file mentioning permission_mode (and any `git log`
-    // whose history discusses permissions) into an auto-expanded approval
-    // card, shattering the transcript's work-session fold.
-    if normalized_output.contains("requested permissions")
+    // Only the CLI's own "requested permissions" denial marks approval
+    // traffic, and a denial always accompanies a failed call. Matching the
+    // bare word "permission" in outputs or titles turned every `Read` of a
+    // file mentioning permission_mode (and any `git log` whose history
+    // discusses permissions) into an auto-expanded approval card, shattering
+    // the transcript's work-session fold; a successful grep quoting the
+    // denial phrase must not count either.
+    if (errored && normalized_output.contains("requested permissions"))
         || normalized_kind.contains("approval")
         || normalized_title.contains("approval")
     {

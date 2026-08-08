@@ -488,6 +488,16 @@ fn reads_mentioning_permissions_are_not_approval_artifacts() {
         Some("c5b3c3c fix: persist permission modes across clients"),
     );
     assert_ne!(git_log.activity_kind, ToolActivityKind::Approval);
+
+    // A successful grep quoting the CLI's denial phrase is still a search.
+    let quoting_grep = tool_display_metadata(
+        "grep -rn \"requested permissions\" src",
+        "commandExecution",
+        "completed",
+        Some(0),
+        Some("threads.rs:12: // requested permissions marker"),
+    );
+    assert_ne!(quoting_grep.activity_kind, ToolActivityKind::Approval);
 }
 
 #[test]

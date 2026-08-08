@@ -375,8 +375,9 @@ function correctMisclassifiedApproval(
     return display
   }
   // The CLI's own denial phrasing is a genuine approval signal even when the
-  // tool identity is a plain command.
-  if ((item.output ?? '').toLowerCase().includes('requested permissions')) {
+  // tool identity is a plain command — but a denial always accompanies a
+  // failed call, so a successful grep merely quoting the phrase doesn't count.
+  if (display.is_error && (item.output ?? '').toLowerCase().includes('requested permissions')) {
     return display
   }
   return {

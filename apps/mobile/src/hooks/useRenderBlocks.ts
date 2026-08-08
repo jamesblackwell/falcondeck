@@ -26,13 +26,19 @@ export function useConversationPresentation(): ConversationPresentation {
     })
     // Auto-expanding the turn's first diff is a desktop nicety; on a phone a
     // multi-hundred-line edit snippet swallows the whole transcript. Edits
-    // still surface as cards here — they just start collapsed.
+    // still surface as cards here — they just start collapsed. The same goes
+    // for approval-related cards, whose outputs can run to tens of thousands
+    // of characters.
     const normalized = normalizePreferences(preferences)
     const mobilePreferences = {
       ...normalized,
       conversation: {
         ...normalized.conversation,
-        auto_expand: { ...normalized.conversation.auto_expand, first_diff: false },
+        auto_expand: {
+          ...normalized.conversation.auto_expand,
+          first_diff: false,
+          approvals: false,
+        },
       },
     }
     return deriveConversationPresentation(filteredItems, mobilePreferences)
