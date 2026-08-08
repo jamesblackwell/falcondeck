@@ -20,7 +20,7 @@ export function Sidebar({ className, children, ...props }: React.HTMLAttributes<
 export function SidebarHeader({ className, children, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn('flex flex-col gap-3 border-b border-border-subtle px-4 pb-3 pt-11', className)}
+      className={cn('flex flex-col gap-3 border-b border-border-subtle px-4 pb-3 pt-8', className)}
       {...props}
     >
       {children}

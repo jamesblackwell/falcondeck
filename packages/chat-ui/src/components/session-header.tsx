@@ -35,7 +35,7 @@ export const SessionHeader = memo(function SessionHeader({
   const pathLabel = workspace?.path.split('/').pop()
 
   return (
-    <Toolbar className={cn('bg-surface-1 pt-10', className)}>
+    <Toolbar className={cn('bg-surface-1 pt-8', className)}>
       <div className="flex min-w-0 items-center gap-3">
         {navigation}
         {thread ? (
