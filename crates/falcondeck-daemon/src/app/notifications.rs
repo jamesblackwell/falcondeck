@@ -133,6 +133,8 @@ pub(super) async fn ingest_notification(
                         thread.updated_at = updated_at;
                     })
                     .await?;
+                app.settle_running_tool_calls(workspace_id, &thread_id, updated_at)
+                    .await;
                 app.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id.clone()),

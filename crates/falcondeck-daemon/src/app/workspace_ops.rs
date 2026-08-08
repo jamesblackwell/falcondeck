@@ -2264,7 +2264,10 @@ pub(super) async fn thread_detail(
         .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
     let workspace_summary = workspace.summary.clone();
     let thread_summary = thread.summary.clone();
-    let detail = thread_detail_window(&thread.items, request)?;
+    let mut detail = thread_detail_window(&thread.items, request)?;
+    if !thread_is_busy(&thread.summary.status) {
+        settle_running_tool_call_items(&mut detail.items, Utc::now());
+    }
     drop(workspaces);
     let items = with_renderable_attachment_previews_for_items(detail.items).await;
 

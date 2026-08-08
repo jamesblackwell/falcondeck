@@ -26,8 +26,8 @@ use super::{
     },
     conversation_helpers::{
         build_ai_thread_title_prompt, is_placeholder_thread_title, is_provisional_thread_title,
-        normalize_generated_thread_title, should_generate_ai_thread_title, tool_display_metadata,
-        with_renderable_attachment_previews,
+        normalize_generated_thread_title, settle_running_tool_call_items,
+        should_generate_ai_thread_title, tool_display_metadata, with_renderable_attachment_previews,
     },
 };
 use crate::{
@@ -42,6 +42,37 @@ struct AiThreadTitleInput {
 }
 
 impl AppState {
+    /// Closes transient tool activity once an agent reports that its turn has
+    /// ended, even if the per-tool completion notification was lost.
+    pub(super) async fn settle_running_tool_calls(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        settled_at: chrono::DateTime<Utc>,
+    ) {
+        let updated = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(thread) = workspaces
+                .get_mut(workspace_id)
+                .and_then(|workspace| workspace.threads.get_mut(thread_id))
+            else {
+                return;
+            };
+            settle_running_tool_call_items(&mut thread.items, settled_at)
+        };
+        if updated.is_empty() {
+            return;
+        }
+        for item in updated {
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::ConversationItemUpdated { item },
+            );
+        }
+        let _ = self.persist_local_state().await;
+    }
+
     pub(super) async fn session_for(
         &self,
         workspace_id: &str,

@@ -120,6 +120,45 @@ pub(super) fn build_user_message_item(inputs: &[TurnInputItem]) -> ConversationI
     }
 }
 
+/// Marks tool calls left in a transient state as completed when their turn is
+/// known to be over. Some agent transports omit an individual terminal tool
+/// event even though they still emit the terminal turn event.
+pub(super) fn settle_running_tool_call_items(
+    items: &mut [ConversationItem],
+    settled_at: chrono::DateTime<Utc>,
+) -> Vec<ConversationItem> {
+    let mut updated = Vec::new();
+    for item in items {
+        if let ConversationItem::ToolCall {
+            status,
+            completed_at,
+            title,
+            tool_kind,
+            output,
+            exit_code,
+            display,
+            ..
+        } = item
+            && matches!(
+                status.trim().to_ascii_lowercase().as_str(),
+                "running" | "in_progress" | "inprogress" | "pending"
+            )
+        {
+            *status = "completed".to_string();
+            *completed_at = Some(settled_at);
+            *display = tool_display_metadata(
+                title,
+                tool_kind,
+                status,
+                *exit_code,
+                output.as_deref(),
+            );
+            updated.push(item.clone());
+        }
+    }
+    updated
+}
+
 pub(super) fn provisional_thread_title_from_inputs(inputs: &[TurnInputItem]) -> Option<String> {
     let text = inputs.iter().find_map(|input| match input {
         TurnInputItem::Text { text, .. } => Some(text.as_str()),
@@ -876,6 +915,61 @@ mod attachment_preview_tests {
         };
 
         assert_eq!(attachments[0].url, url);
+    }
+}
+
+#[cfg(test)]
+mod tool_settlement_tests {
+    use super::*;
+
+    fn tool_item(status: &str) -> ConversationItem {
+        ConversationItem::ToolCall {
+            id: "tool-1".to_string(),
+            title: "git add .".to_string(),
+            tool_kind: "commandExecution".to_string(),
+            status: status.to_string(),
+            output: Some("done".to_string()),
+            exit_code: Some(0),
+            display: tool_display_metadata(
+                "git add .",
+                "commandExecution",
+                status,
+                Some(0),
+                Some("done"),
+            ),
+            created_at: Utc::now(),
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn settles_transient_tool_status_when_turn_is_over() {
+        let settled_at = Utc::now();
+        let mut items = vec![tool_item("running")];
+
+        let updated = settle_running_tool_call_items(&mut items, settled_at);
+
+        let ConversationItem::ToolCall {
+            status,
+            completed_at,
+            ..
+        } = &items[0]
+        else {
+            panic!("expected tool call");
+        };
+        assert_eq!(
+            (status.as_str(), *completed_at, updated.len()),
+            ("completed", Some(settled_at), 1)
+        );
+    }
+
+    #[test]
+    fn leaves_terminal_tool_status_unchanged() {
+        let mut items = vec![tool_item("failed")];
+
+        let updated = settle_running_tool_call_items(&mut items, Utc::now());
+
+        assert!(updated.is_empty());
     }
 }
 
