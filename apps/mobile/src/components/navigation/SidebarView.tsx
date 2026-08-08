@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { KeyboardAvoidingView, Modal, Platform, Pressable, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
@@ -16,6 +16,7 @@ import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
 
 import { Text, Button, EmptyState, Input } from '@/components/ui'
 import { SessionListItem } from '@/components/chat'
+import { useCollapsible } from '@/components/chat/useCollapsible'
 import { useThreadActions } from '@/hooks/useThreadActions'
 import { buildSidebarRows, SHOW_MORE_STEP, type SidebarRow } from './sidebarRows'
 
@@ -63,6 +64,33 @@ const WorkspaceChevron = memo(function WorkspaceChevron({
   return (
     <Animated.View style={chevronStyle}>
       <ChevronRight size={size} color={color} />
+    </Animated.View>
+  )
+})
+
+// Collapsed projects keep their thread rows in the list data so the same cells
+// can animate shut — height runs to zero while everything below slides up,
+// matching the iOS accordion feel. `useCollapsible` already handles FlashList
+// recycling (snap, don't animate, when the cell lands on a different row).
+const CollapsibleRow = memo(function CollapsibleRow({
+  rowKey,
+  isCollapsed,
+  children,
+}: {
+  rowKey: string
+  isCollapsed: boolean
+  children: ReactNode
+}) {
+  const { bodyStyle, onContentLayout } = useCollapsible(!isCollapsed, rowKey)
+
+  return (
+    <Animated.View
+      style={bodyStyle}
+      pointerEvents={isCollapsed ? 'none' : 'auto'}
+      accessibilityElementsHidden={isCollapsed}
+      importantForAccessibility={isCollapsed ? 'no-hide-descendants' : 'auto'}
+    >
+      <View onLayout={onContentLayout}>{children}</View>
     </Animated.View>
   )
 })
@@ -260,34 +288,38 @@ export const SidebarView = memo(function SidebarView({
 
       if (item.type === 'overflow') {
         return (
-          <Pressable
-            style={styles.overflowRow}
-            onPress={() =>
-              handleOverflowPress(item.workspaceId, item.visibleCount, item.isExpanded)
-            }
-            accessibilityRole="button"
-            accessibilityState={{ expanded: item.isExpanded }}
-          >
-            <ChevronDown
-              size={12}
-              color={theme.colors.fg.muted}
-              style={item.isExpanded ? styles.chevronFlipped : undefined}
-            />
-            <Text variant="caption" color="muted">
-              {item.isExpanded ? 'Show less' : 'Show more'}
-            </Text>
-          </Pressable>
+          <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
+            <Pressable
+              style={styles.overflowRow}
+              onPress={() =>
+                handleOverflowPress(item.workspaceId, item.visibleCount, item.isExpanded)
+              }
+              accessibilityRole="button"
+              accessibilityState={{ expanded: item.isExpanded }}
+            >
+              <ChevronDown
+                size={12}
+                color={theme.colors.fg.muted}
+                style={item.isExpanded ? styles.chevronFlipped : undefined}
+              />
+              <Text variant="caption" color="muted">
+                {item.isExpanded ? 'Show less' : 'Show more'}
+              </Text>
+            </Pressable>
+          </CollapsibleRow>
         )
       }
 
       return (
-        <SessionListItem
-          thread={item.thread}
-          workspaceId={item.workspaceId}
-          isSelected={selectedThreadId === item.thread.id}
-          onSelectThread={onSelectThread}
-          onOpenThreadOptions={openThreadOptions}
-        />
+        <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
+          <SessionListItem
+            thread={item.thread}
+            workspaceId={item.workspaceId}
+            isSelected={selectedThreadId === item.thread.id}
+            onSelectThread={onSelectThread}
+            onOpenThreadOptions={openThreadOptions}
+          />
+        </CollapsibleRow>
       )
     },
     [

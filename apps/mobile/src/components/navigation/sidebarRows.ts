@@ -22,6 +22,12 @@ export type SidebarRow =
       type: 'thread'
       workspaceId: string
       thread: ThreadSummary
+      /**
+       * True while the owning project is collapsed. Collapsed rows stay in the
+       * data (keys unchanged) so the same cells can animate shut instead of
+       * unmounting.
+       */
+      isCollapsed: boolean
     }
   | {
       key: string
@@ -31,6 +37,7 @@ export type SidebarRow =
       /** The count currently shown — "Show more" advances from here. */
       visibleCount: number
       isExpanded: boolean
+      isCollapsed: boolean
     }
 
 export function buildSidebarRows(
@@ -47,6 +54,7 @@ export function buildSidebarRows(
         type: 'thread' as const,
         workspaceId: group.workspace.id,
         thread,
+        isCollapsed: false,
       })),
   )
 
@@ -63,8 +71,6 @@ export function buildSidebarRows(
       isOpen,
       threadCount: group.threads.length,
     }
-
-    if (!isOpen) return [workspaceRow]
 
     const unpinnedThreads = group.threads.filter((thread) => !thread.is_pinned)
 
@@ -84,6 +90,7 @@ export function buildSidebarRows(
       type: 'thread',
       workspaceId: group.workspace.id,
       thread,
+      isCollapsed: !isOpen,
     }))
 
     const rows: SidebarRow[] = [workspaceRow, ...threadRows]
@@ -96,6 +103,7 @@ export function buildSidebarRows(
         hiddenCount,
         visibleCount: visible.length,
         isExpanded: canCollapse,
+        isCollapsed: !isOpen,
       })
     }
 

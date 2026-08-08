@@ -74,7 +74,7 @@ describe('buildSidebarRows', () => {
     })
   })
 
-  it('collapses workspace and hides threads', () => {
+  it('keeps thread rows for a collapsed workspace but marks them collapsed', () => {
     const collapsed = new Set(['w1'])
     const rows = buildSidebarRows(
       [
@@ -88,9 +88,12 @@ describe('buildSidebarRows', () => {
       null,
     )
 
-    expect(rows).toHaveLength(2)
+    // Rows stay in the data (same keys) so collapse can animate the cells
+    // shut instead of unmounting them.
+    expect(rows).toHaveLength(3)
     expect(rows[1]!.type).toBe('workspace')
     expect((rows[1] as any).isOpen).toBe(false)
+    expect(rows[2]).toMatchObject({ key: 'thread:t1', type: 'thread', isCollapsed: true })
   })
 
   it('places pinned threads above projects and removes them from project rows', () => {
@@ -114,7 +117,10 @@ describe('buildSidebarRows', () => {
       'pinned:w1:pinned',
       'section:projects',
       'workspace:w1',
+      'thread:regular',
     ])
+    expect(rows[1]).toMatchObject({ isCollapsed: false })
+    expect(rows[4]).toMatchObject({ isCollapsed: true })
   })
 
   it('limits visible threads and shows overflow row', () => {
