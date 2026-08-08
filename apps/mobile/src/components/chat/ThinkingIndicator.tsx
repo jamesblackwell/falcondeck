@@ -13,7 +13,9 @@ export const ThinkingIndicator = memo(function ThinkingIndicator() {
 
   return (
     <View style={styles.row}>
-      <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} />
+      <View style={styles.spinner}>
+        <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} />
+      </View>
       <Text variant="label" color="muted">
         Thinking…
       </Text>
@@ -25,11 +27,16 @@ const styles = StyleSheet.create((theme) => ({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[1.5],
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[1],
     // Same height as the (touch-target-sized) work-session row, so the
     // transcript's bottom edge doesn't hop when one replaces the other.
     minHeight: theme.minTouchTarget,
+  },
+  spinner: {
+    // Keep the status copy on the same 16pt column as assistant messages;
+    // the small liveness glyph occupies the otherwise-empty left gutter.
+    position: 'absolute',
+    left: theme.spacing[0.5],
   },
 }))

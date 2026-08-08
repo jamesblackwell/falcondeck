@@ -163,7 +163,7 @@ describe('ChatInput component', () => {
     expect(textOf(r)).toContain('Run lint fixes')
   })
 
-  it('resets multiline height after the draft clears', () => {
+  it('expands for two lines on iOS and resets after the draft clears', () => {
     const r = renderComponent(<ChatInput value={'Line one\nLine two'} {...chatInputDefaults} />)
     const input = r.root.findByType('TextInput' as any)
 
@@ -171,20 +171,40 @@ describe('ChatInput component', () => {
       input.props.onContentSizeChange({
         nativeEvent: {
           contentSize: {
-            height: 96,
+            height: 48,
             width: 240,
           },
         },
       })
     })
 
-    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(96)
+    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(48)
+    expect(r.root.findByType('TextInput' as any).props.scrollEnabled).toBe(false)
 
     act(() => {
       r.update(<ChatInput value="" {...chatInputDefaults} />)
     })
 
     expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(44)
+  })
+
+  it('caps a long draft and enables scrolling only at the maximum height', () => {
+    const r = renderComponent(<ChatInput value={'Line\n'.repeat(10)} {...chatInputDefaults} />)
+    const input = r.root.findByType('TextInput' as any)
+
+    act(() => {
+      input.props.onContentSizeChange({
+        nativeEvent: {
+          contentSize: {
+            height: 240,
+            width: 240,
+          },
+        },
+      })
+    })
+
+    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(140)
+    expect(r.root.findByType('TextInput' as any).props.scrollEnabled).toBe(true)
   })
 })
 

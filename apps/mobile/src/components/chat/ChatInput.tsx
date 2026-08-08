@@ -349,6 +349,7 @@ export const ChatInput = memo(function ChatInput({
           placeholderTextColor={theme.colors.fg.muted}
           selectionColor={theme.colors.accent.default}
           multiline
+          scrollEnabled={inputHeight >= MAX_INPUT_HEIGHT}
           maxLength={100_000}
           editable={!disabled}
         />
@@ -547,12 +548,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   input: {
     fontSize: theme.fontSize.base,
+    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
     fontFamily: theme.fontFamily.sans,
     color: theme.colors.fg.primary,
     minHeight: MIN_INPUT_HEIGHT,
     maxHeight: MAX_INPUT_HEIGHT,
     paddingHorizontal: theme.spacing[4],
-    paddingBottom: theme.spacing[2],
+    paddingVertical: 0,
+    textAlignVertical: 'top',
   },
   attachmentSection: {
     paddingHorizontal: theme.spacing[4],
