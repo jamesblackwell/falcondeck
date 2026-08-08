@@ -58,7 +58,6 @@ export const SidebarView = memo(function SidebarView({
     [insets.bottom, theme.spacing],
   )
 
-
   const toggleWorkspaceCollapse = useCallback((workspaceId: string) => {
     setCollapsedWorkspaces((prev) => {
       const next = new Set(prev)
@@ -163,6 +162,14 @@ export const SidebarView = memo(function SidebarView({
 
   const renderRow = useCallback(
     ({ item }: { item: SidebarRow }) => {
+      if (item.type === 'section') {
+        return (
+          <Text variant="caption" color="muted" weight="medium" style={styles.sectionHeading}>
+            {item.title.toUpperCase()}
+          </Text>
+        )
+      }
+
       if (item.type === 'workspace') {
         // Two sibling controls, not a button inside a button: nesting them made
         // VoiceOver read the row as one element and swallowed "new thread".
@@ -181,7 +188,13 @@ export const SidebarView = memo(function SidebarView({
               ) : (
                 <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
               )}
-              <Text variant="label" color="secondary" weight="medium" numberOfLines={1} style={styles.workspaceName}>
+              <Text
+                variant="label"
+                color="secondary"
+                weight="medium"
+                numberOfLines={1}
+                style={styles.workspaceName}
+              >
                 {item.workspaceName}
               </Text>
             </Pressable>
@@ -201,7 +214,9 @@ export const SidebarView = memo(function SidebarView({
         return (
           <Pressable
             style={styles.overflowRow}
-            onPress={() => handleOverflowPress(item.workspaceId, item.visibleCount, item.isExpanded)}
+            onPress={() =>
+              handleOverflowPress(item.workspaceId, item.visibleCount, item.isExpanded)
+            }
             accessibilityRole="button"
             accessibilityState={{ expanded: item.isExpanded }}
           >
@@ -227,7 +242,16 @@ export const SidebarView = memo(function SidebarView({
         />
       )
     },
-    [onNewThread, onSelectThread, openThreadOptions, selectedThreadId, theme.colors.fg.muted, theme.iconSize.xs, toggleWorkspaceCollapse, handleOverflowPress],
+    [
+      onNewThread,
+      onSelectThread,
+      openThreadOptions,
+      selectedThreadId,
+      theme.colors.fg.muted,
+      theme.iconSize.xs,
+      toggleWorkspaceCollapse,
+      handleOverflowPress,
+    ],
   )
 
   const renderSheetContent = () => {
@@ -369,6 +393,12 @@ const styles = StyleSheet.create((theme) => ({
     justifyContent: 'space-between',
     paddingHorizontal: theme.spacing[3],
     marginTop: theme.spacing[2],
+  },
+  sectionHeading: {
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[3],
+    paddingBottom: theme.spacing[1],
+    letterSpacing: 0.8,
   },
   workspaceLeft: {
     flex: 1,

@@ -6,6 +6,11 @@ export const SHOW_MORE_STEP = 10
 export type SidebarRow =
   | {
       key: string
+      type: 'section'
+      title: 'Pinned' | 'Projects'
+    }
+  | {
+      key: string
       type: 'workspace'
       workspaceId: string
       workspaceName: string
@@ -34,8 +39,20 @@ export function buildSidebarRows(
   visibleThreadCounts: ReadonlyMap<string, number>,
   selectedThreadId: string | null,
 ): SidebarRow[] {
-  return groups.flatMap((group) => {
-    const workspaceName = group.workspace.path.split('/').pop() || group.workspace.path || 'Workspace'
+  const pinnedRows: SidebarRow[] = groups.flatMap((group) =>
+    group.threads
+      .filter((thread) => thread.is_pinned)
+      .map((thread) => ({
+        key: `pinned:${group.workspace.id}:${thread.id}`,
+        type: 'thread' as const,
+        workspaceId: group.workspace.id,
+        thread,
+      })),
+  )
+
+  const projectRows = groups.flatMap((group) => {
+    const workspaceName =
+      group.workspace.path.split('/').pop() || group.workspace.path || 'Workspace'
     const isOpen = !collapsedWorkspaces.has(group.workspace.id)
 
     const workspaceRow: SidebarRow = {
@@ -49,24 +66,18 @@ export function buildSidebarRows(
 
     if (!isOpen) return [workspaceRow]
 
-    const pinned = group.threads.filter((thread) => thread.is_pinned)
-    const orderedThreads =
-      pinned.length > 0
-        ? [...pinned, ...group.threads.filter((thread) => !thread.is_pinned)]
-        : group.threads
+    const unpinnedThreads = group.threads.filter((thread) => !thread.is_pinned)
 
     const requestedCount = visibleThreadCounts.get(group.workspace.id) ?? VISIBLE_THREAD_LIMIT
 
     // Reveal just enough to keep the selected thread visible, without jumping
     // straight to the full list.
     const selectedIndex =
-      selectedThreadId != null
-        ? orderedThreads.findIndex((t) => t.id === selectedThreadId)
-        : -1
+      selectedThreadId != null ? unpinnedThreads.findIndex((t) => t.id === selectedThreadId) : -1
     const effectiveCount = selectedIndex >= requestedCount ? selectedIndex + 1 : requestedCount
-    const visible = orderedThreads.slice(0, effectiveCount)
-    const hiddenCount = Math.max(0, orderedThreads.length - visible.length)
-    const canCollapse = hiddenCount === 0 && orderedThreads.length > VISIBLE_THREAD_LIMIT
+    const visible = unpinnedThreads.slice(0, effectiveCount)
+    const hiddenCount = Math.max(0, unpinnedThreads.length - visible.length)
+    const canCollapse = hiddenCount === 0 && unpinnedThreads.length > VISIBLE_THREAD_LIMIT
 
     const threadRows: SidebarRow[] = visible.map((thread) => ({
       key: `thread:${thread.id}`,
@@ -90,4 +101,27 @@ export function buildSidebarRows(
 
     return rows
   })
+
+  return [
+    ...(pinnedRows.length > 0
+      ? [
+          {
+            key: 'section:pinned',
+            type: 'section' as const,
+            title: 'Pinned' as const,
+          },
+          ...pinnedRows,
+        ]
+      : []),
+    ...(groups.length > 0
+      ? [
+          {
+            key: 'section:projects',
+            type: 'section' as const,
+            title: 'Projects' as const,
+          },
+        ]
+      : []),
+    ...projectRows,
+  ]
 }

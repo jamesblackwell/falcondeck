@@ -30,7 +30,6 @@ const SHOW_MORE_STEP = 10
 const RELATIVE_TIME_TICK_MS = 60_000
 const OPTIMISTIC_SELECTION_TTL_MS = 1_500
 
-
 type SidebarEmptyState = {
   title: string
   description?: string
@@ -50,7 +49,11 @@ export type WorkspaceSidebarProps = {
   /** Permanent, unlike archive: also removes a variant thread's checkout. */
   onDeleteThread?: (workspaceId: string, threadId: string) => Promise<void> | void
   onRenameThread?: (workspaceId: string, threadId: string, title: string) => Promise<void> | void
-  onTogglePinThread?: (workspaceId: string, threadId: string, pinned: boolean) => Promise<void> | void
+  onTogglePinThread?: (
+    workspaceId: string,
+    threadId: string,
+    pinned: boolean,
+  ) => Promise<void> | void
   onMarkThreadRead?: (workspaceId: string, threadId: string) => Promise<void> | void
   onAddProject?: () => void
   onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void
@@ -80,22 +83,21 @@ const ThreadList = memo(function ThreadList({
   nowTick: number
 }) {
   const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT)
-  const orderedThreads = useMemo(() => {
-    const pinned = group.threads.filter((thread) => thread.is_pinned)
-    if (pinned.length === 0) return group.threads
-    return [...pinned, ...group.threads.filter((thread) => !thread.is_pinned)]
-  }, [group.threads])
+  const unpinnedThreads = useMemo(
+    () => group.threads.filter((thread) => !thread.is_pinned),
+    [group.threads],
+  )
 
   // Reveal just enough to keep the selected thread visible, without jumping
   // straight to the full list.
   const selectedIndex =
     selectedThreadId != null
-      ? orderedThreads.findIndex((thread) => thread.id === selectedThreadId)
+      ? unpinnedThreads.findIndex((thread) => thread.id === selectedThreadId)
       : -1
   const effectiveCount = selectedIndex >= visibleCount ? selectedIndex + 1 : visibleCount
-  const visible = orderedThreads.slice(0, effectiveCount)
-  const hiddenCount = Math.max(0, orderedThreads.length - visible.length)
-  const canCollapse = hiddenCount === 0 && orderedThreads.length > VISIBLE_THREAD_LIMIT
+  const visible = unpinnedThreads.slice(0, effectiveCount)
+  const hiddenCount = Math.max(0, unpinnedThreads.length - visible.length)
+  const canCollapse = hiddenCount === 0 && unpinnedThreads.length > VISIBLE_THREAD_LIMIT
 
   return (
     <>
@@ -128,6 +130,54 @@ const ThreadList = memo(function ThreadList({
         </button>
       ) : null}
     </>
+  )
+})
+
+type PinnedThreadEntry = {
+  workspaceId: string
+  thread: ThreadSummary
+}
+
+const PinnedThreadList = memo(function PinnedThreadList({
+  entries,
+  selectedThreadId,
+  onSelectThread,
+  onArchiveThread,
+  onOpenThreadContextMenu,
+  nowTick,
+}: {
+  entries: PinnedThreadEntry[]
+  selectedThreadId: string | null
+  onSelectThread: (workspaceId: string, threadId: string) => void
+  onArchiveThread?: ThreadItemArchiveHandler
+  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void
+  nowTick: number
+}) {
+  if (entries.length === 0) return null
+
+  return (
+    <section aria-labelledby="fd-pinned-threads-heading" className="mb-4">
+      <h2
+        id="fd-pinned-threads-heading"
+        className="px-2.5 pb-1.5 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted"
+      >
+        Pinned
+      </h2>
+      <div>
+        {entries.map(({ workspaceId, thread }) => (
+          <ThreadItem
+            key={`${workspaceId}:${thread.id}`}
+            thread={thread}
+            workspaceId={workspaceId}
+            isSelected={selectedThreadId === thread.id}
+            onSelect={onSelectThread}
+            onArchive={onArchiveThread}
+            onOpenContextMenu={onOpenThreadContextMenu}
+            nowTick={nowTick}
+          />
+        ))}
+      </div>
+    </section>
   )
 })
 
@@ -179,9 +229,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [isDeletingThread, setIsDeletingThread] = useState(false)
   const [workspaceContextMenu, setWorkspaceContextMenu] =
     useState<WorkspaceContextMenuState | null>(null)
-  const [removeTarget, setRemoveTarget] = useState<{ workspaceId: string; path: string } | null>(
-    null,
-  )
+  const [removeTarget, setRemoveTarget] = useState<{
+    workspaceId: string
+    path: string
+  } | null>(null)
   const [removeError, setRemoveError] = useState<string | null>(null)
   const [isRemovingWorkspace, setIsRemovingWorkspace] = useState(false)
   const threadContextMenuRef = useRef<HTMLDivElement | null>(null)
@@ -374,7 +425,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
       if (!onRemoveWorkspace) return
       setThreadContextMenu(null)
-      setWorkspaceContextMenu({ workspaceId, path, x: position.x, y: position.y })
+      setWorkspaceContextMenu({
+        workspaceId,
+        path,
+        x: position.x,
+        y: position.y,
+      })
     },
     [onRemoveWorkspace],
   )
@@ -410,6 +466,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const workspacePathById = useMemo(
     () => new Map(groups.map((group) => [group.workspace.id, group.workspace.path])),
+    [groups],
+  )
+  const pinnedThreads = useMemo(
+    () =>
+      groups.flatMap((group) =>
+        group.threads
+          .filter((thread) => thread.is_pinned)
+          .map((thread) => ({ workspaceId: group.workspace.id, thread })),
+      ),
     [groups],
   )
 
@@ -579,71 +644,85 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           ) : null}
         </div>
 
-        {errors
-          .filter(Boolean)
-          .map((error) => (
-            <p key={error} className="text-[length:var(--fd-text-xs)] text-warning">
-              {error}
-            </p>
-          ))}
+        {errors.filter(Boolean).map((error) => (
+          <p key={error} className="text-[length:var(--fd-text-xs)] text-warning">
+            {error}
+          </p>
+        ))}
       </SidebarHeader>
 
       <SidebarContent className={contentClassName}>
+        <PinnedThreadList
+          entries={pinnedThreads}
+          selectedThreadId={visualSelectedThreadId}
+          onSelectThread={handleSelectThread}
+          onArchiveThread={onArchiveThread}
+          onOpenThreadContextMenu={handleOpenThreadContextMenu}
+          nowTick={nowTick}
+        />
         <AttentionInbox
           groups={groups}
           selectedThreadId={visualSelectedThreadId}
           onSelectThread={handleSelectThread}
         />
-        <div className="space-y-4">
-          {groups.map((group) => (
-            <WorkspaceGroup
-              key={group.workspace.id}
-              workspace={group.workspace}
-              host={workspaceHosts?.[group.workspace.id] ?? null}
-              isSelected={visualSelectedWorkspaceId === group.workspace.id}
-              onSelect={() =>
-                handleSelectWorkspace(
-                  group.workspace.id,
-                  groupMetadata.get(group.workspace.id)?.initialThreadId ?? null,
-                )
-              }
-              onNewThread={onNewThread ? () => handleNewThread(group.workspace.id) : undefined}
-              onOpenContextMenu={
-                onRemoveWorkspace
-                  ? (position) =>
-                      handleOpenWorkspaceContextMenu(
-                        group.workspace.id,
-                        group.workspace.path,
-                        position,
-                      )
-                  : undefined
-              }
-            >
-              <ThreadList
-                group={group}
-                selectedThreadId={visualSelectedThreadId}
-                onSelectThread={handleSelectThread}
-                onArchiveThread={onArchiveThread}
-                onOpenThreadContextMenu={handleOpenThreadContextMenu}
-                nowTick={nowTick}
+        <section aria-labelledby="fd-projects-heading">
+          <h2
+            id="fd-projects-heading"
+            className="px-2.5 pb-1.5 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted"
+          >
+            Projects
+          </h2>
+          <div className="space-y-4">
+            {groups.map((group) => (
+              <WorkspaceGroup
+                key={group.workspace.id}
+                workspace={group.workspace}
+                host={workspaceHosts?.[group.workspace.id] ?? null}
+                isSelected={visualSelectedWorkspaceId === group.workspace.id}
+                onSelect={() =>
+                  handleSelectWorkspace(
+                    group.workspace.id,
+                    groupMetadata.get(group.workspace.id)?.initialThreadId ?? null,
+                  )
+                }
+                onNewThread={onNewThread ? () => handleNewThread(group.workspace.id) : undefined}
+                onOpenContextMenu={
+                  onRemoveWorkspace
+                    ? (position) =>
+                        handleOpenWorkspaceContextMenu(
+                          group.workspace.id,
+                          group.workspace.path,
+                          position,
+                        )
+                    : undefined
+                }
+              >
+                <ThreadList
+                  group={group}
+                  selectedThreadId={visualSelectedThreadId}
+                  onSelectThread={handleSelectThread}
+                  onArchiveThread={onArchiveThread}
+                  onOpenThreadContextMenu={handleOpenThreadContextMenu}
+                  nowTick={nowTick}
+                />
+              </WorkspaceGroup>
+            ))}
+            {groups.length === 0 ? (
+              <EmptyState
+                icon={onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined}
+                title={emptyState.title}
+                description={emptyState.description}
               />
-            </WorkspaceGroup>
-          ))}
-          {groups.length === 0 ? (
-            <EmptyState
-              icon={onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined}
-              title={emptyState.title}
-              description={emptyState.description}
-            />
-          ) : null}
-        </div>
+            ) : null}
+          </div>
+        </section>
       </SidebarContent>
       {footer ? <div className="border-t border-border-subtle p-3">{footer}</div> : null}
       <ThreadContextMenu
         menuRef={threadContextMenuRef}
         target={threadContextMenu}
         workspacePath={
-          threadContextMenu ? workspacePathById.get(threadContextMenu.workspaceId) ?? null : null
+          threadContextMenu ? (workspacePathById.get(threadContextMenu.workspaceId) ?? null) : null
         }
         canRename={Boolean(onRenameThread)}
         canArchive={Boolean(onArchiveThread)}

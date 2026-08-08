@@ -26,6 +26,11 @@ describe('buildSidebarRows', () => {
 
     expect(rows).toEqual([
       {
+        key: 'section:projects',
+        type: 'section',
+        title: 'Projects',
+      },
+      {
         key: 'workspace:w1',
         type: 'workspace',
         workspaceId: 'w1',
@@ -59,7 +64,7 @@ describe('buildSidebarRows', () => {
       null,
     )
 
-    expect(rows[0]).toEqual({
+    expect(rows[1]).toEqual({
       key: 'workspace:w1',
       type: 'workspace',
       workspaceId: 'w1',
@@ -83,15 +88,37 @@ describe('buildSidebarRows', () => {
       null,
     )
 
-    expect(rows).toHaveLength(1)
-    expect(rows[0]!.type).toBe('workspace')
-    expect((rows[0] as any).isOpen).toBe(false)
+    expect(rows).toHaveLength(2)
+    expect(rows[1]!.type).toBe('workspace')
+    expect((rows[1] as any).isOpen).toBe(false)
+  })
+
+  it('places pinned threads above projects and removes them from project rows', () => {
+    const rows = buildSidebarRows(
+      [
+        {
+          workspace: workspace({ id: 'w1', path: '/tmp/project' }),
+          threads: [
+            thread({ id: 'pinned', workspace_id: 'w1', is_pinned: true }),
+            thread({ id: 'regular', workspace_id: 'w1' }),
+          ],
+        },
+      ],
+      new Set(['w1']),
+      defaultCounts,
+      'pinned',
+    )
+
+    expect(rows.map((row) => row.key)).toEqual([
+      'section:pinned',
+      'pinned:w1:pinned',
+      'section:projects',
+      'workspace:w1',
+    ])
   })
 
   it('limits visible threads and shows overflow row', () => {
-    const threads = Array.from({ length: 8 }, (_, i) =>
-      thread({ id: `t${i}`, workspace_id: 'w1' }),
-    )
+    const threads = Array.from({ length: 8 }, (_, i) => thread({ id: `t${i}`, workspace_id: 'w1' }))
     const rows = buildSidebarRows(
       [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
       emptyCollapsed,
@@ -130,9 +157,7 @@ describe('buildSidebarRows', () => {
   })
 
   it('offers Show less once every thread is visible', () => {
-    const threads = Array.from({ length: 8 }, (_, i) =>
-      thread({ id: `t${i}`, workspace_id: 'w1' }),
-    )
+    const threads = Array.from({ length: 8 }, (_, i) => thread({ id: `t${i}`, workspace_id: 'w1' }))
     const counts = new Map([['w1', 15]])
     const rows = buildSidebarRows(
       [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
@@ -150,9 +175,7 @@ describe('buildSidebarRows', () => {
   })
 
   it('extends the visible range just enough to include a hidden selected thread', () => {
-    const threads = Array.from({ length: 8 }, (_, i) =>
-      thread({ id: `t${i}`, workspace_id: 'w1' }),
-    )
+    const threads = Array.from({ length: 8 }, (_, i) => thread({ id: `t${i}`, workspace_id: 'w1' }))
     const rows = buildSidebarRows(
       [{ workspace: workspace({ id: 'w1', path: '/tmp/p' }), threads }],
       emptyCollapsed,

@@ -1,5 +1,5 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
 
@@ -98,6 +98,41 @@ function renderSidebar(
 }
 
 describe('DesktopSidebar', () => {
+  it('shows pinned chats above projects without duplicating them in their project', () => {
+    const onSelectThread = vi.fn()
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [
+            thread({
+              id: 'pinned-thread',
+              title: 'Pinned chat',
+              is_pinned: true,
+            }),
+            thread({ id: 'regular-thread', title: 'Project chat' }),
+          ],
+        },
+      ],
+      selectedThreadId: 'regular-thread',
+      onSelectThread,
+    })
+
+    const pinnedSection = screen.getByRole('region', { name: 'Pinned' })
+    const projectsSection = screen.getByRole('region', { name: 'Projects' })
+
+    expect(pinnedSection.compareDocumentPosition(projectsSection)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+    expect(within(pinnedSection).getByText('Pinned chat')).toBeInTheDocument()
+    expect(within(projectsSection).queryByText('Pinned chat')).not.toBeInTheDocument()
+    expect(within(projectsSection).getByText('Project chat')).toBeInTheDocument()
+    expect(screen.getAllByText('Pinned chat')).toHaveLength(1)
+
+    fireEvent.click(within(pinnedSection).getByText('Pinned chat'))
+    expect(onSelectThread).toHaveBeenCalledWith('workspace-1', 'pinned-thread')
+  })
+
   it('renames a thread from the right-click menu', async () => {
     const { onRenameThread } = renderSidebar()
 
