@@ -1273,6 +1273,24 @@ impl AppState {
         crate::git::git_status(&self.git_root(workspace_id, thread_id).await?).await
     }
 
+    // Branch listing and switching act on the project folder only: an isolated
+    // thread's checkout is fixed at creation, so there is no thread variant.
+    pub async fn git_branches(
+        &self,
+        workspace_id: &str,
+    ) -> Result<falcondeck_core::GitBranchesResponse, DaemonError> {
+        crate::git::git_branches(&self.git_root(workspace_id, None).await?).await
+    }
+
+    pub async fn git_checkout(
+        &self,
+        workspace_id: &str,
+        branch: &str,
+        create: bool,
+    ) -> Result<falcondeck_core::GitBranchesResponse, DaemonError> {
+        crate::git::git_checkout(&self.git_root(workspace_id, None).await?, branch, create).await
+    }
+
     pub async fn git_diff(
         &self,
         workspace_id: &str,

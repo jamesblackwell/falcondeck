@@ -3,6 +3,7 @@ import type {
   CollaborationModeSummary,
   DaemonSnapshot,
   EventEnvelope,
+  GitBranchesResponse,
   GitDiffResponse,
   GitFileStatus,
   GitStatusResponse,
@@ -286,6 +287,22 @@ export function createDaemonApiClient(baseUrl: string) {
       const params = query.toString() ? `?${query.toString()}` : ''
       return parseJson<GitStatusResponse>(
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/status${params}`),
+      )
+    },
+    // Branches always describe the project folder: isolated-thread checkouts
+    // are fixed at creation, so the picker only exists for new threads.
+    async gitBranches(workspaceId: string) {
+      return parseJson<GitBranchesResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/branches`),
+      )
+    },
+    async gitCheckout(workspaceId: string, branch: string, create = false) {
+      return parseJson<GitBranchesResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/checkout`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ branch, create }),
+        }),
       )
     },
     async gitDiff(

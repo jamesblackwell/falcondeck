@@ -2284,6 +2284,15 @@ pub struct GitStatusResponse {
     pub entries: Vec<GitStatusEntry>,
 }
 
+/// Local branches of a workspace checkout, for the new-thread branch picker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitBranchesResponse {
+    /// Currently checked-out branch, if HEAD is not detached.
+    pub current: Option<String>,
+    /// Local branch names, most recently committed first.
+    pub branches: Vec<String>,
+}
+
 /// Full diff response returned by the daemon.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GitDiffResponse {

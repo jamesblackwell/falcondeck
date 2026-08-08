@@ -544,6 +544,11 @@ export type GitDiffResponse = {
   content: string | null
 }
 
+export type GitBranchesResponse = {
+  current: string | null
+  branches: string[]
+}
+
 export type RemoteConnectionStatus =
   | 'inactive'
   | 'pairing_pending'

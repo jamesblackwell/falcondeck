@@ -167,6 +167,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/providers", get(read_providers).put(update_providers))
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
+        .route(
+            "/api/workspaces/{workspace_id}/git/branches",
+            get(git_branches),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/git/checkout",
+            post(git_checkout),
+        )
         .route("/api/claude/hooks/pre-tool-use", post(claude_pre_tool_use))
         .layer(
             CorsLayer::new()
@@ -450,6 +458,34 @@ async fn git_status(
     Ok(Json(
         state
             .git_status(&workspace_id, query.thread_id.as_deref())
+            .await?,
+    ))
+}
+
+async fn git_branches(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<falcondeck_core::GitBranchesResponse>, DaemonError> {
+    Ok(Json(state.git_branches(&workspace_id).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct GitCheckoutRequest {
+    branch: String,
+    #[serde(default)]
+    create: bool,
+}
+
+/// Switches (or creates) a branch in the project folder and returns the
+/// refreshed branch list, so the picker can update from a single round trip.
+async fn git_checkout(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(request): Json<GitCheckoutRequest>,
+) -> Result<Json<falcondeck_core::GitBranchesResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .git_checkout(&workspace_id, &request.branch, request.create)
             .await?,
     ))
 }

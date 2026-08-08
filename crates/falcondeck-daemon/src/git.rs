@@ -1,4 +1,6 @@
-use falcondeck_core::{GitDiffResponse, GitFileStatus, GitStatusEntry, GitStatusResponse};
+use falcondeck_core::{
+    GitBranchesResponse, GitDiffResponse, GitFileStatus, GitStatusEntry, GitStatusResponse,
+};
 use std::path::Path;
 use tokio::fs;
 use tokio::process::Command;
@@ -141,6 +143,93 @@ pub async fn git_status(workspace_path: &str) -> Result<GitStatusResponse, Daemo
     Ok(GitStatusResponse { branch, entries })
 }
 
+pub async fn git_branches(workspace_path: &str) -> Result<GitBranchesResponse, DaemonError> {
+    let current_output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(workspace_path)
+        .output()
+        .await
+        .map_err(|e| DaemonError::Rpc(format!("failed to run git: {e}")))?;
+
+    let current = if current_output.status.success() {
+        let b = String::from_utf8_lossy(&current_output.stdout)
+            .trim()
+            .to_string();
+        if b.is_empty() || b == "HEAD" {
+            None
+        } else {
+            Some(b)
+        }
+    } else {
+        None
+    };
+
+    let list_output = Command::new("git")
+        .args([
+            "for-each-ref",
+            "refs/heads/",
+            "--sort=-committerdate",
+            "--format=%(refname:short)",
+        ])
+        .current_dir(workspace_path)
+        .output()
+        .await
+        .map_err(|e| DaemonError::Rpc(format!("failed to run git for-each-ref: {e}")))?;
+
+    if !list_output.status.success() {
+        return Err(DaemonError::Rpc(
+            "git for-each-ref failed — not a git repository?".to_string(),
+        ));
+    }
+
+    let branches = String::from_utf8_lossy(&list_output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    Ok(GitBranchesResponse { current, branches })
+}
+
+pub async fn git_checkout(
+    workspace_path: &str,
+    branch: &str,
+    create: bool,
+) -> Result<GitBranchesResponse, DaemonError> {
+    // Refuse names that read as flags or revision expressions; branch pickers
+    // only ever hand us plain ref names.
+    if branch.is_empty() || branch.starts_with('-') || branch.contains("..") {
+        return Err(DaemonError::Rpc(format!("invalid branch name: {branch}")));
+    }
+
+    let mut args = vec!["checkout"];
+    if create {
+        args.push("-b");
+    }
+    args.push(branch);
+    // `--` guards against a branch name shadowing a path.
+    if !create {
+        args.push("--");
+    }
+
+    let output = Command::new("git")
+        .args(&args)
+        .current_dir(workspace_path)
+        .output()
+        .await
+        .map_err(|e| DaemonError::Rpc(format!("failed to run git checkout: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(DaemonError::Rpc(
+            stderr.trim().lines().last().unwrap_or("git checkout failed").to_string(),
+        ));
+    }
+
+    git_branches(workspace_path).await
+}
+
 pub async fn git_diff(
     workspace_path: &str,
     path: Option<&str>,
@@ -239,6 +328,38 @@ mod tests {
                 .iter()
                 .any(|entry| entry.path == "content/posts/")
         );
+    }
+
+    #[tokio::test]
+    async fn git_branches_lists_and_checkout_switches_and_creates() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+
+        run_git(repo, &["init", "--initial-branch=main"]).await;
+        run_git(repo, &["config", "user.email", "test@example.com"]).await;
+        run_git(repo, &["config", "user.name", "Test"]).await;
+        fs::write(repo.join("README.md"), "hello\n").await.unwrap();
+        run_git(repo, &["add", "."]).await;
+        run_git(repo, &["commit", "-m", "init"]).await;
+        run_git(repo, &["branch", "feature/one"]).await;
+
+        let path = repo.to_str().unwrap();
+        let listed = git_branches(path).await.unwrap();
+        assert_eq!(listed.current.as_deref(), Some("main"));
+        assert!(listed.branches.contains(&"main".to_string()));
+        assert!(listed.branches.contains(&"feature/one".to_string()));
+
+        let switched = git_checkout(path, "feature/one", false).await.unwrap();
+        assert_eq!(switched.current.as_deref(), Some("feature/one"));
+
+        let created = git_checkout(path, "feature/two", true).await.unwrap();
+        assert_eq!(created.current.as_deref(), Some("feature/two"));
+        assert!(created.branches.contains(&"feature/two".to_string()));
+
+        let missing = git_checkout(path, "does-not-exist", false).await;
+        assert!(missing.is_err());
+        let flagged = git_checkout(path, "--force", false).await;
+        assert!(flagged.is_err());
     }
 
     #[tokio::test]
