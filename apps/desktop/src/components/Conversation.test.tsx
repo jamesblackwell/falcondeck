@@ -20,6 +20,28 @@ describe('Conversation empty state', () => {
     expect(screen.getByText('Thinking…')).toBeInTheDocument()
   })
 
+  it('shows an optimistic sending indicator before daemon activity arrives', () => {
+    render(
+      <Conversation
+        items={[
+          {
+            kind: 'user_message',
+            id: 'user-1',
+            text: 'Did you implement it?',
+            attachments: [],
+            created_at: '2026-08-08T12:00:00Z',
+          },
+        ]}
+        isSending
+        isThinking
+      />,
+    )
+
+    expect(screen.queryByText('Ready for instructions')).toBeNull()
+    expect(screen.getByText('Sending…')).toBeInTheDocument()
+    expect(screen.queryByText('Thinking…')).toBeNull()
+  })
+
   it('yields to the approval notice when an empty-transcript turn is blocked', () => {
     render(<Conversation items={[]} isWaitingForInput />)
 

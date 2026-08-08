@@ -151,6 +151,14 @@ const NO_ATTACHMENTS: ImageInput[] = []
 // while the connection is up but the session data key is missing.
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
 
+function lastAgentItemId(items: ConversationItem[]) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item && item.kind !== 'user_message') return item.id
+  }
+  return null
+}
+
 export default function App() {
   return (
     <ToastProvider>
@@ -244,6 +252,8 @@ function RemoteApp() {
   // offline banner can stay put across the whole backoff cycle.
   const [hasConnectedOnce, setHasConnectedOnce] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
+  const sendingConversationKeyRef = useRef<string | null>(null)
+  const sendingBaselineAgentItemIdRef = useRef<string | null>(null)
   const threadSettingsRequestRef = useRef(0)
   const notifiedAttentionRef = useRef(new Map<string, string>())
   const reconnectTimerRef = useRef<number | null>(null)
@@ -648,6 +658,28 @@ function RemoteApp() {
       ),
     [selectedThreadId, selectedThreadItems, selectedWorkspaceId, threadDetail],
   )
+
+  // Relay acceptance only means the prompt is queued for the daemon. Preserve
+  // immediate feedback until the selected thread exposes real agent activity.
+  useEffect(() => {
+    if (!isSubmitting) return
+    if (sendingConversationKeyRef.current !== conversationKey) {
+      sendingConversationKeyRef.current = null
+      setIsSubmitting(false)
+      return
+    }
+    const hasAgentActivity =
+      lastAgentItemId(items) !== sendingBaselineAgentItemIdRef.current
+    if (
+      selectedThread?.status === 'running' ||
+      selectedThread?.status === 'waiting_for_input' ||
+      selectedThread?.status === 'error' ||
+      hasAgentActivity
+    ) {
+      sendingConversationKeyRef.current = null
+      setIsSubmitting(false)
+    }
+  }, [conversationKey, isSubmitting, items, selectedThread?.status])
 
   // ── WebSocket relay connection ─────────────────────────────────────
 
@@ -1537,6 +1569,8 @@ function RemoteApp() {
     const submittedAttachments = attachments
     const submittedSkills = selectedSkillsFromText(submittedDraft, selectedWorkspace.skills ?? [])
     const submittedKey = conversationKey
+    sendingConversationKeyRef.current = submittedKey
+    sendingBaselineAgentItemIdRef.current = lastAgentItemId(items)
     setDraftForConversation(submittedKey, '')
     setAttachmentsForConversation(submittedKey, () => [])
     setIsSubmitting(true)
@@ -1554,6 +1588,8 @@ function RemoteApp() {
           }),
         )
         activeThreadId = handle.thread.id
+        sendingConversationKeyRef.current = draftKeyFor(selectedWorkspace.id, activeThreadId)
+        sendingBaselineAgentItemIdRef.current = null
         setSelectedWorkspaceId(handle.workspace.id)
         setSelectedThreadId(handle.thread.id)
       }
@@ -1582,7 +1618,7 @@ function RemoteApp() {
       setDraftForConversation(restoreKey, submittedDraft)
       setAttachmentsForConversation(restoreKey, () => submittedAttachments)
       reportError(e, 'Failed to send message')
-    } finally {
+      sendingConversationKeyRef.current = null
       setIsSubmitting(false)
     }
   }
@@ -2598,7 +2634,8 @@ function RemoteApp() {
               items={items}
               preferences={snapshot?.preferences ?? null}
               emptyState={conversationEmptyState}
-              isThinking={isSubmitting || selectedThread?.status === 'running'}
+              isSending={isSubmitting}
+              isThinking={selectedThread?.status === 'running'}
               isWaitingForInput={selectedThread?.status === 'waiting_for_input'}
               isLoading={isThreadDetailPending}
             />

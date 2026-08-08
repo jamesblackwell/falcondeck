@@ -83,6 +83,14 @@ import { hostLabelByWorkspaceId, mergeSnapshots } from './hosts'
 const NO_ATTACHMENTS: ImageInput[] = []
 const DRAFT_PERSIST_DELAY_MS = 200
 
+function lastAgentItemId(items: ConversationItem[]) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item && item.kind !== 'user_message') return item.id
+  }
+  return null
+}
+
 const SettingsView = lazy(() =>
   import('./components/SettingsView').then((module) => ({ default: module.SettingsView })),
 )
@@ -162,6 +170,8 @@ function AppInner() {
   const announcedUpdateVersionRef = useRef<string | null>(null)
   const announcedDownloadedVersionRef = useRef<string | null>(null)
   const draftsRef = useRef(drafts)
+  const sendingConversationKeyRef = useRef<string | null>(null)
+  const sendingBaselineAgentItemIdRef = useRef<string | null>(null)
 
   // Each conversation keeps its own unsent input, keyed by workspace + thread
   // ('new' for a thread not yet created), so navigating never carries text or
@@ -986,6 +996,8 @@ function AppInner() {
       return
     }
     const submittedKey = conversationKey
+    sendingConversationKeyRef.current = submittedKey
+    sendingBaselineAgentItemIdRef.current = lastAgentItemId(conversationItems)
     setDraftForConversation(submittedKey, '')
     setAttachmentsForConversation(submittedKey, () => [])
     setIsSending(true)
@@ -1002,6 +1014,8 @@ function AppInner() {
           isolation: selectedIsolation,
         })
         activeThreadId = handle.thread.id
+        sendingConversationKeyRef.current = draftKeyFor(selectedWorkspace.id, activeThreadId)
+        sendingBaselineAgentItemIdRef.current = null
         setSelectedThreadId(activeThreadId)
         setSnapshot((c) =>
           c
@@ -1055,7 +1069,7 @@ function AppInner() {
       const msg = normalizeSendError(rawMessage, activeProvider)
       setActionError(msg)
       toast({ variant: 'danger', title: 'Failed to send message', description: msg })
-    } finally {
+      sendingConversationKeyRef.current = null
       setIsSending(false)
     }
   }
@@ -1547,6 +1561,29 @@ function AppInner() {
     () => conversationItemsForSelection(selectedWorkspaceId, selectedThreadId, threadDetail),
     [selectedThreadId, selectedWorkspaceId, threadDetail],
   )
+
+  // The transport acknowledging turn.start is not the same as the agent
+  // starting work (especially for Claude over SSH). Keep the optimistic label
+  // until the daemon exposes either a running status or the first agent item.
+  useEffect(() => {
+    if (!isSending) return
+    if (sendingConversationKeyRef.current !== conversationKey) {
+      sendingConversationKeyRef.current = null
+      setIsSending(false)
+      return
+    }
+    const hasAgentActivity =
+      lastAgentItemId(conversationItems) !== sendingBaselineAgentItemIdRef.current
+    if (
+      selectedThread?.status === 'running' ||
+      selectedThread?.status === 'waiting_for_input' ||
+      selectedThread?.status === 'error' ||
+      hasAgentActivity
+    ) {
+      sendingConversationKeyRef.current = null
+      setIsSending(false)
+    }
+  }, [conversationItems, conversationKey, isSending, selectedThread?.status])
   const activeProvider = selectedThread?.provider ?? selectedProvider
   const currentReasoningOptions = useMemo(
     () =>

@@ -38,6 +38,7 @@ export const Conversation = memo(function Conversation({
   items,
   preferences = null,
   emptyState,
+  isSending = false,
   isThinking = false,
   isWaitingForInput = false,
   isLoading = false,
@@ -47,6 +48,9 @@ export const Conversation = memo(function Conversation({
   items: ConversationItem[]
   preferences?: FalconDeckPreferences | null
   emptyState?: React.ReactNode
+  /** A prompt has left the composer but the daemon has not surfaced agent
+      activity yet. This optimistic state keeps slow transports responsive. */
+  isSending?: boolean
   isThinking?: boolean
   /** The turn is blocked on an approval or question. Renders a pinned notice
       so the thread can never look idle while the agent is waiting on the user. */
@@ -94,15 +98,16 @@ export const Conversation = memo(function Conversation({
     return last?.kind === 'reasoning' ? last.id : null
   }, [isThinking, renderableItems])
   const hasHiddenOnlyItems = items.length > 0 && renderableItems.length === 0
+  const isBusy = isSending || isThinking
   // "Ready for instructions" claims the thread is idle and empty, so any busy
   // signal outranks it: a just-submitted prompt hasn't echoed into `items` yet
-  // (isThinking covers that gap), a blocked turn is waiting on the user, and a
+  // (isSending covers that gap), a blocked turn is waiting on the user, and a
   // hydrating thread hasn't revealed whether it is empty at all.
   const showEmptyState =
     renderBlocks.length === 0 &&
     liveActivityGroups.length === 0 &&
     !hasHiddenOnlyItems &&
-    !isThinking &&
+    !isBusy &&
     !isWaitingForInput &&
     !isLoading
 
@@ -225,7 +230,7 @@ export const Conversation = memo(function Conversation({
 
   useLayoutEffect(() => {
     if (isLoading) return
-    if (!renderBlocks.length && !isThinking && !isWaitingForInput) return
+    if (!renderBlocks.length && !isBusy && !isWaitingForInput) return
     // ResizeObserver below runs after layout and before paint. Avoid doing the
     // same forced scroll-height read twice on every streaming update.
     if (typeof ResizeObserver !== 'undefined') return
@@ -236,7 +241,7 @@ export const Conversation = memo(function Conversation({
     }
 
     pinToBottomNow()
-  }, [isLoading, isThinking, isWaitingForInput, persistScrollPosition, renderBlocks, pinToBottomNow])
+  }, [isBusy, isLoading, isWaitingForInput, persistScrollPosition, renderBlocks, pinToBottomNow])
 
   useEffect(() => {
     if (!threadKey || isLoading) return
@@ -290,7 +295,7 @@ export const Conversation = memo(function Conversation({
           >
             {showEmptyState ||
             (renderBlocks.length === 0 &&
-              (isThinking || isWaitingForInput) &&
+              (isBusy || isWaitingForInput) &&
               liveActivityGroups.length === 0) ? (
             <div className="flex min-h-full flex-1 flex-col gap-3">
               {showEmptyState
@@ -304,10 +309,10 @@ export const Conversation = memo(function Conversation({
                 : null}
               {isWaitingForInput && liveActivityGroups.length === 0 ? (
                 <WaitingForApprovalNotice />
-              ) : isThinking && liveActivityGroups.length === 0 ? (
+              ) : isBusy && liveActivityGroups.length === 0 ? (
                 <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
                   <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
-                  Thinking…
+                  {isSending ? 'Sending…' : 'Thinking…'}
                 </div>
               ) : null}
             </div>
@@ -369,16 +374,19 @@ export const Conversation = memo(function Conversation({
                 is waiting on them. */}
             {renderBlocks.length > 0 && isWaitingForInput ? <WaitingForApprovalNotice /> : null}
 
-            {/* A streaming thought already says "Thinking…" in its own header. */}
-            {renderBlocks.length > 0 &&
-            isThinking &&
+            {/* Sending is purely optimistic, so show it even if stale live
+                presentation data is still settling. A streaming thought
+                already says "Thinking…" in its own header. */}
+            {(renderBlocks.length > 0 || liveActivityGroups.length > 0) &&
             !isWaitingForInput &&
-            liveActivityGroups.length === 0 &&
-            !hasRunningWorkSession &&
-            !streamingReasoningId ? (
+            (isSending ||
+              (isThinking &&
+                liveActivityGroups.length === 0 &&
+                !hasRunningWorkSession &&
+                !streamingReasoningId)) ? (
             <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
               <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
-              Thinking…
+              {isSending ? 'Sending…' : 'Thinking…'}
             </div>
           ) : null}
 
