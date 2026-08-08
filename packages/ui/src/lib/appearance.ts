@@ -240,12 +240,17 @@ export function updateAppearance(patch: Partial<AppearanceSettings>) {
   notify()
 }
 
-function subscribe(listener: () => void) {
+/**
+ * Observe appearance changes. Fires after the document has been restyled, and
+ * — unlike the `useAppearance` hook — also for OS appearance flips under the
+ * "system" setting, where the settings object itself is unchanged.
+ */
+export function subscribeAppearance(listener: () => void) {
   listeners.add(listener)
   return () => listeners.delete(listener)
 }
 
 /** Reactive hook over the appearance store. */
 export function useAppearance(): AppearanceSettings {
-  return useSyncExternalStore(subscribe, getAppearance, getAppearance)
+  return useSyncExternalStore(subscribeAppearance, getAppearance, getAppearance)
 }

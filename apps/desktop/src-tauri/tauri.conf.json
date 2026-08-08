@@ -31,6 +31,7 @@
         "title": "FalconDeck",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
+        "backgroundColor": "#09090b",
         "width": 1520,
         "height": 980,
         "minWidth": 1120,
