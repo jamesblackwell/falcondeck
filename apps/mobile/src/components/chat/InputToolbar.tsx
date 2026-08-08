@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react'
-import { View, Pressable } from 'react-native'
+import { View, Pressable, ScrollView } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { ChevronDown, Zap } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
@@ -188,7 +188,16 @@ export const InputToolbar = memo(function InputToolbar({
 
   return (
     <>
-      <View style={styles.container}>
+      {/* A scrolling row, not a wrapping one: Yoga wraps a shrinkable
+          flexWrap container well before it actually runs out of space,
+          stacking the chips beside the attach button. Overflowing chips
+          scroll under the send button instead. */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.scroll}
+        contentContainerStyle={styles.container}
+      >
         {showProviderSelector && providers.length > 0 ? (
           <View style={[styles.providerToggle, disabled && styles.controlDisabled]}>
             {providers.map((p) => {
@@ -269,7 +278,7 @@ export const InputToolbar = memo(function InputToolbar({
             onPress={handleFastPress}
           />
         ) : null}
-      </View>
+      </ScrollView>
 
       {sheet ? (
         <OptionSheet
@@ -355,11 +364,13 @@ const FastChip = memo(function FastChip({
 })
 
 const styles = StyleSheet.create((theme) => ({
+  scroll: {
+    flexShrink: 1,
+    flexGrow: 0,
+  },
   container: {
     flexDirection: 'row',
     alignItems: 'center',
-    flexShrink: 1,
-    flexWrap: 'wrap',
     gap: theme.spacing[2],
   },
   providerToggle: {
