@@ -14,6 +14,7 @@ import {
   generateBoxKeyPair,
   identityPublicKeyToBase64,
   normalizePreferences,
+  normalizeConversationItem,
   normalizeThreadSummary,
   normalizeWorkspaceSummary,
   projectLabel,
@@ -568,6 +569,64 @@ describe('client-core conversation helpers', () => {
       is_read_only: false,
       activity_kind: 'other',
       history_mode: 'full',
+    })
+  })
+
+  it('downgrades approval artifacts on tools that merely mention permissions', () => {
+    const readItem = {
+      kind: 'tool_call',
+      id: 'read-1',
+      title: 'Read /project/src/index.tsx',
+      tool_kind: 'fileRead',
+      status: 'completed',
+      output: 'const mode = resolvePermissionMode(preferred.permissionMode)',
+      exit_code: 0,
+      display: {
+        is_read_only: true,
+        has_side_effect: false,
+        is_error: false,
+        artifact_kind: 'approval_related',
+        activity_kind: 'approval',
+        history_mode: 'full',
+        summary_hint: null,
+      },
+      created_at: '2026-03-15T10:06:00Z',
+      completed_at: '2026-03-15T10:06:01Z',
+    } satisfies ConversationItem
+
+    const normalized = normalizeConversationItem(readItem)
+    expect(normalized.kind === 'tool_call' ? normalized.display : null).toMatchObject({
+      artifact_kind: 'command_output',
+      activity_kind: 'other',
+    })
+  })
+
+  it('keeps approval artifacts for genuine approval traffic', () => {
+    const denied = {
+      kind: 'tool_call',
+      id: 'bash-1',
+      title: 'Bash npm install',
+      tool_kind: 'commandExecution',
+      status: 'failed',
+      output: 'This command requested permissions to run.',
+      exit_code: 1,
+      display: {
+        is_read_only: false,
+        has_side_effect: true,
+        is_error: true,
+        artifact_kind: 'approval_related',
+        activity_kind: 'approval',
+        history_mode: 'full',
+        summary_hint: null,
+      },
+      created_at: '2026-03-15T10:06:00Z',
+      completed_at: '2026-03-15T10:06:01Z',
+    } satisfies ConversationItem
+
+    const normalized = normalizeConversationItem(denied)
+    expect(normalized.kind === 'tool_call' ? normalized.display : null).toMatchObject({
+      artifact_kind: 'approval_related',
+      activity_kind: 'approval',
     })
   })
 

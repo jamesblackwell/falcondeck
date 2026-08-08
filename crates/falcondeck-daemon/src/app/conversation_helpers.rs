@@ -603,11 +603,14 @@ fn classify_tool_activity_kind(
     normalized_kind: &str,
     normalized_output: &str,
 ) -> ToolActivityKind {
+    // Only the CLI's own "requested permissions" phrasing marks approval
+    // traffic. Matching the bare word "permission" in outputs or titles turned
+    // every `Read` of a file mentioning permission_mode (and any `git log`
+    // whose history discusses permissions) into an auto-expanded approval
+    // card, shattering the transcript's work-session fold.
     if normalized_output.contains("requested permissions")
-        || normalized_output.contains("permission")
         || normalized_kind.contains("approval")
         || normalized_title.contains("approval")
-        || normalized_title.contains("permission")
     {
         ToolActivityKind::Approval
     } else if normalized_kind.contains("filechange")

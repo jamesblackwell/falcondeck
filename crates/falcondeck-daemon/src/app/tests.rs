@@ -5,7 +5,8 @@ use chrono::{Duration, Utc};
 use falcondeck_core::{
     AgentProvider, ConversationItem, ImageInput, InteractiveRequest, InteractiveRequestKind,
     SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary,
-    ToolActivityKind, ToolHistoryMode, TurnInputItem, UpdateThreadRequest, WorkspaceStatus,
+    ToolActivityKind, ToolArtifactKind, ToolHistoryMode, TurnInputItem, UpdateThreadRequest,
+    WorkspaceStatus,
     WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
@@ -462,6 +463,44 @@ fn derives_summary_mode_for_low_signal_explore_tools() {
     );
     assert_eq!(display.activity_kind, ToolActivityKind::Search);
     assert_eq!(display.history_mode, ToolHistoryMode::Summary);
+}
+
+#[test]
+fn reads_mentioning_permissions_are_not_approval_artifacts() {
+    // A source file that talks about permission_mode is still just a read;
+    // classifying it as approval-related auto-expands the card and splits the
+    // transcript's work-session fold.
+    let display = tool_display_metadata(
+        "Read /project/src/index.tsx",
+        "fileRead",
+        "completed",
+        Some(0),
+        Some("const selectedPermissionMode = resolvePermissionMode(preferred.permissionMode)"),
+    );
+    assert_eq!(display.activity_kind, ToolActivityKind::Read);
+    assert_eq!(display.artifact_kind, ToolArtifactKind::CommandOutput);
+
+    let git_log = tool_display_metadata(
+        "git log --oneline -5",
+        "commandExecution",
+        "completed",
+        Some(0),
+        Some("c5b3c3c fix: persist permission modes across clients"),
+    );
+    assert_ne!(git_log.activity_kind, ToolActivityKind::Approval);
+}
+
+#[test]
+fn requested_permissions_output_still_marks_approval() {
+    let display = tool_display_metadata(
+        "Bash npm install",
+        "commandExecution",
+        "failed",
+        Some(1),
+        Some("This command requested permissions to run."),
+    );
+    assert_eq!(display.activity_kind, ToolActivityKind::Approval);
+    assert_eq!(display.artifact_kind, ToolArtifactKind::ApprovalRelated);
 }
 
 #[test]

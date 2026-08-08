@@ -347,9 +347,48 @@ export function normalizeConversationItem(item: ConversationItem): ConversationI
   return item.kind === 'tool_call'
     ? {
         ...item,
-        display: normalizeToolCallDisplay((item as { display?: unknown }).display),
+        display: correctMisclassifiedApproval(
+          item,
+          normalizeToolCallDisplay((item as { display?: unknown }).display),
+        ),
       }
     : item
+}
+
+/**
+ * Older daemons flag any tool whose output mentions the word "permission" as
+ * approval-related, which auto-expands the card and splits the transcript's
+ * work-session fold — reading a file that contains `permission_mode` was
+ * enough. Approval traffic is identified by the tool's own identity, so when
+ * neither the title nor the kind mentions approvals/permissions, downgrade the
+ * artifact to plain output and let the call fold back into its work session.
+ */
+function correctMisclassifiedApproval(
+  item: Extract<ConversationItem, { kind: 'tool_call' }>,
+  display: ToolCallDisplay,
+): ToolCallDisplay {
+  if (display.artifact_kind !== 'approval_related' && display.activity_kind !== 'approval') {
+    return display
+  }
+  const identity = `${item.title} ${item.tool_kind}`.toLowerCase()
+  if (identity.includes('approval') || identity.includes('permission')) {
+    return display
+  }
+  // The CLI's own denial phrasing is a genuine approval signal even when the
+  // tool identity is a plain command.
+  if ((item.output ?? '').toLowerCase().includes('requested permissions')) {
+    return display
+  }
+  return {
+    ...display,
+    activity_kind: display.activity_kind === 'approval' ? 'other' : display.activity_kind,
+    artifact_kind:
+      display.artifact_kind === 'approval_related'
+        ? item.output && item.output.trim().length > 0
+          ? 'command_output'
+          : 'none'
+        : display.artifact_kind,
+  }
 }
 
 export function normalizeThreadDetail(value: ThreadDetail | unknown): ThreadDetail {
