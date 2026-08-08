@@ -650,6 +650,7 @@ export default function HomeScreen() {
     }
 
     let cancelled = false
+    let snapTimer: ReturnType<typeof setTimeout> | null = null
     setIsLoadingOlder(false)
     // Read the item count imperatively: subscribing to it would refire this
     // effect (and a full thread.detail RPC) for every streamed item.
@@ -660,15 +661,26 @@ export default function HomeScreen() {
     void loadThreadDetail(selectedWorkspaceId, selectedThreadId).finally(() => {
       if (cancelled) return
       setDetailLoadingThreadId((current) => (current === selectedThreadId ? null : current))
+      // Snap to the true bottom once the fresh page lands. Opening from cache
+      // renders at the *cached* bottom, and anything the agent produced while
+      // the app was closed appends below the anchored viewport — outside
+      // maintainVisibleContentPosition's autoscroll threshold, so nothing else
+      // brings the reader down. The delay lets the merged items commit and lay
+      // out before the scroll measures content height.
+      snapTimer = setTimeout(() => {
+        if (!cancelled) scrollToBottom(false)
+      }, 80)
     })
 
     return () => {
       cancelled = true
+      if (snapTimer) clearTimeout(snapTimer)
     }
-  }, [isEncrypted, loadThreadDetail, selectedThreadId, selectedWorkspaceId])
+  }, [isEncrypted, loadThreadDetail, scrollToBottom, selectedThreadId, selectedWorkspaceId])
 
-  // Opening a thread starts at the bottom via the list's
-  // startRenderingFromBottom; only the jump-button state needs resetting.
+  // Opening a thread starts at the bottom of the cached items via the list's
+  // startRenderingFromBottom (the detail-load effect snaps past any newer
+  // items once they land); only the jump-button state needs resetting.
   useEffect(() => {
     resetScrollState()
   }, [resetScrollState, selectedThreadId])
