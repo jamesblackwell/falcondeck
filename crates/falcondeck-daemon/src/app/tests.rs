@@ -2781,3 +2781,99 @@ async fn steering_an_unknown_queued_id_reports_not_found() {
     );
     assert_eq!(app.snapshot().await.threads[0].queued_turns.len(), 1);
 }
+
+#[tokio::test]
+async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    let workspace_id = "workspace-hook".to_string();
+    let mut thread = ThreadSummary {
+        id: "thread-hook".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "t".to_string(),
+        provider: AgentProvider::CLAUDE,
+        native_session_id: Some("sess-hook".to_string()),
+        status: ThreadStatus::Running,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    thread.agent.permission_mode = Some("bypassPermissions".to_string());
+    let workspace = WorkspaceSummary {
+        id: workspace_id.clone(),
+        path: temp_dir.path().to_string_lossy().to_string(),
+        status: WorkspaceStatus::Busy,
+        agents: Vec::new(),
+        skills: Vec::new(),
+        default_provider: AgentProvider::CLAUDE,
+        models: Vec::new(),
+        collaboration_modes: Vec::new(),
+        account: falcondeck_core::AccountSummary::default(),
+        current_thread_id: Some("thread-hook".to_string()),
+        connected_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_error: None,
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: workspace,
+            codex_session: None,
+            claude_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [("thread-hook".to_string(), super::ManagedThread::new(thread))]
+                .into_iter()
+                .collect(),
+        },
+    );
+
+    // Bypass mode set on the thread NOW allows immediately — even though the
+    // running turn was spawned before the mode changed.
+    let decision = app
+        .handle_claude_pre_tool_use(claude_pre_tool_use_payload("sess-hook", "Bash"))
+        .await;
+    assert_eq!(
+        decision
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|value| value.as_str()),
+        Some("allow"),
+        "bypassPermissions must allow without prompting: {decision}"
+    );
+
+    // Back to default mode: read-only tools still never prompt.
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let thread = workspaces
+            .get_mut(&workspace_id)
+            .unwrap()
+            .threads
+            .get_mut("thread-hook")
+            .unwrap();
+        thread.summary.agent.permission_mode = None;
+    }
+    let decision = app
+        .handle_claude_pre_tool_use(claude_pre_tool_use_payload("sess-hook", "Read"))
+        .await;
+    assert_eq!(
+        decision
+            .pointer("/hookSpecificOutput/permissionDecision")
+            .and_then(|value| value.as_str()),
+        Some("allow"),
+        "read-only tools must not prompt: {decision}"
+    );
+}

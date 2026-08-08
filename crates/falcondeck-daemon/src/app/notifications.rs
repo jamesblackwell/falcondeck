@@ -773,6 +773,41 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
     };
 
     let allow = claude_hook_decision("allow", "Approved in FalconDeck");
+
+    // The thread's CURRENT permission mode decides, not the mode the turn was
+    // spawned with — that's what makes flipping to Bypass on a phone stop the
+    // prompts at the very next tool call instead of after a restart.
+    let permission_mode = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.threads.get(&thread_id))
+            .and_then(|thread| thread.summary.agent.permission_mode.clone())
+    };
+    let permission_mode = permission_mode.as_deref().map(str::trim).unwrap_or("");
+    if permission_mode.eq_ignore_ascii_case("bypasspermissions")
+        || permission_mode.eq_ignore_ascii_case("dontask")
+        || permission_mode.eq_ignore_ascii_case("auto")
+    {
+        return allow;
+    }
+
+    // Read-only tools never prompt: Claude Code's own permission model does
+    // not ask for these, and a hook that does turns every exploration step
+    // into an approval card.
+    if matches!(
+        tool_name.as_str(),
+        "Read" | "Grep" | "Glob" | "LS" | "NotebookRead" | "TodoWrite" | "TodoRead"
+    ) {
+        return allow;
+    }
+    // acceptEdits means edits proceed without asking; commands still prompt.
+    if permission_mode.eq_ignore_ascii_case("acceptedits")
+        && matches!(tool_name.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+    {
+        return allow;
+    }
+
     {
         let always_allowed = app.inner.claude_always_allowed_tools.lock().await;
         if always_allowed
