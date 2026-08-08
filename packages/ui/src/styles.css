@@ -176,6 +176,17 @@
   --fd-shell-padding: 12px;
 }
 
+/* Every token-driven transition and collapse animation reads these, so
+   zeroing them here is the single lever for "reduce motion". Spinners and
+   loading feedback carry their own durations and keep running. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --fd-duration-fast: 0.01ms;
+    --fd-duration-normal: 0.01ms;
+    --fd-duration-slow: 0.01ms;
+  }
+}
+
 /* ================================================================
    Light theme — same "Precision Instrument" hierarchy inverted.
    Activated by data-theme="light" on <html>; the appearance module
@@ -485,6 +496,10 @@ body {
 @theme {
   --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-default);
   --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-default);
+  /* Navigation collapses run quicker than content collapses: the payload is
+     small and the toggle is high-frequency, so 250ms reads as sluggish. */
+  --animate-expand-fast: fd-expand var(--fd-duration-normal) var(--fd-ease-default);
+  --animate-collapse-fast: fd-collapse var(--fd-duration-normal) var(--fd-ease-default);
   --animate-toast-in: fd-toast-in 250ms var(--fd-ease-default);
   --animate-toast-out: fd-toast-out 200ms var(--fd-ease-default) forwards;
 }

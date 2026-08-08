@@ -1,7 +1,13 @@
-import { memo, useCallback, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { KeyboardAvoidingView, Modal, Platform, Pressable, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated'
 import { FlashList } from '@shopify/flash-list'
 import { ChevronDown, ChevronRight, SquarePen } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
@@ -19,6 +25,47 @@ interface SidebarViewProps {
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread: (workspaceId: string) => void
 }
+
+// Rotating one chevron rather than swapping two icons, so the open/close
+// toggle reads as a single continuous motion.
+const CHEVRON_TIMING = { duration: 150, easing: Easing.out(Easing.cubic) } as const
+
+const WorkspaceChevron = memo(function WorkspaceChevron({
+  workspaceId,
+  isOpen,
+  size,
+  color,
+}: {
+  workspaceId: string
+  isOpen: boolean
+  size: number
+  color: string
+}) {
+  const progress = useSharedValue(isOpen ? 1 : 0)
+  const renderedWorkspaceId = useRef(workspaceId)
+
+  useEffect(() => {
+    const target = isOpen ? 1 : 0
+    // FlashList recycles rows, so this view can land on a different workspace
+    // mid-scroll: snap there instead of spinning through a toggle nobody made.
+    if (renderedWorkspaceId.current !== workspaceId) {
+      renderedWorkspaceId.current = workspaceId
+      progress.value = target
+      return
+    }
+    progress.value = withTiming(target, CHEVRON_TIMING)
+  }, [isOpen, progress, workspaceId])
+
+  const chevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${progress.value * 90}deg` }],
+  }))
+
+  return (
+    <Animated.View style={chevronStyle}>
+      <ChevronRight size={size} color={color} />
+    </Animated.View>
+  )
+})
 
 export const SidebarView = memo(function SidebarView({
   groups,
@@ -183,11 +230,12 @@ export const SidebarView = memo(function SidebarView({
               accessibilityHint={item.isOpen ? 'Collapses this project' : 'Expands this project'}
               accessibilityState={{ expanded: item.isOpen }}
             >
-              {item.isOpen ? (
-                <ChevronDown size={theme.iconSize.xs} color={theme.colors.fg.muted} />
-              ) : (
-                <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
-              )}
+              <WorkspaceChevron
+                workspaceId={item.workspaceId}
+                isOpen={item.isOpen}
+                size={theme.iconSize.xs}
+                color={theme.colors.fg.muted}
+              />
               <Text
                 variant="label"
                 color="secondary"

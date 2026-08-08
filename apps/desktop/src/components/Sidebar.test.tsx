@@ -133,6 +133,25 @@ describe('DesktopSidebar', () => {
     expect(onSelectThread).toHaveBeenCalledWith('workspace-1', 'pinned-thread')
   })
 
+  it('collapses a project to hide its threads, and selects it on the way back open', () => {
+    const onSelectWorkspace = vi.fn()
+    renderSidebar({ onSelectWorkspace })
+
+    const toggle = screen.getByRole('button', { name: 'falcondeck' })
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('Main thread')).not.toBeInTheDocument()
+    // Collapsing is not a selection change, so nothing should be re-selected.
+    expect(onSelectWorkspace).not.toHaveBeenCalled()
+
+    fireEvent.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('Main thread')).toBeInTheDocument()
+    expect(onSelectWorkspace).toHaveBeenCalledWith('workspace-1', 'thread-1')
+  })
+
   it('renames a thread from the right-click menu', async () => {
     const { onRenameThread } = renderSidebar()
 

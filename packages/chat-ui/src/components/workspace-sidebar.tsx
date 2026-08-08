@@ -123,9 +123,15 @@ const ThreadList = memo(function ThreadList({
             setVisibleCount(canCollapse ? VISIBLE_THREAD_LIMIT : effectiveCount + SHOW_MORE_STEP)
           }
           aria-expanded={canCollapse}
-          className="fd-focus flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
+          className="fd-focus flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary"
         >
-          <ChevronDown aria-hidden="true" className={cn('h-3 w-3', canCollapse && 'rotate-180')} />
+          <ChevronDown
+            aria-hidden="true"
+            className={cn(
+              'h-3 w-3 transition-transform duration-[var(--fd-duration-normal)] ease-[var(--fd-ease-default)]',
+              canCollapse && 'rotate-180',
+            )}
+          />
           {canCollapse ? 'Show less' : 'Show more'}
         </button>
       ) : null}
