@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 
 import {
   deriveConversationPresentation,
+  normalizePreferences,
   type ConversationPresentation,
   type ConversationRenderBlock,
 } from '@falcondeck/client-core'
@@ -23,7 +24,18 @@ export function useConversationPresentation(): ConversationPresentation {
       if (item.kind === 'interactive_request' && item.request.kind === 'approval') return false
       return true
     })
-    return deriveConversationPresentation(filteredItems, preferences)
+    // Auto-expanding the turn's first diff is a desktop nicety; on a phone a
+    // multi-hundred-line edit snippet swallows the whole transcript. Edits
+    // still surface as cards here — they just start collapsed.
+    const normalized = normalizePreferences(preferences)
+    const mobilePreferences = {
+      ...normalized,
+      conversation: {
+        ...normalized.conversation,
+        auto_expand: { ...normalized.conversation.auto_expand, first_diff: false },
+      },
+    }
+    return deriveConversationPresentation(filteredItems, mobilePreferences)
   }, [items, preferences])
 }
 
