@@ -357,6 +357,55 @@ fn streamed_token_deltas_concatenate_verbatim() {
 }
 
 #[test]
+fn new_text_block_start_flags_a_paragraph_break() {
+    // A fresh text block after tool use opens a new paragraph; its deltas
+    // must not weld onto the previous block ("…at the bottom.Also updating…").
+    assert!(super::is_claude_text_block_start(&json!({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": { "type": "text", "text": "" }
+        }
+    })));
+    // Tool-use blocks and token deltas are not text-paragraph boundaries.
+    assert!(!super::is_claude_text_block_start(&json!({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_start",
+            "content_block": { "type": "tool_use", "id": "toolu_1", "name": "Read" }
+        }
+    })));
+    assert!(!super::is_claude_text_block_start(&json!({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "delta": { "type": "text_delta", "text": "Also" }
+        }
+    })));
+}
+
+#[test]
+fn multi_block_assistant_messages_join_as_paragraphs() {
+    // A complete assistant message with several text blocks reads as separate
+    // paragraphs, and it dedupes against delta-accumulated text that used the
+    // same separator at the block boundary.
+    let echo = super::extract_claude_text_chunk(&json!({
+        "type": "assistant",
+        "message": { "content": [
+            { "type": "text", "text": "Let me check the list." },
+            { "type": "text", "text": "Also updating the comment:" }
+        ]}
+    }))
+    .expect("full chunk");
+    assert_eq!(echo.text, "Let me check the list.\n\nAlso updating the comment:");
+    assert_eq!(
+        super::merge_claude_assistant_text(&echo.text, &echo.text),
+        "Let me check the list.\n\nAlso updating the comment:"
+    );
+}
+
+#[test]
 fn extracts_nested_claude_tool_use_and_result_events() {
     assert_eq!(
         super::extract_claude_tool_event(&json!({

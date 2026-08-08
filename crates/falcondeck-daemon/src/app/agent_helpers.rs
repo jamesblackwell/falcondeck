@@ -877,14 +877,34 @@ fn claude_message_text(value: &Value) -> Option<String> {
             continue;
         }
         if let Some(text) = extract_string(item, &["text"]) {
-            parts.push(text);
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
         }
     }
     if parts.is_empty() {
         None
     } else {
-        Some(parts.join(""))
+        // Each content block is its own paragraph; joining bare welds the next
+        // block's first word onto the previous block's final sentence. The
+        // separator must match the one the delta path inserts at block starts,
+        // or these whole-message echoes stop deduping against accumulated text.
+        Some(parts.join("\n\n"))
     }
+}
+
+/// True when the stream opens a fresh `text` content block. The token deltas
+/// that follow are a new paragraph: appended verbatim they weld onto the
+/// previous block's last sentence ("…at the bottom.Also updating…").
+pub(crate) fn is_claude_text_block_start(value: &Value) -> bool {
+    let event = claude_event_value(value);
+    extract_string(event, &["type"]).as_deref() == Some("content_block_start")
+        && event
+            .get("content_block")
+            .and_then(|block| extract_string(block, &["type"]))
+            .as_deref()
+            == Some("text")
 }
 
 // Provider ids are open-ended (ACP providers arrive via providers.json), so any

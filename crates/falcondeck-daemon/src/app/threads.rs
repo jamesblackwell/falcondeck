@@ -23,7 +23,8 @@ use super::{
     agent_helpers::{
         SUBAGENT_ACTIVITY_KEPT_STEPS, append_claude_text_delta, claude_parent_tool_use_id,
         extract_claude_error, extract_claude_service_message, extract_claude_text_chunk,
-        extract_claude_tool_event, format_subagent_activity, merge_claude_assistant_text,
+        extract_claude_tool_event, format_subagent_activity, is_claude_text_block_start,
+        merge_claude_assistant_text,
     },
     conversation_helpers::{
         build_ai_thread_title_prompt, is_placeholder_thread_title, is_provisional_thread_title,
@@ -436,6 +437,9 @@ impl AppState {
     ) {
         let assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
         let mut assistant_text = String::new();
+        // Set when a new text content block opens mid-turn; the next delta
+        // starts a fresh paragraph rather than continuing the previous one.
+        let mut assistant_block_break_pending = false;
         let mut tool_identity = HashMap::<String, (String, String)>::new();
         // Sub-agent step log per spawning tool call: (kept steps, dropped count).
         let mut subagent_steps = HashMap::<String, (Vec<String>, usize)>::new();
@@ -585,10 +589,22 @@ impl AppState {
                             }
                             continue;
                         }
+                        if is_claude_text_block_start(&value) {
+                            assistant_block_break_pending = !assistant_text.is_empty();
+                        }
                         if let Some(chunk) = extract_claude_text_chunk(&value) {
                             assistant_text = if chunk.is_delta {
-                                append_claude_text_delta(&assistant_text, &chunk.text)
+                                if std::mem::take(&mut assistant_block_break_pending) {
+                                    format!(
+                                        "{}\n\n{}",
+                                        assistant_text.trim_end(),
+                                        chunk.text.trim_start()
+                                    )
+                                } else {
+                                    append_claude_text_delta(&assistant_text, &chunk.text)
+                                }
                             } else {
+                                assistant_block_break_pending = false;
                                 merge_claude_assistant_text(&assistant_text, &chunk.text)
                             };
                             saw_agent_output = true;
