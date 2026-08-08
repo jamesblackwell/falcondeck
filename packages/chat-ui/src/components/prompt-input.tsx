@@ -80,6 +80,13 @@ export type PromptInputProps = {
    * all of those choices are fixed once the thread exists.
    */
   contextBar?: ReactNode
+  /**
+   * Focuses the textarea whenever this changes to a non-null value. Hosts pass
+   * a key that changes when a new conversation opens (and null while a thread
+   * is selected) so the caret lands in the composer without stealing focus on
+   * ordinary thread switches.
+   */
+  autoFocusKey?: string | null
   disabled?: boolean
   sendDisabled?: boolean
   /** True while the selected thread has an in-flight turn. */
@@ -131,6 +138,7 @@ export const PromptInput = memo(function PromptInput({
   selectedSandboxMode = null,
   onSandboxModeChange,
   contextBar,
+  autoFocusKey = null,
   disabled = false,
   sendDisabled = false,
   isRunning = false,
@@ -192,6 +200,11 @@ export const PromptInput = memo(function PromptInput({
   useLayoutEffect(() => {
     syncTextareaHeight(textareaRef.current)
   }, [syncTextareaHeight, value])
+
+  useEffect(() => {
+    if (autoFocusKey == null || disabled) return
+    textareaRef.current?.focus()
+  }, [autoFocusKey, disabled])
 
   const activeSkill =
     filteredSkills.length > 0

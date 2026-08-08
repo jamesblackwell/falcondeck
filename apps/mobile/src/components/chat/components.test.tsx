@@ -185,48 +185,18 @@ describe('ChatInput component', () => {
     expect(textOf(r)).toContain('Run lint fixes')
   })
 
-  it('expands for two lines on iOS and resets after the draft clears', () => {
-    const r = renderComponent(<ChatInput value={'Line one\nLine two'} {...chatInputDefaults} />)
-    const input = r.root.findByType('TextInput' as any)
-
-    act(() => {
-      input.props.onContentSizeChange({
-        nativeEvent: {
-          contentSize: {
-            height: 48,
-            width: 240,
-          },
-        },
-      })
-    })
-
-    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(48)
-    expect(r.root.findByType('TextInput' as any).props.scrollEnabled).toBe(false)
-
-    act(() => {
-      r.update(<ChatInput value="" {...chatInputDefaults} />)
-    })
-
-    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(44)
-  })
-
-  it('caps a long draft and enables scrolling only at the maximum height', () => {
+  it('sizes itself natively between the min and max heights', () => {
+    // Native auto-grow handles multiline sizing: no fixed height, no manual
+    // scrollEnabled toggling — the input grows to maxHeight and then scrolls.
     const r = renderComponent(<ChatInput value={'Line\n'.repeat(10)} {...chatInputDefaults} />)
     const input = r.root.findByType('TextInput' as any)
+    const style = flattenStyle(input.props.style)
 
-    act(() => {
-      input.props.onContentSizeChange({
-        nativeEvent: {
-          contentSize: {
-            height: 240,
-            width: 240,
-          },
-        },
-      })
-    })
-
-    expect(flattenStyle(r.root.findByType('TextInput' as any).props.style).height).toBe(140)
-    expect(r.root.findByType('TextInput' as any).props.scrollEnabled).toBe(true)
+    expect(style.height).toBeUndefined()
+    expect(style.minHeight).toBe(44)
+    expect(style.maxHeight).toBe(280)
+    expect(input.props.multiline).toBe(true)
+    expect(input.props.scrollEnabled).toBeUndefined()
   })
 })
 

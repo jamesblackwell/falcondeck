@@ -1870,6 +1870,10 @@ function AppInner() {
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,
+                // Land the caret in the composer when a new conversation
+                // opens; null while a thread is selected keeps thread
+                // switches from stealing focus.
+                autoFocusKey: selectedThread ? null : selectedWorkspaceId ?? 'new',
                 onSubmit: handleSubmitCallback,
                 onStop: handleStopCallback,
                 onPickImages: handlePickImages,

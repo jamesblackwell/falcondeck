@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, View } from 'react-native'
+import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, View, type TextInput } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
@@ -158,6 +158,7 @@ export default function HomeScreen() {
   const [isStopping, setIsStopping] = useState(false)
   const [isGoalSheetOpen, setIsGoalSheetOpen] = useState(false)
   const selectionSeedRef = useRef<string | null>(null)
+  const composerInputRef = useRef<TextInput>(null)
   const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lastSentReadSeqRef = useRef<{ threadId: string; readSeq: number } | null>(null)
 
@@ -202,6 +203,18 @@ export default function HomeScreen() {
 
   // True during initial sync: session exists but snapshot hasn't loaded yet
   const isSyncing = !!sessionId && !snapshot
+
+  // Mirrors ChatInput's disabled prop; a non-editable input rejects focus().
+  const isComposerEnabled = !!workspace && !isSubmitting && isEncrypted
+
+  // A new conversation focuses the composer so typing can start immediately.
+  // Existing threads keep the keyboard down for reading. The short delay lets
+  // the drawer-close/navigation animation finish before the keyboard rises.
+  useEffect(() => {
+    if (selectedThreadId || !isComposerEnabled) return
+    const timer = setTimeout(() => composerInputRef.current?.focus(), 350)
+    return () => clearTimeout(timer)
+  }, [isComposerEnabled, selectedThreadId])
 
   // Seed provider/model/effort/mode from the current workspace selection.
   useEffect(() => {
@@ -869,6 +882,7 @@ export default function HomeScreen() {
           while it is up would float the composer above the keyboard. */}
       <View style={{ paddingBottom: isKeyboardVisible ? 0 : insets.bottom }}>
         <ChatInput
+          textInputRef={composerInputRef}
           value={draft}
           onChangeText={setDraft}
           onSubmit={() => void submitTurn()}

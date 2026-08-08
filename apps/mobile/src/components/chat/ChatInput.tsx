@@ -1,5 +1,5 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { View, TextInput, Pressable, type NativeSyntheticEvent, type TextInputContentSizeChangeEventData } from 'react-native'
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import { View, TextInput, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Plus, Send, Square } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
@@ -65,10 +65,12 @@ interface ChatInputProps {
   selectedSandboxMode?: string | null
   onSelectPermissionMode?: (mode: string | null) => void
   onSelectSandboxMode?: (mode: string | null) => void
+  /** Lets the host focus the input imperatively, e.g. on a new conversation. */
+  textInputRef?: RefObject<TextInput | null>
 }
 
 const MIN_INPUT_HEIGHT = 44
-const MAX_INPUT_HEIGHT = 140
+const MAX_INPUT_HEIGHT = 280
 // Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
 const CONTROL_SIZE = 32
 const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
@@ -107,10 +109,10 @@ export const ChatInput = memo(function ChatInput({
   selectedSandboxMode = null,
   onSelectPermissionMode,
   onSelectSandboxMode,
+  textInputRef,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
   const [caretIndex, setCaretIndex] = useState(value.length)
-  const [inputHeight, setInputHeight] = useState(MIN_INPUT_HEIGHT)
   const [pendingSelection, setPendingSelection] = useState<{ start: number; end: number } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const [openSheet, setOpenSheet] = useState<
@@ -185,12 +187,6 @@ export const ChatInput = memo(function ChatInput({
     updateSlashQuery(value, boundedCaretIndex)
   }, [caretIndex, pendingSelection, updateSlashQuery, value])
 
-  useEffect(() => {
-    if (value.length === 0) {
-      setInputHeight(MIN_INPUT_HEIGHT)
-    }
-  }, [value])
-
   const handleSubmit = useCallback(() => {
     if ((!value.trim() && attachments.length === 0) || disabled) return
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
@@ -232,17 +228,6 @@ export const ChatInput = memo(function ChatInput({
       setSlashQuery(null)
     },
     [onChangeText, slashQuery, value],
-  )
-
-  const handleContentSizeChange = useCallback(
-    (event: NativeSyntheticEvent<TextInputContentSizeChangeEventData>) => {
-      const nextHeight = Math.max(
-        MIN_INPUT_HEIGHT,
-        Math.min(event.nativeEvent.contentSize.height, MAX_INPUT_HEIGHT),
-      )
-      setInputHeight((current) => (current === nextHeight ? current : nextHeight))
-    },
-    [],
   )
 
   const canSend = hasContent && !disabled
@@ -328,10 +313,10 @@ export const ChatInput = memo(function ChatInput({
           </View>
         ) : null}
         <TextInput
-          style={[styles.input, { height: inputHeight }]}
+          ref={textInputRef}
+          style={styles.input}
           value={value}
           onChangeText={handleChangeText}
-          onContentSizeChange={handleContentSizeChange}
           onSelectionChange={(event) => {
             const nextSelection = event.nativeEvent.selection
             selectionRangeRef.current = nextSelection
@@ -349,7 +334,6 @@ export const ChatInput = memo(function ChatInput({
           placeholderTextColor={theme.colors.fg.muted}
           selectionColor={theme.colors.accent.default}
           multiline
-          scrollEnabled={inputHeight >= MAX_INPUT_HEIGHT}
           maxLength={100_000}
           editable={!disabled}
         />
@@ -551,6 +535,10 @@ const styles = StyleSheet.create((theme) => ({
     lineHeight: theme.fontSize.base * theme.lineHeight.normal,
     fontFamily: theme.fontFamily.sans,
     color: theme.colors.fg.primary,
+    // No explicit height: on the new architecture a multiline input sizes
+    // itself to its content, growing to maxHeight and scrolling past it.
+    // Driving height from onContentSizeChange fought that and left the box
+    // stuck at one line with scrolling disabled.
     minHeight: MIN_INPUT_HEIGHT,
     maxHeight: MAX_INPUT_HEIGHT,
     paddingHorizontal: theme.spacing[4],
