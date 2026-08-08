@@ -1,5 +1,15 @@
 import { ImagePlus, Plug, Send, Square, X } from 'lucide-react'
-import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
+import React, {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ReactNode,
+} from 'react'
 
 import type {
   ActiveSlashQuery,
@@ -9,7 +19,6 @@ import type {
   ModelSummary,
   ProviderOption,
   SkillSummary,
-  ThreadIsolation,
 } from '@falcondeck/client-core'
 import {
   activeSlashQuery,
@@ -23,12 +32,9 @@ import {
 import { Button, cn } from '@falcondeck/ui'
 
 import {
-  FastModeToggle,
-  IsolationSelector,
-  ModelSelector,
+  ModelMenu,
   PermissionModeSelector,
   ProviderSelector,
-  ReasoningSelector,
   SandboxSelector,
 } from './model-selector'
 import { attachmentLabel, canRenderAttachmentImage } from './attachment-preview'
@@ -69,12 +75,11 @@ export type PromptInputProps = {
   selectedSandboxMode?: string | null
   onSandboxModeChange?: (value: string | null) => void
   /**
-   * Isolation for the thread this composer will create. Omitting the handler
-   * hides the control — mid-thread it has nothing to change, because a
-   * thread's working directory is fixed when it is created.
+   * Thread-creation choices (project, isolation, branch) rendered as a tab
+   * docked above the composer. Hosts pass it only while no thread is selected;
+   * all of those choices are fixed once the thread exists.
    */
-  selectedIsolation?: ThreadIsolation
-  onIsolationChange?: (value: ThreadIsolation) => void
+  contextBar?: ReactNode
   disabled?: boolean
   sendDisabled?: boolean
   /** True while the selected thread has an in-flight turn. */
@@ -125,8 +130,7 @@ export const PromptInput = memo(function PromptInput({
   onPermissionModeChange,
   selectedSandboxMode = null,
   onSandboxModeChange,
-  selectedIsolation = 'project_folder',
-  onIsolationChange,
+  contextBar,
   disabled = false,
   sendDisabled = false,
   isRunning = false,
@@ -290,7 +294,9 @@ export const PromptInput = memo(function PromptInput({
 
   return (
     <div className="mx-auto w-full max-w-3xl px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:mb-4 md:px-6 md:pt-3 md:pb-0">
-      <div className="rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.35)]">
+      {contextBar}
+      {/* `relative` keeps the card painting above the docked context bar tab. */}
+      <div className="relative rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.35)]">
         {/* Attachment previews */}
         {attachments.length > 0 ? (
           <div className="flex flex-wrap gap-2 border-b border-border-subtle px-4 py-3">
@@ -429,35 +435,26 @@ export const PromptInput = memo(function PromptInput({
                 onValueChange={onSandboxModeChange ?? noopModeChange}
                 disabled={disabled || !onSandboxModeChange}
               />
-              <ModelSelector
-                value={selectedModelId}
+              <ModelMenu
                 models={models}
-                onValueChange={onModelChange}
-                disabled={disabled || models.length === 0}
+                selectedModel={selectedModel}
+                onModelChange={onModelChange}
+                reasoningOptions={reasoningOptions}
+                selectedEffort={selectedEffort}
+                onEffortChange={onEffortChange}
+                fastTier={modelFastTier(selectedModel)}
+                fastActive={resolveServiceTier(selectedServiceTier, selectedModel) !== null}
+                onFastActiveChange={
+                  onServiceTierChange
+                    ? (active) =>
+                        onServiceTierChange(
+                          active ? (modelFastTier(selectedModel)?.id ?? null) : null,
+                        )
+                    : undefined
+                }
+                showFastRow={Boolean(onServiceTierChange) && anyModelHasFastTier(models)}
+                disabled={disabled}
               />
-              <ReasoningSelector
-                value={selectedEffort}
-                options={reasoningOptions}
-                onValueChange={onEffortChange}
-                disabled={disabled || reasoningOptions.length === 0}
-              />
-              {onServiceTierChange && anyModelHasFastTier(models) ? (
-                <FastModeToggle
-                  tier={modelFastTier(selectedModel)}
-                  active={resolveServiceTier(selectedServiceTier, selectedModel) !== null}
-                  onActiveChange={(active) =>
-                    onServiceTierChange(active ? (modelFastTier(selectedModel)?.id ?? null) : null)
-                  }
-                  disabled={disabled}
-                />
-              ) : null}
-              {onIsolationChange ? (
-                <IsolationSelector
-                  value={selectedIsolation}
-                  onValueChange={onIsolationChange}
-                  disabled={disabled}
-                />
-              ) : null}
             </>
           ) : null}
 

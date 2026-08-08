@@ -38,7 +38,7 @@ import {
   type TurnInputItem,
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
-import { CommandPalette, GoalControl, NewThreadState } from '@falcondeck/chat-ui'
+import { CommandPalette, ComposerContextBar, GoalControl, NewThreadState } from '@falcondeck/chat-ui'
 import { Button, ToastProvider, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
@@ -77,6 +77,7 @@ import { ProjectImportOverlay } from './components/ProjectImportOverlay'
 import type { SettingsSectionId } from './components/settings/settings-utils'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
+import { useGitBranches } from './hooks/useGitBranches'
 import { usePanelVisibility } from './hooks/usePanelVisibility'
 import { useRemoteHosts } from './hooks/useRemoteHosts'
 import { hostLabelByWorkspaceId, mergeSnapshots } from './hosts'
@@ -321,6 +322,22 @@ function AppInner() {
   const selectedThread = useMemo(
     () => viewSnapshot?.threads.find((t) => t.id === selectedThreadId) ?? null,
     [selectedThreadId, viewSnapshot?.threads],
+  )
+  // Checkouts happen outside the daemon's event stream, so the app keeps its
+  // own bump to refresh the changes rail after a branch switch.
+  const [localGitBump, setLocalGitBump] = useState(0)
+  const combinedGitRefreshTrigger = gitRefreshTrigger + localGitBump
+  // Branch state feeds the new-thread context bar only: threads pin their
+  // checkout at creation, and remote hosts have no local repo to ask.
+  const {
+    branches,
+    uncommittedCount,
+    isCheckoutPending,
+    checkout: checkoutBranch,
+  } = useGitBranches(
+    !selectedThread && !isRemoteWorkspaceSelected && !isSettingsOpen ? api : null,
+    selectedWorkspaceId,
+    combinedGitRefreshTrigger,
   )
   const groups = useMemo(
     () => buildProjectGroups(viewSnapshot?.workspaces ?? [], viewSnapshot?.threads ?? []),
@@ -1228,6 +1245,20 @@ function AppInner() {
     setSelectedThreadId(null)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
+  const handleCheckoutBranch = useCallback(
+    async (branch: string, create: boolean) => {
+      try {
+        await checkoutBranch(branch, create)
+        // The changes rail reads the working tree, which a checkout just swapped.
+        setLocalGitBump((current) => current + 1)
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        toast({ variant: 'danger', title: 'Branch switch failed', description: msg })
+      }
+    },
+    [checkoutBranch, toast],
+  )
+
   const handleNewThreadFromCurrent = useCallback(() => {
     if (!selectedWorkspace || !selectedThread) return
     const provider = selectedThread.provider
@@ -1692,14 +1723,8 @@ function AppInner() {
   )
 
   const newThreadEmptyState = useMemo(
-    () => (
-      <NewThreadState
-        workspaces={workspaces}
-        selectedWorkspace={selectedWorkspace}
-        onSelectWorkspace={handleNewThread}
-      />
-    ),
-    [workspaces, selectedWorkspace, handleNewThread],
+    () => <NewThreadState selectedWorkspace={selectedWorkspace} />,
+    [selectedWorkspace],
   )
   const loadingThreadState = useMemo(
     () => (
@@ -1869,8 +1894,21 @@ function AppInner() {
                 onPermissionModeChange: handlePermissionModeChange,
                 selectedSandboxMode,
                 onSandboxModeChange: handleSandboxModeChange,
-                selectedIsolation,
-                onIsolationChange: selectedThread ? undefined : setSelectedIsolation,
+                // The bar itself stays enabled while the composer is blocked:
+                // picking a project is how you unblock an empty window.
+                contextBar: selectedThread ? undefined : (
+                  <ComposerContextBar
+                    workspaces={workspaces}
+                    selectedWorkspace={selectedWorkspace}
+                    onSelectWorkspace={handleNewThread}
+                    selectedIsolation={selectedIsolation}
+                    onIsolationChange={setSelectedIsolation}
+                    branches={branches}
+                    uncommittedCount={uncommittedCount}
+                    onCheckoutBranch={handleCheckoutBranch}
+                    isCheckoutPending={isCheckoutPending}
+                  />
+                ),
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
                 // waiting_for_input counts: the CLI is alive and blocked on an
@@ -1918,7 +1956,7 @@ function AppInner() {
                     // workspaces have no local checkout to inspect.
                     api={workspaceHostIndex.has(selectedWorkspaceId ?? '') ? null : api}
                     workspaceId={selectedWorkspaceId}
-                    refreshTrigger={gitRefreshTrigger}
+                    refreshTrigger={combinedGitRefreshTrigger}
                     reviewThreadId={
                       selectedThread && activeCapabilities.supports_review ? selectedThread.id : null
                     }

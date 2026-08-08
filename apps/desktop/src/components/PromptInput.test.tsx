@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { PromptInput } from '@falcondeck/chat-ui'
@@ -166,7 +166,7 @@ describe('PromptInput', () => {
     expect(screen.getByRole('combobox', { name: 'Sandbox mode' })).toBeEnabled()
   })
 
-  it('orders the toggle row capability first, then model and effort', () => {
+  it('orders the toggle row capability first, then the combined model menu', () => {
     render(
       <PromptInput
         {...promptInputProps}
@@ -186,7 +186,39 @@ describe('PromptInput', () => {
     )
 
     expect(screen.getAllByRole('combobox').map((element) => element.getAttribute('aria-label')))
-      .toEqual(['Agent', 'Permission mode', 'Sandbox mode', 'Model', 'Reasoning effort'])
+      .toEqual(['Agent', 'Permission mode', 'Sandbox mode'])
+    // Model, effort, and fast mode share one popover chip at the end of the row.
+    expect(screen.getByRole('button', { name: 'Model' })).toBeInTheDocument()
+  })
+
+  it('shows model and effort together on the model menu chip', () => {
+    render(
+      <PromptInput
+        {...promptInputProps}
+        models={[
+          {
+            id: 'gpt-5.4',
+            label: 'gpt-5.4',
+            is_default: true,
+            default_reasoning_effort: null,
+            supported_reasoning_efforts: [],
+          },
+        ]}
+        selectedModelId="gpt-5.4"
+      />,
+    )
+
+    const trigger = screen.getByRole('button', { name: 'Model' })
+    expect(trigger).toHaveTextContent('gpt-5.4')
+    expect(trigger).toHaveTextContent('Medium')
+
+    fireEvent.click(trigger)
+    expect(screen.getByRole('menuitemradio', { name: 'gpt-5.4' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    )
+    const effort = screen.getByRole('radio', { name: 'Medium' })
+    expect(effort).toHaveAttribute('aria-checked', 'true')
   })
 
   describe('fast mode toggle', () => {
@@ -207,6 +239,10 @@ describe('PromptInput', () => {
       supported_reasoning_efforts: [],
     }
 
+    function openModelMenu() {
+      fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    }
+
     it('stays hidden while no model of the provider advertises a tier', () => {
       render(
         <PromptInput
@@ -216,7 +252,8 @@ describe('PromptInput', () => {
           onServiceTierChange={noop}
         />,
       )
-      expect(screen.queryByRole('button', { name: 'Fast mode' })).not.toBeInTheDocument()
+      openModelMenu()
+      expect(screen.queryByRole('menuitemcheckbox', { name: 'Fast mode' })).not.toBeInTheDocument()
     })
 
     it('greys out for a model without a tier instead of unmounting', () => {
@@ -228,7 +265,8 @@ describe('PromptInput', () => {
           onServiceTierChange={noop}
         />,
       )
-      expect(screen.getByRole('button', { name: 'Fast mode' })).toBeDisabled()
+      openModelMenu()
+      expect(screen.getByRole('menuitemcheckbox', { name: 'Fast mode' })).toBeDisabled()
     })
 
     it('reports the advertised tier id on toggle and null on toggle-off', () => {
@@ -243,10 +281,10 @@ describe('PromptInput', () => {
         />,
       )
 
-      const toggle = screen.getByRole('button', { name: 'Fast mode' })
-      expect(toggle).toHaveAttribute('aria-pressed', 'false')
-      expect(toggle).toHaveTextContent('Fast')
-      toggle.click()
+      openModelMenu()
+      const toggle = screen.getByRole('menuitemcheckbox', { name: 'Fast mode' })
+      expect(toggle).toHaveAttribute('aria-checked', 'false')
+      fireEvent.click(toggle)
       expect(onServiceTierChange).toHaveBeenLastCalledWith('priority')
 
       rerender(
@@ -258,8 +296,9 @@ describe('PromptInput', () => {
           onServiceTierChange={onServiceTierChange}
         />,
       )
-      expect(toggle).toHaveAttribute('aria-pressed', 'true')
-      toggle.click()
+      expect(toggle).toHaveAttribute('aria-checked', 'true')
+      // The chip advertises the active tier with a filled bolt while the menu is open or closed.
+      fireEvent.click(toggle)
       expect(onServiceTierChange).toHaveBeenLastCalledWith(null)
     })
   })

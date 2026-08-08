@@ -1,4 +1,6 @@
-import { Zap } from 'lucide-react'
+import { useState } from 'react'
+import * as Popover from '@radix-ui/react-popover'
+import { Check, ChevronDown, Zap } from 'lucide-react'
 
 import {
   formatModelLabel,
@@ -6,7 +8,6 @@ import {
   type ModelSummary,
   type ProviderOption,
   type ServiceTierOption,
-  type ThreadIsolation,
 } from '@falcondeck/client-core'
 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue, cn } from '@falcondeck/ui'
@@ -50,103 +51,168 @@ export function ProviderSelector({
   )
 }
 
-export function ModelSelector({
-  value,
-  models,
-  onValueChange,
-  disabled = false,
-}: {
-  value: string | null
-  models: ModelSummary[]
-  onValueChange: (value: string) => void
-  disabled?: boolean
-}) {
-  return (
-    <Select value={value ?? ''} onValueChange={onValueChange} disabled={disabled}>
-      <SelectTrigger variant="quiet" disabled={disabled} aria-label="Model">
-        <SelectValue placeholder="Model" />
-      </SelectTrigger>
-      <SelectContent>
-        {models.map((model) => (
-          <SelectItem key={model.id} value={model.id}>
-            {formatModelLabel(model.label)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
-  )
+function capitalize(value: string) {
+  return value.charAt(0).toUpperCase() + value.slice(1)
 }
 
 /**
- * The boolean speed switch from the composer spec: a pressed toggle, not a
- * two-item dropdown. Callers mount it when any of the provider's models
- * advertise a service tier and pass `tier: null` while the *selected* model
- * lacks one, so the control greys out instead of vanishing (same rule as the
- * mode pickers).
+ * The single model chip on the composer: model, reasoning effort, and the fast
+ * service tier live in one popover so the toggle row stays short. The trigger
+ * reads like ChatGPT's — "GPT-5.6-Sol · Medium" with a filled bolt while the
+ * fast tier is on.
  */
-export function FastModeToggle({
-  tier,
-  active,
-  onActiveChange,
+export function ModelMenu({
+  models,
+  selectedModel,
+  onModelChange,
+  reasoningOptions,
+  selectedEffort,
+  onEffortChange,
+  fastTier = null,
+  fastActive = false,
+  onFastActiveChange,
+  showFastRow = false,
   disabled = false,
 }: {
-  tier: ServiceTierOption | null
-  active: boolean
-  onActiveChange: (active: boolean) => void
+  models: ModelSummary[]
+  /** The model a send would use: the explicit pick or the provider default. */
+  selectedModel: ModelSummary | null
+  onModelChange: (value: string) => void
+  reasoningOptions: string[]
+  selectedEffort: string | null
+  onEffortChange: (value: string) => void
+  /** Fast tier of the selected model; null greys the row out. */
+  fastTier?: ServiceTierOption | null
+  fastActive?: boolean
+  onFastActiveChange?: (active: boolean) => void
+  /** True when any model of the provider advertises a tier, so the row does not flicker per model. */
+  showFastRow?: boolean
   disabled?: boolean
 }) {
-  const unavailable = tier === null
-  const isOn = active && !unavailable
-  return (
-    <button
-      type="button"
-      aria-pressed={isOn}
-      aria-label="Fast mode"
-      disabled={disabled || unavailable}
-      title={
-        unavailable
-          ? 'This model has one speed'
-          : tier.description || `Run on the ${tier.name} tier`
-      }
-      onClick={() => onActiveChange(!isOn)}
-      className={cn(
-        'fd-focus inline-flex h-7 max-w-full items-center gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] transition-colors duration-[var(--fd-duration-fast)] disabled:cursor-not-allowed disabled:opacity-50',
-        isOn
-          ? 'bg-accent-dim text-accent'
-          : 'text-fg-muted hover:bg-surface-3 hover:text-fg-secondary',
-      )}
-    >
-      {/* The bolt fills in when the tier is on, so state survives without color. */}
-      <Zap className="h-3 w-3 shrink-0" fill={isOn ? 'currentColor' : 'none'} />
-      {tier?.name ?? 'Fast'}
-    </button>
-  )
-}
+  const [open, setOpen] = useState(false)
+  const isFastOn = fastActive && fastTier !== null
+  const triggerLabel = selectedModel ? formatModelLabel(selectedModel.label) : 'Model'
+  const effortLabel = selectedEffort && reasoningOptions.length > 0 ? capitalize(selectedEffort) : null
 
-export function ReasoningSelector({
-  value,
-  options,
-  onValueChange,
-  disabled = false,
-}: {
-  value: string | null
-  options: string[]
-  onValueChange: (value: string) => void
-  disabled?: boolean
-}) {
   return (
-    <Select value={value ?? ''} onValueChange={onValueChange} disabled={disabled}>
-      <SelectTrigger variant="quiet" disabled={disabled} aria-label="Reasoning effort">
-        <SelectValue placeholder="Effort" />
-      </SelectTrigger>
-      <SelectContent>
-        {options.map((option) => (
-          <SelectItem key={option} value={option}>
-            {option.charAt(0).toUpperCase() + option.slice(1)}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label="Model"
+          disabled={disabled || models.length === 0}
+          className="fd-focus inline-flex h-7 max-w-full items-center gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
+        >
+          {isFastOn ? (
+            <Zap aria-hidden="true" className="h-3 w-3 shrink-0 text-accent" fill="currentColor" />
+          ) : null}
+          <span className="truncate">{triggerLabel}</span>
+          {effortLabel ? <span className="shrink-0 text-fg-muted">{effortLabel}</span> : null}
+          <ChevronDown aria-hidden="true" className="h-3 w-3 shrink-0 text-fg-muted" />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="start"
+          sideOffset={6}
+          className="z-50 w-64 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+        >
+          <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
+            Model
+          </p>
+          <div className="max-h-56 overflow-y-auto">
+            {models.map((model) => {
+              const isSelected = model.id === selectedModel?.id
+              return (
+                <button
+                  key={model.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={isSelected}
+                  onClick={() => {
+                    onModelChange(model.id)
+                    setOpen(false)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-surface-2"
+                >
+                  <span className="min-w-0 flex-1 truncate">{formatModelLabel(model.label)}</span>
+                  {isSelected ? <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
+                </button>
+              )
+            })}
+          </div>
+
+          {reasoningOptions.length > 0 ? (
+            <>
+              <p className="border-t border-border-subtle px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
+                Reasoning effort
+              </p>
+              <div
+                role="radiogroup"
+                aria-label="Reasoning effort"
+                className="flex items-center gap-1 px-1.5 pb-1.5"
+              >
+                {reasoningOptions.map((option) => {
+                  const isSelected = option === selectedEffort
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      role="radio"
+                      aria-checked={isSelected}
+                      onClick={() => onEffortChange(option)}
+                      className={cn(
+                        'fd-focus h-6 flex-1 rounded-[var(--fd-radius-md)] text-[length:var(--fd-text-xs)] transition-colors',
+                        isSelected
+                          ? 'bg-surface-3 text-fg-primary'
+                          : 'text-fg-muted hover:bg-surface-2 hover:text-fg-secondary',
+                      )}
+                    >
+                      {capitalize(option)}
+                    </button>
+                  )
+                })}
+              </div>
+            </>
+          ) : null}
+
+          {showFastRow && onFastActiveChange ? (
+            <div className="border-t border-border-subtle pt-1">
+              <button
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={isFastOn}
+                aria-label="Fast mode"
+                disabled={fastTier === null}
+                title={
+                  fastTier === null
+                    ? 'This model has one speed'
+                    : fastTier.description || `Run on the ${fastTier.name} tier`
+                }
+                onClick={() => onFastActiveChange(!isFastOn)}
+                className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {/* The bolt fills in when the tier is on, so state survives without color. */}
+                <Zap
+                  aria-hidden="true"
+                  className={cn('h-3.5 w-3.5 shrink-0', isFastOn ? 'text-accent' : 'text-fg-muted')}
+                  fill={isFastOn ? 'currentColor' : 'none'}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate">{fastTier?.name ?? 'Fast'} mode</span>
+                  {fastTier?.description ? (
+                    <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                      {fastTier.description}
+                    </span>
+                  ) : null}
+                </span>
+                {isFastOn ? <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
+              </button>
+            </div>
+          ) : null}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   )
 }
 
@@ -264,37 +330,6 @@ export function SandboxSelector({
               {modeLabel(SANDBOX_MODE_LABELS, mode)}
             </SelectItem>
           ))}
-      </SelectContent>
-    </Select>
-  )
-}
-
-/**
- * Where a new thread will run. Only meaningful before the thread exists —
- * isolation is fixed at creation, so the composer hides this once a thread is
- * selected rather than offering a control that would silently do nothing.
- */
-export function IsolationSelector({
-  value,
-  onValueChange,
-  disabled = false,
-}: {
-  value: ThreadIsolation
-  onValueChange: (value: ThreadIsolation) => void
-  disabled?: boolean
-}) {
-  return (
-    <Select
-      value={value}
-      onValueChange={(next) => onValueChange(next as ThreadIsolation)}
-      disabled={disabled}
-    >
-      <SelectTrigger variant="quiet" disabled={disabled} aria-label="Run in">
-        <SelectValue placeholder="Run in" />
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="project_folder">Project folder</SelectItem>
-        <SelectItem value="isolated">Isolated copy</SelectItem>
       </SelectContent>
     </Select>
   )
