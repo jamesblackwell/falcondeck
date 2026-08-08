@@ -21,8 +21,9 @@ use uuid::Uuid;
 use super::{
     AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
     agent_helpers::{
-        append_claude_text_delta, extract_claude_error, extract_claude_service_message,
-        extract_claude_text_chunk, extract_claude_tool_event, merge_claude_assistant_text,
+        SUBAGENT_ACTIVITY_KEPT_STEPS, append_claude_text_delta, claude_parent_tool_use_id,
+        extract_claude_error, extract_claude_service_message, extract_claude_text_chunk,
+        extract_claude_tool_event, format_subagent_activity, merge_claude_assistant_text,
     },
     conversation_helpers::{
         build_ai_thread_title_prompt, is_placeholder_thread_title, is_provisional_thread_title,
@@ -34,6 +35,13 @@ use crate::{
     agent_binary::preferred_command_path, claude::ClaudeRuntime, codex::CodexSession,
     error::DaemonError,
 };
+
+/// How long a running Claude turn may stay silent — no stream traffic at all,
+/// not even thinking heartbeats — before the thread gets a visible warning.
+/// Long tool runs (builds, test suites) are legitimately silent, so this warns
+/// rather than intervenes, and names the tool when one is mid-flight.
+const CLAUDE_STALL_WARN_AFTER: Duration = Duration::from_secs(300);
+const CLAUDE_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 struct AiThreadTitleInput {
     workspace_path: String,
@@ -188,6 +196,20 @@ impl AppState {
     {
         self.upsert_thread(workspace_id, thread_id, updater).await?;
         Ok(())
+    }
+
+    /// Cheap status peek for paths that only need to know whether the thread
+    /// is blocked on the user (no summary rebuild, no attention counts).
+    pub(super) async fn thread_waiting_for_input(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> bool {
+        let workspaces = self.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .is_some_and(|thread| matches!(thread.summary.status, ThreadStatus::WaitingForInput))
     }
 
     pub(super) async fn with_managed_thread_mut<F>(
@@ -415,6 +437,11 @@ impl AppState {
         let assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
         let mut assistant_text = String::new();
         let mut tool_identity = HashMap::<String, (String, String)>::new();
+        // Sub-agent step log per spawning tool call: (kept steps, dropped count).
+        let mut subagent_steps = HashMap::<String, (Vec<String>, usize)>::new();
+        let mut running_tool_titles = HashMap::<String, String>::new();
+        let mut last_line_at = tokio::time::Instant::now();
+        let mut stall_warned = false;
         let mut turn_error: Option<String> = None;
         let mut saw_agent_output = false;
         let stderr_task = stderr.map(|stderr| {
@@ -463,13 +490,101 @@ impl AppState {
                     let _ = line_tx.send(line);
                 }
             });
-            while let Some(line) = line_rx.recv().await {
+            loop {
+                let line = match timeout(CLAUDE_STALL_CHECK_INTERVAL, line_rx.recv()).await {
+                    Ok(Some(line)) => line,
+                    Ok(None) => break,
+                    Err(_) => {
+                        // Total stream silence — not even thinking heartbeats.
+                        // Either a tool is legitimately long-running or the CLI
+                        // wedged; a thread that just sits there is what reads
+                        // as "stopped working", so say which it is, once per
+                        // silent stretch. An approval wait is expected silence
+                        // and already renders its own pinned notice.
+                        if !stall_warned
+                            && last_line_at.elapsed() >= CLAUDE_STALL_WARN_AFTER
+                            && !self
+                                .thread_waiting_for_input(&workspace_id, &thread_id)
+                                .await
+                        {
+                            stall_warned = true;
+                            let minutes = last_line_at.elapsed().as_secs() / 60;
+                            let message = match running_tool_titles.values().next() {
+                                Some(title) => format!(
+                                    "Still running {title} — no output for {minutes}m. Stop the turn if this looks stuck."
+                                ),
+                                None => format!(
+                                    "No output from Claude for {minutes}m. Stop the turn if this looks stuck."
+                                ),
+                            };
+                            let _ = self.emit_service(
+                                Some(workspace_id.clone()),
+                                Some(thread_id.clone()),
+                                ServiceLevel::Warning,
+                                message,
+                                Some("claude-watchdog".to_string()),
+                            );
+                        }
+                        continue;
+                    }
+                };
+                last_line_at = tokio::time::Instant::now();
+                stall_warned = false;
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
                 match serde_json::from_str::<Value>(trimmed) {
                     Ok(value) => {
+                        // Sub-agent traffic is tagged with the id of the tool
+                        // call that spawned it. It must stay out of the main
+                        // transcript paths — its prose would merge into the
+                        // assistant's reply and its tool calls would render as
+                        // main-loop work. Instead, fold each tool start into a
+                        // step log on the spawning tool call's card; the
+                        // parent's own tool_result later replaces the log with
+                        // the sub-agent's report.
+                        if let Some(parent_id) = claude_parent_tool_use_id(&value) {
+                            let parent_id = parent_id.to_string();
+                            let step = extract_claude_tool_event(&value)
+                                .filter(|event| event.status == "running")
+                                .and_then(|event| event.title);
+                            if let Some(step) = step {
+                                let entry = subagent_steps.entry(parent_id.clone()).or_default();
+                                entry.0.push(step);
+                                if entry.0.len() > SUBAGENT_ACTIVITY_KEPT_STEPS {
+                                    entry.0.remove(0);
+                                    entry.1 += 1;
+                                }
+                                let output = format_subagent_activity(&entry.0, entry.1);
+                                saw_agent_output = true;
+                                let (title, tool_kind) =
+                                    tool_identity.get(&parent_id).cloned().unwrap_or_else(|| {
+                                        ("Sub-agent".to_string(), "Task".to_string())
+                                    });
+                                let item = ConversationItem::ToolCall {
+                                    id: parent_id,
+                                    title: title.clone(),
+                                    tool_kind: tool_kind.clone(),
+                                    status: "running".to_string(),
+                                    output: Some(output.clone()),
+                                    exit_code: None,
+                                    display: tool_display_metadata(
+                                        &title,
+                                        &tool_kind,
+                                        "running",
+                                        None,
+                                        Some(&output),
+                                    ),
+                                    created_at: Utc::now(),
+                                    completed_at: None,
+                                };
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
+                            }
+                            continue;
+                        }
                         if let Some(chunk) = extract_claude_text_chunk(&value) {
                             assistant_text = if chunk.is_delta {
                                 append_claude_text_delta(&assistant_text, &chunk.text)
@@ -505,6 +620,9 @@ impl AppState {
                                     tool_event.id.clone(),
                                     (title.clone(), tool_kind.clone()),
                                 );
+                                running_tool_titles.insert(tool_event.id.clone(), title.clone());
+                            } else {
+                                running_tool_titles.remove(&tool_event.id);
                             }
                             let completed_at = if tool_event.status == "running" {
                                 None

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, LoaderCircle, MessageSquare } from 'lucide-react'
+import { ChevronDown, LoaderCircle, MessageSquare, ShieldQuestion } from 'lucide-react'
 
 import type { ConversationItem, FalconDeckPreferences } from '@falcondeck/client-core'
 import { deriveConversationPresentation, normalizePreferences } from '@falcondeck/client-core'
@@ -21,12 +21,25 @@ function clampScrollTop(scrollTop: number, element: HTMLDivElement) {
   return Math.min(scrollTop, Math.max(0, element.scrollHeight - element.clientHeight))
 }
 
+/** Pinned notice for a turn blocked on the user. The actionable card lives in
+    the approval bar just below the transcript; this row makes the blocked
+    state visible from within the conversation flow. */
+function WaitingForApprovalNotice() {
+  return (
+    <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
+      <ShieldQuestion className="h-4 w-4 animate-pulse text-warning" />
+      Waiting for approval — respond below to continue
+    </div>
+  )
+}
+
 export const Conversation = memo(function Conversation({
   threadKey = null,
   items,
   preferences = null,
   emptyState,
   isThinking = false,
+  isWaitingForInput = false,
   isLoading = false,
   onOpenFile = null,
 }: {
@@ -35,6 +48,9 @@ export const Conversation = memo(function Conversation({
   preferences?: FalconDeckPreferences | null
   emptyState?: React.ReactNode
   isThinking?: boolean
+  /** The turn is blocked on an approval or question. Renders a pinned notice
+      so the thread can never look idle while the agent is waiting on the user. */
+  isWaitingForInput?: boolean
   isLoading?: boolean
   /** Opens a file's diff in the host's side panel; omit where there is none. */
   onOpenFile?: OpenFileDiff | null
@@ -56,8 +72,11 @@ export const Conversation = memo(function Conversation({
   )
   const normalizedPreferences = useMemo(() => normalizePreferences(preferences), [preferences])
   const presentation = useMemo(
-    () => deriveConversationPresentation(renderableItems, normalizedPreferences),
-    [normalizedPreferences, renderableItems],
+    () =>
+      deriveConversationPresentation(renderableItems, normalizedPreferences, {
+        is_streaming: isThinking,
+      }),
+    [isThinking, normalizedPreferences, renderableItems],
   )
   const renderBlocks = presentation.history_blocks
   const liveActivityGroups = presentation.live_activity_groups
@@ -194,7 +213,7 @@ export const Conversation = memo(function Conversation({
 
   useLayoutEffect(() => {
     if (isLoading) return
-    if (!renderBlocks.length && !isThinking) return
+    if (!renderBlocks.length && !isThinking && !isWaitingForInput) return
 
     if (!stickyToBottomRef.current) {
       persistScrollPosition()
@@ -202,7 +221,7 @@ export const Conversation = memo(function Conversation({
     }
 
     pinToBottomNow()
-  }, [isLoading, isThinking, persistScrollPosition, renderBlocks, pinToBottomNow])
+  }, [isLoading, isThinking, isWaitingForInput, persistScrollPosition, renderBlocks, pinToBottomNow])
 
   useEffect(() => {
     if (!threadKey || isLoading) return
@@ -254,7 +273,10 @@ export const Conversation = memo(function Conversation({
             ref={contentRef}
             className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-3 px-3 pt-4 pb-10 md:px-6 md:pb-12"
           >
-            {showEmptyState || (renderBlocks.length === 0 && isThinking && liveActivityGroups.length === 0) ? (
+            {showEmptyState ||
+            (renderBlocks.length === 0 &&
+              (isThinking || isWaitingForInput) &&
+              liveActivityGroups.length === 0) ? (
             <div className="flex min-h-full flex-1 flex-col gap-3">
               {showEmptyState
                 ? emptyState ?? (
@@ -265,7 +287,9 @@ export const Conversation = memo(function Conversation({
                     />
                   )
                 : null}
-              {isThinking && liveActivityGroups.length === 0 ? (
+              {isWaitingForInput && liveActivityGroups.length === 0 ? (
+                <WaitingForApprovalNotice />
+              ) : isThinking && liveActivityGroups.length === 0 ? (
                 <div className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
                   <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
                   Thinking…
@@ -325,9 +349,15 @@ export const Conversation = memo(function Conversation({
             </div>
           ))}
 
+            {/* A blocked turn outranks every indicator heuristic: whatever the
+                transcript's tail looks like, the user must see that the agent
+                is waiting on them. */}
+            {renderBlocks.length > 0 && isWaitingForInput ? <WaitingForApprovalNotice /> : null}
+
             {/* A streaming thought already says "Thinking…" in its own header. */}
             {renderBlocks.length > 0 &&
             isThinking &&
+            !isWaitingForInput &&
             liveActivityGroups.length === 0 &&
             !hasRunningWorkSession &&
             !streamingReasoningId ? (

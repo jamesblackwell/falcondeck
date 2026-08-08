@@ -803,9 +803,20 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
     ) {
         return allow;
     }
+    // Spawning a sub-agent has no side effects of its own, and every tool the
+    // sub-agent then uses flows back through this same hook to be gated
+    // individually. Prompting for the spawn too would charge each sub-agent
+    // run a second approval for nothing. ("Task" is the tool's former name;
+    // current CLIs call it "Agent".)
+    if matches!(tool_name.as_str(), "Task" | "Agent") {
+        return allow;
+    }
     // acceptEdits means edits proceed without asking; commands still prompt.
     if permission_mode.eq_ignore_ascii_case("acceptedits")
-        && matches!(tool_name.as_str(), "Edit" | "Write" | "MultiEdit" | "NotebookEdit")
+        && matches!(
+            tool_name.as_str(),
+            "Edit" | "Write" | "MultiEdit" | "NotebookEdit"
+        )
     {
         return allow;
     }
@@ -821,13 +832,22 @@ pub(super) async fn handle_claude_pre_tool_use(app: &AppState, payload: Value) -
     }
 
     let request_id = format!("claude-{}", Uuid::new_v4());
+    // Tool calls made inside a sub-agent hit this hook too (with the parent
+    // session id), but their surrounding work is invisible in the transcript —
+    // an unlabelled "Allow Bash?" out of nowhere reads as a glitch. Hook
+    // payloads mark sub-agent calls with `agent_type`/`agent_id`.
+    let subagent_type = crate::codex::extract_string(&payload, &["agent_type"]);
+    let title = match &subagent_type {
+        Some(kind) => format!("Allow {tool_name}? (sub-agent: {kind})"),
+        None => format!("Allow {tool_name}?"),
+    };
     let request = InteractiveRequest {
         request_id: request_id.clone(),
         workspace_id: workspace_id.clone(),
         thread_id: Some(thread_id.clone()),
         method: "claude/hooks/pre-tool-use".to_string(),
         kind: InteractiveRequestKind::Approval,
-        title: format!("Allow {tool_name}?"),
+        title,
         detail: claude_tool_input_summary(&tool_input),
         command: crate::codex::extract_string(&tool_input, &["command"]),
         path: crate::codex::extract_string(&tool_input, &["file_path", "path"]),

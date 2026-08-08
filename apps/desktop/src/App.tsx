@@ -1676,7 +1676,12 @@ function AppInner() {
                 onIsolationChange: selectedThread ? undefined : setSelectedIsolation,
                 disabled: isComposerDisabled,
                 sendDisabled: Boolean(sendBlockReason),
-                isRunning: selectedThread?.status === 'running',
+                // waiting_for_input counts: the CLI is alive and blocked on an
+                // approval, and Stop is the only way out of one that has gone
+                // stale or was never noticed.
+                isRunning:
+                  selectedThread?.status === 'running' ||
+                  selectedThread?.status === 'waiting_for_input',
                 isStopping,
                 connectorCount,
                 onConnectorsClick: () => {

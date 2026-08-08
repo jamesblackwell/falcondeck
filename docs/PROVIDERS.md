@@ -440,7 +440,46 @@ on-disk session format is parseable, which is unverified.
 
 Phases 3 and 4 are independent and could run in parallel. Phase 1 gates both.
 
-## 11. Open questions
+## 11. Experiment: Claude over ACP (Aug 2026)
+
+The Claude runtime is the one provider still driven by heuristics: it parses
+`claude -p` stream-json (whole-message dedupe/merge in `agent_helpers.rs`) and
+transports approvals over a curl `PreToolUse` hook with a 540s deny timeout.
+Codex feels smoother precisely because it speaks a structured protocol. Zed
+closes the same gap by running Claude through their ACP adapter,
+[`@zed-industries/claude-code-acp`](https://github.com/zed-industries/claude-code-acp),
+which is built on the Claude Code SDK and emits structured `session/update`
+events: thought chunks (live thinking, which the stream-json path drops),
+tool calls with status transitions, and permissions as blocking
+`session/request_permission` RPCs — no hook, no silent timeout-deny.
+
+Because the generic `AcpAdapter` is configured by data, the experiment needs no
+Rust changes. Add to `providers.json` in the daemon state dir (or via Settings →
+Providers):
+
+```jsonc
+"providers": {
+  "claude-acp": {
+    "kind": "acp",
+    "command": ["npx", "--yes", "@zed-industries/claude-code-acp"],
+    "label": "Claude (ACP)"
+  }
+}
+```
+
+Notes:
+
+- The id must not be `claude` — built-in providers cannot be overridden
+  (`load_acp_provider_configs` rejects the entry), and keeping the native
+  runtime intact means existing Claude threads are untouched while the two run
+  side by side.
+- The adapter reuses the local `claude` login (Claude Code SDK credentials).
+- Things to compare against the native runtime before promoting it: streamed
+  thinking as reasoning items, sub-agent activity attribution, permission
+  round-trips, steering/interrupt behaviour, and session resume across daemon
+  restarts (ACP `session/load` vs `--resume`).
+
+## 12. Open questions
 
 - Is the OpenCode server per-workspace or one process serving all workspaces via
   `?directory=`? One process is cheaper; per-workspace matches the current

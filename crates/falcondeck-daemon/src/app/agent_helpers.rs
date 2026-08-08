@@ -389,6 +389,37 @@ pub(crate) fn append_claude_text_delta(current: &str, delta: &str) -> String {
     format!("{current}{delta}")
 }
 
+/// Sub-agent traffic in the stream is tagged with the id of the Task/Agent
+/// tool call that spawned it; main-loop events carry no such tag. Everything
+/// tagged must be kept out of the main transcript accumulation paths.
+pub(crate) fn claude_parent_tool_use_id(value: &Value) -> Option<&str> {
+    value.get("parent_tool_use_id").and_then(Value::as_str)
+}
+
+/// Most recent steps a sub-agent has taken, rendered as the spawning tool
+/// call's live output so the card has something truthful to show while the
+/// sub-agent works out of view.
+pub(crate) const SUBAGENT_ACTIVITY_KEPT_STEPS: usize = 24;
+
+pub(crate) fn format_subagent_activity(steps: &[String], dropped: usize) -> String {
+    let mut lines = Vec::with_capacity(steps.len() + 2);
+    lines.push("Sub-agent activity:".to_string());
+    if dropped > 0 {
+        lines.push(format!(
+            "… {dropped} earlier step{} hidden",
+            plural_s(dropped)
+        ));
+    }
+    for step in steps {
+        lines.push(format!("· {step}"));
+    }
+    lines.join("\n")
+}
+
+fn plural_s(count: usize) -> &'static str {
+    if count == 1 { "" } else { "s" }
+}
+
 pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent> {
     let top_level_type = extract_string(value, &["type"]);
     let event = claude_event_value(value);
@@ -906,6 +937,52 @@ mod service_message_tests {
         assert_eq!(
             extract_claude_service_message(&event).as_deref(),
             Some("Context low — auto-compacting the conversation")
+        );
+    }
+}
+
+#[cfg(test)]
+mod subagent_stream_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn tagged_events_are_recognized_as_subagent_traffic() {
+        let tagged = json!({
+            "type": "assistant",
+            "parent_tool_use_id": "toolu_parent",
+            "message": { "content": [{ "type": "text", "text": "sub-agent prose" }] }
+        });
+        assert_eq!(claude_parent_tool_use_id(&tagged), Some("toolu_parent"));
+
+        let main_loop = json!({
+            "type": "assistant",
+            "message": { "content": [{ "type": "text", "text": "main reply" }] }
+        });
+        assert_eq!(claude_parent_tool_use_id(&main_loop), None);
+
+        // A null tag (serializers love emitting it) is not sub-agent traffic.
+        let null_tag = json!({ "type": "assistant", "parent_tool_use_id": null });
+        assert_eq!(claude_parent_tool_use_id(&null_tag), None);
+    }
+
+    #[test]
+    fn activity_log_reports_kept_and_dropped_steps() {
+        let steps = vec![
+            "Bash: cargo test".to_string(),
+            "Read src/lib.rs".to_string(),
+        ];
+        assert_eq!(
+            format_subagent_activity(&steps, 0),
+            "Sub-agent activity:\n· Bash: cargo test\n· Read src/lib.rs"
+        );
+        assert_eq!(
+            format_subagent_activity(&steps[..1], 1),
+            "Sub-agent activity:\n… 1 earlier step hidden\n· Bash: cargo test"
+        );
+        assert_eq!(
+            format_subagent_activity(&steps[..1], 3),
+            "Sub-agent activity:\n… 3 earlier steps hidden\n· Bash: cargo test"
         );
     }
 }

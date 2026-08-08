@@ -150,3 +150,73 @@ describe('reasoning reveal', () => {
     expect(screen.getByRole('button', { name: /Planning the change/ })).toBeInTheDocument()
   })
 })
+
+describe('live thread indicators', () => {
+  it('keeps the work session alive while a trailing thought streams', () => {
+    // Regression: all tools done + a streaming thought at the tail used to
+    // render "Worked for 43s" with no indicator anywhere — a running thread
+    // that looked settled.
+    render(
+      <Conversation
+        items={[toolCall({ id: 'tool-1' }), reasoning({ id: 'reasoning-tail' })]}
+        isThinking
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: /Worked for/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Thinking…/ })).toBeInTheDocument()
+  })
+
+  it('settles the session back to "Worked for" once the turn ends', () => {
+    const { rerender } = render(
+      <Conversation
+        items={[toolCall({ id: 'tool-1' }), reasoning({ id: 'reasoning-tail' })]}
+        isThinking
+      />,
+    )
+
+    rerender(
+      <Conversation
+        items={[toolCall({ id: 'tool-1' }), reasoning({ id: 'reasoning-tail' })]}
+        isThinking={false}
+      />,
+    )
+    expect(screen.getByRole('button', { name: /Worked for/ })).toBeInTheDocument()
+  })
+
+  it('labels a live session by its running tool, not the thinking tail', () => {
+    render(
+      <Conversation
+        items={[
+          toolCall({ id: 'tool-1', status: 'running', completed_at: null }),
+          reasoning({ id: 'reasoning-tail' }),
+        ]}
+        isThinking
+      />,
+    )
+
+    // A tool is still mid-flight, so the trailing thought must not flip the
+    // session's label over to "Thinking…".
+    expect(screen.getByRole('button', { name: /Working…/ })).toBeInTheDocument()
+  })
+
+  it('pins a waiting-for-approval notice that no fold can hide', () => {
+    // While an approval is pending the thread is not "thinking", but it must
+    // never look idle either — the turn is blocked on the reader.
+    render(
+      <Conversation
+        items={[toolCall({ id: 'tool-1' }), reasoning({ id: 'reasoning-tail' })]}
+        isWaitingForInput
+      />,
+    )
+
+    expect(screen.getByText(/Waiting for approval/)).toBeInTheDocument()
+    expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
+  })
+
+  it('shows the waiting notice on an empty thread too', () => {
+    render(<Conversation items={[]} isWaitingForInput />)
+
+    expect(screen.getByText(/Waiting for approval/)).toBeInTheDocument()
+  })
+})

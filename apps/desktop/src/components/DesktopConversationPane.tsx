@@ -94,6 +94,7 @@ export function DesktopConversationPane({
         preferences={preferences}
         emptyState={conversationEmptyState}
         isThinking={isSending || selectedThread?.status === 'running'}
+        isWaitingForInput={selectedThread?.status === 'waiting_for_input'}
         isLoading={isThreadDetailPending}
         onOpenFile={onOpenFile}
       />

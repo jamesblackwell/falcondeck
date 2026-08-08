@@ -1855,6 +1855,94 @@ async fn claude_pre_tool_use_ignores_unknown_sessions() {
 }
 
 #[tokio::test]
+async fn claude_pre_tool_use_auto_allows_subagent_spawns() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "55555555-5555-4555-8555-555555555555",
+        temp_dir.path(),
+    )
+    .await;
+
+    // Both the current tool name and its former one: the spawn itself is
+    // side-effect-free, and the sub-agent's tools are gated individually.
+    for tool_name in ["Agent", "Task"] {
+        let response = app
+            .handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+                "55555555-5555-4555-8555-555555555555",
+                tool_name,
+            ))
+            .await;
+        assert_eq!(
+            response["hookSpecificOutput"]["permissionDecision"], "allow",
+            "{tool_name} spawns must not raise approval cards"
+        );
+    }
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+    let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_ne!(thread.status, ThreadStatus::WaitingForInput);
+}
+
+#[tokio::test]
+async fn claude_pre_tool_use_labels_subagent_tool_calls() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "66666666-6666-4666-8666-666666666666",
+        temp_dir.path(),
+    )
+    .await;
+
+    // A tool call made inside a sub-agent carries agent_type/agent_id in the
+    // hook payload; its work is invisible in the transcript, so the card must
+    // say where the request comes from.
+    let mut payload = claude_pre_tool_use_payload("66666666-6666-4666-8666-666666666666", "Bash");
+    payload["agent_type"] = json!("general-purpose");
+    payload["agent_id"] = json!("agent-123");
+    let hook_task = tokio::spawn({
+        let app = app.clone();
+        async move { app.handle_claude_pre_tool_use(payload).await }
+    });
+
+    let request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    {
+        let requests = app.inner.interactive_requests.lock().await;
+        let pending = requests
+            .get(&("workspace-1".to_string(), request_id.clone()))
+            .unwrap();
+        assert_eq!(
+            pending.request.title,
+            "Allow Bash? (sub-agent: general-purpose)"
+        );
+    }
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        request_id,
+        falcondeck_core::InteractiveResponsePayload::Approval {
+            decision: falcondeck_core::ApprovalDecision::Deny,
+        },
+    )
+    .await
+    .unwrap();
+    let response = hook_task.await.unwrap();
+    assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[tokio::test]
 async fn claude_pre_tool_use_always_allow_short_circuits_later_calls() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
@@ -2612,7 +2700,9 @@ async fn a_steer_against_a_steering_provider_reaches_the_runtime_and_never_queue
         .expect_err("steer must reach the provider");
 
     assert!(
-        error.to_string().contains("not currently connected to Claude"),
+        error
+            .to_string()
+            .contains("not currently connected to Claude"),
         "unexpected error: {error}"
     );
     let summary = &app.snapshot().await.threads[0];
@@ -2647,7 +2737,9 @@ async fn a_steer_against_an_idle_thread_starts_a_normal_turn() {
         .expect_err("dispatch must reach the provider");
 
     assert!(
-        error.to_string().contains("not currently connected to Claude"),
+        error
+            .to_string()
+            .contains("not currently connected to Claude"),
         "unexpected error: {error}"
     );
     let summary = &app.snapshot().await.threads[0];
@@ -2694,7 +2786,9 @@ async fn a_failed_steer_of_a_queued_turn_puts_it_back_in_its_original_slot() {
         .await
         .expect_err("steer must reach the provider and fail");
     assert!(
-        error.to_string().contains("not currently connected to Claude"),
+        error
+            .to_string()
+            .contains("not currently connected to Claude"),
         "unexpected error: {error}"
     );
 

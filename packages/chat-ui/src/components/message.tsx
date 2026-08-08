@@ -653,15 +653,23 @@ export const WorkSessionCard = memo(function WorkSessionCard({
     (entry): entry is Extract<ConversationItem, { kind: 'tool_call' }> =>
       entry.kind === 'tool_call',
   )
-  const currentLabel = running
-    ? toolCallLabel(
-        [...toolCalls]
-          .reverse()
-          .find((item) => item.status === 'running' || item.status === 'in_progress')?.title ??
-          toolCalls[toolCalls.length - 1]?.title ??
-          '',
-      )
-    : null
+  // A session can be live past its last tool call — the agent is thinking
+  // about what it just did. Labelling that state with the finished tool's
+  // name would claim work that already ended.
+  const thinkingTail =
+    running &&
+    items[items.length - 1]?.kind === 'reasoning' &&
+    !toolCalls.some((item) => item.status === 'running' || item.status === 'in_progress')
+  const currentLabel =
+    running && !thinkingTail
+      ? toolCallLabel(
+          [...toolCalls]
+            .reverse()
+            .find((item) => item.status === 'running' || item.status === 'in_progress')?.title ??
+            toolCalls[toolCalls.length - 1]?.title ??
+            '',
+        )
+      : null
 
   return (
     <Collapsible.Root open={open} onOpenChange={setOpen}>
@@ -674,7 +682,7 @@ export const WorkSessionCard = memo(function WorkSessionCard({
           {running ? (
             <>
               <Loader2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
-              <span className="shrink-0 font-medium">Working…</span>
+              <span className="shrink-0 font-medium">{thinkingTail ? 'Thinking…' : 'Working…'}</span>
               {currentLabel ? (
                 <span className="min-w-0 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-faint">
                   {currentLabel}

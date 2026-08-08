@@ -202,4 +202,42 @@ describe('collapsed mode grouping', () => {
       'work_session',
     ])
   })
+
+  it('keeps the tail session live while a trailing thought streams', () => {
+    const items: ConversationItem[] = [
+      toolCall({ id: 'tool-1' }),
+      {
+        kind: 'reasoning',
+        id: 'reasoning-1',
+        summary: 'Deciding next step',
+        content: 'The tools are done; considering the reply.',
+        created_at: '2026-03-16T10:00:02Z',
+      },
+    ]
+
+    const streaming = deriveConversationPresentation(items, collapsed, { is_streaming: true })
+    const tail = streaming.history_blocks.at(-1)
+    if (tail?.kind !== 'work_session') throw new Error('expected a work session tail')
+    // Every tool has settled, but the turn has not: the session must stay
+    // running or the thread renders with zero live indicators.
+    expect(tail.running).toBe(true)
+    expect(tail.completed_at).toBeNull()
+
+    const settled = deriveConversationPresentation(items, collapsed)
+    const settledTail = settled.history_blocks.at(-1)
+    if (settledTail?.kind !== 'work_session') throw new Error('expected a work session tail')
+    expect(settledTail.running).toBe(false)
+  })
+
+  it('leaves sessions that end in tool calls alone when streaming', () => {
+    const presentation = deriveConversationPresentation(
+      [toolCall({ id: 'tool-1' })],
+      collapsed,
+      { is_streaming: true },
+    )
+
+    const tail = presentation.history_blocks.at(-1)
+    if (tail?.kind !== 'work_session') throw new Error('expected a work session tail')
+    expect(tail.running).toBe(false)
+  })
 })

@@ -225,6 +225,12 @@ export type ConversationPresentation = {
   history_blocks: ConversationHistoryBlock[]
 }
 
+export type ConversationPresentationOptions = {
+  /** True while the agent's turn is still streaming. A trailing thought keeps
+      its work session alive so a running thread can never render as settled. */
+  is_streaming?: boolean
+}
+
 function isToolCall(item: ConversationItem): item is Extract<ConversationItem, { kind: 'tool_call' }> {
   return item.kind === 'tool_call'
 }
@@ -396,6 +402,7 @@ export function formatWorkDuration(startedAt: string, completedAt: string): stri
 export function deriveConversationPresentation(
   items: ConversationItem[],
   preferencesInput: FalconDeckPreferences | null | undefined,
+  options: ConversationPresentationOptions = {},
 ): ConversationPresentation {
   const preferences = normalizePreferences(preferencesInput)
   const historyBlocks: ConversationHistoryBlock[] = []
@@ -517,6 +524,23 @@ export function deriveConversationPresentation(
     }
     flushWork()
 
+    // A turn that is mid-thought after its tools settled must keep its work
+    // session live. Without this the session collapses to "Worked for 43s"
+    // with the streaming thought buried inside it, and the conversation's
+    // standalone "Thinking…" line is suppressed because a reasoning item is
+    // the newest item — a running thread rendering zero indicators.
+    if (options.is_streaming) {
+      const tail = historyBlocks[historyBlocks.length - 1]
+      if (
+        tail?.kind === 'work_session' &&
+        !tail.running &&
+        tail.items[tail.items.length - 1]?.kind === 'reasoning'
+      ) {
+        tail.running = true
+        tail.completed_at = null
+      }
+    }
+
     // Running work renders as its own "Working…" block, so the pinned live
     // lane stays empty in this mode.
     return {
@@ -610,6 +634,7 @@ export function deriveConversationPresentation(
 export function deriveConversationRenderBlocks(
   items: ConversationItem[],
   preferencesInput: FalconDeckPreferences | null | undefined,
+  options: ConversationPresentationOptions = {},
 ): ConversationRenderBlock[] {
-  return deriveConversationPresentation(items, preferencesInput).history_blocks
+  return deriveConversationPresentation(items, preferencesInput, options).history_blocks
 }

@@ -2575,6 +2575,7 @@ function RemoteApp() {
               preferences={snapshot?.preferences ?? null}
               emptyState={conversationEmptyState}
               isThinking={isSubmitting || selectedThread?.status === 'running'}
+              isWaitingForInput={selectedThread?.status === 'waiting_for_input'}
               isLoading={isThreadDetailPending}
             />
           </div>
@@ -2621,7 +2622,10 @@ function RemoteApp() {
               selectedSandboxMode={selectedSandboxMode}
               onSandboxModeChange={handleSandboxModeChange}
               disabled={!selectedWorkspace || isSubmitting || !sessionId || !clientToken || !hasSessionKey}
-              isRunning={selectedThread?.status === 'running'}
+              isRunning={
+                selectedThread?.status === 'running' ||
+                selectedThread?.status === 'waiting_for_input'
+              }
               isStopping={isStopping}
             />
           </div>
