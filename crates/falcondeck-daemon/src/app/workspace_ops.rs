@@ -194,53 +194,13 @@ pub(super) async fn connect_workspace_internal(
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
-    for state in persisted_thread_states.values() {
-        if threads
-            .iter()
-            .any(|thread| thread.summary.id == state.thread_id)
-        {
-            continue;
-        }
-        let restored_status = match state.status.clone().unwrap_or(ThreadStatus::Idle) {
-            ThreadStatus::Running => ThreadStatus::Error,
-            other => other,
-        };
-        let restored_last_error = state.last_error.clone().or_else(|| {
-            matches!(state.status, Some(ThreadStatus::Running))
-                .then(|| "FalconDeck was closed while this turn was running".to_string())
-        });
-        threads.push(crate::codex::HydratedThread {
-            summary: ThreadSummary {
-                id: state.thread_id.clone(),
-                workspace_id: workspace_id.clone(),
-                title: state
-                    .title
-                    .clone()
-                    .unwrap_or_else(|| "Restored thread".to_string()),
-                provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
-                native_session_id: state.native_session_id.clone(),
-                status: restored_status,
-                updated_at: state
-                    .updated_at
-                    .or_else(|| persisted_workspace_ref.and_then(|workspace| workspace.updated_at))
-                    .unwrap_or(now),
-                last_message_preview: None,
-                latest_turn_id: None,
-                latest_plan: None,
-                latest_diff: None,
-                last_tool: None,
-                last_error: restored_last_error,
-                agent: ThreadAgentParams::default(),
-                attention: ThreadAttention::default(),
-                is_archived: false,
-                is_pinned: false,
-                goal: None,
-                queued_turns: Vec::new(),
-                variant: state.variant.clone(),
-            },
-            items: Vec::new(),
-        });
-    }
+    let threads = merge_hydrated_threads_with_persisted_state(
+        threads,
+        &persisted_thread_states,
+        &workspace_id,
+        persisted_workspace_ref.and_then(|workspace| workspace.updated_at),
+        now,
+    );
     let current_thread_id = persisted_workspace_ref
         .and_then(|workspace| workspace.current_thread_id.as_deref())
         .and_then(|thread_id| {
@@ -415,6 +375,117 @@ pub(super) async fn connect_workspace_internal(
     }
 
     Ok(summary)
+}
+
+/// Reconciles provider-hydrated threads with the daemon's own persisted thread
+/// states when a workspace (re)connects.
+///
+/// A FalconDeck-created Claude thread persists under its own id while the
+/// provider hydrates the same session under the session id. Left alone, every
+/// restart would both duplicate the conversation in the sidebar and restore
+/// the owning thread with no transcript. Fold each hydrated transcript into
+/// the thread that owns its session and drop the twin; persisted threads with
+/// no hydrated transcript are restored bare, with a mid-turn `Running` status
+/// downgraded to a visible error.
+pub(super) fn merge_hydrated_threads_with_persisted_state(
+    threads: Vec<crate::codex::HydratedThread>,
+    persisted_thread_states: &HashMap<String, PersistedThreadState>,
+    workspace_id: &str,
+    workspace_updated_at: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> Vec<crate::codex::HydratedThread> {
+    let mut session_owners = HashMap::new();
+    for state in persisted_thread_states.values() {
+        let Some(session_id) = state.native_session_id.as_deref() else {
+            continue;
+        };
+        if session_id == state.thread_id {
+            continue;
+        }
+        // Contested sessions (legacy duplicated state) go to the most recently
+        // updated claimant; the rest restore without a transcript.
+        let owner = session_owners.entry(session_id.to_string()).or_insert(state);
+        if state.updated_at > owner.updated_at {
+            *owner = state;
+        }
+    }
+    let mut adopted_transcripts = HashMap::new();
+    let mut threads_out = Vec::with_capacity(threads.len());
+    for thread in threads {
+        match session_owners.get(thread.summary.id.as_str()) {
+            Some(owner) => {
+                adopted_transcripts.insert(owner.thread_id.clone(), thread);
+            }
+            None => threads_out.push(thread),
+        }
+    }
+    for state in persisted_thread_states.values() {
+        if threads_out
+            .iter()
+            .any(|thread| thread.summary.id == state.thread_id)
+        {
+            continue;
+        }
+        // This state entry is a session-id twin of a thread restored above;
+        // recreating it would bring the duplicate back as an empty thread.
+        if session_owners
+            .get(state.thread_id.as_str())
+            .is_some_and(|owner| owner.thread_id != state.thread_id)
+        {
+            continue;
+        }
+        let adopted = adopted_transcripts.remove(&state.thread_id);
+        let restored_status = match state.status.clone().unwrap_or(ThreadStatus::Idle) {
+            ThreadStatus::Running => ThreadStatus::Error,
+            other => other,
+        };
+        let restored_last_error = state.last_error.clone().or_else(|| {
+            matches!(state.status, Some(ThreadStatus::Running))
+                .then(|| "FalconDeck was closed while this turn was running".to_string())
+        });
+        threads_out.push(crate::codex::HydratedThread {
+            summary: ThreadSummary {
+                id: state.thread_id.clone(),
+                workspace_id: workspace_id.to_string(),
+                title: state
+                    .title
+                    .clone()
+                    .or_else(|| {
+                        adopted
+                            .as_ref()
+                            .map(|transcript| transcript.summary.title.clone())
+                    })
+                    .unwrap_or_else(|| "Restored thread".to_string()),
+                provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
+                native_session_id: state.native_session_id.clone(),
+                status: restored_status,
+                updated_at: state
+                    .updated_at
+                    .max(adopted.as_ref().map(|transcript| transcript.summary.updated_at))
+                    .or(workspace_updated_at)
+                    .unwrap_or(now),
+                last_message_preview: adopted
+                    .as_ref()
+                    .and_then(|transcript| transcript.summary.last_message_preview.clone()),
+                latest_turn_id: None,
+                latest_plan: None,
+                latest_diff: None,
+                last_tool: None,
+                last_error: restored_last_error,
+                agent: ThreadAgentParams::default(),
+                attention: ThreadAttention::default(),
+                is_archived: false,
+                is_pinned: false,
+                goal: None,
+                queued_turns: Vec::new(),
+                variant: state.variant.clone(),
+            },
+            items: adopted
+                .map(|transcript| transcript.items)
+                .unwrap_or_default(),
+        });
+    }
+    threads_out
 }
 
 pub(super) async fn start_thread(
@@ -2404,6 +2475,138 @@ mod tests {
             text: format!("message {id}"),
             created_at: Utc::now(),
         }
+    }
+
+    fn hydrated_thread(session_id: &str, preview: &str) -> crate::codex::HydratedThread {
+        crate::codex::HydratedThread {
+            summary: ThreadSummary {
+                id: session_id.to_string(),
+                workspace_id: "workspace-1".to_string(),
+                title: format!("Hydrated {session_id}"),
+                provider: AgentProvider::CLAUDE,
+                native_session_id: Some(session_id.to_string()),
+                status: ThreadStatus::Idle,
+                updated_at: Utc::now(),
+                last_message_preview: Some(preview.to_string()),
+                latest_turn_id: None,
+                latest_plan: None,
+                latest_diff: None,
+                last_tool: None,
+                last_error: None,
+                agent: ThreadAgentParams::default(),
+                attention: ThreadAttention::default(),
+                is_archived: false,
+                is_pinned: false,
+                goal: None,
+                queued_turns: Vec::new(),
+                variant: None,
+            },
+            items: vec![assistant_message(&format!("assistant-{session_id}"))],
+        }
+    }
+
+    fn persisted_thread(thread_id: &str, session_id: Option<&str>) -> PersistedThreadState {
+        PersistedThreadState {
+            thread_id: thread_id.to_string(),
+            updated_at: Some(Utc::now()),
+            provider: Some(AgentProvider::CLAUDE),
+            native_session_id: session_id.map(ToOwned::to_owned),
+            title: Some(format!("Persisted {thread_id}")),
+            manual_title: false,
+            ai_title_generated: true,
+            status: Some(ThreadStatus::Idle),
+            last_error: None,
+            last_read_seq: 0,
+            last_agent_activity_seq: 0,
+            variant: None,
+        }
+    }
+
+    #[test]
+    fn restored_thread_adopts_the_transcript_hydrated_under_its_session_id() {
+        let mut state = persisted_thread("claude-thread-x", Some("session-1"));
+        state.status = Some(ThreadStatus::Running);
+        let states = HashMap::from([("claude-thread-x".to_string(), state)]);
+
+        let merged = merge_hydrated_threads_with_persisted_state(
+            vec![hydrated_thread("session-1", "hello")],
+            &states,
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+
+        // One thread, owned id, with the hydrated transcript — not an empty
+        // restored thread plus a session-id duplicate.
+        assert_eq!(merged.len(), 1);
+        let thread = &merged[0];
+        assert_eq!(thread.summary.id, "claude-thread-x");
+        assert_eq!(thread.items.len(), 1);
+        assert_eq!(
+            thread.summary.last_message_preview.as_deref(),
+            Some("hello")
+        );
+        // A turn that was mid-flight when the daemon went away is surfaced as
+        // an error, not left phantom-running.
+        assert_eq!(thread.summary.status, ThreadStatus::Error);
+        assert_eq!(
+            thread.summary.last_error.as_deref(),
+            Some("FalconDeck was closed while this turn was running")
+        );
+    }
+
+    #[test]
+    fn legacy_session_id_twin_state_is_dropped_in_favor_of_the_owning_thread() {
+        // Older builds persisted the same conversation twice: once under the
+        // FalconDeck thread id and once under the raw session id.
+        let states = HashMap::from([
+            (
+                "claude-thread-x".to_string(),
+                persisted_thread("claude-thread-x", Some("session-1")),
+            ),
+            (
+                "session-1".to_string(),
+                persisted_thread("session-1", Some("session-1")),
+            ),
+        ]);
+
+        let merged = merge_hydrated_threads_with_persisted_state(
+            vec![hydrated_thread("session-1", "hello")],
+            &states,
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].summary.id, "claude-thread-x");
+        assert_eq!(merged[0].items.len(), 1);
+    }
+
+    #[test]
+    fn unowned_hydrated_sessions_and_bare_persisted_threads_survive_the_merge() {
+        let states = HashMap::from([(
+            "claude-thread-x".to_string(),
+            persisted_thread("claude-thread-x", Some("session-gone")),
+        )]);
+
+        let mut merged = merge_hydrated_threads_with_persisted_state(
+            vec![hydrated_thread("session-2", "imported")],
+            &states,
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+
+        merged.sort_by(|left, right| left.summary.id.cmp(&right.summary.id));
+        // The terminal-CLI session with no owning thread stays an import of
+        // its own; the persisted thread whose session file is gone restores
+        // bare rather than disappearing.
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].summary.id, "claude-thread-x");
+        assert!(merged[0].items.is_empty());
+        assert_eq!(merged[1].summary.id, "session-2");
+        assert_eq!(merged[1].items.len(), 1);
     }
 
     #[tokio::test]

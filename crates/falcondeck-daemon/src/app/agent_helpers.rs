@@ -319,6 +319,13 @@ impl ClaudeTextChunk {
 }
 
 pub(crate) fn extract_claude_text_chunk(value: &Value) -> Option<ClaudeTextChunk> {
+    // User records carry prompts, steering echoes, and tool results — never
+    // assistant prose. Without this guard their text lands in the assistant
+    // transcript: hydrated sessions show the user's own prompts as agent
+    // bubbles, and a steered message gets folded into the live reply.
+    if matches!(extract_string(value, &["type"]).as_deref(), Some("user")) {
+        return None;
+    }
     if matches!(extract_string(value, &["type"]).as_deref(), Some("result")) {
         // Error results are surfaced via `extract_claude_error`; folding them
         // into the assistant message would render the failure as agent prose.

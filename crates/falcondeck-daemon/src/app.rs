@@ -63,6 +63,10 @@ use threads::{interactive_request_counts, refresh_thread_attention};
 
 const WORKSPACE_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long `schedule_persist` waits before writing, so a burst of streamed
+/// updates costs one state snapshot instead of one per chunk.
+const PERSIST_COALESCE_WINDOW: Duration = Duration::from_millis(750);
+
 #[derive(Clone)]
 pub struct AppState {
     inner: Arc<InnerState>,
@@ -100,6 +104,9 @@ struct InnerState {
     /// Set at the start of `shutdown` so respawn/reconnect paths cannot race
     /// the teardown with fresh agent processes.
     shutting_down: AtomicBool,
+    /// True while a deferred `persist_local_state` is scheduled; lets bursts of
+    /// small changes coalesce into one write. See `schedule_persist`.
+    persist_pending: AtomicBool,
 }
 
 struct ManagedWorkspace {
@@ -365,6 +372,7 @@ impl AppState {
                 }),
                 provision_jobs: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
+                persist_pending: AtomicBool::new(false),
             }),
         }
     }
@@ -1058,6 +1066,27 @@ impl AppState {
         read_seq: u64,
     ) -> Result<ThreadSummary, DaemonError> {
         workspace_ops::mark_thread_read(self, workspace_id, thread_id, read_seq).await
+    }
+
+    /// Persists soon, coalescing bursts into one write. Streaming a turn
+    /// touches thread state on every chunk; snapshotting and fsyncing the full
+    /// state file each time starves the turn monitors, so the agent's stdout
+    /// pipe fills and the CLI itself stalls. Anything that changes state at
+    /// stream frequency must use this instead of `persist_local_state`; the
+    /// window only defers the write, `shutdown`'s final persist still runs
+    /// after it.
+    pub(crate) fn schedule_persist(&self) {
+        if self.inner.persist_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let app = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(PERSIST_COALESCE_WINDOW).await;
+            app.inner.persist_pending.store(false, Ordering::Release);
+            if let Err(error) = app.persist_local_state().await {
+                tracing::warn!(%error, "deferred state persist failed");
+            }
+        });
     }
 
     async fn persist_local_state(&self) -> Result<(), DaemonError> {

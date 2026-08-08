@@ -167,7 +167,10 @@ impl AppState {
         if thread.summary.updated_at == before {
             thread.summary.updated_at = now;
         }
-        workspace.summary.current_thread_id = Some(thread.summary.id.clone());
+        // Deliberately not touching current_thread_id: this runs for
+        // background activity (turn ends, notifications, title updates) on any
+        // thread, and "current" is the restore hint for where the user last
+        // acted — send_turn and start_thread set it themselves.
         if thread.summary.updated_at > workspace.summary.updated_at {
             workspace.summary.updated_at = thread.summary.updated_at;
         }
@@ -206,7 +209,8 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         updater(thread);
         let updated_at = thread.summary.updated_at;
-        workspace.summary.current_thread_id = Some(thread.summary.id.clone());
+        // Same as upsert_thread: background mutations must not move the
+        // workspace's current-thread restore hint.
         if updated_at > workspace.summary.updated_at {
             workspace.summary.updated_at = updated_at;
         }
@@ -440,11 +444,26 @@ impl AppState {
         // never reaches EOF on the happy path. The stream's terminal `result`
         // event is the turn boundary; stdout EOF remains the backstop for a
         // CLI that died without emitting one.
+        //
+        // The pipe is drained by its own task, decoupled from event handling:
+        // the CLI stalls mid-turn if nothing empties the 64KB pipe buffer, so
+        // slow handling (state writes, a wedged downstream) must never be what
+        // reads stdout. The reader also keeps draining after the monitor stops
+        // listening, which doubles as the post-`result` drain.
         let mut saw_result = false;
         let mut result_reported_success = false;
         if let Some(stdout) = stdout {
-            let mut lines = tokio::io::BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            tokio::spawn(async move {
+                let mut lines = tokio::io::BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    // A dropped receiver means the monitor is done with events;
+                    // keep reading so a late write cannot fill the buffer or
+                    // SIGPIPE the CLI mid-shutdown.
+                    let _ = line_tx.send(line);
+                }
+            });
+            while let Some(line) = line_rx.recv().await {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
@@ -540,12 +559,6 @@ impl AppState {
                         );
                     }
                 }
-            }
-            if saw_result {
-                // Nothing reads this pipe once the loop breaks; drain it until
-                // the process exits so a late write cannot fill the buffer or
-                // SIGPIPE the CLI mid-shutdown.
-                tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
             }
         }
 
@@ -706,7 +719,10 @@ impl AppState {
                     Some(thread_id.to_string()),
                     UnifiedEvent::ThreadUpdated { thread },
                 );
-                self.persist_local_state().await?;
+                // Deferred: this path runs per streamed chunk, and a full
+                // persist per chunk backs the agent's stdout pipe up until the
+                // CLI wedges mid-turn.
+                self.schedule_persist();
             }
             return Ok(());
         }
@@ -747,7 +763,8 @@ impl AppState {
                 Some(thread_id.to_string()),
                 UnifiedEvent::ThreadUpdated { thread },
             );
-            self.persist_local_state().await?;
+            // Deferred for the same reason as the update path above.
+            self.schedule_persist();
         }
         Ok(())
     }

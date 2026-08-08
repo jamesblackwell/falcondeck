@@ -1550,6 +1550,26 @@ mod tests {
                     "created_at": "2026-03-19T10:00:03Z"
                 })
                 .to_string(),
+                // The array-content form Claude Code actually writes for user
+                // prompts; it must hydrate as the user's message, not as
+                // assistant prose.
+                json!({
+                    "session_id": "11111111-1111-4111-8111-111111111111",
+                    "cwd": "/tmp/project",
+                    "type": "user",
+                    "uuid": "user-2",
+                    "message": {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "and now commit it"
+                            }
+                        ]
+                    },
+                    "created_at": "2026-03-19T10:00:04Z"
+                })
+                .to_string(),
             ]
             .join("\n"),
         )
@@ -1561,7 +1581,7 @@ mod tests {
             hydrated.summary.native_session_id.as_deref(),
             Some("11111111-1111-4111-8111-111111111111")
         );
-        assert_eq!(hydrated.items.len(), 3);
+        assert_eq!(hydrated.items.len(), 4);
         assert!(matches!(
             hydrated.items.get(1),
             Some(ConversationItem::AssistantMessage { text, .. }) if text == "world"
@@ -1572,6 +1592,10 @@ mod tests {
                 if title == "Read /tmp/notes.md"
                     && status == "completed"
                     && output.as_deref() == Some("line 1")
+        ));
+        assert!(matches!(
+            hydrated.items.get(3),
+            Some(ConversationItem::UserMessage { text, .. }) if text == "and now commit it"
         ));
     }
 
