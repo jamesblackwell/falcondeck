@@ -12,6 +12,7 @@ import {
 } from '@falcondeck/client-core'
 
 import { detectApiBaseUrl } from '../api'
+import { performanceTracingEnabled, recordPerformance } from '../performance'
 
 type ConnectionState = 'connecting' | 'ready' | 'error'
 const SELECTION_STORAGE_KEY = 'falcondeck.desktop.selection'
@@ -22,6 +23,13 @@ const DAEMON_RECONNECT_MAX_DELAY_MS = 10_000
 // Only treat a connection as healthy (and reset backoff) after it stays open
 // this long — mirrors the relay clients.
 const DAEMON_BACKOFF_RESET_MS = 10_000
+const THREAD_PREFETCH_LIMIT = 3
+const THREAD_PREFETCH_FALLBACK_DELAY_MS = 250
+
+type IdleWindow = Window & {
+  requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
+  cancelIdleCallback?: (handle: number) => void
+}
 
 function threadCacheKey(workspaceId: string, threadId: string) {
   return `${workspaceId}:${threadId}`
@@ -77,6 +85,9 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0)
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
   const threadDetailPrefetchRef = useRef(new Set<string>())
+  const pendingEventsRef = useRef<EventEnvelope[]>([])
+  const eventFrameRef = useRef<number | null>(null)
+  const eventTimerRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
   // Workspace ids are minted per daemon connect, so a daemon restart
   // invalidates the selected id even though it is the same project on disk.
@@ -88,10 +99,26 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
 
-  const handleEvent = useCallback((event: EventEnvelope) => {
-    setSnapshot((c) => applySnapshotEvent(c, event))
+  const flushEvents = useCallback(() => {
+    const startedAt = performanceTracingEnabled ? performance.now() : 0
+    eventFrameRef.current = null
+    eventTimerRef.current = null
+    const events = pendingEventsRef.current
+    if (events.length === 0) return
+    pendingEventsRef.current = []
+
+    // WebSocket frames can arrive much faster than the display can paint.
+    // Applying one React update per frame made streaming cost scale with token
+    // rate; one batch per animation frame preserves every protocol event while
+    // limiting the UI to one render per paint.
+    setSnapshot((current) => {
+      let next = current
+      for (const event of events) next = applySnapshotEvent(next, event)
+      return next
+    })
     setThreadDetail((c) => {
-      const next = applyEventToThreadDetail(c, event)
+      let next = c
+      for (const event of events) next = applyEventToThreadDetail(next, event)
       if (next) {
         threadDetailCacheRef.current.set(
           threadCacheKey(next.workspace.id, next.thread.id),
@@ -103,16 +130,18 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       // sync so switching threads renders fresh data from memory. The loaded
       // detail's cache entry was already written above from `next` — applying
       // the same event to it a second time would just burn allocations.
-      if (event.workspace_id && event.thread_id) {
-        const cacheKey = threadCacheKey(event.workspace_id, event.thread_id)
-        const isLoadedDetail =
-          next !== null && threadCacheKey(next.workspace.id, next.thread.id) === cacheKey
-        if (!isLoadedDetail) {
-          const cached = threadDetailCacheRef.current.get(cacheKey)
-          if (cached) {
-            const updated = applyEventToThreadDetail(cached, event)
-            if (updated && updated !== cached) {
-              threadDetailCacheRef.current.set(cacheKey, updated)
+      for (const event of events) {
+        if (event.workspace_id && event.thread_id) {
+          const cacheKey = threadCacheKey(event.workspace_id, event.thread_id)
+          const isLoadedDetail =
+            next !== null && threadCacheKey(next.workspace.id, next.thread.id) === cacheKey
+          if (!isLoadedDetail) {
+            const cached = threadDetailCacheRef.current.get(cacheKey)
+            if (cached) {
+              const updated = applyEventToThreadDetail(cached, event)
+              if (updated && updated !== cached) {
+                threadDetailCacheRef.current.set(cacheKey, updated)
+              }
             }
           }
         }
@@ -121,9 +150,35 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       return next
     })
 
-    if (event.event.type === 'turn-end') {
+    if (events.some((event) => event.event.type === 'turn-end')) {
       setGitRefreshTrigger((c) => c + 1)
     }
+    recordPerformance('falcondeck:event-flush', startedAt, { eventCount: events.length })
+  }, [])
+
+  const handleEvent = useCallback((event: EventEnvelope) => {
+    pendingEventsRef.current.push(event)
+    if (eventFrameRef.current !== null || eventTimerRef.current !== null) return
+    // requestAnimationFrame can be suspended for a hidden webview. Continue
+    // draining at a low rate in the background so a long-running turn cannot
+    // accumulate an unbounded event queue while the app is minimised.
+    if (document.visibilityState === 'hidden') {
+      eventTimerRef.current = window.setTimeout(flushEvents, 50)
+    } else {
+      eventFrameRef.current = window.requestAnimationFrame(flushEvents)
+    }
+  }, [flushEvents])
+
+  useEffect(() => () => {
+    if (eventFrameRef.current !== null) {
+      window.cancelAnimationFrame(eventFrameRef.current)
+      eventFrameRef.current = null
+    }
+    if (eventTimerRef.current !== null) {
+      window.clearTimeout(eventTimerRef.current)
+      eventTimerRef.current = null
+    }
+    pendingEventsRef.current = []
   }, [])
 
   // Bootstrap daemon connection
@@ -167,6 +222,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       let lastError: unknown = null
 
       for (let attempt = 0; attempt < DAEMON_BOOTSTRAP_RETRY_COUNT; attempt += 1) {
+        const startedAt = performanceTracingEnabled ? performance.now() : 0
         try {
           const nextBaseUrl = await detectApiBaseUrl()
           if (cancelled) return
@@ -181,6 +237,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
           setRemoteStatus(nextRemoteStatus)
           setConnectionError(null)
           setConnectionState('ready')
+          recordPerformance('falcondeck:daemon-bootstrap', startedAt, { attempt: attempt + 1 })
           socket = nextApi.connectEvents(handleEvent)
           socket.onopen = () => {
             if (cancelled) return
@@ -383,12 +440,17 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
     let cancelled = false
     setThreadDetailError(null)
+    const startedAt = performanceTracingEnabled ? performance.now() : 0
     void api
       .threadDetail(selectedWorkspaceId, selectedThreadId)
       .then((detail) => {
         if (cancelled) return
         threadDetailCacheRef.current.set(cacheKey, detail)
         setThreadDetail(detail)
+        recordPerformance('falcondeck:thread-detail', startedAt, {
+          cached: Boolean(cachedDetail),
+          itemCount: detail.items.length,
+        })
       })
       .catch((error: unknown) => {
         if (cancelled) return
@@ -408,9 +470,12 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   ])
    
 
-  // Prefetch likely-next threads so switching can render from memory immediately.
+  // Prefetch only a few likely-next threads once startup/selection work is
+  // idle. Fetching every workspace's current thread plus six recent threads
+  // at once contended with the selected detail and made launch slower on
+  // machines with fewer cores.
   useEffect(() => {
-    if (!api || !snapshot) return
+    if (!api || !snapshot || !selectedWorkspaceId) return
 
     const targets = new Map<string, { workspaceId: string; threadId: string }>()
     const rememberTarget = (workspaceId: string | null | undefined, threadId: string | null | undefined) => {
@@ -418,38 +483,47 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       targets.set(threadCacheKey(workspaceId, threadId), { workspaceId, threadId })
     }
 
-    for (const workspace of snapshot.workspaces) {
-      rememberTarget(workspace.id, workspace.current_thread_id)
+    const hotThreads = snapshot.threads
+      .filter(
+        (thread) =>
+          thread.workspace_id === selectedWorkspaceId &&
+          thread.id !== selectedThreadId &&
+          !thread.is_archived,
+      )
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
+      .slice(0, THREAD_PREFETCH_LIMIT)
+
+    for (const thread of hotThreads) {
+      rememberTarget(thread.workspace_id, thread.id)
     }
 
-    if (selectedWorkspaceId) {
-      const hotThreads = snapshot.threads
-        .filter((thread) => thread.workspace_id === selectedWorkspaceId && !thread.is_archived)
-        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))
-        .slice(0, 6)
+    const prefetch = () => {
+      for (const [cacheKey, target] of targets) {
+        if (threadDetailCacheRef.current.has(cacheKey) || threadDetailPrefetchRef.current.has(cacheKey)) {
+          continue
+        }
 
-      for (const thread of hotThreads) {
-        rememberTarget(thread.workspace_id, thread.id)
+        threadDetailPrefetchRef.current.add(cacheKey)
+        void api
+          .threadDetail(target.workspaceId, target.threadId)
+          .then((detail) => {
+            threadDetailCacheRef.current.set(cacheKey, detail)
+          })
+          .catch(() => {})
+          .finally(() => {
+            threadDetailPrefetchRef.current.delete(cacheKey)
+          })
       }
     }
 
-    for (const [cacheKey, target] of targets) {
-      if (threadDetailCacheRef.current.has(cacheKey) || threadDetailPrefetchRef.current.has(cacheKey)) {
-        continue
-      }
-
-      threadDetailPrefetchRef.current.add(cacheKey)
-      void api
-        .threadDetail(target.workspaceId, target.threadId)
-        .then((detail) => {
-          threadDetailCacheRef.current.set(cacheKey, detail)
-        })
-        .catch(() => {})
-        .finally(() => {
-          threadDetailPrefetchRef.current.delete(cacheKey)
-        })
+    const idleWindow = window as IdleWindow
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(prefetch, { timeout: 1_000 })
+      return () => idleWindow.cancelIdleCallback?.(handle)
     }
-  }, [api, selectedWorkspaceId, snapshot])
+    const handle = window.setTimeout(prefetch, THREAD_PREFETCH_FALLBACK_DELAY_MS)
+    return () => window.clearTimeout(handle)
+  }, [api, selectedThreadId, selectedWorkspaceId, snapshot])
 
   useEffect(() => {
     if (!snapshot) {

@@ -128,6 +128,31 @@ export function reconcileSnapshotSelection(
     return { workspaceId: null, threadId: null }
   }
 
+  // The overwhelmingly common path is an already-valid selection receiving a
+  // snapshot update while a turn streams. Avoid allocating two Maps and a
+  // filtered thread list just to return the ids React already holds.
+  if (selectedWorkspaceId) {
+    const selectedWorkspace = snapshot.workspaces.find(
+      (workspace) => workspace.id === selectedWorkspaceId,
+    )
+    if (selectedWorkspace) {
+      if (
+        selectedThreadId === null &&
+        options.preserveEmptyThreadSelection === true
+      ) {
+        return { workspaceId: selectedWorkspaceId, threadId: null }
+      }
+      if (selectedThreadId) {
+        const selectedThread = snapshot.threads.find(
+          (thread) => thread.id === selectedThreadId,
+        )
+        if (selectedThread?.workspace_id === selectedWorkspaceId) {
+          return { workspaceId: selectedWorkspaceId, threadId: selectedThreadId }
+        }
+      }
+    }
+  }
+
   const workspaceById = new Map(snapshot.workspaces.map((workspace) => [workspace.id, workspace] as const))
   const threadById = new Map(snapshot.threads.map((thread) => [thread.id, thread] as const))
 

@@ -156,8 +156,11 @@ export const Conversation = memo(function Conversation({
     if (!el) return
     el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight)
     stickyToBottomRef.current = true
-    persistScrollPosition()
-  }, [persistScrollPosition])
+    if (threadKey) {
+      scrollPositionsRef.current.delete(threadKey)
+      scrollPositionsRef.current.set(threadKey, { scrollTop: el.scrollTop, stickToBottom: true })
+    }
+  }, [threadKey])
 
   /// Deferred pin, for thread switches only: restored content (images, code
   /// blocks, fonts) settles its height over the next couple of frames, so the
@@ -223,6 +226,9 @@ export const Conversation = memo(function Conversation({
   useLayoutEffect(() => {
     if (isLoading) return
     if (!renderBlocks.length && !isThinking && !isWaitingForInput) return
+    // ResizeObserver below runs after layout and before paint. Avoid doing the
+    // same forced scroll-height read twice on every streaming update.
+    if (typeof ResizeObserver !== 'undefined') return
 
     if (!stickyToBottomRef.current) {
       persistScrollPosition()
@@ -327,7 +333,7 @@ export const Conversation = memo(function Conversation({
           ) : null}
 
             {renderBlocks.map((block) => (
-            <div key={block.id} className="min-w-0">
+            <div key={block.id} className="fd-conversation-block min-w-0">
               {block.kind === 'item' ? (
                 <MessageCard
                   item={block.item}

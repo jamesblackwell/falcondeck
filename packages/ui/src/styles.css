@@ -493,6 +493,14 @@ body {
   }
 }
 
+/* Long transcripts should not pay layout and paint costs for every offscreen
+   message when switching threads. Browsers without content-visibility simply
+   ignore these declarations. */
+.fd-conversation-block {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 96px;
+}
+
 @theme {
   --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-default);
   --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-default);

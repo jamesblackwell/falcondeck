@@ -621,18 +621,45 @@ export const MessageCard = memo(function MessageCard({
   }
 })
 
-export const ToolSummaryCard = memo(function ToolSummaryCard(props: {
+type ToolSummaryCardProps = {
   summary: ToolActivitySummary
   items: Extract<ConversationItem, { kind: 'tool_call' }>[]
   defaultOpen?: boolean
   expansionMode?: ExpansionMode
   suppressReadOnlyDetail?: boolean
-}) {
+}
+
+function sameItemReferences<T>(left: T[], right: T[]) {
+  if (left === right) return true
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) return false
+  }
+  return true
+}
+
+export const ToolSummaryCard = memo(function ToolSummaryCard(props: ToolSummaryCardProps) {
   return <ToolSummaryMessage {...props} />
-})
+}, (previous, next) =>
+  sameItemReferences(previous.items, next.items) &&
+  previous.defaultOpen === next.defaultOpen &&
+  previous.expansionMode === next.expansionMode &&
+  previous.suppressReadOnlyDetail === next.suppressReadOnlyDetail &&
+  previous.summary.title === next.summary.title &&
+  previous.summary.subtitle === next.summary.subtitle &&
+  previous.summary.completed_at === next.summary.completed_at)
 
 /** One buried run of tool work: a single quiet line ("Working…" while live,
     "Worked for 2m 14s" when done) that expands to the full tool detail. */
+type WorkSessionCardProps = {
+  items: WorkSessionEntry[]
+  running: boolean
+  startedAt: string
+  completedAt: string | null
+  expansionMode?: ExpansionMode
+  thinkingDisplay?: ThinkingDisplay
+}
+
 export const WorkSessionCard = memo(function WorkSessionCard({
   items,
   running,
@@ -640,14 +667,7 @@ export const WorkSessionCard = memo(function WorkSessionCard({
   completedAt,
   expansionMode = 'default',
   thinkingDisplay = 'auto',
-}: {
-  items: WorkSessionEntry[]
-  running: boolean
-  startedAt: string
-  completedAt: string | null
-  expansionMode?: ExpansionMode
-  thinkingDisplay?: ThinkingDisplay
-}) {
+}: WorkSessionCardProps) {
   const [open, setOpen] = useExpansionState(false, expansionMode, items[0]?.id ?? 'work')
   const toolCalls = items.filter(
     (entry): entry is Extract<ConversationItem, { kind: 'tool_call' }> =>
@@ -717,7 +737,13 @@ export const WorkSessionCard = memo(function WorkSessionCard({
       </Collapsible.Content>
     </Collapsible.Root>
   )
-})
+}, (previous, next) =>
+  sameItemReferences(previous.items, next.items) &&
+  previous.running === next.running &&
+  previous.startedAt === next.startedAt &&
+  previous.completedAt === next.completedAt &&
+  previous.expansionMode === next.expansionMode &&
+  previous.thinkingDisplay === next.thinkingDisplay)
 
 export const LiveActivityLane = memo(function LiveActivityLane({
   groups,

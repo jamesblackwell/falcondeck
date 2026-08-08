@@ -1,3 +1,4 @@
+import { memo } from 'react'
 import { Settings } from 'lucide-react'
 
 import {
@@ -11,7 +12,7 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   settingsOpen?: boolean
 }
 
-export function DesktopSidebar({
+export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenSettings,
   settingsOpen = false,
   ...props
@@ -39,4 +40,4 @@ export function DesktopSidebar({
       }
     />
   )
-}
+})

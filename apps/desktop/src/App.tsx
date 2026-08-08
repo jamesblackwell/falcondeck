@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
   buildProjectGroups,
@@ -68,10 +68,9 @@ import {
 import { DesktopConversationPane } from './components/DesktopConversationPane'
 import { DesktopSidebar } from './components/Sidebar'
 import { DesktopShell } from './components/DesktopShell'
-import { DiffPanel, type DiffPanelSelection } from './components/DiffPanel'
+import type { DiffPanelSelection } from './components/DiffPanel'
 import { PanelToggles } from './components/PanelToggles'
 import { ProjectImportOverlay } from './components/ProjectImportOverlay'
-import { SettingsView } from './components/SettingsView'
 import type { SettingsSectionId } from './components/settings/settings-utils'
 import { useAppUpdater } from './hooks/useAppUpdater'
 import { useDaemonConnection } from './hooks/useDaemonConnection'
@@ -82,6 +81,14 @@ import { hostLabelByWorkspaceId, mergeSnapshots } from './hosts'
 // Stable empty array so conversations without attachments don't bust the
 // memoized PromptInput on every render.
 const NO_ATTACHMENTS: ImageInput[] = []
+const DRAFT_PERSIST_DELAY_MS = 200
+
+const SettingsView = lazy(() =>
+  import('./components/SettingsView').then((module) => ({ default: module.SettingsView })),
+)
+const DiffPanel = lazy(() =>
+  import('./components/DiffPanel').then((module) => ({ default: module.DiffPanel })),
+)
 
 export default function App() {
   return (
@@ -154,6 +161,7 @@ function AppInner() {
   const notifiedAttentionRef = useRef(new Map<string, string>())
   const announcedUpdateVersionRef = useRef<string | null>(null)
   const announcedDownloadedVersionRef = useRef<string | null>(null)
+  const draftsRef = useRef(drafts)
 
   // Each conversation keeps its own unsent input, keyed by workspace + thread
   // ('new' for a thread not yet created), so navigating never carries text or
@@ -166,9 +174,30 @@ function AppInner() {
   const setDraftForConversation = useCallback((key: string, value: string) => {
     setDrafts((current) => {
       const next = upsertComposerDraft(current, key, value)
-      if (next !== current) writeStoredDrafts(next)
+      draftsRef.current = next
       return next
     })
+  }, [])
+
+  // localStorage writes and whole-draft JSON serialization are synchronous.
+  // Debouncing keeps the input path free of storage work while still flushing
+  // immediately when the webview is backgrounded or closed.
+  useEffect(() => {
+    const timeout = window.setTimeout(() => writeStoredDrafts(drafts), DRAFT_PERSIST_DELAY_MS)
+    return () => window.clearTimeout(timeout)
+  }, [drafts])
+
+  useEffect(() => {
+    const flushDrafts = () => writeStoredDrafts(draftsRef.current)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'hidden') flushDrafts()
+    }
+    window.addEventListener('pagehide', flushDrafts)
+    document.addEventListener('visibilitychange', handleVisibility)
+    return () => {
+      window.removeEventListener('pagehide', flushDrafts)
+      document.removeEventListener('visibilitychange', handleVisibility)
+    }
   }, [])
 
   const setDraft = useCallback(
@@ -975,8 +1004,27 @@ function AppInner() {
         activeThreadId = handle.thread.id
         setSelectedThreadId(activeThreadId)
         setSnapshot((c) =>
-          c ? { ...c, threads: [handle.thread, ...c.threads.filter((t) => t.id !== handle.thread.id)] } : c,
+          c
+            ? {
+                ...c,
+                workspaces: c.workspaces.map((workspace) =>
+                  workspace.id === handle.workspace.id ? handle.workspace : workspace,
+                ),
+                threads: [handle.thread, ...c.threads.filter((t) => t.id !== handle.thread.id)],
+              }
+            : c,
         )
+        // The new thread is known to be empty. Render it immediately rather
+        // than showing a loading state while the detail endpoint catches up.
+        setThreadDetail({
+          workspace: handle.workspace,
+          thread: handle.thread,
+          items: [],
+          has_older: false,
+          oldest_item_id: null,
+          newest_item_id: null,
+          is_partial: false,
+        })
       }
       const inputs: TurnInputItem[] = [
         ...(submittedDraft.trim() ? [{ type: 'text', text: submittedDraft } satisfies TurnInputItem] : []),
@@ -1585,6 +1633,10 @@ function AppInner() {
     selectedThreadId,
     threadDetailErrorState,
   ])
+  const sidebarErrors = useMemo(
+    () => [connectionError, actionError].filter((value): value is string => Boolean(value)),
+    [actionError, connectionError],
+  )
 
   return (
     <>
@@ -1616,38 +1668,40 @@ function AppInner() {
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
-            errors={[connectionError, actionError].filter((value): value is string => Boolean(value))}
+            errors={sidebarErrors}
           />
         }
         main={
           isSettingsOpen ? (
-            <SettingsView
-              initialSection={settingsSection}
-              workspace={selectedWorkspace}
-              localWorkspaces={snapshot?.workspaces ?? []}
-              baseUrl={baseUrl}
-              hostManager={remoteHosts.manager}
-              hosts={remoteHosts.hosts}
-              onToast={toast}
-              preferences={effectivePreferences}
-              remoteStatus={remoteStatus}
-              pairingLink={pairingLink}
-              relayUrl={relayUrl}
-              isStartingRemote={isStartingRemote}
-              remoteControlsDisabled={remoteControlsDisabled}
-              remoteControlsUnavailableReason={remoteControlsUnavailableReason}
-              revokingDeviceId={revokingDeviceId}
-              updater={updater.state}
-              updaterProgressPercent={updater.progressPercent}
-              onUpdatePreferences={handleUpdatePreferences}
-              onStartPairing={handleStartPairingCallback}
-              onRefreshRemoteStatus={handleRefreshRemoteStatus}
-              onRevokeDevice={handleRevokeDevice}
-              onCheckForUpdates={handleCheckForUpdates}
-              onDownloadUpdate={handleDownloadUpdate}
-              onRestartToInstallUpdate={handleRestartToInstallUpdate}
-              onClose={() => setIsSettingsOpen(false)}
-            />
+            <Suspense fallback={loadingThreadState}>
+              <SettingsView
+                initialSection={settingsSection}
+                workspace={selectedWorkspace}
+                localWorkspaces={snapshot?.workspaces ?? []}
+                baseUrl={baseUrl}
+                hostManager={remoteHosts.manager}
+                hosts={remoteHosts.hosts}
+                onToast={toast}
+                preferences={effectivePreferences}
+                remoteStatus={remoteStatus}
+                pairingLink={pairingLink}
+                relayUrl={relayUrl}
+                isStartingRemote={isStartingRemote}
+                remoteControlsDisabled={remoteControlsDisabled}
+                remoteControlsUnavailableReason={remoteControlsUnavailableReason}
+                revokingDeviceId={revokingDeviceId}
+                updater={updater.state}
+                updaterProgressPercent={updater.progressPercent}
+                onUpdatePreferences={handleUpdatePreferences}
+                onStartPairing={handleStartPairingCallback}
+                onRefreshRemoteStatus={handleRefreshRemoteStatus}
+                onRevokeDevice={handleRevokeDevice}
+                onCheckForUpdates={handleCheckForUpdates}
+                onDownloadUpdate={handleDownloadUpdate}
+                onRestartToInstallUpdate={handleRestartToInstallUpdate}
+                onClose={() => setIsSettingsOpen(false)}
+              />
+            </Suspense>
           ) : (
             <DesktopConversationPane
               selectedWorkspace={selectedWorkspace}
@@ -1743,18 +1797,20 @@ function AppInner() {
           isSettingsOpen
             ? undefined
             : (
-                <DiffPanel
-                  // Git status/diff runs against the local daemon; remote-host
-                  // workspaces have no local checkout to inspect.
-                  api={workspaceHostIndex.has(selectedWorkspaceId ?? '') ? null : api}
-                  workspaceId={selectedWorkspaceId}
-                  refreshTrigger={gitRefreshTrigger}
-                  reviewThreadId={
-                    selectedThread && activeCapabilities.supports_review ? selectedThread.id : null
-                  }
-                  selection={diffSelection}
-                  onSelectionChange={setDiffSelection}
-                />
+                <Suspense fallback={null}>
+                  <DiffPanel
+                    // Git status/diff runs against the local daemon; remote-host
+                    // workspaces have no local checkout to inspect.
+                    api={workspaceHostIndex.has(selectedWorkspaceId ?? '') ? null : api}
+                    workspaceId={selectedWorkspaceId}
+                    refreshTrigger={gitRefreshTrigger}
+                    reviewThreadId={
+                      selectedThread && activeCapabilities.supports_review ? selectedThread.id : null
+                    }
+                    selection={diffSelection}
+                    onSelectionChange={setDiffSelection}
+                  />
+                </Suspense>
               )
         }
         sidebarVisible={sidebarVisible}
