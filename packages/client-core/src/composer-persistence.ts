@@ -241,5 +241,46 @@ export function resolvePersistedMode(
   mode: string | null | undefined,
   availableModes: string[],
 ): string | null {
+  if (mode === 'default') return null
   return mode && availableModes.includes(mode) ? mode : null
+}
+
+/** Permission ids commonly used for a provider's least-interactive mode. */
+const PERMISSIVE_PERMISSION_MODE_IDS = [
+  'bypasspermissions',
+  'bypasspermission',
+  'dontask',
+  'alwaysallow',
+  'alwaysapprove',
+  'allowall',
+  'yolo',
+  'auto',
+]
+
+function normalizedModeId(mode: string): string {
+  return mode.replace(/[-_\s]/g, '').toLowerCase()
+}
+
+/** Returns the most permissive permission mode a harness advertises. */
+export function preferredPermissionMode(availableModes: string[]): string | null {
+  for (const preferred of PERMISSIVE_PERMISSION_MODE_IDS) {
+    const match = availableModes.find((mode) => normalizedModeId(mode) === preferred)
+    if (match) return match
+  }
+  return null
+}
+
+/**
+ * Resolves a remembered permission choice for a new conversation. `default`
+ * is an explicit user choice and clears the wire override. A saved mode is
+ * retained while capabilities are still loading so lazy ACP providers do not
+ * forget it before their first session advertises modes.
+ */
+export function resolvePermissionMode(
+  mode: string | null | undefined,
+  availableModes: string[],
+): string | null {
+  if (mode === 'default') return null
+  if (mode && (availableModes.length === 0 || availableModes.includes(mode))) return mode
+  return preferredPermissionMode(availableModes)
 }

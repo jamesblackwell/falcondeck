@@ -11,6 +11,7 @@ import {
   filesToImageInputs,
   providerForThread,
   resolvePersistedMode,
+  resolvePermissionMode,
   selectedSkillsFromText,
   upsertComposerDraft,
   withComposerProvider,
@@ -393,7 +394,7 @@ function AppInner() {
     setSelectedPermissionMode(
       selectedThread
         ? selectedThread.agent.permission_mode ?? null
-        : resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+        : resolvePermissionMode(preferredSelection?.permissionMode, capabilities.permission_modes),
     )
     setSelectedSandboxMode(
       selectedThread
@@ -711,7 +712,10 @@ function AppInner() {
     (mode: string | null) => {
       setSelectedPermissionMode(mode)
       rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
-        permissionMode: mode,
+        // Keep an explicit "Ask to approve" choice distinct from an old
+        // selection that has never been set; the latter defaults to bypass
+        // when the provider offers it.
+        permissionMode: mode ?? 'default',
       })
       const client = apiFor(selectedWorkspace?.id)
       if (!client || !selectedWorkspace || !selectedThreadId) return
@@ -853,7 +857,7 @@ function AppInner() {
       // than losing the choice every time.
       const capabilities = workspaceAgentCapabilities(selectedWorkspace, provider)
       setSelectedPermissionMode(
-        resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+        resolvePermissionMode(preferredSelection?.permissionMode, capabilities.permission_modes),
       )
       setSelectedSandboxMode(
         resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),

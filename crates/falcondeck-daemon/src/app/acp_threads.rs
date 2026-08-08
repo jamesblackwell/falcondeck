@@ -16,6 +16,7 @@ use crate::acp::{AcpEvent, AcpRuntime};
 use crate::error::DaemonError;
 
 use super::conversation_helpers::tool_display_metadata;
+use super::provider_runtime::ProviderRuntime;
 use super::{AppState, PendingServerRequest};
 
 impl AppState {
@@ -396,6 +397,71 @@ impl AppState {
     }
 }
 
+/// Applies a permission-mode update to an already-open ACP session.
+///
+/// The thread summary is FalconDeck's durable record, but ACP agents keep the
+/// active mode inside their session. Updating only the summary makes a picker
+/// appear to work while the harness continues prompting with its old mode.
+pub(super) async fn set_acp_thread_permission_mode(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    requested_mode: &Option<String>,
+) -> Result<(), DaemonError> {
+    let provider = app.thread_provider(workspace_id, thread_id).await?;
+    let ProviderRuntime::Acp(provider) = ProviderRuntime::for_provider(&provider) else {
+        return Ok(());
+    };
+
+    let session_id = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .and_then(|thread| thread.summary.native_session_id.clone())
+    };
+    let Some(session_id) = session_id else {
+        // The first turn will apply the stored mode after ACP creates a
+        // session, so changing a brand-new thread still works.
+        return Ok(());
+    };
+
+    let runtime = app.acp_runtime_for(workspace_id, &provider).await?;
+    let Some(mode_state) = runtime.session_mode_state(&session_id).await else {
+        return Ok(());
+    };
+    let desired_mode = requested_mode
+        .as_deref()
+        .or_else(|| default_acp_mode(&mode_state.available));
+    let Some(desired_mode) = desired_mode else {
+        return Ok(());
+    };
+    if !mode_state.available.iter().any(|mode| mode == desired_mode) {
+        return Err(DaemonError::BadRequest(format!(
+            "permission mode '{desired_mode}' is not advertised by provider '{provider}'"
+        )));
+    }
+    if mode_state.current.as_deref() == Some(desired_mode) {
+        return Ok(());
+    }
+    runtime.set_session_mode(&session_id, desired_mode).await
+}
+
+fn default_acp_mode(available_modes: &[String]) -> Option<&str> {
+    available_modes
+        .iter()
+        .find(|mode| {
+            matches!(
+                mode.replace(['-', '_', ' '], "")
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "default" | "normal" | "standard"
+            )
+        })
+        .map(String::as_str)
+        .or_else(|| available_modes.first().map(String::as_str))
+}
+
 /// Maps ACP tool statuses onto the daemon's running/completed/failed set.
 fn normalize_acp_tool_status(status: &str) -> String {
     match status {
@@ -562,4 +628,26 @@ pub(super) async fn start_acp_turn(
             .await;
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_acp_mode;
+
+    #[test]
+    fn default_acp_mode_prefers_a_named_default() {
+        let modes = vec![
+            "plan".to_string(),
+            "default".to_string(),
+            "yolo".to_string(),
+        ];
+        assert_eq!(default_acp_mode(&modes), Some("default"));
+    }
+
+    #[test]
+    fn default_acp_mode_falls_back_to_the_first_advertised_mode() {
+        let modes = vec!["safe".to_string(), "fast".to_string()];
+        assert_eq!(default_acp_mode(&modes), Some("safe"));
+        assert_eq!(default_acp_mode(&[]), None);
+    }
 }

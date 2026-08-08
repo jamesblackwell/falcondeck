@@ -7,7 +7,9 @@ import {
   MAX_COMPOSER_DRAFTS,
   parseComposerDrafts,
   parsePersistedComposerState,
+  preferredPermissionMode,
   resolvePersistedMode,
+  resolvePermissionMode,
   upsertComposerDraft,
   withComposerProvider,
   withComposerSelection,
@@ -165,6 +167,21 @@ describe('resolvePersistedMode', () => {
     expect(resolvePersistedMode('dontAsk', modes)).toBeNull()
     expect(resolvePersistedMode(null, modes)).toBeNull()
     expect(resolvePersistedMode(undefined, [])).toBeNull()
+    expect(resolvePersistedMode('default', modes)).toBeNull()
+  })
+
+  it('defaults new permission selections to bypass when the harness offers it', () => {
+    const modes = ['default', 'acceptEdits', 'bypassPermissions']
+    expect(preferredPermissionMode(modes)).toBe('bypassPermissions')
+    expect(resolvePermissionMode(null, modes)).toBe('bypassPermissions')
+    expect(resolvePermissionMode('default', modes)).toBeNull()
+    expect(resolvePermissionMode('bypassPermissions', [])).toBe('bypassPermissions')
+    expect(resolvePermissionMode('stale-mode', modes)).toBe('bypassPermissions')
+  })
+
+  it('uses common permissive ACP ids without hard-coding a provider', () => {
+    expect(preferredPermissionMode(['default', 'yolo'])).toBe('yolo')
+    expect(preferredPermissionMode(['default', 'plan'])).toBeNull()
   })
 })
 

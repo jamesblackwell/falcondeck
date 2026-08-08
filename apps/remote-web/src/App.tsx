@@ -29,6 +29,7 @@ import {
   publicKeyToBase64,
   reconcileSnapshotSelection,
   resolvePersistedMode,
+  resolvePermissionMode,
   restoreBoxKeyPair,
   selectedSkillsFromText,
   upsertComposerDraft,
@@ -1676,7 +1677,7 @@ function RemoteApp() {
     setSelectedPermissionMode(
       selectedThread
         ? selectedThread.agent.permission_mode ?? null
-        : resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+        : resolvePermissionMode(preferredSelection?.permissionMode, capabilities.permission_modes),
     )
     setSelectedSandboxMode(
       selectedThread
@@ -1830,7 +1831,7 @@ function RemoteApp() {
     (mode: string | null) => {
       setSelectedPermissionMode(mode)
       rememberComposerSelection(selectedThread?.provider ?? selectedProvider, {
-        permissionMode: mode,
+        permissionMode: mode ?? 'default',
       })
       if (!selectedWorkspace || !selectedThreadId) return
       void submitQueuedAction<ThreadHandle>('thread.update', {
@@ -1985,7 +1986,7 @@ function RemoteApp() {
       // than losing the choice every time.
       const capabilities = workspaceAgentCapabilities(selectedWorkspace, provider)
       setSelectedPermissionMode(
-        resolvePersistedMode(preferredSelection?.permissionMode, capabilities.permission_modes),
+        resolvePermissionMode(preferredSelection?.permissionMode, capabilities.permission_modes),
       )
       setSelectedSandboxMode(
         resolvePersistedMode(preferredSelection?.sandboxMode, capabilities.sandbox_modes),

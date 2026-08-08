@@ -13,6 +13,7 @@ import {
   encryptJson,
   providerForThread,
   resolvePersistedMode,
+  resolvePermissionMode,
   workspaceAgentCapabilities,
   workspaceModels,
   workspaceProviderOptions,
@@ -219,7 +220,7 @@ export default function HomeScreen() {
     setSelectedPermissionMode(
       selectedThread
         ? selectedThread.agent.permission_mode ?? null
-        : resolvePersistedMode(
+        : resolvePermissionMode(
             preferredSelection?.permissionMode,
             seededCapabilities.permission_modes,
           ),
@@ -316,7 +317,7 @@ export default function HomeScreen() {
       setSelectedEffort(preferredSelection?.effort ?? null)
       const providerCapabilities = workspaceAgentCapabilities(workspace, provider)
       setSelectedPermissionMode(
-        resolvePersistedMode(
+        resolvePermissionMode(
           preferredSelection?.permissionMode,
           providerCapabilities.permission_modes,
         ),
@@ -365,7 +366,9 @@ export default function HomeScreen() {
     (mode: string | null) => {
       setSelectedPermissionMode(mode)
       if (workspace) {
-        rememberComposerSelection(workspace.path, activeProvider, { permissionMode: mode })
+        rememberComposerSelection(workspace.path, activeProvider, {
+          permissionMode: mode ?? 'default',
+        })
       }
       if (!selectedWorkspaceId || !selectedThreadId) return
       void setThreadMode(selectedWorkspaceId, selectedThreadId, 'permission_mode', mode).catch(

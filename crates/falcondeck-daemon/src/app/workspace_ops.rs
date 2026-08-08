@@ -1630,6 +1630,16 @@ pub(super) async fn update_thread(
     app: &AppState,
     request: UpdateThreadRequest,
 ) -> Result<ThreadHandle, DaemonError> {
+    if let Some(permission_mode) = request.permission_mode.as_ref() {
+        super::acp_threads::set_acp_thread_permission_mode(
+            app,
+            &request.workspace_id,
+            &request.thread_id,
+            permission_mode,
+        )
+        .await?;
+    }
+
     let workspace_summary = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
