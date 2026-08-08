@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as SelectPrimitive from '@radix-ui/react-select'
-import { Check, ChevronDown, ChevronUp } from 'lucide-react'
+import { Check, ChevronDown } from 'lucide-react'
 
 import { cn } from '../lib/utils'
 
@@ -46,23 +46,27 @@ SelectTrigger.displayName = SelectPrimitive.Trigger.displayName
 export const SelectContent = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
->(({ className, children, ...props }, ref) => (
+>(({ className, children, position = 'popper', sideOffset = 6, collisionPadding = 8, ...props }, ref) => (
   <SelectPrimitive.Portal>
     <SelectPrimitive.Content
       ref={ref}
+      position={position}
+      sideOffset={sideOffset}
+      collisionPadding={collisionPadding}
       className={cn(
         'z-50 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-emphasis bg-surface-2 text-fg-primary shadow-[var(--fd-shadow-lg)]',
         className,
       )}
       {...props}
     >
-      <SelectPrimitive.ScrollUpButton className="flex h-6 items-center justify-center border-b border-border-subtle bg-surface-2 text-fg-muted">
-        <ChevronUp className="h-3.5 w-3.5" />
-      </SelectPrimitive.ScrollUpButton>
-      <SelectPrimitive.Viewport className="max-h-72 p-1.5">{children}</SelectPrimitive.Viewport>
-      <SelectPrimitive.ScrollDownButton className="flex h-6 items-center justify-center border-t border-border-subtle bg-surface-2 text-fg-muted">
-        <ChevronDown className="h-3.5 w-3.5" />
-      </SelectPrimitive.ScrollDownButton>
+      {/* Popper positioning with a natively scrolling viewport. Radix's default
+          "item-aligned" mode overlays the trigger and repositions the popup on
+          every wheel tick, which flickers on trackpads — same reason there are
+          no ScrollUp/DownButtons: they mount into the flow the moment the list
+          can scroll, shoving every row down a step. */}
+      <SelectPrimitive.Viewport className="max-h-[min(18rem,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] p-1.5">
+        {children}
+      </SelectPrimitive.Viewport>
     </SelectPrimitive.Content>
   </SelectPrimitive.Portal>
 ))
