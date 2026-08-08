@@ -45,9 +45,7 @@ export const WorkSessionBlock = memo(function WorkSessionBlock({
         style={styles.row}
       >
         {running ? (
-          <View style={styles.spinner}>
-            <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} />
-          </View>
+          <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} />
         ) : null}
         <Text variant="label" color="muted">
           {running ? 'Working…' : `Worked for ${formatWorkDuration(startedAt, completedAt ?? startedAt)}`}
@@ -83,19 +81,13 @@ const styles = StyleSheet.create((theme) => ({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[1.5],
+    gap: theme.spacing[2],
     // Sits on the transcript's content column, in line with message text
     // and the thinking indicator it trades places with.
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[1],
     // The painted row is short; keep the tap target at the HIG minimum.
     minHeight: theme.minTouchTarget,
-  },
-  spinner: {
-    // The label, rather than the glyph, is the transcript content. Hang the
-    // glyph in the gutter so Thinking…, Working…, and message copy align.
-    position: 'absolute',
-    left: theme.spacing[0.5],
   },
   chevronOpen: {
     transform: [{ rotate: '90deg' }],
