@@ -1,12 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { View, TextInput, Pressable, type NativeSyntheticEvent, type TextInputContentSizeChangeEventData } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ImagePlus, Send, Square } from 'lucide-react-native'
+import { Plus, Send, Square } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import {
   activeSlashQuery,
   canonicalSkillAlias,
+  NO_AGENT_CAPABILITIES,
   providerSupportsSkill,
   type ActiveSlashQuery,
   type AgentCapabilitySummary,
@@ -17,10 +18,17 @@ import {
   type SkillSummary,
 } from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
 
 import { AttachmentPreviewList } from './AttachmentPreviewList'
 import { InputToolbar } from './InputToolbar'
+import {
+  SANDBOX_DEFAULT_VALUE,
+  permissionChipLabel,
+  permissionModeItems,
+  sandboxChipLabel,
+  sandboxModeItems,
+} from './composerModes'
 
 interface ChatInputProps {
   value: string
@@ -29,6 +37,7 @@ interface ChatInputProps {
   /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
   onStop?: () => void
   onPickImages: () => void
+  onTakePhoto?: () => void
   onRemoveAttachment: (attachmentId: string) => void
   disabled?: boolean
   placeholder?: string
@@ -59,6 +68,10 @@ const MIN_INPUT_HEIGHT = 44
 const MAX_INPUT_HEIGHT = 140
 // Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
 const CONTROL_SIZE = 32
+const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
+  { provider: 'codex', label: 'Codex' },
+  { provider: 'claude', label: 'Claude' },
+]
 
 export const ChatInput = memo(function ChatInput({
   value,
@@ -66,6 +79,7 @@ export const ChatInput = memo(function ChatInput({
   onSubmit,
   onStop,
   onPickImages,
+  onTakePhoto,
   onRemoveAttachment,
   disabled,
   placeholder = 'Ask anything',
@@ -83,9 +97,9 @@ export const ChatInput = memo(function ChatInput({
   onSelectProvider,
   isRunning = false,
   isStopping = false,
-  capabilities,
-  selectedPermissionMode,
-  selectedSandboxMode,
+  capabilities = NO_AGENT_CAPABILITIES,
+  selectedPermissionMode = null,
+  selectedSandboxMode = null,
   onSelectPermissionMode,
   onSelectSandboxMode,
 }: ChatInputProps) {
@@ -94,6 +108,9 @@ export const ChatInput = memo(function ChatInput({
   const [inputHeight, setInputHeight] = useState(MIN_INPUT_HEIGHT)
   const [pendingSelection, setPendingSelection] = useState<{ start: number; end: number } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
+  const [openSheet, setOpenSheet] = useState<
+    'more' | 'provider' | 'permission' | 'sandbox' | null
+  >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
   const hasContent = value.trim().length > 0 || attachments.length > 0
   const showStop = Boolean(onStop) && isRunning && !hasContent
@@ -225,6 +242,73 @@ export const ChatInput = memo(function ChatInput({
 
   const canSend = hasContent && !disabled
   const canStop = showStop && !disabled && !isStopping
+  const providerOptions = providers ?? DEFAULT_PROVIDER_OPTIONS
+  const moreItems = useMemo<OptionSheetItem[]>(() => {
+    const items: OptionSheetItem[] = [
+      {
+        value: 'photos',
+        label: 'Photos',
+        description: 'Choose images from your photo library',
+      },
+    ]
+    if (onTakePhoto) {
+      items.push({ value: 'camera', label: 'Camera', description: 'Take a new photo' })
+    }
+    if (showProviderSelector && providerOptions.length > 0) {
+      items.push({
+        value: 'provider',
+        label: 'Agent',
+        description:
+          providerOptions.find((option) => option.provider === selectedProvider)?.label ??
+          selectedProvider,
+      })
+    }
+    if (onSelectPermissionMode && capabilities.permission_modes.length > 0) {
+      items.push({
+        value: 'permission',
+        label: 'Permissions',
+        description: permissionChipLabel(selectedPermissionMode, capabilities.permission_modes),
+      })
+    }
+    if (onSelectSandboxMode && capabilities.sandbox_modes.length > 0) {
+      items.push({
+        value: 'sandbox',
+        label: 'Sandbox',
+        description: sandboxChipLabel(selectedSandboxMode),
+      })
+    }
+    return items
+  }, [
+    capabilities.permission_modes,
+    capabilities.sandbox_modes,
+    onSelectPermissionMode,
+    onSelectSandboxMode,
+    onTakePhoto,
+    providerOptions,
+    selectedPermissionMode,
+    selectedProvider,
+    selectedSandboxMode,
+    showProviderSelector,
+  ])
+
+  const handleMoreAction = useCallback(
+    (value: string) => {
+      if (value === 'photos') {
+        setOpenSheet(null)
+        onPickImages()
+      } else if (value === 'camera') {
+        setOpenSheet(null)
+        onTakePhoto?.()
+      } else if (value === 'provider') {
+        setOpenSheet('provider')
+      } else if (value === 'permission') {
+        setOpenSheet('permission')
+      } else if (value === 'sandbox') {
+        setOpenSheet('sandbox')
+      }
+    },
+    [onPickImages, onTakePhoto],
+  )
 
   return (
     <View style={styles.container}>
@@ -317,14 +401,14 @@ export const ChatInput = memo(function ChatInput({
           <View style={styles.footerControls}>
             <Pressable
               style={[styles.attachButton, disabled ? styles.attachButtonDisabled : null]}
-              onPress={onPickImages}
+              onPress={() => setOpenSheet('more')}
               disabled={disabled}
               accessibilityRole="button"
-              accessibilityLabel="Attach image"
+              accessibilityLabel="Add to prompt"
               accessibilityState={{ disabled: Boolean(disabled) }}
               hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
             >
-              <ImagePlus
+              <Plus
                 size={theme.iconSize.sm}
                 color={disabled ? theme.colors.fg.faint : theme.colors.fg.muted}
               />
@@ -336,7 +420,7 @@ export const ChatInput = memo(function ChatInput({
               effortOptions={effortOptions}
               selectedProvider={selectedProvider}
               providers={providers}
-              showProviderSelector={showProviderSelector}
+              showProviderSelector={false}
               disabled={disabled}
               onSelectModel={onSelectModel}
               onSelectEffort={onSelectEffort}
@@ -346,6 +430,7 @@ export const ChatInput = memo(function ChatInput({
               selectedSandboxMode={selectedSandboxMode}
               onSelectPermissionMode={onSelectPermissionMode}
               onSelectSandboxMode={onSelectSandboxMode}
+              showModePickers={false}
             />
           </View>
           <Pressable
@@ -381,6 +466,56 @@ export const ChatInput = memo(function ChatInput({
           </Pressable>
         </View>
       </View>
+      {openSheet === 'more' ? (
+        <OptionSheet
+          title="Add to prompt"
+          items={moreItems}
+          onSelect={handleMoreAction}
+          onClose={() => setOpenSheet(null)}
+        />
+      ) : null}
+      {openSheet === 'permission' && onSelectPermissionMode ? (
+        <OptionSheet
+          title="Permissions"
+          items={permissionModeItems(capabilities.permission_modes)}
+          selected={
+            selectedPermissionMode ??
+            (capabilities.permission_modes.includes('default') ? 'default' : null)
+          }
+          onSelect={(value) => {
+            onSelectPermissionMode(value === 'default' ? null : value)
+            setOpenSheet(null)
+          }}
+          onClose={() => setOpenSheet(null)}
+        />
+      ) : null}
+      {openSheet === 'provider' ? (
+        <OptionSheet
+          title="Agent"
+          items={providerOptions.map((option) => ({
+            value: option.provider,
+            label: option.label,
+          }))}
+          selected={selectedProvider}
+          onSelect={(value) => {
+            onSelectProvider(value as AgentProvider)
+            setOpenSheet(null)
+          }}
+          onClose={() => setOpenSheet(null)}
+        />
+      ) : null}
+      {openSheet === 'sandbox' && onSelectSandboxMode ? (
+        <OptionSheet
+          title="Sandbox"
+          items={sandboxModeItems(capabilities.sandbox_modes)}
+          selected={selectedSandboxMode ?? SANDBOX_DEFAULT_VALUE}
+          onSelect={(value) => {
+            onSelectSandboxMode(value === SANDBOX_DEFAULT_VALUE ? null : value)
+            setOpenSheet(null)
+          }}
+          onClose={() => setOpenSheet(null)}
+        />
+      ) : null}
     </View>
   )
 })

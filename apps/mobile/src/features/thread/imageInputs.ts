@@ -54,3 +54,25 @@ export async function pickImageInputsFromLibrary() {
 
   return attachments
 }
+
+export async function pickImageInputFromCamera() {
+  const permission = await ImagePicker.requestCameraPermissionsAsync()
+  if (!permission.granted) {
+    throw new Error('Camera access is required to take a photo.')
+  }
+
+  const result = await ImagePicker.launchCameraAsync({
+    mediaTypes: ['images'],
+    base64: true,
+    quality: 0.8,
+  })
+
+  if (result.canceled) return []
+
+  const attachments = imagePickerAssetsToImageInputs(result.assets)
+  if (result.assets.length > 0 && attachments.length === 0) {
+    throw new Error('FalconDeck could not read the captured photo.')
+  }
+
+  return attachments
+}

@@ -43,6 +43,7 @@ type DesktopConversationPaneProps = {
   canSteerQueuedTurn?: boolean
   onOpenFile?: OpenFileDiff | null
   headerControls?: ReactNode
+  onNewThread?: () => void
 }
 
 export function DesktopConversationPane({
@@ -70,10 +71,11 @@ export function DesktopConversationPane({
   canSteerQueuedTurn,
   onOpenFile,
   headerControls,
+  onNewThread,
 }: DesktopConversationPaneProps) {
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface-1">
-      <SessionHeader workspace={selectedWorkspace} thread={selectedThread}>
+      <SessionHeader workspace={selectedWorkspace} thread={selectedThread} onNewThread={onNewThread}>
         <RemotePairingPopover
           remoteStatus={remoteStatus}
           pairingLink={pairingLink}

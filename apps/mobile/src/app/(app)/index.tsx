@@ -3,7 +3,7 @@ import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable,
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { FlashList } from '@shopify/flash-list'
-import { ChevronLeft, Target } from 'lucide-react-native'
+import { ChevronLeft, SquarePen, Target } from 'lucide-react-native'
 import { DrawerActions } from '@react-navigation/native'
 import { useNavigation, useRouter } from 'expo-router'
 import {
@@ -52,7 +52,10 @@ import {
   ThinkingIndicator,
 } from '@/components/chat'
 import { ConnectionHeader } from '@/components/navigation'
-import { pickImageInputsFromLibrary } from '@/features/thread/imageInputs'
+import {
+  pickImageInputFromCamera,
+  pickImageInputsFromLibrary,
+} from '@/features/thread/imageInputs'
 import { getWorkspaceTitle, shouldShowThinkingIndicator } from '@/features/thread/threadScreen'
 
 const renderBlock = ({ item }: { item: ConversationRenderBlock }) => (
@@ -466,6 +469,30 @@ export default function HomeScreen() {
     router.push('/(app)/settings')
   }, [router])
 
+  const handleNewThreadFromCurrent = useCallback(() => {
+    if (!workspace) return
+
+    // Keep the current project and agent setup, but start with an empty transcript.
+    rememberWorkspaceProvider(workspace.path, activeProvider)
+    rememberComposerSelection(workspace.path, activeProvider, {
+      modelId: selectedModel,
+      effort: selectedEffort,
+      permissionMode: selectedPermissionMode,
+      sandboxMode: selectedSandboxMode,
+    })
+    setIsGoalSheetOpen(false)
+    useSessionStore.getState().selectNewThread(workspace.id)
+  }, [
+    activeProvider,
+    rememberComposerSelection,
+    rememberWorkspaceProvider,
+    selectedEffort,
+    selectedModel,
+    selectedPermissionMode,
+    selectedSandboxMode,
+    workspace,
+  ])
+
   const handleAllowApproval = useCallback(
     (id: string) => {
       void respondApproval(id, 'allow')
@@ -509,6 +536,20 @@ export default function HomeScreen() {
       .catch((error) => {
         useRelayStore.getState()._setError(
           error instanceof Error ? error.message : 'Failed to pick images',
+        )
+      })
+  }, [addAttachments])
+
+  const handleTakePhoto = useCallback(() => {
+    void pickImageInputFromCamera()
+      .then((pickedAttachments) => {
+        if (pickedAttachments.length === 0) return
+        addAttachments(pickedAttachments)
+        useRelayStore.getState()._setError(null)
+      })
+      .catch((error) => {
+        useRelayStore.getState()._setError(
+          error instanceof Error ? error.message : 'Failed to take photo',
         )
       })
   }, [addAttachments])
@@ -628,6 +669,16 @@ export default function HomeScreen() {
           </Text>
         </Pressable>
         <View style={styles.headerRight}>
+          {selectedThread ? (
+            <Pressable
+              onPress={handleNewThreadFromCurrent}
+              accessibilityRole="button"
+              accessibilityLabel="New thread with current settings"
+              hitSlop={(theme.minTouchTarget - theme.iconSize.md) / 2}
+            >
+              <SquarePen size={theme.iconSize.md} color={theme.colors.fg.secondary} />
+            </Pressable>
+          ) : null}
           {showGoalControl ? (
             <Pressable
               onPress={() => setIsGoalSheetOpen(true)}
@@ -759,6 +810,7 @@ export default function HomeScreen() {
             void interruptTurn().finally(() => setIsStopping(false))
           }}
           onPickImages={handlePickImages}
+          onTakePhoto={handleTakePhoto}
           onRemoveAttachment={removeAttachment}
           disabled={!workspace || isSubmitting || !isEncrypted}
           attachments={attachments}

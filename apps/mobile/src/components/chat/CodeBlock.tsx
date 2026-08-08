@@ -1,6 +1,7 @@
-import { memo, useMemo } from 'react'
-import { View, ScrollView } from 'react-native'
+import { memo, useMemo, useState } from 'react'
+import { View, ScrollView, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
+import { ChevronDown, ChevronUp } from 'lucide-react-native'
 import * as Clipboard from 'expo-clipboard'
 
 import { Text, Button } from '@/components/ui'
@@ -8,17 +9,23 @@ import { Text, Button } from '@/components/ui'
 interface CodeBlockProps {
   code: string
   language?: string
+  previewLines?: number
 }
 
-export const CodeBlock = memo(function CodeBlock({ code, language }: CodeBlockProps) {
-  useUnistyles()
+const DEFAULT_PREVIEW_LINES = 12
+
+export const CodeBlock = memo(function CodeBlock({
+  code,
+  language,
+  previewLines = DEFAULT_PREVIEW_LINES,
+}: CodeBlockProps) {
+  const { theme } = useUnistyles()
+  const [expanded, setExpanded] = useState(false)
   const isDiff = language === 'diff'
   const headerLabel = language ?? 'code'
-
-  const diffLines = useMemo(() => {
-    if (!isDiff) return null
-    return code.split('\n')
-  }, [code, isDiff])
+  const lines = useMemo(() => code.split('\n'), [code])
+  const hiddenLineCount = previewLines > 0 ? Math.max(0, lines.length - previewLines) : 0
+  const visibleLines = hiddenLineCount > 0 && !expanded ? lines.slice(0, previewLines) : lines
 
   return (
     <View style={styles.container}>
@@ -26,6 +33,11 @@ export const CodeBlock = memo(function CodeBlock({ code, language }: CodeBlockPr
         <Text variant="caption" color="muted" size="2xs">
           {headerLabel}
         </Text>
+        {hiddenLineCount > 0 ? (
+          <Text variant="caption" color="muted" size="2xs">
+            {lines.length} lines
+          </Text>
+        ) : null}
         <Button
           variant="ghost"
           size="sm"
@@ -34,9 +46,9 @@ export const CodeBlock = memo(function CodeBlock({ code, language }: CodeBlockPr
         />
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-        {isDiff && diffLines ? (
+        {isDiff ? (
           <View style={styles.diffContainer}>
-            {diffLines.map((line, i) => {
+            {visibleLines.map((line, i) => {
               const isAdded = line.startsWith('+')
               const isRemoved = line.startsWith('-')
 
@@ -58,10 +70,30 @@ export const CodeBlock = memo(function CodeBlock({ code, language }: CodeBlockPr
           </View>
         ) : (
           <Text variant="mono" color="secondary" style={styles.code}>
-            {code}
+            {visibleLines.join('\n')}
           </Text>
         )}
       </ScrollView>
+      {hiddenLineCount > 0 ? (
+        <Pressable
+          style={styles.expandButton}
+          accessibilityRole="button"
+          accessibilityState={{ expanded }}
+          accessibilityLabel={expanded ? 'Collapse code' : `Show ${hiddenLineCount} more lines`}
+          onPress={() => setExpanded((current) => !current)}
+        >
+          <Text variant="caption" color="muted" size="xs">
+            {expanded
+              ? 'Show less'
+              : `Show ${hiddenLineCount} more line${hiddenLineCount === 1 ? '' : 's'}`}
+          </Text>
+          {expanded ? (
+            <ChevronUp size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+          ) : (
+            <ChevronDown size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+          )}
+        </Pressable>
+      ) : null}
     </View>
   )
 })
@@ -83,17 +115,20 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: theme.spacing[1],
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border.subtle,
+    gap: theme.spacing[2],
   },
   code: {
     padding: theme.spacing[3],
-    lineHeight: 20,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.relaxed,
+    textAlign: 'left',
   },
   diffContainer: {
     padding: theme.spacing[3],
   },
   codeLine: {
-    lineHeight: 20,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.relaxed,
     paddingHorizontal: theme.spacing[1],
+    textAlign: 'left',
   },
   codeLineAdded: {
     backgroundColor: theme.colors.diff.added,
@@ -102,5 +137,15 @@ const styles = StyleSheet.create((theme) => ({
   codeLineRemoved: {
     backgroundColor: theme.colors.diff.removed,
     color: theme.colors.diff.removedText,
+  },
+  expandButton: {
+    minHeight: theme.minTouchTarget,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border.subtle,
   },
 }))

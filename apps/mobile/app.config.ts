@@ -46,6 +46,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-font',
     'expo-notifications',
     [
+      'expo-image-picker',
+      {
+        photosPermission: 'Allow FalconDeck to choose photos to attach to a prompt.',
+        cameraPermission: 'Allow FalconDeck to take photos to attach to a prompt.',
+      },
+    ],
+    [
       'expo-camera',
       {
         cameraPermission: 'Allow FalconDeck to use your camera to scan QR codes for pairing.',

@@ -1090,6 +1090,29 @@ function AppInner() {
     setSelectedThreadId(null)
   }, [setSelectedWorkspaceId, setSelectedThreadId])
 
+  const handleNewThreadFromCurrent = useCallback(() => {
+    if (!selectedWorkspace || !selectedThread) return
+    const provider = selectedThread.provider
+    rememberWorkspaceProvider(provider)
+    rememberComposerSelection(provider, {
+      modelId: selectedModel,
+      effort: selectedEffort,
+      permissionMode: selectedPermissionMode,
+      sandboxMode: selectedSandboxMode,
+    })
+    handleNewThread(selectedWorkspace.id)
+  }, [
+    handleNewThread,
+    rememberComposerSelection,
+    rememberWorkspaceProvider,
+    selectedEffort,
+    selectedModel,
+    selectedPermissionMode,
+    selectedSandboxMode,
+    selectedThread,
+    selectedWorkspace,
+  ])
+
   const handleInteractiveResponseCallback = useCallback(
     (request: InteractiveRequest, response: InteractiveResponsePayload) =>
       handleInteractiveResponse(request.workspace_id, request.request_id, response),
@@ -1651,6 +1674,7 @@ function AppInner() {
               onOpenFile={isRemoteWorkspaceSelected ? null : handleOpenFileDiff}
               onStartPairing={handleStartPairingCallback}
               onInteractiveResponse={handleInteractiveResponseCallback}
+              onNewThread={selectedThread ? handleNewThreadFromCurrent : undefined}
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,

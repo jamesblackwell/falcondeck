@@ -78,6 +78,25 @@ describe('ChatInput component', () => {
     expect(r.toJSON()).toBeTruthy()
   })
 
+  it('moves thread setup controls into the plus menu', () => {
+    const r = renderComponent(
+      <ChatInput
+        value=""
+        {...chatInputDefaults}
+        showProviderSelector
+        providers={[{ provider: 'codex', label: 'Codex' }]}
+      />,
+    )
+
+    const addButton = r.root
+      .findAllByType('Pressable' as any)
+      .find((button) => button.props.accessibilityLabel === 'Add to prompt')
+    act(() => addButton?.props.onPress())
+
+    expect(textOf(r)).toContain('Photos')
+    expect(textOf(r)).toContain('Agent')
+  })
+
   it('submits while the thread is running', () => {
     const onSubmit = vi.fn()
     const r = renderComponent(<ChatInput value="Steer the agent" {...chatInputDefaults} onSubmit={onSubmit} />)
@@ -190,6 +209,22 @@ describe('CodeBlock component', () => {
   it('renders diff with colored lines', () => {
     const r = renderComponent(<CodeBlock code={'+added\n-removed\n context'} language="diff" />)
     expect(r.toJSON()).toBeTruthy()
+  })
+
+  it('caps long code until the user expands it', () => {
+    const code = Array.from({ length: 15 }, (_, index) => `line ${index + 1}`).join('\n')
+    const r = renderComponent(<CodeBlock code={code} language="ts" />)
+
+    expect(textOf(r)).toContain('Show 3 more lines')
+    expect(textOf(r)).not.toContain('line 15')
+
+    const expand = r.root
+      .findAllByType('Pressable' as any)
+      .find((button) => button.props.accessibilityLabel === 'Show 3 more lines')
+    act(() => expand?.props.onPress())
+
+    expect(textOf(r)).toContain('line 15')
+    expect(textOf(r)).toContain('Show less')
   })
 })
 

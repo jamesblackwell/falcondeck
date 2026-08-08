@@ -1,8 +1,9 @@
 import { memo } from 'react'
 import * as React from 'react'
+import { SquarePen } from 'lucide-react'
 
 import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
-import { Badge, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
+import { Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
 
 function threadStatusDisplay(status: ThreadSummary['status']) {
   switch (status) {
@@ -21,6 +22,7 @@ export type SessionHeaderProps = {
   workspace: WorkspaceSummary | null
   thread: ThreadSummary | null
   navigation?: React.ReactNode
+  onNewThread?: () => void
   children?: React.ReactNode
   className?: string
 }
@@ -29,6 +31,7 @@ export const SessionHeader = memo(function SessionHeader({
   workspace,
   thread,
   navigation,
+  onNewThread,
   children,
   className,
 }: SessionHeaderProps) {
@@ -67,7 +70,22 @@ export const SessionHeader = memo(function SessionHeader({
         </div>
       </div>
 
-      <ToolbarGroup align="end">{children}</ToolbarGroup>
+      <ToolbarGroup align="end">
+        {thread && onNewThread ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={onNewThread}
+            aria-label="New thread with current settings"
+            title="New thread with current settings"
+          >
+            <SquarePen aria-hidden="true" className="h-4 w-4" />
+            <span className="hidden sm:inline">New</span>
+          </Button>
+        ) : null}
+        {children}
+      </ToolbarGroup>
     </Toolbar>
   )
 })

@@ -42,6 +42,8 @@ interface InputToolbarProps {
   selectedSandboxMode?: string | null
   onSelectPermissionMode?: (mode: string | null) => void
   onSelectSandboxMode?: (mode: string | null) => void
+  /** Advanced modes can move into the composer's plus menu on narrow screens. */
+  showModePickers?: boolean
 }
 
 function capitalize(s: string) {
@@ -79,6 +81,7 @@ export const InputToolbar = memo(function InputToolbar({
   selectedSandboxMode = null,
   onSelectPermissionMode,
   onSelectSandboxMode,
+  showModePickers = true,
 }: InputToolbarProps) {
   const [sheet, setSheet] = useState<SheetConfig>(null)
 
@@ -202,7 +205,7 @@ export const InputToolbar = memo(function InputToolbar({
 
         {/* Order matches the desktop composer: what the agent may do, then
             where it may do it, then which model and how hard it thinks. */}
-        {showPermissionPicker ? (
+        {showModePickers && showPermissionPicker ? (
           <Chip
             label={permissionChipLabel(selectedPermissionMode, permissionModes)}
             accessibilityLabel="Permission mode"
@@ -211,7 +214,7 @@ export const InputToolbar = memo(function InputToolbar({
           />
         ) : null}
 
-        {showSandboxPicker ? (
+        {showModePickers && showSandboxPicker ? (
           <Chip
             label={sandboxChipLabel(selectedSandboxMode)}
             accessibilityLabel="Sandbox mode"

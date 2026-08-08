@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  launchCameraAsync,
   launchImageLibraryAsync,
+  requestCameraPermissionsAsync,
   requestMediaLibraryPermissionsAsync,
 } from 'expo-image-picker'
 
 import {
   imagePickerAssetsToImageInputs,
+  pickImageInputFromCamera,
   pickImageInputsFromLibrary,
 } from './imageInputs'
 
@@ -13,6 +16,8 @@ describe('imageInputs', () => {
   beforeEach(() => {
     vi.mocked(requestMediaLibraryPermissionsAsync).mockReset()
     vi.mocked(launchImageLibraryAsync).mockReset()
+    vi.mocked(requestCameraPermissionsAsync).mockReset()
+    vi.mocked(launchCameraAsync).mockReset()
 
     vi.mocked(requestMediaLibraryPermissionsAsync).mockResolvedValue({
       granted: true,
@@ -22,6 +27,8 @@ describe('imageInputs', () => {
       canceled: true,
       assets: null,
     } as any)
+    vi.mocked(requestCameraPermissionsAsync).mockResolvedValue({ granted: true } as any)
+    vi.mocked(launchCameraAsync).mockResolvedValue({ canceled: true, assets: null } as any)
   })
 
   it('converts picker assets into image inputs', () => {
@@ -124,6 +131,32 @@ describe('imageInputs', () => {
       allowsMultipleSelection: true,
       selectionLimit: 0,
       orderedSelection: true,
+      base64: true,
+      quality: 0.8,
+    })
+  })
+
+  it('returns a photo captured with the camera', async () => {
+    vi.mocked(launchCameraAsync).mockResolvedValue({
+      canceled: false,
+      assets: [
+        {
+          uri: 'file:///tmp/camera.jpg',
+          fileName: 'camera.jpg',
+          mimeType: 'image/jpeg',
+          base64: 'camera-encoded',
+        },
+      ],
+    } as any)
+
+    await expect(pickImageInputFromCamera()).resolves.toEqual([
+      expect.objectContaining({
+        name: 'camera.jpg',
+        url: 'data:image/jpeg;base64,camera-encoded',
+      }),
+    ])
+    expect(launchCameraAsync).toHaveBeenCalledWith({
+      mediaTypes: ['images'],
       base64: true,
       quality: 0.8,
     })

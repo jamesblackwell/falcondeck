@@ -2039,6 +2039,28 @@ function RemoteApp() {
     setSelectedThreadId(null)
     setShowProjects(false)
   }, [])
+  const handleNewThreadFromCurrent = useCallback(() => {
+    if (!selectedWorkspace || !selectedThread) return
+    const provider = selectedThread.provider
+    rememberWorkspaceProvider(provider)
+    rememberComposerSelection(provider, {
+      modelId: selectedModel,
+      effort: selectedEffort,
+      permissionMode: selectedPermissionMode,
+      sandboxMode: selectedSandboxMode,
+    })
+    handleNewThread(selectedWorkspace.id)
+  }, [
+    handleNewThread,
+    rememberComposerSelection,
+    rememberWorkspaceProvider,
+    selectedEffort,
+    selectedModel,
+    selectedPermissionMode,
+    selectedSandboxMode,
+    selectedThread,
+    selectedWorkspace,
+  ])
   // workspace.remove has no queued-action handler on the daemon (the queue
   // only covers the write path a reconnect may replay), so this goes over the
   // encrypted RPC channel like the other structural edits below.
@@ -2405,6 +2427,7 @@ function RemoteApp() {
       <SessionHeader
         workspace={selectedWorkspace}
         thread={selectedThread}
+        onNewThread={selectedThread ? handleNewThreadFromCurrent : undefined}
         className="border-b border-border-subtle pt-3"
         navigation={
           <button
