@@ -1136,6 +1136,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 last_read_seq: 2,
                 last_agent_activity_seq: 7,
                 variant: None,
+                agent: ThreadAgentParams::default(),
             }],
         }],
         remote: None,
@@ -1246,6 +1247,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_read_seq: 0,
                     last_agent_activity_seq: 0,
                     variant: None,
+                    agent: ThreadAgentParams::default(),
                 }],
             },
         );
@@ -1272,6 +1274,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_read_seq: 1,
                     last_agent_activity_seq: 3,
                     variant: None,
+                    agent: ThreadAgentParams::default(),
                 }],
             },
         );

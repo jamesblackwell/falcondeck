@@ -272,6 +272,11 @@ struct PersistedThreadState {
     /// clean up when the thread is deleted.
     #[serde(default)]
     variant: Option<falcondeck_core::ThreadVariant>,
+    /// Model/effort/tier/mode selections on the thread. Provider hydration
+    /// only restores the fields its own records carry, so these fill the gaps
+    /// after a restart.
+    #[serde(default)]
+    agent: ThreadAgentParams,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1129,6 +1134,7 @@ impl AppState {
                     last_read_seq: thread.summary.attention.last_read_seq,
                     last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
                     variant: thread.summary.variant.clone(),
+                    agent: thread.summary.agent.clone(),
                 })
                 .collect::<Vec<_>>();
             thread_states.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));

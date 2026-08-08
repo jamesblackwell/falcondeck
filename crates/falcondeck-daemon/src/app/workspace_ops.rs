@@ -296,6 +296,10 @@ pub(super) async fn connect_workspace_internal(
                         // Provider hydration reports the workspace folder; only
                         // our own state knows the thread runs somewhere else.
                         thread.summary.variant = state.variant.clone();
+                        // Params the provider's records didn't carry (Codex
+                        // omits the standard tier; Claude reports nothing)
+                        // come back from the last persisted selections.
+                        thread.summary.agent.merge_missing_from(&state.agent);
                     }
                     (thread.summary.id.clone(), {
                         let mut managed = ManagedThread::with_items(thread.summary, thread.items);
@@ -472,7 +476,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 latest_diff: None,
                 last_tool: None,
                 last_error: restored_last_error,
-                agent: ThreadAgentParams::default(),
+                agent: state.agent.clone(),
                 attention: ThreadAttention::default(),
                 is_archived: false,
                 is_pinned: false,
@@ -2626,7 +2630,46 @@ mod tests {
             last_read_seq: 0,
             last_agent_activity_seq: 0,
             variant: None,
+            agent: ThreadAgentParams::default(),
         }
+    }
+
+    #[test]
+    fn bare_restored_threads_keep_their_persisted_agent_params() {
+        let mut state = persisted_thread("codex-thread-x", None);
+        state.agent = ThreadAgentParams {
+            model_id: Some("gpt-5.6-sol".to_string()),
+            reasoning_effort: Some("low".to_string()),
+            service_tier: Some("priority".to_string()),
+            ..ThreadAgentParams::default()
+        };
+        let states = HashMap::from([("codex-thread-x".to_string(), state)]);
+
+        let merged =
+            merge_hydrated_threads_with_persisted_state(Vec::new(), &states, "w", None, Utc::now());
+
+        assert_eq!(merged.len(), 1);
+        let agent = &merged[0].summary.agent;
+        assert_eq!(agent.model_id.as_deref(), Some("gpt-5.6-sol"));
+        assert_eq!(agent.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(agent.service_tier.as_deref(), Some("priority"));
+    }
+
+    #[test]
+    fn merge_missing_from_lets_provider_reported_params_win() {
+        let mut hydrated = ThreadAgentParams {
+            model_id: Some("gpt-5.6-terra".to_string()),
+            ..ThreadAgentParams::default()
+        };
+        hydrated.merge_missing_from(&ThreadAgentParams {
+            model_id: Some("gpt-5.6-sol".to_string()),
+            service_tier: Some("priority".to_string()),
+            ..ThreadAgentParams::default()
+        });
+        // The provider's own record wins where it says anything; persisted
+        // values only fill the silence.
+        assert_eq!(hydrated.model_id.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(hydrated.service_tier.as_deref(), Some("priority"));
     }
 
     #[test]

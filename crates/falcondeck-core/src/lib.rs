@@ -626,6 +626,27 @@ pub struct ThreadAgentParams {
     pub sandbox_mode: Option<String>,
 }
 
+impl ThreadAgentParams {
+    /// Fills every unset field from `fallback`. Used when a provider's session
+    /// records rehydrate a thread with partial params (Codex omits the service
+    /// tier while it is standard, Claude sessions report nothing): what the
+    /// provider states wins, and the rest falls back to the last-known values.
+    pub fn merge_missing_from(&mut self, fallback: &Self) {
+        fn fill(field: &mut Option<String>, fallback: &Option<String>) {
+            if field.is_none() {
+                *field = fallback.clone();
+            }
+        }
+        fill(&mut self.model_id, &fallback.model_id);
+        fill(&mut self.reasoning_effort, &fallback.reasoning_effort);
+        fill(&mut self.collaboration_mode_id, &fallback.collaboration_mode_id);
+        fill(&mut self.approval_policy, &fallback.approval_policy);
+        fill(&mut self.service_tier, &fallback.service_tier);
+        fill(&mut self.permission_mode, &fallback.permission_mode);
+        fill(&mut self.sandbox_mode, &fallback.sandbox_mode);
+    }
+}
+
 /// Agent provider identifier.
 ///
 /// An open, nominal string id rather than a closed enum so new providers
