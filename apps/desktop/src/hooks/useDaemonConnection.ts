@@ -318,6 +318,13 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
   }, [externalSnapshots, snapshot])
 
+  const selectedLocalWorkspaceStatus = useMemo(
+    () =>
+      snapshot?.workspaces.find((workspace) => workspace.id === selectedWorkspaceId)?.status ??
+      null,
+    [selectedWorkspaceId, snapshot?.workspaces],
+  )
+
   // Reconcile selection when snapshot changes
 
   useEffect(() => {
@@ -427,6 +434,21 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
 
     const cacheKey = threadCacheKey(selectedWorkspaceId, selectedThreadId)
+    // Startup restoration first publishes persisted thread summaries under a
+    // Connecting workspace, before provider transcripts have been hydrated.
+    // A detail fetched in that window is an empty placeholder whose timestamp
+    // can equal the later hydrated summary, making it look cache-valid forever.
+    // Drop that provisional value and fetch only after restoration settles.
+    if (selectedLocalWorkspaceStatus === 'connecting') {
+      threadDetailCacheRef.current.delete(cacheKey)
+      setThreadDetail((current) =>
+        current?.workspace.id === selectedWorkspaceId && current.thread.id === selectedThreadId
+          ? null
+          : current,
+      )
+      setThreadDetailError(null)
+      return
+    }
     const cachedDetail = threadDetailCacheRef.current.get(cacheKey) ?? null
     const selectedSummary =
       snapshot?.threads.find((thread) => thread.id === selectedThreadId) ?? null
@@ -465,6 +487,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     externalWorkspaceIds,
     selectedThreadId,
     selectedWorkspaceId,
+    selectedLocalWorkspaceStatus,
     snapshot?.threads,
     threadDetailRetry,
   ])
@@ -476,6 +499,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   // machines with fewer cores.
   useEffect(() => {
     if (!api || !snapshot || !selectedWorkspaceId) return
+    if (selectedLocalWorkspaceStatus === 'connecting') return
 
     const targets = new Map<string, { workspaceId: string; threadId: string }>()
     const rememberTarget = (workspaceId: string | null | undefined, threadId: string | null | undefined) => {
@@ -523,7 +547,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
     const handle = window.setTimeout(prefetch, THREAD_PREFETCH_FALLBACK_DELAY_MS)
     return () => window.clearTimeout(handle)
-  }, [api, selectedThreadId, selectedWorkspaceId, snapshot])
+  }, [api, selectedLocalWorkspaceStatus, selectedThreadId, selectedWorkspaceId, snapshot])
 
   useEffect(() => {
     if (!snapshot) {
