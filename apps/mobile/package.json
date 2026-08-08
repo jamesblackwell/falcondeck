@@ -15,7 +15,7 @@
   "dependencies": {
     "@falcondeck/client-core": "*",
     "@react-navigation/drawer": "^7.5.0",
-    "@shopify/flash-list": "2.0.2",
+    "@shopify/flash-list": "2.3.2",
     "expo": "~54.0.36",
     "expo-camera": "~17.0.10",
     "expo-clipboard": "~8.0.8",
