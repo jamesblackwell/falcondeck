@@ -7,7 +7,6 @@ import type {
   ToolDetailsMode,
 } from './types'
 import {
-  normalizeConversationItem,
   normalizeEventEnvelope,
   normalizePreferences,
   normalizeThreadDetail,
