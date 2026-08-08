@@ -47,7 +47,13 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       : (() => {
           try {
             const raw = window.localStorage.getItem(SELECTION_STORAGE_KEY)
-            return raw ? (JSON.parse(raw) as { workspaceId: string | null; threadId: string | null }) : null
+            return raw
+              ? (JSON.parse(raw) as {
+                  workspaceId: string | null
+                  threadId: string | null
+                  workspacePath?: string | null
+                })
+              : null
           } catch {
             return null
           }
@@ -72,6 +78,13 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
   const threadDetailPrefetchRef = useRef(new Set<string>())
   const reconnectAttemptRef = useRef(0)
+  // Workspace ids are minted per daemon connect, so a daemon restart
+  // invalidates the selected id even though it is the same project on disk.
+  // The path is the stable identity used to re-map selection instead of
+  // dumping the user into whatever thread reconcile falls back to.
+  const selectedWorkspacePathRef = useRef<string | null>(
+    initialSelection?.workspacePath ?? null,
+  )
 
   const api = useMemo(() => (baseUrl ? createDaemonApiClient(baseUrl) : null), [baseUrl])
 
@@ -251,6 +264,37 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   // Reconcile selection when snapshot changes
 
   useEffect(() => {
+    // Nothing to validate against yet; reconciling now would only wipe the
+    // selection restored from storage before the first snapshot arrives.
+    if (!selectionSnapshot) return
+    const workspaces = selectionSnapshot.workspaces
+    const selectedWorkspace = workspaces.find(
+      (workspace) => workspace.id === selectedWorkspaceId,
+    )
+    if (selectedWorkspace) {
+      selectedWorkspacePathRef.current = selectedWorkspace.path
+    } else if (selectedWorkspacePathRef.current) {
+      // The selected id is gone (or was already dropped) — typically a daemon
+      // restart re-minting workspace ids while it restores workspaces. Follow
+      // the project by path (local workspaces are listed first, so a same-path
+      // remote cannot shadow the local one) and keep the thread selection:
+      // restored thread ids are stable, and a new-thread draft (null) survives
+      // via preserveEmptyThreadSelection below.
+      const samePathWorkspace = workspaces.find(
+        (workspace) => workspace.path === selectedWorkspacePathRef.current,
+      )
+      if (samePathWorkspace && samePathWorkspace.id !== selectedWorkspaceId) {
+        setSelectedWorkspaceId(samePathWorkspace.id)
+        return
+      }
+      if (!samePathWorkspace) {
+        // The remembered project is not back yet (workspaces restore one by
+        // one after a daemon restart). Hold rather than teleport the user
+        // into whichever project happened to reconnect first; an explicit
+        // sidebar click still changes selection at any time.
+        return
+      }
+    }
     const nextSelection = reconcileSnapshotSelection(selectionSnapshot, selectedWorkspaceId, selectedThreadId, {
       preserveEmptyThreadSelection: true,
     })
@@ -270,6 +314,9 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
         JSON.stringify({
           workspaceId: selectedWorkspaceId,
           threadId: selectedThreadId,
+          // The path survives daemon restarts (ids do not); it is what the
+          // reconcile pass uses to re-find the same project.
+          workspacePath: selectedWorkspacePathRef.current,
         }),
       )
     } catch {

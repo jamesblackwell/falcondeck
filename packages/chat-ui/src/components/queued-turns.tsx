@@ -145,7 +145,9 @@ export function QueuedTurns({
 }) {
   if (queuedTurns.length === 0) return null
   return (
-    <div className="flex flex-col gap-1.5 px-1 pb-2">
+    // Same centered column as the conversation and the composer, so the chips
+    // sit directly above the prompt input instead of hugging the window edge.
+    <div className="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-3 pb-2 md:px-6">
       {queuedTurns.map((queued) => (
         <QueuedTurnChip
           key={queued.id}
