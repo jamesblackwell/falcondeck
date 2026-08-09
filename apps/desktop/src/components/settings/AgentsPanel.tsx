@@ -44,11 +44,23 @@ const BUILT_IN_AGENTS = [
   { id: 'claude', label: 'Claude', detail: 'Claude Code CLI, full integration' },
 ]
 
+const RECOMMENDED_AGENTS = [
+  {
+    id: 'pi',
+    label: 'Pi',
+    detail: 'Minimal, extensible coding harness through the maintained pi-acp adapter',
+    command: ['pi-acp'],
+    installCommand:
+      'npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp',
+  },
+]
+
 export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
   const [overview, setOverview] = useState<ProvidersOverview | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isAdding, setIsAdding] = useState(false)
+  const configuredProviderIds = new Set(overview?.resolved.map((provider) => provider.id))
 
   const load = useCallback(async () => {
     if (!baseUrl) return
@@ -138,6 +150,63 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
               <Badge variant="success">Built in</Badge>
             </div>
           ))}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Recommended</CardTitle>
+          <CardDescription>
+            Maintained ACP adapters that work with FalconDeck&apos;s shared conversation experience.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {RECOMMENDED_AGENTS.map((agent) => {
+            const isConfigured = configuredProviderIds.has(agent.id)
+            return (
+              <div
+                key={agent.id}
+                className="flex items-center gap-3 rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3"
+              >
+                <Bot className="h-4 w-4 shrink-0 text-fg-muted" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                      {agent.label}
+                    </span>
+                    <Badge variant="default">ACP</Badge>
+                  </div>
+                  <p className="text-[length:var(--fd-text-xs)] text-fg-muted">{agent.detail}</p>
+                  {!isConfigured ? (
+                    <p className="mt-1 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
+                      {agent.installCommand}
+                    </p>
+                  ) : null}
+                </div>
+                <Button
+                  size="sm"
+                  variant={isConfigured ? 'secondary' : 'default'}
+                  disabled={!overview || isConfigured}
+                  onClick={() => {
+                    void write((providers) => ({
+                      ...providers,
+                      [agent.id]: { label: agent.label, command: agent.command },
+                    })).then((ok) => {
+                      if (ok) {
+                        onToast({
+                          variant: 'success',
+                          title: `${agent.label} configured`,
+                          description: `FalconDeck will run ${agent.command.join(' ')} on this host.`,
+                        })
+                      }
+                    })
+                  }}
+                >
+                  {isConfigured ? 'Configured' : `Configure ${agent.label}`}
+                </Button>
+              </div>
+            )
+          })}
         </CardContent>
       </Card>
 

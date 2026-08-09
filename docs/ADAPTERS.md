@@ -155,3 +155,34 @@ the second real integration (Crystal's dead `CliToolRegistry`).
    the process + a `ProviderRuntime` variant + ingestion into
    `push_conversation_item`. Budget accordingly; tier 1 covers more than you
    think.
+
+## Pi
+
+Pi uses the generic ACP tier through the maintained `pi-acp` adapter, which
+bridges ACP to Pi's native `pi --mode rpc` interface. Install both commands on
+the daemon host:
+
+```sh
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp
+```
+
+Then choose **Settings → Agents → Recommended → Configure Pi**. This writes the
+equivalent of:
+
+```json
+{
+  "providers": {
+    "pi": {
+      "label": "Pi",
+      "command": ["pi-acp"]
+    }
+  }
+}
+```
+
+Pi owns its authentication, model-provider configuration, extensions, skills,
+and persisted sessions. FalconDeck owns the client connection, normalized
+conversation stream, remote transport, and capability-gated presentation. Keep
+Pi on the ACP path unless a concrete Pi feature proves impossible to represent
+there; do not add a `ProviderRuntime::Pi` branch merely to make the provider
+look built in.
