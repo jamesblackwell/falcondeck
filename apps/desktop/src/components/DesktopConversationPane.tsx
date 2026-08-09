@@ -75,7 +75,12 @@ export function DesktopConversationPane({
 }: DesktopConversationPaneProps) {
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface-1">
-      <SessionHeader workspace={selectedWorkspace} thread={selectedThread} onNewThread={onNewThread}>
+      <SessionHeader
+        workspace={selectedWorkspace}
+        thread={selectedThread}
+        onNewThread={onNewThread}
+        compact
+      >
         <RemotePairingPopover
           remoteStatus={remoteStatus}
           pairingLink={pairingLink}

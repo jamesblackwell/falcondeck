@@ -21,6 +21,7 @@ function threadStatusDisplay(status: ThreadSummary['status']) {
 export type SessionHeaderProps = {
   workspace: WorkspaceSummary | null
   thread: ThreadSummary | null
+  compact?: boolean
   navigation?: React.ReactNode
   onNewThread?: () => void
   children?: React.ReactNode
@@ -30,6 +31,7 @@ export type SessionHeaderProps = {
 export const SessionHeader = memo(function SessionHeader({
   workspace,
   thread,
+  compact = false,
   navigation,
   onNewThread,
   children,
@@ -38,7 +40,13 @@ export const SessionHeader = memo(function SessionHeader({
   const pathLabel = workspace?.path.split('/').pop()
 
   return (
-    <Toolbar className={cn('bg-surface-1 pt-8', className)}>
+    <Toolbar
+      className={cn(
+        'bg-surface-1 pt-8',
+        compact && 'h-12 py-0 pt-0',
+        className,
+      )}
+    >
       <div className="flex min-w-0 items-center gap-3">
         {navigation}
         {thread ? (
@@ -48,10 +56,17 @@ export const SessionHeader = memo(function SessionHeader({
             pulse={thread.status === 'running'}
           />
         ) : null}
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <p className="truncate text-[length:var(--fd-text-2xs)] uppercase tracking-[0.12em] text-fg-muted">
-              {pathLabel ?? 'No project'}
+        <div className={cn('min-w-0', compact && 'flex items-center gap-2')}>
+          <div className={cn('flex items-center gap-2', compact && 'contents')}>
+            <p
+              className={cn(
+                'truncate text-[length:var(--fd-text-2xs)] uppercase tracking-[0.12em] text-fg-muted',
+                compact &&
+                  thread &&
+                  'text-[length:var(--fd-text-base)] font-semibold normal-case tracking-normal text-fg-primary',
+              )}
+            >
+              {compact && thread ? thread.title : (pathLabel ?? 'No project')}
             </p>
             {thread ? (
               <Badge
@@ -62,7 +77,7 @@ export const SessionHeader = memo(function SessionHeader({
               </Badge>
             ) : null}
           </div>
-          {thread ? (
+          {thread && !compact ? (
             <p className="truncate text-[length:var(--fd-text-md)] font-semibold text-fg-primary">
               {thread.title}
             </p>

@@ -20,6 +20,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   return (
     <WorkspaceSidebar
       {...props}
+      headerClassName="min-h-12 justify-center gap-1 pb-1 pl-20 pr-3 pt-1"
       footer={
         onOpenSettings ? (
           <button
