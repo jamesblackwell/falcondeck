@@ -5,6 +5,7 @@
 //! mobile, and remote web shells.
 
 pub mod acp;
+pub mod acp_conformance;
 mod agent_binary;
 mod api;
 mod app;
