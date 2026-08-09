@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useToast } from '@falcondeck/ui'
 
 import type {
@@ -71,9 +71,22 @@ export const DiffPanel = memo(function DiffPanel({
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState<ReviewPanelTab>('changes')
   const [isReviewPending, setIsReviewPending] = useState(false)
+  const previewContextRef = useRef({ workspaceId, threadId })
   const selectedFile =
     selection && selection.workspaceId === workspaceId ? selection.filePath : null
   const selectedView = selection?.view ?? 'changes'
+
+  useEffect(() => {
+    const previous = previewContextRef.current
+    previewContextRef.current = { workspaceId, threadId }
+    if (
+      selection &&
+      (previous.workspaceId !== workspaceId || previous.threadId !== threadId)
+    ) {
+      onSelectionChange(null)
+    }
+  }, [onSelectionChange, selection, threadId, workspaceId])
+
   const {
     status,
     isLoading,

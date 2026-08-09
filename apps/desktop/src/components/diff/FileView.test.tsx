@@ -4,6 +4,26 @@ import { describe, expect, it, vi } from 'vitest'
 import { FileView } from './FileView'
 
 describe('FileView', () => {
+  it('calls back when the preview arrow is clicked', () => {
+    const onBack = vi.fn()
+    render(
+      <FileView
+        filePath="README.md"
+        file={null}
+        isLoading={false}
+        isSaving={false}
+        error={null}
+        onBack={onBack}
+        onReload={vi.fn()}
+        onSave={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Back to files' }))
+
+    expect(onBack).toHaveBeenCalledOnce()
+  })
+
   it('keeps files read-only until edit and saves the replacement', async () => {
     const onSave = vi.fn().mockResolvedValue(true)
     render(

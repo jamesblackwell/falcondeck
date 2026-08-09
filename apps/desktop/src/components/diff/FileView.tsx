@@ -61,7 +61,7 @@ export const FileView = memo(function FileView({
   return (
     <div className="flex h-full flex-col">
       <div className="flex h-11 items-center gap-2 border-b border-border-subtle px-3">
-        <Button variant="ghost" size="icon" onClick={onBack} aria-label="Back to files" className="h-6 w-6">
+        <Button type="button" variant="ghost" size="icon" onClick={onBack} aria-label="Back to files" className="h-6 w-6">
           <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
         </Button>
         <FileTypeIcon path={filePath} />
