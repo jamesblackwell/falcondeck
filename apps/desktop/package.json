@@ -7,6 +7,7 @@
     "predev": "npm run typecheck",
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:frontend": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",

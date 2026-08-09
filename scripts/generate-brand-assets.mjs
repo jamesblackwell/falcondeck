@@ -1,7 +1,10 @@
-import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { execFile, execFileSync } from 'node:child_process'
+import { copyFileSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(scriptDir, '..')
@@ -11,6 +14,7 @@ const mobileDir = resolve(repoRoot, 'apps', 'mobile')
 const remoteWebDir = resolve(repoRoot, 'apps', 'remote-web')
 const siteDir = resolve(repoRoot, 'apps', 'site')
 const darkBackground = '#111113'
+const thisScript = fileURLToPath(import.meta.url)
 
 const sources = {
   dark: resolve(brandDir, 'logomark-dark.svg'),
@@ -26,6 +30,14 @@ function run(command, args, cwd = repoRoot) {
 
 function ensureDir(path) {
   mkdirSync(path, { recursive: true })
+}
+
+function mtimeMs(path) {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return 0
+  }
 }
 
 function renderSquare(source, target, size) {
@@ -71,7 +83,7 @@ function renderPaddedOnSolid(source, target, iconSize, canvasSize, backgroundCol
  * on a transparent background.  macOS does not auto-apply the squircle mask
  * to .icns files (unlike iOS), so we bake the shape into the icon itself.
  */
-function generateMacOSIcns(markSource, output, bgColor) {
+async function generateMacOSIcns(markSource, output, bgColor) {
   const tmp = resolve(repoRoot, '.tmp-macicon')
   const iconsetDir = resolve(tmp, 'icon.iconset')
   ensureDir(iconsetDir)
@@ -93,26 +105,47 @@ function generateMacOSIcns(markSource, output, bgColor) {
   // Pre-rasterize the SVG mark to a large PNG first — ImageMagick's SVG
   // renderer struggles with complex paths inside multi-step composite commands.
   const markPng = resolve(tmp, 'mark.png')
-  run('magick', ['-background', 'none', '-density', '144', markSource, '-resize', '1024x1024', `png32:${markPng}`])
+  await execFileAsync('magick', [
+    '-background',
+    'none',
+    '-density',
+    '144',
+    markSource,
+    '-resize',
+    '1024x1024',
+    `png32:${markPng}`,
+  ])
 
-  for (const { name, size } of specs) {
-    // Apple's macOS icon corner radius is ~22.37% of the icon width
-    const radius = Math.round(size * 0.2237)
-    const markSize = Math.round(size * 0.62)
-    const target = resolve(iconsetDir, name)
+  // Render iconset sizes in parallel — sequential magick was a multi-second cost.
+  await Promise.all(
+    specs.map(async ({ name, size }) => {
+      // Apple's macOS icon corner radius is ~22.37% of the icon width
+      const radius = Math.round(size * 0.2237)
+      const markSize = Math.round(size * 0.62)
+      const target = resolve(iconsetDir, name)
 
-    run('magick', [
-      // Transparent canvas with dark rounded-rect background
-      '(', '-size', `${size}x${size}`, 'xc:none',
-      '-fill', bgColor,
-      '-draw', `roundrectangle 0,0 ${size - 1},${size - 1} ${radius},${radius}`,
-      ')',
-      // White falcon mark, resized and centered
-      '(', markPng, '-resize', `${markSize}x${markSize}`, ')',
-      '-gravity', 'center', '-composite',
-      `png32:${target}`,
-    ])
-  }
+      await execFileAsync('magick', [
+        '(',
+        '-size',
+        `${size}x${size}`,
+        'xc:none',
+        '-fill',
+        bgColor,
+        '-draw',
+        `roundrectangle 0,0 ${size - 1},${size - 1} ${radius},${radius}`,
+        ')',
+        '(',
+        markPng,
+        '-resize',
+        `${markSize}x${markSize}`,
+        ')',
+        '-gravity',
+        'center',
+        '-composite',
+        `png32:${target}`,
+      ])
+    }),
+  )
 
   // Pack into .icns using Apple's built-in tool
   run('iconutil', ['-c', 'icns', '-o', output, iconsetDir])
@@ -164,7 +197,37 @@ function generateMobileAssets() {
   renderPaddedTransparentRect(sources.markLight, resolve(assetsDir, 'splash.png'), 720, 1284, 2778)
 }
 
-function generateDesktopAssets() {
+function desktopOutputs() {
+  const publicDir = resolve(desktopDir, 'public')
+  const iconsDir = resolve(desktopDir, 'src-tauri', 'icons')
+  return [
+    resolve(publicDir, 'favicon.svg'),
+    resolve(publicDir, 'favicon-32x32.png'),
+    // Icons referenced by apps/desktop/src-tauri/tauri.conf.json
+    resolve(iconsDir, '32x32.png'),
+    resolve(iconsDir, '128x128.png'),
+    resolve(iconsDir, '128x128@2x.png'),
+    resolve(iconsDir, 'icon.png'),
+    resolve(iconsDir, 'icon.icns'),
+  ]
+}
+
+function isDesktopUpToDate() {
+  const inputs = [...Object.values(sources), thisScript]
+  const outputs = desktopOutputs()
+  if (outputs.some((path) => !existsSync(path))) {
+    return false
+  }
+  const newestInput = Math.max(...inputs.map(mtimeMs))
+  const oldestOutput = Math.min(...outputs.map(mtimeMs))
+  return oldestOutput >= newestInput
+}
+
+/**
+ * Generate desktop favicons + the macOS icons listed in tauri.conf.json.
+ * Prefer this for local install loops — skips `tauri icon`'s iOS/Android/Windows sets.
+ */
+async function generateDesktopAssetsFast() {
   const publicDir = resolve(desktopDir, 'public')
   const iconsDir = resolve(desktopDir, 'src-tauri', 'icons')
 
@@ -173,18 +236,63 @@ function generateDesktopAssets() {
   renderSquare(sources.dark, resolve(publicDir, 'favicon-32x32.png'), 32)
 
   ensureDir(iconsDir)
-  run('npm', ['exec', 'tauri', 'icon', '--', '../../assets/brand/logomark-dark.svg', '-o', 'src-tauri/icons', '--ios-color', darkBackground], desktopDir)
+  // Sizes match tauri.conf.json bundle.icon entries (and icon.png at 512).
+  renderSquare(sources.dark, resolve(iconsDir, '32x32.png'), 32)
+  renderSquare(sources.dark, resolve(iconsDir, '128x128.png'), 128)
+  renderSquare(sources.dark, resolve(iconsDir, '128x128@2x.png'), 256)
+  renderSquare(sources.dark, resolve(iconsDir, 'icon.png'), 512)
 
-  // Override the .icns with a properly shaped macOS icon (rounded corners on transparent bg).
-  // Tauri generates a full-bleed square which renders with hard corners on macOS.
-  generateMacOSIcns(sources.markLight, resolve(iconsDir, 'icon.icns'), darkBackground)
+  // Rounded macOS .icns (full-bleed squares get hard corners on macOS).
+  await generateMacOSIcns(sources.markLight, resolve(iconsDir, 'icon.icns'), darkBackground)
 }
 
-if (args.has('--desktop-only')) {
-  generateDesktopAssets()
-} else {
+/**
+ * Full desktop icon set for cross-platform packaging (`npm run brand:generate`).
+ * Still overrides icon.icns with the shaped macOS mark.
+ */
+async function generateDesktopAssetsFull() {
+  const publicDir = resolve(desktopDir, 'public')
+  const iconsDir = resolve(desktopDir, 'src-tauri', 'icons')
+
+  ensureDir(publicDir)
+  copyFileSync(sources.markDark, resolve(publicDir, 'favicon.svg'))
+  renderSquare(sources.dark, resolve(publicDir, 'favicon-32x32.png'), 32)
+
+  ensureDir(iconsDir)
+  run(
+    'npm',
+    [
+      'exec',
+      'tauri',
+      'icon',
+      '--',
+      '../../assets/brand/logomark-dark.svg',
+      '-o',
+      'src-tauri/icons',
+      '--ios-color',
+      darkBackground,
+    ],
+    desktopDir,
+  )
+
+  await generateMacOSIcns(sources.markLight, resolve(iconsDir, 'icon.icns'), darkBackground)
+}
+
+async function main() {
+  if (args.has('--desktop-only')) {
+    if (!args.has('--force') && isDesktopUpToDate()) {
+      console.log('Desktop brand assets are up to date; skipping regeneration')
+      return
+    }
+    console.log('Generating desktop brand assets')
+    await generateDesktopAssetsFast()
+    return
+  }
+
   generateMobileAssets()
-  generateDesktopAssets()
+  await generateDesktopAssetsFull()
   generateWebAssets(siteDir, 'FalconDeck', 'FalconDeck')
   generateWebAssets(remoteWebDir, 'FalconDeck Remote', 'FalconDeck')
 }
+
+await main()

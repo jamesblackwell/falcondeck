@@ -1,4 +1,7 @@
 {
+  "build": {
+    "beforeBuildCommand": "npm run build:frontend"
+  },
   "bundle": {
     "createUpdaterArtifacts": false
   }

@@ -35,11 +35,13 @@ UI_PORT ?= 1420
 REMOTE_WEB_PORT ?= 4174
 RELAY_BIND_HOST ?= 0.0.0.0
 CODEX_BIN ?= codex
-TAURI_EXPECTED_PACKAGE = @tauri-apps/cli-$$(cd "$(DESKTOP_DIR)" && npm exec -- node -p "process.platform + '-' + process.arch")
-DESKTOP_NATIVE_CHECK = cd "$(DESKTOP_DIR)" && npm exec -- node -e "require('@tauri-apps/cli')" && npm exec -- node -e "import('rolldown').then(() => undefined, (error) => { console.error(error); process.exit(1) })"
+TAURI_CLI := $(ROOT)/node_modules/@tauri-apps/cli/tauri.js
+# Prefer direct node requires over `npm exec` — each npm exec adds ~200-300ms.
+# Resolve from the desktop package so workspace-hoisted deps are found correctly.
+DESKTOP_NATIVE_CHECK = cd "$(DESKTOP_DIR)" && node -e "require('@tauri-apps/cli')" && node --input-type=module -e "import('rolldown').then(() => undefined, (error) => { console.error(error); process.exit(1) })"
 # The dev overlay keeps watcher-triggered relaunches from stealing focus and
 # labels the window "(dev)" so it is distinguishable from the installed app.
-TAURI_DEV = cd "$(DESKTOP_DIR)" && npm exec tauri -- dev --config src-tauri/tauri.dev.conf.json
+TAURI_DEV = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" dev --config src-tauri/tauri.dev.conf.json
 # Kill anything already listening on the UI port (e.g. a stray Vite left
 # behind by an agent or background session) so dev targets always start
 # cleanly instead of failing with "Port 1420 is already in use".
@@ -51,13 +53,16 @@ FREE_UI_PORT = pids=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true)
 		leftover=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true); \
 		if [ -n "$$leftover" ]; then kill -9 $$leftover 2>/dev/null || true; sleep 1; fi; \
 	fi
+# Local installs use release+incremental so small Rust edits rebuild in a few
+# seconds instead of re-optimizing the whole crate (~20s → ~3s typical).
+DESKTOP_INSTALL_CARGO_ENV = CARGO_PROFILE_RELEASE_INCREMENTAL=true
 ifeq ($(strip $(DESKTOP_TAURI_TARGET)),)
-TAURI_BUILD = cd "$(DESKTOP_DIR)" && npm exec tauri -- build
-TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --bundles app --config src-tauri/tauri.local.conf.json
+TAURI_BUILD = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" build
+TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --bundles app --config src-tauri/tauri.local.conf.json
 DESKTOP_BUNDLE_APP := $(ROOT)/target/release/bundle/macos/FalconDeck.app
 else
-TAURI_BUILD = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --target $(DESKTOP_TAURI_TARGET)
-TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && npm exec tauri -- build --target $(DESKTOP_TAURI_TARGET) --bundles app --config src-tauri/tauri.local.conf.json
+TAURI_BUILD = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" build --target $(DESKTOP_TAURI_TARGET)
+TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --target $(DESKTOP_TAURI_TARGET) --bundles app --config src-tauri/tauri.local.conf.json
 DESKTOP_BUNDLE_APP := $(ROOT)/target/$(DESKTOP_TAURI_TARGET)/release/bundle/macos/FalconDeck.app
 endif
 APPLICATIONS_APP := /Applications/FalconDeck.app
@@ -90,7 +95,7 @@ help:
 		'Build & install:' \
 		'  make install          Install desktop, mobile, and web dependencies' \
 		'  make desktop-install  Build the packaged desktop app and install it to /Applications' \
-		'  make desktop-brand-assets Regenerate desktop icons/brand assets' \
+		'  make desktop-brand-assets Regenerate desktop icons/brand assets (skip if up to date; FORCE_BRAND=1 to force)' \
 		'  make build            Build desktop, remote web, and site bundles' \
 		'  make mobile-build     Build the iOS app via EAS (cloud, ad-hoc distribution)' \
 		'  make mobile-deploy    Push an OTA JS update to the preview channel' \
@@ -120,26 +125,24 @@ install:
 	@$(MAKE) remote-web-prepare
 	@$(MAKE) site-prepare
 
+# Uses require/import resolution (not apps/desktop/node_modules/* paths) because
+# npm workspaces hoist @tauri-apps/cli and native bindings to the repo root.
 desktop-prepare:
 	@set -e; \
-		expected_package="$(TAURI_EXPECTED_PACKAGE)"; \
-		echo "Checking desktop dependencies ($$expected_package)"; \
-		if [ ! -d "$(DESKTOP_DIR)/node_modules/@tauri-apps/cli" ] || [ ! -d "$(DESKTOP_DIR)/node_modules/$$expected_package" ]; then \
+		echo "Checking desktop dependencies"; \
+		if [ ! -f "$(TAURI_CLI)" ] || ! ($(DESKTOP_NATIVE_CHECK)) >/dev/null 2>&1; then \
 			echo "Repairing workspace dependencies for the current platform"; \
-			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
-			$(ROOT_NPM) install; \
-		fi; \
-		if ! ($(DESKTOP_NATIVE_CHECK)); then \
-			echo "Retrying workspace install after desktop native dependency check failed"; \
 			rm -rf "$(ROOT)/node_modules" "$(DESKTOP_DIR)/node_modules" "$(REMOTE_WEB_DIR)/node_modules" "$(SITE_DIR)/node_modules"; \
 			$(ROOT_NPM) install; \
 			($(DESKTOP_NATIVE_CHECK)); \
 		fi
 
+# Regenerates only when brand sources (or the generator) are newer than outputs.
+# Force with: make desktop-brand-assets FORCE_BRAND=1
 desktop-brand-assets: desktop-prepare
 	@set -e; \
-		echo "Refreshing desktop brand assets"; \
-		cd "$(ROOT)" && node ./scripts/generate-brand-assets.mjs --desktop-only
+		echo "Checking desktop brand assets"; \
+		cd "$(ROOT)" && node ./scripts/generate-brand-assets.mjs --desktop-only $(if $(FORCE_BRAND),--force,)
 
 mobile-prepare:
 	@set -e; \
@@ -306,7 +309,7 @@ desktop-install: desktop-brand-assets
 	@set -e; \
 		if [ -n "$(DESKTOP_TAURI_TARGET)" ]; then \
 			if command -v rustup >/dev/null 2>&1; then \
-				if ! rustup target list --installed | grep -qx "$(DESKTOP_TAURI_TARGET)"; then \
+				if ! rustup target list --installed 2>/dev/null | grep -qx "$(DESKTOP_TAURI_TARGET)"; then \
 					echo "Installing Rust target $(DESKTOP_TAURI_TARGET)"; \
 					rustup target add "$(DESKTOP_TAURI_TARGET)"; \
 				fi; \
@@ -315,8 +318,11 @@ desktop-install: desktop-brand-assets
 				exit 1; \
 			fi; \
 		fi; \
+		if [ ! -f "$(TAURI_CLI)" ]; then \
+			echo "Tauri CLI not found at $(TAURI_CLI). Run: npm install"; \
+			exit 1; \
+		fi; \
 		echo "Building packaged FalconDeck desktop app"; \
-		rm -rf "$(DESKTOP_BUNDLE_APP)"; \
 		$(TAURI_BUILD_INSTALL); \
 		if [ ! -d "$(DESKTOP_BUNDLE_APP)" ]; then \
 			echo "Expected app bundle not found at $(DESKTOP_BUNDLE_APP)"; \
