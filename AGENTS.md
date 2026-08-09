@@ -60,6 +60,14 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 - `falcondeck.com` - public site
 - You may use Ansible and SSH on the production relay/app host for deployment, debugging, and verification when needed.
 
+## Code Review
+
+- For major changes, run the repo-local autoreview before committing or handing off.
+- Treat new features, protocol or API changes, cross-package refactors, migrations, release work, and changes spanning several packages as major changes.
+- For uncommitted work, run `.agents/skills/autoreview/scripts/autoreview --mode local`.
+- Verify accepted findings against the real code path, fix in-scope issues, rerun focused checks, and rerun autoreview until clean.
+- Record the autoreview command and result in the handoff when you skip it or when it finds follow-up work.
+
 ## Priorities
 
 1. Keep the desktop and daemon flow solid.
