@@ -291,6 +291,7 @@ export const Conversation = memo(function Conversation({
         >
           <div
             ref={contentRef}
+            data-conversation-transcript
             className="mx-auto flex min-h-full w-full max-w-3xl flex-col gap-3 px-3 pt-4 pb-10 md:px-6 md:pb-12"
           >
             {showEmptyState ||

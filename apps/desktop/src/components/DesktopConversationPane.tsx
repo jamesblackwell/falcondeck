@@ -12,6 +12,7 @@ import type {
 import { Conversation, PromptInput, QueuedTurns, type OpenFileDiff } from '@falcondeck/chat-ui'
 
 import { InteractiveRequestBar } from './InteractiveRequestBar'
+import { ConversationFindBar } from './ConversationFindBar'
 import { RemotePairingPopover } from './RemotePairingPopover'
 import { SessionHeader } from './SessionHeader'
 
@@ -31,6 +32,7 @@ type DesktopConversationPaneProps = {
   isSending: boolean
   isThreadDetailPending: boolean
   interactiveRequests: InteractiveRequest[]
+  findRequestKey?: number
   onStartPairing: () => void
   onInteractiveResponse: (
     request: InteractiveRequest,
@@ -62,6 +64,7 @@ export function DesktopConversationPane({
   isSending,
   isThreadDetailPending,
   interactiveRequests,
+  findRequestKey = 0,
   onStartPairing,
   onInteractiveResponse,
   promptInputProps,
@@ -91,6 +94,7 @@ export function DesktopConversationPane({
         />
         {headerControls}
       </SessionHeader>
+      <ConversationFindBar requestKey={findRequestKey} />
       <Conversation
         threadKey={
           selectedThreadId

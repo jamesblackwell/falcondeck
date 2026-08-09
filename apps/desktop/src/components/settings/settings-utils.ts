@@ -4,13 +4,14 @@ import type {
   ToolDetailsMode,
   TrustedDevice,
 } from '@falcondeck/client-core'
-import { Bot, Palette, Plug, Server, Settings, Wifi } from 'lucide-react'
+import { Bot, Keyboard, Palette, Plug, Server, Settings, Wifi } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 
 export type SettingsSectionId =
   | 'general'
   | 'appearance'
+  | 'keyboard'
   | 'servers'
   | 'agents'
   | 'connectors'
@@ -35,6 +36,12 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: 'Appearance',
     description: 'Theme, fonts, and text size',
     icon: Palette,
+  },
+  {
+    id: 'keyboard',
+    label: 'Keyboard Shortcuts',
+    description: 'Customize every command',
+    icon: Keyboard,
   },
   {
     id: 'servers',

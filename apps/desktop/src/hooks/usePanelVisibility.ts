@@ -28,7 +28,7 @@ function readPersistedVisibility(): PanelVisibility {
 
 /**
  * Visibility state for the collapsible side panels, persisted across launches.
- * ⌘B toggles the sidebar; ⌥⌘B toggles the right side panel.
+ * Keyboard dispatch lives in App so customized bindings have one owner.
  */
 export function usePanelVisibility() {
   const [visibility, setVisibility] = useState<PanelVisibility>(readPersistedVisibility)
@@ -52,20 +52,6 @@ export function usePanelVisibility() {
   const showRail = useCallback(() => {
     setVisibility((current) => (current.rail ? current : { ...current, rail: true }))
   }, [])
-
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (!event.metaKey || event.ctrlKey || event.key.toLowerCase() !== 'b') return
-      event.preventDefault()
-      if (event.altKey) {
-        toggleRail()
-      } else {
-        toggleSidebar()
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [toggleRail, toggleSidebar])
 
   return {
     sidebarVisible: visibility.sidebar,

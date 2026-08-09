@@ -43,6 +43,14 @@ export type PromptInputProps = {
   value: string
   onValueChange: (value: string) => void
   onSubmit: () => void
+  /** Sends with the opposite running follow-up behavior (Queue vs Steer). */
+  onAlternateSubmit?: () => void
+  /** Host-owned shortcut resolver keeps product bindings out of shared UI. */
+  resolveComposerShortcut?: (event: React.KeyboardEvent<HTMLTextAreaElement>) =>
+    | 'submit'
+    | 'alternate-submit'
+    | 'newline'
+    | null
   /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
   onStop?: () => void
   onPickImages?: (files: FileList | null) => void
@@ -87,6 +95,8 @@ export type PromptInputProps = {
    * ordinary thread switches.
    */
   autoFocusKey?: string | null
+  /** Focus request for app-level shortcuts; unlike autoFocusKey it may repeat in an existing chat. */
+  focusRequestKey?: number
   disabled?: boolean
   sendDisabled?: boolean
   /** True while the selected thread has an in-flight turn. */
@@ -114,6 +124,8 @@ export const PromptInput = memo(function PromptInput({
   value,
   onValueChange,
   onSubmit,
+  onAlternateSubmit,
+  resolveComposerShortcut,
   onStop,
   onPickImages,
   onRemoveAttachment,
@@ -139,6 +151,7 @@ export const PromptInput = memo(function PromptInput({
   onSandboxModeChange,
   contextBar,
   autoFocusKey = null,
+  focusRequestKey = 0,
   disabled = false,
   sendDisabled = false,
   isRunning = false,
@@ -206,6 +219,11 @@ export const PromptInput = memo(function PromptInput({
     textareaRef.current?.focus()
   }, [autoFocusKey, disabled])
 
+  useEffect(() => {
+    if (focusRequestKey <= 0 || disabled) return
+    textareaRef.current?.focus()
+  }, [disabled, focusRequestKey])
+
   const activeSkill =
     filteredSkills.length > 0
       ? filteredSkills[Math.min(activeSkillIndex, filteredSkills.length - 1)] ?? null
@@ -233,6 +251,9 @@ export const PromptInput = memo(function PromptInput({
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
+    if (event.repeat) return
+    const hasCommandModifier = event.metaKey || event.ctrlKey || event.altKey || event.shiftKey
     if (slashQuery && filteredSkills.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
@@ -249,13 +270,37 @@ export const PromptInput = memo(function PromptInput({
         setSlashQuery(null)
         return
       }
-      if ((event.key === 'Tab' || event.key === 'Enter') && activeSkillSupported && activeSkill) {
+      if (!hasCommandModifier && (event.key === 'Tab' || event.key === 'Enter') && activeSkillSupported && activeSkill) {
           event.preventDefault()
           insertSkillAlias(activeSkill.alias)
           return
       }
     }
-    if (event.key === 'Enter') {
+    const shortcutAction = resolveComposerShortcut?.(event) ?? null
+    if (shortcutAction === 'newline') {
+      event.preventDefault()
+      const textarea = event.currentTarget
+      const start = textarea.selectionStart
+      const end = textarea.selectionEnd
+      const nextValue = `${value.slice(0, start)}\n${value.slice(end)}`
+      onValueChange(nextValue)
+      requestAnimationFrame(() => {
+        textarea.focus()
+        textarea.setSelectionRange(start + 1, start + 1)
+      })
+      return
+    }
+    if (shortcutAction === 'alternate-submit') {
+      event.preventDefault()
+      if (canSubmit) onAlternateSubmit?.()
+      return
+    }
+    if (shortcutAction === 'submit') {
+      event.preventDefault()
+      if (canSubmit) onSubmit()
+      return
+    }
+    if (!resolveComposerShortcut && event.key === 'Enter') {
       if (event.metaKey || event.ctrlKey || event.shiftKey) {
         // Cmd/Ctrl+Enter or Shift+Enter → insert newline (default textarea behavior)
         return

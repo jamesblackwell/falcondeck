@@ -420,6 +420,12 @@ body {
   outline-offset: calc(-1 * var(--fd-focus-ring-width));
 }
 
+/* Composite inputs put the focusable control inside a painted shell. */
+.fd-focus-within:has(:focus-visible) {
+  outline: var(--fd-focus-ring-width) solid var(--fd-focus-ring-color);
+  outline-offset: var(--fd-focus-ring-offset);
+}
+
 /* Allow selection in content areas only */
 [data-selectable], [data-selectable] * {
   -webkit-user-select: text;

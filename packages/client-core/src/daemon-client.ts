@@ -54,6 +54,8 @@ export type SendTurnPayload = {
   service_tier?: string | null
   permission_mode?: string | null
   sandbox_mode?: string | null
+  /** Apply this follow-up to the active turn instead of queueing it. */
+  steer?: boolean
 }
 
 export type StartThreadPayload = {

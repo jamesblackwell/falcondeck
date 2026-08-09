@@ -23,6 +23,7 @@ import {
   useAppearance,
 } from '@falcondeck/ui'
 
+
 type PaletteItem = {
   id: string
   section: 'Threads' | 'Actions' | 'Appearance'
@@ -60,6 +61,10 @@ export type CommandPaletteProps = {
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread?: (workspaceId: string) => void
   onOpenSettings?: () => void
+  /** Controlled open request for hosts with customizable shortcuts. */
+  openRequestKey?: number
+  initialQuery?: string
+  requestMode?: 'open' | 'toggle' | 'close'
 }
 
 /**
@@ -71,6 +76,9 @@ export const CommandPalette = memo(function CommandPalette({
   onSelectThread,
   onNewThread,
   onOpenSettings,
+  openRequestKey,
+  initialQuery = '',
+  requestMode = 'open',
 }: CommandPaletteProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -79,6 +87,15 @@ export const CommandPalette = memo(function CommandPalette({
   const appearance = useAppearance()
 
   useEffect(() => {
+    if (openRequestKey === undefined) return
+    if (openRequestKey > 0) {
+      setQuery(initialQuery)
+      setOpen((current) => requestMode === 'toggle' ? !current : requestMode === 'close' ? false : true)
+    }
+  }, [initialQuery, openRequestKey, requestMode])
+
+  useEffect(() => {
+    if (openRequestKey !== undefined) return
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
@@ -87,14 +104,14 @@ export const CommandPalette = memo(function CommandPalette({
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [])
+  }, [openRequestKey])
 
   useEffect(() => {
     if (!open) {
-      setQuery('')
+      setQuery(initialQuery)
       setHighlight(0)
     }
-  }, [open])
+  }, [initialQuery, open])
 
   const close = useCallback(() => setOpen(false), [])
 

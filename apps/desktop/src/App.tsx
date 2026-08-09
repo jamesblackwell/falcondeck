@@ -1,4 +1,13 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react'
 
 import {
   buildProjectGroups,
@@ -39,7 +48,7 @@ import {
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
 import { CommandPalette, ComposerContextBar, GoalControl, NewThreadState } from '@falcondeck/chat-ui'
-import { Button, ToastProvider, useToast } from '@falcondeck/ui'
+import { Button, FONT_SCALE_OPTIONS, ToastProvider, getAppearance, updateAppearance, useToast } from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
 import {
@@ -81,6 +90,12 @@ import { useGitBranches } from './hooks/useGitBranches'
 import { usePanelVisibility } from './hooks/usePanelVisibility'
 import { useRemoteHosts } from './hooks/useRemoteHosts'
 import { hostLabelByWorkspaceId, mergeSnapshots } from './hosts'
+import {
+  commandForEvent,
+  getShortcutSettings,
+  isEditableTarget,
+  useShortcutSettings,
+} from './shortcuts'
 
 // Stable empty array so conversations without attachments don't bust the
 // memoized PromptInput on every render.
@@ -137,6 +152,7 @@ function AppInner() {
   } = useDaemonConnection({ externalSnapshots: hostSnapshots })
   const updater = useAppUpdater()
   const { sidebarVisible, railVisible, toggleSidebar, toggleRail, showRail } = usePanelVisibility()
+  const shortcutSettings = useShortcutSettings()
 
   const [drafts, setDrafts] = useState<ComposerDrafts>(() => readStoredDrafts())
   const [relayUrl] = useState(
@@ -162,6 +178,10 @@ function AppInner() {
   const [isStartingRemote, setIsStartingRemote] = useState(false)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId>('general')
+  const [settingsRequestKey, setSettingsRequestKey] = useState(0)
+  const [paletteRequest, setPaletteRequest] = useState({ key: 0, query: '', mode: 'toggle' as 'open' | 'toggle' | 'close' })
+  const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0)
+  const [findRequestKey, setFindRequestKey] = useState(0)
   const [diffSelection, setDiffSelection] = useState<DiffPanelSelection | null>(null)
   const [isSending, setIsSending] = useState(false)
   const [isStopping, setIsStopping] = useState(false)
@@ -178,6 +198,9 @@ function AppInner() {
   const draftsRef = useRef(drafts)
   const sendingConversationKeyRef = useRef<string | null>(null)
   const sendingBaselineAgentItemIdRef = useRef<string | null>(null)
+  const selectionHistoryRef = useRef<Array<{ workspaceId: string | null; threadId: string | null }>>([])
+  const selectionHistoryIndexRef = useRef(-1)
+  const navigatingHistoryRef = useRef(false)
 
   // Each conversation keeps its own unsent input, keyed by workspace + thread
   // ('new' for a thread not yet created), so navigating never carries text or
@@ -186,6 +209,21 @@ function AppInner() {
   const conversationKey = draftKeyFor(selectedWorkspaceId, selectedThreadId)
   const draft = drafts[conversationKey]?.text ?? ''
   const attachments = attachmentsByConversation[conversationKey] ?? NO_ATTACHMENTS
+
+  useEffect(() => {
+    if (navigatingHistoryRef.current) {
+      navigatingHistoryRef.current = false
+      return
+    }
+    const next = { workspaceId: selectedWorkspaceId, threadId: selectedThreadId }
+    const history = selectionHistoryRef.current
+    const current = history[selectionHistoryIndexRef.current]
+    if (current?.workspaceId === next.workspaceId && current.threadId === next.threadId) return
+    history.splice(selectionHistoryIndexRef.current + 1)
+    history.push(next)
+    if (history.length > 50) history.shift()
+    selectionHistoryIndexRef.current = history.length - 1
+  }, [selectedThreadId, selectedWorkspaceId])
 
   const setDraftForConversation = useCallback((key: string, value: string) => {
     setDrafts((current) => {
@@ -342,6 +380,10 @@ function AppInner() {
   const groups = useMemo(
     () => buildProjectGroups(viewSnapshot?.workspaces ?? [], viewSnapshot?.threads ?? []),
     [viewSnapshot?.threads, viewSnapshot?.workspaces],
+  )
+  const conversationItems: ConversationItem[] = useMemo(
+    () => conversationItemsForSelection(selectedWorkspaceId, selectedThreadId, threadDetail),
+    [selectedThreadId, selectedWorkspaceId, threadDetail],
   )
   const interactiveRequests = useMemo(
     () =>
@@ -1052,7 +1094,7 @@ function AppInner() {
   async function handleStop() {
     const client = apiFor(selectedWorkspace?.id)
     if (!client || !selectedWorkspace || !selectedThreadId) return
-    if (selectedThread?.status !== 'running') return
+    if (selectedThread?.status !== 'running' && selectedThread?.status !== 'waiting_for_input') return
     setIsStopping(true)
     try {
       await client.interruptTurn(selectedWorkspace.id, selectedThreadId)
@@ -1066,7 +1108,7 @@ function AppInner() {
     }
   }
 
-  async function handleSubmit() {
+  async function handleSubmit(steer = false) {
     const client = apiFor(selectedWorkspace?.id)
     if (!client || !selectedWorkspace || (!draft.trim() && attachments.length === 0)) return
     const submittedDraft = draft
@@ -1148,6 +1190,7 @@ function AppInner() {
         service_tier: serviceTierForTurn(selectedServiceTier, activeModel),
         permission_mode: selectedPermissionMode,
         sandbox_mode: selectedSandboxMode,
+        steer,
       })
       setActionError(null)
     } catch (error) {
@@ -1302,7 +1345,9 @@ function AppInner() {
   ])
 
   const handleSubmitCallback = useCallback(() => {
-    void handleSubmit()
+    const isBusy = selectedThread?.status === 'running' || selectedThread?.status === 'waiting_for_input'
+    const shouldSteer = isBusy && getShortcutSettings().followUpBehavior === 'steer'
+    void handleSubmit(shouldSteer)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     api,
@@ -1315,6 +1360,33 @@ function AppInner() {
     attachments,
     selectedModel,
     selectedEffort,
+    selectedServiceTier,
+    selectedPermissionMode,
+    selectedSandboxMode,
+    selectedIsolation,
+  ])
+
+  const handleAlternateSubmitCallback = useCallback(() => {
+    const settings = getShortcutSettings()
+    const isBusy = selectedThread?.status === 'running' || selectedThread?.status === 'waiting_for_input'
+    const shouldSteer = isBusy && settings.followUpBehavior !== 'steer'
+    void handleSubmit(shouldSteer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    api,
+    apiFor,
+    selectedWorkspace,
+    selectedThread,
+    selectedThreadId,
+    selectedProvider,
+    draft,
+    attachments,
+    selectedModel,
+    selectedEffort,
+    selectedServiceTier,
+    selectedPermissionMode,
+    selectedSandboxMode,
+    selectedIsolation,
   ])
 
   const handlePickImages = useCallback(
@@ -1389,6 +1461,7 @@ function AppInner() {
 
   const handleOpenSettings = useCallback(() => {
     setSettingsSection('general')
+    setSettingsRequestKey((current) => current + 1)
     setIsSettingsOpen(true)
   }, [])
 
@@ -1664,10 +1737,6 @@ function AppInner() {
         threadDetail.workspace.id !== selectedWorkspaceId ||
         threadDetail.thread.id !== selectedThreadId),
   )
-  const conversationItems: ConversationItem[] = useMemo(
-    () => conversationItemsForSelection(selectedWorkspaceId, selectedThreadId, threadDetail),
-    [selectedThreadId, selectedWorkspaceId, threadDetail],
-  )
 
   // The transport acknowledging turn.start is not the same as the agent
   // starting work (especially for Claude over SSH). Keep the optimistic label
@@ -1721,6 +1790,117 @@ function AppInner() {
     () => preferencesWithThinkingDisplay(snapshot?.preferences ?? null, thinkingDisplay),
     [snapshot?.preferences, thinkingDisplay],
   )
+
+  const resolveComposerShortcut = useCallback(
+    (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
+      const command = commandForEvent('composer', event.nativeEvent, shortcutSettings)
+      if (command === 'sendMessage') return 'submit' as const
+      if (command === 'invertFollowUp') return 'alternate-submit' as const
+      if (command === 'insertNewline') return 'newline' as const
+      return null
+    },
+    [shortcutSettings],
+  )
+
+  const selectAdjacentThread = useCallback((offset: -1 | 1) => {
+    const threads = groups.flatMap((group) => group.threads.filter((thread) => !thread.is_archived))
+    if (threads.length === 0) return
+    const selectedIndex = threads.findIndex((thread) => thread.id === selectedThreadId)
+    const index = selectedIndex >= 0 ? selectedIndex : offset === 1 ? -1 : 0
+    const next = threads[(index + offset + threads.length) % threads.length]
+    if (!next) return
+    setIsSettingsOpen(false)
+    setSelectedWorkspaceId(next.workspace_id)
+    setSelectedThreadId(next.id)
+  }, [groups, selectedThreadId, setSelectedThreadId, setSelectedWorkspaceId])
+
+  const navigateSelectionHistory = useCallback((offset: -1 | 1) => {
+    const nextIndex = selectionHistoryIndexRef.current + offset
+    const entry = selectionHistoryRef.current[nextIndex]
+    if (!entry) return
+    navigatingHistoryRef.current = true
+    selectionHistoryIndexRef.current = nextIndex
+    setIsSettingsOpen(false)
+    setSelectedWorkspaceId(entry.workspaceId)
+    setSelectedThreadId(entry.threadId)
+  }, [setSelectedThreadId, setSelectedWorkspaceId])
+
+  useEffect(() => {
+    function handleShortcut(event: KeyboardEvent) {
+      if (event.isComposing || event.keyCode === 229 || event.repeat) return
+      const command = commandForEvent('global', event, shortcutSettings)
+      if (!command) return
+      if (isEditableTarget(event.target) && !event.metaKey && !event.ctrlKey) return
+      event.preventDefault()
+      if (command !== 'commandPalette' && command !== 'searchThreads') {
+        setPaletteRequest((current) => ({ ...current, key: current.key + 1, mode: 'close' }))
+      }
+      switch (command) {
+        case 'commandPalette':
+          setPaletteRequest((current) => ({ key: current.key + 1, query: '', mode: 'toggle' }))
+          break
+        case 'searchThreads':
+          setPaletteRequest((current) => ({ key: current.key + 1, query: '', mode: 'open' }))
+          break
+        case 'openSettings':
+          setSettingsSection('general')
+          setSettingsRequestKey((current) => current + 1)
+          setIsSettingsOpen(true)
+          break
+        case 'openKeyboardShortcuts':
+          setSettingsSection('keyboard')
+          setSettingsRequestKey((current) => current + 1)
+          setIsSettingsOpen(true)
+          break
+        case 'openProject':
+          void handleAddProject()
+          break
+        case 'newThread':
+          if (selectedWorkspaceId) handleNewThread(selectedWorkspaceId)
+          break
+        case 'findInThread':
+          if (!isSettingsOpen && selectedThreadId) setFindRequestKey((current) => current + 1)
+          break
+        case 'navigateBack': navigateSelectionHistory(-1); break
+        case 'navigateForward': navigateSelectionHistory(1); break
+        case 'previousThread': selectAdjacentThread(-1); break
+        case 'nextThread': selectAdjacentThread(1); break
+        case 'toggleSidebar': toggleSidebar(); break
+        case 'toggleChanges': toggleRail(); break
+        case 'increaseTextSize':
+        case 'decreaseTextSize': {
+          const currentIndex = FONT_SCALE_OPTIONS.findIndex((option) => option.value === getAppearance().fontScale)
+          const direction = command === 'increaseTextSize' ? 1 : -1
+          const next = FONT_SCALE_OPTIONS[Math.max(0, Math.min(FONT_SCALE_OPTIONS.length - 1, currentIndex + direction))]
+          if (next) updateAppearance({ fontScale: next.value })
+          break
+        }
+        case 'resetTextSize': updateAppearance({ fontScale: 1 }); break
+        case 'focusComposer':
+          setIsSettingsOpen(false)
+          setComposerFocusRequestKey((current) => current + 1)
+          break
+        case 'stopTurn':
+          if (selectedThread?.status === 'running' || selectedThread?.status === 'waiting_for_input') handleStopCallback()
+          break
+      }
+    }
+    window.addEventListener('keydown', handleShortcut)
+    return () => window.removeEventListener('keydown', handleShortcut)
+  }, [
+    handleAddProject,
+    handleNewThread,
+    handleStopCallback,
+    isSettingsOpen,
+    navigateSelectionHistory,
+    selectAdjacentThread,
+    selectedThread?.status,
+    selectedThreadId,
+    selectedWorkspaceId,
+    shortcutSettings,
+    toggleRail,
+    toggleSidebar,
+  ])
 
   const newThreadEmptyState = useMemo(
     () => <NewThreadState selectedWorkspace={selectedWorkspace} />,
@@ -1783,6 +1963,9 @@ function AppInner() {
         onSelectThread={handleSelectThread}
         onNewThread={handleNewThread}
         onOpenSettings={handleOpenSettings}
+        openRequestKey={paletteRequest.key}
+        initialQuery={paletteRequest.query}
+        requestMode={paletteRequest.mode}
       />
       <DesktopShell
         sidebar={
@@ -1814,6 +1997,7 @@ function AppInner() {
             <Suspense fallback={loadingThreadState}>
               <SettingsView
                 initialSection={settingsSection}
+                sectionRequestKey={settingsRequestKey}
                 workspace={selectedWorkspace}
                 localWorkspaces={snapshot?.workspaces ?? []}
                 baseUrl={baseUrl}
@@ -1857,6 +2041,7 @@ function AppInner() {
               isSending={isSending}
               isThreadDetailPending={isThreadDetailPending}
               interactiveRequests={interactiveRequests}
+              findRequestKey={findRequestKey}
               onRemoveQueuedTurn={handleRemoveQueuedTurn}
               onSteerQueuedTurn={handleSteerQueuedTurn}
               onEditQueuedTurn={handleEditQueuedTurn}
@@ -1875,6 +2060,9 @@ function AppInner() {
                 // switches from stealing focus.
                 autoFocusKey: selectedThread ? null : selectedWorkspaceId ?? 'new',
                 onSubmit: handleSubmitCallback,
+                onAlternateSubmit: handleAlternateSubmitCallback,
+                resolveComposerShortcut,
+                focusRequestKey: composerFocusRequestKey,
                 onStop: handleStopCallback,
                 onPickImages: handlePickImages,
                 onRemoveAttachment: handleRemoveAttachment,

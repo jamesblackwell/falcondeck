@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import type {
   FalconDeckPreferences,
@@ -14,6 +14,7 @@ import { AgentsPanel } from './settings/AgentsPanel'
 import { AppearanceSettingsPanel } from './settings/AppearanceSettingsPanel'
 import { ConnectorsPanel } from './settings/ConnectorsPanel'
 import { GeneralSettingsPanel } from './settings/GeneralSettingsPanel'
+import { KeyboardShortcutsPanel } from './settings/KeyboardShortcutsPanel'
 import { RemoteAccessPanel } from './settings/RemoteAccessPanel'
 import { ServersPanel, type ServersPanelProps } from './settings/ServersPanel'
 import { SettingsSidebar } from './settings/SettingsSidebar'
@@ -23,6 +24,8 @@ export type SettingsViewProps = {
   /** Section shown when the view mounts; deep-links like the composer's
    * connectors chip land directly on their panel. */
   initialSection?: SettingsSectionId
+  /** Changes for every deep-link request, including repeats of the same section. */
+  sectionRequestKey?: number
   workspace?: WorkspaceSummary | null
   localWorkspaces: WorkspaceSummary[]
   baseUrl: string | null
@@ -54,6 +57,10 @@ export function SettingsView(props: SettingsViewProps) {
     props.initialSection ?? 'general',
   )
 
+  useEffect(() => {
+    setActiveSection(props.initialSection ?? 'general')
+  }, [props.initialSection, props.sectionRequestKey])
+
   return (
     <section className="flex h-full min-h-0 bg-surface-1">
       <SettingsSidebar
@@ -66,6 +73,8 @@ export function SettingsView(props: SettingsViewProps) {
         <div className="mx-auto w-full max-w-4xl">
           {activeSection === 'appearance' ? (
             <AppearanceSettingsPanel />
+          ) : activeSection === 'keyboard' ? (
+            <KeyboardShortcutsPanel />
           ) : activeSection === 'servers' ? (
             <ServersPanel
               baseUrl={props.baseUrl}

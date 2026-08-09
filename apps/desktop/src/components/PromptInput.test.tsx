@@ -124,6 +124,117 @@ describe('PromptInput', () => {
     expect(onStop).toHaveBeenCalledTimes(1)
   })
 
+  it('delegates send, alternate follow-up, and newline to the host shortcut resolver', () => {
+    const onSubmit = vi.fn()
+    const onAlternateSubmit = vi.fn()
+    const onValueChange = vi.fn()
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="first line"
+        onSubmit={onSubmit}
+        onAlternateSubmit={onAlternateSubmit}
+        onValueChange={onValueChange}
+        resolveComposerShortcut={(event) => {
+          if (event.key !== 'Enter') return null
+          if (event.metaKey) return 'alternate-submit'
+          if (event.shiftKey) return 'newline'
+          return 'submit'
+        }}
+      />,
+    )
+
+    const textarea = screen.getByPlaceholderText('Ask anything') as HTMLTextAreaElement
+    textarea.setSelectionRange(5, 5)
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true })
+
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onAlternateSubmit).toHaveBeenCalledTimes(1)
+    expect(onValueChange).toHaveBeenCalledWith('first\n line')
+  })
+
+  it('does not retain a hard-coded Enter send when the host unbinds it', () => {
+    const onSubmit = vi.fn()
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="draft"
+        onSubmit={onSubmit}
+        resolveComposerShortcut={() => null}
+      />,
+    )
+    fireEvent.keyDown(screen.getByPlaceholderText('Ask anything'), { key: 'Enter' })
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('does not let slash completion consume a modified composer shortcut', () => {
+    const onAlternateSubmit = vi.fn()
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="/review"
+        skills={[{
+          id: 'review',
+          label: 'Review',
+          alias: 'review',
+          availability: 'both',
+          providers: ['codex', 'claude'],
+          source_kind: 'provider_native',
+        }]}
+        onAlternateSubmit={onAlternateSubmit}
+        resolveComposerShortcut={(event) => event.metaKey && event.key === 'Enter' ? 'alternate-submit' : null}
+      />,
+    )
+    const textarea = screen.getByPlaceholderText('Ask anything') as HTMLTextAreaElement
+    textarea.setSelectionRange(7, 7)
+    fireEvent.click(textarea)
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+    expect(onAlternateSubmit).toHaveBeenCalledOnce()
+  })
+
+  it('does not resolve shortcuts while an IME candidate is being composed', () => {
+    const onSubmit = vi.fn()
+    const resolveComposerShortcut = vi.fn(() => 'submit' as const)
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="編集中"
+        onSubmit={onSubmit}
+        resolveComposerShortcut={resolveComposerShortcut}
+      />,
+    )
+
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message composer' }), {
+      key: 'Enter',
+      keyCode: 229,
+      isComposing: true,
+    })
+
+    expect(resolveComposerShortcut).not.toHaveBeenCalled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('does not repeat one-shot composer shortcuts while a key is held', () => {
+    const onSubmit = vi.fn()
+    const resolveComposerShortcut = vi.fn(() => 'submit' as const)
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="send once"
+        onSubmit={onSubmit}
+        resolveComposerShortcut={resolveComposerShortcut}
+      />,
+    )
+    fireEvent.keyDown(screen.getByRole('textbox', { name: 'Message composer' }), {
+      key: 'Enter',
+      repeat: true,
+    })
+    expect(resolveComposerShortcut).not.toHaveBeenCalled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
   it('greys the capability pickers instead of dropping them, so the row keeps its shape', () => {
     const capabilities = {
       supports_review: false,
