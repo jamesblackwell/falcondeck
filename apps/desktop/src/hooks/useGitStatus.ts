@@ -3,13 +3,14 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GitStatusResponse } from '@falcondeck/client-core'
 
 type DaemonApi = {
-  gitStatus: (workspaceId: string) => Promise<GitStatusResponse>
+  gitStatus: (workspaceId: string, threadId?: string | null) => Promise<GitStatusResponse>
 }
 
 export function useGitStatus(
   api: DaemonApi | null,
   workspaceId: string | null,
   refreshTrigger: number,
+  threadId: string | null = null,
 ) {
   const [status, setStatus] = useState<GitStatusResponse | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -30,7 +31,7 @@ export function useGitStatus(
     setIsLoading(true)
     setError(null)
     try {
-      const result = await api.gitStatus(workspaceId)
+      const result = await api.gitStatus(workspaceId, threadId)
       if (generationRef.current !== generation) return
       setStatus(result)
     } catch (err) {
@@ -39,7 +40,7 @@ export function useGitStatus(
     } finally {
       if (generationRef.current === generation) setIsLoading(false)
     }
-  }, [api, workspaceId])
+  }, [api, threadId, workspaceId])
 
   // Single effect: initial fetch + debounced refresh
   useEffect(() => {
@@ -65,7 +66,7 @@ export function useGitStatus(
     if (debounceRef.current) clearTimeout(debounceRef.current)
     debounceRef.current = setTimeout(() => {
       void fetchStatus()
-    }, 500)
+    }, 200)
 
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)

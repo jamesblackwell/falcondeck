@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::{
-        Arc, OnceLock,
+        Arc, Mutex as StdMutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
@@ -10,14 +10,14 @@ use std::{
 use chrono::Utc;
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
-    CommandResponse, ConnectWorkspaceRequest, ConversationItem, DaemonInfo, DaemonSnapshot,
-    EventEnvelope, FalconDeckPreferences, HealthResponse, InteractiveRequest,
-    InteractiveRequestKind, InteractiveResponsePayload, PairingPublicKeyBundle,
-    RemoteConnectionStatus, SendTurnRequest, ServiceLevel, SkillSummary, SnapshotRequest,
-    StartReviewRequest, StartThreadRequest, ThreadAgentParams, ThreadAttention, ThreadDetail,
-    ThreadDetailRequest, ThreadHandle, ThreadStatus, ThreadSummary, UnifiedEvent,
-    UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
-    WorkspaceSummary, crypto::LocalBoxKeyPair,
+    CommandResponse, ConnectWorkspaceRequest, ContentLifecycle, ConversationItem, DaemonInfo,
+    DaemonSnapshot, EventEnvelope, FalconDeckPreferences, ForkThreadRequest, HealthResponse,
+    InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload, PairingPublicKeyBundle,
+    RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice, SkillSummary,
+    SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget, ThreadAgentParams,
+    ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus,
+    ThreadSummary, ThreadTokenUsage, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
+    WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary, crypto::LocalBoxKeyPair,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -87,6 +87,12 @@ struct InnerState {
     /// overwrite newer remote pairing metadata.
     persistence: Mutex<()>,
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
+    /// Capped session-level notices for workspace events without a transcript target.
+    service_notices: StdMutex<Vec<ServiceNotice>>,
+    /// Latest high-frequency token usage keyed by thread id.
+    thread_token_usage: StdMutex<HashMap<String, ThreadTokenUsage>>,
+    /// Active realtime transcript parts keyed by (thread id, provider role).
+    realtime_transcripts: StdMutex<HashMap<(String, String), RealtimeTranscriptState>>,
     /// Pending Claude PreToolUse approvals keyed by (workspace_id, request_id);
     /// the hook handler blocks on the receiver until the UI responds.
     claude_approvals: Mutex<HashMap<(String, String), oneshot::Sender<ApprovalDecision>>>,
@@ -123,6 +129,7 @@ struct ManagedThread {
     items: Vec<ConversationItem>,
     assistant_items: HashMap<String, usize>,
     reasoning_items: HashMap<String, usize>,
+    plan_items: HashMap<String, usize>,
     tool_items: HashMap<String, usize>,
     manual_title: bool,
     ai_title_generated: bool,
@@ -132,6 +139,13 @@ struct ManagedThread {
     /// the summary entry's id. In-memory only: a queued turn does not survive
     /// a daemon restart (neither does the turn it was waiting on).
     queued_requests: Vec<QueuedTurnRequest>,
+}
+
+#[derive(Clone)]
+struct RealtimeTranscriptState {
+    id: String,
+    text: String,
+    created_at: chrono::DateTime<Utc>,
 }
 
 /// A send accepted while the thread was busy, held until the active turn ends.
@@ -359,6 +373,9 @@ impl AppState {
                 saved_workspaces: Mutex::new(HashMap::new()),
                 persistence: Mutex::new(()),
                 interactive_requests: Mutex::new(HashMap::new()),
+                service_notices: StdMutex::new(Vec::new()),
+                thread_token_usage: StdMutex::new(HashMap::new()),
+                realtime_transcripts: StdMutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
                 claude_always_allowed_tools: Mutex::new(HashMap::new()),
                 local_base_url: OnceLock::new(),
@@ -785,6 +802,20 @@ impl AppState {
         let workspaces = self.inner.workspaces.lock().await;
         let interactive_requests = self.inner.interactive_requests.lock().await;
         let preferences = self.inner.preferences.lock().await.clone();
+        let service_notices = self
+            .inner
+            .service_notices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let thread_token_usage = self
+            .inner
+            .thread_token_usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .iter()
+            .map(|(thread_id, usage)| (thread_id.clone(), usage.clone()))
+            .collect();
 
         // Reconcile providers.json edits onto each workspace's agent list:
         // additions appear (placeholder entries; live runtimes refine the
@@ -847,6 +878,8 @@ impl AppState {
             workspaces: workspace_list,
             threads,
             interactive_requests: interactive_request_list,
+            service_notices,
+            thread_token_usage,
             preferences,
         }
     }
@@ -948,6 +981,13 @@ impl AppState {
         request: StartThreadRequest,
     ) -> Result<ThreadHandle, DaemonError> {
         workspace_ops::start_thread(self, request).await
+    }
+
+    pub async fn fork_thread(
+        &self,
+        request: ForkThreadRequest,
+    ) -> Result<ThreadHandle, DaemonError> {
+        workspace_ops::fork_thread(self, request).await
     }
 
     pub async fn archive_thread(
@@ -1248,6 +1288,30 @@ impl AppState {
                     .await;
             });
         }
+        let notice = match (workspace_id.as_ref(), thread_id.as_ref()) {
+            (Some(workspace_id), None) => {
+                let notice = ServiceNotice {
+                    id: format!("notice-{}", Uuid::new_v4().simple()),
+                    workspace_id: workspace_id.clone(),
+                    level: level.clone(),
+                    message: message.clone(),
+                    raw_method: raw_method.clone(),
+                    created_at: Utc::now(),
+                };
+                let mut notices = self
+                    .inner
+                    .service_notices
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                notices.push(notice.clone());
+                if notices.len() > 32 {
+                    let excess = notices.len() - 32;
+                    notices.drain(0..excess);
+                }
+                Some(notice)
+            }
+            _ => None,
+        };
         self.emit(
             workspace_id,
             thread_id,
@@ -1255,6 +1319,7 @@ impl AppState {
                 level,
                 message,
                 raw_method,
+                notice,
             },
         );
         Ok(())
@@ -1305,6 +1370,39 @@ impl AppState {
         status: Option<&falcondeck_core::GitFileStatus>,
     ) -> Result<falcondeck_core::GitDiffResponse, DaemonError> {
         crate::git::git_diff(&self.git_root(workspace_id, thread_id).await?, path, status).await
+    }
+
+    pub async fn workspace_files(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+    ) -> Result<falcondeck_core::WorkspaceFilesResponse, DaemonError> {
+        crate::workspace_files::list_files(&self.git_root(workspace_id, thread_id).await?).await
+    }
+
+    pub async fn workspace_file(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+        path: &str,
+    ) -> Result<falcondeck_core::WorkspaceFileResponse, DaemonError> {
+        crate::workspace_files::read_file(&self.git_root(workspace_id, thread_id).await?, path)
+            .await
+    }
+
+    pub async fn write_workspace_file(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+        path: &str,
+        request: &falcondeck_core::WriteWorkspaceFileRequest,
+    ) -> Result<falcondeck_core::WorkspaceFileResponse, DaemonError> {
+        crate::workspace_files::write_file(
+            &self.git_root(workspace_id, thread_id).await?,
+            path,
+            request,
+        )
+        .await
     }
 
     /// Directory git status and diffs are read from: an isolated thread's own

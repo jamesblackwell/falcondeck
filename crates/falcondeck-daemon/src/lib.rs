@@ -18,6 +18,7 @@ mod git;
 mod skills;
 mod ssh_config;
 mod variant;
+mod workspace_files;
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

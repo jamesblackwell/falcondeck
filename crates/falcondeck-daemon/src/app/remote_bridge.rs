@@ -2,10 +2,11 @@ use std::{collections::HashMap, sync::atomic::Ordering};
 
 use chrono::Utc;
 use falcondeck_core::{
-    DaemonSnapshot, EncryptedEnvelope, EventEnvelope, PairingPublicKeyBundle, RelayClientMessage,
-    RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse, RemoteConnectionStatus,
-    SendTurnRequest, SessionKeyMaterial, SnapshotRequest, StartThreadRequest, ThreadDetailMode,
-    ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
+    DaemonSnapshot, EncryptedEnvelope, EventEnvelope, ForkThreadRequest, PairingPublicKeyBundle,
+    RelayClientMessage, RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse,
+    RemoteConnectionStatus, SendTurnRequest, SessionKeyMaterial, SnapshotRequest,
+    StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
+    UpdatePreferencesRequest, UpdateThreadRequest,
     crypto::{
         LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material,
         verify_pairing_public_key_bundle,
@@ -42,6 +43,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "interactive.respond",
     "approval.respond",
     "thread.start",
+    "thread.fork",
     "thread.detail",
     "thread.update",
     "thread.archive",
@@ -58,6 +60,11 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.queue.edit",
     "workspace.connect",
     "workspace.remove",
+    "workspace.files",
+    "workspace.file.read",
+    "workspace.file.write",
+    "git.status",
+    "git.diff",
     "connectors.read",
     "connectors.update",
     "providers.read",
@@ -169,11 +176,7 @@ impl AppState {
                             }
                             send_relay_message(
                                 &mut writer,
-                                &RelayClientMessage::Update {
-                                    body: RelayUpdateBody::Encrypted {
-                                        envelope: encrypt_remote_daemon_event(&pairing.data_key, &event)?,
-                                    },
-                                },
+                                &remote_event_message(&pairing.data_key, &event)?,
                             ).await?;
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -704,6 +707,17 @@ impl AppState {
                         .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
+                "thread.fork" => {
+                    let request = ForkThreadRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        last_turn_id: required(&["lastTurnId", "last_turn_id"])?,
+                    };
+                    self.fork_thread(request)
+                        .await
+                        .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
                 "thread.detail" => {
                     let request = ThreadDetailRequest {
                         workspace_id: required(&["workspaceId", "workspace_id"])?,
@@ -781,6 +795,65 @@ impl AppState {
                             serde_json::to_value(response).map_err(DaemonError::from)
                         })
                         .map_err(|error| error.to_string())
+                }
+                "workspace.files" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = extract_string(&params, &["threadId", "thread_id"]);
+                    self.workspace_files(&workspace_id, thread_id.as_deref())
+                        .await
+                        .and_then(|files| serde_json::to_value(files).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "workspace.file.read" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = extract_string(&params, &["threadId", "thread_id"]);
+                    let path = required(&["path"])?;
+                    self.workspace_file(&workspace_id, thread_id.as_deref(), &path)
+                        .await
+                        .and_then(|file| serde_json::to_value(file).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "workspace.file.write" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = extract_string(&params, &["threadId", "thread_id"]);
+                    let path = required(&["path"])?;
+                    let request = falcondeck_core::WriteWorkspaceFileRequest {
+                        content: required(&["content"])?,
+                        expected_version: extract_string(
+                            &params,
+                            &["expectedVersion", "expected_version"],
+                        ),
+                    };
+                    self.write_workspace_file(&workspace_id, thread_id.as_deref(), &path, &request)
+                        .await
+                        .and_then(|file| serde_json::to_value(file).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "git.status" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = extract_string(&params, &["threadId", "thread_id"]);
+                    self.git_status(&workspace_id, thread_id.as_deref())
+                        .await
+                        .and_then(|status| serde_json::to_value(status).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "git.diff" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = extract_string(&params, &["threadId", "thread_id"]);
+                    let path = extract_string(&params, &["path"]);
+                    let status = params
+                        .get("status")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok());
+                    self.git_diff(
+                        &workspace_id,
+                        thread_id.as_deref(),
+                        path.as_deref(),
+                        status.as_ref(),
+                    )
+                    .await
+                    .and_then(|diff| serde_json::to_value(diff).map_err(DaemonError::from))
+                    .map_err(|error| error.to_string())
                 }
                 "thread.goal.set" => {
                     let request = falcondeck_core::SetThreadGoalRequest {
@@ -1374,6 +1447,30 @@ pub(super) fn encrypt_remote_daemon_event(
     .map_err(|error| format!("failed to encrypt relay update: {error}"))
 }
 
+fn remote_event_message(
+    data_key: &[u8; 32],
+    event: &EventEnvelope,
+) -> Result<RelayClientMessage, String> {
+    let envelope = encrypt_remote_daemon_event(data_key, event)?;
+    if matches!(
+        event.event,
+        UnifiedEvent::RealtimeAudioStarted { .. }
+            | UnifiedEvent::RealtimeAudioDelta { .. }
+            | UnifiedEvent::RealtimeAudioEnded { .. }
+            | UnifiedEvent::RealtimeItemAdded { .. }
+    ) {
+        return Ok(RelayClientMessage::Ephemeral {
+            body: json!({
+                "kind": "encrypted-daemon-event",
+                "envelope": envelope,
+            }),
+        });
+    }
+    Ok(RelayClientMessage::Update {
+        body: RelayUpdateBody::Encrypted { envelope },
+    })
+}
+
 async fn send_relay_message(
     writer: &mut RelayWriter,
     message: &RelayClientMessage,
@@ -1397,6 +1494,76 @@ fn explicit_optional_string(params: &Value, keys: &[&str]) -> Option<Option<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn realtime_audio_uses_encrypted_non_replayed_relay_delivery() {
+        let event = EventEnvelope {
+            seq: 7,
+            emitted_at: Utc::now(),
+            workspace_id: Some("workspace-1".to_string()),
+            thread_id: Some("thread-1".to_string()),
+            event: UnifiedEvent::RealtimeAudioDelta {
+                audio: falcondeck_core::RealtimeAudioChunk {
+                    item_id: Some("voice-1".to_string()),
+                    data: "AAAA".to_string(),
+                    sample_rate: 24_000,
+                    num_channels: 1,
+                    samples_per_channel: Some(1),
+                },
+            },
+        };
+
+        let message = remote_event_message(&[7; 32], &event).expect("encrypted event");
+        assert!(matches!(
+            message,
+            RelayClientMessage::Ephemeral { body }
+                if body.get("kind").and_then(Value::as_str) == Some("encrypted-daemon-event")
+                    && body.get("envelope").is_some()
+        ));
+    }
+
+    #[test]
+    fn realtime_items_also_bypass_relay_replay() {
+        let event = EventEnvelope {
+            seq: 9,
+            emitted_at: Utc::now(),
+            workspace_id: Some("workspace-1".to_string()),
+            thread_id: Some("thread-1".to_string()),
+            event: UnifiedEvent::RealtimeItemAdded {
+                item: falcondeck_core::RealtimeConversationItem {
+                    id: "handoff-1".to_string(),
+                    item_type: "handoff_request".to_string(),
+                    title: "Voice handoff requested".to_string(),
+                    summary: None,
+                    payload: json!({ "type": "handoff_request" }),
+                    created_at: Utc::now(),
+                },
+            },
+        };
+
+        assert!(matches!(
+            remote_event_message(&[9; 32], &event).expect("encrypted event"),
+            RelayClientMessage::Ephemeral { .. }
+        ));
+    }
+
+    #[test]
+    fn durable_daemon_events_still_use_replayed_relay_updates() {
+        let event = EventEnvelope {
+            seq: 8,
+            emitted_at: Utc::now(),
+            workspace_id: None,
+            thread_id: None,
+            event: UnifiedEvent::Stop { reason: None },
+        };
+
+        assert!(matches!(
+            remote_event_message(&[8; 32], &event).expect("encrypted event"),
+            RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted { .. }
+            }
+        ));
+    }
 
     /// Guards the registration↔dispatch invariant: a method advertised to the
     /// relay must have a dispatch arm, or every remote call to it fails with

@@ -3,7 +3,12 @@ import { useEffect, useState } from 'react'
 import type { GitDiffResponse, GitFileStatus } from '@falcondeck/client-core'
 
 type DaemonApi = {
-  gitDiff: (workspaceId: string, path?: string, status?: GitFileStatus | null) => Promise<GitDiffResponse>
+  gitDiff: (
+    workspaceId: string,
+    path?: string,
+    status?: GitFileStatus | null,
+    threadId?: string | null,
+  ) => Promise<GitDiffResponse>
 }
 
 export function useGitDiff(
@@ -11,6 +16,7 @@ export function useGitDiff(
   workspaceId: string | null,
   filePath: string | null,
   fileStatus: GitFileStatus | null,
+  threadId: string | null = null,
 ) {
   const [diff, setDiff] = useState<string | null>(null)
   const [content, setContent] = useState<string | null>(null)
@@ -30,7 +36,7 @@ export function useGitDiff(
       setError(null)
 
       try {
-        const result = await api.gitDiff(workspaceId, filePath, fileStatus)
+        const result = await api.gitDiff(workspaceId, filePath, fileStatus, threadId)
         if (!cancelled) {
           setDiff(result.diff)
           setContent(result.content ?? null)
@@ -49,7 +55,7 @@ export function useGitDiff(
     void loadDiff()
 
     return () => { cancelled = true }
-  }, [api, workspaceId, filePath, fileStatus])
+  }, [api, workspaceId, filePath, fileStatus, threadId])
 
   return {
     diff: isActive ? diff : null,

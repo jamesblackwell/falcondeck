@@ -69,6 +69,8 @@ export type AgentCapabilitySummary = {
   supports_interrupt: boolean
   /** Whether a message can be injected into a running turn to redirect it. */
   supports_steering: boolean
+  /** Whether the provider can branch history at a completed turn boundary. */
+  supports_forking: boolean
   /** Sandbox modes the provider accepts; empty hides the sandbox picker. */
   sandbox_modes: string[]
   /** Permission modes the provider accepts; empty hides the picker. */
@@ -195,16 +197,144 @@ export type ToolActivityKind =
   | 'context'
   | 'other'
 export type ToolHistoryMode = 'summary' | 'full'
+export type ToolLifecycle =
+  | 'unknown'
+  | 'queued'
+  | 'awaiting_approval'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'denied'
+  | 'interrupted'
+export type ContentLifecycle = 'pending' | 'streaming' | 'complete' | 'interrupted' | 'error'
+
+export type ToolTestSummary = {
+  framework: string | null
+  total: number | null
+  passed: number | null
+  failed: number | null
+  skipped: number | null
+  suites_total: number | null
+  suites_passed: number | null
+  suites_failed: number | null
+  duration_ms: number | null
+}
 
 export type ToolCallDisplay = {
   is_read_only: boolean
   has_side_effect: boolean
   is_error: boolean
+  /** Added in protocol vNext; clients derive it from status for older history. */
+  lifecycle?: ToolLifecycle
   artifact_kind: ToolArtifactKind
   activity_kind: ToolActivityKind
   history_mode: ToolHistoryMode
   summary_hint: string | null
+  /** Optional because older daemons do not derive structured test counts. */
+  test_summary?: ToolTestSummary | null
 }
+
+export type ToolCommandAction = {
+  action_kind: string
+  command: string
+  name: string | null
+  path: string | null
+  query: string | null
+}
+
+export type ToolMcpAppContext = {
+  connector_id: string
+  app_name: string | null
+  action_name: string | null
+  link_id: string | null
+  resource_uri: string | null
+  template_id: string | null
+}
+
+export type ToolOutputContentItem =
+  | { kind: 'text'; text: string }
+  | { kind: 'image'; url: string }
+
+export type ToolCollabAgentState = {
+  status: string
+  message: string | null
+}
+
+export type ToolHookOutputEntry = {
+  entry_kind: string
+  text: string
+}
+
+export type ToolCallDetail =
+  | {
+      kind: 'command_execution'
+      command: string
+      cwd: string
+      actions: ToolCommandAction[]
+      process_id: string | null
+      duration_ms: number | null
+      source: string | null
+    }
+  | {
+      kind: 'mcp'
+      server: string
+      tool: string
+      arguments: unknown
+      result: unknown | null
+      error: string | null
+      duration_ms: number | null
+      app_context: ToolMcpAppContext | null
+    }
+  | {
+      kind: 'dynamic'
+      tool: string
+      namespace: string | null
+      arguments: unknown
+      content_items: ToolOutputContentItem[]
+      success: boolean | null
+      duration_ms: number | null
+    }
+  | {
+      kind: 'collab_agent'
+      tool: string
+      sender_thread_id: string
+      receiver_thread_ids: string[]
+      prompt: string | null
+      model: string | null
+      reasoning_effort: string | null
+      agent_states: Record<string, ToolCollabAgentState>
+    }
+  | {
+      kind: 'subagent_activity'
+      activity: string
+      agent_thread_id: string
+      agent_path: string
+    }
+  | {
+      kind: 'hook'
+      event_name: string
+      handler_type: string
+      execution_mode: string
+      scope: string
+      source_path: string
+      duration_ms: number | null
+      status_message: string | null
+      entries: ToolHookOutputEntry[]
+    }
+  | {
+      kind: 'guardian_review'
+      review_id: string
+      action_kind: string
+      action: string
+      cwd: string | null
+      target_item_id: string | null
+      status: string
+      risk_level: string | null
+      user_authorization: string | null
+      rationale: string | null
+      decision_source: string | null
+      duration_ms: number | null
+    }
 
 export type WorkspaceSummary = {
   id: string
@@ -332,6 +462,19 @@ export type InteractiveResponsePayload =
       answers: Record<string, string[]>
     }
 
+export type InteractiveRequestOutcome =
+  | 'allowed'
+  | 'always_allowed'
+  | 'denied'
+  | 'answered'
+  | 'expired'
+  | 'cancelled'
+
+export type InteractiveRequestResolution = {
+  outcome: InteractiveRequestOutcome
+  resolved_at: string
+}
+
 export type ImageInput = {
   type: 'image'
   id: string
@@ -339,6 +482,58 @@ export type ImageInput = {
   mime_type: string | null
   url: string
   local_path?: string | null
+}
+
+export type ConversationImage = {
+  id: string
+  name?: string | null
+  mime_type?: string | null
+  url: string
+  local_path?: string | null
+  alt_text?: string | null
+}
+
+export type WebSearchActionKind = 'search' | 'open_page' | 'find_in_page' | 'other'
+
+export type ConversationWebSearch = {
+  id: string
+  query: string
+  action_kind: WebSearchActionKind
+  queries: string[]
+  url: string | null
+  pattern: string | null
+}
+
+export type ConversationFileChange = {
+  path: string
+  /** Open-ended provider value; known Codex values are add/delete/update. */
+  change_kind: string
+  diff: string
+  move_path: string | null
+}
+
+export type AssistantMessagePhase = 'commentary' | 'final_answer'
+
+export type MemoryCitationEntry = {
+  path: string
+  line_start: number
+  line_end: number
+  note: string
+}
+
+export type ConversationMemoryCitation = {
+  entries: MemoryCitationEntry[]
+  thread_ids: string[]
+}
+
+/** Evidence explicitly attached to assistant content by the provider. */
+export type ConversationCitation = {
+  /** Open-ended provider discriminator. */
+  kind: string
+  url?: string | null
+  source?: string | null
+  title?: string | null
+  cited_text?: string | null
 }
 
 export type TextInput = {
@@ -360,12 +555,24 @@ export type ConversationItem =
       id: string
       text: string
       attachments: ImageInput[]
+      /** Provider turn containing this message, when known. */
+      turn_id?: string | null
+      /** Last completed turn before this message; safe edit/fork boundary. */
+      previous_turn_id?: string | null
       created_at: string
     }
   | {
       kind: 'assistant_message'
       id: string
       text: string
+      /** Provider-supplied role within the turn; absent means unknown/legacy. */
+      phase?: AssistantMessagePhase | null
+      /** Provider-supplied file-backed evidence for the response. */
+      memory_citation?: ConversationMemoryCitation | null
+      /** Provider-emitted web, document, or retrieval citations. */
+      citations?: ConversationCitation[]
+      /** Omitted by older daemons and hydrated as complete by clients. */
+      lifecycle?: ContentLifecycle
       created_at: string
     }
   | {
@@ -373,7 +580,36 @@ export type ConversationItem =
       id: string
       summary: string | null
       content: string
+      /** Omitted by older daemons and hydrated as complete by clients. */
+      lifecycle?: ContentLifecycle
       created_at: string
+    }
+  | {
+      kind: 'image'
+      id: string
+      title?: string | null
+      image: ConversationImage
+      /** Omitted by older daemons and hydrated as complete by clients. */
+      lifecycle?: ContentLifecycle
+      created_at: string
+    }
+  | {
+      kind: 'web_search'
+      id: string
+      search: ConversationWebSearch
+      /** Omitted by older daemons and hydrated as complete by clients. */
+      lifecycle?: ContentLifecycle
+      created_at: string
+    }
+  | {
+      kind: 'file_change'
+      id: string
+      changes: ConversationFileChange[]
+      status: string
+      /** Omitted by older daemons and derived from status by clients. */
+      lifecycle?: ToolLifecycle
+      created_at: string
+      completed_at: string | null
     }
   | {
       kind: 'tool_call'
@@ -384,6 +620,7 @@ export type ConversationItem =
       output: string | null
       exit_code: number | null
       display: ToolCallDisplay
+      detail?: ToolCallDetail | null
       created_at: string
       completed_at: string | null
     }
@@ -407,11 +644,21 @@ export type ConversationItem =
       created_at: string
     }
   | {
+      kind: 'realtime'
+      id: string
+      item_type: string
+      title: string
+      summary: string | null
+      payload: unknown
+      created_at: string
+    }
+  | {
       kind: 'interactive_request'
       id: string
       request: InteractiveRequest
       created_at: string
       resolved: boolean
+      resolution?: InteractiveRequestResolution | null
     }
 
 export type ThreadDetail = {
@@ -432,7 +679,35 @@ export type DaemonSnapshot = {
   workspaces: WorkspaceSummary[]
   threads: ThreadSummary[]
   interactive_requests: InteractiveRequest[]
+  /** Older daemons omit workspace notices; normalization always supplies an array. */
+  service_notices?: ServiceNotice[]
+  /** High-frequency usage lives outside thread summaries to avoid sidebar churn. */
+  thread_token_usage?: Record<string, ThreadTokenUsage>
   preferences: FalconDeckPreferences
+}
+
+export type ServiceNotice = {
+  id: string
+  workspace_id: string
+  level: ServiceLevel
+  message: string
+  raw_method: string | null
+  created_at: string
+}
+
+export type TokenUsageBreakdown = {
+  total_tokens: number
+  input_tokens: number
+  cached_input_tokens: number
+  output_tokens: number
+  reasoning_output_tokens: number
+}
+
+export type ThreadTokenUsage = {
+  total: TokenUsageBreakdown
+  last: TokenUsageBreakdown | null
+  model_context_window: number | null
+  updated_at: string | null
 }
 
 export type SnapshotRequest = {
@@ -460,8 +735,21 @@ export type EventEnvelope = {
     | { type: 'stop'; reason?: string | null }
     | { type: 'turn-start'; turn_id: string }
     | { type: 'turn-end'; turn_id: string; status: string; error?: string | null }
-    | { type: 'text'; item_id: string; delta: string }
-    | { type: 'service'; level: ServiceLevel; message: string; raw_method?: string | null }
+    | {
+        type: 'text'
+        item_id: string
+        delta: string
+        target?: 'assistant_text' | 'reasoning_summary' | 'reasoning_content' | 'tool_output' | 'plan_explanation'
+        /** UTF-16 offsets let clients reject gaps and repeated relay events safely. */
+        start_offset?: number | null
+        end_offset?: number | null
+      }
+    | { type: 'service'; level: ServiceLevel; message: string; raw_method?: string | null; notice?: ServiceNotice | null }
+    | { type: 'thread-token-usage-updated'; usage: ThreadTokenUsage }
+    | { type: 'realtime-audio-started'; session_id?: string | null }
+    | { type: 'realtime-audio-delta'; audio: RealtimeAudioChunk }
+    | { type: 'realtime-audio-ended'; reason?: string | null; interrupted: boolean }
+    | { type: 'realtime-item-added'; item: RealtimeConversationItem }
     | { type: 'tool-call-start'; item_id: string; title: string; kind: string }
     | {
         type: 'tool-call-end'
@@ -479,6 +767,24 @@ export type EventEnvelope = {
     | { type: 'preferences-updated'; preferences: FalconDeckPreferences }
     | { type: 'conversation-item-added'; item: ConversationItem }
     | { type: 'conversation-item-updated'; item: ConversationItem }
+}
+
+export type RealtimeAudioChunk = {
+  item_id: string | null
+  /** Base64-encoded interleaved signed 16-bit little-endian PCM. */
+  data: string
+  sample_rate: number
+  num_channels: number
+  samples_per_channel: number | null
+}
+
+export type RealtimeConversationItem = {
+  id: string
+  item_type: string
+  title: string
+  summary: string | null
+  payload: unknown
+  created_at: string
 }
 
 export type ThreadHandle = {
@@ -542,6 +848,24 @@ export type GitStatusResponse = {
 export type GitDiffResponse = {
   diff: string
   content: string | null
+}
+
+export type WorkspaceFilesResponse = {
+  files: string[]
+  truncated: boolean
+}
+
+export type WorkspaceFileResponse = {
+  path: string
+  content: string | null
+  is_binary: boolean
+  truncated: boolean
+  version: string | null
+}
+
+export type WriteWorkspaceFilePayload = {
+  content: string
+  expected_version: string | null
 }
 
 export type GitBranchesResponse = {

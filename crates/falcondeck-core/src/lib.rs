@@ -180,6 +180,9 @@ pub struct ToolCallDisplay {
     /// Whether the tool is in an error state.
     #[serde(default)]
     pub is_error: bool,
+    /// Provider-independent lifecycle used by clients for status presentation.
+    #[serde(default)]
+    pub lifecycle: ToolLifecycle,
     /// Artifact classification used by clients to decide prominence.
     #[serde(default)]
     pub artifact_kind: ToolArtifactKind,
@@ -192,6 +195,266 @@ pub struct ToolCallDisplay {
     /// Optional short summary hint for grouped tool-burst headers.
     #[serde(default)]
     pub summary_hint: Option<String>,
+    /// Best-effort structured counts parsed from a provider's test-run output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub test_summary: Option<ToolTestSummary>,
+}
+
+/// Provider-independent summary of a test run. Raw output remains authoritative.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ToolTestSummary {
+    /// Detected runner (`vitest`, `jest`, `pytest`, `cargo`, `go`, or newer).
+    #[serde(default)]
+    pub framework: Option<String>,
+    /// Total individual tests when reported or safely derived.
+    #[serde(default)]
+    pub total: Option<u64>,
+    /// Passed individual tests.
+    #[serde(default)]
+    pub passed: Option<u64>,
+    /// Failed individual tests.
+    #[serde(default)]
+    pub failed: Option<u64>,
+    /// Skipped, ignored, pending, or otherwise not-run tests.
+    #[serde(default)]
+    pub skipped: Option<u64>,
+    /// Total suites/files when the runner reports them separately.
+    #[serde(default)]
+    pub suites_total: Option<u64>,
+    /// Passed suites/files.
+    #[serde(default)]
+    pub suites_passed: Option<u64>,
+    /// Failed suites/files.
+    #[serde(default)]
+    pub suites_failed: Option<u64>,
+    /// Runner-reported wall duration, normalized to milliseconds.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+}
+
+/// Best-effort semantic action parsed from a shell command by the provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCommandAction {
+    /// Open-ended action kind (`read`, `list_files`, `search`, or newer).
+    pub action_kind: String,
+    /// Command fragment associated with this action.
+    pub command: String,
+    /// Optional filename supplied for read actions.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Optional path affected or inspected by the action.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Optional search query supplied by the provider.
+    #[serde(default)]
+    pub query: Option<String>,
+}
+
+/// Application identity attached to an MCP tool invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolMcpAppContext {
+    /// Stable connector identifier.
+    pub connector_id: String,
+    /// Human-readable application name, when supplied.
+    #[serde(default)]
+    pub app_name: Option<String>,
+    /// Application action name, when supplied.
+    #[serde(default)]
+    pub action_name: Option<String>,
+    /// Provider link identifier, when supplied.
+    #[serde(default)]
+    pub link_id: Option<String>,
+    /// Resource URI used by the action, when supplied.
+    #[serde(default)]
+    pub resource_uri: Option<String>,
+    /// Application template identifier, when supplied.
+    #[serde(default)]
+    pub template_id: Option<String>,
+}
+
+/// Structured content returned by a provider-defined dynamic tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolOutputContentItem {
+    /// Text returned by the tool.
+    Text {
+        /// Exact returned text.
+        text: String,
+    },
+    /// Image returned by the tool.
+    Image {
+        /// Renderable image URL or data URL.
+        url: String,
+    },
+}
+
+/// Latest status reported for one collaboration target thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCollabAgentState {
+    /// Open-ended Codex state (`running`, `completed`, `errored`, and newer).
+    pub status: String,
+    /// Optional human-readable provider status detail.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// One typed line emitted by a Codex hook run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolHookOutputEntry {
+    /// Entry severity/category (`warning`, `stop`, `feedback`, `context`, or `error`).
+    pub entry_kind: String,
+    /// Exact hook output text.
+    pub text: String,
+}
+
+/// Provider-native structured detail retained for a generic tool call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolCallDetail {
+    /// Codex command execution metadata beyond its streamed output.
+    CommandExecution {
+        /// Exact shell command requested by the agent.
+        command: String,
+        /// Working directory in which the process ran.
+        cwd: String,
+        /// Best-effort semantic actions parsed by Codex.
+        #[serde(default)]
+        actions: Vec<ToolCommandAction>,
+        /// Underlying PTY process identifier, when available.
+        #[serde(default)]
+        process_id: Option<String>,
+        /// Total provider-reported duration in milliseconds.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        /// Open-ended command source (`agent`, `userShell`, or newer).
+        #[serde(default)]
+        source: Option<String>,
+    },
+    /// Model Context Protocol tool invocation and its structured result.
+    Mcp {
+        /// MCP server name.
+        server: String,
+        /// MCP tool name.
+        tool: String,
+        /// Provider-native JSON arguments.
+        arguments: Value,
+        /// Provider-native MCP result, including content and structured content.
+        #[serde(default)]
+        result: Option<Value>,
+        /// Provider error message, when the call failed.
+        #[serde(default)]
+        error: Option<String>,
+        /// Provider-reported duration in milliseconds.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        /// Connected application context, when available.
+        #[serde(default)]
+        app_context: Option<ToolMcpAppContext>,
+    },
+    /// Provider-defined dynamic tool invocation and typed returned content.
+    Dynamic {
+        /// Dynamic tool name.
+        tool: String,
+        /// Optional tool namespace.
+        #[serde(default)]
+        namespace: Option<String>,
+        /// Provider-native JSON arguments.
+        arguments: Value,
+        /// Ordered text and image outputs.
+        #[serde(default)]
+        content_items: Vec<ToolOutputContentItem>,
+        /// Provider success flag, when terminal.
+        #[serde(default)]
+        success: Option<bool>,
+        /// Provider-reported duration in milliseconds.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
+    /// A Codex collaboration operation involving one or more agent threads.
+    CollabAgent {
+        /// Operation (`spawnAgent`, `sendInput`, `resumeAgent`, `wait`, or `closeAgent`).
+        tool: String,
+        /// Thread issuing the operation.
+        sender_thread_id: String,
+        /// Target or newly spawned thread ids.
+        #[serde(default)]
+        receiver_thread_ids: Vec<String>,
+        /// Exact delegated prompt or follow-up input, when available.
+        #[serde(default)]
+        prompt: Option<String>,
+        /// Requested model for a spawn.
+        #[serde(default)]
+        model: Option<String>,
+        /// Requested reasoning effort for a spawn.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+        /// Last known state keyed by target thread id.
+        #[serde(default)]
+        agent_states: std::collections::BTreeMap<String, ToolCollabAgentState>,
+    },
+    /// Lifecycle activity emitted by a spawned sub-agent thread.
+    SubagentActivity {
+        /// Activity (`started`, `interacted`, or `interrupted`).
+        activity: String,
+        /// Stable spawned thread id.
+        agent_thread_id: String,
+        /// Provider agent path/name.
+        agent_path: String,
+    },
+    /// A Codex hook execution and its typed output.
+    Hook {
+        /// Hook lifecycle event (`preToolUse`, `subagentStart`, and newer).
+        event_name: String,
+        /// Handler implementation (`command`, `prompt`, or `agent`).
+        handler_type: String,
+        /// Whether the hook ran synchronously or asynchronously.
+        execution_mode: String,
+        /// Hook scope (`thread` or `turn`).
+        scope: String,
+        /// Provider-reported hook source file.
+        source_path: String,
+        /// Provider-reported runtime in milliseconds.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        /// Optional terminal status detail.
+        #[serde(default)]
+        status_message: Option<String>,
+        /// Ordered typed hook outputs.
+        #[serde(default)]
+        entries: Vec<ToolHookOutputEntry>,
+    },
+    /// A provider safety review of a potentially sensitive action.
+    GuardianReview {
+        /// Stable provider review identifier.
+        review_id: String,
+        /// Reviewed action category (`command`, `applyPatch`, `networkAccess`, and newer).
+        action_kind: String,
+        /// Human-readable exact action target or command.
+        action: String,
+        /// Working directory for filesystem or process actions, when supplied.
+        #[serde(default)]
+        cwd: Option<String>,
+        /// Item or tool call under review, when the provider can identify one.
+        #[serde(default)]
+        target_item_id: Option<String>,
+        /// Provider review state (`inProgress`, `approved`, `denied`, and newer).
+        status: String,
+        /// Provider-assigned risk level.
+        #[serde(default)]
+        risk_level: Option<String>,
+        /// Provider-assigned user authorization level.
+        #[serde(default)]
+        user_authorization: Option<String>,
+        /// Exact provider rationale, when supplied.
+        #[serde(default)]
+        rationale: Option<String>,
+        /// Source of the terminal decision, when supplied.
+        #[serde(default)]
+        decision_source: Option<String>,
+        /// Provider-reported review duration in milliseconds.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+    },
 }
 
 impl Default for ToolCallDisplay {
@@ -200,12 +463,54 @@ impl Default for ToolCallDisplay {
             is_read_only: false,
             has_side_effect: false,
             is_error: false,
+            lifecycle: ToolLifecycle::Unknown,
             artifact_kind: ToolArtifactKind::None,
             activity_kind: ToolActivityKind::Other,
             history_mode: ToolHistoryMode::Full,
             summary_hint: None,
+            test_summary: None,
         }
     }
+}
+
+/// Provider-independent lifecycle for one tool invocation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolLifecycle {
+    /// The provider has not supplied a recognized lifecycle yet.
+    #[default]
+    Unknown,
+    /// The call is accepted but has not started.
+    Queued,
+    /// The call is paused until the user approves it.
+    AwaitingApproval,
+    /// The tool is actively executing or streaming output.
+    Running,
+    /// The tool finished successfully.
+    Succeeded,
+    /// The tool finished with an error or non-zero exit code.
+    Failed,
+    /// The user or policy denied the invocation.
+    Denied,
+    /// Execution stopped before reaching a terminal result.
+    Interrupted,
+}
+
+/// Lifecycle for assistant-authored text and reasoning content.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentLifecycle {
+    /// The provider announced content but has not emitted its first fragment.
+    Pending,
+    /// Content is actively receiving fragments.
+    Streaming,
+    /// Content reached a normal terminal state.
+    #[default]
+    Complete,
+    /// The user or provider stopped the turn before content completed.
+    Interrupted,
+    /// The turn failed while producing this content.
+    Error,
 }
 
 /// High-level artifact type associated with a tool call.
@@ -278,9 +583,65 @@ pub struct DaemonSnapshot {
     pub threads: Vec<ThreadSummary>,
     /// Outstanding approvals or questions awaiting user input.
     pub interactive_requests: Vec<InteractiveRequest>,
+    /// Recent workspace-level operational notices that do not belong in a transcript.
+    #[serde(default)]
+    pub service_notices: Vec<ServiceNotice>,
+    /// Latest provider-reported token usage keyed by thread id. Kept separate
+    /// from thread summaries so frequent usage updates do not churn sidebars.
+    #[serde(default)]
+    pub thread_token_usage: std::collections::BTreeMap<String, ThreadTokenUsage>,
     /// Global FalconDeck preferences persisted by the daemon.
     #[serde(default)]
     pub preferences: FalconDeckPreferences,
+}
+
+/// Retained operational notice scoped to a workspace rather than a thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceNotice {
+    /// Stable notice identity for replay deduplication and local dismissal.
+    pub id: String,
+    /// Workspace affected by the notice.
+    pub workspace_id: String,
+    /// Notice severity.
+    pub level: ServiceLevel,
+    /// Human-readable provider detail.
+    pub message: String,
+    /// Provider notification method, when known.
+    #[serde(default)]
+    pub raw_method: Option<String>,
+    /// When FalconDeck received the notice.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Provider-reported token counts for one scope.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TokenUsageBreakdown {
+    /// Total tokens in this breakdown.
+    pub total_tokens: u64,
+    /// Non-cached prompt tokens.
+    pub input_tokens: u64,
+    /// Prompt tokens served from provider cache.
+    pub cached_input_tokens: u64,
+    /// Generated response tokens.
+    pub output_tokens: u64,
+    /// Generated reasoning tokens, when separately reported.
+    pub reasoning_output_tokens: u64,
+}
+
+/// Latest context usage reported for a thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadTokenUsage {
+    /// Aggregate usage for the active thread context.
+    pub total: TokenUsageBreakdown,
+    /// Usage attributed to the latest model call.
+    #[serde(default)]
+    pub last: Option<TokenUsageBreakdown>,
+    /// Maximum model context size in tokens, when reported.
+    #[serde(default)]
+    pub model_context_window: Option<u64>,
+    /// Provider notification time, when available.
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
 }
 
 /// Health-check response for daemon HTTP endpoints.
@@ -331,6 +692,17 @@ pub struct StartThreadRequest {
     /// between the project folder and an isolated copy afterwards.
     #[serde(default)]
     pub isolation: ThreadIsolation,
+}
+
+/// Request payload used to fork a provider-owned thread at a completed turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkThreadRequest {
+    /// Workspace identifier that owns the source thread.
+    pub workspace_id: String,
+    /// Provider thread to branch without modifying the source.
+    pub thread_id: String,
+    /// Last completed provider turn to retain, inclusive.
+    pub last_turn_id: String,
 }
 
 /// Working directory a thread's turns run in.
@@ -467,6 +839,129 @@ pub struct ImageInput {
     pub url: String,
     /// Optional absolute local path when the image exists on disk.
     pub local_path: Option<String>,
+}
+
+/// Renderable image produced or inspected by an agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationImage {
+    /// Stable asset identifier, independent of the enclosing conversation item.
+    pub id: String,
+    /// Optional display filename.
+    pub name: Option<String>,
+    /// Optional image MIME type.
+    pub mime_type: Option<String>,
+    /// Client-renderable URL or compact daemon-local path.
+    pub url: String,
+    /// Absolute daemon-local path when the asset is file-backed.
+    pub local_path: Option<String>,
+    /// Provider-supplied description used for accessibility.
+    pub alt_text: Option<String>,
+}
+
+/// Provider-native action represented by a web-search conversation item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchActionKind {
+    /// Search the web for one or more queries.
+    Search,
+    /// Open a result page directly.
+    OpenPage,
+    /// Find text within a previously opened page.
+    FindInPage,
+    /// A provider action newer than this protocol version.
+    Other,
+}
+
+/// Structured web research activity emitted by an agent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationWebSearch {
+    /// Stable action identifier, independent of the enclosing item.
+    pub id: String,
+    /// Provider's top-level display query.
+    pub query: String,
+    /// Typed provider action.
+    pub action_kind: WebSearchActionKind,
+    /// All search queries when a batched search action supplied them.
+    #[serde(default)]
+    pub queries: Vec<String>,
+    /// Page URL for open-page and find-in-page actions.
+    pub url: Option<String>,
+    /// Match pattern for find-in-page actions.
+    pub pattern: Option<String>,
+}
+
+/// One provider-reported file mutation within a file-change item.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationFileChange {
+    /// Workspace-relative or absolute path supplied by the provider.
+    pub path: String,
+    /// Open-ended provider change kind (`add`, `delete`, `update`, or newer).
+    pub change_kind: String,
+    /// Unified diff for this path, when available.
+    #[serde(default)]
+    pub diff: String,
+    /// Destination path when an update also moves or renames the file.
+    #[serde(default)]
+    pub move_path: Option<String>,
+}
+
+/// Provider-supplied role of an assistant message within a turn.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMessagePhase {
+    /// Interim narration; more work or output may follow.
+    Commentary,
+    /// Terminal answer for the current turn.
+    FinalAnswer,
+}
+
+/// A file-backed citation attached to an assistant message.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryCitationEntry {
+    /// File or memory-note path supplied by the provider.
+    pub path: String,
+    /// Inclusive one-based start line when available.
+    pub line_start: u32,
+    /// Inclusive one-based end line when available.
+    pub line_end: u32,
+    /// Provider explanation of what the cited range supports.
+    pub note: String,
+}
+
+/// Structured memory evidence attached to a Codex assistant response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationMemoryCitation {
+    /// Cited file ranges and provider notes.
+    #[serde(default)]
+    pub entries: Vec<MemoryCitationEntry>,
+    /// Native threads from which the memory evidence originated.
+    #[serde(default)]
+    pub thread_ids: Vec<String>,
+}
+
+/// Provider-emitted evidence attached to an assistant response.
+///
+/// `kind` remains open-ended so newer providers can add citation families
+/// without breaking older FalconDeck clients. A citation is evidence only
+/// when the provider attaches it to assistant content; tool/search activity
+/// is intentionally represented elsewhere.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationCitation {
+    /// Provider citation discriminator, for example
+    /// `web_search_result_location` or `search_result_location`.
+    pub kind: String,
+    /// Canonical web URL supplied by the provider, when applicable.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Stable non-web source identifier supplied by the provider.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// Human-readable source title supplied by the provider.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Exact supporting excerpt supplied by the provider.
+    #[serde(default)]
+    pub cited_text: Option<String>,
 }
 
 /// Normalized provider availability for a skill entry.
@@ -639,7 +1134,10 @@ impl ThreadAgentParams {
         }
         fill(&mut self.model_id, &fallback.model_id);
         fill(&mut self.reasoning_effort, &fallback.reasoning_effort);
-        fill(&mut self.collaboration_mode_id, &fallback.collaboration_mode_id);
+        fill(
+            &mut self.collaboration_mode_id,
+            &fallback.collaboration_mode_id,
+        );
         fill(&mut self.approval_policy, &fallback.approval_policy);
         fill(&mut self.service_tier, &fallback.service_tier);
         fill(&mut self.permission_mode, &fallback.permission_mode);
@@ -804,6 +1302,55 @@ pub enum InteractiveResponsePayload {
     },
 }
 
+/// Non-sensitive outcome retained after an interactive request is resolved.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractiveRequestResolution {
+    /// Outcome visible in conversation history.
+    pub outcome: InteractiveRequestOutcome,
+    /// Timestamp when FalconDeck observed the resolution.
+    pub resolved_at: DateTime<Utc>,
+}
+
+/// Possible terminal outcomes for an interactive request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractiveRequestOutcome {
+    /// The request was allowed once.
+    Allowed,
+    /// The request and matching future requests were allowed.
+    AlwaysAllowed,
+    /// The request was denied.
+    Denied,
+    /// The user submitted answers. Answer values are deliberately not retained.
+    Answered,
+    /// The request expired before it could be answered.
+    Expired,
+    /// The request was cancelled without an answer.
+    Cancelled,
+}
+
+impl InteractiveRequestResolution {
+    /// Creates the non-sensitive history record for a submitted response.
+    #[must_use]
+    pub fn from_response(
+        response: &InteractiveResponsePayload,
+        resolved_at: DateTime<Utc>,
+    ) -> Self {
+        let outcome = match response {
+            InteractiveResponsePayload::Approval { decision } => match decision {
+                ApprovalDecision::Allow => InteractiveRequestOutcome::Allowed,
+                ApprovalDecision::Deny => InteractiveRequestOutcome::Denied,
+                ApprovalDecision::AlwaysAllow => InteractiveRequestOutcome::AlwaysAllowed,
+            },
+            InteractiveResponsePayload::Question { .. } => InteractiveRequestOutcome::Answered,
+        };
+        Self {
+            outcome,
+            resolved_at,
+        }
+    }
+}
+
 /// Generic command result returned by mutating endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CommandResponse {
@@ -879,6 +1426,9 @@ pub struct AgentCapabilitySummary {
     /// the message in the thread queue instead.
     #[serde(default)]
     pub supports_steering: bool,
+    /// Whether the provider can create a history-preserving branch at a turn boundary.
+    #[serde(default)]
+    pub supports_forking: bool,
     /// Sandbox modes the provider accepts; empty hides the sandbox picker.
     #[serde(default)]
     pub sandbox_modes: Vec<String>,
@@ -897,6 +1447,7 @@ impl AgentCapabilitySummary {
             supports_skills: true,
             supports_interrupt: true,
             supports_steering: false,
+            supports_forking: true,
             sandbox_modes: vec![
                 "read-only".to_string(),
                 "workspace-write".to_string(),
@@ -917,6 +1468,7 @@ impl AgentCapabilitySummary {
             // The Claude CLI reads `--input-format stream-json` for the whole
             // life of a turn, so extra user messages reach the running agent.
             supports_steering: true,
+            supports_forking: false,
             sandbox_modes: Vec::new(),
             permission_modes: vec![
                 "default".to_string(),
@@ -1350,6 +1902,12 @@ pub enum ConversationItem {
         text: String,
         /// Attached images included with the message.
         attachments: Vec<ImageInput>,
+        /// Provider turn containing this message, when known.
+        #[serde(default)]
+        turn_id: Option<String>,
+        /// Last completed turn before this message; the safe edit/fork boundary.
+        #[serde(default)]
+        previous_turn_id: Option<String>,
         /// Timestamp when the item was created.
         created_at: DateTime<Utc>,
     },
@@ -1359,6 +1917,18 @@ pub enum ConversationItem {
         id: String,
         /// Assistant-visible text content.
         text: String,
+        /// Interim commentary versus the terminal answer, when provided.
+        #[serde(default)]
+        phase: Option<AssistantMessagePhase>,
+        /// Structured file-backed evidence supplied by the provider.
+        #[serde(default)]
+        memory_citation: Option<ConversationMemoryCitation>,
+        /// Provider-emitted web, document, or retrieval citations.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        citations: Vec<ConversationCitation>,
+        /// Streaming and terminal state for this response block.
+        #[serde(default)]
+        lifecycle: ContentLifecycle,
         /// Timestamp when the item was created.
         created_at: DateTime<Utc>,
     },
@@ -1370,8 +1940,54 @@ pub enum ConversationItem {
         summary: Option<String>,
         /// Full reasoning content.
         content: String,
+        /// Streaming and terminal state for this reasoning block.
+        #[serde(default)]
+        lifecycle: ContentLifecycle,
         /// Timestamp when the item was created.
         created_at: DateTime<Utc>,
+    },
+    /// Image generated or viewed by the agent.
+    Image {
+        /// Stable conversation item identifier.
+        id: String,
+        /// Optional short label displayed with the image.
+        title: Option<String>,
+        /// Renderable image asset metadata.
+        image: ConversationImage,
+        /// Loading and terminal state for the image.
+        #[serde(default)]
+        lifecycle: ContentLifecycle,
+        /// Timestamp when the item was created.
+        created_at: DateTime<Utc>,
+    },
+    /// Structured web-search, page-open, or in-page-find activity.
+    WebSearch {
+        /// Stable conversation item identifier.
+        id: String,
+        /// Provider-native search action metadata.
+        search: ConversationWebSearch,
+        /// Loading and terminal state for the research action.
+        #[serde(default)]
+        lifecycle: ContentLifecycle,
+        /// Timestamp when the item was created.
+        created_at: DateTime<Utc>,
+    },
+    /// Structured file mutations emitted by an agent patch operation.
+    FileChange {
+        /// Stable provider item identifier.
+        id: String,
+        /// Ordered file mutations in the patch.
+        changes: Vec<ConversationFileChange>,
+        /// Raw provider status retained for diagnostics and forward compatibility.
+        status: String,
+        /// Provider-independent lifecycle used for consistent presentation.
+        #[serde(default)]
+        lifecycle: ToolLifecycle,
+        /// Timestamp when the patch operation started.
+        created_at: DateTime<Utc>,
+        /// Timestamp when the patch operation reached a terminal state.
+        #[serde(default)]
+        completed_at: Option<DateTime<Utc>>,
     },
     /// Tool invocation emitted by the agent.
     ToolCall {
@@ -1390,6 +2006,11 @@ pub enum ConversationItem {
         /// Display metadata derived by the daemon.
         #[serde(default)]
         display: ToolCallDisplay,
+        /// Provider-native structured metadata used by specialized renderers.
+        /// Boxed so rare, metadata-heavy tools do not inflate every item in a
+        /// long conversation vector.
+        #[serde(default)]
+        detail: Option<Box<ToolCallDetail>>,
         /// Timestamp when the tool call started.
         created_at: DateTime<Utc>,
         /// Timestamp when the tool call finished.
@@ -1434,6 +2055,9 @@ pub enum ConversationItem {
         created_at: DateTime<Utc>,
         /// Whether the request has already been resolved.
         resolved: bool,
+        /// Non-sensitive terminal outcome, when FalconDeck observed one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resolution: Option<InteractiveRequestResolution>,
     },
 }
 
@@ -1475,6 +2099,55 @@ pub struct EventEnvelope {
     pub event: UnifiedEvent,
 }
 
+/// Text field receiving an incremental conversation-item delta.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextDeltaTarget {
+    /// The visible body of an assistant message.
+    #[default]
+    AssistantText,
+    /// The short summary attached to a reasoning item.
+    ReasoningSummary,
+    /// The full content attached to a reasoning item.
+    ReasoningContent,
+    /// Incremental stdout/stderr aggregated for a tool call.
+    ToolOutput,
+    /// Streaming free-form plan text before an authoritative structured plan arrives.
+    PlanExplanation,
+}
+
+/// One streamed PCM audio fragment produced by a realtime conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RealtimeAudioChunk {
+    /// Provider item identifier when one is available.
+    pub item_id: Option<String>,
+    /// Base64-encoded interleaved signed 16-bit little-endian PCM samples.
+    pub data: String,
+    /// PCM sample rate in hertz.
+    pub sample_rate: u32,
+    /// Number of interleaved audio channels.
+    pub num_channels: u16,
+    /// Provider-reported sample frames per channel, when available.
+    pub samples_per_channel: Option<u32>,
+}
+
+/// Forward-compatible non-audio item emitted by a realtime conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RealtimeConversationItem {
+    /// Stable provider item identifier, synthesized when absent.
+    pub id: String,
+    /// Provider item discriminator such as `handoff_request`.
+    pub item_type: String,
+    /// Short human-readable label derived without interpreting unstable fields.
+    pub title: String,
+    /// Best available descriptive text from the item.
+    pub summary: Option<String>,
+    /// Size-bounded provider JSON retained for inspection and future clients.
+    pub payload: Value,
+    /// Time the daemon observed the item.
+    pub created_at: DateTime<Utc>,
+}
+
 /// Event payload sent over the unified daemon stream.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -1514,6 +2187,15 @@ pub enum UnifiedEvent {
         item_id: String,
         /// Text delta content.
         delta: String,
+        /// Conversation-item field receiving the delta.
+        #[serde(default)]
+        target: TextDeltaTarget,
+        /// UTF-16 offset at which the delta starts, for idempotent replay.
+        #[serde(default)]
+        start_offset: Option<u64>,
+        /// UTF-16 offset immediately after the delta, for idempotent replay.
+        #[serde(default)]
+        end_offset: Option<u64>,
     },
     /// Service-level status update.
     Service {
@@ -1523,6 +2205,36 @@ pub enum UnifiedEvent {
         message: String,
         /// Provider method associated with the message, if any.
         raw_method: Option<String>,
+        /// Retained workspace notice for events without a thread target.
+        #[serde(default)]
+        notice: Option<ServiceNotice>,
+    },
+    /// Latest token/context usage for the target thread.
+    ThreadTokenUsageUpdated {
+        /// Provider-reported usage snapshot.
+        usage: ThreadTokenUsage,
+    },
+    /// A realtime audio session started. Live-only; never retained in snapshots.
+    RealtimeAudioStarted {
+        /// Provider realtime session identifier, when available.
+        session_id: Option<String>,
+    },
+    /// A streamed realtime PCM fragment. Remote bridges use non-replayed delivery.
+    RealtimeAudioDelta {
+        /// Audio fragment to enqueue for immediate playback.
+        audio: RealtimeAudioChunk,
+    },
+    /// A realtime audio session reached a terminal state.
+    RealtimeAudioEnded {
+        /// Provider close or error reason, when available.
+        reason: Option<String>,
+        /// Whether pending playback should be discarded rather than drained.
+        interrupted: bool,
+    },
+    /// Raw non-audio realtime item. Live-only and delivered without relay replay.
+    RealtimeItemAdded {
+        /// Forward-compatible item projection.
+        item: RealtimeConversationItem,
     },
     /// Tool call start marker.
     ToolCallStart {
@@ -2323,6 +3035,39 @@ pub struct GitDiffResponse {
     pub content: Option<String>,
 }
 
+/// Workspace-relative files available to the code-review browser.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceFilesResponse {
+    /// Workspace-relative file paths, sorted lexicographically.
+    pub files: Vec<String>,
+    /// Whether the daemon stopped listing at its safety limit.
+    pub truncated: bool,
+}
+
+/// UTF-8 contents and metadata for one workspace file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceFileResponse {
+    /// Workspace-relative path that was read.
+    pub path: String,
+    /// UTF-8 contents, absent for binary or oversized files.
+    pub content: Option<String>,
+    /// Whether the file is not valid UTF-8.
+    pub is_binary: bool,
+    /// Whether the file exceeded the viewer's size limit.
+    pub truncated: bool,
+    /// Opaque filesystem version used for conflict-aware saves.
+    pub version: Option<String>,
+}
+
+/// Conflict-aware request to replace an existing workspace file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WriteWorkspaceFileRequest {
+    /// Complete replacement contents.
+    pub content: String,
+    /// Opaque version returned by the preceding read.
+    pub expected_version: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2337,6 +3082,8 @@ mod tests {
             workspaces: Vec::new(),
             threads: Vec::new(),
             interactive_requests: Vec::new(),
+            service_notices: Vec::new(),
+            thread_token_usage: std::collections::BTreeMap::new(),
             preferences: FalconDeckPreferences::default(),
         };
 
@@ -2355,5 +3102,61 @@ mod tests {
         let json = serde_json::to_value(message).unwrap();
         assert_eq!(json["type"], "ready");
         assert_eq!(json["role"], "daemon");
+    }
+
+    #[test]
+    fn interactive_resolution_retains_outcome_without_question_answers() {
+        let response = InteractiveResponsePayload::Question {
+            answers: std::collections::HashMap::from([(
+                "password".to_string(),
+                vec!["do-not-retain-this".to_string()],
+            )]),
+        };
+        let resolution = InteractiveRequestResolution::from_response(
+            &response,
+            "2026-08-09T12:00:00Z".parse().unwrap(),
+        );
+        let json = serde_json::to_string(&resolution).unwrap();
+
+        assert_eq!(resolution.outcome, InteractiveRequestOutcome::Answered);
+        assert!(
+            !json.contains("do-not-retain-this"),
+            "resolution leaked answer: {json}"
+        );
+    }
+
+    #[test]
+    fn legacy_resolved_interactive_item_deserializes_without_an_outcome() {
+        let item: ConversationItem = serde_json::from_value(serde_json::json!({
+            "kind": "interactive_request",
+            "id": "request-1",
+            "request": {
+                "request_id": "request-1",
+                "workspace_id": "workspace-1",
+                "thread_id": "thread-1",
+                "method": "approval/request",
+                "kind": "approval",
+                "title": "Allow tests?",
+                "detail": null,
+                "command": "npm test",
+                "path": null,
+                "turn_id": null,
+                "item_id": null,
+                "questions": [],
+                "created_at": "2026-08-09T12:00:00Z"
+            },
+            "created_at": "2026-08-09T12:00:00Z",
+            "resolved": true
+        }))
+        .unwrap();
+
+        assert!(matches!(
+            item,
+            ConversationItem::InteractiveRequest {
+                resolved: true,
+                resolution: None,
+                ..
+            }
+        ));
     }
 }

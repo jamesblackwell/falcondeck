@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react'
-import { ArrowLeft, LoaderCircle } from 'lucide-react'
+import { ArrowLeft, ChevronDown, ChevronUp, FileCode2, LoaderCircle } from 'lucide-react'
 
 import {
   buildDiffFileRows,
@@ -18,6 +18,9 @@ export type DiffViewProps = {
   isLoading: boolean
   error: string | null
   onBack: () => void
+  onOpenFile?: (() => void) | null
+  onPrevious?: (() => void) | null
+  onNext?: (() => void) | null
 }
 
 export const DiffView = memo(function DiffView({
@@ -27,6 +30,9 @@ export const DiffView = memo(function DiffView({
   isLoading,
   error,
   onBack,
+  onOpenFile = null,
+  onPrevious = null,
+  onNext = null,
 }: DiffViewProps) {
   const parsed = useMemo(() => parseUnifiedDiff(diff), [diff])
   const fileRows = useMemo(
@@ -50,7 +56,7 @@ export const DiffView = memo(function DiffView({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="flex items-center gap-2 border-b border-border-subtle px-3 pb-2 pt-10">
+      <div className="flex h-11 items-center gap-2 border-b border-border-subtle px-3">
         <Button
           variant="ghost"
           size="icon"
@@ -63,6 +69,21 @@ export const DiffView = memo(function DiffView({
         <p className="min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
           {filePath}
         </p>
+        {onPrevious ? (
+          <button type="button" onClick={onPrevious} aria-label="Previous changed file" className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary">
+            <ChevronUp aria-hidden="true" className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+        {onNext ? (
+          <button type="button" onClick={onNext} aria-label="Next changed file" className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary">
+            <ChevronDown aria-hidden="true" className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
+        {onOpenFile ? (
+          <button type="button" onClick={onOpenFile} aria-label="Open current file" className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary">
+            <FileCode2 aria-hidden="true" className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">

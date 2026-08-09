@@ -18,6 +18,9 @@ import {
   deriveThreadAttentionPresentation,
   draftKeyFor,
   filesToImageInputs,
+  latestWorkspaceNotice,
+  mergeFailedComposerAttachments,
+  mergeFailedComposerDraft,
   providerForThread,
   resolvePersistedMode,
   resolvePermissionMode,
@@ -47,8 +50,15 @@ import {
   type TurnInputItem,
   type UpdatePreferencesPayload,
 } from '@falcondeck/client-core'
-import { CommandPalette, ComposerContextBar, GoalControl, NewThreadState } from '@falcondeck/chat-ui'
-import { Button, FONT_SCALE_OPTIONS, ToastProvider, getAppearance, updateAppearance, useToast } from '@falcondeck/ui'
+import { CommandPalette, ComposerContextBar, NewThreadState } from '@falcondeck/chat-ui'
+import {
+  Button,
+  FONT_SCALE_OPTIONS,
+  ToastProvider,
+  getAppearance,
+  updateAppearance,
+  useToast,
+} from '@falcondeck/ui'
 import { LoaderCircle } from 'lucide-react'
 
 import {
@@ -188,6 +198,7 @@ function AppInner() {
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [windowFocused, setWindowFocused] = useState(() => document.visibilityState !== 'hidden')
+  const [dismissedNoticeIds, setDismissedNoticeIds] = useState<Set<string>>(() => new Set())
   const [thinkingDisplay, setThinkingDisplay] = useState<ThinkingDisplay>(readStoredThinkingDisplay)
   const [threadSort, setThreadSort] = useState<ThreadSortMode>(readStoredThreadSort)
   const selectionSeedRef = useRef<string | null>(null)
@@ -275,6 +286,25 @@ function AppInner() {
     [],
   )
 
+  const restoreFailedSubmission = useCallback(
+    (key: string, failedDraft: string, failedAttachments: ImageInput[]) => {
+      setDrafts((current) => {
+        const restored = mergeFailedComposerDraft(failedDraft, current[key]?.text ?? '')
+        const next = upsertComposerDraft(current, key, restored)
+        draftsRef.current = next
+        return next
+      })
+      setAttachmentsByConversation((current) => ({
+        ...current,
+        [key]: mergeFailedComposerAttachments(
+          failedAttachments,
+          current[key] ?? NO_ATTACHMENTS,
+        ),
+      }))
+    },
+    [],
+  )
+
   // Local daemon snapshot merged with enrolled remote-host snapshots: the
   // sidebar, selection, and composer all see one world; writes route back to
   // the owning daemon via apiFor.
@@ -320,7 +350,7 @@ function AppInner() {
   const handleOpenFileDiff = useCallback(
     (filePath: string) => {
       if (!selectedWorkspaceId) return
-      setDiffSelection({ workspaceId: selectedWorkspaceId, filePath })
+      setDiffSelection({ workspaceId: selectedWorkspaceId, filePath, view: 'changes' })
       showRail()
     },
     [selectedWorkspaceId, showRail],
@@ -1199,8 +1229,7 @@ function AppInner() {
       const restoreKey = activeThreadId
         ? draftKeyFor(selectedWorkspace.id, activeThreadId)
         : submittedKey
-      setDraftForConversation(restoreKey, submittedDraft)
-      setAttachmentsForConversation(restoreKey, () => submittedAttachments)
+      restoreFailedSubmission(restoreKey, submittedDraft, submittedAttachments)
       const rawMessage = error instanceof Error ? error.message : 'Failed to send turn'
       const msg = normalizeSendError(rawMessage, activeProvider)
       setActionError(msg)
@@ -1248,7 +1277,7 @@ function AppInner() {
         current && current.workspace.id === workspaceId
           ? {
               ...current,
-              items: markInteractiveRequestResolved(current.items, requestId),
+              items: markInteractiveRequestResolved(current.items, requestId, response),
             }
           : current,
       )
@@ -1394,9 +1423,11 @@ function AppInner() {
       // Bind to the conversation the user picked in; file reading is async and
       // they may have navigated away by the time it resolves.
       const key = conversationKey
-      void filesToImageInputs(files).then((next) =>
-        setAttachmentsForConversation(key, (current) => [...current, ...next]),
-      )
+      void filesToImageInputs(files)
+        .then((next) => setAttachmentsForConversation(key, (current) => [...current, ...next]))
+        .catch((error: unknown) => {
+          setActionError(error instanceof Error ? error.message : 'Could not attach that image')
+        })
     },
     [conversationKey, setAttachmentsForConversation],
   )
@@ -1672,6 +1703,141 @@ function AppInner() {
     [apiFor, applyThreadHandle, setActionError, toast],
   )
 
+  const branchFromMessage = useCallback(
+    async (item: Extract<ConversationItem, { kind: 'user_message' }>) => {
+      if (!selectedWorkspace || !selectedThread) return
+      const client = apiFor(selectedWorkspace.id)
+      if (!client) return
+      const handle = item.previous_turn_id
+        ? await client.forkThread({
+            workspace_id: selectedWorkspace.id,
+            thread_id: selectedThread.id,
+            last_turn_id: item.previous_turn_id,
+          })
+        : await client.startThread({
+            workspace_id: selectedWorkspace.id,
+            provider: selectedThread.provider,
+            model_id: selectedThread.agent.model_id,
+            approval_policy: selectedThread.agent.approval_policy,
+            permission_mode: selectedThread.agent.permission_mode,
+            sandbox_mode: selectedThread.agent.sandbox_mode,
+            isolation: 'project_folder',
+          })
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              workspaces: current.workspaces.map((workspace) =>
+                workspace.id === handle.workspace.id ? handle.workspace : workspace,
+              ),
+              threads: [handle.thread, ...current.threads.filter((t) => t.id !== handle.thread.id)],
+            }
+          : current,
+      )
+      setSelectedWorkspaceId(handle.workspace.id)
+      setSelectedThreadId(handle.thread.id)
+      setThreadDetail({
+        workspace: handle.workspace,
+        thread: handle.thread,
+        items: [],
+        has_older: false,
+        oldest_item_id: null,
+        newest_item_id: null,
+        is_partial: false,
+      })
+      return { client, handle }
+    },
+    [
+      apiFor,
+      selectedThread,
+      selectedWorkspace,
+      setSelectedThreadId,
+      setSelectedWorkspaceId,
+      setSnapshot,
+      setThreadDetail,
+    ],
+  )
+
+  const handleEditResend = useCallback(
+    async (item: Extract<ConversationItem, { kind: 'user_message' }>) => {
+      try {
+        const branch = await branchFromMessage(item)
+        if (!branch) return
+        const key = draftKeyFor(branch.handle.workspace.id, branch.handle.thread.id)
+        setDraftForConversation(key, item.text)
+        setAttachmentsForConversation(key, () => item.attachments)
+        setActionError(null)
+        toast({
+          variant: 'success',
+          title: 'New branch ready',
+          description: 'Edit the message in the composer, then send when ready.',
+        })
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : 'Failed to branch conversation'
+        setActionError(message)
+        toast({ variant: 'danger', title: 'Failed to branch conversation', description: message })
+      }
+    },
+    [
+      branchFromMessage,
+      setAttachmentsForConversation,
+      setDraftForConversation,
+      toast,
+    ],
+  )
+
+  const handleRetryResponse = useCallback(
+    async (item: Extract<ConversationItem, { kind: 'user_message' }>) => {
+      if (!selectedWorkspace || !selectedThread) return
+      let branch: Awaited<ReturnType<typeof branchFromMessage>>
+      try {
+        branch = await branchFromMessage(item)
+        if (!branch) return
+        const key = draftKeyFor(branch.handle.workspace.id, branch.handle.thread.id)
+        sendingConversationKeyRef.current = key
+        sendingBaselineAgentItemIdRef.current = null
+        setIsSending(true)
+        await branch.client.sendTurn({
+          workspace_id: branch.handle.workspace.id,
+          thread_id: branch.handle.thread.id,
+          inputs: [
+            ...(item.text.trim() ? [{ type: 'text', text: item.text } satisfies TurnInputItem] : []),
+            ...item.attachments,
+          ],
+          selected_skills: selectedSkillsFromText(item.text, selectedWorkspace.skills ?? []),
+          provider: selectedThread.provider,
+          model_id: selectedThread.agent.model_id,
+          reasoning_effort: selectedThread.agent.reasoning_effort,
+          approval_policy: selectedThread.agent.approval_policy,
+          service_tier: selectedThread.agent.service_tier,
+          permission_mode: selectedThread.agent.permission_mode,
+          sandbox_mode: selectedThread.agent.sandbox_mode,
+        })
+        setActionError(null)
+        toast({ variant: 'success', title: 'Trying again', description: 'The original thread is unchanged.' })
+      } catch (error: unknown) {
+        if (branch) {
+          const key = draftKeyFor(branch.handle.workspace.id, branch.handle.thread.id)
+          setDraftForConversation(key, item.text)
+          setAttachmentsForConversation(key, () => item.attachments)
+        }
+        sendingConversationKeyRef.current = null
+        setIsSending(false)
+        const message = error instanceof Error ? error.message : 'Failed to retry response'
+        setActionError(message)
+        toast({ variant: 'danger', title: 'Failed to try again', description: message })
+      }
+    },
+    [
+      branchFromMessage,
+      selectedThread,
+      selectedWorkspace,
+      setAttachmentsForConversation,
+      setDraftForConversation,
+      toast,
+    ],
+  )
+
   const handleTogglePinThread = useCallback(
     async (workspaceId: string, threadId: string, pinned: boolean) => {
       const client = apiFor(workspaceId)
@@ -1737,6 +1903,23 @@ function AppInner() {
         threadDetail.workspace.id !== selectedWorkspaceId ||
         threadDetail.thread.id !== selectedThreadId),
   )
+  const operationalNotice = useMemo(
+    () =>
+      latestWorkspaceNotice(
+        viewSnapshot?.service_notices,
+        selectedWorkspaceId,
+        dismissedNoticeIds,
+      ),
+    [dismissedNoticeIds, selectedWorkspaceId, viewSnapshot?.service_notices],
+  )
+  const dismissOperationalNotice = useCallback((noticeId: string) => {
+    setDismissedNoticeIds((current) => {
+      if (current.has(noticeId)) return current
+      const next = new Set(current)
+      next.add(noticeId)
+      return next
+    })
+  }, [])
 
   // The transport acknowledging turn.start is not the same as the agent
   // starting work (especially for Claude over SSH). Keep the optimistic label
@@ -1784,7 +1967,7 @@ function AppInner() {
     [activeProvider, selectedWorkspace],
   )
   const sendBlockReason = workspaceSendBlockReason(selectedWorkspace, activeProvider)
-  const isComposerDisabled = isSending || workspaceComposerDisabled(selectedWorkspace)
+  const isComposerDisabled = workspaceComposerDisabled(selectedWorkspace)
   const workspaces = useMemo(() => viewSnapshot?.workspaces ?? [], [viewSnapshot?.workspaces])
   const effectivePreferences = useMemo(
     () => preferencesWithThinkingDisplay(snapshot?.preferences ?? null, thinkingDisplay),
@@ -2041,7 +2224,14 @@ function AppInner() {
               isSending={isSending}
               isThreadDetailPending={isThreadDetailPending}
               interactiveRequests={interactiveRequests}
+              operationalNotice={operationalNotice}
+              onDismissOperationalNotice={dismissOperationalNotice}
               findRequestKey={findRequestKey}
+              tokenUsage={
+                selectedThreadId
+                  ? viewSnapshot?.thread_token_usage?.[selectedThreadId] ?? null
+                  : null
+              }
               onRemoveQueuedTurn={handleRemoveQueuedTurn}
               onSteerQueuedTurn={handleSteerQueuedTurn}
               onEditQueuedTurn={handleEditQueuedTurn}
@@ -2052,6 +2242,24 @@ function AppInner() {
               onStartPairing={handleStartPairingCallback}
               onInteractiveResponse={handleInteractiveResponseCallback}
               onNewThread={selectedThread ? handleNewThreadFromCurrent : undefined}
+              onEditResend={
+                selectedThread &&
+                activeCapabilities.supports_forking &&
+                !selectedThread.variant &&
+                selectedThread.status !== 'running' &&
+                selectedThread.status !== 'waiting_for_input'
+                  ? (item) => void handleEditResend(item)
+                  : undefined
+              }
+              onRetryResponse={
+                selectedThread &&
+                activeCapabilities.supports_forking &&
+                !selectedThread.variant &&
+                selectedThread.status !== 'running' &&
+                selectedThread.status !== 'waiting_for_input'
+                  ? (item) => void handleRetryResponse(item)
+                  : undefined
+              }
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,
@@ -2102,7 +2310,9 @@ function AppInner() {
                   />
                 ),
                 disabled: isComposerDisabled,
-                sendDisabled: Boolean(sendBlockReason),
+                // Submission should block duplicate sends, not permission and
+                // sandbox changes while an agent turn is active or stopping.
+                sendDisabled: Boolean(sendBlockReason) || isSending,
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone
                 // stale or was never noticed.
@@ -2113,27 +2323,28 @@ function AppInner() {
                 connectorCount,
                 onConnectorsClick: () => {
                   setSettingsSection('connectors')
+                  setSettingsRequestKey((current) => current + 1)
                   setIsSettingsOpen(true)
                 },
+                // Goals live in the composer's plus menu, not the header.
+                goal:
+                  selectedThread && activeCapabilities.supports_goals
+                    ? {
+                        goal: selectedThread.goal,
+                        provider: activeProvider,
+                        onSetGoal: handleSetGoal,
+                        onClearGoal: handleClearGoal,
+                        onSetGoalStatus: handleSetGoalStatus,
+                      }
+                    : undefined,
               }}
               headerControls={
-                <>
-                  {selectedThread && activeCapabilities.supports_goals ? (
-                    <GoalControl
-                      goal={selectedThread.goal}
-                      provider={activeProvider}
-                      onSetGoal={handleSetGoal}
-                      onClearGoal={handleClearGoal}
-                      onSetGoalStatus={handleSetGoalStatus}
-                    />
-                  ) : null}
-                  <PanelToggles
+                <PanelToggles
                   sidebarVisible={sidebarVisible}
                   railVisible={railVisible}
                   onToggleSidebar={toggleSidebar}
                   onToggleRail={toggleRail}
-                  />
-                </>
+                />
               }
             />
           )
@@ -2144,10 +2355,9 @@ function AppInner() {
             : (
                 <Suspense fallback={null}>
                   <DiffPanel
-                    // Git status/diff runs against the local daemon; remote-host
-                    // workspaces have no local checkout to inspect.
-                    api={workspaceHostIndex.has(selectedWorkspaceId ?? '') ? null : api}
+                    api={apiFor(selectedWorkspaceId)}
                     workspaceId={selectedWorkspaceId}
+                    threadId={selectedThread?.id ?? null}
                     refreshTrigger={combinedGitRefreshTrigger}
                     reviewThreadId={
                       selectedThread && activeCapabilities.supports_review ? selectedThread.id : null

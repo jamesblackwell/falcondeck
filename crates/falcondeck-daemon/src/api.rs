@@ -14,10 +14,11 @@ use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ApprovalResponseRequest, ConnectWorkspaceRequest, InteractiveResponseRequest,
-    MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest, SnapshotRequest,
-    StartRemotePairingRequest, StartReviewRequest, StartThreadRequest, ThreadDetailMode,
-    ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
+    ApprovalResponseRequest, ConnectWorkspaceRequest, ForkThreadRequest,
+    InteractiveResponseRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
+    SnapshotRequest, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
+    ThreadDetailMode, ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest,
+    UpdateThreadRequest,
 };
 
 use crate::{
@@ -113,8 +114,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{workspace_id}/threads", post(start_thread))
         .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/fork",
+            post(fork_thread),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}",
-            get(thread_detail).patch(update_thread).delete(delete_thread),
+            get(thread_detail)
+                .patch(update_thread)
+                .delete(delete_thread),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/archive",
@@ -167,6 +174,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/providers", get(read_providers).put(update_providers))
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
+        .route("/api/workspaces/{workspace_id}/files", get(workspace_files))
+        .route(
+            "/api/workspaces/{workspace_id}/files/content",
+            get(workspace_file).put(write_workspace_file),
+        )
         .route(
             "/api/workspaces/{workspace_id}/git/branches",
             get(git_branches),
@@ -285,6 +297,16 @@ async fn start_thread(
 ) -> Result<Json<falcondeck_core::ThreadHandle>, DaemonError> {
     request.workspace_id = workspace_id;
     Ok(Json(state.start_thread(request).await?))
+}
+
+async fn fork_thread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(mut request): Json<ForkThreadRequest>,
+) -> Result<Json<falcondeck_core::ThreadHandle>, DaemonError> {
+    request.workspace_id = workspace_id;
+    request.thread_id = thread_id;
+    Ok(Json(state.fork_thread(request).await?))
 }
 
 async fn thread_detail(
@@ -629,6 +651,59 @@ async fn git_diff(
                 query.thread_id.as_deref(),
                 query.path.as_deref(),
                 query.status.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceFilesQuery {
+    thread_id: Option<String>,
+}
+
+async fn workspace_files(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<WorkspaceFilesQuery>,
+) -> Result<Json<falcondeck_core::WorkspaceFilesResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .workspace_files(&workspace_id, query.thread_id.as_deref())
+            .await?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceFileQuery {
+    path: String,
+    thread_id: Option<String>,
+}
+
+async fn workspace_file(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<WorkspaceFileQuery>,
+) -> Result<Json<falcondeck_core::WorkspaceFileResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .workspace_file(&workspace_id, query.thread_id.as_deref(), &query.path)
+            .await?,
+    ))
+}
+
+async fn write_workspace_file(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<WorkspaceFileQuery>,
+    Json(request): Json<falcondeck_core::WriteWorkspaceFileRequest>,
+) -> Result<Json<falcondeck_core::WorkspaceFileResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .write_workspace_file(
+                &workspace_id,
+                query.thread_id.as_deref(),
+                &query.path,
+                &request,
             )
             .await?,
     ))

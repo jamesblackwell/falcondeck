@@ -7,6 +7,9 @@ import type {
   GitDiffResponse,
   GitFileStatus,
   GitStatusResponse,
+  WorkspaceFileResponse,
+  WorkspaceFilesResponse,
+  WriteWorkspaceFilePayload,
   InteractiveResponsePayload,
   MarkThreadReadPayload,
   RemoteStatusResponse,
@@ -67,6 +70,12 @@ export type StartThreadPayload = {
   sandbox_mode?: string | null
   /** Omitted means the project folder — isolation is always opt-in. */
   isolation?: ThreadIsolation
+}
+
+export type ForkThreadPayload = {
+  workspace_id: string
+  thread_id: string
+  last_turn_id: string
 }
 
 export function createDaemonApiClient(baseUrl: string) {
@@ -141,6 +150,20 @@ export function createDaemonApiClient(baseUrl: string) {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(payload),
         })),
+      )
+    },
+    async forkThread(payload: ForkThreadPayload) {
+      return normalizeThreadHandle(
+        await parseJson<ThreadHandle>(
+          await fetch(
+            `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/fork`,
+            {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify(payload),
+            },
+          ),
+        ),
       )
     },
     async threadDetail(
@@ -320,6 +343,37 @@ export function createDaemonApiClient(baseUrl: string) {
       const params = query.toString() ? `?${query.toString()}` : ''
       return parseJson<GitDiffResponse>(
         await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/diff${params}`),
+      )
+    },
+    async workspaceFiles(workspaceId: string, threadId?: string | null) {
+      const query = new URLSearchParams()
+      if (threadId) query.set('thread_id', threadId)
+      const params = query.toString() ? `?${query.toString()}` : ''
+      return parseJson<WorkspaceFilesResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/files${params}`),
+      )
+    },
+    async workspaceFile(workspaceId: string, path: string, threadId?: string | null) {
+      const query = new URLSearchParams({ path })
+      if (threadId) query.set('thread_id', threadId)
+      return parseJson<WorkspaceFileResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/files/content?${query.toString()}`),
+      )
+    },
+    async writeWorkspaceFile(
+      workspaceId: string,
+      path: string,
+      payload: WriteWorkspaceFilePayload,
+      threadId?: string | null,
+    ) {
+      const query = new URLSearchParams({ path })
+      if (threadId) query.set('thread_id', threadId)
+      return parseJson<WorkspaceFileResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/files/content?${query.toString()}`, {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload),
+        }),
       )
     },
     async deleteThread(workspaceId: string, threadId: string) {

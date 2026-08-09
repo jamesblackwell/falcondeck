@@ -15,6 +15,9 @@ import {
   DEFAULT_REMOTE_RELAY_URL,
   type DaemonSnapshot,
   type EventEnvelope,
+  type GitDiffResponse,
+  type GitFileStatus,
+  type GitStatusResponse,
   type InteractiveResponsePayload,
   type MachinePresence,
   type MarkThreadReadPayload,
@@ -25,10 +28,15 @@ import {
   type StartThreadPayload,
   type ThreadDetail,
   type ThreadHandle,
+  type ForkThreadPayload,
   type ThreadSummary,
   type UpdateThreadPayload,
   type WorkspaceSummary,
+  type WorkspaceFileResponse,
+  type WorkspaceFilesResponse,
+  type WriteWorkspaceFilePayload,
 } from '@falcondeck/client-core'
+import { realtimeAudioPlayer } from '@falcondeck/chat-ui'
 
 const HOSTS_STORAGE_KEY = 'falcondeck.desktop.hosts.v1'
 
@@ -95,6 +103,7 @@ export function saveStoredHosts(hosts: StoredHost[]) {
 // workspace owner without branching on payload format.
 export type WorkspaceScopedApi = {
   startThread(payload: StartThreadPayload): Promise<ThreadHandle>
+  forkThread(payload: ForkThreadPayload): Promise<ThreadHandle>
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
   interruptTurn(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
   removeQueuedTurn(
@@ -128,6 +137,25 @@ export type WorkspaceScopedApi = {
   threadDetail(workspaceId: string, threadId: string): Promise<ThreadDetail>
   connectWorkspace(path: string): Promise<WorkspaceSummary>
   removeWorkspace(workspaceId: string): Promise<unknown>
+  gitStatus(workspaceId: string, threadId?: string | null): Promise<GitStatusResponse>
+  gitDiff(
+    workspaceId: string,
+    path?: string,
+    status?: GitFileStatus | null,
+    threadId?: string | null,
+  ): Promise<GitDiffResponse>
+  workspaceFiles(workspaceId: string, threadId?: string | null): Promise<WorkspaceFilesResponse>
+  workspaceFile(
+    workspaceId: string,
+    path: string,
+    threadId?: string | null,
+  ): Promise<WorkspaceFileResponse>
+  writeWorkspaceFile(
+    workspaceId: string,
+    path: string,
+    payload: WriteWorkspaceFilePayload,
+    threadId?: string | null,
+  ): Promise<WorkspaceFileResponse>
 }
 
 export class HostConnection {
@@ -206,6 +234,7 @@ export class HostConnection {
 
   private applyEvents(events: EventEnvelope[]) {
     for (const event of events) {
+      realtimeAudioPlayer.handleEvent(event)
       this.snapshot = applySnapshotEvent(this.snapshot, event)
       if (event.workspace_id && event.thread_id) {
         const key = `${event.workspace_id}:${event.thread_id}`
@@ -258,6 +287,8 @@ export class HostConnection {
     return {
       startThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.start', payload)),
+      forkThread: async (payload) =>
+        normalizeThreadHandle(await this.rpc('thread.fork', payload)),
       sendTurn: (payload) => this.rpc('turn.start', payload),
       interruptTurn: (workspaceId, threadId) =>
         this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),
@@ -324,6 +355,31 @@ export class HostConnection {
         await this.refreshSnapshot()
         return result
       },
+      gitStatus: (workspaceId, threadId) =>
+        this.rpc('git.status', { workspace_id: workspaceId, thread_id: threadId }),
+      gitDiff: (workspaceId, path, status, threadId) =>
+        this.rpc('git.diff', {
+          workspace_id: workspaceId,
+          path,
+          status,
+          thread_id: threadId,
+        }),
+      workspaceFiles: (workspaceId, threadId) =>
+        this.rpc('workspace.files', { workspace_id: workspaceId, thread_id: threadId }),
+      workspaceFile: (workspaceId, path, threadId) =>
+        this.rpc('workspace.file.read', {
+          workspace_id: workspaceId,
+          path,
+          thread_id: threadId,
+        }),
+      writeWorkspaceFile: (workspaceId, path, payload, threadId) =>
+        this.rpc('workspace.file.write', {
+          workspace_id: workspaceId,
+          path,
+          content: payload.content,
+          expected_version: payload.expected_version,
+          thread_id: threadId,
+        }),
     }
   }
 
@@ -514,6 +570,15 @@ export function mergeSnapshots(
       ...(local?.interactive_requests ?? []),
       ...hostSnapshots.flatMap((snapshot) => snapshot.interactive_requests),
     ],
+    service_notices: [
+      ...(local?.service_notices ?? []),
+      ...hostSnapshots.flatMap((snapshot) => snapshot.service_notices ?? []),
+    ],
+    thread_token_usage: Object.assign(
+      {},
+      base?.thread_token_usage ?? {},
+      ...hostSnapshots.map((snapshot) => snapshot.thread_token_usage ?? {}),
+    ),
   }
 }
 
