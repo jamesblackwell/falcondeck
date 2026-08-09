@@ -112,6 +112,7 @@ input.on('line', (line) => {
     promptCount += 1
     if (promptCount === 1) {
       update({ sessionUpdate: 'available_commands_update', availableCommands: [] })
+      update({ sessionUpdate: 'provider_extension', fixtureValue: true })
       update({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'FALCONDECK_ACP_TEXT_OK' },

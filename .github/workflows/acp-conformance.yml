@@ -1,0 +1,32 @@
+name: ACP conformance
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/acp-conformance.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/falcondeck-core/**'
+      - 'crates/falcondeck-daemon/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/acp-conformance.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/falcondeck-core/**'
+      - 'crates/falcondeck-daemon/**'
+
+permissions:
+  contents: read
+
+jobs:
+  deterministic-adapter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run deterministic ACP adapter checks
+        run: cargo test -p falcondeck-daemon --test acp_conformance --locked

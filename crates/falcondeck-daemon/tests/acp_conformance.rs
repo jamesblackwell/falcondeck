@@ -56,6 +56,10 @@ async fn live_probe_exercises_permission_cancel_resume_and_unknown_events() {
         .into_iter()
         .collect()
     );
+    assert_eq!(
+        report.unknown_update_kinds,
+        ["provider_extension".to_string()].into_iter().collect()
+    );
     assert!(report.stderr_tail.contains("fixture adapter diagnostic"));
     assert!(!report.has_failures());
 }

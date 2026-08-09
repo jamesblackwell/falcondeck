@@ -11,7 +11,7 @@
 //! daemon state file declares `{ id: { command: [...], label: "..." } }` and
 //! each entry becomes a selectable provider with no Rust changes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -26,6 +26,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{AgentProvider, ApprovalDecision, ImageInput, PlanStep, ThreadPlan};
 
+use crate::acp_protocol::AcpSessionUpdateKind;
 use crate::agent_binary::resolve_agent_binary;
 use crate::error::DaemonError;
 
@@ -118,7 +119,9 @@ pub async fn acp_image_content_block(image: &ImageInput, encoded_budget: &mut us
 /// everything before it. A chunk that already contains the accumulated text is
 /// a snapshot, so replace rather than append.
 fn merge_assistant_chunk(accumulated: &mut String, chunk: &str) {
-    if !accumulated.is_empty() && chunk.len() >= accumulated.len() && chunk.starts_with(&*accumulated)
+    if !accumulated.is_empty()
+        && chunk.len() >= accumulated.len()
+        && chunk.starts_with(&*accumulated)
     {
         *accumulated = chunk.to_string();
     } else {
@@ -363,6 +366,9 @@ pub struct AcpRuntime {
     /// Session modes advertised via session/new (or session/load), by
     /// session id. Backs the permission-mode picker for ACP providers.
     session_modes: Mutex<HashMap<String, SessionModeState>>,
+    /// Session-update kinds already diagnosed for this process. Adapters can
+    /// emit thousands of chunks, so protocol drift is logged once per kind.
+    reported_update_kinds: Mutex<HashSet<String>>,
     initialize_result: Mutex<Option<Value>>,
     closed: AtomicBool,
     events: mpsc::UnboundedSender<AcpEvent>,
@@ -422,6 +428,7 @@ impl AcpRuntime {
             current_items: Mutex::new(HashMap::new()),
             current_tools: Mutex::new(HashMap::new()),
             session_modes: Mutex::new(HashMap::new()),
+            reported_update_kinds: Mutex::new(HashSet::new()),
             initialize_result: Mutex::new(None),
             closed: AtomicBool::new(false),
             events,
@@ -957,122 +964,157 @@ impl AcpRuntime {
             .get("sessionUpdate")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let event =
-            match kind {
-                "agent_message_chunk" => update
-                    .pointer("/content/text")
+        let classified = AcpSessionUpdateKind::classify(kind);
+        let event = match classified {
+            AcpSessionUpdateKind::AgentMessageChunk => update
+                .pointer("/content/text")
+                .and_then(Value::as_str)
+                .map(|text| AcpEvent::MessageDelta {
+                    session_id: session_id.to_string(),
+                    text: text.to_string(),
+                }),
+            // Thought chunks are internal reasoning; fold them away for now.
+            AcpSessionUpdateKind::AgentThoughtChunk => None,
+            // The agent switched modes on its own (or confirmed ours).
+            AcpSessionUpdateKind::CurrentModeUpdate => {
+                if let Some(mode_id) = update.get("currentModeId").and_then(Value::as_str)
+                    && let Some(state) = self.session_modes.lock().await.get_mut(session_id)
+                {
+                    state.current = Some(mode_id.to_string());
+                }
+                None
+            }
+            AcpSessionUpdateKind::ToolCall => {
+                let call_id = update
+                    .get("toolCallId")
                     .and_then(Value::as_str)
-                    .map(|text| AcpEvent::MessageDelta {
-                        session_id: session_id.to_string(),
-                        text: text.to_string(),
-                    }),
-                // Thought chunks are internal reasoning; fold them away for now.
-                "agent_thought_chunk" => None,
-                // The agent switched modes on its own (or confirmed ours).
-                "current_mode_update" => {
-                    if let Some(mode_id) = update.get("currentModeId").and_then(Value::as_str)
-                        && let Some(state) = self.session_modes.lock().await.get_mut(session_id)
-                    {
-                        state.current = Some(mode_id.to_string());
-                    }
-                    None
-                }
-                "tool_call" => {
-                    let call_id = update
-                        .get("toolCallId")
+                    .unwrap_or_default()
+                    .to_string();
+                Some(AcpEvent::ToolCall {
+                    session_id: session_id.to_string(),
+                    call_id,
+                    title: update
+                        .get("title")
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    Some(AcpEvent::ToolCall {
-                        session_id: session_id.to_string(),
-                        call_id,
-                        title: update
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Tool call")
-                            .to_string(),
-                        kind: update
-                            .get("kind")
-                            .and_then(Value::as_str)
-                            .unwrap_or("other")
-                            .to_string(),
-                        status: update
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .unwrap_or("pending")
-                            .to_string(),
-                    })
-                }
-                "tool_call_update" => {
-                    let call_id = update
-                        .get("toolCallId")
+                        .unwrap_or("Tool call")
+                        .to_string(),
+                    kind: update
+                        .get("kind")
                         .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let output = update
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .map(|items| {
-                            items
-                                .iter()
-                                .filter_map(|item| {
-                                    item.pointer("/content/text")
-                                        .or_else(|| item.get("text"))
-                                        .and_then(Value::as_str)
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        })
-                        .filter(|text| !text.is_empty());
-                    Some(AcpEvent::ToolCallUpdate {
-                        session_id: session_id.to_string(),
-                        call_id,
-                        title: update
-                            .get("title")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned),
-                        status: update
-                            .get("status")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned),
-                        output,
+                        .unwrap_or("other")
+                        .to_string(),
+                    status: update
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("pending")
+                        .to_string(),
+                })
+            }
+            AcpSessionUpdateKind::ToolCallUpdate => {
+                let call_id = update
+                    .get("toolCallId")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let output = update
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                item.pointer("/content/text")
+                                    .or_else(|| item.get("text"))
+                                    .and_then(Value::as_str)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
                     })
-                }
-                "plan" => {
-                    let steps = update
-                        .get("entries")
-                        .and_then(Value::as_array)
-                        .map(|entries| {
-                            entries
-                                .iter()
-                                .filter_map(|entry| {
-                                    let content =
-                                        entry.get("content").and_then(Value::as_str)?.to_string();
-                                    let status = entry
-                                        .get("status")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or("pending")
-                                        .to_string();
-                                    Some(PlanStep {
-                                        step: content,
-                                        status,
-                                    })
+                    .filter(|text| !text.is_empty());
+                Some(AcpEvent::ToolCallUpdate {
+                    session_id: session_id.to_string(),
+                    call_id,
+                    title: update
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    status: update
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    output,
+                })
+            }
+            AcpSessionUpdateKind::Plan => {
+                let steps = update
+                    .get("entries")
+                    .and_then(Value::as_array)
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| {
+                                let content =
+                                    entry.get("content").and_then(Value::as_str)?.to_string();
+                                let status = entry
+                                    .get("status")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("pending")
+                                    .to_string();
+                                Some(PlanStep {
+                                    step: content,
+                                    status,
                                 })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    Some(AcpEvent::Plan {
-                        session_id: session_id.to_string(),
-                        plan: ThreadPlan {
-                            explanation: None,
-                            steps,
-                        },
+                            })
+                            .collect::<Vec<_>>()
                     })
-                }
-                _ => None,
-            };
+                    .unwrap_or_default();
+                Some(AcpEvent::Plan {
+                    session_id: session_id.to_string(),
+                    plan: ThreadPlan {
+                        explanation: None,
+                        steps,
+                    },
+                })
+            }
+            AcpSessionUpdateKind::AvailableCommandsUpdate
+            | AcpSessionUpdateKind::SessionInfoUpdate
+            | AcpSessionUpdateKind::UsageUpdate
+            | AcpSessionUpdateKind::UserMessageChunk => {
+                self.report_unprojected_update(classified, false).await;
+                None
+            }
+            AcpSessionUpdateKind::Unknown(_) => {
+                self.report_unprojected_update(classified, true).await;
+                None
+            }
+        };
         if let Some(event) = event {
             let _ = self.events.send(event);
+        }
+    }
+
+    async fn report_unprojected_update(&self, kind: AcpSessionUpdateKind<'_>, is_unknown: bool) {
+        let kind = kind.as_str();
+        if !self
+            .reported_update_kinds
+            .lock()
+            .await
+            .insert(kind.to_string())
+        {
+            return;
+        }
+        if is_unknown {
+            tracing::warn!(
+                provider = %self.config.id,
+                update_kind = kind,
+                "ACP adapter emitted an unknown session-update kind"
+            );
+        } else {
+            tracing::debug!(
+                provider = %self.config.id,
+                update_kind = kind,
+                "ACP session-update kind has no FalconDeck projection"
+            );
         }
     }
 

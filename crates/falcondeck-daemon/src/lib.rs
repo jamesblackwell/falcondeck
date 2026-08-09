@@ -6,6 +6,7 @@
 
 pub mod acp;
 pub mod acp_conformance;
+pub mod acp_protocol;
 mod agent_binary;
 mod api;
 mod app;

@@ -57,6 +57,12 @@ The protocol engine is exported as `falcondeck_daemon::acp_conformance`, so
 tests and future settings/API surfaces consume structured `Report` values
 instead of scraping the command-line display.
 
+This is not a routine end-user test. FalconDeck owns certification and release
+qualification for built-in and recommended agents. A future product surface
+should expose only a lightweight **Verify setup** action while someone is
+adding or troubleshooting a custom ACP command; token-spending live and restart
+checks remain developer diagnostics.
+
 ## Deterministic coverage
 
 `tests/fixtures/acp_conformance_agent.mjs` is a zero-model ACP adapter used by
@@ -81,6 +87,28 @@ Run it with:
 ```sh
 cargo test -p falcondeck-daemon --test acp_conformance
 ```
+
+The path-scoped `ACP conformance` GitHub Actions workflow runs this deterministic
+suite for daemon/protocol changes. It does not use model credentials or contact
+external harnesses.
+
+## Shared event classification
+
+Production ACP ingestion and the conformance report both classify
+`session/update` values through `acp_protocol::AcpSessionUpdateKind`. Every
+observed kind has one disposition:
+
+- **projected** — becomes a client-visible conversation event;
+- **consumed** — updates daemon state or is deliberately suppressed;
+- **known unhandled** — recognized but not represented by FalconDeck yet;
+- **unknown** — not known to this build and therefore potential protocol drift.
+
+The runtime logs known-unhandled and unknown discriminants at most once per
+adapter process, preventing streaming-event log floods. The compatibility
+report lists known product gaps separately from genuinely unknown protocol
+values. Adding or changing production handling therefore changes the shared
+classifier and fails the same deterministic tests that power diagnostics,
+instead of requiring a second manually mirrored allowlist.
 
 ## Pilot results (2026-08-09)
 
@@ -114,8 +142,6 @@ shape of the emitted event kinds.
 - Mid-turn process death and daemon-owned recovery are not yet tested; the
   restart check currently occurs after a completed/cancelled turn.
 - Slow partial lines and oversized messages need deterministic fixture cases.
-- The handled-event list currently mirrors `acp.rs` manually. It should be
-  derived from a shared classifier before long-term use.
 
 The pilot is useful precisely because it separates three questions: whether an
 adapter speaks ACP, whether its live behavior matches FalconDeck's assumptions,

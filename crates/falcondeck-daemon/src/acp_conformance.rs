@@ -23,6 +23,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::acp_protocol::{AcpSessionUpdateKind, AcpUpdateDisposition};
+
 const PROTOCOL_VERSION: u64 = 1;
 const DEFAULT_TIMEOUT_SECONDS: u64 = 45;
 const TEXT_MARKER: &str = "FALCONDECK_ACP_TEXT_OK";
@@ -226,8 +228,10 @@ pub struct Report {
     pub checks: Vec<Check>,
     /// All `session/update` kinds seen during the probe.
     pub observed_update_kinds: BTreeSet<String>,
-    /// Observed kinds not projected by FalconDeck's ACP runtime.
+    /// Recognized kinds not projected by FalconDeck's ACP runtime.
     pub unhandled_update_kinds: BTreeSet<String>,
+    /// Wire discriminants unknown to this FalconDeck build.
+    pub unknown_update_kinds: BTreeSet<String>,
     /// Bounded tail of adapter stderr.
     pub stderr_tail: String,
 }
@@ -242,6 +246,7 @@ impl Report {
             checks: Vec::new(),
             observed_update_kinds: BTreeSet::new(),
             unhandled_update_kinds: BTreeSet::new(),
+            unknown_update_kinds: BTreeSet::new(),
             stderr_tail: String::new(),
         }
     }
@@ -274,10 +279,22 @@ impl Report {
             ));
         }
         if !self.unhandled_update_kinds.is_empty() {
-            output.push_str("\nUnhandled session updates: ");
+            output.push_str("\nKnown unprojected session updates: ");
             output.push_str(
                 &self
                     .unhandled_update_kinds
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+            output.push('\n');
+        }
+        if !self.unknown_update_kinds.is_empty() {
+            output.push_str("\nUnknown session updates: ");
+            output.push_str(
+                &self
+                    .unknown_update_kinds
                     .iter()
                     .cloned()
                     .collect::<Vec<_>>()
@@ -867,13 +884,19 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
     }
 
     report.observed_update_kinds = update_kinds(&observed_updates);
-    report.unhandled_update_kinds = report
-        .observed_update_kinds
-        .difference(&handled_update_kinds())
-        .cloned()
-        .collect();
+    for kind in &report.observed_update_kinds {
+        match AcpSessionUpdateKind::classify(kind).disposition() {
+            AcpUpdateDisposition::KnownUnhandled => {
+                report.unhandled_update_kinds.insert(kind.clone());
+            }
+            AcpUpdateDisposition::Unknown => {
+                report.unknown_update_kinds.insert(kind.clone());
+            }
+            AcpUpdateDisposition::Projected | AcpUpdateDisposition::Consumed => {}
+        }
+    }
     report.push(
-        "Unknown events",
+        "Unprojected events",
         if report.unhandled_update_kinds.is_empty() {
             CheckStatus::Pass
         } else {
@@ -883,6 +906,19 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
             "all observed update kinds handled by FalconDeck".to_string()
         } else {
             format!("{} unhandled kind(s)", report.unhandled_update_kinds.len())
+        },
+    );
+    report.push(
+        "Protocol drift",
+        if report.unknown_update_kinds.is_empty() {
+            CheckStatus::Pass
+        } else {
+            CheckStatus::Warning
+        },
+        if report.unknown_update_kinds.is_empty() {
+            "no unknown session-update kinds".to_string()
+        } else {
+            format!("{} unknown kind(s)", report.unknown_update_kinds.len())
         },
     );
     report.push(
@@ -976,20 +1012,6 @@ fn update_kinds(updates: &[Value]) -> BTreeSet<String> {
         .collect()
 }
 
-fn handled_update_kinds() -> BTreeSet<String> {
-    [
-        "agent_message_chunk",
-        "agent_thought_chunk",
-        "current_mode_update",
-        "plan",
-        "tool_call",
-        "tool_call_update",
-    ]
-    .into_iter()
-    .map(ToOwned::to_owned)
-    .collect()
-}
-
 /// Parses CLI arguments, runs the probe, prints its report, and returns an exit
 /// code (`0` compatible, `1` failed checks, `2` invalid invocation/output).
 pub async fn run_cli(args: impl IntoIterator<Item = String>) -> i32 {
@@ -1053,20 +1075,33 @@ mod tests {
     }
 
     #[test]
-    fn unknown_update_detection_matches_the_daemon_handler() {
+    fn update_detection_uses_the_shared_protocol_classifier() {
         let updates = vec![
             json!({ "sessionUpdate": "agent_message_chunk" }),
             json!({ "sessionUpdate": "available_commands_update" }),
+            json!({ "sessionUpdate": "provider_extension" }),
         ];
         let observed = update_kinds(&updates);
+        let unhandled = observed
+            .iter()
+            .filter(|kind| {
+                AcpSessionUpdateKind::classify(kind).disposition()
+                    == AcpUpdateDisposition::KnownUnhandled
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let unknown = observed
-            .difference(&handled_update_kinds())
+            .iter()
+            .filter(|kind| {
+                AcpSessionUpdateKind::classify(kind).disposition() == AcpUpdateDisposition::Unknown
+            })
             .cloned()
             .collect::<BTreeSet<_>>();
         assert_eq!(
-            unknown,
+            unhandled,
             BTreeSet::from(["available_commands_update".to_string()])
         );
+        assert_eq!(unknown, BTreeSet::from(["provider_extension".to_string()]));
     }
 
     #[test]
