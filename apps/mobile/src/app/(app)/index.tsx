@@ -1,50 +1,69 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ActivityIndicator, AppState, KeyboardAvoidingView, Platform, Pressable, View, type TextInput } from 'react-native'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { FlashList } from '@shopify/flash-list'
-import { ChevronLeft, SquarePen, Target } from 'lucide-react-native'
-import { DrawerActions } from '@react-navigation/native'
-import { useNavigation, useRouter } from 'expo-router'
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  ActivityIndicator,
+  AppState,
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  View,
+  type TextInput,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { FlashList } from "@shopify/flash-list";
+import { ChevronLeft, SquarePen } from "lucide-react-native";
+import { DrawerActions } from "@react-navigation/native";
+import { useNavigation, useRouter } from "expo-router";
 import {
   composerProviderFor,
   composerSelectionFor,
+  conversationRenderBlockType,
   defaultProvider,
+  editResendUnavailableReason,
   encryptJson,
+  imageAttachmentSendBlockReason,
+  latestWorkspaceNotice,
+  orderedInteractiveRequestQueue,
   providerForThread,
+  reuseRetrySourcesByAssistantId,
   resolvePersistedMode,
   resolvePermissionMode,
   resolveServiceTier,
   STANDARD_SERVICE_TIER,
+  validateImageAttachmentBudget,
   workspaceAgentCapabilities,
   workspaceModels,
+  workspaceProviderLabel,
   workspaceProviderOptions,
   type AgentProvider,
   type ConversationPresentation,
   type ConversationRenderBlock,
+  type InteractiveResponsePayload,
   type QueuedTurnSummary,
-} from '@falcondeck/client-core'
-import { useShallow } from 'zustand/react/shallow'
+} from "@falcondeck/client-core";
+import { useShallow } from "zustand/react/shallow";
 
 import {
-  useApprovals,
+  useInteractiveRequests,
   useRelayStore,
   useSessionStore,
   useSelectedThread,
   useSelectedThreadHistory,
+  useConversationItems,
   useSelectedWorkspace,
   useUIStore,
-} from '@/store'
-import { useSessionActions } from '@/hooks/useSessionActions'
-import { useInterruptTurn } from '@/hooks/useInterruptTurn'
-import { useThreadActions } from '@/hooks/useThreadActions'
-import { useKeyboardVisible } from '@/hooks/useKeyboardVisible'
-import { useConversationPresentation } from '@/hooks/useRenderBlocks'
-import { useScrollToBottom } from '@/hooks/useScrollToBottom'
-import { Button, Text, EmptyState, ErrorBanner } from '@/components/ui'
+} from "@/store";
+import { useSessionActions } from "@/hooks/useSessionActions";
+import { useInterruptTurn } from "@/hooks/useInterruptTurn";
+import { useThreadActions } from "@/hooks/useThreadActions";
+import { useKeyboardVisible } from "@/hooks/useKeyboardVisible";
+import { useConversationPresentation } from "@/hooks/useRenderBlocks";
+import { useScrollToBottom } from "@/hooks/useScrollToBottom";
+import { useResponseCompletionAnnouncement } from "@/hooks/useResponseCompletionAnnouncement";
+import { Button, Text, EmptyState, ErrorBanner } from "@/components/ui";
 import {
   ChatInput,
-  ApprovalBanner,
+  InteractiveRequestBanner,
   LiveActivityLane,
   MessageRouter,
   GoalBanner,
@@ -52,61 +71,86 @@ import {
   JumpToBottomFab,
   QueuedTurns,
   ThinkingIndicator,
-} from '@/components/chat'
-import { ConnectionHeader } from '@/components/navigation'
+  OperationalNoticeBanner,
+  ConversationShareButton,
+} from "@/components/chat";
+import { ConnectionHeader } from "@/components/navigation";
 import {
+  pasteImageInputFromClipboard,
   pickImageInputFromCamera,
   pickImageInputsFromLibrary,
-} from '@/features/thread/imageInputs'
-import { getWorkspaceTitle, shouldShowThinkingIndicator } from '@/features/thread/threadScreen'
+} from "@/features/thread/imageInputs";
+import {
+  getWorkspaceTitle,
+  shouldShowThinkingIndicator,
+} from "@/features/thread/threadScreen";
+import {
+  triggerAgentCompletionHaptic,
+  triggerThreadSelectionHaptic,
+} from "@/lib/haptics";
 
-const renderBlock = ({ item }: { item: ConversationRenderBlock }) => (
-  <MessageRouter item={item} />
-)
-const keyExtractor = (block: ConversationRenderBlock) => block.id
-const EMPTY_QUEUED_TURNS: QueuedTurnSummary[] = []
-const getItemType = (block: ConversationRenderBlock) =>
-  block.kind === 'tool_summary' || block.kind === 'work_session' ? block.kind : block.item.kind
+const keyExtractor = (block: ConversationRenderBlock) => block.id;
+const EMPTY_QUEUED_TURNS: QueuedTurnSummary[] = [];
 
 export default function HomeScreen() {
-  const insets = useSafeAreaInsets()
-  const { theme } = useUnistyles()
-  const navigation = useNavigation()
-  const router = useRouter()
+  const insets = useSafeAreaInsets();
+  const { theme } = useUnistyles();
+  const navigation = useNavigation();
+  const router = useRouter();
 
-  const presentation: ConversationPresentation = useConversationPresentation()
-  const blocks = presentation.history_blocks
-  const liveActivityGroups = presentation.live_activity_groups
-  const approvals = useApprovals()
-  const approvalQueue = useMemo(() => {
-    const unique = new Map(
-      approvals
-        .filter((request) => request.kind === 'approval')
-        .map((request) => [request.request_id, request]),
-    )
-    return [...unique.values()].sort((left, right) => {
-      const byCreatedAt = Date.parse(left.created_at) - Date.parse(right.created_at)
-      return byCreatedAt || left.request_id.localeCompare(right.request_id)
-    })
-  }, [approvals])
-  const activeApproval = approvalQueue[0] ?? null
-  const selectedThread = useSelectedThread()
-  const selectedThreadHistory = useSelectedThreadHistory()
-  const workspace = useSelectedWorkspace()
-  const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
-  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
-  const snapshot = useSessionStore((s) => s.snapshot)
-  const { connectionStatus, error, isEncrypted, machinePresence, relayUrl, sessionId } =
-    useRelayStore(
-      useShallow((s) => ({
-        connectionStatus: s.connectionStatus,
-        error: s.error,
-        isEncrypted: s.isEncrypted,
-        machinePresence: s.machinePresence,
-        relayUrl: s.relayUrl,
-        sessionId: s.sessionId,
-      })),
-    )
+  const presentation: ConversationPresentation = useConversationPresentation();
+  const blocks = presentation.history_blocks;
+  const liveActivityGroups = presentation.live_activity_groups;
+  const interactiveRequests = useInteractiveRequests();
+  const interactiveQueue = useMemo(
+    () => orderedInteractiveRequestQueue(interactiveRequests),
+    [interactiveRequests],
+  );
+  const activeInteractiveRequest = interactiveQueue[0] ?? null;
+  const selectedThread = useSelectedThread();
+  const selectedThreadHistory = useSelectedThreadHistory();
+  const conversationItems = useConversationItems();
+  const workspace = useSelectedWorkspace();
+  const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
+  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
+  const snapshot = useSessionStore((s) => s.snapshot);
+  const [dismissedNoticeIds, setDismissedNoticeIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const operationalNotice = useMemo(
+    () =>
+      latestWorkspaceNotice(
+        snapshot?.service_notices,
+        selectedWorkspaceId,
+        dismissedNoticeIds,
+      ),
+    [dismissedNoticeIds, selectedWorkspaceId, snapshot?.service_notices],
+  );
+  const dismissOperationalNotice = useCallback((noticeId: string) => {
+    setDismissedNoticeIds((current) => {
+      if (current.has(noticeId)) return current;
+      const next = new Set(current);
+      next.add(noticeId);
+      return next;
+    });
+  }, []);
+  const {
+    connectionStatus,
+    error,
+    isEncrypted,
+    machinePresence,
+    relayUrl,
+    sessionId,
+  } = useRelayStore(
+    useShallow((s) => ({
+      connectionStatus: s.connectionStatus,
+      error: s.error,
+      isEncrypted: s.isEncrypted,
+      machinePresence: s.machinePresence,
+      relayUrl: s.relayUrl,
+      sessionId: s.sessionId,
+    })),
+  );
   const {
     attachments,
     draft,
@@ -131,9 +175,8 @@ export default function HomeScreen() {
       selectedSandboxMode: s.selectedSandboxMode,
       selectedServiceTier: s.selectedServiceTier,
     })),
-  )
+  );
   const {
-    addAttachments,
     rememberComposerSelection,
     rememberWorkspaceProvider,
     setDraft,
@@ -144,182 +187,342 @@ export default function HomeScreen() {
     setSelectedSandboxMode,
     setSelectedServiceTier,
     removeAttachment,
-  } = useUIStore.getState()
-  const { submitTurn, respondApproval, loadThreadDetail } = useSessionActions()
-  const interruptTurn = useInterruptTurn()
-  const { clearThreadGoal, editQueuedTurn, removeQueuedTurn, setThreadGoal, setThreadMode, steerQueuedTurn } =
-    useThreadActions()
-  const { listRef, showJumpButton, onScroll, resetScrollState, scrollToBottom } =
-    useScrollToBottom<ConversationRenderBlock>()
-  const isKeyboardVisible = useKeyboardVisible()
-  const [appState, setAppState] = useState(AppState.currentState)
-  const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<string | null>(null)
-  const [isLoadingOlder, setIsLoadingOlder] = useState(false)
-  const [isStopping, setIsStopping] = useState(false)
-  const [isGoalSheetOpen, setIsGoalSheetOpen] = useState(false)
-  const selectionSeedRef = useRef<string | null>(null)
-  const composerInputRef = useRef<TextInput>(null)
-  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const lastSentReadSeqRef = useRef<{ threadId: string; readSeq: number } | null>(null)
+  } = useUIStore.getState();
+  const {
+    submitTurn,
+    respondApproval,
+    respondInteractive,
+    loadThreadDetail,
+    editResend,
+    retryResponse,
+  } = useSessionActions();
+  const interruptTurn = useInterruptTurn();
+  const {
+    clearThreadGoal,
+    editQueuedTurn,
+    removeQueuedTurn,
+    setThreadGoal,
+    setThreadMode,
+    steerQueuedTurn,
+  } = useThreadActions();
+  const {
+    listRef,
+    showJumpButton,
+    autoscrollToBottomThreshold,
+    onScroll,
+    onScrollBeginDrag,
+    onScrollEndDrag,
+    onMomentumScrollEnd,
+    resetScrollState,
+    scrollToBottom,
+  } = useScrollToBottom<ConversationRenderBlock>();
+  const isKeyboardVisible = useKeyboardVisible();
+  const [appState, setAppState] = useState(AppState.currentState);
+  const [detailLoadingThreadId, setDetailLoadingThreadId] = useState<
+    string | null
+  >(null);
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [isGoalSheetOpen, setIsGoalSheetOpen] = useState(false);
+  const selectionSeedRef = useRef<string | null>(null);
+  const composerInputRef = useRef<TextInput>(null);
+  const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSentReadSeqRef = useRef<{
+    threadId: string;
+    readSeq: number;
+  } | null>(null);
+  const retrySourcesRef = useRef<ReturnType<
+    typeof reuseRetrySourcesByAssistantId
+  > | null>(null);
+  const previousThreadStateRef = useRef<{
+    threadId: string | null;
+    status: string | null;
+    appState: string;
+  } | null>(null);
 
   // Compute active provider: thread's provider if running, otherwise UI selection or workspace default
   const activeProvider: AgentProvider = selectedThread
     ? selectedThread.provider
-    : (selectedProvider ?? defaultProvider(workspace))
+    : (selectedProvider ?? defaultProvider(workspace));
 
-  const providerOptions = useMemo(() => workspaceProviderOptions(workspace), [workspace])
+  const providerOptions = useMemo(
+    () => workspaceProviderOptions(workspace),
+    [workspace],
+  );
 
   // Which mode pickers the composer shows, and whether a queued message can be
   // steered — both are per-provider, so they change with the active agent.
   const capabilities = useMemo(
     () => workspaceAgentCapabilities(workspace, activeProvider),
     [activeProvider, workspace],
-  )
-  const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS
+  );
+  const attachmentSendBlockReason = imageAttachmentSendBlockReason(
+    capabilities,
+    attachments.length,
+  );
+  const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS;
   // A goal belongs to a thread, so there is nothing to set one on until one
   // exists — same gate as desktop.
-  const showGoalControl = Boolean(selectedThread) && capabilities.supports_goals
+  const showGoalControl =
+    Boolean(selectedThread) && capabilities.supports_goals;
+  const canEditResend = Boolean(
+    selectedThread &&
+    capabilities.supports_forking &&
+    !selectedThread.variant &&
+    selectedThread.status !== "running" &&
+    selectedThread.status !== "waiting_for_input",
+  );
+  const editResendReason = selectedThread
+    ? editResendUnavailableReason({
+        providerLabel: workspaceProviderLabel(
+          workspace,
+          selectedThread.provider,
+        ),
+        supportsForking: capabilities.supports_forking,
+        isIsolated: Boolean(selectedThread.variant),
+        threadStatus: selectedThread.status,
+      })
+    : null;
+  // Render-only structural sharing keeps this lookup stable while only an
+  // assistant tail streams. React has no previous-value useMemo primitive;
+  // the helper validates all source identities before returning the cache.
+  /* eslint-disable react-hooks/refs */
+  const retrySources = useMemo(() => {
+    if (!canEditResend) {
+      retrySourcesRef.current = null;
+      return null;
+    }
+    const stable = reuseRetrySourcesByAssistantId(
+      retrySourcesRef.current,
+      conversationItems,
+    );
+    retrySourcesRef.current = stable;
+    return stable;
+  }, [canEditResend, conversationItems]);
+  /* eslint-enable react-hooks/refs */
+  const renderBlock = useCallback(
+    ({ item }: { item: ConversationRenderBlock }) => (
+      <MessageRouter
+        item={item}
+        onApprovalDecision={respondApproval}
+        canEditResend={canEditResend}
+        editResendUnavailableReason={editResendReason}
+        onEditResend={editResend}
+        retrySource={
+          item.kind === "item" && item.item.kind === "assistant_message"
+            ? (retrySources?.get(item.item.id) ?? null)
+            : null
+        }
+        onRetryResponse={retryResponse}
+      />
+    ),
+    [
+      canEditResend,
+      editResend,
+      editResendReason,
+      respondApproval,
+      retryResponse,
+      retrySources,
+    ],
+  );
 
   // Filter models by active provider (matches desktop behavior)
   const models = useMemo(
     () => workspaceModels(workspace, activeProvider),
     [activeProvider, workspace],
-  )
+  );
 
   // Compute effort options from the selected model's supported_reasoning_efforts
   const resolvedModel = useMemo(() => {
-    if (selectedModel) return models.find((m) => m.id === selectedModel) ?? null
-    return models.find((m) => m.is_default) ?? models[0] ?? null
-  }, [models, selectedModel])
+    if (selectedModel)
+      return models.find((m) => m.id === selectedModel) ?? null;
+    return models.find((m) => m.is_default) ?? models[0] ?? null;
+  }, [models, selectedModel]);
 
   const effortOptions = useMemo(() => {
-    const supported = resolvedModel?.supported_reasoning_efforts.map((e) => e.reasoning_effort) ?? []
-    if (supported.length > 0) return supported
-    return resolvedModel?.default_reasoning_effort ? [resolvedModel.default_reasoning_effort] : ['medium']
-  }, [resolvedModel])
-  const isThreadRunning = selectedThread?.status === 'running'
-  const showThinking = shouldShowThinkingIndicator(presentation, isThreadRunning)
-  const isSelectedThreadLoading = !!selectedThreadId && detailLoadingThreadId === selectedThreadId
+    const supported =
+      resolvedModel?.supported_reasoning_efforts.map(
+        (e) => e.reasoning_effort,
+      ) ?? [];
+    if (supported.length > 0) return supported;
+    return resolvedModel?.default_reasoning_effort
+      ? [resolvedModel.default_reasoning_effort]
+      : ["medium"];
+  }, [resolvedModel]);
+  const isThreadRunning = selectedThread?.status === "running";
+  const showThinking = shouldShowThinkingIndicator(
+    presentation,
+    isThreadRunning,
+  );
+  const isSelectedThreadLoading =
+    !!selectedThreadId && detailLoadingThreadId === selectedThreadId;
+
+  // One soft pulse when the currently viewed agent turn finishes. Watching
+  // the summary transition keeps this independent of token/tool events and
+  // prevents replayed relay updates from producing notification spam.
+  useEffect(() => {
+    const status = selectedThread?.status ?? null;
+    const previous = previousThreadStateRef.current;
+    if (
+      previous?.appState === "active" &&
+      appState === "active" &&
+      previous.threadId === selectedThreadId &&
+      previous.status === "running" &&
+      status === "idle"
+    ) {
+      triggerAgentCompletionHaptic();
+    }
+    previousThreadStateRef.current = {
+      threadId: selectedThreadId,
+      status,
+      appState,
+    };
+  }, [appState, selectedThread?.status, selectedThreadId]);
+
+  useResponseCompletionAnnouncement({
+    threadKey: selectedThreadId,
+    status: selectedThread?.status ?? null,
+    items: conversationItems,
+    appState,
+  });
 
   // True during initial sync: session exists but snapshot hasn't loaded yet
-  const isSyncing = !!sessionId && !snapshot
+  const isSyncing = !!sessionId && !snapshot;
 
-  // Mirrors ChatInput's disabled prop; a non-editable input rejects focus().
-  const isComposerEnabled = !!workspace && !isSubmitting && isEncrypted
+  // Transport loss gates sending, not drafting. A saved workspace is enough
+  // to focus and edit the composer while relay encryption reconnects.
+  const isComposerEnabled = !!workspace;
 
   // A new conversation focuses the composer so typing can start immediately.
   // Existing threads keep the keyboard down for reading. The short delay lets
   // the drawer-close/navigation animation finish before the keyboard rises.
   useEffect(() => {
-    if (selectedThreadId || !isComposerEnabled) return
-    const timer = setTimeout(() => composerInputRef.current?.focus(), 350)
-    return () => clearTimeout(timer)
-  }, [isComposerEnabled, selectedThreadId])
+    if (selectedThreadId || !isComposerEnabled) return;
+    const timer = setTimeout(() => composerInputRef.current?.focus(), 350);
+    return () => clearTimeout(timer);
+  }, [isComposerEnabled, selectedThreadId]);
 
   // Seed provider/model/effort/mode from the current workspace selection.
   useEffect(() => {
     if (!workspace) {
-      selectionSeedRef.current = null
-      setSelectedProvider(null)
-      setSelectedModel(null)
-      setSelectedEffort('medium')
-      setSelectedServiceTier(null)
-      setSelectedPermissionMode(null)
-      setSelectedSandboxMode(null)
-      return
+      selectionSeedRef.current = null;
+      setSelectedProvider(null);
+      setSelectedModel(null);
+      setSelectedEffort("medium");
+      setSelectedServiceTier(null);
+      setSelectedPermissionMode(null);
+      setSelectedSandboxMode(null);
+      return;
     }
 
-    const seedKey = `${workspace.id}:${selectedThread?.id ?? 'workspace'}`
-    if (selectionSeedRef.current === seedKey) return
-    selectionSeedRef.current = seedKey
+    const seedKey = `${workspace.id}:${selectedThread?.id ?? "workspace"}`;
+    if (selectionSeedRef.current === seedKey) return;
+    selectionSeedRef.current = seedKey;
 
     // An existing thread dictates its own provider; a new conversation starts
     // from the provider the user last picked here, so that choice sticks.
-    const stickyProvider = composerProviderFor(persistedComposerSelections, workspace.path)
+    const stickyProvider = composerProviderFor(
+      persistedComposerSelections,
+      workspace.path,
+    );
     const nextProvider =
       !selectedThread &&
       stickyProvider &&
-      workspaceProviderOptions(workspace).some((option) => option.provider === stickyProvider)
+      workspaceProviderOptions(workspace).some(
+        (option) => option.provider === stickyProvider,
+      )
         ? stickyProvider
-        : providerForThread(selectedThread, workspace)
+        : providerForThread(selectedThread, workspace);
     const preferredSelection = composerSelectionFor(
       persistedComposerSelections,
       workspace.path,
       nextProvider,
-    )
+    );
 
     // A thread owns its modes; a new conversation gets the remembered choice
     // as long as the provider still offers it.
-    const seededCapabilities = workspaceAgentCapabilities(workspace, nextProvider)
+    const seededCapabilities = workspaceAgentCapabilities(
+      workspace,
+      nextProvider,
+    );
     setSelectedPermissionMode(
       selectedThread
-        ? selectedThread.agent.permission_mode ?? null
+        ? (selectedThread.agent.permission_mode ?? null)
         : resolvePermissionMode(
             preferredSelection?.permissionMode,
             seededCapabilities.permission_modes,
           ),
-    )
+    );
     setSelectedSandboxMode(
       selectedThread
-        ? selectedThread.agent.sandbox_mode ?? null
-        : resolvePersistedMode(preferredSelection?.sandboxMode, seededCapabilities.sandbox_modes),
-    )
+        ? (selectedThread.agent.sandbox_mode ?? null)
+        : resolvePersistedMode(
+            preferredSelection?.sandboxMode,
+            seededCapabilities.sandbox_modes,
+          ),
+    );
 
-    setSelectedProvider(nextProvider)
-    const providerModels = workspaceModels(workspace, nextProvider)
+    setSelectedProvider(nextProvider);
+    const providerModels = workspaceModels(workspace, nextProvider);
     const preferredModel =
       preferredSelection?.modelId &&
       providerModels.some((model) => model.id === preferredSelection.modelId)
         ? preferredSelection.modelId
-        : null
+        : null;
     const fallbackModel =
       preferredModel ??
       providerModels.find((model) => model.is_default)?.id ??
       providerModels[0]?.id ??
-      null
+      null;
 
     if (selectedThread) {
-      const nextModel = selectedThread.agent.model_id ?? fallbackModel
+      const nextModel = selectedThread.agent.model_id ?? fallbackModel;
       const nextModelSummary = nextModel
-        ? providerModels.find((model) => model.id === nextModel) ?? null
-        : null
+        ? (providerModels.find((model) => model.id === nextModel) ?? null)
+        : null;
       const supportedEfforts =
-        nextModelSummary?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
-      setSelectedModel(nextModel)
+        nextModelSummary?.supported_reasoning_efforts.map(
+          (entry) => entry.reasoning_effort,
+        ) ?? [];
+      setSelectedModel(nextModel);
       setSelectedEffort(
         selectedThread.agent.reasoning_effort ??
           nextModelSummary?.default_reasoning_effort ??
           supportedEfforts[0] ??
-          'medium',
-      )
+          "medium",
+      );
       setSelectedServiceTier(
         resolveServiceTier(selectedThread.agent.service_tier, nextModelSummary),
-      )
-      return
+      );
+      return;
     }
 
     const fallbackModelSummary = fallbackModel
-      ? providerModels.find((model) => model.id === fallbackModel) ?? null
-      : null
+      ? (providerModels.find((model) => model.id === fallbackModel) ?? null)
+      : null;
     const supportedEfforts =
-      fallbackModelSummary?.supported_reasoning_efforts.map((entry) => entry.reasoning_effort) ?? []
-    setSelectedModel(fallbackModel)
+      fallbackModelSummary?.supported_reasoning_efforts.map(
+        (entry) => entry.reasoning_effort,
+      ) ?? [];
+    setSelectedModel(fallbackModel);
     setSelectedEffort(
-      (preferredSelection?.effort && supportedEfforts.includes(preferredSelection.effort)
+      (preferredSelection?.effort &&
+      supportedEfforts.includes(preferredSelection.effort)
         ? preferredSelection.effort
         : null) ??
         fallbackModelSummary?.default_reasoning_effort ??
         supportedEfforts[0] ??
-        'medium',
-    )
+        "medium",
+    );
     // Threads keep the tier they last ran with; new conversations take the
     // remembered choice, falling back to the model catalog's default tier.
     setSelectedServiceTier(
       resolveServiceTier(
-        preferredSelection?.serviceTier ?? fallbackModelSummary?.default_service_tier,
+        preferredSelection?.serviceTier ??
+          fallbackModelSummary?.default_service_tier,
         fallbackModelSummary,
       ),
-    )
+    );
   }, [
     persistedComposerSelections,
     selectedThread,
@@ -330,58 +533,70 @@ export default function HomeScreen() {
     setSelectedSandboxMode,
     setSelectedServiceTier,
     workspace,
-  ])
+  ]);
 
   // Reset effort when it's no longer valid for the current model
   useEffect(() => {
-    if (effortOptions.length === 0) return
+    if (effortOptions.length === 0) return;
     if (!selectedEffort || !effortOptions.includes(selectedEffort)) {
-      const fallback = resolvedModel?.default_reasoning_effort ?? effortOptions[0] ?? 'medium'
-      setSelectedEffort(fallback)
+      const fallback =
+        resolvedModel?.default_reasoning_effort ?? effortOptions[0] ?? "medium";
+      setSelectedEffort(fallback);
     }
-  }, [effortOptions, resolvedModel, selectedEffort, setSelectedEffort])
+  }, [effortOptions, resolvedModel, selectedEffort, setSelectedEffort]);
 
   const handleProviderChange = useCallback(
     (provider: AgentProvider) => {
-      if (selectedThread) return // locked
-      setSelectedProvider(provider)
-      if (workspace) rememberWorkspaceProvider(workspace.path, provider)
+      if (selectedThread) return; // locked
+      setSelectedProvider(provider);
+      if (workspace) rememberWorkspaceProvider(workspace.path, provider);
       // Swap in the new provider's remembered model/effort/modes rather than
       // resetting; the seed and validity effects clean up anything stale.
       const preferredSelection = composerSelectionFor(
         persistedComposerSelections,
         workspace?.path,
         provider,
-      )
-      const providerModels = workspaceModels(workspace, provider)
+      );
+      const providerModels = workspaceModels(workspace, provider);
       setSelectedModel(
         preferredSelection?.modelId &&
-          providerModels.some((model) => model.id === preferredSelection.modelId)
+          providerModels.some(
+            (model) => model.id === preferredSelection.modelId,
+          )
           ? preferredSelection.modelId
           : null,
-      )
-      setSelectedEffort(preferredSelection?.effort ?? null)
-      const providerCapabilities = workspaceAgentCapabilities(workspace, provider)
+      );
+      setSelectedEffort(preferredSelection?.effort ?? null);
+      const providerCapabilities = workspaceAgentCapabilities(
+        workspace,
+        provider,
+      );
       setSelectedPermissionMode(
         resolvePermissionMode(
           preferredSelection?.permissionMode,
           providerCapabilities.permission_modes,
         ),
-      )
+      );
       setSelectedSandboxMode(
-        resolvePersistedMode(preferredSelection?.sandboxMode, providerCapabilities.sandbox_modes),
-      )
+        resolvePersistedMode(
+          preferredSelection?.sandboxMode,
+          providerCapabilities.sandbox_modes,
+        ),
+      );
       const providerDefaultModel =
-        providerModels.find((model) => model.id === preferredSelection?.modelId) ??
+        providerModels.find(
+          (model) => model.id === preferredSelection?.modelId,
+        ) ??
         providerModels.find((model) => model.is_default) ??
         providerModels[0] ??
-        null
+        null;
       setSelectedServiceTier(
         resolveServiceTier(
-          preferredSelection?.serviceTier ?? providerDefaultModel?.default_service_tier,
+          preferredSelection?.serviceTier ??
+            providerDefaultModel?.default_service_tier,
           providerDefaultModel,
         ),
-      )
+      );
     },
     [
       persistedComposerSelections,
@@ -395,43 +610,46 @@ export default function HomeScreen() {
       setSelectedServiceTier,
       workspace,
     ],
-  )
+  );
 
   const handleModelChange = useCallback(
     (modelId: string | null) => {
-      setSelectedModel(modelId)
+      setSelectedModel(modelId);
       if (workspace && modelId) {
-        rememberComposerSelection(workspace.path, activeProvider, { modelId })
+        rememberComposerSelection(workspace.path, activeProvider, { modelId });
       }
     },
     [activeProvider, rememberComposerSelection, setSelectedModel, workspace],
-  )
+  );
 
   const handleEffortChange = useCallback(
     (effort: string | null) => {
-      setSelectedEffort(effort)
+      setSelectedEffort(effort);
       if (workspace && effort) {
-        rememberComposerSelection(workspace.path, activeProvider, { effort })
+        rememberComposerSelection(workspace.path, activeProvider, { effort });
       }
     },
     [activeProvider, rememberComposerSelection, setSelectedEffort, workspace],
-  )
+  );
 
   // Local state moves first so the chip responds to the tap; with a thread
   // selected the choice is also persisted, matching desktop. Before the thread
   // exists there is nothing to persist to — submitTurn carries it instead.
   const handlePermissionModeChange = useCallback(
     (mode: string | null) => {
-      setSelectedPermissionMode(mode)
+      setSelectedPermissionMode(mode);
       if (workspace) {
         rememberComposerSelection(workspace.path, activeProvider, {
-          permissionMode: mode ?? 'default',
-        })
+          permissionMode: mode ?? "default",
+        });
       }
-      if (!selectedWorkspaceId || !selectedThreadId) return
-      void setThreadMode(selectedWorkspaceId, selectedThreadId, 'permission_mode', mode).catch(
-        () => {},
-      )
+      if (!selectedWorkspaceId || !selectedThreadId) return;
+      void setThreadMode(
+        selectedWorkspaceId,
+        selectedThreadId,
+        "permission_mode",
+        mode,
+      ).catch(() => {});
     },
     [
       activeProvider,
@@ -442,16 +660,23 @@ export default function HomeScreen() {
       setThreadMode,
       workspace,
     ],
-  )
+  );
 
   const handleSandboxModeChange = useCallback(
     (mode: string | null) => {
-      setSelectedSandboxMode(mode)
+      setSelectedSandboxMode(mode);
       if (workspace) {
-        rememberComposerSelection(workspace.path, activeProvider, { sandboxMode: mode })
+        rememberComposerSelection(workspace.path, activeProvider, {
+          sandboxMode: mode,
+        });
       }
-      if (!selectedWorkspaceId || !selectedThreadId) return
-      void setThreadMode(selectedWorkspaceId, selectedThreadId, 'sandbox_mode', mode).catch(() => {})
+      if (!selectedWorkspaceId || !selectedThreadId) return;
+      void setThreadMode(
+        selectedWorkspaceId,
+        selectedThreadId,
+        "sandbox_mode",
+        mode,
+      ).catch(() => {});
     },
     [
       activeProvider,
@@ -462,25 +687,25 @@ export default function HomeScreen() {
       setThreadMode,
       workspace,
     ],
-  )
+  );
 
   const handleServiceTierChange = useCallback(
     (tier: string | null) => {
-      setSelectedServiceTier(tier)
+      setSelectedServiceTier(tier);
       if (workspace) {
         // Turning fast off is an explicit choice, distinct from never having
         // touched the toggle — only the latter follows the catalog default.
         rememberComposerSelection(workspace.path, activeProvider, {
           serviceTier: tier ?? STANDARD_SERVICE_TIER,
-        })
+        });
       }
-      if (!selectedWorkspaceId || !selectedThreadId) return
+      if (!selectedWorkspaceId || !selectedThreadId) return;
       void setThreadMode(
         selectedWorkspaceId,
         selectedThreadId,
-        'service_tier',
+        "service_tier",
         tier ?? STANDARD_SERVICE_TIER,
-      ).catch(() => {})
+      ).catch(() => {});
     },
     [
       activeProvider,
@@ -491,81 +716,91 @@ export default function HomeScreen() {
       setThreadMode,
       workspace,
     ],
-  )
+  );
 
   const handleRemoveQueuedTurn = useCallback(
     (queuedId: string) => {
-      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
-      return removeQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId)
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve();
+      return removeQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId);
     },
     [removeQueuedTurn, selectedThreadId, selectedWorkspaceId],
-  )
+  );
 
   const handleSteerQueuedTurn = useCallback(
     (queuedId: string) => {
-      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
-      return steerQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId)
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve();
+      return steerQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId);
     },
     [selectedThreadId, selectedWorkspaceId, steerQueuedTurn],
-  )
+  );
 
   const handleEditQueuedTurn = useCallback(
     (queuedId: string, text: string) => {
-      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
-      return editQueuedTurn(selectedWorkspaceId, selectedThreadId, queuedId, text)
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve();
+      return editQueuedTurn(
+        selectedWorkspaceId,
+        selectedThreadId,
+        queuedId,
+        text,
+      );
     },
     [editQueuedTurn, selectedThreadId, selectedWorkspaceId],
-  )
+  );
 
   const handleSetGoal = useCallback(
     (objective: string, tokenBudget: number | null) => {
-      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve();
       return setThreadGoal(selectedWorkspaceId, selectedThreadId, {
         objective,
         token_budget: tokenBudget,
-      })
+      });
     },
     [selectedThreadId, selectedWorkspaceId, setThreadGoal],
-  )
+  );
 
   const handleClearGoal = useCallback(() => {
-    if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
-    return clearThreadGoal(selectedWorkspaceId, selectedThreadId)
-  }, [clearThreadGoal, selectedThreadId, selectedWorkspaceId])
+    if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve();
+    return clearThreadGoal(selectedWorkspaceId, selectedThreadId);
+  }, [clearThreadGoal, selectedThreadId, selectedWorkspaceId]);
 
   const handleSetGoalStatus = useCallback(
-    (status: 'active' | 'paused') => {
-      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve()
-      return setThreadGoal(selectedWorkspaceId, selectedThreadId, { status })
+    (status: "active" | "paused") => {
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve();
+      return setThreadGoal(selectedWorkspaceId, selectedThreadId, { status });
     },
     [selectedThreadId, selectedWorkspaceId, setThreadGoal],
-  )
+  );
 
   const handleDismissError = useCallback(() => {
-    useRelayStore.getState()._setError(null)
-  }, [])
+    useRelayStore.getState()._setError(null);
+  }, []);
+
+  const handleConversationShareError = useCallback((message: string) => {
+    useRelayStore.getState()._setError(message);
+  }, []);
 
   const handleOpenDrawer = useCallback(() => {
-    navigation.dispatch(DrawerActions.openDrawer())
-  }, [navigation])
+    navigation.dispatch(DrawerActions.openDrawer());
+  }, [navigation]);
 
   const handleOpenSettings = useCallback(() => {
-    router.push('/(app)/settings')
-  }, [router])
+    router.push("/(app)/settings");
+  }, [router]);
 
   const handleNewThreadFromCurrent = useCallback(() => {
-    if (!workspace) return
+    if (!workspace) return;
 
     // Keep the current project and agent setup, but start with an empty transcript.
-    rememberWorkspaceProvider(workspace.path, activeProvider)
+    rememberWorkspaceProvider(workspace.path, activeProvider);
     rememberComposerSelection(workspace.path, activeProvider, {
       modelId: selectedModel,
       effort: selectedEffort,
       permissionMode: selectedPermissionMode,
       sandboxMode: selectedSandboxMode,
-    })
-    setIsGoalSheetOpen(false)
-    useSessionStore.getState().selectNewThread(workspace.id)
+    });
+    setIsGoalSheetOpen(false);
+    triggerThreadSelectionHaptic();
+    useSessionStore.getState().selectNewThread(workspace.id);
   }, [
     activeProvider,
     rememberComposerSelection,
@@ -575,92 +810,177 @@ export default function HomeScreen() {
     selectedPermissionMode,
     selectedSandboxMode,
     workspace,
-  ])
+  ]);
 
-  const handleAllowApproval = useCallback(
-    (id: string) => respondApproval(id, 'allow'),
-    [respondApproval],
-  )
-
-  const handleDenyApproval = useCallback(
-    (id: string) => respondApproval(id, 'deny'),
-    [respondApproval],
-  )
+  const activeInteractiveWorkspaceId =
+    activeInteractiveRequest?.workspace_id ?? null;
+  const activeInteractiveRequestId =
+    activeInteractiveRequest?.request_id ?? null;
+  const handleActiveInteractiveResponse = useCallback(
+    (response: InteractiveResponsePayload) => {
+      if (!activeInteractiveWorkspaceId || !activeInteractiveRequestId) return;
+      return respondInteractive(
+        activeInteractiveWorkspaceId,
+        activeInteractiveRequestId,
+        response,
+      );
+    },
+    [
+      activeInteractiveRequestId,
+      activeInteractiveWorkspaceId,
+      respondInteractive,
+    ],
+  );
 
   const handleLoadOlder = useCallback(() => {
-    if (!selectedWorkspaceId || !selectedThreadId || isLoadingOlder || !selectedThreadHistory.hasOlder) {
-      return
+    if (
+      !selectedWorkspaceId ||
+      !selectedThreadId ||
+      isLoadingOlder ||
+      !selectedThreadHistory.hasOlder
+    ) {
+      return;
     }
 
     // maintainVisibleContentPosition keeps the viewport anchored while the
     // older page prepends above it; no scroll bookkeeping needed here.
-    setIsLoadingOlder(true)
-    void loadThreadDetail(selectedWorkspaceId, selectedThreadId, { older: true }).finally(() => {
-      setIsLoadingOlder(false)
-    })
+    setIsLoadingOlder(true);
+    void loadThreadDetail(selectedWorkspaceId, selectedThreadId, {
+      older: true,
+    }).finally(() => {
+      setIsLoadingOlder(false);
+    });
   }, [
     isLoadingOlder,
     loadThreadDetail,
     selectedThreadHistory.hasOlder,
     selectedThreadId,
     selectedWorkspaceId,
-  ])
+  ]);
+
+  const appendImageAttachments = useCallback(
+    (
+      conversationKey: string,
+      nextAttachments: ReturnType<typeof useUIStore.getState>["attachments"],
+    ) => {
+      if (nextAttachments.length === 0) return;
+      const state = useUIStore.getState();
+      const currentAttachments =
+        state.attachmentsByConversation[conversationKey] ?? [];
+      validateImageAttachmentBudget([
+        ...currentAttachments,
+        ...nextAttachments,
+      ]);
+      const currentDraft =
+        state.conversationKey === conversationKey
+          ? state.draft
+          : (state.drafts[conversationKey]?.text ?? "");
+      state.setComposerForConversation(conversationKey, currentDraft, [
+        ...currentAttachments,
+        ...nextAttachments,
+      ]);
+      useRelayStore.getState()._setError(null);
+    },
+    [],
+  );
 
   const handlePickImages = useCallback(() => {
+    if (!capabilities.supports_images) {
+      useRelayStore
+        .getState()
+        ._setError("The selected agent does not support image attachments.");
+      return;
+    }
+    const conversationKey = useUIStore.getState().conversationKey;
     void pickImageInputsFromLibrary()
       .then((pickedAttachments) => {
-        if (pickedAttachments.length === 0) return
-        addAttachments(pickedAttachments)
-        useRelayStore.getState()._setError(null)
+        appendImageAttachments(conversationKey, pickedAttachments);
       })
       .catch((error) => {
-        useRelayStore.getState()._setError(
-          error instanceof Error ? error.message : 'Failed to pick images',
-        )
-      })
-  }, [addAttachments])
+        useRelayStore
+          .getState()
+          ._setError(
+            error instanceof Error ? error.message : "Failed to pick images",
+          );
+      });
+  }, [appendImageAttachments, capabilities.supports_images]);
 
   const handleTakePhoto = useCallback(() => {
+    if (!capabilities.supports_images) {
+      useRelayStore
+        .getState()
+        ._setError("The selected agent does not support image attachments.");
+      return;
+    }
+    const conversationKey = useUIStore.getState().conversationKey;
     void pickImageInputFromCamera()
       .then((pickedAttachments) => {
-        if (pickedAttachments.length === 0) return
-        addAttachments(pickedAttachments)
-        useRelayStore.getState()._setError(null)
+        appendImageAttachments(conversationKey, pickedAttachments);
       })
       .catch((error) => {
-        useRelayStore.getState()._setError(
-          error instanceof Error ? error.message : 'Failed to take photo',
-        )
+        useRelayStore
+          .getState()
+          ._setError(
+            error instanceof Error ? error.message : "Failed to take photo",
+          );
+      });
+  }, [appendImageAttachments, capabilities.supports_images]);
+
+  const handlePasteImage = useCallback(() => {
+    if (!capabilities.supports_images) {
+      useRelayStore
+        .getState()
+        ._setError("The selected agent does not support image attachments.");
+      return;
+    }
+    const conversationKey = useUIStore.getState().conversationKey;
+    void pasteImageInputFromClipboard()
+      .then((pastedAttachments) => {
+        appendImageAttachments(conversationKey, pastedAttachments);
       })
-  }, [addAttachments])
+      .catch((error) => {
+        useRelayStore
+          .getState()
+          ._setError(
+            error instanceof Error
+              ? error.message
+              : "Failed to paste clipboard image",
+          );
+      });
+  }, [appendImageAttachments, capabilities.supports_images]);
 
   useEffect(() => {
-    const subscription = AppState.addEventListener('change', setAppState)
+    const subscription = AppState.addEventListener("change", setAppState);
     return () => {
-      subscription.remove()
-    }
-  }, [])
+      subscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId || !isEncrypted) {
-      setDetailLoadingThreadId(null)
-      setIsLoadingOlder(false)
-      useSessionStore.getState().setThreadDetail(null)
-      return
+      setDetailLoadingThreadId(null);
+      setIsLoadingOlder(false);
+      useSessionStore.getState().setThreadDetail(null);
+      return;
     }
 
-    let cancelled = false
-    let snapTimer: ReturnType<typeof setTimeout> | null = null
-    setIsLoadingOlder(false)
+    let cancelled = false;
+    let snapTimer: ReturnType<typeof setTimeout> | null = null;
+    setIsLoadingOlder(false);
     // Read the item count imperatively: subscribing to it would refire this
     // effect (and a full thread.detail RPC) for every streamed item.
-    if ((useSessionStore.getState().threadItems[selectedThreadId]?.length ?? 0) === 0) {
-      setDetailLoadingThreadId(selectedThreadId)
+    if (
+      (useSessionStore.getState().threadItems[selectedThreadId]?.length ??
+        0) === 0
+    ) {
+      setDetailLoadingThreadId(selectedThreadId);
     }
 
     void loadThreadDetail(selectedWorkspaceId, selectedThreadId).finally(() => {
-      if (cancelled) return
-      setDetailLoadingThreadId((current) => (current === selectedThreadId ? null : current))
+      if (cancelled) return;
+      setDetailLoadingThreadId((current) =>
+        current === selectedThreadId ? null : current,
+      );
       // Snap to the true bottom once the fresh page lands. Opening from cache
       // renders at the *cached* bottom, and anything the agent produced while
       // the app was closed appends below the anchored viewport — outside
@@ -668,83 +988,105 @@ export default function HomeScreen() {
       // brings the reader down. The delay lets the merged items commit and lay
       // out before the scroll measures content height.
       snapTimer = setTimeout(() => {
-        if (!cancelled) scrollToBottom(false)
-      }, 80)
-    })
+        if (!cancelled) scrollToBottom(false);
+      }, 80);
+    });
 
     return () => {
-      cancelled = true
-      if (snapTimer) clearTimeout(snapTimer)
-    }
-  }, [isEncrypted, loadThreadDetail, scrollToBottom, selectedThreadId, selectedWorkspaceId])
+      cancelled = true;
+      if (snapTimer) clearTimeout(snapTimer);
+    };
+  }, [
+    isEncrypted,
+    loadThreadDetail,
+    scrollToBottom,
+    selectedThreadId,
+    selectedWorkspaceId,
+  ]);
 
   // Opening a thread starts at the bottom of the cached items via the list's
   // startRenderingFromBottom (the detail-load effect snaps past any newer
   // items once they land); only the jump-button state needs resetting.
   useEffect(() => {
-    resetScrollState()
-  }, [resetScrollState, selectedThreadId])
+    resetScrollState();
+  }, [resetScrollState, selectedThreadId]);
 
   useEffect(() => {
     // The cleanup below cancels any pending debounce whenever the deps change
     // (or the screen unmounts), so an early return — switching threads,
     // backgrounding, losing encryption — can never let a stale timer mark the
     // previous thread read with captured values.
-    if (appState !== 'active' || !workspace || !selectedThread || !sessionId || !isEncrypted) return
+    if (
+      appState !== "active" ||
+      !workspace ||
+      !selectedThread ||
+      !sessionId ||
+      !isEncrypted
+    )
+      return;
 
-    const readSeq = selectedThread.attention.last_agent_activity_seq
-    if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return
+    const readSeq = selectedThread.attention.last_agent_activity_seq;
+    if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return;
 
     // Streamed events refire this effect long before the summary reflects the
     // send, so suppress duplicates locally and debounce the action itself.
-    const lastSent = lastSentReadSeqRef.current
-    if (lastSent && lastSent.threadId === selectedThread.id && lastSent.readSeq >= readSeq) return
+    const lastSent = lastSentReadSeqRef.current;
+    if (
+      lastSent &&
+      lastSent.threadId === selectedThread.id &&
+      lastSent.readSeq >= readSeq
+    )
+      return;
 
-    const workspaceId = workspace.id
-    const threadId = selectedThread.id
+    const workspaceId = workspace.id;
+    const threadId = selectedThread.id;
 
     markReadTimerRef.current = setTimeout(() => {
-      markReadTimerRef.current = null
-      const relay = useRelayStore.getState()
-      const clientToken = relay._getClientToken()
-      const sessionCrypto = relay._getSessionCrypto()
-      if (!clientToken || !sessionCrypto) return
+      markReadTimerRef.current = null;
+      const relay = useRelayStore.getState();
+      const clientToken = relay._getClientToken();
+      const sessionCrypto = relay._getSessionCrypto();
+      if (!clientToken || !sessionCrypto) return;
 
-      lastSentReadSeqRef.current = { threadId, readSeq }
+      lastSentReadSeqRef.current = { threadId, readSeq };
       void encryptJson(sessionCrypto.dataKey, {
         workspace_id: workspaceId,
         thread_id: threadId,
         read_seq: readSeq,
       })
         .then((payload) =>
-          fetch(`${relayUrl.replace(/\/$/, '')}/v1/sessions/${encodeURIComponent(sessionId)}/actions`, {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${clientToken}`,
-              'content-type': 'application/json',
+          fetch(
+            `${relayUrl.replace(/\/$/, "")}/v1/sessions/${encodeURIComponent(sessionId)}/actions`,
+            {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${clientToken}`,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({
+                idempotency_key:
+                  globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
+                action_type: "thread.mark_read",
+                payload,
+              }),
             },
-            body: JSON.stringify({
-              idempotency_key: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}`,
-              action_type: 'thread.mark_read',
-              payload,
-            }),
-          }),
+          ),
         )
-        .catch(() => {})
-    }, 1_000)
+        .catch(() => {});
+    }, 1_000);
 
     return () => {
       if (markReadTimerRef.current) {
-        clearTimeout(markReadTimerRef.current)
-        markReadTimerRef.current = null
+        clearTimeout(markReadTimerRef.current);
+        markReadTimerRef.current = null;
       }
-    }
-  }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace])
+    };
+  }, [appState, isEncrypted, relayUrl, selectedThread, sessionId, workspace]);
 
   return (
     <KeyboardAvoidingView
       style={[styles.container, { paddingTop: insets.top }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === "ios" ? "padding" : undefined}
       keyboardVerticalOffset={0}
     >
       <View style={styles.header}>
@@ -756,33 +1098,38 @@ export default function HomeScreen() {
           accessibilityHint="Opens the project and thread list"
         >
           <ChevronLeft size={18} color={theme.colors.fg.muted} />
-          <Text variant="label" color="primary" weight="semibold" numberOfLines={1} style={styles.headerTitle}>
+          <Text
+            variant="label"
+            color="primary"
+            weight="semibold"
+            numberOfLines={1}
+            style={styles.headerTitle}
+          >
             {getWorkspaceTitle(workspace?.path)}
           </Text>
         </Pressable>
         <View style={styles.headerRight}>
+          {selectedThread && conversationItems.length > 0 ? (
+            <ConversationShareButton
+              items={conversationItems}
+              title={selectedThread.title}
+              partial={selectedThreadHistory.hasOlder}
+              onError={handleConversationShareError}
+            />
+          ) : null}
           {selectedThread ? (
             <Pressable
               onPress={handleNewThreadFromCurrent}
               accessibilityRole="button"
               accessibilityLabel="New thread with current settings"
-              hitSlop={(theme.minTouchTarget - theme.iconSize.md) / 2}
+              style={({ pressed }) => [
+                styles.headerIconButton,
+                pressed && styles.headerIconButtonPressed,
+              ]}
             >
-              <SquarePen size={theme.iconSize.md} color={theme.colors.fg.secondary} />
-            </Pressable>
-          ) : null}
-          {showGoalControl ? (
-            <Pressable
-              onPress={() => setIsGoalSheetOpen(true)}
-              accessibilityRole="button"
-              accessibilityLabel={
-                selectedThread?.goal ? `Goal: ${selectedThread.goal.objective}` : 'Set a goal'
-              }
-              hitSlop={(theme.minTouchTarget - theme.iconSize.md) / 2}
-            >
-              <Target
+              <SquarePen
                 size={theme.iconSize.md}
-                color={selectedThread?.goal ? theme.colors.accent.default : theme.colors.fg.muted}
+                color={theme.colors.fg.secondary}
               />
             </Pressable>
           ) : null}
@@ -797,13 +1144,19 @@ export default function HomeScreen() {
 
       <ErrorBanner message={error} onDismiss={handleDismissError} />
 
-      {activeApproval ? (
-        <ApprovalBanner
-          key={activeApproval.request_id}
-          approval={activeApproval}
-          pendingCount={approvalQueue.length}
-          onAllow={handleAllowApproval}
-          onDeny={handleDenyApproval}
+      {operationalNotice ? (
+        <OperationalNoticeBanner
+          notice={operationalNotice}
+          onDismiss={dismissOperationalNotice}
+        />
+      ) : null}
+
+      {activeInteractiveRequest ? (
+        <InteractiveRequestBanner
+          key={activeInteractiveRequest.request_id}
+          request={activeInteractiveRequest}
+          pendingCount={interactiveQueue.length}
+          onRespond={handleActiveInteractiveResponse}
         />
       ) : null}
 
@@ -812,7 +1165,11 @@ export default function HomeScreen() {
           <View style={styles.syncState}>
             <ActivityIndicator size="small" color={theme.colors.fg.muted} />
             <Text variant="caption" color="muted">
-              {connectionStatus === 'encrypted' ? 'Syncing...' : connectionStatus === 'connected' ? 'Securing session...' : 'Connecting...'}
+              {connectionStatus === "encrypted"
+                ? "Syncing..."
+                : connectionStatus === "connected"
+                  ? "Securing session..."
+                  : "Connecting..."}
             </Text>
           </View>
         ) : !selectedThread ? (
@@ -821,7 +1178,7 @@ export default function HomeScreen() {
               Let's build
             </Text>
             <Text variant="body" size="lg" color="muted">
-              {workspace?.path.split('/').pop() ?? 'Select a project'}
+              {workspace?.path.split("/").pop() ?? "Select a project"}
             </Text>
           </View>
         ) : blocks.length === 0 && isSelectedThreadLoading ? (
@@ -831,8 +1188,13 @@ export default function HomeScreen() {
               Loading thread...
             </Text>
           </View>
-        ) : blocks.length === 0 && liveActivityGroups.length === 0 && !isThreadRunning ? (
-          <EmptyState title="No messages yet" description="Send a message to get started" />
+        ) : blocks.length === 0 &&
+          liveActivityGroups.length === 0 &&
+          !isThreadRunning ? (
+          <EmptyState
+            title="No messages yet"
+            description="Send a message to get started"
+          />
         ) : (
           <FlashList
             key={selectedThreadId}
@@ -840,18 +1202,23 @@ export default function HomeScreen() {
             data={blocks}
             renderItem={renderBlock}
             keyExtractor={keyExtractor}
-            getItemType={getItemType}
+            getItemType={conversationRenderBlockType}
+            accessibilityLabel="Conversation"
             showsVerticalScrollIndicator={false}
-            // Native bottom-pinning: chat opens at the bottom, follows
-            // streaming output only while the user is near the bottom, and
-            // stays anchored when reading older messages or loading a page
-            // above. Replaces a manual scrollToEnd-on-content-size handler
-            // that teleported the list whenever recycled cells re-measured.
+            // Native bottom-pinning: chat opens at the bottom and follows
+            // streaming output, but only while the user hasn't scrolled away —
+            // the threshold is stateful (see useScrollToBottom) because a
+            // fixed one lets each streamed chunk's autoscroll cancel an
+            // in-progress upward drag, making the list unscrollable while
+            // streaming.
             maintainVisibleContentPosition={{
-              autoscrollToBottomThreshold: 0.2,
+              autoscrollToBottomThreshold,
               startRenderingFromBottom: true,
             }}
             onScroll={onScroll}
+            onScrollBeginDrag={onScrollBeginDrag}
+            onScrollEndDrag={onScrollEndDrag}
+            onMomentumScrollEnd={onMomentumScrollEnd}
             scrollEventThrottle={16}
             contentContainerStyle={styles.listContent}
             ListHeaderComponent={
@@ -860,7 +1227,11 @@ export default function HomeScreen() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    label={isLoadingOlder ? 'Loading older messages...' : 'Load older messages'}
+                    label={
+                      isLoadingOlder
+                        ? "Loading older messages..."
+                        : "Load older messages"
+                    }
                     onPress={handleLoadOlder}
                     loading={isLoadingOlder}
                   />
@@ -880,7 +1251,10 @@ export default function HomeScreen() {
 
       <LiveActivityLane groups={liveActivityGroups} />
 
-      <GoalBanner goal={selectedThread?.goal ?? null} onPress={() => setIsGoalSheetOpen(true)} />
+      <GoalBanner
+        goal={selectedThread?.goal ?? null}
+        onPress={() => setIsGoalSheetOpen(true)}
+      />
 
       <QueuedTurns
         queuedTurns={queuedTurns}
@@ -899,14 +1273,25 @@ export default function HomeScreen() {
           onChangeText={setDraft}
           onSubmit={() => void submitTurn()}
           onStop={() => {
-            if (isStopping) return
-            setIsStopping(true)
-            void interruptTurn().finally(() => setIsStopping(false))
+            if (isStopping) return;
+            setIsStopping(true);
+            void interruptTurn().finally(() => setIsStopping(false));
           }}
           onPickImages={handlePickImages}
+          onPasteImage={handlePasteImage}
           onTakePhoto={handleTakePhoto}
           onRemoveAttachment={removeAttachment}
-          disabled={!workspace || isSubmitting || !isEncrypted}
+          disabled={!workspace}
+          sendDisabled={
+            isSubmitting || !isEncrypted || Boolean(attachmentSendBlockReason)
+          }
+          sendDisabledReason={
+            isSubmitting
+              ? "Message is being sent"
+              : !isEncrypted
+                ? "Reconnect to send"
+                : (attachmentSendBlockReason ?? undefined)
+          }
           attachments={attachments}
           skills={workspace?.skills ?? []}
           models={models}
@@ -942,7 +1327,7 @@ export default function HomeScreen() {
         />
       ) : null}
     </KeyboardAvoidingView>
-  )
+  );
 }
 
 const styles = StyleSheet.create((theme) => ({
@@ -951,9 +1336,9 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface[0],
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[3],
     borderBottomWidth: 1,
@@ -961,8 +1346,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   headerLeft: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: theme.spacing[1],
     marginRight: theme.spacing[3],
   },
@@ -970,9 +1355,20 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
   },
   headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: theme.spacing[3],
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  headerIconButton: {
+    minWidth: theme.minTouchTarget,
+    minHeight: theme.minTouchTarget,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: theme.radius.sm,
+    borderCurve: "continuous",
+  },
+  headerIconButtonPressed: {
+    backgroundColor: theme.colors.surface[2],
   },
   listContainer: {
     flex: 1,
@@ -986,19 +1382,19 @@ const styles = StyleSheet.create((theme) => ({
   },
   syncState: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     gap: theme.spacing[3],
   },
   newThreadState: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     gap: theme.spacing[2],
   },
   loadOlderContainer: {
-    alignItems: 'center',
+    alignItems: "center",
     paddingTop: theme.spacing[3],
     paddingBottom: theme.spacing[1],
   },
-}))
+}));
