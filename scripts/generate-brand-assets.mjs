@@ -41,7 +41,10 @@ function mtimeMs(path) {
 }
 
 function renderSquare(source, target, size) {
-  run('magick', [source, '-resize', `${size}x${size}`, target])
+  // ImageMagick Q16 builds otherwise preserve the SVG at 16 bits/channel.
+  // Tauri's PNG icon loader expects one 8-bit RGBA value per pixel and aborts
+  // at startup when handed a 16-bit icon.
+  run('magick', [source, '-resize', `${size}x${size}`, `png32:${target}`])
 }
 
 function renderPaddedTransparent(source, target, iconSize, canvasSize) {
@@ -74,7 +77,7 @@ function renderPaddedOnSolid(source, target, iconSize, canvasSize, backgroundCol
     'center',
     '-extent',
     `${canvasSize}x${canvasSize}`,
-    target,
+    `png32:${target}`,
   ])
 }
 
