@@ -257,6 +257,40 @@ function renderMarkdownInlineNode(
   }
 }
 
+const TABLE_COLUMN_MIN_WIDTH = 88
+const TABLE_COLUMN_MAX_WIDTH = 248
+const TABLE_CELL_HORIZONTAL_PADDING = 12
+// Rough average glyph width for the cell font; exact measurement is
+// impossible before layout in React Native, but any consistent per-column
+// estimate keeps every row's cells the same width — which is what makes the
+// columns line up. Content wider than the estimate simply wraps in its cell.
+const TABLE_CHAR_WIDTH = 8.5
+const TABLE_HEADER_CHAR_WIDTH = 9
+
+function markdownNodePlainText(node: MarkdownNode): string {
+  if (typeof node.value === 'string') return node.value
+  return (node.children ?? []).map(markdownNodePlainText).join('')
+}
+
+function markdownTableColumnWidths(
+  rows: MarkdownNode[],
+  columnCount: number,
+  cellHorizontalPadding: number,
+): number[] {
+  return Array.from({ length: columnCount }, (_, columnIndex) => {
+    const contentWidth = rows.reduce((widest, row, rowIndex) => {
+      const cell = row.children?.[columnIndex]
+      if (!cell) return widest
+      const charWidth = rowIndex === 0 ? TABLE_HEADER_CHAR_WIDTH : TABLE_CHAR_WIDTH
+      return Math.max(widest, markdownNodePlainText(cell).trim().length * charWidth)
+    }, 0)
+    return Math.min(
+      TABLE_COLUMN_MAX_WIDTH,
+      Math.max(TABLE_COLUMN_MIN_WIDTH, Math.ceil(contentWidth) + cellHorizontalPadding),
+    )
+  })
+}
+
 function renderMarkdownTable(
   node: MarkdownNode,
   definitions: MarkdownDefinitions,
@@ -271,6 +305,15 @@ function renderMarkdownTable(
   if (rows.length === 0 || columnCount === 0) {
     return null
   }
+
+  // Every cell in a column gets the same explicit width; rows laid out
+  // independently would otherwise each size their own cells, leaving the
+  // header dividers misaligned with the body columns.
+  const columnWidths = markdownTableColumnWidths(
+    rows,
+    columnCount,
+    2 * TABLE_CELL_HORIZONTAL_PADDING,
+  )
 
   return (
     <ScrollView key={key} horizontal showsHorizontalScrollIndicator={false}>
@@ -288,6 +331,7 @@ function renderMarkdownTable(
                   key={`${key}-cell-${rowIndex}-${columnIndex}`}
                   style={[
                     styles.tableCell,
+                    { width: columnWidths[columnIndex] },
                     isHeader ? styles.tableHeaderCell : undefined,
                     isLastColumn ? styles.tableCellLastColumn : undefined,
                     isLastRow ? styles.tableCellLastRow : undefined,
@@ -504,8 +548,7 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomWidth: 1,
     borderRightColor: theme.colors.border.default,
     borderRightWidth: 1,
-    minWidth: 120,
-    paddingHorizontal: theme.spacing[3],
+    paddingHorizontal: TABLE_CELL_HORIZONTAL_PADDING,
     paddingVertical: 10,
   },
   tableCellText: {

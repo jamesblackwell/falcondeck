@@ -129,6 +129,43 @@ describe('MarkdownRenderer', () => {
     expect(renderedText).toContain('Footnote body')
   })
 
+  it('gives every cell in a table column the same explicit width', () => {
+    const renderer = renderComponent(
+      <MarkdownRenderer
+        text={[
+          '| Buyer type | Fit |',
+          '| --- | --- |',
+          '| Indie / operator | High |',
+          '| Edtech strategic (Quizlet, Pearson, UWorld, etc.) | Medium |',
+        ].join('\n')}
+      />,
+    )
+
+    const cellWidths = renderer.root
+      .findAllByType(View)
+      .map((node) =>
+        (Array.isArray(node.props.style) ? node.props.style : [])
+          .filter(Boolean)
+          .reduce(
+            (width: number | undefined, style: { width?: number }) => style?.width ?? width,
+            undefined,
+          ),
+      )
+      .filter((width): width is number => typeof width === 'number')
+
+    // 3 rows x 2 columns, laid out row by row.
+    expect(cellWidths).toHaveLength(6)
+    const [headerA, headerB] = cellWidths
+    for (let row = 1; row < 3; row += 1) {
+      expect(cellWidths[row * 2]).toBe(headerA)
+      expect(cellWidths[row * 2 + 1]).toBe(headerB)
+    }
+    // The long first column caps at the max width instead of forcing one
+    // enormous column, and the short second column stays at the minimum.
+    expect(headerA).toBe(248)
+    expect(headerB).toBe(88)
+  })
+
   it('renders streamed partial markdown cleanly', () => {
     const codeBlock = renderComponent(<MarkdownRenderer text={'```ts\nconst value = 1'} />)
     const partialLink = renderComponent(
