@@ -1856,35 +1856,62 @@ impl AppState {
         token: &str,
     ) -> Result<TrustedDevicesResponse, RelayError> {
         let _ = self.authenticate_session(session_id, token).await?;
+        self.trusted_devices_response(session_id).await
+    }
+
+    /// Build the devices response with per-device liveness overlaid from the
+    /// live peer map. Callers must have authenticated already.
+    async fn trusted_devices_response(
+        &self,
+        session_id: &str,
+    ) -> Result<TrustedDevicesResponse, RelayError> {
         let store = self.inner.store.lock().await;
         let session = store
             .data
             .sessions
             .get(session_id)
             .ok_or_else(|| RelayError::NotFound("session not found".to_string()))?;
+        let live = store.live_sessions.get(session_id);
+        let connected_device_ids: std::collections::HashSet<&str> = live
+            .map(|live| {
+                live.peers
+                    .values()
+                    .filter(|peer| matches!(peer.role, RelayPeerRole::Client))
+                    .filter_map(|peer| peer.device_id.as_deref())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut devices = session.trusted_devices();
+        for device in &mut devices {
+            device.connected = connected_device_ids.contains(device.device_id.as_str());
+        }
         Ok(TrustedDevicesResponse {
             session_id: session_id.to_string(),
-            devices: session.trusted_devices(),
-            presence: session.machine_presence(store.live_sessions.get(session_id).is_some_and(
-                |live| {
-                    live.peers
-                        .values()
-                        .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
-                },
-            )),
+            devices,
+            presence: session.machine_presence(live.is_some_and(|live| {
+                live.peers
+                    .values()
+                    .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
+            })),
         })
     }
 
     pub async fn revoke_trusted_device(
         &self,
         session_id: &str,
-        daemon_token: &str,
+        token: &str,
         device_id: &str,
     ) -> Result<TrustedDevicesResponse, RelayError> {
-        let auth = self.authenticate_session(session_id, daemon_token).await?;
-        if !matches!(auth.role, RelayPeerRole::Daemon) {
+        let auth = self.authenticate_session(session_id, token).await?;
+        // A device may remove itself (unpairing on the phone), so its record
+        // does not linger in the desktop's device list forever. Self-removal
+        // purges in one call: revoking would invalidate the device's own
+        // token and leave it unable to complete the revoke-then-purge pair.
+        let is_self_revoke = matches!(auth.role, RelayPeerRole::Client)
+            && auth.device_id.as_deref() == Some(device_id);
+        if !matches!(auth.role, RelayPeerRole::Daemon) && !is_self_revoke {
             return Err(RelayError::Unauthorized(
-                "only daemon peers may revoke trusted devices".to_string(),
+                "only the daemon or the device itself may revoke a trusted device".to_string(),
             ));
         }
         let (revoked_peer_ids, session, device_snapshot) = {
@@ -1902,9 +1929,10 @@ impl AppState {
                     .devices
                     .get_mut(device_id)
                     .ok_or_else(|| RelayError::NotFound("trusted device not found".to_string()))?;
-                if device.revoked_at.is_some() {
+                if is_self_revoke || device.revoked_at.is_some() {
                     // Revoking an already-revoked device purges it entirely —
-                    // this is how the UI's "Remove" clears dead entries.
+                    // this is how the UI's "Remove" clears dead entries. A
+                    // self-revoke purges immediately (see above).
                     session.devices.remove(device_id);
                     device_snapshot = None;
                 } else {
@@ -1949,7 +1977,9 @@ impl AppState {
             self.unregister_peer(session_id, &peer_id).await;
         }
         self.broadcast_presence(session_id).await;
-        self.trusted_devices(session_id, daemon_token).await
+        // Not `trusted_devices`: a self-revoked device's token was just
+        // invalidated, so re-authenticating with it would fail the response.
+        self.trusted_devices_response(session_id).await
     }
 
     /// Store (or clear) the Expo push token for a trusted device. Clients may
@@ -2606,6 +2636,9 @@ impl AppState {
         backend.remove_sessions(&report.removed_session_ids).await?;
         backend.remove_pairings(&report.removed_pairing_ids).await?;
         backend.remove_actions(&report.removed_action_ids).await?;
+        for (session_id, device_id) in &report.removed_devices {
+            backend.remove_device(session_id, device_id).await?;
+        }
         for (session, oldest_retained_seq) in &report.pruned_update_sessions {
             backend
                 .prune_updates(&session.session_id, *oldest_retained_seq)
@@ -2739,6 +2772,9 @@ impl SessionRecord {
     }
 
     fn trusted_devices(&self) -> Vec<TrustedDevice> {
+        // Liveness is a property of the live peer map, not the durable
+        // record; callers with access to `live_sessions` overlay `connected`
+        // via `AppState::trusted_devices`.
         let mut devices = self
             .devices
             .values()
@@ -2751,6 +2787,7 @@ impl SessionRecord {
                 } else {
                     TrustedDeviceStatus::Active
                 },
+                connected: false,
                 created_at: device.created_at,
                 last_seen_at: device.last_seen_at,
                 revoked_at: device.revoked_at,
@@ -2866,6 +2903,9 @@ struct PruneReport {
     removed_action_ids: Vec<String>,
     removed_session_ids: Vec<String>,
     removed_pairing_ids: Vec<String>,
+    /// Individual stale device rows removed from sessions that are otherwise
+    /// retained, as `(session_id, device_id)` pairs.
+    removed_devices: Vec<(String, String)>,
 }
 
 impl PruneReport {
@@ -2874,6 +2914,7 @@ impl PruneReport {
             && self.removed_action_ids.is_empty()
             && self.removed_session_ids.is_empty()
             && self.removed_pairing_ids.is_empty()
+            && self.removed_devices.is_empty()
     }
 }
 
@@ -2930,6 +2971,26 @@ fn prune_state(
             let keep = !terminal || action.updated_at >= action_cutoff;
             if !keep {
                 report.removed_action_ids.push(action_id.clone());
+            }
+            keep
+        });
+
+        // Device rows inside a retained session were previously immortal:
+        // every re-pair from a lost phone left a row behind forever. Drop
+        // revoked rows once their grace window passes, and active rows that
+        // nothing has connected with for the trusted-device retention period.
+        let session_id = session.session_id.clone();
+        let revoked_device_cutoff = saturating_sub(now, retention.completed_action_retention);
+        let stale_device_cutoff = saturating_sub(now, retention.trusted_device_retention);
+        session.devices.retain(|device_id, device| {
+            let keep = match device.revoked_at {
+                Some(revoked_at) => revoked_at >= revoked_device_cutoff,
+                None => device.last_seen_at.unwrap_or(device.created_at) >= stale_device_cutoff,
+            };
+            if !keep {
+                report
+                    .removed_devices
+                    .push((session_id.clone(), device_id.clone()));
             }
             keep
         });

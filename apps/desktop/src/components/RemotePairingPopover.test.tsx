@@ -134,6 +134,56 @@ describe('RemotePairingPopover', () => {
     expect(onStartPairing).toHaveBeenCalledTimes(1)
   })
 
+  it('counts only live devices as connected and shows last-seen for offline ones', async () => {
+    const status: RemoteStatusResponse = {
+      ...remoteStatus(),
+      status: 'connected',
+      pairing: null,
+      trusted_devices: [
+        {
+          device_id: 'device-live',
+          session_id: 'session-1',
+          label: 'iPhone 17 Pro',
+          status: 'active',
+          connected: true,
+          created_at: '2026-08-01T12:00:00Z',
+          last_seen_at: '2026-08-08T11:59:00Z',
+          revoked_at: null,
+        },
+        {
+          device_id: 'device-stale',
+          session_id: 'session-1',
+          label: 'Old iPhone',
+          status: 'active',
+          connected: false,
+          created_at: '2026-07-01T12:00:00Z',
+          last_seen_at: '2026-08-01T12:00:00Z',
+          revoked_at: null,
+        },
+      ],
+      presence: null,
+      last_error: null,
+    }
+    render(
+      <ToastProvider>
+        <RemotePairingPopover
+          remoteStatus={status}
+          pairingLink={null}
+          onStartPairing={() => {}}
+          isStartingRemote={false}
+          remoteControlsDisabled={false}
+          remoteControlsUnavailableReason={null}
+        />
+      </ToastProvider>,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: /connected/i }))
+
+    expect(await screen.findByText('1 of 2 devices connected')).toBeInTheDocument()
+    expect(screen.getByText('iPhone 17 Pro')).toBeInTheDocument()
+    expect(screen.getByText('Old iPhone')).toBeInTheDocument()
+  })
+
   it('explains when pairing controls are unavailable', async () => {
     render(
       <ToastProvider>

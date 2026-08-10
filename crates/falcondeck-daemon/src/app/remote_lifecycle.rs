@@ -170,6 +170,7 @@ impl AppState {
         remote.last_error = None;
         remote.command_tx = None;
         remote.trusted_client_bundles.clear();
+        remote.unresumed_remote = None;
     }
 
     pub async fn remote_status(&self) -> RemoteStatusResponse {
@@ -296,56 +297,60 @@ impl AppState {
             })?;
 
         let reused_existing_pairing = seed_pairing.is_some();
-        let remote_pairing = if let Some(previous_pairing) = seed_pairing {
-            RemotePairingState {
-                pairing_id: pairing.pairing_id.clone(),
-                pairing_code: pairing.pairing_code.clone(),
-                session_id: Some(pairing.session_id.clone()),
-                device_id: previous_pairing.device_id,
-                trusted_at: previous_pairing.trusted_at,
-                expires_at: pairing.expires_at,
-                client_bundle: None,
-                local_key_pair,
-                data_key,
-            }
-        } else {
-            RemotePairingState {
-                pairing_id: pairing.pairing_id.clone(),
-                pairing_code: pairing.pairing_code.clone(),
-                session_id: Some(pairing.session_id.clone()),
-                device_id: None,
-                trusted_at: None,
-                expires_at: pairing.expires_at,
-                client_bundle: None,
-                local_key_pair,
-                data_key,
-            }
+        // The state for the pairing that was just minted. Never seeded with a
+        // previous pairing's device: carrying the old device_id made the
+        // bridge treat the new pairing as an already-trusted restore, skip
+        // claim polling entirely, and never publish a bootstrap — the newly
+        // claimed phone then hung on "Securing session…" forever.
+        let new_pairing_state = RemotePairingState {
+            pairing_id: pairing.pairing_id.clone(),
+            pairing_code: pairing.pairing_code.clone(),
+            session_id: Some(pairing.session_id.clone()),
+            device_id: None,
+            trusted_at: None,
+            expires_at: pairing.expires_at,
+            client_bundle: None,
+            local_key_pair,
+            data_key,
         };
+        // A previous pairing that already trusts a device keeps serving it:
+        // the bridge reconnects with the old pairing state while the new
+        // pairing is watched separately for its claim.
+        let carried_pairing = seed_pairing.filter(|previous| previous.device_id.is_some());
 
         let response = {
             let mut remote = self.inner.remote.lock().await;
             reconcile_remote_runtime_state(&mut remote);
             let additional_pairing = remote.task.is_some();
-            if !additional_pairing && let Some(task) = remote.task.take() {
-                task.abort();
-            }
             if let Some(task) = remote.pairing_watch_task.take() {
                 task.abort();
-            }
-            if !additional_pairing {
-                remote.status = RemoteConnectionStatus::PairingPending;
             }
             remote.relay_url = Some(relay_url.clone());
             remote.daemon_token = Some(pairing.daemon_token.clone());
             remote.last_error = None;
+            remote.unresumed_remote = None;
 
             if additional_pairing {
-                remote.pending_pairing = Some(RemotePairingState {
-                    device_id: None,
-                    trusted_at: None,
-                    client_bundle: None,
-                    ..remote_pairing.clone()
+                remote.pending_pairing = Some(new_pairing_state.clone());
+                let app = self.clone();
+                let watch_task = tokio::spawn(async move {
+                    app.watch_pairing_claim(relay_url, pairing.daemon_token, pairing.pairing_id)
+                        .await;
                 });
+                remote.pairing_watch_task = Some(watch_task);
+            } else if let Some(previous_pairing) = carried_pairing {
+                // Bridge task is down but a trusted device exists: reconnect
+                // for it immediately with the previous pairing state, and
+                // watch the new pairing's claim on the side exactly like an
+                // additional-device pairing.
+                remote.status = RemoteConnectionStatus::Connecting;
+                remote.pending_pairing = Some(new_pairing_state.clone());
+                remote.pairing = Some(previous_pairing);
+                self.spawn_remote_bridge_locked(
+                    &mut remote,
+                    relay_url.clone(),
+                    pairing.daemon_token.clone(),
+                );
                 let app = self.clone();
                 let watch_task = tokio::spawn(async move {
                     app.watch_pairing_claim(relay_url, pairing.daemon_token, pairing.pairing_id)
@@ -353,13 +358,14 @@ impl AppState {
                 });
                 remote.pairing_watch_task = Some(watch_task);
             } else {
+                remote.status = RemoteConnectionStatus::PairingPending;
                 remote.pending_pairing = None;
                 if !reused_existing_pairing {
                     // A brand-new pairing mints fresh key material; bundles
                     // trusted for the previous session must not carry over.
                     remote.trusted_client_bundles.clear();
                 }
-                remote.pairing = Some(remote_pairing.clone());
+                remote.pairing = Some(new_pairing_state.clone());
                 self.spawn_remote_bridge_locked(&mut remote, relay_url, pairing.daemon_token);
             }
             build_remote_status_response(&remote)
@@ -566,10 +572,14 @@ impl AppState {
                 .await;
 
             // A worker can finish before the next status poll (for example
-            // during early startup). Give the runtime a short chance to
-            // settle, then let the idempotent supervisor recreate it.
-            sleep(Duration::from_secs(1)).await;
-            app.ensure_remote_bridge_running().await;
+            // during early startup). Respawn the supervisor from a DETACHED
+            // task: calling it inline would observe this task as unfinished
+            // and early-return, leaving the bridge down until the next
+            // remote_status poll — which never comes when no UI is open.
+            tokio::spawn(async move {
+                sleep(Duration::from_secs(1)).await;
+                app.ensure_remote_bridge_running().await;
+            });
         });
         remote.command_tx = Some(command_tx);
         remote.task = Some(task);
@@ -875,14 +885,24 @@ impl AppState {
                         let mut remote = self.inner.remote.lock().await;
                         if remote.relay_url.as_deref() != Some(relay_url.as_str())
                             || remote.daemon_token.as_deref() != Some(daemon_token.as_str())
-                            || remote
-                                .pending_pairing
-                                .as_ref()
-                                .is_none_or(|current_pairing| {
-                                    current_pairing.pairing_id != pairing_id
-                                })
                         {
                             (None, false)
+                        } else if remote
+                            .pending_pairing
+                            .as_ref()
+                            .is_none_or(|current_pairing| current_pairing.pairing_id != pairing_id)
+                        {
+                            // The pending pairing was cleared (bridge hiccup,
+                            // status churn) after the phone already claimed on
+                            // the relay. The claim was still authorized on our
+                            // session, so remember the bundle: the phone's
+                            // periodic request-bootstrap can then recover
+                            // instead of being refused forever.
+                            remember_trusted_client_bundle(
+                                &mut remote.trusted_client_bundles,
+                                &client_bundle,
+                            );
+                            (None, true)
                         } else {
                             let Some(current_pairing) = remote.pending_pairing.as_mut() else {
                                 return;
@@ -1003,6 +1023,7 @@ impl AppState {
             current.pending_pairing = None;
             current.trusted_client_bundles = trusted_client_bundles;
             current.last_error = None;
+            current.unresumed_remote = None;
             self.spawn_remote_bridge_locked(&mut current, relay_url, daemon_token);
         }
 
@@ -1040,6 +1061,10 @@ pub(super) fn build_remote_status_response(remote: &RemoteBridgeState) -> Remote
                     } else {
                         falcondeck_core::TrustedDeviceStatus::Active
                     },
+                    // This synthesized fallback only renders when the relay's
+                    // authoritative device list is unavailable; without relay
+                    // reachability no device can be live, so never claim so.
+                    connected: false,
                     created_at: trusted_at,
                     last_seen_at: matches!(&status, RemoteConnectionStatus::Connected)
                         .then(Utc::now),

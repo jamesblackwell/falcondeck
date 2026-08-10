@@ -37,12 +37,26 @@ describe('secure storage', () => {
     expect(await loadClientToken()).toBeNull()
   })
 
-  it('clearSecureSession removes all keys', async () => {
+  it('clearSecureSession keeps the identity keypair by default', async () => {
     await persistClientSecretKey('key1')
     await persistDataKey('key2')
     await persistClientToken('key3')
 
     await clearSecureSession()
+
+    // The identity keypair survives so re-pairing dedupes back to the same
+    // trusted-device record instead of minting a duplicate.
+    expect(await loadClientSecretKey()).toBe('key1')
+    expect(await loadDataKey()).toBeNull()
+    expect(await loadClientToken()).toBeNull()
+  })
+
+  it('clearSecureSession removes all keys when identity rotation is requested', async () => {
+    await persistClientSecretKey('key1')
+    await persistDataKey('key2')
+    await persistClientToken('key3')
+
+    await clearSecureSession({ keepIdentity: false })
 
     expect(await loadClientSecretKey()).toBeNull()
     expect(await loadDataKey()).toBeNull()

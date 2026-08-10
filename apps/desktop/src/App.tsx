@@ -2218,6 +2218,8 @@ function AppInner() {
               isStartingRemote={isStartingRemote}
               remoteControlsDisabled={remoteControlsDisabled}
               remoteControlsUnavailableReason={remoteControlsUnavailableReason}
+              onRevokeDevice={handleRevokeDevice}
+              revokingDeviceId={revokingDeviceId}
               conversationItems={conversationItems}
               preferences={effectivePreferences}
               conversationEmptyState={conversationEmptyState}

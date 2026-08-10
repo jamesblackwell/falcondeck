@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AppState } from 'react-native'
 
-import { normalizeEventEnvelope, normalizeDaemonSnapshot } from '@falcondeck/client-core'
+import { normalizeEventEnvelope, normalizeDaemonSnapshot, publicKeyToBase64 } from '@falcondeck/client-core'
 import type {
   DaemonSnapshot,
   EventEnvelope,
@@ -11,6 +11,7 @@ import type {
   RelayWebSocketTicketResponse,
 } from '@falcondeck/client-core'
 
+import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { isPushEnabled, registerPushToken } from '@/lib/push-notifications'
 import { useRelayStore, useSessionStore } from '@/store'
 
@@ -26,6 +27,9 @@ const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
 // response can come back stale forever; bound the refetch loop.
 const MAX_SNAPSHOT_REFETCH_ATTEMPTS = 3
 const SNAPSHOT_REFETCH_DELAY_MS = 1_000
+// A WebSocket stuck in CONNECTING never fires close on some platforms; give
+// the handshake a hard deadline so the UI cannot park at "Connecting…".
+const RELAY_CONNECT_TIMEOUT_MS = 20_000
 
 function parseDaemonEvent(payload: unknown): EventEnvelope | null {
   if (
@@ -104,7 +108,6 @@ export function useRelayConnection() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const bootstrapRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryAttempt = useRef(0)
   const snapshotRefetchAttempt = useRef(0)
   const reconnectAttempt = useRef(0)
@@ -367,6 +370,11 @@ export function useRelayConnection() {
     let activeSocket: WebSocket | null = null
     let pingInterval: ReturnType<typeof setInterval> | null = null
     let backoffResetTimer: ReturnType<typeof setTimeout> | null = null
+    // Effect-run-local timers: a component-level ref here would let a stale
+    // socket's close handler cancel the CURRENT run's retry chain (the old
+    // "bootstrap retry silently stops" bug).
+    let bootstrapRetryTimer: ReturnType<typeof setTimeout> | null = null
+    let connectTimeout: ReturnType<typeof setTimeout> | null = null
     const relayUrl = relay.relayUrl.trim().replace(/\/$/, '')
     const wsUrl = relayUrl.startsWith('https://')
       ? `wss://${relayUrl.slice('https://'.length)}`
@@ -410,9 +418,13 @@ export function useRelayConnection() {
         clearTimeout(backoffResetTimer)
         backoffResetTimer = null
       }
-      if (bootstrapRetryTimer.current !== null) {
-        clearTimeout(bootstrapRetryTimer.current)
-        bootstrapRetryTimer.current = null
+      if (bootstrapRetryTimer !== null) {
+        clearTimeout(bootstrapRetryTimer)
+        bootstrapRetryTimer = null
+      }
+      if (connectTimeout !== null) {
+        clearTimeout(connectTimeout)
+        connectTimeout = null
       }
     }
 
@@ -427,15 +439,18 @@ export function useRelayConnection() {
       const current = useRelayStore.getState()
       if (current._getSessionCrypto()) return
       current._requestBootstrap()
-      bootstrapRetryTimer.current = setTimeout(() => {
-        bootstrapRetryTimer.current = null
+      bootstrapRetryTimer = setTimeout(() => {
+        bootstrapRetryTimer = null
         requestBootstrapWhileKeyless()
       }, BOOTSTRAP_REQUEST_RETRY_MS)
     }
 
     const scheduleReconnect = () => {
-      clearSocketTimers()
+      // Guards must run BEFORE touching any timers: a stale socket's close
+      // event otherwise reaches into the live run and cancels its retry
+      // chains.
       if (!isCurrent || !shouldReconnect || !useRelayStore.getState().sessionId) return
+      clearSocketTimers()
       relay._setConnectionStatus('disconnected')
       relay._setMachinePresence(null)
       relay._setSocket(null)
@@ -494,7 +509,7 @@ export function useRelayConnection() {
       setReconnectGeneration((value) => value + 1)
     })
 
-    void fetch(`${relayUrl}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`, {
+    void fetchWithTimeout(`${relayUrl}/v1/sessions/${encodeURIComponent(sessionId)}/ws-ticket`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${clientToken}`,
@@ -514,9 +529,20 @@ export function useRelayConnection() {
         )
         activeSocket = socket
         relay._setSocket(socket)
+        connectTimeout = setTimeout(() => {
+          connectTimeout = null
+          if (socket.readyState !== WebSocket.OPEN) {
+            // close() on a CONNECTING socket fires onclose → scheduleReconnect.
+            socket.close()
+          }
+        }, RELAY_CONNECT_TIMEOUT_MS)
 
         socket.onopen = () => {
           if (!isCurrent) return
+          if (connectTimeout !== null) {
+            clearTimeout(connectTimeout)
+            connectTimeout = null
+          }
           // The relay drops peers that stay silent for 45s.
           pingInterval = setInterval(() => {
             if (socket.readyState === WebSocket.OPEN) {
@@ -585,6 +611,27 @@ export function useRelayConnection() {
             case 'rpc-result':
               void processRpcResult(payload)
               break
+            case 'ephemeral': {
+              // The daemon refuses bootstrap requests from bundles it does
+              // not recognize (e.g. after its trusted list was reset). Without
+              // surfacing this, the pairing screen spins on "Securing
+              // session…" forever with no hint that re-pairing is required.
+              const refusal = payload.body as { kind?: unknown; client_public_key?: unknown } | null
+              if (refusal?.kind === 'bootstrap-refused') {
+                const keyPair = useRelayStore.getState()._getKeyPair()
+                if (
+                  keyPair &&
+                  typeof refusal.client_public_key === 'string' &&
+                  refusal.client_public_key === publicKeyToBase64(keyPair) &&
+                  !useRelayStore.getState()._getSessionCrypto()
+                ) {
+                  relay._setError(
+                    'The desktop does not recognize this device. Start over and pair again.',
+                  )
+                }
+              }
+              break
+            }
             case 'presence':
               relay._setMachinePresence(payload.presence)
               break

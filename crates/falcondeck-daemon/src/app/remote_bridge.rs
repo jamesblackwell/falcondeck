@@ -162,10 +162,18 @@ impl AppState {
         // minimum interval between publishes and a hard per-connection
         // budget, and prune the map so it cannot grow unbounded.
         const BOOTSTRAP_GLOBAL_MIN_INTERVAL: Duration = Duration::from_secs(10);
-        const BOOTSTRAP_MAX_PUBLISHES_PER_CONNECTION: u32 = 5;
+        // Generous: the global interval is the real flood control. A tight
+        // budget (this was 5) let a handful of stale devices starve the one
+        // phone that genuinely needed its key, with no recovery until the
+        // bridge happened to reconnect.
+        const BOOTSTRAP_MAX_PUBLISHES_PER_CONNECTION: u32 = 50;
+        // Refusals are cheap ephemerals but still rate-limited so an
+        // attacker minting fresh bundles cannot use us as a broadcast pump.
+        const BOOTSTRAP_REFUSAL_MIN_INTERVAL: Duration = Duration::from_secs(5);
         let mut bootstrap_request_publishes: HashMap<String, tokio::time::Instant> = HashMap::new();
         let mut bootstrap_publishes_used: u32 = 0;
         let mut last_bootstrap_publish: Option<tokio::time::Instant> = None;
+        let mut last_bootstrap_refusal: Option<tokio::time::Instant> = None;
         loop {
             tokio::select! {
                 event = events.recv() => {
@@ -254,7 +262,27 @@ impl AppState {
                                         let globally_throttled = last_bootstrap_publish
                                             .is_some_and(|last| now.duration_since(last) < BOOTSTRAP_GLOBAL_MIN_INTERVAL);
                                         if !trusted {
-                                            tracing::warn!("ignoring bootstrap request from a client bundle that never completed pairing");
+                                            tracing::warn!("refusing bootstrap request from a client bundle that never completed pairing");
+                                            // Tell the requesting device it is not
+                                            // recognized instead of dropping the
+                                            // request silently — without this the
+                                            // phone spins on "Securing session…"
+                                            // forever with no hint that re-pairing
+                                            // is the only way out.
+                                            let refusal_throttled = last_bootstrap_refusal
+                                                .is_some_and(|last| now.duration_since(last) < BOOTSTRAP_REFUSAL_MIN_INTERVAL);
+                                            if !refusal_throttled {
+                                                last_bootstrap_refusal = Some(now);
+                                                send_relay_message(
+                                                    &mut writer,
+                                                    &RelayClientMessage::Ephemeral {
+                                                        body: serde_json::json!({
+                                                            "kind": "bootstrap-refused",
+                                                            "client_public_key": client_bundle.public_key,
+                                                        }),
+                                                    },
+                                                ).await?;
+                                            }
                                         } else if bootstrap_publishes_used >= BOOTSTRAP_MAX_PUBLISHES_PER_CONNECTION {
                                             tracing::warn!("ignoring bootstrap request: per-connection publish budget exhausted");
                                         } else if recently_served || globally_throttled {

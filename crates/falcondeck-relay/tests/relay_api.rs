@@ -194,6 +194,73 @@ async fn revoking_twice_purges_the_device_entirely() {
 }
 
 #[tokio::test]
+async fn a_device_can_revoke_itself_and_is_purged_in_one_call() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let devices_url = format!(
+        "{}/v1/sessions/{}/devices",
+        server.http_base, claim.session_id
+    );
+
+    // A device unpairing on the phone removes its own record entirely: the
+    // revoke-then-purge pair is impossible for a client whose token dies with
+    // the first revoke.
+    let response = client
+        .delete(format!("{}/{}", devices_url, claim.device_id))
+        .bearer_auth(&claim.client_token)
+        .send()
+        .await
+        .expect("self revoke request");
+    assert!(response.status().is_success());
+
+    let devices =
+        get_json::<TrustedDevicesResponse>(&client, &devices_url, Some(&pairing.daemon_token))
+            .await;
+    assert!(devices.devices.is_empty());
+}
+
+#[tokio::test]
+async fn a_device_cannot_revoke_a_different_device() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, first_claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let second_pairing = post_json::<_, StartPairingResponse>(
+        &client,
+        &format!("{}/v1/pairings", server.http_base),
+        &StartPairingRequest {
+            label: Some("desktop".to_string()),
+            ttl_seconds: Some(300),
+            existing_session_id: Some(pairing.session_id.clone()),
+            daemon_token: Some(pairing.daemon_token.clone()),
+            daemon_bundle: Some(test_bundle()),
+        },
+        None,
+    )
+    .await;
+    let second_claim = claim_with_challenge(
+        &client,
+        &server.http_base,
+        &second_pairing.pairing_code,
+        Some("tablet"),
+        &LocalBoxKeyPair::generate(),
+    )
+    .await;
+
+    let response = client
+        .delete(format!(
+            "{}/v1/sessions/{}/devices/{}",
+            server.http_base, first_claim.session_id, first_claim.device_id
+        ))
+        .bearer_auth(&second_claim.client_token)
+        .send()
+        .await
+        .expect("cross-device revoke request");
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn re_pairing_the_same_client_key_reuses_the_existing_trusted_device() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();

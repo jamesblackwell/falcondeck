@@ -891,6 +891,9 @@ export type TrustedDevice = {
   session_id: string
   label: string | null
   status: TrustedDeviceStatus
+  /** Live relay connection right now; `status` only tracks trust. Optional
+   * because older daemons/relays omit it. */
+  connected?: boolean
   created_at: string
   last_seen_at: string | null
   revoked_at: string | null

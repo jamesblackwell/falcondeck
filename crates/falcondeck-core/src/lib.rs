@@ -2600,6 +2600,10 @@ pub struct TrustedDevice {
     pub label: Option<String>,
     /// Current device status.
     pub status: TrustedDeviceStatus,
+    /// Whether the device currently holds a live relay connection. `status`
+    /// only tracks trust (active vs revoked); this is the liveness dimension.
+    #[serde(default)]
+    pub connected: bool,
     /// Timestamp when the device was created.
     pub created_at: DateTime<Utc>,
     /// Timestamp when the device last connected.

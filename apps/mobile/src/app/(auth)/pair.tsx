@@ -45,6 +45,18 @@ export default function PairScreen() {
   const isSecuringSession = !!sessionId && !isEncrypted
   const desktopOnline = machinePresence?.daemon_connected ?? false
 
+  // The handshake normally completes within seconds. If it has been spinning
+  // far longer, say so instead of letting the spinner run silently forever.
+  const [securingTooLong, setSecuringTooLong] = useState(false)
+  useEffect(() => {
+    if (!isSecuringSession) {
+      setSecuringTooLong(false)
+      return
+    }
+    const timer = setTimeout(() => setSecuringTooLong(true), 45_000)
+    return () => clearTimeout(timer)
+  }, [isSecuringSession])
+
   const handleConnect = useCallback(() => {
     if (isSecuringSession) return
     if (pairingCode.trim().toUpperCase() === DEMO_PAIRING_CODE) {
@@ -168,6 +180,12 @@ export default function PairScreen() {
                 {error ? (
                   <Text variant="caption" color="danger" style={styles.error}>
                     {error}
+                  </Text>
+                ) : null}
+                {securingTooLong && !error ? (
+                  <Text variant="caption" color="danger" style={styles.error}>
+                    This is taking longer than expected. Check that FalconDeck
+                    is running on your desktop, or start over to pair again.
                   </Text>
                 ) : null}
                 <Button

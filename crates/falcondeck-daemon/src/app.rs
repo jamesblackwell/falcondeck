@@ -219,6 +219,11 @@ struct RemoteBridgeState {
     /// this list, so a compromised relay cannot mint its own bundle and be
     /// handed the key.
     trusted_client_bundles: Vec<PairingPublicKeyBundle>,
+    /// Persisted remote state that failed to resume (e.g. a transient
+    /// secure-storage error at startup). Held so `persist_local_state` can
+    /// round-trip it instead of writing `remote: null` — which would
+    /// permanently destroy the pairing over a transient keychain failure.
+    unresumed_remote: Option<Box<PersistedRemoteState>>,
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +396,7 @@ impl AppState {
                     pairing_watch_task: None,
                     command_tx: None,
                     trusted_client_bundles: Vec::new(),
+                    unresumed_remote: None,
                 }),
                 provision_jobs: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
@@ -476,8 +482,18 @@ impl AppState {
                 );
                 self.clear_remote_bridge_state().await;
                 self.persist_local_state().await?;
-            } else if let Err(error) = self.resume_remote_bridge(remote).await {
+            } else if let Err(error) = self.resume_remote_bridge(remote.clone()).await {
                 tracing::warn!("failed to restore remote bridge: {error}");
+                // Keep the un-resumed pairing so persistence round-trips it;
+                // otherwise the next persist_local_state writes remote: null
+                // and a transient keychain error destroys the pairing.
+                let mut current = self.inner.remote.lock().await;
+                if current.pairing.is_none() {
+                    current.unresumed_remote = Some(Box::new(remote));
+                    current.status = RemoteConnectionStatus::Error;
+                    current.last_error =
+                        Some(format!("failed to restore remote pairing: {error}"));
+                }
             } else if should_migrate_secure_storage {
                 self.persist_local_state().await?;
             }
@@ -1199,6 +1215,7 @@ impl AppState {
 
         let remote = self.inner.remote.lock().await;
         let persisted_remote = persisted_remote_state(&remote)?;
+        let unresumed_remote = remote.unresumed_remote.clone();
         drop(remote);
 
         let (persisted_remote, remote_secret_write) = match persisted_remote {
@@ -1211,7 +1228,10 @@ impl AppState {
                     })?;
                 (Some(persisted_remote), Some((secure_storage_key, secrets)))
             }
-            None => (None, None),
+            // A pairing that failed to resume still round-trips as-is (its
+            // secret-store entry on disk is untouched) so a transient
+            // secure-storage error cannot erase it.
+            None => (unresumed_remote.map(|remote| *remote), None),
         };
         let persisted = PersistedAppState {
             workspaces: persisted_workspaces,

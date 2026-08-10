@@ -59,10 +59,30 @@ export async function loadClientToken(): Promise<string | null> {
   }
 }
 
-export async function clearSecureSession(): Promise<void> {
+export async function clearDataKey(): Promise<void> {
+  try {
+    await SecureStore.deleteItemAsync(KEY_DATA_KEY, STORE_OPTIONS)
+  } catch (e) {
+    console.warn('[SecureStore] clearDataKey failed', e)
+  }
+}
+
+/**
+ * Clear session credentials. By default the client identity keypair is kept:
+ * reusing it on the next pairing claim lets the relay dedupe this phone back
+ * to its existing trusted-device record instead of minting a duplicate.
+ * Pass `keepIdentity: false` only when the identity itself is compromised or
+ * must be rotated.
+ */
+export async function clearSecureSession(
+  options?: { keepIdentity?: boolean },
+): Promise<void> {
+  const keepIdentity = options?.keepIdentity ?? true
   try {
     await Promise.all([
-      SecureStore.deleteItemAsync(KEY_CLIENT_SECRET, STORE_OPTIONS),
+      ...(keepIdentity
+        ? []
+        : [SecureStore.deleteItemAsync(KEY_CLIENT_SECRET, STORE_OPTIONS)]),
       SecureStore.deleteItemAsync(KEY_DATA_KEY, STORE_OPTIONS),
       SecureStore.deleteItemAsync(KEY_CLIENT_TOKEN, STORE_OPTIONS),
     ])

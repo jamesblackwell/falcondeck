@@ -41,6 +41,7 @@ import {
   type RelayUpdate,
 } from '@falcondeck/client-core'
 
+import { fetchWithTimeout } from '@/lib/fetch-timeout'
 import { clearPushToken } from '@/lib/push-notifications'
 import { getJson, setJson, removeKey } from '@/storage/mmkv'
 import {
@@ -50,6 +51,7 @@ import {
   loadDataKey,
   persistClientToken,
   loadClientToken,
+  clearDataKey,
   clearSecureSession,
 } from '@/storage/secure'
 import { clearMobileSessionCache } from '@/storage/mobile-session-cache'
@@ -152,6 +154,33 @@ function hasLiveRelayConnection(status: ConnectionStatus) {
   return status === 'connected' || status === 'encrypted'
 }
 
+/**
+ * Best-effort removal of this phone's trusted-device record when unpairing so
+ * it does not linger in the desktop's device list. Two DELETEs because the
+ * relay's endpoint is revoke-then-purge. Never throws — unpairing must not
+ * block on the network.
+ */
+async function removeOwnTrustedDevice(
+  relayUrl: string,
+  sessionId: string,
+  deviceId: string,
+  clientToken: string,
+): Promise<void> {
+  const base = relayUrl.trim().replace(/\/$/, '')
+  const url = `${base}/v1/sessions/${encodeURIComponent(sessionId)}/devices/${encodeURIComponent(deviceId)}`
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const response = await fetchWithTimeout(url, {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${clientToken}` },
+      })
+      if (!response.ok) return
+    }
+  } catch {
+    // Orphaned rows are eventually pruned relay-side by retention.
+  }
+}
+
 function encryptedRpcErrorMessage(payload: unknown) {
   if (typeof payload === 'object' && payload !== null && 'message' in payload) {
     const message = (payload as { message?: unknown }).message
@@ -182,7 +211,17 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
     set({ connectionStatus: 'claiming', error: null })
 
-    const keyPair = generateBoxKeyPair()
+    // Reuse the stored identity keypair when one exists: the relay dedupes
+    // trusted devices by client public key, so re-pairing with the same key
+    // reattaches this phone to its existing device record instead of minting
+    // a duplicate entry that lingers on the desktop forever.
+    let keyPair: BoxKeyPair
+    try {
+      const existingSecret = await loadClientSecretKey()
+      keyPair = existingSecret ? restoreBoxKeyPair(existingSecret) : generateBoxKeyPair()
+    } catch {
+      keyPair = generateBoxKeyPair()
+    }
 
     try {
       const relayBase = relayUrl.replace(/\/$/, '')
@@ -192,7 +231,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
 
       // Claims are challenge-bound: fetch a single-use challenge and prove
       // possession of the identity secret key by signing it.
-      const challengeResponse = await fetch(`${relayBase}/v1/pairings/challenge`, {
+      const challengeResponse = await fetchWithTimeout(`${relayBase}/v1/pairings/challenge`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -219,7 +258,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       }
 
       const clientBundle = buildPairingPublicKeyBundle(keyPair)
-      const response = await fetch(`${relayBase}/v1/pairings/claim`, {
+      const response = await fetchWithTimeout(`${relayBase}/v1/pairings/claim`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -251,8 +290,10 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       }
       verifyPairingPublicKeyBundle(claim.daemon_bundle)
 
-      // Persist to secure storage
-      await clearSecureSession()
+      // Persist to secure storage. Any stored data key belongs to the
+      // previous session and must not survive into this pairing; the
+      // identity keypair and client token are overwritten in place.
+      await clearDataKey()
       await Promise.all([
         persistClientSecretKey(secretKeyToBase64(keyPair)),
         persistClientToken(claim.client_token),
@@ -417,6 +458,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
     const { relayUrl, sessionId, deviceId } = get()
     if (sessionId && deviceId && _clientToken) {
       void clearPushToken(relayUrl, sessionId, deviceId, _clientToken)
+      void removeOwnTrustedDevice(relayUrl, sessionId, deviceId, _clientToken)
     }
 
     const socket = _socket
@@ -621,6 +663,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       get()._setSessionCrypto(bootstrapSessionCrypto(kp, update.body.material))
       get()._setConnectionStatus('encrypted')
       get()._persistSession()
+      // A stale error from an earlier attempt must not linger over a now
+      // successfully secured session.
+      set({ error: null })
     } catch (e) {
       // A malformed or unverifiable bootstrap must not unpair the device:
       // bootstraps are durable updates the relay replays, so one bad update

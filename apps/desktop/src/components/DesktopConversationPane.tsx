@@ -7,6 +7,7 @@ import type {
   InteractiveResponsePayload,
   RemoteStatusResponse,
   ThreadSummary,
+  TrustedDevice,
   WorkspaceSummary,
 } from '@falcondeck/client-core'
 import { Conversation, PromptInput, QueuedTurns, type OpenFileDiff } from '@falcondeck/chat-ui'
@@ -34,6 +35,8 @@ type DesktopConversationPaneProps = {
   interactiveRequests: InteractiveRequest[]
   findRequestKey?: number
   onStartPairing: () => void
+  onRevokeDevice?: (device: TrustedDevice) => void
+  revokingDeviceId?: string | null
   onInteractiveResponse: (
     request: InteractiveRequest,
     response: InteractiveResponsePayload,
@@ -66,6 +69,8 @@ export function DesktopConversationPane({
   interactiveRequests,
   findRequestKey = 0,
   onStartPairing,
+  onRevokeDevice,
+  revokingDeviceId,
   onInteractiveResponse,
   promptInputProps,
   onRemoveQueuedTurn,
@@ -91,6 +96,8 @@ export function DesktopConversationPane({
           isStartingRemote={isStartingRemote}
           remoteControlsDisabled={remoteControlsDisabled}
           remoteControlsUnavailableReason={remoteControlsUnavailableReason}
+          onRevokeDevice={onRevokeDevice}
+          revokingDeviceId={revokingDeviceId}
         />
         {headerControls}
       </SessionHeader>

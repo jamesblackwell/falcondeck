@@ -8,15 +8,17 @@ import {
   RadioTower,
   RefreshCw,
   TimerOff,
+  Trash2,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import * as Popover from '@radix-ui/react-popover'
 
-import type { RemoteStatusResponse } from '@falcondeck/client-core'
+import type { RemoteStatusResponse, TrustedDevice } from '@falcondeck/client-core'
 import { Button, CopyButton, StatusIndicator, useToast } from '@falcondeck/ui'
 
 import { openExternalUrl } from '../api'
 import { formatCountdown, useMillisUntil } from '../pairing-expiry'
+import { formatRelative } from './settings/settings-utils'
 
 /* ------------------------------------------------------------------ */
 /*  Pairing QR card — shown when a pairing session is active          */
@@ -186,6 +188,8 @@ export type RemotePairingPopoverProps = {
   isStartingRemote: boolean
   remoteControlsDisabled: boolean
   remoteControlsUnavailableReason: string | null
+  onRevokeDevice?: (device: TrustedDevice) => void
+  revokingDeviceId?: string | null
 }
 
 export function RemotePairingPopover({
@@ -195,6 +199,8 @@ export function RemotePairingPopover({
   isStartingRemote,
   remoteControlsDisabled,
   remoteControlsUnavailableReason,
+  onRevokeDevice,
+  revokingDeviceId,
 }: RemotePairingPopoverProps) {
   const status = remoteStatus?.status
   const isConnected = status === 'connected'
@@ -205,6 +211,7 @@ export function RemotePairingPopover({
   const hasPendingPairing = !!pairingLink
   const needsFreshPairing = !status || status === 'inactive' || status === 'revoked' || status === 'error' || status === 'offline'
   const activeDevices = remoteStatus?.trusted_devices?.filter((d) => d.status === 'active') ?? []
+  const connectedCount = activeDevices.filter((d) => d.connected).length
 
   return (
     <Popover.Root>
@@ -295,14 +302,38 @@ export function RemotePairingPopover({
                 ) : (
                   <div className="space-y-2">
                     <p className="text-[length:var(--fd-text-xs)] font-medium text-fg-muted">
-                      {activeDevices.length} {activeDevices.length === 1 ? 'device' : 'devices'} connected
+                      {connectedCount} of {activeDevices.length}{' '}
+                      {activeDevices.length === 1 ? 'device' : 'devices'} connected
                     </p>
                     {activeDevices.map((d) => (
-                      <div key={d.device_id} className="flex items-center gap-2">
-                        <StatusIndicator status="connected" size="sm" />
-                        <span className="text-[length:var(--fd-text-sm)] text-fg-primary">
+                      <div key={d.device_id} className="group flex items-center gap-2">
+                        <StatusIndicator status={d.connected ? 'connected' : 'disconnected'} size="sm" />
+                        <span
+                          className={`flex-1 truncate text-[length:var(--fd-text-sm)] ${d.connected ? 'text-fg-primary' : 'text-fg-muted'}`}
+                        >
                           {d.label ?? 'Unknown device'}
                         </span>
+                        {!d.connected ? (
+                          <span className="shrink-0 text-[length:var(--fd-text-2xs)] text-fg-faint">
+                            {formatRelative(d.last_seen_at)}
+                          </span>
+                        ) : null}
+                        {onRevokeDevice ? (
+                          <button
+                            type="button"
+                            title="Remove device"
+                            aria-label={`Remove ${d.label ?? 'device'}`}
+                            className="fd-focus shrink-0 rounded-[var(--fd-radius-sm)] p-1 text-fg-faint opacity-0 transition-opacity hover:bg-danger-muted hover:text-danger focus-visible:opacity-100 group-hover:opacity-100"
+                            onClick={() => onRevokeDevice(d)}
+                            disabled={revokingDeviceId != null}
+                          >
+                            {revokingDeviceId === d.device_id ? (
+                              <LoaderCircle className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3 w-3" />
+                            )}
+                          </button>
+                        ) : null}
                       </div>
                     ))}
                   </div>
