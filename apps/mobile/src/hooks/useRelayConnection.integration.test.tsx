@@ -83,6 +83,8 @@ describe('useRelayConnection session rotation', () => {
       error: null,
       isConnected: false,
       isEncrypted: false,
+      isSyncing: false,
+      hasSyncedOnce: false,
     })
   })
 
@@ -536,5 +538,67 @@ describe('useRelayConnection session rotation', () => {
     await vi.waitFor(() => expect(useSessionStore.getState().snapshot).not.toBeNull())
 
     expect(useRelayStore.getState()._getLastReceivedSeq()).toBe(7)
+  })
+
+  it('still fetches a snapshot when the offline cache already hydrated one', async () => {
+    // Warm start: the cache paints projects before the socket opens. Guarding
+    // the fetch on "no snapshot" used to skip it entirely, so hasSyncedOnce
+    // never flipped and the syncing banner hung forever over stale threads.
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'warm-start-ticket' }) } as Response
+      }
+      if (url.endsWith('/push-token')) {
+        return { ok: true } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    useRelayStore.getState().setPairingCode('WARM-START')
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+    useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
+
+    act(() => {
+      useSessionStore.getState().applyDaemonEvents([snapshotEvent(snapshot())])
+    })
+    expect(useSessionStore.getState().snapshot).not.toBeNull()
+    expect(useRelayStore.getState().hasSyncedOnce).toBe(false)
+
+    const callRpc = vi.fn().mockResolvedValue(snapshot())
+    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+
+    function Harness() {
+      useRelayConnection()
+      return null
+    }
+    renderComponent(<Harness />)
+    await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
+
+    const socket = TestWebSocket.instances[0]!
+    socket.readyState = TestWebSocket.OPEN
+    act(() => {
+      socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+    })
+
+    await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
+      'snapshot.current',
+      expect.anything(),
+      expect.anything(),
+    ))
+    await vi.waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true))
+    expect(useRelayStore.getState().isSyncing).toBe(false)
   })
 })

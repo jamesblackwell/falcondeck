@@ -126,10 +126,26 @@ export function bufferSnapshotRaceEvent(
  * cursor until they are actually processed. Returns the cursor seq to adopt,
  * or null when no advance should happen.
  */
+
+/**
+ * True while this launch still owes the user an authoritative snapshot.
+ *
+ * `snapshot` alone is not enough: the offline cache hydrates it before the
+ * socket is even open, so guarding on `!snapshot` skips the fetch entirely on
+ * every warm start — leaving the "Syncing your projects…" banner up forever
+ * (hasSyncedOnce never flips) on top of a list that is only as fresh as the
+ * relay replay. hasSyncedOnce survives reconnects, so this still costs at most
+ * one snapshot RPC per app session.
+ */
+function needsAuthoritativeSnapshot() {
+  return !useSessionStore.getState().snapshot || !useRelayStore.getState().hasSyncedOnce
+}
+
 export function useRelayConnection() {
   const sessionId = useRelayStore((s) => s.sessionId)
   const deviceId = useRelayStore((s) => s.deviceId)
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
+  const hasSyncedOnce = useRelayStore((s) => s.hasSyncedOnce)
   const snapshot = useSessionStore((s) => s.snapshot)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -265,7 +281,10 @@ export function useRelayConnection() {
     } catch (e) {
       if (requestGeneration !== snapshotRequestGeneration.current) return
       relay._setError(e instanceof Error ? e.message : 'Failed to load snapshot')
-      if (!useSessionStore.getState().snapshot && !snapshotRetryTimer.current) {
+      // Retry while this launch still owes a fresh snapshot — including when a
+      // stale offline cache is on screen, otherwise one failed fetch strands
+      // the banner with nothing scheduled to clear it.
+      if (needsAuthoritativeSnapshot() && !snapshotRetryTimer.current) {
         const delay = Math.min(1000 * 2 ** snapshotRetryAttempt.current, 5_000)
         snapshotRetryAttempt.current += 1
         snapshotRetryTimer.current = setTimeout(() => {
@@ -450,7 +469,7 @@ export function useRelayConnection() {
           relay._persistSession()
         }
 
-        if (relay._getSessionCrypto() && !useSessionStore.getState().snapshot) {
+        if (relay._getSessionCrypto() && needsAuthoritativeSnapshot()) {
           void requestSnapshot()
         }
 
@@ -754,7 +773,7 @@ export function useRelayConnection() {
             case 'ready':
               if (relay._getSessionCrypto()) {
                 relay._setConnectionStatus('encrypted')
-                if (!useSessionStore.getState().snapshot) {
+                if (needsAuthoritativeSnapshot()) {
                   void requestSnapshot()
                 }
               }
@@ -938,7 +957,7 @@ export function useRelayConnection() {
   ])
 
   useEffect(() => {
-    if (!sessionId || !isEncrypted || snapshot) {
+    if (!sessionId || !isEncrypted || !needsAuthoritativeSnapshot()) {
       return
     }
 
@@ -949,7 +968,7 @@ export function useRelayConnection() {
     }
 
     void requestSnapshot()
-  }, [isEncrypted, requestSnapshot, sessionId, snapshot])
+  }, [hasSyncedOnce, isEncrypted, requestSnapshot, sessionId, snapshot])
 
   // Once the session is usable (encrypted), register this device's push token
   // with the relay so it can alert us when an agent needs attention while the
