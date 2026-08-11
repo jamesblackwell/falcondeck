@@ -5,9 +5,12 @@ import {
   requestCameraPermissionsAsync,
   requestMediaLibraryPermissionsAsync,
 } from 'expo-image-picker'
+import { MAX_IMAGE_ATTACHMENT_BYTES } from '@falcondeck/client-core'
+import * as Clipboard from 'expo-clipboard'
 
 import {
   imagePickerAssetsToImageInputs,
+  pasteImageInputFromClipboard,
   pickImageInputFromCamera,
   pickImageInputsFromLibrary,
 } from './imageInputs'
@@ -18,6 +21,8 @@ describe('imageInputs', () => {
     vi.mocked(launchImageLibraryAsync).mockReset()
     vi.mocked(requestCameraPermissionsAsync).mockReset()
     vi.mocked(launchCameraAsync).mockReset()
+    vi.mocked(Clipboard.getImageAsync).mockReset()
+    vi.mocked(Clipboard.getImageAsync).mockResolvedValue(null)
 
     vi.mocked(requestMediaLibraryPermissionsAsync).mockResolvedValue({
       granted: true,
@@ -160,5 +165,51 @@ describe('imageInputs', () => {
       base64: true,
       quality: 0.8,
     })
+  })
+
+  it('returns an image copied to the clipboard', async () => {
+    vi.mocked(Clipboard.getImageAsync).mockResolvedValue({
+      data: 'data:image/png;base64,abc123==',
+      size: { width: 1200, height: 800 },
+    })
+
+    await expect(pasteImageInputFromClipboard()).resolves.toEqual([
+      expect.objectContaining({
+        type: 'image',
+        name: 'Pasted image.png',
+        mime_type: 'image/png',
+        url: 'data:image/png;base64,abc123==',
+        local_path: null,
+      }),
+    ])
+  })
+
+  it('explains when the clipboard has no image', async () => {
+    await expect(pasteImageInputFromClipboard()).rejects.toThrow(
+      'No image found on the clipboard.',
+    )
+  })
+
+  it('rejects malformed clipboard image data', async () => {
+    vi.mocked(Clipboard.getImageAsync).mockResolvedValue({
+      data: 'https://example.com/not-an-image.png',
+      size: { width: 1200, height: 800 },
+    })
+
+    await expect(pasteImageInputFromClipboard()).rejects.toThrow(
+      'FalconDeck could not read the clipboard image.',
+    )
+  })
+
+  it('rejects an oversized clipboard image before it reaches composer state', async () => {
+    const encodedLength = Math.ceil((MAX_IMAGE_ATTACHMENT_BYTES + 1) / 3) * 4
+    vi.mocked(Clipboard.getImageAsync).mockResolvedValue({
+      data: `data:image/png;base64,${'A'.repeat(encodedLength)}`,
+      size: { width: 4000, height: 4000 },
+    })
+
+    await expect(pasteImageInputFromClipboard()).rejects.toThrow(
+      'Pasted image.png is too large.',
+    )
   })
 })

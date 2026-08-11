@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { KeyboardAvoidingView, Modal, Platform, Pressable, View } from 'react-native'
+import { Pressable, View } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import Animated, {
@@ -9,12 +9,12 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated'
 import { FlashList } from '@shopify/flash-list'
-import { ChevronDown, ChevronRight, SquarePen } from 'lucide-react-native'
+import { ChevronDown, ChevronRight, Settings, SquarePen, X } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
 
-import { Text, Button, EmptyState, Input } from '@/components/ui'
+import { Text, Button, EmptyState, Input, NativeSheet } from '@/components/ui'
 import { SessionListItem } from '@/components/chat'
 import { useCollapsible } from '@/components/chat/useCollapsible'
 import { useThreadActions } from '@/hooks/useThreadActions'
@@ -25,6 +25,9 @@ interface SidebarViewProps {
   selectedThreadId: string | null
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread: (workspaceId: string) => void
+  onOpenSettings?: () => void
+  /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
+  onClose?: () => void
 }
 
 // Rotating one chevron rather than swapping two icons, so the open/close
@@ -100,6 +103,8 @@ export const SidebarView = memo(function SidebarView({
   selectedThreadId,
   onSelectThread,
   onNewThread,
+  onOpenSettings,
+  onClose,
 }: SidebarViewProps) {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
@@ -338,7 +343,7 @@ export const SidebarView = memo(function SidebarView({
     if (!optionsTarget) return null
     const isRenaming = sheetMode === 'rename'
     return (
-      <View style={styles.sheet}>
+      <View>
         <View style={styles.sheetHandle} />
         <Text variant="label" color="primary" weight="semibold" style={styles.sheetTitle}>
           {isRenaming ? 'Rename thread' : 'Thread options'}
@@ -424,6 +429,23 @@ export const SidebarView = memo(function SidebarView({
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
+      {onClose ? (
+        <View style={styles.header}>
+          <Text variant="label" color="primary" weight="semibold">
+            Threads
+          </Text>
+          <Pressable
+            style={({ pressed }) => [styles.closeButton, pressed ? styles.closeButtonPressed : undefined]}
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel="Close sidebar"
+            hitSlop={8}
+          >
+            <X size={theme.iconSize.md} color={theme.colors.fg.secondary} />
+          </Pressable>
+        </View>
+      ) : null}
+
       <View style={styles.list}>
         {rows.length === 0 ? (
           <EmptyState title="No projects" description="Connect from your desktop to get started" />
@@ -439,21 +461,29 @@ export const SidebarView = memo(function SidebarView({
         )}
       </View>
 
-      {optionsTarget ? (
-        <Modal transparent animationType="fade" onRequestClose={closeThreadOptions}>
-          <KeyboardAvoidingView
-            style={styles.sheetContainer}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      {onOpenSettings ? (
+        <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, theme.spacing[3]) }]}>
+          <Pressable
+            style={({ pressed }) => [styles.settingsRow, pressed ? styles.settingsRowPressed : undefined]}
+            onPress={onOpenSettings}
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
+            accessibilityHint="Opens mobile settings"
           >
-            <Pressable
-              style={styles.sheetBackdrop}
-              onPress={closeThreadOptions}
-              accessibilityRole="button"
-              accessibilityLabel="Close thread options"
-            />
-            {renderSheetContent()}
-          </KeyboardAvoidingView>
-        </Modal>
+            <Settings size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
+            <Text variant="label" color="secondary" weight="medium">Settings</Text>
+          </Pressable>
+        </View>
+      ) : null}
+
+      {optionsTarget ? (
+        <NativeSheet
+          onClose={closeThreadOptions}
+          accessibilityLabel="Close thread options"
+          contentStyle={styles.sheetContent}
+        >
+          {renderSheetContent()}
+        </NativeSheet>
       ) : null}
     </View>
   )
@@ -467,6 +497,39 @@ const styles = StyleSheet.create((theme) => ({
   list: {
     flex: 1,
   },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: theme.minTouchTarget,
+    paddingLeft: theme.spacing[4],
+    paddingRight: theme.spacing[2],
+    paddingTop: theme.spacing[1],
+  },
+  closeButton: {
+    width: theme.minTouchTarget,
+    height: theme.minTouchTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: theme.radius.full,
+  },
+  closeButtonPressed: { backgroundColor: theme.colors.surface[2] },
+  footer: {
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[2],
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border.subtle,
+    backgroundColor: theme.colors.surface[1],
+  },
+  settingsRow: {
+    minHeight: theme.minTouchTarget,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[3],
+    borderRadius: theme.radius.lg,
+  },
+  settingsRowPressed: { backgroundColor: theme.colors.surface[2] },
   workspaceHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -503,19 +566,7 @@ const styles = StyleSheet.create((theme) => ({
   chevronFlipped: {
     transform: [{ rotate: '180deg' }],
   },
-  sheetContainer: {
-    flex: 1,
-    justifyContent: 'flex-end',
-  },
-  sheetBackdrop: {
-    flex: 1,
-    backgroundColor: theme.colors.overlay,
-  },
-  sheet: {
-    backgroundColor: theme.colors.surface[1],
-    borderTopLeftRadius: theme.radius['2xl'],
-    borderTopRightRadius: theme.radius['2xl'],
-    paddingBottom: theme.spacing[8],
+  sheetContent: {
     paddingHorizontal: theme.spacing[4],
   },
   sheetHandle: {
@@ -538,6 +589,7 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    minHeight: theme.minTouchTarget,
     paddingVertical: theme.spacing[3],
     paddingHorizontal: theme.spacing[2],
     borderRadius: theme.radius.lg,

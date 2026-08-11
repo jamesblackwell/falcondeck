@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
 import { View, TextInput, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Plus, Send, Square } from 'lucide-react-native'
@@ -37,9 +45,15 @@ interface ChatInputProps {
   /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
   onStop?: () => void
   onPickImages: () => void
+  onPasteImage?: () => void
   onTakePhoto?: () => void
   onRemoveAttachment: (attachmentId: string) => void
+  /** Locks all composer editing, for example when no workspace exists. */
   disabled?: boolean
+  /** Keeps drafting available while the current transport cannot submit. */
+  sendDisabled?: boolean
+  /** Accessible explanation for a temporarily unavailable send/stop action. */
+  sendDisabledReason?: string
   placeholder?: string
   attachments: ImageInput[]
   skills: SkillSummary[]
@@ -69,10 +83,10 @@ interface ChatInputProps {
   textInputRef?: RefObject<TextInput | null>
 }
 
-const MIN_INPUT_HEIGHT = 44
+const MIN_INPUT_HEIGHT = 48
 const MAX_INPUT_HEIGHT = 280
 // Painted size of the attach/send buttons; hitSlop lifts them to 44pt.
-const CONTROL_SIZE = 32
+const CONTROL_SIZE = 40
 const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
   { provider: 'codex', label: 'Codex' },
   { provider: 'claude', label: 'Claude' },
@@ -84,9 +98,12 @@ export const ChatInput = memo(function ChatInput({
   onSubmit,
   onStop,
   onPickImages,
+  onPasteImage,
   onTakePhoto,
   onRemoveAttachment,
   disabled,
+  sendDisabled = false,
+  sendDisabledReason,
   placeholder = 'Ask anything',
   attachments,
   skills,
@@ -113,7 +130,10 @@ export const ChatInput = memo(function ChatInput({
 }: ChatInputProps) {
   const { theme } = useUnistyles()
   const [caretIndex, setCaretIndex] = useState(value.length)
-  const [pendingSelection, setPendingSelection] = useState<{ start: number; end: number } | null>(null)
+  const [pendingSelection, setPendingSelection] = useState<{
+    start: number
+    end: number
+  } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const [openSheet, setOpenSheet] = useState<
     'more' | 'provider' | 'permission' | 'sandbox' | null
@@ -159,8 +179,14 @@ export const ChatInput = memo(function ChatInput({
 
   useEffect(() => {
     const boundedCaretIndex = Math.min(caretIndex, value.length)
-    const boundedSelectionStart = Math.min(selectionRangeRef.current.start, value.length)
-    const boundedSelectionEnd = Math.min(selectionRangeRef.current.end, value.length)
+    const boundedSelectionStart = Math.min(
+      selectionRangeRef.current.start,
+      value.length,
+    )
+    const boundedSelectionEnd = Math.min(
+      selectionRangeRef.current.end,
+      value.length,
+    )
 
     if (
       boundedSelectionStart !== selectionRangeRef.current.start ||
@@ -179,7 +205,8 @@ export const ChatInput = memo(function ChatInput({
 
     if (
       pendingSelection &&
-      (pendingSelection.start > value.length || pendingSelection.end > value.length)
+      (pendingSelection.start > value.length ||
+        pendingSelection.end > value.length)
     ) {
       setPendingSelection(null)
     }
@@ -188,23 +215,27 @@ export const ChatInput = memo(function ChatInput({
   }, [caretIndex, pendingSelection, updateSlashQuery, value])
 
   const handleSubmit = useCallback(() => {
-    if ((!value.trim() && attachments.length === 0) || disabled) return
+    if ((!value.trim() && attachments.length === 0) || disabled || sendDisabled)
+      return
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
     onSubmit()
-  }, [attachments.length, value, disabled, onSubmit])
+  }, [attachments.length, value, disabled, onSubmit, sendDisabled])
 
   const handleStop = useCallback(() => {
-    if (disabled || isStopping || !onStop) return
+    if (disabled || sendDisabled || isStopping || !onStop) return
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium)
     onStop()
-  }, [disabled, isStopping, onStop])
+  }, [disabled, isStopping, onStop, sendDisabled])
 
   const handleChangeText = useCallback(
     (nextValue: string) => {
       const { start, end } = selectionRangeRef.current
       const selectedLength = Math.max(0, end - start)
       const insertedLength = nextValue.length - (value.length - selectedLength)
-      const nextCaret = Math.max(0, Math.min(start + insertedLength, nextValue.length))
+      const nextCaret = Math.max(
+        0,
+        Math.min(start + insertedLength, nextValue.length),
+      )
 
       selectionRangeRef.current = { start: nextCaret, end: nextCaret }
       setCaretIndex(nextCaret)
@@ -217,8 +248,7 @@ export const ChatInput = memo(function ChatInput({
     (alias: string) => {
       if (!slashQuery) return
 
-      const nextValue =
-        `${value.slice(0, slashQuery.rangeStart)}${alias} ${value.slice(slashQuery.rangeEnd)}`
+      const nextValue = `${value.slice(0, slashQuery.rangeStart)}${alias} ${value.slice(slashQuery.rangeEnd)}`
       const nextCaret = slashQuery.rangeStart + alias.length + 1
 
       onChangeText(nextValue)
@@ -230,34 +260,49 @@ export const ChatInput = memo(function ChatInput({
     [onChangeText, slashQuery, value],
   )
 
-  const canSend = hasContent && !disabled
-  const canStop = showStop && !disabled && !isStopping
+  const canSend = hasContent && !disabled && !sendDisabled
+  const canStop = showStop && !disabled && !sendDisabled && !isStopping
   const providerOptions = providers ?? DEFAULT_PROVIDER_OPTIONS
   const moreItems = useMemo<OptionSheetItem[]>(() => {
-    const items: OptionSheetItem[] = [
-      {
+    const items: OptionSheetItem[] = []
+    if (capabilities.supports_images) {
+      if (onPasteImage) {
+        items.push({
+          value: 'paste-image',
+          label: 'Paste image',
+          description: 'Attach an image copied to your clipboard',
+        })
+      }
+      items.push({
         value: 'photos',
         label: 'Photos',
         description: 'Choose images from your photo library',
-      },
-    ]
-    if (onTakePhoto) {
-      items.push({ value: 'camera', label: 'Camera', description: 'Take a new photo' })
+      })
+      if (onTakePhoto) {
+        items.push({
+          value: 'camera',
+          label: 'Camera',
+          description: 'Take a new photo',
+        })
+      }
     }
     if (showProviderSelector && providerOptions.length > 0) {
       items.push({
         value: 'provider',
         label: 'Agent',
         description:
-          providerOptions.find((option) => option.provider === selectedProvider)?.label ??
-          selectedProvider,
+          providerOptions.find((option) => option.provider === selectedProvider)
+            ?.label ?? selectedProvider,
       })
     }
     if (onSelectPermissionMode && capabilities.permission_modes.length > 0) {
       items.push({
         value: 'permission',
         label: 'Permissions',
-        description: permissionChipLabel(selectedPermissionMode, capabilities.permission_modes),
+        description: permissionChipLabel(
+          selectedPermissionMode,
+          capabilities.permission_modes,
+        ),
       })
     }
     if (onSelectSandboxMode && capabilities.sandbox_modes.length > 0) {
@@ -271,8 +316,10 @@ export const ChatInput = memo(function ChatInput({
   }, [
     capabilities.permission_modes,
     capabilities.sandbox_modes,
+    capabilities.supports_images,
     onSelectPermissionMode,
     onSelectSandboxMode,
+    onPasteImage,
     onTakePhoto,
     providerOptions,
     selectedPermissionMode,
@@ -286,6 +333,9 @@ export const ChatInput = memo(function ChatInput({
       if (value === 'photos') {
         setOpenSheet(null)
         onPickImages()
+      } else if (value === 'paste-image') {
+        setOpenSheet(null)
+        onPasteImage?.()
       } else if (value === 'camera') {
         setOpenSheet(null)
         onTakePhoto?.()
@@ -297,7 +347,7 @@ export const ChatInput = memo(function ChatInput({
         setOpenSheet('sandbox')
       }
     },
-    [onPickImages, onTakePhoto],
+    [onPasteImage, onPickImages, onTakePhoto],
   )
 
   return (
@@ -342,7 +392,8 @@ export const ChatInput = memo(function ChatInput({
             {filteredSkills.length > 0 ? (
               filteredSkills.map((skill) => {
                 const supported = providerSupportsSkill(skill, selectedProvider)
-                const lastItem = filteredSkills[filteredSkills.length - 1]?.id === skill.id
+                const lastItem =
+                  filteredSkills[filteredSkills.length - 1]?.id === skill.id
 
                 return (
                   <Pressable
@@ -358,7 +409,12 @@ export const ChatInput = memo(function ChatInput({
                     <View style={styles.skillItemBody}>
                       <View style={styles.skillHeading}>
                         <View style={styles.skillAliasPill}>
-                          <Text variant="caption" size="2xs" color="secondary" weight="semibold">
+                          <Text
+                            variant="caption"
+                            size="2xs"
+                            color="secondary"
+                            weight="semibold"
+                          >
                             {skill.alias}
                           </Text>
                         </View>
@@ -366,7 +422,11 @@ export const ChatInput = memo(function ChatInput({
                           {skill.providers.join(' / ')}
                         </Text>
                       </View>
-                      <Text color={supported ? 'primary' : 'muted'} size="sm" weight="medium">
+                      <Text
+                        color={supported ? 'primary' : 'muted'}
+                        size="sm"
+                        weight="medium"
+                      >
                         {skill.label}
                       </Text>
                       {skill.description ? (
@@ -387,22 +447,40 @@ export const ChatInput = memo(function ChatInput({
             )}
           </View>
         ) : null}
+        {hasContent && sendDisabled && sendDisabledReason ? (
+          <Text
+            variant="caption"
+            color="warning"
+            size="xs"
+            accessibilityLiveRegion="polite"
+            style={styles.sendDisabledReason}
+          >
+            {sendDisabledReason}
+          </Text>
+        ) : null}
         <View style={styles.footer}>
           <View style={styles.footerControls}>
-            <Pressable
-              style={[styles.attachButton, disabled ? styles.attachButtonDisabled : null]}
-              onPress={() => setOpenSheet('more')}
-              disabled={disabled}
-              accessibilityRole="button"
-              accessibilityLabel="Add to prompt"
-              accessibilityState={{ disabled: Boolean(disabled) }}
-              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
-            >
-              <Plus
-                size={theme.iconSize.sm}
-                color={disabled ? theme.colors.fg.faint : theme.colors.fg.muted}
-              />
-            </Pressable>
+            {moreItems.length > 0 ? (
+              <Pressable
+                style={[
+                  styles.attachButton,
+                  disabled ? styles.attachButtonDisabled : null,
+                ]}
+                onPress={() => setOpenSheet('more')}
+                disabled={disabled}
+                accessibilityRole="button"
+                accessibilityLabel="Add to prompt"
+                accessibilityState={{ disabled: Boolean(disabled) }}
+                hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+              >
+                <Plus
+                  size={theme.iconSize.md}
+                  color={
+                    disabled ? theme.colors.fg.faint : theme.colors.fg.muted
+                  }
+                />
+              </Pressable>
+            ) : null}
             <InputToolbar
               models={models}
               selectedModel={selectedModel}
@@ -439,20 +517,31 @@ export const ChatInput = memo(function ChatInput({
             onPress={showStop ? handleStop : handleSubmit}
             disabled={showStop ? !canStop : !canSend}
             accessibilityRole="button"
-            accessibilityLabel={showStop ? (isStopping ? 'Stopping' : 'Stop generating') : 'Send message'}
+            accessibilityLabel={
+              showStop
+                ? isStopping
+                  ? 'Stopping'
+                  : 'Stop generating'
+                : 'Send message'
+            }
+            accessibilityHint={sendDisabled ? sendDisabledReason : undefined}
             accessibilityState={{ disabled: showStop ? !canStop : !canSend }}
             hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
           >
             {showStop ? (
               <Square
-                size={theme.iconSize.sm - 2}
-                color={canStop ? theme.colors.surface[0] : theme.colors.fg.faint}
+                size={theme.iconSize.md - 4}
+                color={
+                  canStop ? theme.colors.surface[0] : theme.colors.fg.faint
+                }
                 fill={canStop ? theme.colors.surface[0] : theme.colors.fg.faint}
               />
             ) : (
               <Send
-                size={theme.iconSize.sm}
-                color={canSend ? theme.colors.surface[0] : theme.colors.fg.faint}
+                size={theme.iconSize.md}
+                color={
+                  canSend ? theme.colors.surface[0] : theme.colors.fg.faint
+                }
               />
             )}
           </Pressable>
@@ -472,10 +561,12 @@ export const ChatInput = memo(function ChatInput({
           items={permissionModeItems(capabilities.permission_modes)}
           selected={
             selectedPermissionMode ??
-            (capabilities.permission_modes.includes('default') ? 'default' : null)
+            (capabilities.permission_modes.includes('default')
+              ? 'default'
+              : null)
           }
           onSelect={(value) => {
-            onSelectPermissionMode(value === 'default' ? null : value)
+            onSelectPermissionMode(value)
             setOpenSheet(null)
           }}
           onClose={() => setOpenSheet(null)}
@@ -586,6 +677,9 @@ const styles = StyleSheet.create((theme) => ({
   skillEmpty: {
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[3],
+  },
+  sendDisabledReason: {
+    paddingHorizontal: theme.spacing[4],
   },
   footer: {
     flexDirection: 'row',

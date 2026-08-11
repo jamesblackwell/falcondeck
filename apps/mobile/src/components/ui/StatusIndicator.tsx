@@ -1,7 +1,9 @@
 import { memo, useEffect } from 'react'
 import Animated, {
+  cancelAnimation,
   useSharedValue,
   useAnimatedStyle,
+  useReducedMotion,
   withRepeat,
   withTiming,
 } from 'react-native-reanimated'
@@ -21,14 +23,17 @@ export const StatusIndicator = memo(function StatusIndicator({
   pulse,
 }: StatusIndicatorProps) {
   const opacity = useSharedValue(1)
+  const reducedMotion = useReducedMotion()
 
   useEffect(() => {
-    if (pulse) {
+    cancelAnimation(opacity)
+    if (pulse && !reducedMotion) {
       opacity.value = withRepeat(withTiming(0.3, { duration: 800 }), -1, true)
     } else {
-      opacity.value = withTiming(1, { duration: 150 })
+      opacity.value = reducedMotion ? 1 : withTiming(1, { duration: 150 })
     }
-  }, [pulse, opacity])
+    return () => cancelAnimation(opacity)
+  }, [pulse, reducedMotion, opacity])
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,

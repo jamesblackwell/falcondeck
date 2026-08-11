@@ -118,6 +118,25 @@ describe('session-store', () => {
   })
 
   describe('selectThread / selectWorkspace', () => {
+    it('inserts a newly forked thread handle without losing existing threads', () => {
+      const originalWorkspace = workspace({ id: 'w1', current_thread_id: 't1' })
+      const originalThread = thread({ id: 't1', workspace_id: 'w1' })
+      useSessionStore.getState().applyDaemonEvent(
+        snapshotEvent(snapshot({ workspaces: [originalWorkspace], threads: [originalThread] })),
+      )
+
+      const forkedWorkspace = { ...originalWorkspace, current_thread_id: 't2' }
+      const forkedThread = thread({ id: 't2', workspace_id: 'w1', title: 'Branch' })
+      useSessionStore.getState().applyThreadHandle({
+        workspace: forkedWorkspace,
+        thread: forkedThread,
+      })
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot?.threads.map((entry) => entry.id)).toEqual(['t2', 't1'])
+      expect(state.snapshot?.workspaces[0]?.current_thread_id).toBe('t2')
+    })
+
     it('sets both workspace and thread when selecting a thread', () => {
       const { selectThread } = useSessionStore.getState()
       selectThread('w1', 't1')
@@ -254,8 +273,40 @@ describe('session-store', () => {
         hasOlder: false,
         oldestItemId: 'msg-0',
         newestItemId: 'msg-3',
-        isPartial: true,
+        isPartial: false,
       })
+    })
+
+    it('replaces a stale cached tail inside the authoritative refresh overlap', () => {
+      const { selectThread, setThreadDetail } = useSessionStore.getState()
+      selectThread('workspace-1', 'thread-1')
+      setThreadDetail(threadDetail({
+        items: [
+          userMessage('msg-0', 'old prefix'),
+          assistantMessage('msg-1', 'cached version'),
+          assistantMessage('stale', 'removed provider output'),
+        ],
+        has_older: false,
+      }))
+
+      setThreadDetail(threadDetail({
+        items: [
+          assistantMessage('msg-1', 'authoritative version'),
+          assistantMessage('msg-2', 'new tail'),
+        ],
+        has_older: true,
+      }))
+
+      const state = useSessionStore.getState()
+      expect(state.threadItems['thread-1']?.map((item) => item.id)).toEqual([
+        'msg-0',
+        'msg-1',
+        'msg-2',
+      ])
+      expect(state.threadItems['thread-1']?.[1]).toMatchObject({
+        text: 'authoritative version',
+      })
+      expect(state.threadHistory['thread-1']?.hasOlder).toBe(false)
     })
   })
 
@@ -513,6 +564,20 @@ describe('session-store', () => {
       expect(state.snapshot).toBeNull()
       expect(state.selectedWorkspaceId).toBeNull()
       expect(state.selectedThreadId).toBeNull()
+      expect(state.threadItems).toEqual({})
+    })
+
+    it('can clear derived state while preserving the current conversation selection', () => {
+      const { applyDaemonEvent, selectThread, reset } = useSessionStore.getState()
+      applyDaemonEvent(snapshotEvent(snapshot()))
+      selectThread('w1', 't1')
+
+      reset({ preserveCache: true, preserveSelection: true })
+
+      const state = useSessionStore.getState()
+      expect(state.snapshot).toBeNull()
+      expect(state.selectedWorkspaceId).toBe('w1')
+      expect(state.selectedThreadId).toBe('t1')
       expect(state.threadItems).toEqual({})
     })
   })

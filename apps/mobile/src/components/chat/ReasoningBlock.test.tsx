@@ -1,70 +1,151 @@
-import React from 'react'
-import { act } from 'react-test-renderer'
-import { afterEach, describe, expect, it } from 'vitest'
+import React from "react";
+import { act } from "react-test-renderer";
+import { afterEach, describe, expect, it } from "vitest";
 
-import type { ConversationItem } from '@falcondeck/client-core'
+import type { ConversationItem } from "@falcondeck/client-core";
 
-import { cleanup, renderComponent, textOf } from '../../test/render'
-import { ReasoningBlock } from './ReasoningBlock'
+import { cleanup, renderComponent, textOf } from "../../test/render";
+import { ReasoningBlock } from "./ReasoningBlock";
 
-afterEach(cleanup)
+afterEach(cleanup);
 
-type ReasoningItem = Extract<ConversationItem, { kind: 'reasoning' }>
+type ReasoningItem = Extract<ConversationItem, { kind: "reasoning" }>;
 
 function reasoning(overrides: Partial<ReasoningItem> = {}): ReasoningItem {
   return {
-    kind: 'reasoning',
-    id: 'reasoning-1',
-    summary: 'Weighing the options',
-    content: 'First I will read the config, then run the tests.',
-    created_at: '2026-03-16T10:00:00Z',
+    kind: "reasoning",
+    id: "reasoning-1",
+    summary: "Weighing the options",
+    content: "First I will read the config, then run the tests.",
+    created_at: "2026-03-16T10:00:00Z",
     ...overrides,
-  }
+  };
 }
 
 function findPressables(renderer: ReturnType<typeof renderComponent>) {
-  return renderer.root.findAllByType('Pressable' as never)
+  return renderer.root.findAllByType("Pressable" as never);
 }
 
-describe('ReasoningBlock', () => {
-  it('shows the summary as the header and hides the thought by default', () => {
-    const r = renderComponent(<ReasoningBlock item={reasoning()} display="auto" />)
-    expect(textOf(r)).toContain('Weighing the options')
-    expect(textOf(r)).not.toContain('First I will read the config')
-  })
+describe("ReasoningBlock", () => {
+  it("shows the summary as the header and hides the thought by default", () => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning()} display="auto" />,
+    );
+    expect(textOf(r)).toContain("Weighing the options");
+    expect(textOf(r)).not.toContain("First I will read the config");
+  });
 
-  it('falls back to a generic header when the provider sent no summary', () => {
-    const r = renderComponent(<ReasoningBlock item={reasoning({ summary: null })} display="auto" />)
-    expect(textOf(r)).toContain('Thought process')
-  })
+  it("falls back to a generic header when the provider sent no summary", () => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning({ summary: null })} display="auto" />,
+    );
+    expect(textOf(r)).toContain("Thought process");
+  });
 
-  it('reveals the thought when the header is tapped', () => {
-    const r = renderComponent(<ReasoningBlock item={reasoning()} display="auto" />)
+  it("reveals the thought when the header is tapped", () => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning()} display="auto" />,
+    );
+    const header = findPressables(r)[0]!;
+    expect(header.props.accessibilityHint).toBe("Shows the full thought");
+    act(() => header.props.onPress());
+    expect(textOf(r)).toContain("First I will read the config");
+    expect(findPressables(r)[0]!.props.accessibilityHint).toBe(
+      "Hides the full thought",
+    );
+  });
+
+  it("starts open under always_expanded", () => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning()} display="always_expanded" />,
+    );
+    expect(textOf(r)).toContain("First I will read the config");
+  });
+
+  it("keeps a capped excerpt visible under preview", () => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning()} display="preview" />,
+    );
+    expect(textOf(r)).toContain("First I will read the config");
+  });
+
+  it("is not toggleable when the thought has no content", () => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning({ content: "  " })} display="auto" />,
+    );
+    const header = findPressables(r)[0]!;
+    expect(header.props.disabled).toBe(true);
+    expect(header.props.accessibilityState.expanded).toBe(false);
+  });
+
+  it("labels the header for VoiceOver", () => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning()} display="auto" />,
+    );
+    expect(findPressables(r)[0]!.props.accessibilityLabel).toBe(
+      "Reasoning: Weighing the options",
+    );
+  });
+
+  it("shows settled duration without presenting stale streaming time", () => {
+    const r = renderComponent(
+      <ReasoningBlock
+        item={reasoning({ lifecycle: "streaming", duration_ms: 2690 })}
+        display="auto"
+      />,
+    );
+    expect(textOf(r)).not.toContain("2.7 s");
+
     act(() => {
-      findPressables(r)[0]!.props.onPress()
-    })
-    expect(textOf(r)).toContain('First I will read the config')
-  })
+      r.update(
+        <ReasoningBlock
+          item={reasoning({ lifecycle: "complete", duration_ms: 2690 })}
+          display="auto"
+        />,
+      );
+    });
+    expect(textOf(r)).toContain("· 2.7 s");
+    expect(findPressables(r)[0]!.props.accessibilityLabel).toBe(
+      "Reasoning: Weighing the options, duration 2.7 s",
+    );
+  });
 
-  it('starts open under always_expanded', () => {
-    const r = renderComponent(<ReasoningBlock item={reasoning()} display="always_expanded" />)
-    expect(textOf(r)).toContain('First I will read the config')
-  })
+  it("auto-expands a streaming thought and collapses it when the turn settles", () => {
+    const r = renderComponent(
+      <ReasoningBlock
+        item={reasoning({ lifecycle: "streaming" })}
+        display="auto"
+      />,
+    );
+    expect(textOf(r)).toContain("Thinking…");
+    expect(textOf(r)).toContain("First I will read the config");
+    expect(findPressables(r)[0]!.props.accessibilityState.expanded).toBe(true);
 
-  it('keeps a capped excerpt visible under preview', () => {
-    const r = renderComponent(<ReasoningBlock item={reasoning()} display="preview" />)
-    expect(textOf(r)).toContain('First I will read the config')
-  })
+    act(() => {
+      r.update(
+        <ReasoningBlock
+          item={reasoning({ lifecycle: "complete" })}
+          display="auto"
+        />,
+      );
+    });
+    expect(textOf(r)).toContain("Weighing the options");
+    expect(textOf(r)).not.toContain("First I will read the config");
+    expect(findPressables(r)[0]!.props.accessibilityState.expanded).toBe(false);
+  });
 
-  it('is not toggleable when the thought has no content', () => {
-    const r = renderComponent(<ReasoningBlock item={reasoning({ content: '  ' })} display="auto" />)
-    const header = findPressables(r)[0]!
-    expect(header.props.disabled).toBe(true)
-    expect(header.props.accessibilityState.expanded).toBe(false)
-  })
-
-  it('labels the header for VoiceOver', () => {
-    const r = renderComponent(<ReasoningBlock item={reasoning()} display="auto" />)
-    expect(findPressables(r)[0]!.props.accessibilityLabel).toBe('Reasoning: Weighing the options')
-  })
-})
+  it.each([
+    ["interrupted", "Thought interrupted"],
+    ["error", "Thought failed"],
+  ] as const)("labels %s thoughts honestly", (lifecycle, label) => {
+    const r = renderComponent(
+      <ReasoningBlock item={reasoning({ lifecycle })} display="auto" />,
+    );
+    expect(textOf(r)).toContain(label);
+    const header = findPressables(r)[0]!;
+    expect(header.props.accessibilityLabel).toBe(`Reasoning: ${label}`);
+    expect(header.props.accessibilityLiveRegion).toBe(
+      lifecycle === "error" ? "assertive" : "polite",
+    );
+  });
+});

@@ -8,6 +8,11 @@ const PERMISSION_MODE_LABELS: Record<string, string> = {
   auto: 'Auto',
   dontAsk: "Don't ask",
   bypassPermissions: 'Bypass permissions',
+  'always-approve': 'Always approve',
+  untrusted: 'Untrusted only',
+  'on-failure': 'Ask on failure',
+  'on-request': 'Ask when needed',
+  never: 'Never ask',
 }
 
 const SANDBOX_MODE_LABELS: Record<string, string> = {

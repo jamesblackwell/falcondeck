@@ -4,12 +4,17 @@
  * test the pure logic functions extracted from it.
  */
 import { describe, it, expect } from 'vitest'
-import type { EventEnvelope, RelayUpdate } from '@falcondeck/client-core'
 import {
+  resolveRelayTruncationCursor,
+  type EventEnvelope,
+  type RelayUpdate,
+} from '@falcondeck/client-core'
+import {
+  bufferSnapshotRaceEvent,
+  canCheckpointReplayCursor,
   isInvalidSavedSessionError,
-  resolveTruncationCursor,
   shouldReconnectOnAppForeground,
-  shouldRefetchStaleSnapshot,
+  shouldDeferSnapshotApplication,
 } from './useRelayConnection'
 
 // Re-implement parseDaemonEvent to test in isolation
@@ -274,21 +279,96 @@ describe('invalid saved session detection', () => {
   })
 })
 
-describe('stale snapshot refetch cap', () => {
-  it('refetches while events raced the RPC and the cap is not reached', () => {
-    expect(shouldRefetchStaleSnapshot(10, 12, 0)).toBe(true)
-    expect(shouldRefetchStaleSnapshot(10, 11, 1)).toBe(true)
-    expect(shouldRefetchStaleSnapshot(10, 99, 2)).toBe(true)
+describe('snapshot race recovery', () => {
+  it('defers while a relay flush may still be decrypting an event', () => {
+    expect(shouldDeferSnapshotApplication(true, false)).toBe(true)
   })
 
-  it('gives up after three refetches so the stale response is applied as a base', () => {
-    expect(shouldRefetchStaleSnapshot(10, 12, 3)).toBe(false)
-    expect(shouldRefetchStaleSnapshot(10, 12, 4)).toBe(false)
+  it('defers when the bounded replay buffer overflowed', () => {
+    expect(shouldDeferSnapshotApplication(false, true)).toBe(true)
   })
 
-  it('does not refetch when no events landed mid-flight', () => {
-    expect(shouldRefetchStaleSnapshot(10, 10, 0)).toBe(false)
-    expect(shouldRefetchStaleSnapshot(10, 9, 0)).toBe(false)
+  it('accepts the snapshot when every raced event is ready to replay atomically', () => {
+    expect(shouldDeferSnapshotApplication(false, false)).toBe(false)
+  })
+
+  it('deduplicates raced events and reports bounded-buffer overflow', () => {
+    const first: EventEnvelope = {
+      seq: 11,
+      emitted_at: '2026-03-16T10:00:00Z',
+      workspace_id: 'w1',
+      thread_id: 't1',
+      event: { type: 'start', title: 'First' },
+    }
+    const second: EventEnvelope = {
+      ...first,
+      seq: 12,
+      event: { type: 'start', title: 'Second' },
+    }
+    const buffer: EventEnvelope[] = []
+    const seen = new Set<number>()
+
+    expect(bufferSnapshotRaceEvent(buffer, seen, first, 1)).toBe(false)
+    expect(bufferSnapshotRaceEvent(buffer, seen, first, 1)).toBe(false)
+    expect(bufferSnapshotRaceEvent(buffer, seen, second, 1)).toBe(true)
+    expect(buffer).toEqual([first])
+    expect(seen).toEqual(new Set([11]))
+  })
+})
+
+describe('replay cursor checkpointing', () => {
+  it('allows a checkpoint once all consumed events are applied', () => {
+    expect(
+      canCheckpointReplayCursor({
+        authoritativeSnapshot: true,
+        snapshotRequestInFlight: false,
+        pendingSnapshotEventCount: 0,
+        snapshotRaceOverflowed: false,
+        parkedUpdateCount: 0,
+      }),
+    ).toBe(true)
+  })
+
+  it('holds the cursor while a snapshot race is still in flight', () => {
+    expect(
+      canCheckpointReplayCursor({
+        authoritativeSnapshot: true,
+        snapshotRequestInFlight: true,
+        pendingSnapshotEventCount: 0,
+        snapshotRaceOverflowed: false,
+        parkedUpdateCount: 0,
+      }),
+    ).toBe(false)
+  })
+
+  it('rejects checkpoints with buffered, overflowed, or parked replay state', () => {
+    expect(
+      canCheckpointReplayCursor({
+        authoritativeSnapshot: true,
+        snapshotRequestInFlight: false,
+        pendingSnapshotEventCount: 1,
+        snapshotRaceOverflowed: false,
+        parkedUpdateCount: 0,
+      }),
+    ).toBe(false)
+    expect(
+      canCheckpointReplayCursor({
+        authoritativeSnapshot: true,
+        snapshotRequestInFlight: false,
+        pendingSnapshotEventCount: 0,
+        snapshotRaceOverflowed: true,
+        parkedUpdateCount: 0,
+      }),
+    ).toBe(false)
+    expect(
+      canCheckpointReplayCursor({
+        authoritativeSnapshot: true,
+        snapshotRequestInFlight: false,
+        pendingSnapshotEventCount: 0,
+        snapshotRaceOverflowed: false,
+        parkedUpdateCount: 1,
+      }),
+    ).toBe(false)
   })
 })
 
@@ -296,18 +376,18 @@ describe('truncation cursor recovery', () => {
   it('advances to the truncation point when a truncated sync carried no updates', () => {
     // history_truncated with updates: [] — the per-update advance never runs,
     // so the flush must adopt next_seq - 1 or the cursor stays stuck forever.
-    expect(resolveTruncationCursor(42, 0)).toBe(41)
+    expect(resolveRelayTruncationCursor(42, 0)).toBe(41)
   })
 
   it('clamps to zero for an empty session', () => {
-    expect(resolveTruncationCursor(0, 0)).toBe(0)
+    expect(resolveRelayTruncationCursor(0, 0)).toBe(0)
   })
 
   it('stays put while encrypted updates are parked waiting for the session key', () => {
-    expect(resolveTruncationCursor(42, 3)).toBeNull()
+    expect(resolveRelayTruncationCursor(42, 3)).toBeNull()
   })
 
   it('does nothing without a pending truncation', () => {
-    expect(resolveTruncationCursor(null, 0)).toBeNull()
+    expect(resolveRelayTruncationCursor(null, 0)).toBeNull()
   })
 })

@@ -1,17 +1,21 @@
 import {
-  applyEventToThreadDetail,
+  applyEventsToThreadDetail,
+  applyConversationEventsToItems,
   applySnapshotEvent,
   generateBoxKeyPair,
+  interactiveResolutionFromResponse,
   normalizeEventEnvelope,
+  normalizeDaemonSnapshot,
+  parseDaemonEvents as parseRemoteDaemonEvents,
   REMOTE_SESSION_STORAGE_VERSION,
   restoreBoxKeyPair,
   secretKeyToBase64,
-  upsertConversationItem,
   workspaceModels,
   type AgentProvider,
   type ConversationItem,
   type DaemonSnapshot,
   type EventEnvelope,
+  type InteractiveResponsePayload,
   type PersistedRemoteSession,
   type RelayClientMessage,
   type ThreadDetail,
@@ -25,6 +29,42 @@ export const CLIENT_KEYPAIR_STORAGE_KEY = 'falcondeck.remote.client-keypair.v1'
 export const SELECTION_STORAGE_KEY = 'falcondeck.remote.selection.v1'
 export const NOTIFICATIONS_STORAGE_KEY = 'falcondeck.remote.notifications.v1'
 export const THREAD_SORT_STORAGE_KEY = 'falcondeck.remote.thread-sort.v1'
+export const SNAPSHOT_STORAGE_KEY = 'falcondeck.remote.snapshot.v1'
+
+const REMOTE_SNAPSHOT_CACHE_VERSION = 1
+
+type PersistedRemoteSnapshot = {
+  version: number
+  sessionId: string
+  lastReceivedSeq: number
+  snapshot: DaemonSnapshot
+}
+
+/**
+ * Buffers each daemon event once while an authoritative snapshot is loading.
+ * Returns true when the bounded buffer is full, which requires discarding the
+ * snapshot response and retrying rather than accepting a known replay gap.
+ */
+export function bufferSnapshotRaceEvent(
+  buffer: EventEnvelope[],
+  seenSeqs: Set<number>,
+  event: EventEnvelope,
+  maxEvents: number,
+) {
+  if (seenSeqs.has(event.seq)) return false
+  if (buffer.length >= maxEvents) return true
+  seenSeqs.add(event.seq)
+  buffer.push(event)
+  return false
+}
+
+export function clearSnapshotRaceBuffer(
+  buffer: EventEnvelope[],
+  seenSeqs: Set<number>,
+) {
+  buffer.length = 0
+  seenSeqs.clear()
+}
 
 /**
  * How long an awaited queued action may stay unfinished before the UI gives
@@ -71,6 +111,10 @@ export function parseDaemonEvent(payload: unknown): EventEnvelope | null {
     return normalizeEventEnvelope((payload as { event: EventEnvelope }).event)
   }
   return null
+}
+
+export function parseDaemonEvents(payload: unknown): EventEnvelope[] {
+  return parseRemoteDaemonEvents(payload)
 }
 
 export function encryptedRpcErrorMessage(payload: unknown) {
@@ -141,15 +185,14 @@ export function applyDaemonEventsToSnapshot(
 
 export function applyDaemonEventsToThreadItems(
   current: Record<string, ConversationItem[]>,
-  updatesByThread: Map<string, ConversationItem[]>,
+  updatesByThread: Map<string, EventEnvelope[]>,
 ) {
   let next = current
 
   for (const [threadId, updates] of updatesByThread) {
-    let updated = current[threadId] ?? []
-    for (const item of updates) {
-      updated = upsertConversationItem(updated, item)
-    }
+    const existing = current[threadId] ?? []
+    const updated = applyConversationEventsToItems(existing, updates)
+    if (updated === existing) continue
     if (next === current) {
       next = { ...current }
     }
@@ -162,12 +205,9 @@ export function applyDaemonEventsToThreadItems(
 export function applyDaemonEventsToThreadDetail(
   current: ThreadDetail | null,
   events: EventEnvelope[],
-  updatesByThread: Map<string, ConversationItem[]>,
+  updatesByThread: Map<string, EventEnvelope[]>,
 ) {
-  let next = current
-  for (const event of events) {
-    next = applyEventToThreadDetail(next, event)
-  }
+  const next = applyEventsToThreadDetail(current, events)
   if (!next) return next
 
   const threadUpdates = updatesByThread.get(next.thread.id)
@@ -175,30 +215,26 @@ export function applyDaemonEventsToThreadDetail(
     return next
   }
 
-  let items = next.items
-  for (const item of threadUpdates) {
-    items = upsertConversationItem(items, item)
-  }
+  const items = applyConversationEventsToItems(next.items, threadUpdates)
 
   return items === next.items ? next : { ...next, items }
 }
 
 export function collectConversationItemUpdates(events: EventEnvelope[]) {
   const passthroughEvents: EventEnvelope[] = []
-  const updatesByThread = new Map<string, Map<string, ConversationItem>>()
+  const updatesByThread = new Map<string, EventEnvelope[]>()
 
   for (const event of events) {
     if (
       event.thread_id &&
       (event.event.type === 'conversation-item-added' ||
-        event.event.type === 'conversation-item-updated')
+        event.event.type === 'conversation-item-updated' ||
+        event.event.type === 'realtime-item-added' ||
+        event.event.type === 'text')
     ) {
-      let threadUpdates = updatesByThread.get(event.thread_id)
-      if (!threadUpdates) {
-        threadUpdates = new Map<string, ConversationItem>()
-        updatesByThread.set(event.thread_id, threadUpdates)
-      }
-      threadUpdates.set(`${event.event.item.kind}:${event.event.item.id}`, event.event.item)
+      const threadUpdates = updatesByThread.get(event.thread_id) ?? []
+      threadUpdates.push(event)
+      updatesByThread.set(event.thread_id, threadUpdates)
       continue
     }
 
@@ -207,19 +243,19 @@ export function collectConversationItemUpdates(events: EventEnvelope[]) {
 
   return {
     passthroughEvents,
-    updatesByThread: new Map(
-      [...updatesByThread.entries()].map(([threadId, items]) => [threadId, [...items.values()]]),
-    ),
+    updatesByThread,
   }
 }
 
 export function markInteractiveRequestResolved(
   items: ConversationItem[],
   requestId: string,
+  response: InteractiveResponsePayload,
 ): ConversationItem[] {
+  const resolution = interactiveResolutionFromResponse(response)
   return items.map((item) =>
     item.kind === 'interactive_request' && item.id === requestId
-      ? { ...item, resolved: true }
+      ? { ...item, resolved: true, resolution }
       : item,
   )
 }
@@ -258,6 +294,94 @@ export function persistRemoteSession(value: PersistedRemoteSession | null) {
   } catch {
     // Ignore local persistence failures and keep the live session running.
   }
+}
+
+/**
+ * Stores the last authoritative snapshot separately from the relay cursor.
+ * The cursor remains owned by PersistedRemoteSession: a cached snapshot is
+ * only a warm-start hint and must never cause the client to skip replay.
+ */
+export function loadPersistedRemoteSnapshot(
+  sessionId: string | null,
+): { snapshot: DaemonSnapshot; lastReceivedSeq: number } | null {
+  if (!sessionId) return null
+
+  try {
+    const raw = window.localStorage.getItem(SNAPSHOT_STORAGE_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw) as Partial<PersistedRemoteSnapshot> | null
+    const lastReceivedSeq = parsed?.lastReceivedSeq
+    if (
+      !parsed ||
+      typeof parsed !== 'object' ||
+      parsed.version !== REMOTE_SNAPSHOT_CACHE_VERSION ||
+      parsed.sessionId !== sessionId ||
+      !parsed.snapshot ||
+      typeof parsed.snapshot !== 'object' ||
+      typeof lastReceivedSeq !== 'number' ||
+      !Number.isSafeInteger(lastReceivedSeq) ||
+      lastReceivedSeq < 0
+    ) {
+      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+      return null
+    }
+
+    return {
+      snapshot: normalizeDaemonSnapshot(parsed.snapshot),
+      lastReceivedSeq,
+    }
+  } catch {
+    try {
+      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+    } catch {
+      // Ignore storage cleanup failures and start without a warm snapshot.
+    }
+    return null
+  }
+}
+
+export function persistRemoteSnapshot(
+  sessionId: string,
+  snapshot: DaemonSnapshot,
+  lastReceivedSeq: number,
+) {
+  if (!sessionId || !Number.isSafeInteger(lastReceivedSeq) || lastReceivedSeq < 0) return
+
+  try {
+    window.localStorage.setItem(
+      SNAPSHOT_STORAGE_KEY,
+      JSON.stringify({
+        version: REMOTE_SNAPSHOT_CACHE_VERSION,
+        sessionId,
+        lastReceivedSeq,
+        snapshot,
+      } satisfies PersistedRemoteSnapshot),
+    )
+  } catch {
+    // Ignore local persistence failures and keep the live session running.
+  }
+}
+
+export function clearPersistedRemoteSnapshot(sessionId?: string | null) {
+  try {
+    if (!sessionId) {
+      window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+      return
+    }
+
+    const cached = loadPersistedRemoteSnapshot(sessionId)
+    if (cached) window.localStorage.removeItem(SNAPSHOT_STORAGE_KEY)
+  } catch {
+    // Ignore storage cleanup failures.
+  }
+}
+
+export function canWarmStartFromSnapshotCache(
+  cachedLastReceivedSeq: number,
+  persistedLastReceivedSeq: number,
+) {
+  return cachedLastReceivedSeq >= persistedLastReceivedSeq
 }
 
 export function loadOrCreateClientKeyPair() {
@@ -315,6 +439,7 @@ export function clearStoredRemoteState() {
     STORAGE_KEY,
     PENDING_ACTIONS_KEY,
     CLIENT_KEYPAIR_STORAGE_KEY,
+    SNAPSHOT_STORAGE_KEY,
     SELECTION_STORAGE_KEY,
     NOTIFICATIONS_STORAGE_KEY,
     THREAD_SORT_STORAGE_KEY,
@@ -344,6 +469,71 @@ export function shouldDiscardPendingAction(error: unknown) {
 
 export function isAbortError(error: unknown) {
   return error instanceof DOMException && error.name === 'AbortError'
+}
+
+export type RecoveredActionPoll = (
+  actionId: string,
+  options: {
+    signal: AbortSignal
+    clientTokenOverride: string
+    sessionIdOverride: string
+  },
+) => Promise<unknown>
+
+/**
+ * Resume durable relay actions for one encrypted browser session.
+ *
+ * Cleanup aborts only this session generation. Aborted and transient failures
+ * deliberately retain the durable action id so the next authenticated session
+ * can collect it; terminal authentication/not-found failures discard it.
+ */
+export function resumePendingActions({
+  actionIds,
+  clientToken,
+  sessionId,
+  pendingPolls,
+  poll,
+  forget,
+}: {
+  actionIds: Iterable<string>
+  clientToken: string
+  sessionId: string
+  pendingPolls: Set<AbortController>
+  poll: RecoveredActionPoll
+  forget: (actionId: string) => void
+}) {
+  const controllers = new Map<string, AbortController>()
+
+  for (const actionId of new Set(actionIds)) {
+    const controller = new AbortController()
+    controllers.set(actionId, controller)
+    pendingPolls.add(controller)
+
+    void poll(actionId, {
+      signal: controller.signal,
+      clientTokenOverride: clientToken,
+      sessionIdOverride: sessionId,
+    })
+      .then(() => forget(actionId))
+      .catch((error) => {
+        if (isAbortError(error)) return
+        if (shouldDiscardPendingAction(error)) forget(actionId)
+      })
+      .finally(() => {
+        const activeController = controllers.get(actionId)
+        if (!activeController) return
+        pendingPolls.delete(activeController)
+        controllers.delete(actionId)
+      })
+  }
+
+  return () => {
+    for (const controller of controllers.values()) {
+      controller.abort()
+      pendingPolls.delete(controller)
+    }
+    controllers.clear()
+  }
 }
 
 /**

@@ -1,5 +1,11 @@
 import { useEffect, useCallback, useRef, useState } from 'react'
-import { View, KeyboardAvoidingView, Platform, Pressable, ActivityIndicator } from 'react-native'
+import {
+  KeyboardAvoidingView,
+  Platform,
+  Pressable,
+  ScrollView,
+  View,
+} from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Lock, ChevronDown, ChevronUp } from 'lucide-react-native'
@@ -10,7 +16,7 @@ import { useRelayStore } from '@/store'
 import { parsePairingQr } from '@/features/pairing/parsePairingQr'
 import { DEMO_PAIRING_CODE } from '@/features/demo/demoData'
 import { enterDemoMode } from '@/features/demo/enterDemoMode'
-import { Text, Button, Input } from '@/components/ui'
+import { ActivityDiamond, Text, Button, Input } from '@/components/ui'
 
 function connectionLabel(status: string, desktopOnline: boolean) {
   if (status === 'claiming') return 'Claiming pairing...'
@@ -154,10 +160,21 @@ export default function PairScreen() {
       style={styles.flex}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
-      <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={styles.scrollContent}
+        contentInsetAdjustmentBehavior="automatic"
+        keyboardShouldPersistTaps="handled"
+        automaticallyAdjustKeyboardInsets
+      >
         <View style={styles.content}>
           <View style={styles.hero}>
-            <Text variant="heading">
+            <Text
+              variant="heading"
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.5}
+            >
               FalconDeck
             </Text>
             <Text variant="body" color="tertiary" style={styles.subtitle}>
@@ -168,7 +185,7 @@ export default function PairScreen() {
           <View style={styles.form}>
             {isSecuringSession ? (
               <View style={styles.connectingState}>
-                <ActivityIndicator size="small" color={theme.colors.fg.muted} />
+                <ActivityDiamond size={theme.iconSize.md} color={theme.colors.accent.default} />
                 <Text variant="label" color="primary" weight="semibold" style={styles.connectingTitle}>
                   {connectionLabel(connectionStatus, desktopOnline)}
                 </Text>
@@ -216,6 +233,8 @@ export default function PairScreen() {
                   value={pairingCode}
                   onChangeText={setPairingCode}
                   placeholder="Pairing code"
+                  accessibilityLabel="Pairing code"
+                  accessibilityHint="Enter the code shown by FalconDeck on your desktop"
                   autoCapitalize="characters"
                   autoCorrect={false}
                   style={styles.codeInput}
@@ -230,7 +249,13 @@ export default function PairScreen() {
                 />
 
                 {error ? (
-                  <Text variant="caption" color="danger" style={styles.error}>
+                  <Text
+                    variant="caption"
+                    color="danger"
+                    style={styles.error}
+                    accessibilityRole="alert"
+                    accessibilityLiveRegion="assertive"
+                  >
                     {error}
                   </Text>
                 ) : null}
@@ -246,6 +271,8 @@ export default function PairScreen() {
                 value={relayUrl}
                 onChangeText={setRelayUrl}
                 placeholder="Relay URL"
+                accessibilityLabel="Relay URL"
+                accessibilityHint="Enter the FalconDeck relay server address"
                 autoCapitalize="none"
                 autoCorrect={false}
                 keyboardType="url"
@@ -257,6 +284,10 @@ export default function PairScreen() {
             style={styles.advancedToggle}
             onPress={() => setShowAdvanced(!showAdvanced)}
             disabled={isSecuringSession}
+            accessibilityRole="button"
+            accessibilityLabel="Advanced settings"
+            accessibilityHint={showAdvanced ? 'Hides relay server settings' : 'Shows relay server settings'}
+            accessibilityState={{ disabled: isSecuringSession, expanded: showAdvanced }}
           >
             <Text variant="caption" color="muted" size="2xs">
               Advanced
@@ -275,7 +306,7 @@ export default function PairScreen() {
             </Text>
           </View>
         </View>
-      </View>
+      </ScrollView>
     </KeyboardAvoidingView>
   )
 }
@@ -285,6 +316,9 @@ const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
     backgroundColor: theme.colors.surface[0],
+  },
+  scrollContent: {
+    flexGrow: 1,
     paddingHorizontal: theme.spacing[6],
   },
   content: {
@@ -349,7 +383,9 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[1],
-    paddingVertical: theme.spacing[1],
+    minHeight: 44,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
   },
   footer: {
     flexDirection: 'row',

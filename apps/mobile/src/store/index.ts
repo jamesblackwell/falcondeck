@@ -1,5 +1,6 @@
 export { useRelayStore } from './relay-store'
 export {
+  persistSessionCacheNow,
   useSessionStore,
   useGroups,
   useSelectedWorkspace,
@@ -7,6 +8,7 @@ export {
   useSelectedThreadHistory,
   useConversationItems,
   useApprovals,
+  useInteractiveRequests,
   useThinkingDisplay,
 } from './session-store'
 export { useUIStore } from './ui-store'

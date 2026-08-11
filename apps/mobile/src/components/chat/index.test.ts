@@ -9,6 +9,7 @@ import {
   UserMessageBlock,
   AssistantMessageBlock,
   ServiceBlock,
+  ContextCompactionBlock,
   LiveActivityLane,
   ToolCallBlock,
   ToolBurstBlock,
@@ -16,9 +17,11 @@ import {
   ReasoningBlock,
   DiffBlock,
   InteractiveRequestBlock,
+  InteractiveRequestBanner,
   InputToolbar,
   JumpToBottomFab,
   ThinkingIndicator,
+  ConversationShareButton,
 } from './index'
 
 describe('chat barrel exports', () => {
@@ -31,6 +34,7 @@ describe('chat barrel exports', () => {
   it('exports UserMessageBlock', () => { expect(UserMessageBlock).toBeDefined() })
   it('exports AssistantMessageBlock', () => { expect(AssistantMessageBlock).toBeDefined() })
   it('exports ServiceBlock', () => { expect(ServiceBlock).toBeDefined() })
+  it('exports ContextCompactionBlock', () => { expect(ContextCompactionBlock).toBeDefined() })
   it('exports LiveActivityLane', () => { expect(LiveActivityLane).toBeDefined() })
   it('exports ToolCallBlock', () => { expect(ToolCallBlock).toBeDefined() })
   it('exports ToolBurstBlock', () => { expect(ToolBurstBlock).toBeDefined() })
@@ -38,7 +42,9 @@ describe('chat barrel exports', () => {
   it('exports ReasoningBlock', () => { expect(ReasoningBlock).toBeDefined() })
   it('exports DiffBlock', () => { expect(DiffBlock).toBeDefined() })
   it('exports InteractiveRequestBlock', () => { expect(InteractiveRequestBlock).toBeDefined() })
+  it('exports InteractiveRequestBanner', () => { expect(InteractiveRequestBanner).toBeDefined() })
   it('exports InputToolbar', () => { expect(InputToolbar).toBeDefined() })
   it('exports JumpToBottomFab', () => { expect(JumpToBottomFab).toBeDefined() })
   it('exports ThinkingIndicator', () => { expect(ThinkingIndicator).toBeDefined() })
+  it('exports ConversationShareButton', () => { expect(ConversationShareButton).toBeDefined() })
 })

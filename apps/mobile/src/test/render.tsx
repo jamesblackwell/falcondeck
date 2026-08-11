@@ -6,16 +6,25 @@
 import React from 'react'
 import TestRenderer, { act } from 'react-test-renderer'
 
+const activeRenderers = new Set<TestRenderer.ReactTestRenderer>()
+
 export function renderComponent(element: React.ReactElement): TestRenderer.ReactTestRenderer {
   let renderer!: TestRenderer.ReactTestRenderer
   act(() => {
     renderer = TestRenderer.create(element)
   })
+  activeRenderers.add(renderer)
   return renderer
 }
 
 export function cleanup() {
-  // react-test-renderer handles cleanup automatically
+  if (activeRenderers.size === 0) return
+  act(() => {
+    for (const renderer of activeRenderers) {
+      renderer.unmount()
+    }
+  })
+  activeRenderers.clear()
 }
 
 /**

@@ -158,6 +158,30 @@ describe('session-store edge cases', () => {
       expect(t?.status).toBe('running')
       expect(t?.title).toBe('Updated title')
     })
+
+    it('replays raced updates after an older snapshot in one store transaction', () => {
+      const staleSnapshot = snapshot({
+        threads: [thread({ status: 'idle', title: 'Before RPC' })],
+      })
+      const racedUpdate = threadUpdatedEvent(
+        thread({ status: 'running', title: 'Streaming now' }),
+      )
+      let notifications = 0
+      const unsubscribe = useSessionStore.subscribe(() => {
+        notifications += 1
+      })
+
+      useSessionStore.getState().applyDaemonEvents([
+        snapshotEvent(staleSnapshot),
+        racedUpdate,
+      ])
+      unsubscribe()
+
+      const current = useSessionStore.getState().snapshot?.threads[0]
+      expect(current?.status).toBe('running')
+      expect(current?.title).toBe('Streaming now')
+      expect(notifications).toBe(1)
+    })
   })
 
   describe('rapid message stream', () => {

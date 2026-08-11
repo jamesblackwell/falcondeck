@@ -1,11 +1,11 @@
 import { memo, useCallback, useState } from 'react'
-import { ActivityIndicator, Alert, Pressable, View } from 'react-native'
+import { Alert, Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Clock, Paperclip } from 'lucide-react-native'
 
 import type { QueuedTurnSummary } from '@falcondeck/client-core'
 
-import { OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
+import { ActivityDiamond, OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
 
 /** Matches the desktop copy for the same disabled action. */
 export const STEER_UNAVAILABLE_REASON = 'This agent cannot take a message mid-turn.'
@@ -117,7 +117,7 @@ export const QueuedTurns = memo(function QueuedTurns({
             onPress={() => setOpenId(queued.id)}
           >
             {isPending ? (
-              <ActivityIndicator size="small" color={theme.colors.fg.muted} />
+              <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.fg.muted} />
             ) : (
               <Clock size={theme.iconSize.xs} color={theme.colors.fg.muted} />
             )}

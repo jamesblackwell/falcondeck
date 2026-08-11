@@ -34,7 +34,7 @@ export class RemoteErrorBoundary extends Component<
     if (!error) return this.props.children
 
     return (
-      <div className="fd-safe-area flex min-h-[100dvh] flex-col items-center justify-center bg-surface-0 p-6">
+      <div className="fd-safe-area-padded flex min-h-[100dvh] flex-col items-center justify-center bg-surface-0">
         <div
           role="alert"
           className="w-full max-w-md space-y-4 rounded-[var(--fd-radius-xl)] border border-danger/25 bg-danger-muted/60 px-5 py-5"

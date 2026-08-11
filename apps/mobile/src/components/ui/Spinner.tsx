@@ -3,6 +3,7 @@ import Animated, {
   cancelAnimation,
   Easing,
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
   withRepeat,
   withTiming,
@@ -22,8 +23,14 @@ interface SpinnerProps {
  */
 export const Spinner = memo(function Spinner({ size = 14, color }: SpinnerProps) {
   const rotation = useSharedValue(0)
+  const reducedMotion = useReducedMotion()
 
   useEffect(() => {
+    if (reducedMotion) {
+      cancelAnimation(rotation)
+      rotation.value = 0
+      return
+    }
     rotation.value = withRepeat(
       withTiming(360, { duration: 900, easing: Easing.linear }),
       -1,
@@ -31,7 +38,7 @@ export const Spinner = memo(function Spinner({ size = 14, color }: SpinnerProps)
     return () => {
       cancelAnimation(rotation)
     }
-  }, [rotation])
+  }, [reducedMotion, rotation])
 
   const style = useAnimatedStyle(() => ({
     transform: [{ rotate: `${rotation.value}deg` }],

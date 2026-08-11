@@ -19,6 +19,7 @@ describe('ui-store', () => {
       selectedModel: null,
       selectedEffort: 'medium',
       persistedComposerSelections: {},
+      pendingSubmissions: {},
       isSubmitting: false,
     })
   })
@@ -74,6 +75,53 @@ describe('ui-store', () => {
 
     setIsSubmitting(false)
     expect(useUIStore.getState().isSubmitting).toBe(false)
+  })
+
+  it('scopes concurrent submission state to its owning conversation', () => {
+    const { setConversation, setIsSubmitting } = useUIStore.getState()
+    const firstKey = draftKeyFor('w1', 't1')
+    const secondKey = draftKeyFor('w1', 't2')
+
+    setConversation('w1', 't1')
+    setIsSubmitting(true, firstKey)
+    expect(useUIStore.getState().isSubmitting).toBe(true)
+
+    setConversation('w1', 't2')
+    expect(useUIStore.getState().isSubmitting).toBe(false)
+    setIsSubmitting(true, secondKey)
+    setIsSubmitting(false, firstKey)
+    expect(useUIStore.getState().isSubmitting).toBe(true)
+
+    setConversation('w1', 't1')
+    expect(useUIStore.getState().isSubmitting).toBe(false)
+    setConversation('w1', 't2')
+    expect(useUIStore.getState().isSubmitting).toBe(true)
+  })
+
+  it('stores a branch composer without overwriting the selected conversation', () => {
+    const branchImage = {
+      type: 'image',
+      id: 'branch-image',
+      name: 'branch.png',
+      mime_type: 'image/png',
+      url: 'data:image/png;base64,branch',
+    } as const
+    const { setComposerForConversation, setConversation, setDraft } =
+      useUIStore.getState()
+
+    setConversation('w1', 'current')
+    setDraft('Keep this draft')
+    setComposerForConversation(
+      draftKeyFor('w1', 'branch'),
+      'Edit this branch',
+      [branchImage],
+    )
+
+    expect(useUIStore.getState().draft).toBe('Keep this draft')
+    expect(useUIStore.getState().attachments).toEqual([])
+    setConversation('w1', 'branch')
+    expect(useUIStore.getState().draft).toBe('Edit this branch')
+    expect(useUIStore.getState().attachments).toEqual([branchImage])
   })
 
   it('defaults reasoning effort to medium', () => {
@@ -141,6 +189,34 @@ describe('ui-store', () => {
 
     setConversation('w1', 't1')
     expect(useUIStore.getState().attachments).toEqual([image])
+  })
+
+  it('restores a failed submission without overwriting newer composer input', () => {
+    const failedImage = { type: 'image', id: 'img-1', name: 'failed.png', mime_type: 'image/png', url: 'data:image/png;base64,failed' } as const
+    const newerImage = { type: 'image', id: 'img-2', name: 'newer.png', mime_type: 'image/png', url: 'data:image/png;base64,newer' } as const
+    const { restoreFailedSubmission, setAttachments, setConversation, setDraft } =
+      useUIStore.getState()
+
+    setConversation('w1', 't1')
+    setDraft('New draft')
+    setAttachments([newerImage])
+    restoreFailedSubmission(draftKeyFor('w1', 't1'), 'Failed message', [failedImage])
+
+    expect(useUIStore.getState().draft).toBe('Failed message\n\nNew draft')
+    expect(useUIStore.getState().attachments).toEqual([failedImage, newerImage])
+  })
+
+  it('restores to a background conversation without changing the visible composer', () => {
+    const { restoreFailedSubmission, setConversation, setDraft } = useUIStore.getState()
+    setConversation('w1', 'visible')
+    setDraft('Visible draft')
+
+    restoreFailedSubmission(draftKeyFor('w1', 'failed'), 'Failed elsewhere', [])
+
+    expect(useUIStore.getState().draft).toBe('Visible draft')
+    expect(useUIStore.getState().drafts[draftKeyFor('w1', 'failed')]?.text).toBe(
+      'Failed elsewhere',
+    )
   })
 
   it('persists drafts to storage and tolerates write failures', () => {

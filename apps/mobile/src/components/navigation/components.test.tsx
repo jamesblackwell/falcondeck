@@ -43,6 +43,14 @@ describe('SidebarView component', () => {
     const r = renderComponent(<SidebarView {...base} />)
     expect(textOf(r)).toContain('No projects')
   })
+  it('renders a persistent settings footer action', () => {
+    const onOpenSettings = vi.fn()
+    const r = renderComponent(<SidebarView {...base} onOpenSettings={onOpenSettings} />)
+    const settings = r.root.find((node) => node.props.accessibilityLabel === 'Settings')
+    expect(textOf(r)).toContain('Settings')
+    settings.props.onPress()
+    expect(onOpenSettings).toHaveBeenCalledTimes(1)
+  })
   it('renders groups', () => {
     const groups: ProjectGroup[] = [{ workspace: workspace({ id: 'w1', path: '/tmp/proj' }), threads: [thread({ id: 't1', workspace_id: 'w1' })] }]
     const r = renderComponent(<SidebarView {...base} groups={groups} />)

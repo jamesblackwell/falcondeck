@@ -2,6 +2,8 @@ import { create } from 'zustand'
 
 import {
   draftKeyFor,
+  mergeFailedComposerAttachments,
+  mergeFailedComposerDraft,
   parseComposerDrafts,
   parsePersistedComposerState,
   upsertComposerDraft,
@@ -61,6 +63,8 @@ interface UIState {
   selectedSandboxMode: string | null
   /** Last-used picker choices per workspace path, persisted device-locally. */
   persistedComposerSelections: PersistedComposerState
+  /** In-flight sends keyed by their owning conversation. */
+  pendingSubmissions: Record<string, true>
   isSubmitting: boolean
 }
 
@@ -68,8 +72,18 @@ interface UIActions {
   setConversation: (workspaceId: string | null, threadId: string | null) => void
   setDraft: (draft: string) => void
   setAttachments: (attachments: ImageInput[]) => void
+  setComposerForConversation: (
+    conversationKey: string,
+    draft: string,
+    attachments: ImageInput[],
+  ) => void
   addAttachments: (attachments: ImageInput[]) => void
   removeAttachment: (attachmentId: string) => void
+  restoreFailedSubmission: (
+    conversationKey: string,
+    failedDraft: string,
+    failedAttachments: ImageInput[],
+  ) => void
   setSelectedProvider: (provider: AgentProvider | null) => void
   setSelectedModel: (modelId: string | null) => void
   setSelectedEffort: (effort: string | null) => void
@@ -82,7 +96,7 @@ interface UIActions {
     patch: Partial<PersistedComposerSelection>,
   ) => void
   rememberWorkspaceProvider: (workspacePath: string, provider: AgentProvider) => void
-  setIsSubmitting: (submitting: boolean) => void
+  setIsSubmitting: (submitting: boolean, conversationKey?: string) => void
   clearAttachments: () => void
   clearDraft: () => void
 }
@@ -107,6 +121,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
   persistedComposerSelections: parsePersistedComposerState(
     storage.getString(COMPOSER_STATE_STORAGE_KEY) ?? null,
   ),
+  pendingSubmissions: {},
   isSubmitting: false,
 
   setConversation: (workspaceId, threadId) => {
@@ -116,6 +131,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
       conversationKey,
       draft: state.drafts[conversationKey]?.text ?? '',
       attachments: state.attachmentsByConversation[conversationKey] ?? [],
+      isSubmitting: Boolean(state.pendingSubmissions[conversationKey]),
     }))
   },
   setDraft: (draft) =>
@@ -134,9 +150,48 @@ export const useUIStore = create<UIStore>((set, get) => ({
       }
       return { attachmentsByConversation, attachments }
     }),
+  setComposerForConversation: (conversationKey, draft, attachments) =>
+    set((state) => {
+      const drafts = upsertComposerDraft(state.drafts, conversationKey, draft)
+      const attachmentsByConversation = { ...state.attachmentsByConversation }
+      if (attachments.length === 0) {
+        delete attachmentsByConversation[conversationKey]
+      } else {
+        attachmentsByConversation[conversationKey] = attachments
+      }
+      if (drafts !== state.drafts) writeStoredDrafts(drafts)
+      return {
+        drafts,
+        attachmentsByConversation,
+        ...(state.conversationKey === conversationKey ? { draft, attachments } : {}),
+      }
+    }),
   addAttachments: (attachments) => get().setAttachments([...get().attachments, ...attachments]),
   removeAttachment: (attachmentId) =>
     get().setAttachments(get().attachments.filter((attachment) => attachment.id !== attachmentId)),
+  restoreFailedSubmission: (conversationKey, failedDraft, failedAttachments) =>
+    set((state) => {
+      const draft = mergeFailedComposerDraft(
+        failedDraft,
+        state.drafts[conversationKey]?.text ?? '',
+      )
+      const attachments = mergeFailedComposerAttachments(
+        failedAttachments,
+        state.attachmentsByConversation[conversationKey] ?? [],
+      )
+      const drafts = upsertComposerDraft(state.drafts, conversationKey, draft)
+      const attachmentsByConversation = {
+        ...state.attachmentsByConversation,
+        [conversationKey]: attachments,
+      }
+      if (attachments.length === 0) delete attachmentsByConversation[conversationKey]
+      if (drafts !== state.drafts) writeStoredDrafts(drafts)
+      return {
+        drafts,
+        attachmentsByConversation,
+        ...(state.conversationKey === conversationKey ? { draft, attachments } : {}),
+      }
+    }),
   setSelectedProvider: (provider) => set({ selectedProvider: provider }),
   setSelectedModel: (modelId) => set({ selectedModel: modelId }),
   setSelectedEffort: (effort) => set({ selectedEffort: effort }),
@@ -165,7 +220,20 @@ export const useUIStore = create<UIStore>((set, get) => ({
       writePersistedComposerState(persistedComposerSelections)
       return { persistedComposerSelections }
     }),
-  setIsSubmitting: (submitting) => set({ isSubmitting: submitting }),
+  setIsSubmitting: (submitting, requestedConversationKey) =>
+    set((state) => {
+      const conversationKey = requestedConversationKey ?? state.conversationKey
+      const pendingSubmissions = { ...state.pendingSubmissions }
+      if (submitting) {
+        pendingSubmissions[conversationKey] = true
+      } else {
+        delete pendingSubmissions[conversationKey]
+      }
+      return {
+        pendingSubmissions,
+        isSubmitting: Boolean(pendingSubmissions[state.conversationKey]),
+      }
+    }),
   clearAttachments: () => get().setAttachments([]),
   clearDraft: () => get().setDraft(''),
 }))

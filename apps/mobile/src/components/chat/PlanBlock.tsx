@@ -1,11 +1,15 @@
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { CheckCircle2, Circle, Loader2 } from 'lucide-react-native'
+import { AlertTriangle, CheckCircle2, Circle, CircleX } from 'lucide-react-native'
 
-import type { ConversationItem } from '@falcondeck/client-core'
+import {
+  planStepPresentation,
+  planStepRenderKeys,
+  type ConversationItem,
+} from '@falcondeck/client-core'
 
-import { Text } from '@/components/ui'
+import { ActivityDiamond, Text } from '@/components/ui'
 
 type PlanItem = Extract<ConversationItem, { kind: 'plan' }>
 
@@ -15,34 +19,73 @@ interface PlanBlockProps {
 
 export const PlanBlock = memo(function PlanBlock({ item }: PlanBlockProps) {
   const { theme } = useUnistyles()
+  const stepKeys = useMemo(() => planStepRenderKeys(item.plan.steps), [item.plan.steps])
 
   return (
     <View style={styles.container}>
+      <Text
+        variant="label"
+        color="tertiary"
+        size="xs"
+        weight="semibold"
+        accessibilityRole="header"
+        accessibilityLabel={`Plan, ${item.plan.steps.length} steps`}
+      >
+        Plan
+      </Text>
       {item.plan.explanation ? (
-        <Text color="secondary" size="sm" style={styles.explanation}>
+        <Text selectable color="secondary" size="sm" style={styles.explanation}>
           {item.plan.explanation}
         </Text>
       ) : null}
       <View style={styles.steps}>
         {item.plan.steps.map((step, index) => {
-          const isDone = step.status === 'done' || step.status === 'completed'
-          const isInProgress = step.status === 'in_progress' || step.status === 'running'
-          const Icon = isDone ? CheckCircle2 : isInProgress ? Loader2 : Circle
+          const presentation = planStepPresentation(step.status)
+          const isDone = presentation.state === 'completed'
           const iconColor = isDone
             ? theme.colors.success.default
-            : isInProgress
+            : presentation.state === 'in_progress'
               ? theme.colors.accent.default
-              : theme.colors.fg.faint
+              : presentation.state === 'blocked'
+                ? theme.colors.warning.default
+                : presentation.state === 'failed'
+                  ? theme.colors.danger.default
+                  : theme.colors.fg.faint
 
           return (
-            <View key={index} style={styles.stepRow}>
-              <Icon size={14} color={iconColor} />
+            <View
+              key={stepKeys[index]}
+              style={styles.stepRow}
+              accessible
+              accessibilityRole="text"
+              accessibilityLabel={`${step.step}, ${presentation.label}`}
+            >
+              {presentation.state === 'in_progress' ? (
+                <ActivityDiamond size={14} color={iconColor} />
+              ) : presentation.state === 'completed' ? (
+                <CheckCircle2 accessible={false} size={14} color={iconColor} />
+              ) : presentation.state === 'blocked' ? (
+                <AlertTriangle accessible={false} size={14} color={iconColor} />
+              ) : presentation.state === 'failed' ? (
+                <CircleX accessible={false} size={14} color={iconColor} />
+              ) : (
+                <Circle accessible={false} size={14} color={iconColor} />
+              )}
               <Text
+                selectable
                 color={isDone ? 'muted' : 'primary'}
                 size="sm"
                 style={[styles.stepText, isDone && styles.stepDone]}
               >
                 {step.step}
+              </Text>
+              <Text
+                variant="caption"
+                size="2xs"
+                color={presentation.state === 'failed' ? 'danger' : presentation.state === 'blocked' ? 'warning' : presentation.state === 'in_progress' ? 'accent' : 'muted'}
+                style={styles.status}
+              >
+                {presentation.label}
               </Text>
             </View>
           )
@@ -82,5 +125,8 @@ const styles = StyleSheet.create((theme) => ({
   stepDone: {
     textDecorationLine: 'line-through',
     opacity: 0.6,
+  },
+  status: {
+    flexShrink: 0,
   },
 }))

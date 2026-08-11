@@ -11,8 +11,20 @@ import { getJson, setJson } from '@/storage/mmkv'
 import {
   darkColors,
   lightColors,
+  catppuccinDarkColors,
+  catppuccinLightColors,
+  draculaDarkColors,
+  draculaLightColors,
   gruvboxDarkColors,
   gruvboxLightColors,
+  nordDarkColors,
+  nordLightColors,
+  oneDarkColors,
+  oneLightColors,
+  rosePineDarkColors,
+  rosePineLightColors,
+  solarizedDarkColors,
+  solarizedLightColors,
   tokyoNightDarkColors,
   tokyoNightLightColors,
   spacing,
@@ -27,7 +39,16 @@ import {
 } from './tokens'
 
 export type ThemeModeSetting = 'system' | 'light' | 'dark'
-export type PaletteSetting = 'falcon' | 'gruvbox' | 'tokyo-night'
+export type PaletteSetting =
+  | 'falcon'
+  | 'catppuccin'
+  | 'dracula'
+  | 'gruvbox'
+  | 'nord'
+  | 'one'
+  | 'rose-pine'
+  | 'solarized'
+  | 'tokyo-night'
 
 export type MobileAppearance = {
   themeMode: ThemeModeSetting
@@ -41,16 +62,49 @@ export const THEME_MODE_OPTIONS: Array<{ value: ThemeModeSetting; label: string 
   { value: 'dark', label: 'Dark' },
 ]
 
-export const PALETTE_OPTIONS: Array<{ value: PaletteSetting; label: string }> = [
-  { value: 'falcon', label: 'Falcon' },
-  { value: 'gruvbox', label: 'Gruvbox' },
-  { value: 'tokyo-night', label: 'Tokyo' },
+export const PALETTE_COLORS: Record<
+  PaletteSetting,
+  { dark: typeof darkColors; light: typeof darkColors }
+> = {
+  falcon: { dark: darkColors, light: lightColors },
+  catppuccin: { dark: catppuccinDarkColors, light: catppuccinLightColors },
+  dracula: { dark: draculaDarkColors, light: draculaLightColors },
+  gruvbox: { dark: gruvboxDarkColors, light: gruvboxLightColors },
+  nord: { dark: nordDarkColors, light: nordLightColors },
+  one: { dark: oneDarkColors, light: oneLightColors },
+  'rose-pine': { dark: rosePineDarkColors, light: rosePineLightColors },
+  solarized: { dark: solarizedDarkColors, light: solarizedLightColors },
+  'tokyo-night': { dark: tokyoNightDarkColors, light: tokyoNightLightColors },
+}
+
+/** Falcon leads as the default; the rest are alphabetical. Descriptions mirror
+    the desktop copy in packages/ui/src/lib/appearance.ts. */
+export const PALETTE_OPTIONS: Array<{
+  value: PaletteSetting
+  label: string
+  description: string
+}> = [
+  { value: 'falcon', label: 'Falcon', description: 'Deep black with an emerald accent.' },
+  { value: 'catppuccin', label: 'Catppuccin', description: 'Soft pastel mauve — Mocha and Latte.' },
+  { value: 'dracula', label: 'Dracula', description: 'Neon purple on graphite.' },
+  { value: 'gruvbox', label: 'Gruvbox', description: 'Warm, retro groove.' },
+  { value: 'nord', label: 'Nord', description: 'Arctic blue-grey calm.' },
+  { value: 'one', label: 'One', description: 'The classic editor grey and blue.' },
+  { value: 'rose-pine', label: 'Rosé Pine', description: 'Muted rose and pine.' },
+  { value: 'solarized', label: 'Solarized', description: 'Precision-tuned cyan and cream.' },
+  { value: 'tokyo-night', label: 'Tokyo Night', description: 'Cool indigo dusk.' },
 ]
 
-const PALETTE_COLORS: Record<PaletteSetting, { dark: typeof darkColors; light: typeof darkColors }> = {
-  falcon: { dark: darkColors, light: lightColors },
-  gruvbox: { dark: gruvboxDarkColors, light: gruvboxLightColors },
-  'tokyo-night': { dark: tokyoNightDarkColors, light: tokyoNightLightColors },
+/** The four tones a palette swatch paints, read straight off the palette so a
+    chip can never drift from the theme it advertises. */
+export function paletteSwatchColors(palette: PaletteSetting, base: 'light' | 'dark') {
+  const colors = PALETTE_COLORS[palette][base]
+  return {
+    bg: colors.surface[1],
+    surface: colors.surface[2],
+    fg: colors.fg.primary,
+    accent: colors.accent.default,
+  }
 }
 
 export const FONT_SCALE_OPTIONS: Array<{ value: number; label: string }> = [

@@ -1,6 +1,10 @@
 import * as ImagePicker from 'expo-image-picker'
+import * as Clipboard from 'expo-clipboard'
 
-import type { ImageInput } from '@falcondeck/client-core'
+import {
+  validateImageAttachmentBudget,
+  type ImageInput,
+} from '@falcondeck/client-core'
 
 function imageInputId(index: number) {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${index}`
@@ -74,5 +78,37 @@ export async function pickImageInputFromCamera() {
     throw new Error('FalconDeck could not read the captured photo.')
   }
 
+  return attachments
+}
+
+export async function pasteImageInputFromClipboard(): Promise<ImageInput[]> {
+  const image = await Clipboard.getImageAsync({ format: 'png' })
+  if (!image) {
+    throw new Error('No image found on the clipboard.')
+  }
+
+  const payload = image.data.match(
+    /^data:image\/png;base64,([A-Za-z0-9+/]+={0,2})$/i,
+  )?.[1]
+  if (
+    !payload ||
+    payload.length % 4 !== 0 ||
+    !Number.isFinite(image.size.width) ||
+    !Number.isFinite(image.size.height) ||
+    image.size.width <= 0 ||
+    image.size.height <= 0
+  ) {
+    throw new Error('FalconDeck could not read the clipboard image.')
+  }
+
+  const attachments: ImageInput[] = [{
+    type: 'image',
+    id: imageInputId(0),
+    name: 'Pasted image.png',
+    mime_type: 'image/png',
+    url: image.data,
+    local_path: null,
+  }]
+  validateImageAttachmentBudget(attachments)
   return attachments
 }

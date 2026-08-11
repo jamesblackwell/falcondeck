@@ -148,11 +148,11 @@ export const InputToolbar = memo(function InputToolbar({
     setSheet({
       title: 'Permissions',
       items: permissionModeItems(permissionModes),
-      // `default` is the daemon's own id for "no override", so it round-trips
-      // to null on the wire while still reading as a chosen option.
+      // Keep `default` explicit: null means the app's permissive default while
+      // this option intentionally restores the provider's safe default.
       selected: selectedPermissionMode ?? (permissionModes.includes('default') ? 'default' : null),
       onSelect: (value) => {
-        onSelectPermissionMode(value === 'default' ? null : value)
+        onSelectPermissionMode(value)
         setSheet(null)
       },
     })
@@ -220,7 +220,7 @@ export const InputToolbar = memo(function InputToolbar({
                   <Text
                     variant="caption"
                     color={active ? 'primary' : 'muted'}
-                    size="2xs"
+                    size="xs"
                     weight={active ? 'semibold' : 'normal'}
                   >
                     {p.label}
@@ -316,10 +316,10 @@ const Chip = memo(function Chip({
       onPress={onPress}
       disabled={disabled}
     >
-      <Text variant="caption" color="secondary" size="2xs" numberOfLines={1}>
+      <Text variant="caption" color="secondary" size="xs" numberOfLines={1}>
         {label}
       </Text>
-      <ChevronDown size={10} color={theme.colors.fg.muted} />
+      <ChevronDown size={theme.iconSize.xs} color={theme.colors.fg.muted} />
     </Pressable>
   )
 })
@@ -349,11 +349,11 @@ const FastChip = memo(function FastChip({
       disabled={disabled}
     >
       {/* The bolt fills in when the tier is on, so state survives without color. */}
-      <Zap size={10} color={color} fill={active ? color : 'none'} />
+      <Zap size={theme.iconSize.xs} color={color} fill={active ? color : 'none'} />
       <Text
         variant="caption"
         color={active ? 'primary' : 'secondary'}
-        size="2xs"
+        size="xs"
         numberOfLines={1}
         style={active ? { color } : undefined}
       >
@@ -382,8 +382,8 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.spacing[0.5],
   },
   providerSegment: {
-    paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[1],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[1.5],
     borderRadius: theme.radius.full,
   },
   providerSegmentActive: {
@@ -392,9 +392,11 @@ const styles = StyleSheet.create((theme) => ({
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[1],
-    paddingHorizontal: theme.spacing[2],
-    paddingVertical: theme.spacing[1],
+    gap: theme.spacing[1.5],
+    // Painted height sits near the 44pt target; hitSlop covers the rest.
+    minHeight: 34,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[1.5],
     backgroundColor: theme.colors.surface[3],
     borderRadius: theme.radius.full,
     // Chips shrink so a long mode label never pushes the send button off-row.

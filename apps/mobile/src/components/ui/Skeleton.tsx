@@ -1,8 +1,10 @@
 import { memo, useEffect } from 'react'
 import { type ViewProps } from 'react-native'
 import Animated, {
+  cancelAnimation,
   useSharedValue,
   useAnimatedStyle,
+  useReducedMotion,
   withRepeat,
   withTiming,
 } from 'react-native-reanimated'
@@ -23,10 +25,15 @@ export const Skeleton = memo(function Skeleton({
 }: SkeletonProps) {
   const { theme } = useUnistyles()
   const opacity = useSharedValue(0.4)
+  const reducedMotion = useReducedMotion()
 
   useEffect(() => {
-    opacity.value = withRepeat(withTiming(1, { duration: 1000 }), -1, true)
-  }, [opacity])
+    cancelAnimation(opacity)
+    opacity.value = reducedMotion
+      ? 0.65
+      : withRepeat(withTiming(1, { duration: 1000 }), -1, true)
+    return () => cancelAnimation(opacity)
+  }, [opacity, reducedMotion])
 
   const animatedStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,

@@ -12,10 +12,15 @@ import { useShallow } from 'zustand/react/shallow'
 
 import {
   MOBILE_SESSION_CACHE_VERSION,
+  applyConversationEventsToItems,
   applySnapshotEvent,
   buildProjectGroups,
+  mergeThreadDetailPage,
   normalizeDaemonSnapshot,
+  normalizeConversationItem,
   reconcileSnapshotSelection,
+  removeConversationItem,
+  threadForSelection,
   upsertConversationItem,
   type CachedThreadHistory,
   type ConversationItem,
@@ -24,6 +29,7 @@ import {
   type MobileSessionCache,
   type ThinkingDisplay,
   type ThreadDetail,
+  type ThreadHandle,
 } from '@falcondeck/client-core'
 
 import { clearMobileSessionCache, persistMobileSessionCache } from '@/storage/mobile-session-cache'
@@ -54,17 +60,23 @@ interface SessionState {
 interface SessionActions {
   applyDaemonEvent: (event: EventEnvelope) => void
   applyDaemonEvents: (events: EventEnvelope[]) => void
+  setPreferences: (preferences: DaemonSnapshot['preferences']) => void
   hydrateCache: (cache: MobileSessionCache) => void
   exportCache: () => MobileSessionCache | null
   selectThread: (workspaceId: string, threadId: string) => void
   selectWorkspace: (workspaceId: string) => void
   selectNewThread: (workspaceId: string) => void
+  applyThreadHandle: (handle: ThreadHandle) => void
   setThreadDetail: (
     detail: ThreadDetail | null,
     options?: { mergeMode?: ThreadDetailMergeMode },
   ) => void
+  /** Inserts a client-local (optimistic) item until the daemon echoes it. */
+  upsertLocalThreadItem: (threadId: string, item: ConversationItem) => void
+  /** Removes a client-local item again (send failed or was queued). */
+  removeLocalThreadItem: (threadId: string, itemId: string) => void
   reconcileSelection: () => void
-  reset: (options?: { preserveCache?: boolean }) => void
+  reset: (options?: { preserveCache?: boolean; preserveSelection?: boolean }) => void
 }
 
 type SessionStore = SessionState & SessionActions
@@ -84,10 +96,6 @@ const EMPTY_HISTORY: ThreadHistoryState = {
   oldestItemId: null,
   newestItemId: null,
   isPartial: false,
-}
-
-function conversationItemKey(item: ConversationItem) {
-  return `${item.kind}:${item.id}`
 }
 
 function filterActiveSnapshot(snapshot: DaemonSnapshot | null): DaemonSnapshot | null {
@@ -148,51 +156,6 @@ function reconcileThreadDetail(
   }
 }
 
-function mergeHistoryState(
-  existing: ThreadHistoryState | undefined,
-  detail: ThreadDetail,
-  mergedItems: ConversationItem[],
-  mergeMode: ThreadDetailMergeMode,
-): ThreadHistoryState {
-  if (mergeMode === 'prepend') {
-    return historyStateForItems(mergedItems, {
-      hasOlder: detail.has_older,
-      isPartial: detail.is_partial,
-      oldestItemId: detail.oldest_item_id,
-      newestItemId: mergedItems.at(-1)?.id ?? detail.newest_item_id ?? null,
-    })
-  }
-
-  const preservesOlderWindow =
-    !!detail.oldest_item_id && mergedItems[0]?.id !== detail.oldest_item_id
-
-  return historyStateForItems(mergedItems, {
-    hasOlder: preservesOlderWindow ? existing?.hasOlder ?? false : detail.has_older,
-    isPartial: preservesOlderWindow ? existing?.isPartial ?? false : detail.is_partial,
-    oldestItemId: mergedItems[0]?.id ?? detail.oldest_item_id ?? null,
-    newestItemId: mergedItems.at(-1)?.id ?? detail.newest_item_id ?? null,
-  })
-}
-
-function mergeThreadItems(
-  existingItems: ConversationItem[],
-  nextItems: ConversationItem[],
-  mergeMode: ThreadDetailMergeMode,
-): ConversationItem[] {
-  if (mergeMode === 'prepend') {
-    const nextKeys = new Set(nextItems.map(conversationItemKey))
-    return [
-      ...nextItems,
-      ...existingItems.filter((item) => !nextKeys.has(conversationItemKey(item))),
-    ]
-  }
-
-  return nextItems.reduce(
-    (items, item) => upsertConversationItem(items, item),
-    existingItems,
-  )
-}
-
 function buildCacheFromState(state: SessionState): MobileSessionCache | null {
   const snapshot = filterActiveSnapshot(state.snapshot)
   if (!snapshot) return null
@@ -206,7 +169,12 @@ function buildCacheFromState(state: SessionState): MobileSessionCache | null {
 
   const threadHistories = Object.fromEntries(
     recentThreadIds.flatMap((threadId) => {
-      const items = state.threadItems[threadId] ?? []
+      // Optimistic user messages are client-local until the daemon echoes
+      // them; a persisted copy would resurrect as a phantom message after a
+      // relaunch if the send never landed.
+      const items = (state.threadItems[threadId] ?? []).filter(
+        (item) => !(item.kind === 'user_message' && item.pending === true),
+      )
       if (items.length === 0) return []
 
       const cachedItems =
@@ -268,6 +236,19 @@ function writeStateCache(state: SessionState) {
   persistMobileSessionCache(cache)
 }
 
+/**
+ * Flush the latest snapshot-backed cache before a relay cursor is
+ * checkpointed. Cursor persistence is an acknowledgement: after a restart,
+ * the cache must be able to reconstruct every update at or below that cursor.
+ */
+export function persistSessionCacheNow(): void {
+  if (trailingCachePersistTimer) {
+    clearTimeout(trailingCachePersistTimer)
+    trailingCachePersistTimer = null
+  }
+  writeStateCache(useSessionStore.getState())
+}
+
 function persistStateCache(state: SessionState) {
   const elapsed = Date.now() - lastCachePersistAt
   if (elapsed >= CACHE_PERSIST_THROTTLE_MS) {
@@ -289,6 +270,8 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
   let nextThreadHistory = state.threadHistory
   let nextThreadDetail = state.threadDetail
 
+  const conversationEventsByThread = new Map<string, EventEnvelope[]>()
+
   for (const event of events) {
     let candidateSnapshot = applySnapshotEvent(nextSnapshot, event)
     if (!candidateSnapshot && event.event.type === 'snapshot') {
@@ -301,20 +284,29 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     const daemonEvent = event.event
     if (
       event.thread_id &&
-      (daemonEvent.type === 'conversation-item-added' || daemonEvent.type === 'conversation-item-updated')
+      (daemonEvent.type === 'conversation-item-added' ||
+        daemonEvent.type === 'conversation-item-updated' ||
+        daemonEvent.type === 'realtime-item-added' ||
+        daemonEvent.type === 'text')
     ) {
-      const threadId = event.thread_id
-      const existingItems = nextThreadItems[threadId] ?? EMPTY_ITEMS
-      const mergedItems = upsertConversationItem(existingItems, daemonEvent.item)
-      const existingHistory = nextThreadHistory[threadId] ?? EMPTY_HISTORY
-      const nextHistory = historyStateForItems(mergedItems, existingHistory)
+      const threadEvents = conversationEventsByThread.get(event.thread_id) ?? []
+      threadEvents.push(event)
+      conversationEventsByThread.set(event.thread_id, threadEvents)
+    }
+  }
 
-      nextThreadItems = { ...nextThreadItems, [threadId]: mergedItems }
-      nextThreadHistory = { ...nextThreadHistory, [threadId]: nextHistory }
+  for (const [threadId, threadEvents] of conversationEventsByThread) {
+    const existingItems = nextThreadItems[threadId] ?? EMPTY_ITEMS
+    const mergedItems = applyConversationEventsToItems(existingItems, threadEvents)
+    if (mergedItems === existingItems) continue
+    const existingHistory = nextThreadHistory[threadId] ?? EMPTY_HISTORY
+    const nextHistory = historyStateForItems(mergedItems, existingHistory)
 
-      if (nextThreadDetail?.thread.id === threadId) {
-        nextThreadDetail = reconcileThreadDetail(nextThreadDetail, mergedItems, nextHistory)
-      }
+    nextThreadItems = { ...nextThreadItems, [threadId]: mergedItems }
+    nextThreadHistory = { ...nextThreadHistory, [threadId]: nextHistory }
+
+    if (nextThreadDetail?.thread.id === threadId) {
+      nextThreadDetail = reconcileThreadDetail(nextThreadDetail, mergedItems, nextHistory)
     }
   }
 
@@ -363,6 +355,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     persistStateCache(get())
   },
 
+  setPreferences: (preferences) => {
+    set((state) => (state.snapshot ? { snapshot: { ...state.snapshot, preferences } } : state))
+    persistStateCache(get())
+  },
+
   hydrateCache: (cache) => {
     const snapshot = filterActiveSnapshot(normalizeDaemonSnapshot(cache.snapshot))
     const visibleThreadIds = new Set(snapshot?.threads.map((thread) => thread.id) ?? [])
@@ -372,7 +369,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     const threadItems = Object.fromEntries(
       cachedThreadHistories.map(([threadId, history]) => [
         threadId,
-        history.items,
+        history.items.map(normalizeConversationItem),
       ]),
     )
     const threadHistory = Object.fromEntries(
@@ -436,6 +433,24 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     persistStateCache(get())
   },
 
+  applyThreadHandle: (handle) => {
+    set((state) => ({
+      snapshot: state.snapshot
+        ? {
+            ...state.snapshot,
+            workspaces: state.snapshot.workspaces.map((workspace) =>
+              workspace.id === handle.workspace.id ? handle.workspace : workspace,
+            ),
+            threads: [
+              handle.thread,
+              ...state.snapshot.threads.filter((thread) => thread.id !== handle.thread.id),
+            ],
+          }
+        : state.snapshot,
+    }))
+    persistStateCache(get())
+  },
+
   setThreadDetail: (detail, options) => {
     if (!detail) {
       set({ threadDetail: null })
@@ -447,24 +462,72 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const threadId = detail.thread.id
       const existingItems = state.threadItems[threadId] ?? EMPTY_ITEMS
       const mergeMode = options?.mergeMode ?? 'refresh'
-      const mergedItems = mergeThreadItems(
-        existingItems,
-        detail.items,
-        mergeMode,
-      )
-      const nextHistory = mergeHistoryState(
-        state.threadHistory[threadId],
-        detail,
-        mergedItems,
-        mergeMode,
-      )
-      const mergedDetail = reconcileThreadDetail(detail, mergedItems, nextHistory)
+      const existingHistory = state.threadHistory[threadId] ?? EMPTY_HISTORY
+      const currentDetail = existingItems.length > 0
+        ? {
+            ...detail,
+            items: existingItems,
+            has_older: existingHistory.hasOlder,
+            oldest_item_id: existingHistory.oldestItemId,
+            newest_item_id: existingHistory.newestItemId,
+            is_partial: existingHistory.isPartial,
+          }
+        : null
+      const mergedDetail = mergeThreadDetailPage(currentDetail, detail, mergeMode)
+      const mergedItems = mergedDetail.items
+      const nextHistory = historyStateForItems(mergedItems, {
+        hasOlder: mergedDetail.has_older,
+        oldestItemId: mergedDetail.oldest_item_id,
+        newestItemId: mergedDetail.newest_item_id,
+        isPartial: mergedDetail.is_partial,
+      })
       const isSelectedThread = state.selectedThreadId === threadId
 
       return {
         threadDetail: isSelectedThread ? mergedDetail : state.threadDetail,
         threadItems: { ...state.threadItems, [threadId]: mergedItems },
         threadHistory: { ...state.threadHistory, [threadId]: nextHistory },
+      }
+    })
+    persistStateCache(get())
+  },
+
+  upsertLocalThreadItem: (threadId, item) => {
+    set((state) => {
+      const existingItems = state.threadItems[threadId] ?? EMPTY_ITEMS
+      const mergedItems = upsertConversationItem(existingItems, item)
+      const nextHistory = historyStateForItems(
+        mergedItems,
+        state.threadHistory[threadId] ?? EMPTY_HISTORY,
+      )
+      return {
+        threadItems: { ...state.threadItems, [threadId]: mergedItems },
+        threadHistory: { ...state.threadHistory, [threadId]: nextHistory },
+        threadDetail:
+          state.threadDetail?.thread.id === threadId
+            ? reconcileThreadDetail(state.threadDetail, mergedItems, nextHistory)
+            : state.threadDetail,
+      }
+    })
+    persistStateCache(get())
+  },
+
+  removeLocalThreadItem: (threadId, itemId) => {
+    set((state) => {
+      const existingItems = state.threadItems[threadId] ?? EMPTY_ITEMS
+      const mergedItems = removeConversationItem(existingItems, itemId)
+      if (mergedItems === existingItems) return state
+      const nextHistory = historyStateForItems(
+        mergedItems,
+        state.threadHistory[threadId] ?? EMPTY_HISTORY,
+      )
+      return {
+        threadItems: { ...state.threadItems, [threadId]: mergedItems },
+        threadHistory: { ...state.threadHistory, [threadId]: nextHistory },
+        threadDetail:
+          state.threadDetail?.thread.id === threadId
+            ? reconcileThreadDetail(state.threadDetail, mergedItems, nextHistory)
+            : state.threadDetail,
       }
     })
     persistStateCache(get())
@@ -481,14 +544,27 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       return {
         selectedWorkspaceId: next.workspaceId,
         selectedThreadId: next.threadId,
-        threadDetail: state.threadDetail?.thread.id === next.threadId ? state.threadDetail : null,
+        threadDetail:
+          state.threadDetail?.workspace.id === next.workspaceId &&
+          state.threadDetail.thread.id === next.threadId
+            ? state.threadDetail
+            : null,
       }
     })
     persistStateCache(get())
   },
 
   reset: (options) => {
-    set(initialState)
+    const previous = get()
+    set({
+      ...initialState,
+      selectedWorkspaceId: options?.preserveSelection
+        ? previous.selectedWorkspaceId
+        : initialState.selectedWorkspaceId,
+      selectedThreadId: options?.preserveSelection
+        ? previous.selectedThreadId
+        : initialState.selectedThreadId,
+    })
     // Drop any throttled trailing write: it would persist (or, before the
     // null-cache guard, delete) a cache derived from the cleared state.
     if (trailingCachePersistTimer) {
@@ -528,7 +604,10 @@ export function useGroups() {
     useShallow((s) => s.snapshot?.workspaces ?? EMPTY_WORKSPACES),
   )
   const threads = useSessionStore(useShallow((s) => s.snapshot?.threads ?? EMPTY_THREADS))
-  return useMemo(() => buildProjectGroups(workspaces, threads), [threads, workspaces])
+  const workspaceOrder = useSessionStore(
+    (s) => s.snapshot?.preferences.workspace_order,
+  )
+  return useMemo(() => buildProjectGroups(workspaces, threads, workspaceOrder), [threads, workspaceOrder, workspaces])
 }
 
 export function useSelectedWorkspace() {
@@ -539,20 +618,44 @@ export function useSelectedWorkspace() {
 
 export function useSelectedThread() {
   return useSessionStore((s) =>
-    s.snapshot?.threads.find((t) => t.id === s.selectedThreadId) ?? null,
+    threadForSelection(
+      s.snapshot?.threads ?? EMPTY_THREADS,
+      s.selectedWorkspaceId,
+      s.selectedThreadId,
+    ),
   )
 }
 
 export function useSelectedThreadHistory() {
   return useSessionStore((s) => {
-    if (!s.selectedThreadId) return EMPTY_HISTORY
-    return s.threadHistory[s.selectedThreadId] ?? EMPTY_HISTORY
+    const selectedThreadId = s.selectedThreadId
+    if (
+      !selectedThreadId ||
+      !threadForSelection(
+        s.snapshot?.threads ?? EMPTY_THREADS,
+        s.selectedWorkspaceId,
+        selectedThreadId,
+      )
+    )
+      return EMPTY_HISTORY
+    return s.threadHistory[selectedThreadId] ?? EMPTY_HISTORY
   })
 }
 
 export function useConversationItems() {
   return useSessionStore(useShallow((s) => {
-    if (s.threadDetail) return s.threadDetail.items
+    const selectedThread = threadForSelection(
+      s.snapshot?.threads ?? EMPTY_THREADS,
+      s.selectedWorkspaceId,
+      s.selectedThreadId,
+    )
+    if (!selectedThread) return EMPTY_ITEMS
+    if (
+      s.threadDetail &&
+      s.threadDetail.workspace.id === s.selectedWorkspaceId &&
+      s.threadDetail.thread.id === selectedThread.id
+    )
+      return s.threadDetail.items
     if (s.selectedThreadId) return s.threadItems[s.selectedThreadId] ?? EMPTY_ITEMS
     return EMPTY_ITEMS
   }))
@@ -564,13 +667,18 @@ export function useThinkingDisplay(): ThinkingDisplay {
   return useSessionStore((s) => s.snapshot?.preferences.conversation.thinking_display ?? 'auto')
 }
 
-export function useApprovals() {
+export function useInteractiveRequests() {
   return useSessionStore(useShallow((s) =>
-    s.selectedThreadId
+    s.selectedWorkspaceId && s.selectedThreadId
       ? (s.snapshot?.interactive_requests ?? []).filter(
-          (a) => a.thread_id === s.selectedThreadId,
+          (a) =>
+            a.workspace_id === s.selectedWorkspaceId &&
+            a.thread_id === s.selectedThreadId,
         )
       : [],
   ))
 }
+
+/** @deprecated Use the accurately named `useInteractiveRequests`. */
+export const useApprovals = useInteractiveRequests
 /* v8 ignore stop */

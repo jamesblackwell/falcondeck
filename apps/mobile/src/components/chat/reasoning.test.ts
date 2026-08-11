@@ -11,6 +11,23 @@ describe('resolveReasoningReveal', () => {
     expect(resolveReasoningReveal('auto')).toEqual({ defaultOpen: false, collapsedLines: 0 })
   })
 
+  it.each(['pending', 'streaming'] as const)('opens transient %s reasoning under auto', (lifecycle) => {
+    expect(resolveReasoningReveal('auto', lifecycle)).toEqual({
+      defaultOpen: true,
+      collapsedLines: 0,
+    })
+  })
+
+  it.each(['complete', 'interrupted', 'error'] as const)(
+    'collapses settled %s reasoning under auto',
+    (lifecycle) => {
+      expect(resolveReasoningReveal('auto', lifecycle)).toEqual({
+        defaultOpen: false,
+        collapsedLines: 0,
+      })
+    },
+  )
+
   it('starts collapsed with no body under always_collapsed', () => {
     expect(resolveReasoningReveal('always_collapsed')).toEqual({
       defaultOpen: false,

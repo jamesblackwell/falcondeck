@@ -24,6 +24,7 @@ const stubTheme = {
   shadow: { sm: {}, md: {}, lg: {} },
   duration: { fast: 100, normal: 150, slow: 250 },
   iconSize: { sm: 16, md: 20, lg: 24, xl: 32 },
+  minTouchTarget: 44,
 }
 
 export const StyleSheet = {

@@ -2,10 +2,10 @@ import { memo } from 'react'
 import { View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import { Spinner, Text } from '@/components/ui'
+import { ActivityDiamond, Text } from '@/components/ui'
 
 /** Liveness row for a running turn with nothing else on screen to say so.
-    It shares the work-session header's geometry and spinner: the two swap
+    It shares the work-session header's geometry and diamond: the two swap
     in the same slot under the transcript, and matching metrics keep that
     handoff from moving a pixel. */
 export const ThinkingIndicator = memo(function ThinkingIndicator() {
@@ -13,7 +13,7 @@ export const ThinkingIndicator = memo(function ThinkingIndicator() {
 
   return (
     <View style={styles.row}>
-      <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} />
+      <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.accent.default} />
       <Text variant="label" color="muted">
         Thinking…
       </Text>
@@ -26,7 +26,7 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[2],
-    // The spinner leads the row on the same 16pt column as message copy;
+    // The diamond leads the row on the same 16pt column as message copy;
     // WorkSessionBlock's header uses the same geometry.
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[1],

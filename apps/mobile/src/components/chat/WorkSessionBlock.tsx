@@ -5,7 +5,7 @@ import { ChevronRight } from 'lucide-react-native'
 
 import { formatWorkDuration, type WorkSessionEntry } from '@falcondeck/client-core'
 
-import { Spinner, Text } from '@/components/ui'
+import { ActivityDiamond, Text } from '@/components/ui'
 import { ToolCallBlock } from './ToolCallBlock'
 import { ConnectedReasoningBlock } from './ReasoningBlock'
 
@@ -45,7 +45,7 @@ export const WorkSessionBlock = memo(function WorkSessionBlock({
         style={styles.row}
       >
         {running ? (
-          <Spinner size={theme.iconSize.xs} color={theme.colors.accent.default} />
+          <ActivityDiamond size={theme.iconSize.xs} color={theme.colors.accent.default} />
         ) : null}
         <Text variant="label" color="muted">
           {running ? 'Working…' : `Worked for ${formatWorkDuration(startedAt, completedAt ?? startedAt)}`}

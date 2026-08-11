@@ -1,4 +1,4 @@
-import type { ThinkingDisplay } from '@falcondeck/client-core'
+import type { ContentLifecycle, ThinkingDisplay } from '@falcondeck/client-core'
 
 /** Lines of the thought kept visible under `preview`. */
 export const REASONING_PREVIEW_LINES = 3
@@ -14,22 +14,26 @@ export type ReasoningReveal = {
  * Map the shared `thinking_display` preference onto what the mobile transcript
  * can actually do.
  *
- * `auto` resolves to collapsed rather than Zed's follow-the-stream behaviour:
- * a reasoning item carries no running flag, so a row inside a virtualised list
- * cannot tell a thought that is still arriving from one that finished. The
- * live case is already covered by the thinking indicator under the transcript,
- * so collapsing here loses nothing and keeps row heights stable while blocks
- * stream in.
+ * `auto` follows the item lifecycle: open while content streams, then collapse
+ * when the turn settles. A user toggle is tracked separately by the renderer,
+ * so lifecycle updates never undo an explicit choice.
  */
-export function resolveReasoningReveal(display: ThinkingDisplay): ReasoningReveal {
+export function resolveReasoningReveal(
+  display: ThinkingDisplay,
+  lifecycle: ContentLifecycle = 'complete',
+): ReasoningReveal {
   switch (display) {
     case 'always_expanded':
       return { defaultOpen: true, collapsedLines: 0 }
     case 'preview':
       return { defaultOpen: false, collapsedLines: REASONING_PREVIEW_LINES }
     case 'always_collapsed':
-    case 'auto':
       return { defaultOpen: false, collapsedLines: 0 }
+    case 'auto':
+      return {
+        defaultOpen: lifecycle === 'pending' || lifecycle === 'streaming',
+        collapsedLines: 0,
+      }
   }
 }
 

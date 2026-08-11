@@ -6,7 +6,7 @@ interface InputProps extends TextInputProps {
   error?: boolean
 }
 
-export const Input = memo(function Input({ error, style, ...props }: InputProps) {
+export const Input = memo(function Input({ error, style, onFocus, onBlur, ...props }: InputProps) {
   const { theme } = useUnistyles()
   const [isFocused, setIsFocused] = useState(false)
 
@@ -14,17 +14,17 @@ export const Input = memo(function Input({ error, style, ...props }: InputProps)
   const handleFocus = useCallback(
     (e: Parameters<NonNullable<TextInputProps['onFocus']>>[0]) => {
       setIsFocused(true)
-      props.onFocus?.(e)
+      onFocus?.(e)
     },
-    [props.onFocus],
+    [onFocus],
   )
 
   const handleBlur = useCallback(
     (e: Parameters<NonNullable<TextInputProps['onBlur']>>[0]) => {
       setIsFocused(false)
-      props.onBlur?.(e)
+      onBlur?.(e)
     },
-    [props.onBlur],
+    [onBlur],
   )
   /* v8 ignore stop */
 
@@ -38,22 +38,23 @@ export const Input = memo(function Input({ error, style, ...props }: InputProps)
       ]}
       placeholderTextColor={theme.colors.fg.muted}
       selectionColor={theme.colors.accent.default}
+      {...props}
       onFocus={handleFocus}
       onBlur={handleBlur}
-      {...props}
     />
   )
 })
 
 const styles = StyleSheet.create((theme) => ({
   base: {
-    height: 44,
+    minHeight: 44,
     borderRadius: theme.radius.lg,
     borderCurve: 'continuous',
     borderWidth: 1,
     borderColor: theme.colors.border.default,
     backgroundColor: theme.colors.surface[2],
     paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
     fontSize: theme.fontSize.base,
     fontFamily: theme.fontFamily.sans,
     color: theme.colors.fg.primary,

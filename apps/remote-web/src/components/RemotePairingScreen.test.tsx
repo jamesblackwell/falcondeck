@@ -28,7 +28,9 @@ afterEach(() => {
 describe('RemotePairingScreen', () => {
   it('labels the pairing code field', () => {
     renderScreen()
-    expect(screen.getByLabelText('Pairing code')).toHaveValue('ABCD1234')
+    const field = screen.getByLabelText('Pairing code')
+    expect(field).toHaveValue('ABCD1234')
+    expect(field.closest('.fd-safe-area-padded')).toBeInTheDocument()
   })
 
   it('submits on Enter from the code field', () => {

@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { AppState } from 'react-native'
 
-import { normalizeEventEnvelope, normalizeDaemonSnapshot, publicKeyToBase64 } from '@falcondeck/client-core'
+import {
+  captureRelayDisplayFrame,
+  encryptedDaemonEventEnvelope,
+  normalizeDaemonSnapshot,
+  parseDaemonEvents as parseRemoteDaemonEvents,
+  publicKeyToBase64,
+  relayBacklogWouldOverflow,
+  REMOTE_EVENT_BATCH_FEATURE,
+  relayReconnectDelayMs,
+  resolveRelayTruncationCursor,
+} from '@falcondeck/client-core'
 import type {
   DaemonSnapshot,
   EventEnvelope,
@@ -12,37 +22,23 @@ import type {
 } from '@falcondeck/client-core'
 
 import { fetchWithTimeout } from '@/lib/fetch-timeout'
-import { isPushEnabled, registerPushToken } from '@/lib/push-notifications'
-import { useRelayStore, useSessionStore } from '@/store'
+import { clearPushToken, isPushEnabled, registerPushToken } from '@/lib/push-notifications'
+import { realtimeAudioPlayer } from '@/lib/realtime-audio-player'
+import { persistSessionCacheNow, useRelayStore, useSessionStore } from '@/store'
 
 // The relay disconnects peers silent for 45s; the daemon pings every 15s.
 const RELAY_PING_INTERVAL_MS = 15_000
 // Only treat a connection as healthy (and reset backoff) after it stays open this long.
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
+const MAX_PENDING_SNAPSHOT_EVENTS = 2_000
 // Retry cadence for asking the daemon to republish the session bootstrap
 // while the connection is up but the session data key is missing.
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
-// During an active turn the cursor advances continuously, so a snapshot RPC
-// response can come back stale forever; bound the refetch loop.
-const MAX_SNAPSHOT_REFETCH_ATTEMPTS = 3
 const SNAPSHOT_REFETCH_DELAY_MS = 1_000
 // A WebSocket stuck in CONNECTING never fires close on some platforms; give
 // the handshake a hard deadline so the UI cannot park at "Connecting…".
 const RELAY_CONNECT_TIMEOUT_MS = 20_000
-
-function parseDaemonEvent(payload: unknown): EventEnvelope | null {
-  if (
-    typeof payload === 'object' &&
-    payload !== null &&
-    'kind' in payload &&
-    'event' in payload &&
-    (payload as { kind?: string }).kind === 'daemon-event'
-  ) {
-    return normalizeEventEnvelope((payload as { event: EventEnvelope }).event)
-  }
-  return null
-}
 
 /**
  * iOS kills the relay socket when the app backgrounds; waiting for the dead
@@ -70,18 +66,56 @@ export function isInvalidSavedSessionError(message: string | null) {
 }
 
 /**
- * A snapshot RPC that raced incremental events is stale; refetching gets a
- * fresher one, but during an active turn the cursor advances on every flush,
- * so the refetch loop must be bounded. Past the cap the stale response is
- * applied as a base — an older snapshot plus the events that follow is
- * strictly better than no snapshot at all.
+ * A snapshot response is safe when every event that raced it has finished
+ * flushing into the replay buffer. An active flush may still be decrypting an
+ * earlier update, while an overflow means the buffer is incomplete; either
+ * condition requires a fresh request instead of applying a known-stale base.
  */
-export function shouldRefetchStaleSnapshot(
-  cursorAtRequest: number,
-  cursorNow: number,
-  refetchAttempt: number,
+export function shouldDeferSnapshotApplication(
+  relayFlushInProgress: boolean,
+  snapshotRaceOverflowed: boolean,
 ) {
-  return cursorNow > cursorAtRequest && refetchAttempt < MAX_SNAPSHOT_REFETCH_ATTEMPTS
+  return relayFlushInProgress || snapshotRaceOverflowed
+}
+
+/**
+ * A replay cursor may only be checkpointed after every event it represents is
+ * either in the applied snapshot or has been applied directly. During a
+ * snapshot race, advancing the durable cursor first can make a crash restart
+ * after the cursor and permanently skip the events that were still buffered.
+ */
+export function canCheckpointReplayCursor(params: {
+  authoritativeSnapshot: boolean
+  snapshotRequestInFlight: boolean
+  pendingSnapshotEventCount: number
+  snapshotRaceOverflowed: boolean
+  parkedUpdateCount: number
+}) {
+  return (
+    params.authoritativeSnapshot &&
+    !params.snapshotRequestInFlight &&
+    params.pendingSnapshotEventCount === 0 &&
+    !params.snapshotRaceOverflowed &&
+    params.parkedUpdateCount === 0
+  )
+}
+
+/**
+ * Buffers each daemon event at most once while snapshot.current is in flight.
+ * Returns true when the bounded buffer cannot safely represent the race and
+ * the caller must discard the snapshot response and retry.
+ */
+export function bufferSnapshotRaceEvent(
+  buffer: EventEnvelope[],
+  seenSeqs: Set<number>,
+  event: EventEnvelope,
+  maxEvents = MAX_PENDING_SNAPSHOT_EVENTS,
+) {
+  if (seenSeqs.has(event.seq)) return false
+  if (buffer.length >= maxEvents) return true
+  seenSeqs.add(event.seq)
+  buffer.push(event)
+  return false
 }
 
 /**
@@ -92,14 +126,6 @@ export function shouldRefetchStaleSnapshot(
  * cursor until they are actually processed. Returns the cursor seq to adopt,
  * or null when no advance should happen.
  */
-export function resolveTruncationCursor(
-  truncationNextSeq: number | null,
-  parkedUpdateCount: number,
-): number | null {
-  if (truncationNextSeq === null || parkedUpdateCount > 0) return null
-  return Math.max(truncationNextSeq - 1, 0)
-}
-
 export function useRelayConnection() {
   const sessionId = useRelayStore((s) => s.sessionId)
   const deviceId = useRelayStore((s) => s.deviceId)
@@ -109,27 +135,70 @@ export function useRelayConnection() {
   const snapshotRetryTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRefetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const snapshotRetryAttempt = useRef(0)
-  const snapshotRefetchAttempt = useRef(0)
   const reconnectAttempt = useRef(0)
   const pendingEncrypted = useRef<RelayUpdate[]>([])
   const evictedWhileParked = useRef(false)
   const pendingTruncationNextSeq = useRef<number | null>(null)
   const pendingRelayUpdates = useRef<RelayUpdate[]>([])
+  const ephemeralAudioChain = useRef<Promise<void>>(Promise.resolve())
   const relayFlushFrame = useRef<number | null>(null)
   const relayFlushTimeout = useRef<ReturnType<typeof setTimeout> | null>(null)
   const relayFlushInProgress = useRef(false)
+  const relayFlushGeneration = useRef(0)
   const snapshotRequestInFlight = useRef(false)
+  const snapshotRequestGeneration = useRef(0)
+  const pendingSnapshotEvents = useRef<EventEnvelope[]>([])
+  const pendingSnapshotEventSeqs = useRef<Set<number>>(new Set())
+  const snapshotRaceOverflowed = useRef(false)
+  const pendingSnapshotCursor = useRef<number | null>(null)
   const snapshotAfterCrypto = useRef(false)
   const [reconnectGeneration, setReconnectGeneration] = useState(0)
+
+  const checkpointPendingSnapshotCursor = useCallback((allowSnapshotRequestInFlight = false) => {
+    const relay = useRelayStore.getState()
+    if (!useSessionStore.getState().snapshot) return
+    if (!allowSnapshotRequestInFlight && snapshotRequestInFlight.current) return
+    if (
+      pendingEncrypted.current.length > 0 ||
+      pendingSnapshotEvents.current.length > 0 ||
+      snapshotRaceOverflowed.current
+    ) return
+
+    const snapshotCursor = pendingSnapshotCursor.current
+    const truncationCursor = resolveRelayTruncationCursor(
+      pendingTruncationNextSeq.current,
+      pendingEncrypted.current.length,
+    )
+    if (snapshotCursor === null && truncationCursor === null) return
+
+    relay._setLastReceivedSeq(Math.max(
+      relay._getLastReceivedSeq(),
+      snapshotCursor ?? 0,
+      truncationCursor ?? 0,
+    ))
+    persistSessionCacheNow()
+    relay._persistSession()
+    pendingSnapshotCursor.current = null
+    if (truncationCursor !== null) {
+      pendingTruncationNextSeq.current = null
+    }
+  }, [])
 
   const requestSnapshot = useCallback(async () => {
     const relay = useRelayStore.getState()
     if (!relay._getSessionCrypto() || snapshotRequestInFlight.current) return
 
+    const requestGeneration = snapshotRequestGeneration.current + 1
+    snapshotRequestGeneration.current = requestGeneration
     snapshotRequestInFlight.current = true
+    pendingSnapshotEvents.current = []
+    pendingSnapshotEventSeqs.current.clear()
+    snapshotRaceOverflowed.current = false
+    // Keep any cursor held by a decrypt that completed between snapshot
+    // attempts. It belongs to this relay session and can only be durably
+    // acknowledged after the replacement snapshot lands.
     let shouldRefetch = false
     try {
-      const cursorAtRequest = relay._getLastReceivedSeq()
       const nextSnapshot = normalizeDaemonSnapshot(
         await relay._callRpc<DaemonSnapshot>(
           'snapshot.current',
@@ -137,22 +206,20 @@ export function useRelayConnection() {
           { requestIdPrefix: 'mobile-snapshot' },
         ),
       )
+      if (requestGeneration !== snapshotRequestGeneration.current) return
       if (
-        shouldRefetchStaleSnapshot(
-          cursorAtRequest,
-          useRelayStore.getState()._getLastReceivedSeq(),
-          snapshotRefetchAttempt.current,
+        shouldDeferSnapshotApplication(
+          relayFlushInProgress.current,
+          snapshotRaceOverflowed.current,
         )
       ) {
-        // Incremental events landed while the RPC was in flight; applying this
-        // response could clobber them, so fetch a fresh snapshot instead —
-        // bounded, because during an active turn every response is stale. Once
-        // the cap is hit the stale response below is applied as a base.
-        snapshotRefetchAttempt.current += 1
+        // The flush has not yet finished buffering every raced event, or the
+        // bounded buffer overflowed. Never knowingly replace live state with
+        // an incomplete snapshot; retry after the frame-batched flush settles.
         shouldRefetch = true
         return
       }
-      snapshotRefetchAttempt.current = 0
+      const racedEvents = pendingSnapshotEvents.current
       useSessionStore.getState().applyDaemonEvents([
         {
           seq: 0,
@@ -161,7 +228,32 @@ export function useRelayConnection() {
           thread_id: null,
           event: { type: 'snapshot', snapshot: nextSnapshot },
         },
+        ...racedEvents,
       ])
+      pendingSnapshotEvents.current = []
+      pendingSnapshotEventSeqs.current.clear()
+      snapshotRaceOverflowed.current = false
+
+      // The cursor for updates consumed during the snapshot race was held
+      // back. Commit it only after the fresh snapshot and every raced event
+      // have been applied together. A truncation cursor can be adopted at the
+      // same point because this snapshot is the recovery base for the lost
+      // history.
+      if (
+        canCheckpointReplayCursor({
+          authoritativeSnapshot: true,
+          snapshotRequestInFlight: false,
+          pendingSnapshotEventCount: 0,
+          snapshotRaceOverflowed: false,
+          parkedUpdateCount: pendingEncrypted.current.length,
+        }) &&
+        (pendingSnapshotCursor.current !== null || pendingTruncationNextSeq.current !== null)
+      ) {
+        // Keep the explicit invariant check here as documentation for the
+        // snapshot RPC path; the shared helper also flushes the cache before
+        // acknowledging the held cursor.
+        checkpointPendingSnapshotCursor(true)
+      }
       snapshotRetryAttempt.current = 0
       if (snapshotRetryTimer.current) {
         clearTimeout(snapshotRetryTimer.current)
@@ -169,6 +261,7 @@ export function useRelayConnection() {
       }
       relay._setError(null)
     } catch (e) {
+      if (requestGeneration !== snapshotRequestGeneration.current) return
       relay._setError(e instanceof Error ? e.message : 'Failed to load snapshot')
       if (!useSessionStore.getState().snapshot && !snapshotRetryTimer.current) {
         const delay = Math.min(1000 * 2 ** snapshotRetryAttempt.current, 5_000)
@@ -182,15 +275,20 @@ export function useRelayConnection() {
         }, delay)
       }
     } finally {
-      snapshotRequestInFlight.current = false
-      if (shouldRefetch && !snapshotRefetchTimer.current) {
-        snapshotRefetchTimer.current = setTimeout(() => {
-          snapshotRefetchTimer.current = null
-          void requestSnapshot()
-        }, SNAPSHOT_REFETCH_DELAY_MS)
+      if (requestGeneration === snapshotRequestGeneration.current) {
+        snapshotRequestInFlight.current = false
+        pendingSnapshotEvents.current = []
+        pendingSnapshotEventSeqs.current.clear()
+        snapshotRaceOverflowed.current = false
+        if (shouldRefetch && !snapshotRefetchTimer.current) {
+          snapshotRefetchTimer.current = setTimeout(() => {
+            snapshotRefetchTimer.current = null
+            void requestSnapshot()
+          }, SNAPSHOT_REFETCH_DELAY_MS)
+        }
       }
     }
-  }, [])
+  }, [checkpointPendingSnapshotCursor])
 
   const processRpcResult = useCallback(async (payload: Extract<RelayServerMessage, { type: 'rpc-result' }>) => {
     const relay = useRelayStore.getState()
@@ -203,21 +301,33 @@ export function useRelayConnection() {
   const flushRelayUpdates = useCallback(async () => {
     if (relayFlushInProgress.current) return
 
+    const flushGeneration = relayFlushGeneration.current
     relayFlushInProgress.current = true
 
     try {
-      while (pendingRelayUpdates.current.length > 0) {
+      if (pendingRelayUpdates.current.length === 0) return
+      if (flushGeneration !== relayFlushGeneration.current) return
+      // Capture one paint-frame batch. Updates that arrive while async
+      // decryption is running stay queued for the next scheduled frame.
         const relay = useRelayStore.getState()
-        const batch = pendingRelayUpdates.current.splice(0)
+        const batch = captureRelayDisplayFrame(pendingRelayUpdates.current)
         const daemonEvents: EventEnvelope[] = []
         let nextPresence: MachinePresence | null | undefined = undefined
         let shouldPersistCursor = false
+        let deferredBootstrapSeq: number | null = null
 
         // The cursor may only advance for updates that were actually consumed;
         // otherwise a parked or failed update can never be replayed by a later
         // sync. While updates are parked the cursor must stay before them.
         const advanceCursor = (seq: number) => {
           if (pendingEncrypted.current.length > 0) return
+          if (snapshotRequestInFlight.current || !useSessionStore.getState().snapshot) {
+            pendingSnapshotCursor.current = Math.max(
+              pendingSnapshotCursor.current ?? 0,
+              seq,
+            )
+            return
+          }
           relay._setLastReceivedSeq(seq)
           shouldPersistCursor = true
         }
@@ -227,9 +337,13 @@ export function useRelayConnection() {
 
           if (update.body.t === 'session-bootstrap') {
             await relay._processBootstrap(update)
+            if (flushGeneration !== relayFlushGeneration.current) return
             if (pendingEncrypted.current.length > 0) {
               batch.splice(index + 1, 0, ...pendingEncrypted.current)
               pendingEncrypted.current = []
+              // Keep the cursor before the parked updates until the inserted
+              // replay window has been consumed.
+              deferredBootstrapSeq = update.seq
             }
             if (evictedWhileParked.current && relay._getSessionCrypto()) {
               // Updates were evicted while parked waiting for this key, so
@@ -238,7 +352,9 @@ export function useRelayConnection() {
               evictedWhileParked.current = false
               snapshotAfterCrypto.current = true
             }
-            advanceCursor(update.seq)
+            if (deferredBootstrapSeq === null) {
+              advanceCursor(update.seq)
+            }
             if (snapshotAfterCrypto.current && relay._getSessionCrypto()) {
               snapshotAfterCrypto.current = false
               void requestSnapshot()
@@ -275,10 +391,19 @@ export function useRelayConnection() {
 
           try {
             const decrypted = await relay._decryptJson(update.body.envelope)
+            if (flushGeneration !== relayFlushGeneration.current) return
             advanceCursor(update.seq)
-            const event = parseDaemonEvent(decrypted)
-            if (event) {
+            const events = parseRemoteDaemonEvents(decrypted)
+            for (const event of events) {
+              realtimeAudioPlayer.handleEvent(event)
               daemonEvents.push(event)
+              if (snapshotRequestInFlight.current) {
+                snapshotRaceOverflowed.current ||= bufferSnapshotRaceEvent(
+                  pendingSnapshotEvents.current,
+                  pendingSnapshotEventSeqs.current,
+                  event,
+                )
+              }
             }
           } catch (e) {
             // Decryption failed: the cursor is not advanced for this update.
@@ -290,6 +415,12 @@ export function useRelayConnection() {
           }
         }
 
+        if (deferredBootstrapSeq !== null) {
+          advanceCursor(deferredBootstrapSeq)
+        }
+
+        if (flushGeneration !== relayFlushGeneration.current) return
+
         if (nextPresence !== undefined) {
           relay._setMachinePresence(nextPresence)
         }
@@ -298,27 +429,49 @@ export function useRelayConnection() {
           useSessionStore.getState().applyDaemonEvents(daemonEvents)
         }
 
-        if (shouldPersistCursor) {
+        checkpointPendingSnapshotCursor()
+
+        if (
+          shouldPersistCursor &&
+          canCheckpointReplayCursor({
+            authoritativeSnapshot: !!useSessionStore.getState().snapshot,
+            snapshotRequestInFlight: snapshotRequestInFlight.current,
+            pendingSnapshotEventCount: pendingSnapshotEvents.current.length,
+            snapshotRaceOverflowed: snapshotRaceOverflowed.current,
+            parkedUpdateCount: pendingEncrypted.current.length,
+          })
+        ) {
+          persistSessionCacheNow()
           relay._persistSession()
         }
 
         if (relay._getSessionCrypto() && !useSessionStore.getState().snapshot) {
           void requestSnapshot()
         }
-      }
+
+      if (flushGeneration !== relayFlushGeneration.current) return
 
       // A truncated sync may deliver no replayable updates at all (idle
       // session aged out), so the per-update cursor advance above never runs;
       // adopt the truncation point here once nothing is parked, otherwise the
       // cursor stays stuck and every reconnect replays the truncation.
-      const truncationCursor = resolveTruncationCursor(
-        pendingTruncationNextSeq.current,
-        pendingEncrypted.current.length,
-      )
+      const truncationCursor = pendingRelayUpdates.current.length === 0 && canCheckpointReplayCursor({
+        authoritativeSnapshot: !!useSessionStore.getState().snapshot,
+        snapshotRequestInFlight: snapshotRequestInFlight.current,
+        pendingSnapshotEventCount: pendingSnapshotEvents.current.length,
+        snapshotRaceOverflowed: snapshotRaceOverflowed.current,
+        parkedUpdateCount: pendingEncrypted.current.length,
+      })
+        ? resolveRelayTruncationCursor(
+            pendingTruncationNextSeq.current,
+            pendingEncrypted.current.length,
+          )
+        : null
       if (truncationCursor !== null) {
         pendingTruncationNextSeq.current = null
         const relay = useRelayStore.getState()
         relay._setLastReceivedSeq(truncationCursor)
+        persistSessionCacheNow()
         relay._persistSession()
       }
     } finally {
@@ -337,7 +490,7 @@ export function useRelayConnection() {
         }
       }
     }
-  }, [requestSnapshot])
+  }, [checkpointPendingSnapshotCursor, requestSnapshot])
 
   const scheduleRelayFlush = useCallback(() => {
     if (relayFlushFrame.current !== null || relayFlushTimeout.current !== null) {
@@ -375,6 +528,7 @@ export function useRelayConnection() {
     // "bootstrap retry silently stops" bug).
     let bootstrapRetryTimer: ReturnType<typeof setTimeout> | null = null
     let connectTimeout: ReturnType<typeof setTimeout> | null = null
+    const snapshotEventSeqs = pendingSnapshotEventSeqs.current
     const relayUrl = relay.relayUrl.trim().replace(/\/$/, '')
     const wsUrl = relayUrl.startsWith('https://')
       ? `wss://${relayUrl.slice('https://'.length)}`
@@ -389,9 +543,14 @@ export function useRelayConnection() {
     evictedWhileParked.current = false
     pendingTruncationNextSeq.current = null
     pendingRelayUpdates.current = []
+    relayFlushGeneration.current += 1
+    snapshotRequestGeneration.current += 1
     snapshotRequestInFlight.current = false
+    pendingSnapshotEvents.current = []
+    snapshotEventSeqs.clear()
+    snapshotRaceOverflowed.current = false
+    pendingSnapshotCursor.current = null
     snapshotRetryAttempt.current = 0
-    snapshotRefetchAttempt.current = 0
     if (snapshotRetryTimer.current) {
       clearTimeout(snapshotRetryTimer.current)
       snapshotRetryTimer.current = null
@@ -451,6 +610,7 @@ export function useRelayConnection() {
       // chains.
       if (!isCurrent || !shouldReconnect || !useRelayStore.getState().sessionId) return
       clearSocketTimers()
+      realtimeAudioPlayer.stop()
       relay._setConnectionStatus('disconnected')
       relay._setMachinePresence(null)
       relay._setSocket(null)
@@ -459,9 +619,14 @@ export function useRelayConnection() {
       evictedWhileParked.current = false
       pendingTruncationNextSeq.current = null
       pendingRelayUpdates.current = []
+      relayFlushGeneration.current += 1
+      snapshotRequestGeneration.current += 1
       snapshotRequestInFlight.current = false
+      pendingSnapshotEvents.current = []
+      snapshotEventSeqs.clear()
+      snapshotRaceOverflowed.current = false
+      pendingSnapshotCursor.current = null
       snapshotRetryAttempt.current = 0
-      snapshotRefetchAttempt.current = 0
       if (snapshotRetryTimer.current) {
         clearTimeout(snapshotRetryTimer.current)
         snapshotRetryTimer.current = null
@@ -479,9 +644,8 @@ export function useRelayConnection() {
         relayFlushTimeout.current = null
       }
 
-      const base = Math.min(1000 * 2 ** reconnectAttempt.current, 15_000)
+      const delay = relayReconnectDelayMs(reconnectAttempt.current, Math.random(), 15_000)
       reconnectAttempt.current += 1
-      const delay = Math.round(base * (0.8 + Math.random() * 0.4))
       reconnectTimer.current = setTimeout(() => {
         reconnectTimer.current = null
         setReconnectGeneration((value) => value + 1)
@@ -556,6 +720,13 @@ export function useRelayConnection() {
             reconnectAttempt.current = 0
           }, RELAY_BACKOFF_RESET_MS)
           relay._setConnectionStatus('connected')
+          relay._sendMessage({
+            type: 'ephemeral',
+            body: {
+              kind: 'client-capabilities',
+              features: [REMOTE_EVENT_BATCH_FEATURE],
+            },
+          })
           relay._sendMessage({ type: 'sync', after_seq: relay._getLastReceivedSeq() })
           if (!relay._getSessionCrypto()) {
             requestBootstrapWhileKeyless()
@@ -582,6 +753,16 @@ export function useRelayConnection() {
               }
               break
             case 'sync':
+              if (
+                relayBacklogWouldOverflow(
+                  pendingRelayUpdates.current.length,
+                  payload.updates.length,
+                )
+              ) {
+                relay._setError('Remote event backlog exceeded the safe limit')
+                socket.close()
+                return
+              }
               if (payload.history_truncated) {
                 // Updates were lost server-side; recover derived state from a
                 // fresh snapshot, but keep the offline cache so the UI does
@@ -594,7 +775,10 @@ export function useRelayConnection() {
                   pendingTruncationNextSeq.current ?? 0,
                   payload.next_seq,
                 )
-                useSessionStore.getState().reset({ preserveCache: true })
+                useSessionStore.getState().reset({
+                  preserveCache: true,
+                  preserveSelection: true,
+                })
                 if (relay._getSessionCrypto()) {
                   void requestSnapshot()
                 } else {
@@ -605,11 +789,13 @@ export function useRelayConnection() {
               scheduleRelayFlush()
               break
             case 'update':
+              if (relayBacklogWouldOverflow(pendingRelayUpdates.current.length, 1)) {
+                relay._setError('Remote event backlog exceeded the safe limit')
+                socket.close()
+                return
+              }
               pendingRelayUpdates.current.push(payload.update)
               scheduleRelayFlush()
-              break
-            case 'rpc-result':
-              void processRpcResult(payload)
               break
             case 'ephemeral': {
               // The daemon refuses bootstrap requests from bundles it does
@@ -629,9 +815,44 @@ export function useRelayConnection() {
                     'The desktop does not recognize this device. Start over and pair again.',
                   )
                 }
+                break
               }
+              const envelope = encryptedDaemonEventEnvelope(payload.body)
+              if (!envelope) break
+              const ephemeralGeneration = relayFlushGeneration.current
+              ephemeralAudioChain.current = ephemeralAudioChain.current
+                .then(async () => {
+                  if (!isCurrent || ephemeralGeneration !== relayFlushGeneration.current) return
+                  const current = useRelayStore.getState()
+                  const crypto = current._getSessionCrypto()
+                  if (!crypto) return
+                  const events = parseRemoteDaemonEvents(await current._decryptJson(envelope))
+                  if (
+                    !isCurrent ||
+                    ephemeralGeneration !== relayFlushGeneration.current ||
+                    crypto !== useRelayStore.getState()._getSessionCrypto()
+                  ) return
+                  for (const event of events) {
+                    realtimeAudioPlayer.handleEvent(event)
+                    if (event.event.type === 'realtime-item-added') {
+                      useSessionStore.getState().applyDaemonEvent(event)
+                    }
+                  }
+                })
+                .catch((error: unknown) => {
+                  if (isCurrent && ephemeralGeneration === relayFlushGeneration.current) {
+                    useRelayStore.getState()._setError(
+                      error instanceof Error
+                        ? error.message
+                        : 'Failed to decrypt live audio event',
+                    )
+                  }
+                })
               break
             }
+            case 'rpc-result':
+              void processRpcResult(payload)
+              break
             case 'presence':
               relay._setMachinePresence(payload.presence)
               break
@@ -662,6 +883,7 @@ export function useRelayConnection() {
     return () => {
       isCurrent = false
       shouldReconnect = false
+      realtimeAudioPlayer.stop()
       appStateSubscription.remove()
       clearSocketTimers()
       activeSocket?.close()
@@ -671,9 +893,14 @@ export function useRelayConnection() {
       evictedWhileParked.current = false
       pendingTruncationNextSeq.current = null
       pendingRelayUpdates.current = []
+      relayFlushGeneration.current += 1
+      snapshotRequestGeneration.current += 1
       snapshotRequestInFlight.current = false
+      pendingSnapshotEvents.current = []
+      snapshotEventSeqs.clear()
+      snapshotRaceOverflowed.current = false
+      pendingSnapshotCursor.current = null
       snapshotRetryAttempt.current = 0
-      snapshotRefetchAttempt.current = 0
       if (snapshotRetryTimer.current) {
         clearTimeout(snapshotRetryTimer.current)
         snapshotRetryTimer.current = null
@@ -723,12 +950,18 @@ export function useRelayConnection() {
   // notifications turned off — the settings toggle re-registers on re-enable.
   // Fire-and-forget: registerPushToken never throws and dedupes
   // re-registration internally.
+  const notificationEnabled = useSessionStore(
+    (state) => state.snapshot?.preferences.notifications.enabled ?? true,
+  )
   useEffect(() => {
-    if (!isPushEnabled()) return
     if (!isEncrypted || !sessionId || !deviceId) return
     const relay = useRelayStore.getState()
     const clientToken = relay._getClientToken()
     if (!clientToken) return
+    if (!notificationEnabled || !isPushEnabled()) {
+      void clearPushToken(relay.relayUrl, sessionId, deviceId, clientToken)
+      return
+    }
     void registerPushToken(relay.relayUrl, sessionId, deviceId, clientToken)
-  }, [deviceId, isEncrypted, sessionId])
+  }, [deviceId, isEncrypted, notificationEnabled, sessionId])
 }

@@ -6,6 +6,12 @@ export default defineConfig({
     alias: {
       '@/': path.resolve(__dirname, 'src') + '/',
       '@falcondeck/client-core': path.resolve(__dirname, '../../packages/client-core/src/index.ts'),
+      // Match Metro's single-React invariant. Hoisted Zustand otherwise loads
+      // the root desktop React while react-test-renderer uses mobile's React,
+      // producing a second dispatcher and invalid-hook-call failures.
+      'react/jsx-runtime': path.resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
+      'react/jsx-dev-runtime': path.resolve(__dirname, 'node_modules/react/jsx-dev-runtime.js'),
+      react: path.resolve(__dirname, 'node_modules/react/index.js'),
       // Stub React Native modules that aren't available in Node
       'react-native': path.resolve(__dirname, 'src/test/__mocks__/react-native.ts'),
       'react-native-mmkv': path.resolve(__dirname, 'src/test/__mocks__/react-native-mmkv.ts'),
@@ -13,8 +19,11 @@ export default defineConfig({
       'expo-haptics': path.resolve(__dirname, 'src/test/__mocks__/expo-haptics.ts'),
       'expo-image': path.resolve(__dirname, 'src/test/__mocks__/expo-image.ts'),
       'expo-image-picker': path.resolve(__dirname, 'src/test/__mocks__/expo-image-picker.ts'),
+      'expo-file-system': path.resolve(__dirname, 'src/test/__mocks__/expo-file-system.ts'),
+      'expo-sharing': path.resolve(__dirname, 'src/test/__mocks__/expo-sharing.ts'),
       'react-native-unistyles': path.resolve(__dirname, 'src/test/__mocks__/react-native-unistyles.ts'),
       'react-native-reanimated': path.resolve(__dirname, 'src/test/__mocks__/react-native-reanimated.ts'),
+      'react-native-audio-api': path.resolve(__dirname, 'src/test/__mocks__/react-native-audio-api.ts'),
       'expo-router': path.resolve(__dirname, 'src/test/__mocks__/expo-router.ts'),
       'expo-router/drawer': path.resolve(__dirname, 'src/test/__mocks__/expo-router.ts'),
       'expo-clipboard': path.resolve(__dirname, 'src/test/__mocks__/expo-clipboard.ts'),
@@ -33,6 +42,12 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    setupFiles: './src/test/setup.ts',
+    server: {
+      // Transform the hoisted package so its React import passes through the
+      // mobile alias above instead of Node resolving root React directly.
+      deps: { inline: ['zustand'] },
+    },
     coverage: {
       provider: 'v8',
       include: ['src/**/*.ts', 'src/**/*.tsx'],

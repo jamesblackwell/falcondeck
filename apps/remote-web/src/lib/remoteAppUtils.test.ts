@@ -5,14 +5,18 @@ import type { DaemonSnapshot } from '@falcondeck/client-core'
 import {
   AwaitedActionTimeoutError,
   canPostNotifications,
+  canWarmStartFromSnapshotCache,
   clearPairingParamsFromUrl,
   connectionBadgeState,
   deriveConnectionHelpState,
+  loadPersistedRemoteSnapshot,
   loadNotificationPreference,
   loadPersistedSelection,
   persistNotificationPreference,
+  persistRemoteSnapshot,
   persistSelection,
   postThreadNotification,
+  resumePendingActions,
   resolveRestoredSelection,
   scheduleVisibilityAwareFlush,
   urlWithoutPairingParams,
@@ -97,6 +101,56 @@ describe('selection persistence', () => {
   })
 })
 
+describe('remote snapshot cache', () => {
+  const snapshot = snapshotWith(['ws-1'], [{ id: 't-1', workspace_id: 'ws-1' }])
+
+  it('round-trips a normalized snapshot for the same session', () => {
+    persistRemoteSnapshot('session-1', snapshot, 42)
+
+    expect(loadPersistedRemoteSnapshot('session-1')).toEqual({
+      snapshot: expect.objectContaining({
+        workspaces: [expect.objectContaining({ id: 'ws-1' })],
+        threads: [expect.objectContaining({ id: 't-1', workspace_id: 'ws-1' })],
+      }),
+      lastReceivedSeq: 42,
+    })
+  })
+
+  it('does not hydrate a cache belonging to another session', () => {
+    persistRemoteSnapshot('session-1', snapshot, 42)
+
+    expect(loadPersistedRemoteSnapshot('session-2')).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.snapshot.v1')).toBeNull()
+  })
+
+  it('removes malformed or old cache entries safely', () => {
+    window.localStorage.setItem(
+      'falcondeck.remote.snapshot.v1',
+      JSON.stringify({ version: 0, sessionId: 'session-1', snapshot, lastReceivedSeq: 42 }),
+    )
+    expect(loadPersistedRemoteSnapshot('session-1')).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.snapshot.v1')).toBeNull()
+
+    window.localStorage.setItem('falcondeck.remote.snapshot.v1', '{not json')
+    expect(loadPersistedRemoteSnapshot('session-1')).toBeNull()
+    expect(window.localStorage.getItem('falcondeck.remote.snapshot.v1')).toBeNull()
+  })
+
+  it('keeps the relay cursor independent from the cached snapshot', () => {
+    persistRemoteSnapshot('session-1', snapshot, 7)
+    expect(loadPersistedRemoteSnapshot('session-1')?.lastReceivedSeq).toBe(7)
+
+    persistRemoteSnapshot('session-1', snapshot, 8)
+    expect(loadPersistedRemoteSnapshot('session-1')?.lastReceivedSeq).toBe(8)
+  })
+
+  it('only warm-starts when the cache covers the persisted cursor', () => {
+    expect(canWarmStartFromSnapshotCache(7, 8)).toBe(false)
+    expect(canWarmStartFromSnapshotCache(8, 8)).toBe(true)
+    expect(canWarmStartFromSnapshotCache(9, 8)).toBe(true)
+  })
+})
+
 describe('scheduleVisibilityAwareFlush', () => {
   it('uses requestAnimationFrame while the tab is visible', () => {
     setVisibility('visible')
@@ -126,6 +180,90 @@ describe('scheduleVisibilityAwareFlush', () => {
     cancel()
     await new Promise((resolve) => setTimeout(resolve, 10))
     expect(callback).not.toHaveBeenCalled()
+  })
+})
+
+describe('resumePendingActions', () => {
+  it('aborts the old session generation and resumes with the new credentials', async () => {
+    const pendingPolls = new Set<AbortController>()
+    const forget = vi.fn()
+    const oldPoll = vi.fn(
+      (_actionId: string, { signal }: { signal: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          signal.addEventListener('abort', () => {
+            reject(new DOMException('The operation was aborted.', 'AbortError'))
+          })
+        }),
+    )
+
+    const stopOldSession = resumePendingActions({
+      actionIds: ['action-1'],
+      clientToken: 'old-token',
+      sessionId: 'old-session',
+      pendingPolls,
+      poll: oldPoll,
+      forget,
+    })
+
+    expect(oldPoll).toHaveBeenCalledWith(
+      'action-1',
+      expect.objectContaining({
+        clientTokenOverride: 'old-token',
+        sessionIdOverride: 'old-session',
+      }),
+    )
+    expect(pendingPolls.size).toBe(1)
+
+    stopOldSession()
+    await vi.waitFor(() => expect(pendingPolls.size).toBe(0))
+    expect(forget).not.toHaveBeenCalled()
+
+    const newPoll = vi.fn().mockResolvedValue({ ok: true })
+    resumePendingActions({
+      actionIds: ['action-1'],
+      clientToken: 'new-token',
+      sessionId: 'new-session',
+      pendingPolls,
+      poll: newPoll,
+      forget,
+    })
+
+    await vi.waitFor(() => expect(forget).toHaveBeenCalledWith('action-1'))
+    expect(newPoll).toHaveBeenCalledWith(
+      'action-1',
+      expect.objectContaining({
+        clientTokenOverride: 'new-token',
+        sessionIdOverride: 'new-session',
+      }),
+    )
+    expect(pendingPolls.size).toBe(0)
+  })
+
+  it('forgets terminal actions but retains transient failures for reconnect', async () => {
+    const pendingPolls = new Set<AbortController>()
+    const forget = vi.fn()
+
+    resumePendingActions({
+      actionIds: ['terminal'],
+      clientToken: 'token',
+      sessionId: 'session',
+      pendingPolls,
+      poll: vi.fn().mockRejectedValue(new Error('Failed with status 404')),
+      forget,
+    })
+    await vi.waitFor(() => expect(forget).toHaveBeenCalledWith('terminal'))
+
+    forget.mockClear()
+    resumePendingActions({
+      actionIds: ['transient', 'transient'],
+      clientToken: 'token',
+      sessionId: 'session',
+      pendingPolls,
+      poll: vi.fn().mockRejectedValue(new Error('Failed with status 503')),
+      forget,
+    })
+    await vi.waitFor(() => expect(pendingPolls.size).toBe(0))
+    expect(forget).not.toHaveBeenCalled()
   })
 })
 

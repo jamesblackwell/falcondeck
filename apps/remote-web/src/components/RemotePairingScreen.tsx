@@ -1,8 +1,8 @@
 import { useId, useState } from 'react'
 
-import { Button, Input } from '@falcondeck/ui'
+import { ActivityDiamond, Button, Input } from '@falcondeck/ui'
 
-import { ChevronDown, LoaderCircle, Lock, Smartphone } from 'lucide-react'
+import { ChevronDown, Lock, Smartphone } from 'lucide-react'
 
 import type { ConnectionHelpState } from '../lib/remoteAppUtils'
 import { RemoteConnectionHelpCard } from './RemoteConnectionHelpCard'
@@ -39,7 +39,7 @@ export function RemotePairingScreen({
   const canSubmit = Boolean(relayUrl.trim() && pairingCode.trim()) && !isConnecting
 
   return (
-    <div className="fd-safe-area flex min-h-[100dvh] flex-col items-center justify-center bg-surface-0 p-6">
+    <div className="fd-safe-area-padded flex min-h-[100dvh] flex-col items-center justify-center bg-surface-0">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-surface-2">
@@ -77,8 +77,6 @@ export function RemotePairingScreen({
               autoCapitalize="characters"
               autoCorrect="off"
               spellCheck={false}
-              // eslint-disable-next-line jsx-a11y/no-autofocus -- the sole
-              // purpose of this screen is entering this one value.
               autoFocus
               className="text-center font-mono tracking-widest"
             />
@@ -118,7 +116,7 @@ export function RemotePairingScreen({
           <Button type="submit" disabled={!canSubmit} className="w-full">
             {isConnecting ? (
               <>
-                <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin" />
+                <ActivityDiamond size="md" tone="current" />
                 Connecting...
               </>
             ) : (

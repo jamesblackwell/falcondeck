@@ -5,7 +5,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
 import type { ThreadSummary } from '@falcondeck/client-core'
 
-import { Badge, Spinner, Text } from '@/components/ui'
+import { ActivityDiamond, Badge, Text } from '@/components/ui'
 import { formatRelativeTime } from './sessionListItem.utils'
 
 interface SessionListItemProps {
@@ -27,10 +27,12 @@ function SessionListItemInner({
 }: SessionListItemProps) {
   const { theme } = useUnistyles()
   const presentation = useMemo(() => deriveThreadAttentionPresentation(thread), [thread])
-  const updatedAtLabel = useMemo(
-    () => formatRelativeTime(thread.updated_at),
-    [nowTick, thread.updated_at],
-  )
+  const updatedAtLabel = useMemo(() => {
+    // The parent advances this primitive once per minute to refresh relative
+    // timestamps without replacing otherwise stable thread objects.
+    void nowTick
+    return formatRelativeTime(thread.updated_at)
+  }, [nowTick, thread.updated_at])
 
   /* v8 ignore start — Pressable callback, tested via E2E */
   const handlePress = useCallback(() => {
@@ -52,7 +54,7 @@ function SessionListItemInner({
     >
       <View style={styles.indicatorSlot}>
         {presentation.showSpinner ? (
-          <Spinner size={14} color={theme.colors.accent.default} />
+          <ActivityDiamond size={14} color={theme.colors.accent.default} />
         ) : presentation.level === 'error' ? (
           <View style={[styles.dot, { backgroundColor: theme.colors.danger.default }]} />
         ) : presentation.level === 'awaiting_response' ? (

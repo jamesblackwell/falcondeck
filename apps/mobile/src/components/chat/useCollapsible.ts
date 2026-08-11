@@ -1,6 +1,13 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react'
 import type { LayoutChangeEvent } from 'react-native'
-import { Easing, useAnimatedStyle, useDerivedValue, useSharedValue, withTiming } from 'react-native-reanimated'
+import {
+  Easing,
+  useAnimatedStyle,
+  useDerivedValue,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated'
 
 const COLLAPSIBLE_TIMING = {
   duration: 250,
@@ -23,6 +30,7 @@ export function useCollapsible(defaultOpen: boolean, resetKey?: string) {
   const [isOpen, setIsOpen] = useState(defaultOpen)
   const contentHeight = useSharedValue(0)
   const progress = useSharedValue(defaultOpen ? 1 : 0)
+  const reducedMotion = useReducedMotion()
   const rotation = useDerivedValue(() => `${progress.value * 90}deg`)
   const appliedResetKeyRef = useRef(resetKey)
 
@@ -38,16 +46,19 @@ export function useCollapsible(defaultOpen: boolean, resetKey?: string) {
       progress.value = defaultOpen ? 1 : 0
       return
     }
-    progress.value = withTiming(defaultOpen ? 1 : 0, COLLAPSIBLE_TIMING)
-  }, [contentHeight, defaultOpen, progress, resetKey])
+    const target = defaultOpen ? 1 : 0
+    progress.value = reducedMotion ? target : withTiming(target, COLLAPSIBLE_TIMING)
+  }, [contentHeight, defaultOpen, progress, reducedMotion, resetKey])
 
   const toggle = useCallback(() => {
-    setIsOpen((current) => {
-      const next = !current
-      progress.value = withTiming(next ? 1 : 0, COLLAPSIBLE_TIMING)
-      return next
-    })
-  }, [progress])
+    const next = !isOpen
+    setIsOpen(next)
+    const target = next ? 1 : 0
+    // Reanimated SharedValues are mutable native animation handles; assigning
+    // `.value` is the library API, not a React render-time mutation.
+    // eslint-disable-next-line react-hooks/immutability
+    progress.value = reducedMotion ? target : withTiming(target, COLLAPSIBLE_TIMING)
+  }, [isOpen, progress, reducedMotion])
 
   const onContentLayout = useCallback(
     (event: LayoutChangeEvent) => {
@@ -60,12 +71,9 @@ export function useCollapsible(defaultOpen: boolean, resetKey?: string) {
   )
 
   const bodyStyle = useAnimatedStyle(() => ({
-    height:
-      contentHeight.value > 0
-        ? progress.value * contentHeight.value
-        : progress.value === 0
-          ? 0
-          : undefined,
+    // Dynamic list cells must be allowed to assume their natural height as
+    // soon as expansion begins. Animating an explicit measured height traps a
+    // never-before-visible body at zero inside FlashList on iOS.
     opacity: progress.value,
     overflow: 'hidden' as const,
   }))
@@ -78,7 +86,7 @@ export function useCollapsible(defaultOpen: boolean, resetKey?: string) {
     isOpen,
     toggle,
     onContentLayout,
-    bodyStyle,
+    bodyStyle: [bodyStyle, { display: isOpen ? 'flex' as const : 'none' as const }],
     chevronStyle,
   }
 }

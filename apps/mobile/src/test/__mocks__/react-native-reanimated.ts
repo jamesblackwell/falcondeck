@@ -6,7 +6,14 @@ export const View = 'Animated.View'
 // shared values in effect dep arrays, and a fresh object per render would
 // re-fire those effects in tests only.
 export function useSharedValue(init: any) {
-  const [shared] = useState(() => ({ value: init }))
+  const [shared] = useState(() => {
+    const value: { value: any; get: () => any; set: (next: any) => void } = {
+      value: init,
+      get: () => value.value,
+      set: (next) => { value.value = next },
+    }
+    return value
+  })
   return shared
 }
 export function cancelAnimation() {}
@@ -16,6 +23,9 @@ export function useAnimatedScrollHandler() { return () => {} }
 export function useAnimatedKeyboard() {
   return { height: { value: 0 }, state: { value: 0 } }
 }
+let reducedMotion = false
+export function useReducedMotion() { return reducedMotion }
+export function __setReducedMotionForTests(value: boolean) { reducedMotion = value }
 export function withTiming(val: any) { return val }
 export function withRepeat(val: any) { return val }
 export function withSequence(...vals: any[]) { return vals[0] }

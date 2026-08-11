@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   AppState,
   KeyboardAvoidingView,
   Platform,
@@ -60,7 +59,7 @@ import { useKeyboardVisible } from "@/hooks/useKeyboardVisible";
 import { useConversationPresentation } from "@/hooks/useRenderBlocks";
 import { useScrollToBottom } from "@/hooks/useScrollToBottom";
 import { useResponseCompletionAnnouncement } from "@/hooks/useResponseCompletionAnnouncement";
-import { Button, Text, EmptyState, ErrorBanner } from "@/components/ui";
+import { ActivityDiamond, Button, Text, EmptyState, ErrorBanner } from "@/components/ui";
 import {
   ChatInput,
   InteractiveRequestBanner,
@@ -1150,7 +1149,7 @@ export default function HomeScreen() {
       <View style={styles.listContainer}>
         {isSyncing ? (
           <View style={styles.syncState}>
-            <ActivityIndicator size="small" color={theme.colors.fg.muted} />
+            <ActivityDiamond size={theme.iconSize.md} color={theme.colors.accent.default} />
             <Text variant="caption" color="muted">
               {connectionStatus === "encrypted"
                 ? "Syncing..."
@@ -1170,7 +1169,7 @@ export default function HomeScreen() {
           </View>
         ) : blocks.length === 0 && isSelectedThreadLoading ? (
           <View style={styles.syncState}>
-            <ActivityIndicator size="small" color={theme.colors.fg.muted} />
+            <ActivityDiamond size={theme.iconSize.md} color={theme.colors.accent.default} />
             <Text variant="caption" color="muted">
               Loading thread...
             </Text>

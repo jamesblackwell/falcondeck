@@ -7,6 +7,7 @@ import {
   useSelectedThread,
   useConversationItems,
   useApprovals,
+  useInteractiveRequests,
   useUIStore,
 } from './index'
 
@@ -32,5 +33,6 @@ describe('store barrel exports', () => {
     expect(typeof useSelectedThread).toBe('function')
     expect(typeof useConversationItems).toBe('function')
     expect(typeof useApprovals).toBe('function')
+    expect(typeof useInteractiveRequests).toBe('function')
   })
 })

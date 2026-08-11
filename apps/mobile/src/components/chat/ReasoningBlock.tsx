@@ -1,22 +1,27 @@
-import { memo, useState } from 'react'
-import { Pressable, View } from 'react-native'
-import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Brain, ChevronRight } from 'lucide-react-native'
+import { memo, useState } from "react";
+import { Pressable, View } from "react-native";
+import { StyleSheet, useUnistyles } from "react-native-unistyles";
+import { Brain, ChevronRight, CircleX, PauseCircle } from "lucide-react-native";
 
-import type { ConversationItem, ThinkingDisplay } from '@falcondeck/client-core'
+import {
+  contentLifecycle,
+  formatDurationMs,
+  type ConversationItem,
+  type ThinkingDisplay,
+} from "@falcondeck/client-core";
 
-import { Text } from '@/components/ui'
-import { useThinkingDisplay } from '@/store'
-import { MarkdownRenderer } from './MarkdownRenderer'
-import { reasoningHeaderLabel, resolveReasoningReveal } from './reasoning'
+import { ActivityDiamond, Text } from "@/components/ui";
+import { useThinkingDisplay } from "@/store";
+import { MarkdownRenderer } from "./MarkdownRenderer";
+import { reasoningHeaderLabel, resolveReasoningReveal } from "./reasoning";
 
-type ReasoningItem = Extract<ConversationItem, { kind: 'reasoning' }>
+type ReasoningItem = Extract<ConversationItem, { kind: "reasoning" }>;
 
 interface ReasoningBlockProps {
-  item: ReasoningItem
-  display: ThinkingDisplay
+  item: ReasoningItem;
+  display: ThinkingDisplay;
   /** Set when the thought renders inside a work session, which draws its own rule. */
-  nested?: boolean
+  nested?: boolean;
 }
 
 /** The agent's thinking, rendered as a quiet left rule rather than a card —
@@ -26,37 +31,101 @@ export const ReasoningBlock = memo(function ReasoningBlock({
   display,
   nested = false,
 }: ReasoningBlockProps) {
-  const { theme } = useUnistyles()
-  const { collapsedLines, defaultOpen } = resolveReasoningReveal(display)
-  const [isOpen, setIsOpen] = useState(defaultOpen)
+  const { theme } = useUnistyles();
+  const lifecycle = contentLifecycle(item);
+  const activelyStreaming =
+    lifecycle === "pending" || lifecycle === "streaming";
+  const { collapsedLines, defaultOpen } = resolveReasoningReveal(
+    display,
+    lifecycle,
+  );
+  const [openOverride, setOpenOverride] = useState<boolean | null>(null);
   // FlashList recycles instances across blocks; without this render-phase
   // reset a thought the user expanded leaks its open state into whichever
   // reasoning row the cell renders next, flickering rows during scroll.
-  const [appliedItemId, setAppliedItemId] = useState(item.id)
-  if (appliedItemId !== item.id) {
-    setAppliedItemId(item.id)
-    setIsOpen(defaultOpen)
+  const revealKey = `${item.id}:${display}`;
+  const [appliedRevealKey, setAppliedRevealKey] = useState(revealKey);
+  if (appliedRevealKey !== revealKey) {
+    setAppliedRevealKey(revealKey);
+    setOpenOverride(null);
   }
 
-  const label = reasoningHeaderLabel(item.summary)
-  const hasBody = item.content.trim().length > 0
-  const showPreview = !isOpen && collapsedLines > 0 && hasBody
+  const isOpen = openOverride ?? defaultOpen;
+  const label = activelyStreaming
+    ? "Thinking…"
+    : lifecycle === "interrupted"
+      ? "Thought interrupted"
+      : lifecycle === "error"
+        ? "Thought failed"
+        : reasoningHeaderLabel(item.summary);
+  const durationLabel =
+    !activelyStreaming && item.duration_ms != null
+      ? formatDurationMs(item.duration_ms)
+      : null;
+  const hasBody = item.content.trim().length > 0;
+  const showPreview = !isOpen && collapsedLines > 0 && hasBody;
 
   return (
     <View style={[styles.container, nested ? styles.containerNested : null]}>
       <Pressable
         style={styles.header}
-        onPress={hasBody ? () => setIsOpen((current) => !current) : undefined}
+        onPress={hasBody ? () => setOpenOverride(!isOpen) : undefined}
         disabled={!hasBody}
         accessibilityRole="button"
         accessibilityState={{ expanded: isOpen, disabled: !hasBody }}
-        accessibilityLabel={`Reasoning: ${label}`}
-        accessibilityHint={hasBody ? 'Shows the full thought' : undefined}
+        accessibilityLabel={`Reasoning: ${label}${durationLabel ? `, duration ${durationLabel}` : ""}`}
+        accessibilityHint={
+          hasBody
+            ? isOpen
+              ? "Hides the full thought"
+              : "Shows the full thought"
+            : undefined
+        }
+        accessibilityLiveRegion={
+          lifecycle === "error"
+            ? "assertive"
+            : lifecycle === "interrupted"
+              ? "polite"
+              : "none"
+        }
       >
-        <Brain size={theme.iconSize.xs} color={theme.colors.fg.faint} />
-        <Text variant="label" color="muted" numberOfLines={1} style={styles.label}>
+        {activelyStreaming ? (
+          <ActivityDiamond
+            size={theme.iconSize.xs}
+            color={theme.colors.accent.default}
+          />
+        ) : lifecycle === "interrupted" ? (
+          <PauseCircle
+            accessible={false}
+            size={theme.iconSize.xs}
+            color={theme.colors.warning.default}
+          />
+        ) : lifecycle === "error" ? (
+          <CircleX
+            accessible={false}
+            size={theme.iconSize.xs}
+            color={theme.colors.danger.default}
+          />
+        ) : (
+          <Brain
+            accessible={false}
+            size={theme.iconSize.xs}
+            color={theme.colors.fg.faint}
+          />
+        )}
+        <Text
+          variant="label"
+          color="muted"
+          numberOfLines={1}
+          style={styles.label}
+        >
           {label}
         </Text>
+        {durationLabel ? (
+          <Text variant="caption" size="xs" color="faint">
+            · {durationLabel}
+          </Text>
+        ) : null}
         {hasBody ? (
           <ChevronRight
             size={theme.iconSize.xs}
@@ -68,20 +137,33 @@ export const ReasoningBlock = memo(function ReasoningBlock({
 
       {isOpen && hasBody ? (
         <View style={styles.body}>
-          <MarkdownRenderer text={item.content} />
+          <MarkdownRenderer
+            text={item.content}
+            streaming={activelyStreaming}
+            interpretDirectives={false}
+          />
         </View>
       ) : null}
 
       {showPreview ? (
-        <Pressable style={styles.body} onPress={() => setIsOpen(true)} accessibilityRole="button">
-          <Text variant="body" size="sm" color="muted" numberOfLines={collapsedLines}>
+        <Pressable
+          style={styles.body}
+          onPress={() => setOpenOverride(true)}
+          accessibilityRole="button"
+        >
+          <Text
+            variant="body"
+            size="sm"
+            color="muted"
+            numberOfLines={collapsedLines}
+          >
             {item.content}
           </Text>
         </Pressable>
       ) : null}
     </View>
-  )
-})
+  );
+});
 
 /** Reads the shared reveal preference. Split out from ReasoningBlock so only
     reasoning rows subscribe to the session store, not every transcript row. */
@@ -89,12 +171,12 @@ export const ConnectedReasoningBlock = memo(function ConnectedReasoningBlock({
   item,
   nested,
 }: {
-  item: ReasoningItem
-  nested?: boolean
+  item: ReasoningItem;
+  nested?: boolean;
 }) {
-  const display = useThinkingDisplay()
-  return <ReasoningBlock item={item} display={display} nested={nested} />
-})
+  const display = useThinkingDisplay();
+  return <ReasoningBlock item={item} display={display} nested={nested} />;
+});
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -110,8 +192,8 @@ const styles = StyleSheet.create((theme) => ({
     paddingLeft: 0,
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: theme.spacing[2],
     // The painted row is short; keep the tap target at the HIG minimum.
     minHeight: theme.minTouchTarget,
@@ -120,9 +202,9 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
   },
   chevronOpen: {
-    transform: [{ rotate: '90deg' }],
+    transform: [{ rotate: "90deg" }],
   },
   body: {
     paddingBottom: theme.spacing[2],
   },
-}))
+}));

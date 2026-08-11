@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 
 const originalConsoleError = console.error
 
-const { routerMock, useRelayStore, useAppearanceStore } = vi.hoisted(() => {
+const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.hoisted(() => {
   ;(globalThis as typeof globalThis & { __DEV__?: boolean }).__DEV__ = false
 
   const relayState = {
@@ -20,6 +20,10 @@ const { routerMock, useRelayStore, useAppearanceStore } = vi.hoisted(() => {
     isEncrypted: false,
     claimPairing: vi.fn().mockResolvedValue(undefined),
     disconnect: vi.fn().mockResolvedValue(undefined),
+    _callRpc: vi.fn().mockImplementation(
+      (_method: string, params: { notifications?: { enabled?: boolean } }) =>
+        Promise.resolve({ notifications: params.notifications }),
+    ),
     _getClientToken: () => relayState.clientToken,
   }
 
@@ -35,6 +39,7 @@ const { routerMock, useRelayStore, useAppearanceStore } = vi.hoisted(() => {
 
   const routerMock = {
     push: vi.fn(),
+    navigate: vi.fn(),
     replace: vi.fn(),
     back: vi.fn(),
   }
@@ -54,15 +59,37 @@ const { routerMock, useRelayStore, useAppearanceStore } = vi.hoisted(() => {
     { getState: () => appearanceState },
   )
 
-  return { routerMock, useRelayStore: store, useAppearanceStore: appearanceStore }
+  const sessionState = {
+    snapshot: {
+      preferences: {
+        notifications: { enabled: true },
+      },
+    },
+    setPreferences: vi.fn((preferences) => {
+      sessionState.snapshot.preferences = preferences
+    }),
+  }
+  const sessionStore = Object.assign(
+    <T,>(selector: (state: typeof sessionState) => T) => selector(sessionState),
+    { getState: () => sessionState },
+  )
+
+  return {
+    routerMock,
+    useRelayStore: store,
+    useSessionStore: sessionStore,
+    useAppearanceStore: appearanceStore,
+  }
 })
 
 vi.mock('expo-router', () => {
+  const Stack = ({ children, ...props }: any) => React.createElement('Stack', props, children)
+  Stack.Screen = ({ name, options }: any) => React.createElement('StackScreen', { name, options })
   return {
     Redirect: ({ href }: { href: string }) => React.createElement('Redirect', { href }),
     useRouter: () => routerMock,
     useLocalSearchParams: () => ({}),
-    Stack: ({ children }: any) => children,
+    Stack,
     Slot: () => null,
     Drawer: ({ children }: any) => children,
   }
@@ -73,7 +100,7 @@ vi.mock('expo-camera', () => ({
   useCameraPermissions: () => [{ granted: true }, vi.fn().mockResolvedValue({ granted: true })],
 }))
 
-vi.mock('@/store', () => ({ useRelayStore }))
+vi.mock('@/store', () => ({ useRelayStore, useSessionStore }))
 vi.mock('@/store/relay-store', () => ({ useRelayStore }))
 vi.mock('@/theme/appearance', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/theme/appearance')>()),
@@ -86,6 +113,9 @@ import { isPushEnabled, setPushEnabled } from '@/lib/push-notifications'
 import IndexScreen from '@/app/index'
 import PairScreen from '@/app/(auth)/pair'
 import SettingsScreen from '@/app/(app)/settings/index'
+import SettingsLayout from '@/app/(app)/settings/_layout'
+import ConnectionsSettingsScreen from '@/app/(app)/settings/connections'
+import NotificationSettingsScreen from '@/app/(app)/settings/notifications'
 
 beforeAll(() => {
   ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -110,6 +140,7 @@ afterAll(() => {
 afterEach(() => {
   cleanup()
   routerMock.push.mockReset()
+  routerMock.navigate.mockReset()
   routerMock.replace.mockReset()
   routerMock.back.mockReset()
 })
@@ -161,6 +192,34 @@ describe('mobile app screens', () => {
     expect(routerMock.replace).not.toHaveBeenCalled()
   })
 
+  it('exposes pairing fields and advanced settings to assistive technology', () => {
+    const renderer = renderComponent(<PairScreen />)
+    const scrollView = renderer.root.findByType('ScrollView' as any)
+    const pairingCode = renderer.root.find(
+      (node) => node.props.accessibilityLabel === 'Pairing code',
+    )
+    const advanced = renderer.root.find(
+      (node) => node.props.accessibilityLabel === 'Advanced settings',
+    )
+
+    expect(pairingCode.props.accessibilityHint).toContain('desktop')
+    expect(scrollView.props.keyboardShouldPersistTaps).toBe('handled')
+    expect(scrollView.props.contentInsetAdjustmentBehavior).toBe('automatic')
+    expect(scrollView.props.automaticallyAdjustKeyboardInsets).toBe(true)
+    expect(advanced.props.accessibilityRole).toBe('button')
+    expect(advanced.props.accessibilityState).toEqual({ disabled: false, expanded: false })
+
+    act(() => {
+      advanced.props.onPress()
+    })
+
+    expect(renderer.root.find((node) => node.props.accessibilityLabel === 'Relay URL')).toBeTruthy()
+    expect(
+      renderer.root.find((node) => node.props.accessibilityLabel === 'Advanced settings').props
+        .accessibilityState,
+    ).toEqual({ disabled: false, expanded: true })
+  })
+
   it('navigates to the app once the session is encrypted', () => {
     useRelayStore.setState({
       relayUrl: 'https://relay.test',
@@ -175,7 +234,17 @@ describe('mobile app screens', () => {
     expect(routerMock.replace).toHaveBeenCalledWith('/(app)')
   })
 
-  it('renders settings and disconnects back to pairing', async () => {
+  it('renders a discoverable settings index', () => {
+    useRelayStore.setState({ connectionStatus: 'encrypted', isEncrypted: true })
+    const renderer = renderComponent(<SettingsScreen />)
+    expect(textOf(renderer)).toContain('Connections')
+    expect(textOf(renderer)).toContain('Appearance')
+    expect(textOf(renderer)).toContain('Conversation')
+    expect(textOf(renderer)).toContain('Notifications')
+    expect(textOf(renderer)).toContain('About FalconDeck')
+  })
+
+  it('renders connection details', () => {
     const disconnect = vi.fn().mockResolvedValue(undefined)
     useRelayStore.setState({
       relayUrl: 'https://relay.test',
@@ -185,20 +254,25 @@ describe('mobile app screens', () => {
     })
     useRelayStore.getState().disconnect = disconnect
 
-    const renderer = renderComponent(<SettingsScreen />)
-    expect(textOf(renderer)).toContain('Settings')
+    const renderer = renderComponent(<ConnectionsSettingsScreen />)
     expect(textOf(renderer)).toContain('https://relay.test')
-    expect(textOf(renderer)).toContain('Relay session encrypted')
+    expect(textOf(renderer)).toContain('End-to-end encrypted')
+    expect(textOf(renderer)).toContain('Replace Connection')
+  })
 
-    const disconnectButton = renderer.root.find(
-      (node) => node.props.label === 'Disconnect' && typeof node.props.onPress === 'function',
+  it('uses the native stack header for settings', () => {
+    const renderer = renderComponent(<SettingsLayout />)
+    const stack = renderer.root.findByType('Stack' as any)
+    expect(stack.props.screenOptions).toEqual(
+      expect.objectContaining({
+        headerShown: true,
+        headerBackTitle: 'Back',
+      }),
     )
-    await act(async () => {
-      await disconnectButton.props.onPress()
-    })
-
-    expect(disconnect).toHaveBeenCalledTimes(1)
-    expect(routerMock.replace).toHaveBeenCalledWith('/(auth)/pair')
+    const screens = renderer.root.findAllByType('StackScreen' as any)
+    expect(screens.find((screen) => screen.props.name === 'index')?.props.options).toEqual(
+      expect.objectContaining({ title: 'Settings', headerLargeTitleEnabled: true }),
+    )
   })
 
   it('toggles push notifications and syncs the relay registration', async () => {
@@ -219,11 +293,16 @@ describe('mobile app screens', () => {
       isEncrypted: true,
     })
 
-    const renderer = renderComponent(<SettingsScreen />)
+    const renderer = renderComponent(<NotificationSettingsScreen />)
     expect(textOf(renderer)).toContain('Push notifications')
 
-    const toggle = renderer.root.findByType('Switch' as any)
+    const toggle = renderer.root
+      .findAllByType('Switch' as any)
+      .find((switchNode) => switchNode.props.accessibilityLabel === 'Push notifications')
+    if (!toggle) throw new Error('Push notifications switch not found')
     expect(toggle.props.value).toBe(true)
+    expect(toggle.props.accessibilityRole).toBe('switch')
+    expect(toggle.props.accessibilityLabel).toBe('Push notifications')
 
     await act(async () => {
       toggle.props.onValueChange(false)

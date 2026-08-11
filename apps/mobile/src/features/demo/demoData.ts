@@ -123,6 +123,13 @@ export const demoSnapshot: DaemonSnapshot = {
       show_expand_all_controls: true,
       thinking_display: 'auto',
     },
+    notifications: {
+      enabled: true,
+      notify_on_turn_complete: true,
+      notify_on_input_required: true,
+      notify_on_error: true,
+      suppress_when_desktop_active: true,
+    },
   },
 }
 

@@ -82,6 +82,13 @@ export function snapshot(overrides: Partial<DaemonSnapshot> = {}): DaemonSnapsho
 }
 
 export function preferences(overrides: Partial<FalconDeckPreferences> = {}): FalconDeckPreferences {
+  const notifications = overrides.notifications ?? {
+    enabled: true,
+    notify_on_turn_complete: true,
+    notify_on_input_required: true,
+    notify_on_error: true,
+    suppress_when_desktop_active: true,
+  }
   return {
     version: 1,
     conversation: {
@@ -97,6 +104,7 @@ export function preferences(overrides: Partial<FalconDeckPreferences> = {}): Fal
       thinking_display: 'auto',
     },
     ...overrides,
+    notifications,
   }
 }
 

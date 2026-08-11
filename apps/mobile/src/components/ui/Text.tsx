@@ -47,32 +47,63 @@ const styles = StyleSheet.create((theme) => ({
   label: {
     fontFamily: theme.fontFamily.sans,
     fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.normal,
     fontWeight: '500',
   },
   caption: {
     fontFamily: theme.fontFamily.sans,
     fontSize: theme.fontSize.xs,
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
     color: theme.colors.fg.tertiary,
   },
   heading: {
     fontFamily: theme.fontFamily.sans,
     fontSize: theme.fontSize.xl,
+    lineHeight: theme.fontSize.xl * theme.lineHeight.tight,
     fontWeight: '600',
     letterSpacing: -0.3,
   },
   mono: {
     fontFamily: theme.fontFamily.mono,
     fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.normal,
   },
-  size_2xs: { fontSize: theme.fontSize['2xs'] },
-  size_xs: { fontSize: theme.fontSize.xs },
-  size_sm: { fontSize: theme.fontSize.sm },
-  size_base: { fontSize: theme.fontSize.base },
-  size_md: { fontSize: theme.fontSize.md },
-  size_lg: { fontSize: theme.fontSize.lg },
-  size_xl: { fontSize: theme.fontSize.xl },
-  'size_2xl': { fontSize: theme.fontSize['2xl'] },
-  'size_3xl': { fontSize: theme.fontSize['3xl'] },
+  size_2xs: {
+    fontSize: theme.fontSize['2xs'],
+    lineHeight: theme.fontSize['2xs'] * theme.lineHeight.normal,
+  },
+  size_xs: {
+    fontSize: theme.fontSize.xs,
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
+  },
+  size_sm: {
+    fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.normal,
+  },
+  size_base: {
+    fontSize: theme.fontSize.base,
+    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
+  },
+  size_md: {
+    fontSize: theme.fontSize.md,
+    lineHeight: theme.fontSize.md * theme.lineHeight.normal,
+  },
+  size_lg: {
+    fontSize: theme.fontSize.lg,
+    lineHeight: theme.fontSize.lg * theme.lineHeight.normal,
+  },
+  size_xl: {
+    fontSize: theme.fontSize.xl,
+    lineHeight: theme.fontSize.xl * theme.lineHeight.normal,
+  },
+  'size_2xl': {
+    fontSize: theme.fontSize['2xl'],
+    lineHeight: theme.fontSize['2xl'] * theme.lineHeight.normal,
+  },
+  'size_3xl': {
+    fontSize: theme.fontSize['3xl'],
+    lineHeight: theme.fontSize['3xl'] * theme.lineHeight.normal,
+  },
   color_primary: { color: theme.colors.fg.primary },
   color_secondary: { color: theme.colors.fg.secondary },
   color_tertiary: { color: theme.colors.fg.tertiary },

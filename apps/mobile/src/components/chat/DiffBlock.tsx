@@ -19,14 +19,21 @@ interface DiffBlockProps {
 
 export const DiffBlock = memo(function DiffBlock({ item, defaultOpen }: DiffBlockProps) {
   const { theme } = useUnistyles()
-  const { bodyStyle, chevronStyle, onContentLayout, toggle } = useCollapsible(
+  const { bodyStyle, chevronStyle, isOpen, onContentLayout, toggle } = useCollapsible(
     defaultOpen,
     item.id,
   )
 
   return (
     <View style={styles.container}>
-      <Pressable style={styles.header} onPress={toggle}>
+      <Pressable
+        style={styles.header}
+        onPress={toggle}
+        accessibilityRole="button"
+        accessibilityLabel="Diff"
+        accessibilityHint={isOpen ? 'Collapses the diff' : 'Expands the diff'}
+        accessibilityState={{ expanded: isOpen }}
+      >
         <GitBranch size={14} color={theme.colors.fg.muted} />
         <Text variant="caption" color="secondary" style={styles.title}>
           Diff
@@ -60,6 +67,7 @@ const styles = StyleSheet.create((theme) => ({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
+    minHeight: theme.minTouchTarget,
     gap: theme.spacing[2],
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[2],

@@ -1,9 +1,16 @@
-import { memo, useCallback } from 'react'
-import { Pressable, type PressableProps, ActivityIndicator } from 'react-native'
+import { memo, useCallback, useEffect } from 'react'
+import { Pressable, type PressableProps } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import Animated, { useSharedValue, useAnimatedStyle, withTiming } from 'react-native-reanimated'
+import Animated, {
+  cancelAnimation,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated'
 import * as Haptics from 'expo-haptics'
 
+import { ActivityDiamond } from './ActivityDiamond'
 import { Text } from './Text'
 
 type ButtonVariant = 'default' | 'secondary' | 'outline' | 'ghost' | 'danger'
@@ -33,6 +40,15 @@ export const Button = memo(function Button({
 }: ButtonProps) {
   const { theme } = useUnistyles()
   const scale = useSharedValue(1)
+  const reducedMotion = useReducedMotion()
+
+  useEffect(() => {
+    if (reducedMotion) {
+      cancelAnimation(scale)
+      scale.value = 1
+    }
+    return () => cancelAnimation(scale)
+  }, [reducedMotion, scale])
 
   const animatedStyle = useAnimatedStyle(() => ({
     transform: [{ scale: scale.value }],
@@ -41,13 +57,13 @@ export const Button = memo(function Button({
   /* v8 ignore start — Reanimated worklets + Pressable callbacks, tested via E2E */
   const handlePressIn = useCallback(() => {
     'worklet'
-    scale.value = withTiming(0.97, { duration: 100 })
-  }, [scale])
+    scale.value = reducedMotion ? 1 : withTiming(0.97, { duration: 100 })
+  }, [reducedMotion, scale])
 
   const handlePressOut = useCallback(() => {
     'worklet'
-    scale.value = withTiming(1, { duration: 100 })
-  }, [scale])
+    scale.value = reducedMotion ? 1 : withTiming(1, { duration: 100 })
+  }, [reducedMotion, scale])
 
   const handlePress = useCallback(
     (e: Parameters<NonNullable<PressableProps['onPress']>>[0]) => {
@@ -79,8 +95,8 @@ export const Button = memo(function Button({
       {...props}
     >
       {loading ? (
-        <ActivityIndicator
-          size="small"
+        <ActivityDiamond
+          size={theme.iconSize.md}
           color={isInverted ? theme.colors.surface[0] : theme.colors.fg.primary}
         />
       ) : (
@@ -116,10 +132,24 @@ const styles = StyleSheet.create((theme) => ({
   },
   variant_ghost: { backgroundColor: theme.colors.transparent },
   variant_danger: { backgroundColor: theme.colors.danger.default },
-  size_default: { height: theme.minTouchTarget, paddingHorizontal: theme.spacing[4] },
-  size_sm: { height: 36, paddingHorizontal: theme.spacing[3], borderRadius: theme.radius.md },
-  size_lg: { height: 52, paddingHorizontal: theme.spacing[5], borderRadius: theme.radius.xl },
-  size_icon: { height: 40, width: 40, borderRadius: theme.radius.md },
+  size_default: {
+    minHeight: theme.minTouchTarget,
+    paddingHorizontal: theme.spacing[4],
+    paddingVertical: theme.spacing[2],
+  },
+  size_sm: {
+    minHeight: theme.minTouchTarget,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    borderRadius: theme.radius.md,
+  },
+  size_lg: {
+    minHeight: 52,
+    paddingHorizontal: theme.spacing[5],
+    paddingVertical: theme.spacing[3],
+    borderRadius: theme.radius.xl,
+  },
+  size_icon: { height: theme.minTouchTarget, width: theme.minTouchTarget, borderRadius: theme.radius.md },
   disabled: { opacity: 0.4 },
   invertedText: { color: theme.colors.surface[0] },
 }))

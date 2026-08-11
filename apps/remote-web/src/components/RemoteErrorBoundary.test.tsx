@@ -33,8 +33,10 @@ describe('RemoteErrorBoundary', () => {
         <Boom />
       </RemoteErrorBoundary>,
     )
-    expect(screen.getByRole('alert')).toHaveTextContent('FalconDeck Remote stopped')
-    expect(screen.getByRole('alert')).toHaveTextContent('kaboom')
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('FalconDeck Remote stopped')
+    expect(alert).toHaveTextContent('kaboom')
+    expect(alert.closest('.fd-safe-area-padded')).toBeInTheDocument()
   })
 
   it('clears every stored key before reloading from the escape hatch', () => {

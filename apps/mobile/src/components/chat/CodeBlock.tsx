@@ -1,10 +1,10 @@
 import { memo, useMemo, useState } from 'react'
 import { View, ScrollView, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { ChevronDown, ChevronUp } from 'lucide-react-native'
-import * as Clipboard from 'expo-clipboard'
+import { Check, ChevronDown, ChevronUp, CircleX, Copy } from 'lucide-react-native'
 
 import { Text, Button } from '@/components/ui'
+import { useClipboardCopy } from './useClipboardCopy'
 
 interface CodeBlockProps {
   code: string
@@ -13,6 +13,8 @@ interface CodeBlockProps {
 }
 
 const DEFAULT_PREVIEW_LINES = 12
+const MAX_RENDERED_CHARS = 120_000
+const MAX_EXPANDED_LINES = 400
 
 export const CodeBlock = memo(function CodeBlock({
   code,
@@ -23,9 +25,34 @@ export const CodeBlock = memo(function CodeBlock({
   const [expanded, setExpanded] = useState(false)
   const isDiff = language === 'diff'
   const headerLabel = language ?? 'code'
-  const lines = useMemo(() => code.split('\n'), [code])
-  const hiddenLineCount = previewLines > 0 ? Math.max(0, lines.length - previewLines) : 0
-  const visibleLines = hiddenLineCount > 0 && !expanded ? lines.slice(0, previewLines) : lines
+  const displayCode = useMemo(() => code.slice(0, MAX_RENDERED_CHARS), [code])
+  const lines = useMemo(() => displayCode.split('\n'), [displayCode])
+  const expandedLineCount = Math.min(lines.length, MAX_EXPANDED_LINES)
+  const previewLineCount = previewLines > 0
+    ? Math.min(previewLines, expandedLineCount)
+    : expandedLineCount
+  const hiddenLineCount = Math.max(0, expandedLineCount - previewLineCount)
+  const expandLabel = `Show ${hiddenLineCount} more line${hiddenLineCount === 1 ? '' : 's'}`
+  const visibleLines = lines.slice(0, expanded ? expandedLineCount : previewLineCount)
+  const displayLimited = code.length > displayCode.length || lines.length > MAX_EXPANDED_LINES
+  const { copy, result: copyResult } = useClipboardCopy(
+    code,
+    'Code copied',
+    'Could not copy code',
+  )
+  const copyLabel = copyResult === 'copied' ? 'Copied' : copyResult === 'failed' ? 'Retry' : 'Copy'
+  const copyAccessibilityLabel = copyResult === 'copied'
+    ? 'Code copied'
+    : copyResult === 'failed'
+      ? 'Could not copy code. Retry'
+      : 'Copy code'
+  const copyIcon = copyResult === 'copied' ? (
+    <Check size={theme.iconSize.xs} color={theme.colors.success.default} />
+  ) : copyResult === 'failed' ? (
+    <CircleX size={theme.iconSize.xs} color={theme.colors.danger.default} />
+  ) : (
+    <Copy size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+  )
 
   return (
     <View style={styles.container}>
@@ -33,16 +60,19 @@ export const CodeBlock = memo(function CodeBlock({
         <Text variant="caption" color="muted" size="2xs">
           {headerLabel}
         </Text>
-        {hiddenLineCount > 0 ? (
+        {hiddenLineCount > 0 || displayLimited ? (
           <Text variant="caption" color="muted" size="2xs">
-            {lines.length} lines
+            {code.length > displayCode.length ? `${lines.length}+` : lines.length} lines
           </Text>
         ) : null}
         <Button
           variant="ghost"
           size="sm"
-          label="Copy"
-          onPress={() => void Clipboard.setStringAsync(code)}
+          label={copyLabel}
+          icon={copyIcon}
+          accessibilityLabel={copyAccessibilityLabel}
+          accessibilityLiveRegion="polite"
+          onPress={() => { void copy() }}
         />
       </View>
       <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -55,6 +85,7 @@ export const CodeBlock = memo(function CodeBlock({
               return (
                 <Text
                   key={i}
+                  selectable
                   variant="mono"
                   color="secondary"
                   style={[
@@ -69,7 +100,7 @@ export const CodeBlock = memo(function CodeBlock({
             })}
           </View>
         ) : (
-          <Text variant="mono" color="secondary" style={styles.code}>
+          <Text selectable variant="mono" color="secondary" style={styles.code}>
             {visibleLines.join('\n')}
           </Text>
         )}
@@ -79,13 +110,13 @@ export const CodeBlock = memo(function CodeBlock({
           style={styles.expandButton}
           accessibilityRole="button"
           accessibilityState={{ expanded }}
-          accessibilityLabel={expanded ? 'Collapse code' : `Show ${hiddenLineCount} more lines`}
+          accessibilityLabel={expanded ? 'Collapse code' : expandLabel}
           onPress={() => setExpanded((current) => !current)}
         >
           <Text variant="caption" color="muted" size="xs">
             {expanded
               ? 'Show less'
-              : `Show ${hiddenLineCount} more line${hiddenLineCount === 1 ? '' : 's'}`}
+              : expandLabel}
           </Text>
           {expanded ? (
             <ChevronUp size={theme.iconSize.xs} color={theme.colors.fg.muted} />
@@ -93,6 +124,18 @@ export const CodeBlock = memo(function CodeBlock({
             <ChevronDown size={theme.iconSize.xs} color={theme.colors.fg.muted} />
           )}
         </Pressable>
+      ) : null}
+      {displayLimited ? (
+        <Text
+          accessible
+          accessibilityLiveRegion="polite"
+          variant="caption"
+          color="muted"
+          size="2xs"
+          style={styles.limitNotice}
+        >
+          Display limited for performance. Copy includes the complete output.
+        </Text>
       ) : null}
     </View>
   )
@@ -147,5 +190,11 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[3],
     borderTopWidth: 1,
     borderTopColor: theme.colors.border.subtle,
+  },
+  limitNotice: {
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border.subtle,
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
   },
 }))

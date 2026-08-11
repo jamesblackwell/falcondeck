@@ -26,14 +26,21 @@ export const ToolSummaryBlock = memo(function ToolSummaryBlock({
   suppressDetail,
 }: ToolBurstBlockProps) {
   const { theme } = useUnistyles()
-  const { bodyStyle, chevronStyle, onContentLayout, toggle } = useCollapsible(
+  const { bodyStyle, chevronStyle, isOpen, onContentLayout, toggle } = useCollapsible(
     defaultOpen,
     items[0]?.id,
   )
 
   return (
     <View style={styles.container}>
-      <Pressable style={styles.header} onPress={toggle}>
+      <Pressable
+        style={styles.header}
+        onPress={toggle}
+        accessibilityRole="button"
+        accessibilityLabel={summary.title}
+        accessibilityHint={isOpen ? 'Collapses tool activity' : 'Expands tool activity'}
+        accessibilityState={{ expanded: isOpen }}
+      >
         <Layers size={14} color={theme.colors.fg.muted} />
         <View style={styles.headerText}>
           <Text variant="caption" color="secondary">
@@ -81,6 +88,7 @@ const styles = StyleSheet.create((theme) => ({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
+    minHeight: theme.minTouchTarget,
     gap: theme.spacing[2],
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[2],
