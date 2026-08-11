@@ -88,21 +88,26 @@ describe('abnormal tool presentation', () => {
     },
   )
 
-  it('buries a failed tool inside the work session in collapsed mode when auto-expand is off', () => {
-    const prefs = preferences(false)
-    prefs.conversation.tool_details_mode = 'collapsed'
+  // Collapsed mode buries failures no matter how the error auto-expand
+  // preference is set: that toggle only governs the summarizing modes.
+  it.each([true, false])(
+    'buries a failed tool inside the work session in collapsed mode (auto-expand %s)',
+    (autoExpandErrors) => {
+      const prefs = preferences(autoExpandErrors)
+      prefs.conversation.tool_details_mode = 'collapsed'
 
-    const presentation = deriveConversationPresentation(
-      [tool('succeeded', { id: 'ok' }), tool('failed', { id: 'boom' })],
-      prefs,
-    )
+      const presentation = deriveConversationPresentation(
+        [tool('succeeded', { id: 'ok' }), tool('failed', { id: 'boom' })],
+        prefs,
+      )
 
-    expect(presentation.history_blocks).toHaveLength(1)
-    expect(presentation.history_blocks[0]).toMatchObject({
-      kind: 'work_session',
-      id: 'tool_call:ok',
-    })
-  })
+      expect(presentation.history_blocks).toHaveLength(1)
+      expect(presentation.history_blocks[0]).toMatchObject({
+        kind: 'work_session',
+        id: 'tool_call:ok',
+      })
+    },
+  )
 
   it('keeps a failed tool with side effects visible even when auto-expand is off', () => {
     const presentation = deriveConversationPresentation(
@@ -155,8 +160,9 @@ describe('abnormal tool presentation', () => {
       kind: 'work_session',
       id: 'tool_call:stable-tool',
     })
+    // Settlement keeps the same block kind and id, so the card never remounts.
     expect(interrupted.history_blocks[0]).toMatchObject({
-      kind: 'item',
+      kind: 'work_session',
       id: 'tool_call:stable-tool',
     })
   })

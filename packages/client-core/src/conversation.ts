@@ -1434,8 +1434,9 @@ function isAbnormalTerminalTool(
 
 /**
  * Whether a failed/denied/interrupted tool may break the fold its mode would
- * otherwise put it in — escaping a summary group, keeping its detail while
- * read-only details are hidden, or surfacing out of a work session.
+ * otherwise put it in — escaping a summary group, or keeping its detail while
+ * read-only details are hidden. Collapsed mode ignores this entirely: its
+ * work sessions bury abnormal calls like any other tool.
  *
  * Gated on the same preference that drives auto-expansion, because most failed
  * calls are noise the agent already recovered from: a probe that missed, a
@@ -1703,9 +1704,7 @@ export function deriveConversationPresentation(
       historyBlocks.push({
         kind: "work_session",
         // Keyed by the first provider item only: folding the running count in
-        // would remount the card whenever another tool joins. Reusing that
-        // item's canonical block id also keeps a single running tool mounted
-        // when interruption/error settlement promotes it out of the fold.
+        // would remount the card whenever another tool joins.
         id: `tool_call:${workBuffer[0]!.id}`,
         items: workBuffer,
         running,
@@ -1757,9 +1756,12 @@ export function deriveConversationPresentation(
             item.detail.result,
             item.display.provider_output_summary,
           ).total > 0;
+        // Unlike the other modes, errors never break this fold — collapsed is
+        // the "just tell me what happened" view, and the agent's own message
+        // already narrates any failure that mattered. The auto-expand-errors
+        // preference still governs the summarizing modes.
         const mustSurface =
           hasProviderArtifacts ||
-          escapesFoldOnError(item, preferences) ||
           (item.display.artifact_kind === "approval_related" &&
             preferences.conversation.auto_expand.approvals) ||
           item.display.artifact_kind === "diff" ||

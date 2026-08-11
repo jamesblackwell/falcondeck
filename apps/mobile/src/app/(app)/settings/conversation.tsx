@@ -91,7 +91,7 @@ export default function ConversationSettingsScreen() {
         />
         <PreferenceSwitch
           label="Auto-open errors"
-          description="Off keeps failed calls folded in with the rest of the tool activity."
+          description="Applies to the summarizing views; the collapsed view always folds failed calls in with the rest of the tool activity."
           value={current.auto_expand.errors}
           disabled={isUpdating}
           onValueChange={(value) => void update({ auto_expand: { errors: value } })}

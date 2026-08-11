@@ -339,7 +339,7 @@ export function GeneralSettingsPanel({
           />
           <PreferenceToggle
             label="Auto-open errors"
-            description="Surface and expand failed calls immediately. Off folds them in with everything else — the agent still explains failures that blocked it."
+            description="Surface and expand failed calls immediately in the summarizing views. The collapsed view always folds them in — the agent still explains failures that blocked it."
             enabled={current.conversation.auto_expand.errors}
             onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { errors: next } } })}
           />
