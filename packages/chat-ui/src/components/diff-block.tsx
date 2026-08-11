@@ -16,6 +16,7 @@ import {
  * otherwise push the rest of the conversation off screen.
  */
 const DEFAULT_PREVIEW_ROWS = 14
+const MAX_EXPANDED_ROWS = 1_000
 
 /**
  * A unified diff rendered as a diff — hunk headers, +/- gutters, line numbers
@@ -26,6 +27,7 @@ export const DiffBlock = memo(function DiffBlock({
   parsed,
   previewRows = DEFAULT_PREVIEW_ROWS,
   title,
+  filePath = null,
 }: {
   diff: string
   /** Parsed once by the caller, which also decides whether a diff renderer fits. */
@@ -34,6 +36,8 @@ export const DiffBlock = memo(function DiffBlock({
   previewRows?: number
   /** Label when the diff names no file (a bare hunk with no `diff --git`). */
   title?: string
+  /** Authoritative current path when provider metadata supersedes patch headers. */
+  filePath?: string | null
 }) {
   const [expanded, setExpanded] = useState(false)
   const fileRows = useMemo(
@@ -41,11 +45,16 @@ export const DiffBlock = memo(function DiffBlock({
     [parsed],
   )
   const totalRows = useMemo(() => countDiffRows(fileRows), [fileRows])
-  const hiddenRowCount = previewRows > 0 ? Math.max(0, totalRows - previewRows) : 0
+  const expandedRowCount = Math.min(totalRows, MAX_EXPANDED_ROWS)
+  const previewRowCount = previewRows > 0
+    ? Math.min(previewRows, expandedRowCount)
+    : expandedRowCount
+  const hiddenRowCount = Math.max(0, expandedRowCount - previewRowCount)
+  const displayLimited = totalRows > MAX_EXPANDED_ROWS
   const isCapped = hiddenRowCount > 0 && !expanded
   const visibleFileRows = useMemo(
-    () => (isCapped ? capDiffFileRows(fileRows, previewRows) : fileRows),
-    [fileRows, isCapped, previewRows],
+    () => capDiffFileRows(fileRows, isCapped ? previewRowCount : expandedRowCount),
+    [expandedRowCount, fileRows, isCapped, previewRowCount],
   )
 
   const paths = useMemo(
@@ -57,7 +66,9 @@ export const DiffBlock = memo(function DiffBlock({
     <div className="overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1">
       <div className="flex items-center justify-between gap-2 border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
         <span className="min-w-0 truncate font-mono">
-          {paths.length === 1 ? (
+          {filePath ? (
+            <FileDiffLink filePath={filePath} className="text-fg-secondary" />
+          ) : paths.length === 1 ? (
             <FileDiffLink filePath={paths[0]} className="text-fg-secondary" />
           ) : paths.length > 1 ? (
             `${paths.length} files changed`
@@ -120,6 +131,11 @@ export const DiffBlock = memo(function DiffBlock({
         >
           {expanded ? 'Show less' : `Show ${hiddenRowCount} more line${hiddenRowCount === 1 ? '' : 's'}`}
         </button>
+      ) : null}
+      {displayLimited ? (
+        <p role="status" className="border-t border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+          Display limited to 1,000 diff lines for performance. Copy includes the complete diff.
+        </p>
       ) : null}
     </div>
   )

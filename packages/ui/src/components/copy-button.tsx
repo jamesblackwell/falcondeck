@@ -18,21 +18,33 @@ export const CopyButton = memo(function CopyButton({
   label = 'Copy',
   copiedLabel = 'Copied',
 }: CopyButtonProps) {
-  const [result, setResult] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [feedback, setFeedback] = useState<{
+    result: 'copied' | 'failed'
+    text: string
+  } | null>(null)
   const resetTimerRef = useRef<number | null>(null)
+  const latestAttemptRef = useRef(0)
+  const mountedRef = useRef(false)
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      latestAttemptRef.current += 1
       if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current)
-    },
-    [],
-  )
+    }
+  }, [])
 
   const handleCopy = useCallback(() => {
+    const attempt = latestAttemptRef.current + 1
+    latestAttemptRef.current = attempt
     const settle = (next: 'copied' | 'failed') => {
-      setResult(next)
+      if (!mountedRef.current || latestAttemptRef.current !== attempt) return
+      setFeedback({ result: next, text })
       if (resetTimerRef.current !== null) window.clearTimeout(resetTimerRef.current)
-      resetTimerRef.current = window.setTimeout(() => setResult('idle'), 1500)
+      resetTimerRef.current = window.setTimeout(() => {
+        if (mountedRef.current) setFeedback(null)
+      }, 1500)
     }
 
     // Confirming before the write resolves is a lie the user only discovers at
@@ -49,6 +61,7 @@ export const CopyButton = memo(function CopyButton({
     )
   }, [text])
 
+  const result = feedback?.text === text ? feedback.result : 'idle'
   const copied = result === 'copied'
   const failed = result === 'failed'
   const currentLabel = copied ? copiedLabel : failed ? 'Copy failed' : label

@@ -12,12 +12,15 @@ import { looksLikeUnifiedDiff, useParsedDiff } from './diff-lines'
  * keeps the shape of the output visible while staying one click from full.
  */
 const DEFAULT_PREVIEW_LINES = 14
+const MAX_RENDERED_CHARS = 200_000
+const MAX_EXPANDED_LINES = 1_000
 
 export const CodeBlock = memo(function CodeBlock({
   code,
   language,
   filePath = null,
   previewLines = DEFAULT_PREVIEW_LINES,
+  highlight = true,
 }: {
   code: string
   language?: string | null
@@ -25,6 +28,8 @@ export const CodeBlock = memo(function CodeBlock({
   filePath?: string | null
   /** Lines shown before capping; pass `0` to never cap (diffs, short output). */
   previewLines?: number
+  /** Keep streamed content plain until it settles to avoid tokenizing every delta. */
+  highlight?: boolean
 }) {
   const [expanded, setExpanded] = useState(false)
 
@@ -39,16 +44,22 @@ export const CodeBlock = memo(function CodeBlock({
     [filePath, language],
   )
 
-  const lines = useMemo(() => code.split('\n'), [code])
-  const hiddenLineCount = previewLines > 0 ? Math.max(0, lines.length - previewLines) : 0
+  const displayCode = useMemo(() => code.slice(0, MAX_RENDERED_CHARS), [code])
+  const lines = useMemo(() => displayCode.split('\n'), [displayCode])
+  const expandedLineCount = Math.min(lines.length, MAX_EXPANDED_LINES)
+  const previewLineCount = previewLines > 0
+    ? Math.min(previewLines, expandedLineCount)
+    : expandedLineCount
+  const hiddenLineCount = Math.max(0, expandedLineCount - previewLineCount)
+  const displayLimited = code.length > displayCode.length || lines.length > MAX_EXPANDED_LINES
   const isCapped = hiddenLineCount > 0 && !expanded
   const visibleLines = useMemo(
-    () => (isCapped ? lines.slice(0, previewLines) : lines),
-    [isCapped, lines, previewLines],
+    () => lines.slice(0, isCapped ? previewLineCount : expandedLineCount),
+    [expandedLineCount, isCapped, lines, previewLineCount],
   )
   // Only the rows on screen are tokenized; expanding re-runs over the whole
   // block, so a capped 2000-line dump costs 14 lines of highlighting.
-  const tokens = useShikiTokens(visibleLines, resolvedLanguage)
+  const tokens = useShikiTokens(visibleLines, highlight ? resolvedLanguage : null)
 
   if (parsedDiff.status !== 'unparsed') {
     return <DiffBlock diff={code} parsed={parsedDiff} previewRows={previewLines} />
@@ -59,14 +70,21 @@ export const CodeBlock = memo(function CodeBlock({
       <div className="flex items-center justify-between border-b border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
         <span className="min-w-0 truncate">{filePath ?? language ?? resolvedLanguage ?? 'code'}</span>
         <div className="flex shrink-0 items-center gap-2">
-          {lines.length > previewLines && previewLines > 0 ? (
-            <span className="tabular-nums">{lines.length} lines</span>
+          {(lines.length > previewLineCount || displayLimited) && previewLines > 0 ? (
+            <span className="tabular-nums">
+              {code.length > displayCode.length ? `${lines.length}+` : lines.length} lines
+            </span>
           ) : null}
           <CopyButton text={code} variant="labeled" />
         </div>
       </div>
       <div className="relative">
-        <pre className="overflow-x-auto p-3 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
+        <pre
+          data-syntax-highlighting={
+            resolvedLanguage ? (highlight ? 'enabled' : 'deferred') : 'unavailable'
+          }
+          className="overflow-x-auto p-3 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary"
+        >
           <code>
             {tokens
               ? visibleLines.map((line, index) => (
@@ -78,7 +96,7 @@ export const CodeBlock = memo(function CodeBlock({
                           </span>
                         ))
                       : line}
-                    {'\n'}
+                    {index < visibleLines.length - 1 ? '\n' : null}
                   </span>
                 ))
               : visibleLines.join('\n')}
@@ -103,6 +121,11 @@ export const CodeBlock = memo(function CodeBlock({
         >
           {expanded ? 'Show less' : `Show ${hiddenLineCount} more line${hiddenLineCount === 1 ? '' : 's'}`}
         </button>
+      ) : null}
+      {displayLimited ? (
+        <p role="status" className="border-t border-border-subtle px-3 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+          Display limited for performance. Copy includes the complete output.
+        </p>
       ) : null}
     </div>
   )

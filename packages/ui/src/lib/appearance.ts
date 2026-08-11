@@ -12,7 +12,16 @@ import { useSyncExternalStore } from 'react'
 
 export type ThemeSetting = 'system' | 'light' | 'dark'
 export type ResolvedTheme = 'light' | 'dark'
-export type PaletteSetting = 'falcon' | 'gruvbox' | 'tokyo-night'
+export type PaletteSetting =
+  | 'falcon'
+  | 'catppuccin'
+  | 'dracula'
+  | 'gruvbox'
+  | 'nord'
+  | 'one'
+  | 'rose-pine'
+  | 'solarized'
+  | 'tokyo-night'
 export type SansFontSetting = 'geist' | 'system' | 'serif'
 export type MonoFontSetting = 'geist-mono' | 'system-mono'
 
@@ -30,7 +39,7 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
   palette: 'falcon',
   sansFont: 'geist',
   monoFont: 'geist-mono',
-  fontScale: 1,
+  fontScale: 1.05,
 }
 
 export const THEME_OPTIONS: Array<{ value: ThemeSetting; label: string; description: string }> = [
@@ -41,6 +50,12 @@ export const THEME_OPTIONS: Array<{ value: ThemeSetting; label: string; descript
 
 export type PalettePreview = { bg: string; surface: string; fg: string; accent: string }
 
+/**
+ * Falcon leads as the default; the rest are alphabetical so a growing list of
+ * editor classics stays scannable. Each preview quartet feeds the swatch in the
+ * picker — canvas, raised surface, text, accent — pulled from the palette's own
+ * bg-1 / bg-2 / fg-0 / accent so the chip never drifts from the real theme.
+ */
 export const PALETTE_OPTIONS: Array<{
   value: PaletteSetting
   label: string
@@ -57,12 +72,66 @@ export const PALETTE_OPTIONS: Array<{
     },
   },
   {
+    value: 'catppuccin',
+    label: 'Catppuccin',
+    description: 'Soft pastel mauve — inspired by Catppuccin Mocha and Latte.',
+    preview: {
+      dark: { bg: '#1e1e2e', surface: '#282839', fg: '#cdd6f4', accent: '#cba6f7' },
+      light: { bg: '#eff1f5', surface: '#ffffff', fg: '#4c4f69', accent: '#8839ef' },
+    },
+  },
+  {
+    value: 'dracula',
+    label: 'Dracula',
+    description: 'Neon purple on graphite — inspired by Dracula and Alucard.',
+    preview: {
+      dark: { bg: '#282a36', surface: '#343746', fg: '#f8f8f2', accent: '#bd93f9' },
+      light: { bg: '#fbf8e8', surface: '#fffbeb', fg: '#1f1f1f', accent: '#644ac9' },
+    },
+  },
+  {
     value: 'gruvbox',
     label: 'Gruvbox',
     description: 'Warm, retro groove — inspired by the classic Gruvbox scheme.',
     preview: {
-      dark: { bg: '#282828', surface: '#32302f', fg: '#ebdbb2', accent: '#8ec07c' },
-      light: { bg: '#f9efc6', surface: '#fbf1c7', fg: '#3c3836', accent: '#427b58' },
+      dark: { bg: '#282828', surface: '#32302f', fg: '#fbf1c7', accent: '#8ec07c' },
+      light: { bg: '#f9efc6', surface: '#fbf1c7', fg: '#282828', accent: '#427b58' },
+    },
+  },
+  {
+    value: 'nord',
+    label: 'Nord',
+    description: 'Arctic blue-grey calm — inspired by the Nord scheme.',
+    preview: {
+      dark: { bg: '#2e3440', surface: '#3b4252', fg: '#eceff4', accent: '#88c0d0' },
+      light: { bg: '#e9edf4', surface: '#f8fafc', fg: '#2e3440', accent: '#4c6f96' },
+    },
+  },
+  {
+    value: 'one',
+    label: 'One',
+    description: 'The classic editor grey and blue — inspired by Atom One.',
+    preview: {
+      dark: { bg: '#282c34', surface: '#31353f', fg: '#dcdfe4', accent: '#61afef' },
+      light: { bg: '#f2f2f3', surface: '#fafafa', fg: '#383a42', accent: '#3568d4' },
+    },
+  },
+  {
+    value: 'rose-pine',
+    label: 'Rosé Pine',
+    description: 'Muted rose and pine — inspired by Rosé Pine and Dawn.',
+    preview: {
+      dark: { bg: '#191724', surface: '#1f1d2e', fg: '#e0def4', accent: '#c4a7e7' },
+      light: { bg: '#faf4ed', surface: '#fffaf3', fg: '#4a4566', accent: '#907aa9' },
+    },
+  },
+  {
+    value: 'solarized',
+    label: 'Solarized',
+    description: 'Precision-tuned cyan and cream — inspired by Solarized.',
+    preview: {
+      dark: { bg: '#002b36', surface: '#073642', fg: '#fdf6e3', accent: '#268bd2' },
+      light: { bg: '#f8f2e0', surface: '#fdf6e3', fg: '#002b36', accent: '#1a6c9c' },
     },
   },
   {
@@ -70,8 +139,8 @@ export const PALETTE_OPTIONS: Array<{
     label: 'Tokyo Night',
     description: 'Cool indigo dusk — inspired by the Tokyo Night scheme.',
     preview: {
-      dark: { bg: '#1a1b26', surface: '#24283b', fg: '#a9b1d6', accent: '#7aa2f7' },
-      light: { bg: '#e4e6ee', surface: '#eff1f7', fg: '#40456b', accent: '#2e7de9' },
+      dark: { bg: '#1a1b26', surface: '#24283b', fg: '#c0caf5', accent: '#7aa2f7' },
+      light: { bg: '#e4e6ee', surface: '#eff1f7', fg: '#2e3350', accent: '#2e7de9' },
     },
   },
 ]
@@ -116,10 +185,10 @@ export const MONO_FONT_OPTIONS: Array<{
 ]
 
 export const FONT_SCALE_OPTIONS: Array<{ value: number; label: string }> = [
-  { value: 0.9, label: 'Small' },
-  { value: 1, label: 'Default' },
-  { value: 1.1, label: 'Large' },
-  { value: 1.2, label: 'Extra large' },
+  { value: 0.95, label: 'Small' },
+  { value: 1.05, label: 'Default' },
+  { value: 1.15, label: 'Large' },
+  { value: 1.25, label: 'Extra large' },
 ]
 
 const STORAGE_KEY = 'fd-appearance'
@@ -141,7 +210,7 @@ export function normalizeAppearance(value: unknown): AppearanceSettings {
       : 'geist-mono',
     fontScale: FONT_SCALE_OPTIONS.some((o) => o.value === raw.fontScale)
       ? (raw.fontScale as number)
-      : 1,
+      : DEFAULT_APPEARANCE.fontScale,
   }
 }
 
@@ -162,9 +231,16 @@ function saveAppearance(settings: AppearanceSettings) {
   }
 }
 
+function darkMediaQuery(): MediaQueryList | null {
+  // jsdom and some embedded webviews ship no matchMedia; callers fall back to
+  // the dark default rather than throwing mid-render.
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return null
+  return window.matchMedia(DARK_QUERY)
+}
+
 export function resolveTheme(setting: ThemeSetting): ResolvedTheme {
   if (setting === 'light' || setting === 'dark') return setting
-  return window.matchMedia(DARK_QUERY).matches ? 'dark' : 'light'
+  return darkMediaQuery()?.matches ? 'dark' : 'light'
 }
 
 function applyAppearance(settings: AppearanceSettings) {
@@ -188,11 +264,7 @@ function applyAppearance(settings: AppearanceSettings) {
   } else {
     root.style.removeProperty('--fd-font-mono')
   }
-  if (settings.fontScale !== 1) {
-    root.style.setProperty('--fd-font-scale', String(settings.fontScale))
-  } else {
-    root.style.removeProperty('--fd-font-scale')
-  }
+  root.style.setProperty('--fd-font-scale', String(settings.fontScale))
 }
 
 /* --- Tiny external store so any component can read/update settings --- */
@@ -216,14 +288,14 @@ export function initAppearance(): AppearanceSettings {
   current = loadAppearance()
   applyAppearance(current)
 
-  const media = window.matchMedia(DARK_QUERY)
+  const media = darkMediaQuery()
   const onSystemChange = () => {
     if (current.theme === 'system') {
       applyAppearance(current)
       notify()
     }
   }
-  if (typeof media.addEventListener === 'function') {
+  if (typeof media?.addEventListener === 'function') {
     media.addEventListener('change', onSystemChange)
   }
   return current

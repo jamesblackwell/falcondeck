@@ -18,6 +18,12 @@ const SIGNING_PUBLIC_KEY_BYTES = 32
 const SIGNATURE_BYTES = 64
 const CONTENT_VERSION = 0
 const WRAPPED_KEY_VERSION = 0
+const MAX_CACHED_AES_KEYS = 4
+
+// The relay uses one data key for a session, so importing the same raw key for
+// every streamed update is redundant WebCrypto work. Cache promises (rather
+// than only resolved keys) so concurrent token bursts share one import too.
+const aesKeyCache = new Map<string, Promise<CryptoKey>>()
 
 function getWebCrypto() {
   const webCrypto = globalThis.crypto
@@ -104,8 +110,25 @@ function ensureWrappedBundle(bundle: Uint8Array) {
 }
 
 async function importAesKey(dataKey: Uint8Array) {
+  const cacheKey = bytesToBase64(dataKey)
+  const cached = aesKeyCache.get(cacheKey)
+  if (cached) return cached
+
   const rawKey = toArrayBuffer(dataKey)
-  return getSubtleCrypto().importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt'])
+  let imported: Promise<CryptoKey>
+  imported = getSubtleCrypto()
+    .importKey('raw', rawKey, 'AES-GCM', false, ['encrypt', 'decrypt'])
+    .catch((error: unknown) => {
+      if (aesKeyCache.get(cacheKey) === imported) aesKeyCache.delete(cacheKey)
+      throw error
+    })
+
+  if (aesKeyCache.size >= MAX_CACHED_AES_KEYS) {
+    const oldest = aesKeyCache.keys().next().value
+    if (oldest) aesKeyCache.delete(oldest)
+  }
+  aesKeyCache.set(cacheKey, imported)
+  return imported
 }
 
 async function encryptAesGcm(dataKey: Uint8Array, nonce: Uint8Array, plaintext: Uint8Array) {

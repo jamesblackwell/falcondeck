@@ -20,6 +20,7 @@ export type WorkspaceGroupProps = {
   onSelect: () => void
   onNewThread?: () => void
   onOpenContextMenu?: (position: { x: number; y: number }) => void
+  dragHandleProps?: React.HTMLAttributes<HTMLDivElement> & React.RefAttributes<HTMLDivElement>
   children: React.ReactNode
 }
 
@@ -30,6 +31,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   onSelect,
   onNewThread,
   onOpenContextMenu,
+  dragHandleProps,
   children,
 }: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
@@ -50,6 +52,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
     <Collapsible.Root asChild open={isOpen} onOpenChange={handleOpenChange}>
       <section className="min-w-0 overflow-hidden">
         <div
+          {...dragHandleProps}
           onContextMenu={
             onOpenContextMenu
               ? (event) => {
@@ -64,6 +67,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
             isSelected
               ? 'bg-surface-2 text-fg-primary'
               : 'text-fg-secondary hover:bg-surface-2 hover:text-fg-primary',
+            dragHandleProps?.className,
           )}
         >
           <Collapsible.Trigger className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] text-left">

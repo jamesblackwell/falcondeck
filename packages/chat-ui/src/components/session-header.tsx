@@ -1,9 +1,9 @@
 import { memo } from 'react'
 import * as React from 'react'
-import { SquarePen } from 'lucide-react'
+import { Split, SquarePen } from 'lucide-react'
 
 import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
-import { Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
+import { ActivityDiamond, Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
 
 function threadStatusDisplay(status: ThreadSummary['status']) {
   switch (status) {
@@ -50,11 +50,11 @@ export const SessionHeader = memo(function SessionHeader({
       <div className="flex min-w-0 items-center gap-3">
         {navigation}
         {thread ? (
-          <StatusIndicator
-            status={threadStatusDisplay(thread.status)}
-            size="md"
-            pulse={thread.status === 'running'}
-          />
+          thread.status === 'running' ? (
+            <ActivityDiamond size="md" />
+          ) : (
+            <StatusIndicator status={threadStatusDisplay(thread.status)} size="md" />
+          )
         ) : null}
         <div className={cn('min-w-0', compact && 'flex items-center gap-2')}>
           <div className={cn('flex items-center gap-2', compact && 'contents')}>
@@ -74,6 +74,16 @@ export const SessionHeader = memo(function SessionHeader({
                 className="h-5 px-1.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em]"
               >
                 {thread.provider}
+              </Badge>
+            ) : null}
+            {thread?.variant ? (
+              <Badge
+                variant="default"
+                title={`Changes land on branch ${thread.variant.branch}, not in your project folder`}
+                className="h-5 gap-1 px-1.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em]"
+              >
+                <Split aria-hidden="true" className="h-3 w-3" />
+                Isolated
               </Badge>
             ) : null}
           </div>

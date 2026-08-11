@@ -1,9 +1,17 @@
-import { memo, useEffect, useState, type FormEvent } from 'react'
+import { memo, useEffect, useMemo, useState, type FormEvent } from 'react'
 import * as Popover from '@radix-ui/react-popover'
-import { Check, FolderClosed, GitBranch, Laptop, LoaderCircle, Plus, Split } from 'lucide-react'
+import { Check, FolderClosed, GitBranch, Laptop, Plus, Split } from 'lucide-react'
 
-import type { GitBranchesResponse, ThreadIsolation, WorkspaceSummary } from '@falcondeck/client-core'
-import { Select, SelectContent, SelectItem, SelectTrigger, cn } from '@falcondeck/ui'
+import {
+  filterOptionsByQuery,
+  SEARCHABLE_OPTION_THRESHOLD,
+  type GitBranchesResponse,
+  type ThreadIsolation,
+  type WorkspaceSummary,
+} from '@falcondeck/client-core'
+import { ActivityDiamond, Select, SelectContent, SelectItem, SelectTrigger, cn } from '@falcondeck/ui'
+
+import { OptionFilterField } from './option-filter-field'
 
 export type ComposerContextBarProps = {
   workspaces: WorkspaceSummary[]
@@ -47,23 +55,13 @@ export const ComposerContextBar = memo(function ComposerContextBar({
 
   return (
     <div className="relative z-0 mx-3 -mb-3 flex items-center gap-0.5 rounded-t-[var(--fd-radius-xl)] border border-b-0 border-border-subtle bg-surface-3/60 px-2 pb-4 pt-1.5">
-      <Select
-        value={selectedWorkspace?.id ?? ''}
-        onValueChange={onSelectWorkspace}
-        disabled={disabled || workspaces.length === 0}
-      >
-        <SelectTrigger variant="quiet" aria-label="Project" className={CHIP_CLASS}>
-          <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-          <span className="truncate">{projectLabel}</span>
-        </SelectTrigger>
-        <SelectContent align="start">
-          {workspaces.map((workspace) => (
-            <SelectItem key={workspace.id} value={workspace.id}>
-              {workspace.path.split('/').pop() || workspace.path}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <ProjectMenu
+        workspaces={workspaces}
+        selectedWorkspace={selectedWorkspace}
+        projectLabel={projectLabel}
+        onSelectWorkspace={onSelectWorkspace}
+        disabled={disabled}
+      />
 
       <Select
         value={selectedIsolation}
@@ -99,6 +97,112 @@ export const ComposerContextBar = memo(function ComposerContextBar({
   )
 })
 
+function ProjectMenu({
+  workspaces,
+  selectedWorkspace,
+  projectLabel,
+  onSelectWorkspace,
+  disabled,
+}: {
+  workspaces: WorkspaceSummary[]
+  selectedWorkspace: WorkspaceSummary | null
+  projectLabel: string
+  onSelectWorkspace: (workspaceId: string) => void
+  disabled: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const searchable = workspaces.length >= SEARCHABLE_OPTION_THRESHOLD
+  const visibleWorkspaces = useMemo(
+    () =>
+      searchable
+        ? filterOptionsByQuery(
+            workspaces,
+            query,
+            (workspace) => `${workspace.path} ${workspace.id}`,
+          )
+        : workspaces,
+    [query, searchable, workspaces],
+  )
+
+  return (
+    <Popover.Root
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen)
+        if (!nextOpen) setQuery('')
+      }}
+    >
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          aria-label="Project"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          disabled={disabled || workspaces.length === 0}
+          className={CHIP_CLASS}
+        >
+          <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+          <span className="truncate">{projectLabel}</span>
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="start"
+          sideOffset={6}
+          className="z-50 w-72 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+        >
+          <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
+            Projects
+          </p>
+          {searchable ? (
+            <OptionFilterField
+              value={query}
+              onChange={setQuery}
+              label="Search projects"
+              resultCount={visibleWorkspaces.length}
+              autoFocus
+            />
+          ) : null}
+          <div role="menu" className="max-h-64 overflow-y-auto">
+            {visibleWorkspaces.map((workspace) => {
+              const label = workspace.path.split('/').pop() || workspace.path
+              const selected = workspace.id === selectedWorkspace?.id
+              return (
+                <button
+                  key={workspace.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={selected}
+                  onClick={() => {
+                    onSelectWorkspace(workspace.id)
+                    setOpen(false)
+                  }}
+                  className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-surface-2"
+                >
+                  <FolderClosed aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate">{label}</span>
+                    <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                      {workspace.path}
+                    </span>
+                  </span>
+                  {selected ? <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" /> : null}
+                </button>
+              )
+            })}
+            {visibleWorkspaces.length === 0 ? (
+              <p className="px-2.5 py-3 text-center text-[length:var(--fd-text-sm)] text-fg-muted">
+                No projects match “{query.trim()}”
+              </p>
+            ) : null}
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  )
+}
+
 function BranchMenu({
   branches,
   uncommittedCount,
@@ -115,12 +219,22 @@ function BranchMenu({
   const [open, setOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newBranchName, setNewBranchName] = useState('')
+  const [query, setQuery] = useState('')
+  const searchable = branches.branches.length >= SEARCHABLE_OPTION_THRESHOLD
+  const visibleBranches = useMemo(
+    () =>
+      searchable
+        ? filterOptionsByQuery(branches.branches, query, (branch) => branch)
+        : branches.branches,
+    [branches.branches, query, searchable],
+  )
 
   // A fresh open always starts on the list, not a stale half-typed name.
   useEffect(() => {
     if (!open) {
       setCreating(false)
       setNewBranchName('')
+      setQuery('')
     }
   }, [open])
 
@@ -135,9 +249,16 @@ function BranchMenu({
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
-        <button type="button" aria-label="Git branch" disabled={disabled} className={CHIP_CLASS}>
+        <button
+          type="button"
+          aria-label="Git branch"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          disabled={disabled}
+          className={CHIP_CLASS}
+        >
           {isCheckoutPending ? (
-            <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 shrink-0 animate-spin text-fg-muted" />
+            <ActivityDiamond className="text-fg-muted" tone="current" />
           ) : (
             <GitBranch aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
           )}
@@ -153,8 +274,17 @@ function BranchMenu({
           <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
             Branches
           </p>
-          <div className="max-h-64 overflow-y-auto">
-            {branches.branches.map((branch) => {
+          {searchable && !creating ? (
+            <OptionFilterField
+              value={query}
+              onChange={setQuery}
+              label="Search branches"
+              resultCount={visibleBranches.length}
+              autoFocus
+            />
+          ) : null}
+          <div role="menu" className="max-h-64 overflow-y-auto">
+            {visibleBranches.map((branch) => {
               const isCurrent = branch === branches.current
               return (
                 <button
@@ -186,6 +316,11 @@ function BranchMenu({
                 </button>
               )
             })}
+            {visibleBranches.length === 0 ? (
+              <p className="px-2.5 py-3 text-center text-[length:var(--fd-text-sm)] text-fg-muted">
+                No branches match “{query.trim()}”
+              </p>
+            ) : null}
           </div>
           <div className="mt-1 border-t border-border-subtle pt-1">
             {creating ? (

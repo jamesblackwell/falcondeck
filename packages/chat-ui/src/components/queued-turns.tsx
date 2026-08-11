@@ -5,6 +5,8 @@ import { useState, type ReactNode } from 'react'
 import type { QueuedTurnSummary } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
+import { isComposingKeyboardEvent } from '../lib/keyboard'
+
 function QueuedMenuItem({
   icon,
   label,
@@ -69,6 +71,7 @@ function QueuedTurnEditor({
         aria-label="Edit queued message"
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
+          if (isComposingKeyboardEvent(event)) return
           if (event.key === 'Enter' && !event.shiftKey) {
             event.preventDefault()
             commit()

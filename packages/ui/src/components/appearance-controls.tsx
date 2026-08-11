@@ -9,10 +9,12 @@ import {
   resolveTheme,
   updateAppearance,
   useAppearance,
+  type PaletteSetting,
   type PalettePreview,
   type ThemeSetting,
 } from '../lib/appearance'
 import { cn } from '../lib/utils'
+import { Select, SelectContent, SelectItem, SelectTrigger } from './select'
 
 const THEME_ICONS: Record<ThemeSetting, typeof Sun> = {
   system: Monitor,
@@ -38,26 +40,33 @@ function GroupLabel({ title, hint }: { title: string; hint: string }) {
   )
 }
 
-function PaletteSwatch({ preview }: { preview: PalettePreview }) {
+/**
+ * A palette's identity in one chip: the circle is quartered into canvas,
+ * raised surface, text, and accent, so two schemes never look alike at 18px.
+ * The ring is a translucent ink rather than a token border — the chip has to
+ * stay readable against whichever surface it lands on.
+ */
+export function PaletteSwatch({
+  preview,
+  size = 18,
+  className,
+}: {
+  preview: PalettePreview
+  size?: number
+  className?: string
+}) {
   return (
-    <div
+    <span
       aria-hidden
-      className="flex h-10 w-full items-center justify-center gap-1.5 rounded-[var(--fd-radius-md)] border border-border-subtle"
-      style={{ backgroundColor: preview.bg }}
-    >
-      <span
-        className="h-4 w-4 rounded-full"
-        style={{ backgroundColor: preview.accent }}
-      />
-      <span
-        className="h-4 w-9 rounded-[4px]"
-        style={{ backgroundColor: preview.surface, border: `1px solid ${preview.fg}22` }}
-      />
-      <span
-        className="h-4 w-4 rounded-[4px]"
-        style={{ backgroundColor: preview.fg, opacity: 0.85 }}
-      />
-    </div>
+      className={cn('inline-block shrink-0 rounded-full ring-1 ring-inset ring-fg-primary/20', className)}
+      style={{
+        width: size,
+        height: size,
+        // Quadrant order matches the 2x2 grid the mobile swatch paints:
+        // canvas top-left, surface top-right, accent bottom-right, text bottom-left.
+        background: `conic-gradient(from 0deg, ${preview.surface} 0deg 90deg, ${preview.accent} 90deg 180deg, ${preview.fg} 180deg 270deg, ${preview.bg} 270deg 360deg)`,
+      }}
+    />
   )
 }
 
@@ -69,6 +78,8 @@ function PaletteSwatch({ preview }: { preview: PalettePreview }) {
 export function AppearanceControls() {
   const appearance = useAppearance()
   const resolvedTheme = resolveTheme(appearance.theme)
+  const activePalette =
+    PALETTE_OPTIONS.find((option) => option.value === appearance.palette) ?? PALETTE_OPTIONS[0]
 
   return (
     <div className="space-y-6">
@@ -101,28 +112,35 @@ export function AppearanceControls() {
           title="Color theme"
           hint="Every palette ships light and dark variants, so it composes with the theme above."
         />
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-          {PALETTE_OPTIONS.map((option) => {
-            const selected = appearance.palette === option.value
-            return (
-              <button
+        <Select
+          value={appearance.palette}
+          onValueChange={(value) => updateAppearance({ palette: value as PaletteSetting })}
+        >
+          <SelectTrigger
+            aria-label="Color theme"
+            className="h-10 w-full justify-between gap-2 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
+          >
+            <span className="flex min-w-0 items-center gap-2.5">
+              <PaletteSwatch preview={activePalette.preview[resolvedTheme]} />
+              <span className="truncate">{activePalette.label}</span>
+            </span>
+          </SelectTrigger>
+          {/* Two-line rows, so the default list height would only show five of
+              nine palettes before scrolling. */}
+          <SelectContent viewportClassName="max-h-[min(26rem,var(--radix-select-content-available-height))]">
+            {PALETTE_OPTIONS.map((option) => (
+              <SelectItem
                 key={option.value}
-                type="button"
-                aria-pressed={selected}
-                onClick={() => updateAppearance({ palette: option.value })}
-                className={cn(optionClass(selected), 'space-y-2')}
+                value={option.value}
+                leading={<PaletteSwatch preview={option.preview[resolvedTheme]} size={20} />}
+                description={option.description}
+                className="py-2"
               >
-                <PaletteSwatch preview={option.preview[resolvedTheme]} />
-                <span className="block text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
-                  {option.label}
-                </span>
-                <span className="block text-[length:var(--fd-text-2xs)] leading-snug text-fg-tertiary">
-                  {option.description}
-                </span>
-              </button>
-            )
-          })}
-        </div>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </section>
 
       <section className="space-y-3">

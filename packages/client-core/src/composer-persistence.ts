@@ -23,6 +23,9 @@ export type ComposerDraft = {
 
 export type ComposerDrafts = Record<string, ComposerDraft>
 
+/** Number of browser image files still being materialized for each composer. */
+export type AttachmentPreparationCounts = Record<string, number>
+
 /** Conversations a device keeps unsent text for; least recently updated are dropped. */
 export const MAX_COMPOSER_DRAFTS = 100
 
@@ -31,8 +34,32 @@ export const MAX_COMPOSER_DRAFTS = 100
  * "new thread" composer each workspace has. Drafts and attachments are keyed
  * by this so navigating never carries unsent input across conversations.
  */
-export function draftKeyFor(workspaceId: string | null, threadId: string | null): string {
+export function draftKeyFor(
+  workspaceId: string | null,
+  threadId: string | null,
+): string {
   return `${workspaceId ?? 'none'}:${threadId ?? 'new'}`
+}
+
+/**
+ * Applies one picker/paste batch to a conversation's pending-file count.
+ * Multiple asynchronous batches may overlap; zero-count keys are removed so
+ * navigating through many threads does not grow transient UI state forever.
+ */
+export function updateAttachmentPreparationCount(
+  counts: AttachmentPreparationCounts,
+  key: string,
+  delta: number,
+): AttachmentPreparationCounts {
+  if (!Number.isSafeInteger(delta) || delta === 0) return counts
+  const nextCount = Math.max(0, (counts[key] ?? 0) + delta)
+  if (nextCount === (counts[key] ?? 0)) return counts
+  if (nextCount === 0) {
+    const next = { ...counts }
+    delete next[key]
+    return next
+  }
+  return { ...counts, [key]: nextCount }
 }
 
 export function parseComposerDrafts(raw: string | null): ComposerDrafts {
@@ -83,6 +110,42 @@ export function upsertComposerDraft(
   return next
 }
 
+/**
+ * Restores text from a failed submission without destroying anything the user
+ * typed while the request was in flight. The failed text stays first because
+ * it was authored first; a blank line keeps two independently authored drafts
+ * readable and editable.
+ */
+export function mergeFailedComposerDraft(
+  failed: string,
+  current: string,
+): string {
+  if (!failed) return current
+  if (!current || current === failed) return failed
+  return `${failed}\n\n${current}`
+}
+
+/**
+ * Restores failed attachments ahead of newer picker additions, deduplicating
+ * by stable attachment id. The current copy wins if metadata for the same id
+ * changed while the request was pending, while its original position remains.
+ */
+export function mergeFailedComposerAttachments<T extends { id: string }>(
+  failed: readonly T[],
+  current: readonly T[],
+): T[] {
+  if (failed.length === 0) return [...current]
+  if (current.length === 0) return [...failed]
+  const currentById = new Map(
+    current.map((attachment) => [attachment.id, attachment]),
+  )
+  const failedIds = new Set(failed.map((attachment) => attachment.id))
+  return [
+    ...failed.map((attachment) => currentById.get(attachment.id) ?? attachment),
+    ...current.filter((attachment) => !failedIds.has(attachment.id)),
+  ]
+}
+
 // ---------------------------------------------------------------------------
 // Sticky picker selections
 
@@ -112,13 +175,18 @@ const EMPTY_COMPOSER_SELECTION: PersistedComposerSelection = {
   serviceTier: null,
 }
 
-function normalizeSelection(value: Record<string, unknown>): PersistedComposerSelection {
+function normalizeSelection(
+  value: Record<string, unknown>,
+): PersistedComposerSelection {
   return {
     modelId: typeof value.modelId === 'string' ? value.modelId : null,
     effort: typeof value.effort === 'string' ? value.effort : null,
-    permissionMode: typeof value.permissionMode === 'string' ? value.permissionMode : null,
-    sandboxMode: typeof value.sandboxMode === 'string' ? value.sandboxMode : null,
-    serviceTier: typeof value.serviceTier === 'string' ? value.serviceTier : null,
+    permissionMode:
+      typeof value.permissionMode === 'string' ? value.permissionMode : null,
+    sandboxMode:
+      typeof value.sandboxMode === 'string' ? value.sandboxMode : null,
+    serviceTier:
+      typeof value.serviceTier === 'string' ? value.serviceTier : null,
   }
 }
 
@@ -131,10 +199,16 @@ function normalizeComposerState(raw: string | null): PersistedComposerState {
     for (const [workspacePath, value] of Object.entries(parsed)) {
       if (!isRecord(value)) continue
       const provider =
-        typeof value.provider === 'string' && value.provider.length > 0 ? value.provider : null
-      const selections: Partial<Record<AgentProvider, PersistedComposerSelection>> = {}
+        typeof value.provider === 'string' && value.provider.length > 0
+          ? value.provider
+          : null
+      const selections: Partial<
+        Record<AgentProvider, PersistedComposerSelection>
+      > = {}
       if (isRecord(value.selections)) {
-        for (const [selectionProvider, selection] of Object.entries(value.selections)) {
+        for (const [selectionProvider, selection] of Object.entries(
+          value.selections,
+        )) {
           if (selectionProvider.length === 0 || !isRecord(selection)) continue
           selections[selectionProvider] = normalizeSelection(selection)
         }
@@ -149,7 +223,9 @@ function normalizeComposerState(raw: string | null): PersistedComposerState {
 }
 
 /** The pre-provider store shape: workspace path → provider → {modelId, effort}. */
-function migrateLegacyComposerSelections(raw: string | null): PersistedComposerState {
+function migrateLegacyComposerSelections(
+  raw: string | null,
+): PersistedComposerState {
   if (!raw) return {}
   try {
     const parsed: unknown = JSON.parse(raw)
@@ -157,7 +233,9 @@ function migrateLegacyComposerSelections(raw: string | null): PersistedComposerS
     const state: PersistedComposerState = {}
     for (const [workspacePath, selections] of Object.entries(parsed)) {
       if (!isRecord(selections)) continue
-      const migrated: Partial<Record<AgentProvider, PersistedComposerSelection>> = {}
+      const migrated: Partial<
+        Record<AgentProvider, PersistedComposerSelection>
+      > = {}
       for (const [provider, selection] of Object.entries(selections)) {
         if (provider.length === 0 || !isRecord(selection)) continue
         migrated[provider] = normalizeSelection(selection)
@@ -209,15 +287,27 @@ export function withComposerSelection(
   provider: AgentProvider,
   patch: Partial<PersistedComposerSelection>,
 ): PersistedComposerState {
-  const workspaceState = state[workspacePath] ?? { provider: null, selections: {} }
-  const existing = workspaceState.selections[provider] ?? EMPTY_COMPOSER_SELECTION
+  const workspaceState = state[workspacePath] ?? {
+    provider: null,
+    selections: {},
+  }
+  const existing =
+    workspaceState.selections[provider] ?? EMPTY_COMPOSER_SELECTION
   const merged: PersistedComposerSelection = {
     modelId: patch.modelId !== undefined ? patch.modelId : existing.modelId,
     effort: patch.effort !== undefined ? patch.effort : existing.effort,
     permissionMode:
-      patch.permissionMode !== undefined ? patch.permissionMode : existing.permissionMode,
-    sandboxMode: patch.sandboxMode !== undefined ? patch.sandboxMode : existing.sandboxMode,
-    serviceTier: patch.serviceTier !== undefined ? patch.serviceTier : existing.serviceTier,
+      patch.permissionMode !== undefined
+        ? patch.permissionMode
+        : existing.permissionMode,
+    sandboxMode:
+      patch.sandboxMode !== undefined
+        ? patch.sandboxMode
+        : existing.sandboxMode,
+    serviceTier:
+      patch.serviceTier !== undefined
+        ? patch.serviceTier
+        : existing.serviceTier,
   }
   return {
     ...state,
@@ -233,59 +323,78 @@ export function withComposerProvider(
   workspacePath: string,
   provider: AgentProvider,
 ): PersistedComposerState {
-  const workspaceState = state[workspacePath] ?? { provider: null, selections: {} }
+  const workspaceState = state[workspacePath] ?? {
+    provider: null,
+    selections: {},
+  }
   if (workspaceState.provider === provider) return state
   return { ...state, [workspacePath]: { ...workspaceState, provider } }
 }
 
 /**
- * A remembered mode only applies while the provider still advertises it; an
- * unknown or absent mode falls back to the provider default (null).
+ * A remembered mode only applies while the provider still advertises it. A
+ * fresh composer uses full sandbox access when the provider supports it, so
+ * local testing does not silently fall back to a restricted sandbox.
  */
 export function resolvePersistedMode(
   mode: string | null | undefined,
   availableModes: string[],
 ): string | null {
   if (mode === 'default') return null
-  return mode && availableModes.includes(mode) ? mode : null
+  return mode && availableModes.includes(mode)
+    ? mode
+    : preferredSandboxMode(availableModes)
 }
 
-/** Permission ids commonly used for a provider's least-interactive mode. */
-const PERMISSIVE_PERMISSION_MODE_IDS = [
-  'bypasspermissions',
-  'bypasspermission',
-  'dontask',
-  'alwaysallow',
-  'alwaysapprove',
-  'allowall',
-  'yolo',
-  'auto',
-]
-
-function normalizedModeId(mode: string): string {
-  return mode.replace(/[-_\s]/g, '').toLowerCase()
-}
-
-/** Returns the most permissive permission mode a harness advertises. */
-export function preferredPermissionMode(availableModes: string[]): string | null {
-  for (const preferred of PERMISSIVE_PERMISSION_MODE_IDS) {
-    const match = availableModes.find((mode) => normalizedModeId(mode) === preferred)
+/**
+ * Returns the strongest known non-interactive permission mode advertised by a
+ * provider. The ids are intentionally matched by normalized spelling so ACP
+ * providers can use either camelCase or kebab-case names.
+ */
+export function preferredPermissionMode(
+  availableModes: string[],
+): string | null {
+  const preferred = [
+    'bypasspermissions',
+    'bypasspermission',
+    'dontask',
+    'never',
+    'alwaysapprove',
+    'alwaysallow',
+    'allowall',
+    'yolo',
+    'auto',
+  ]
+  for (const preferredMode of preferred) {
+    const match = availableModes.find(
+      (mode) => normalizeModeId(mode) === preferredMode,
+    )
     if (match) return match
   }
   return null
 }
 
+/** The broadest sandbox mode used by the built-in Codex harness. */
+export function preferredSandboxMode(availableModes: string[]): string | null {
+  return availableModes.find(
+    (mode) => normalizeModeId(mode) === 'dangerfullaccess',
+  ) ?? null
+}
+
+function normalizeModeId(mode: string): string {
+  return mode.replace(/[-_\s]/g, '').toLowerCase()
+}
+
 /**
  * Resolves a remembered permission choice for a new conversation. `default`
- * is an explicit user choice and clears the wire override. A saved mode is
- * retained while capabilities are still loading so lazy ACP providers do not
- * forget it before their first session advertises modes.
+ * is an explicit user choice and clears the wire override. An absent or stale
+ * mode falls back to the strongest known mode advertised by the provider.
  */
 export function resolvePermissionMode(
   mode: string | null | undefined,
   availableModes: string[],
 ): string | null {
   if (mode === 'default') return null
-  if (mode && (availableModes.length === 0 || availableModes.includes(mode))) return mode
+  if (mode && availableModes.includes(mode)) return mode
   return preferredPermissionMode(availableModes)
 }

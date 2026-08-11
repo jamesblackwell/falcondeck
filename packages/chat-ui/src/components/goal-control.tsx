@@ -1,6 +1,6 @@
 import * as Popover from '@radix-ui/react-popover'
 import { Pause, Play, Target, X } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 
 import type { AgentProvider, ThreadGoal } from '@falcondeck/client-core'
 import { Button, Input, Textarea, cn } from '@falcondeck/ui'
@@ -20,41 +20,38 @@ function formatTokens(tokens: number) {
   return String(tokens)
 }
 
-export type GoalControlProps = {
+export type GoalPanelProps = {
   goal: ThreadGoal | null
   provider: AgentProvider
-  disabled?: boolean
+  /** Called once an action lands, so a host popover/menu can close itself. */
+  onDone?: () => void
   onSetGoal: (objective: string, tokenBudget: number | null) => Promise<void> | void
   onClearGoal: () => Promise<void> | void
   onSetGoalStatus?: (status: 'active' | 'paused') => Promise<void> | void
 }
 
+export type GoalControlProps = Omit<GoalPanelProps, 'onDone'> & {
+  disabled?: boolean
+}
+
 /**
- * Header control for the thread goal: shows the active objective and its
- * status, and hosts the set/clear flow. Token budgets and pause/resume are
- * Codex-only; Claude goals ride the `/goal` slash command.
+ * The goal surface itself: the active objective with its status and
+ * pause/clear actions, or the set-a-goal form. Rendered inside whatever menu
+ * or popover the host provides — the composer's plus menu on desktop, a header
+ * popover elsewhere.
  */
-export function GoalControl({
+export function GoalPanel({
   goal,
   provider,
-  disabled = false,
+  onDone,
   onSetGoal,
   onClearGoal,
   onSetGoalStatus,
-}: GoalControlProps) {
-  const [open, setOpen] = useState(false)
+}: GoalPanelProps) {
   const [objective, setObjective] = useState('')
   const [budget, setBudget] = useState('')
   const [isPending, setIsPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    if (!open) {
-      setObjective('')
-      setBudget('')
-      setError(null)
-    }
-  }, [open])
 
   const supportsBudget = provider === 'codex'
   const statusLabel = goal ? GOAL_STATUS_LABELS[goal.status] ?? goal.status : null
@@ -64,7 +61,7 @@ export function GoalControl({
     setError(null)
     try {
       await action()
-      setOpen(false)
+      onDone?.()
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Goal update failed')
     } finally {
@@ -73,30 +70,7 @@ export function GoalControl({
   }
 
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
-      <Popover.Trigger asChild>
-        <Button
-          type="button"
-          variant={goal ? 'secondary' : 'ghost'}
-          size="sm"
-          disabled={disabled}
-          className={cn('gap-1.5', !goal && 'text-fg-muted')}
-          aria-label={goal ? `Goal: ${goal.objective}` : 'Set a goal'}
-        >
-          <Target className="h-4 w-4" aria-hidden />
-          {goal ? (
-            <span className="max-w-40 truncate text-[length:var(--fd-text-sm)]">
-              {goal.objective}
-            </span>
-          ) : null}
-        </Button>
-      </Popover.Trigger>
-      <Popover.Portal>
-        <Popover.Content
-          align="end"
-          sideOffset={8}
-          className="z-50 w-80 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 p-4 shadow-[var(--fd-shadow-lg)]"
-        >
+    <>
           {goal ? (
             <div className="space-y-3">
               <div className="flex items-start justify-between gap-2">
@@ -216,6 +190,45 @@ export function GoalControl({
               </div>
             </form>
           )}
+    </>
+  )
+}
+
+/**
+ * Popover wrapper around {@link GoalPanel} for hosts that surface the goal as
+ * its own control (mobile, remote web) rather than as a plus-menu entry.
+ */
+export function GoalControl({ disabled = false, ...panelProps }: GoalControlProps) {
+  const [open, setOpen] = useState(false)
+  const { goal } = panelProps
+
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <Button
+          type="button"
+          variant={goal ? 'secondary' : 'ghost'}
+          size="sm"
+          disabled={disabled}
+          className={cn('gap-1.5', !goal && 'text-fg-muted')}
+          aria-label={goal ? `Goal: ${goal.objective}` : 'Set a goal'}
+        >
+          <Target className="h-4 w-4" aria-hidden />
+          {goal ? (
+            <span className="max-w-40 truncate text-[length:var(--fd-text-sm)]">
+              {goal.objective}
+            </span>
+          ) : null}
+        </Button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          align="end"
+          sideOffset={8}
+          className="z-50 w-80 rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-1 p-4 shadow-[var(--fd-shadow-lg)]"
+        >
+          {/* Remount per open so a half-typed objective doesn't linger. */}
+          {open ? <GoalPanel key="goal-panel" {...panelProps} onDone={() => setOpen(false)} /> : null}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>

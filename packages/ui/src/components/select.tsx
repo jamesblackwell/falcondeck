@@ -45,8 +45,11 @@ SelectTrigger.displayName = SelectPrimitive.Trigger.displayName
 
 export const SelectContent = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
->(({ className, children, position = 'popper', sideOffset = 6, collisionPadding = 8, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content> & {
+    /** Raises the default list height, for option rows that carry a second line. */
+    viewportClassName?: string
+  }
+>(({ className, children, position = 'popper', sideOffset = 6, collisionPadding = 8, viewportClassName, ...props }, ref) => (
   <SelectPrimitive.Portal>
     <SelectPrimitive.Content
       ref={ref}
@@ -64,7 +67,12 @@ export const SelectContent = React.forwardRef<
           every wheel tick, which flickers on trackpads — same reason there are
           no ScrollUp/DownButtons: they mount into the flow the moment the list
           can scroll, shoving every row down a step. */}
-      <SelectPrimitive.Viewport className="max-h-[min(18rem,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] p-1.5">
+      <SelectPrimitive.Viewport
+        className={cn(
+          'max-h-[min(18rem,var(--radix-select-content-available-height))] min-w-[var(--radix-select-trigger-width)] p-1.5',
+          viewportClassName,
+        )}
+      >
         {children}
       </SelectPrimitive.Viewport>
     </SelectPrimitive.Content>
@@ -74,17 +82,31 @@ SelectContent.displayName = SelectPrimitive.Content.displayName
 
 export const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
->(({ className, children, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item> & {
+    /** Icon or swatch rendered before the label. Kept outside ItemText so the
+        trigger's SelectValue still resolves to plain text. */
+    leading?: React.ReactNode
+    /** Second line under the label. Also outside ItemText, for the same reason. */
+    description?: React.ReactNode
+  }
+>(({ className, children, leading, description, ...props }, ref) => (
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      'relative flex cursor-default select-none items-center rounded-[var(--fd-radius-md)] py-1.5 pl-3 pr-8 text-[length:var(--fd-text-sm)] text-fg-secondary outline-none transition-colors focus:bg-surface-3 focus:text-fg-primary',
+      'relative flex cursor-default select-none items-center gap-2.5 rounded-[var(--fd-radius-md)] py-1.5 pl-3 pr-8 text-[length:var(--fd-text-sm)] text-fg-secondary outline-none transition-colors focus:bg-surface-3 focus:text-fg-primary',
       className,
     )}
     {...props}
   >
-    <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+    {leading}
+    <span className="min-w-0 flex-1">
+      <SelectPrimitive.ItemText>{children}</SelectPrimitive.ItemText>
+      {description ? (
+        <span className="mt-0.5 block text-[length:var(--fd-text-2xs)] leading-snug text-fg-muted">
+          {description}
+        </span>
+      ) : null}
+    </span>
     <SelectPrimitive.ItemIndicator className="absolute right-3 inline-flex items-center">
       <Check className="h-3.5 w-3.5 text-accent" />
     </SelectPrimitive.ItemIndicator>

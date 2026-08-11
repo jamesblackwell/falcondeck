@@ -1,11 +1,20 @@
 import { AlertTriangle, ArrowLeft, ArrowRight, HelpCircle, Lock } from 'lucide-react'
 import { memo, useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 
-import type { InteractiveRequest, InteractiveResponsePayload } from '@falcondeck/client-core'
+import {
+  interactiveRequestEvidencePresentation,
+  interactiveApprovalDecisions,
+  type InteractiveRequest,
+  type InteractiveResponsePayload,
+} from '@falcondeck/client-core'
 import { Badge, Button, Input } from '@falcondeck/ui'
+
+import { isComposingKeyboardEvent } from '../lib/keyboard'
+import { CodeBlock } from './code-block'
 
 export type InteractiveRequestCardProps = {
   request: InteractiveRequest
+  pendingCount?: number
   resolved?: boolean
   onRespond?: (response: InteractiveResponsePayload) => void | Promise<void>
 }
@@ -23,6 +32,7 @@ function mergeQuestionAnswers(
 
 export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   request,
+  pendingCount = 1,
   resolved = false,
   onRespond,
 }: InteractiveRequestCardProps) {
@@ -31,6 +41,8 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const evidence = interactiveRequestEvidencePresentation(request)
+  const approvalDecisions = interactiveApprovalDecisions(request)
 
   const canRespond = !!onRespond && !resolved
   const questionAnswers = useMemo(
@@ -104,6 +116,13 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   function handleAdvance() {
     if (!currentQuestion || !currentQuestionAnswered) return
     if (isLastQuestion) {
+      if (!allQuestionsAnswered) {
+        const firstUnansweredIndex = request.questions.findIndex(
+          (question) => (questionAnswers[question.id] ?? []).length === 0,
+        )
+        if (firstUnansweredIndex !== -1) setCurrentQuestionIndex(firstUnansweredIndex)
+        return
+      }
       void submit({
         kind: 'question',
         answers: questionAnswers,
@@ -114,6 +133,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   }
 
   function handleQuestionInputKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (isComposingKeyboardEvent(event)) return
     if (event.key !== 'Enter') return
     event.preventDefault()
     if (currentQuestionAnswered && !isSubmitting) {
@@ -135,14 +155,24 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
             <Badge variant={resolved ? 'success' : request.kind === 'approval' ? 'warning' : 'info'}>
               {resolved ? 'Resolved' : request.kind === 'approval' ? 'Approval required' : 'Response required'}
             </Badge>
+            {!resolved && pendingCount > 1 ? (
+              <span className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                1 of {pendingCount}
+              </span>
+            ) : null}
           </div>
-          {request.detail ? (
-            <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-secondary">{request.detail}</p>
+          {evidence.detail ? (
+            <p className="mt-1 whitespace-pre-wrap text-[length:var(--fd-text-xs)] text-fg-secondary">{evidence.detail}</p>
           ) : null}
-          {request.command ? (
-            <pre className="mt-2 overflow-x-auto rounded-[var(--fd-radius-md)] bg-surface-1 px-2.5 py-1.5 font-mono text-[length:var(--fd-text-xs)] text-fg-secondary">
-              {request.command}
-            </pre>
+          {evidence.command ? (
+            <div className="mt-2">
+              <CodeBlock code={evidence.command} language="command" previewLines={4} />
+            </div>
+          ) : null}
+          {evidence.path ? (
+            <p className="mt-1 break-all font-mono text-[length:var(--fd-text-xs)] text-fg-tertiary">
+              {evidence.path}
+            </p>
           ) : null}
 
           {request.kind === 'question' && currentQuestion ? (
@@ -170,13 +200,19 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                 {currentQuestion.question}
               </p>
               {currentQuestion.options?.length ? (
-                <div className="mt-3 grid gap-2">
+                <div
+                  role="radiogroup"
+                  aria-labelledby={`fd-question-${currentQuestion.id}`}
+                  className="mt-3 grid gap-2"
+                >
                   {currentQuestion.options.map((option) => {
                     const isSelected = (selectedOptions[currentQuestion.id] ?? null) === option.label
                     return (
                       <button
                         key={option.label}
                         type="button"
+                        role="radio"
+                        aria-checked={isSelected}
                         disabled={!canRespond || isSubmitting}
                         onClick={() => {
                           setSelectedOptions((current) => ({
@@ -206,6 +242,8 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
               <div className="mt-3">
                 <Input
                   type={currentQuestion.is_secret ? 'password' : 'text'}
+                  autoComplete="off"
+                  spellCheck={!currentQuestion.is_secret}
                   aria-labelledby={`fd-question-${currentQuestion.id}`}
                   value={customAnswers[currentQuestion.id] ?? ''}
                   disabled={!canRespond || isSubmitting}
@@ -217,38 +255,48 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                 />
               </div>
             </div>
+          ) : request.kind === 'question' ? (
+            <p role="alert" className="mt-3 text-[length:var(--fd-text-xs)] text-danger">
+              This provider did not supply a question to answer.
+            </p>
           ) : null}
 
-          {canRespond ? (
+          {canRespond && (request.kind === 'approval' || currentQuestion) ? (
             <div className="mt-3 flex flex-wrap gap-2">
               {request.kind === 'approval' ? (
                 <>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="secondary"
-                    disabled={isSubmitting}
-                    onClick={() => void submit({ kind: 'approval', decision: 'deny' })}
-                  >
-                    Deny
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={isSubmitting}
-                    onClick={() => void submit({ kind: 'approval', decision: 'allow' })}
-                  >
-                    Allow
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    disabled={isSubmitting}
-                    onClick={() => void submit({ kind: 'approval', decision: 'always_allow' })}
-                  >
-                    Always
-                  </Button>
+                  {approvalDecisions.includes('deny') ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={isSubmitting}
+                      onClick={() => void submit({ kind: 'approval', decision: 'deny' })}
+                    >
+                      Deny
+                    </Button>
+                  ) : null}
+                  {approvalDecisions.includes('allow') ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={isSubmitting}
+                      onClick={() => void submit({ kind: 'approval', decision: 'allow' })}
+                    >
+                      Allow
+                    </Button>
+                  ) : null}
+                  {approvalDecisions.includes('always_allow') ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      disabled={isSubmitting}
+                      onClick={() => void submit({ kind: 'approval', decision: 'always_allow' })}
+                    >
+                      Always allow
+                    </Button>
+                  ) : null}
                 </>
               ) : (
                 <>
@@ -290,6 +338,11 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                 </>
               )}
             </div>
+          ) : null}
+          {request.kind === 'approval' && approvalDecisions.length === 0 ? (
+            <p role="alert" className="mt-3 text-[length:var(--fd-text-xs)] text-danger">
+              This provider did not supply an approval decision.
+            </p>
           ) : null}
           {submitError ? (
             <p role="alert" className="mt-2 text-[length:var(--fd-text-xs)] text-danger">

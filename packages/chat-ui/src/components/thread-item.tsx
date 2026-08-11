@@ -1,9 +1,9 @@
 import * as React from 'react'
 import { memo, useMemo } from 'react'
-import { Archive, GitBranch, LoaderCircle, Pin } from 'lucide-react'
+import { Archive, Pin, Split } from 'lucide-react'
 
 import { deriveThreadAttentionPresentation, type ThreadSummary } from '@falcondeck/client-core'
-import { Badge, cn } from '@falcondeck/ui'
+import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 
 export type ThreadItemArchiveHandler = (workspaceId: string, threadId: string) => Promise<void> | void
 
@@ -72,7 +72,7 @@ export const ThreadItem = memo(
         >
           <span className="flex h-4 w-4 shrink-0 items-center justify-center">
             {attention.showSpinner ? (
-              <LoaderCircle className="h-3.5 w-3.5 animate-spin text-accent" />
+              <ActivityDiamond />
             ) : attention.level === 'error' ? (
               <span className="h-2.5 w-2.5 rounded-full bg-danger" />
             ) : attention.level === 'awaiting_response' ? (
@@ -85,12 +85,15 @@ export const ThreadItem = memo(
             {thread.title}
           </span>
           {thread.variant ? (
+            // The same Split icon the composer uses for "Isolated copy", so
+            // the sidebar marker reads as that choice rather than git detail.
             <span
-              title={`Runs in an isolated copy on ${thread.variant.branch}`}
-              className="flex shrink-0 items-center gap-0.5 text-[length:var(--fd-text-xs)] text-fg-muted"
+              role="img"
+              aria-label="Isolated copy"
+              title={`Isolated copy — changes land on branch ${thread.variant.branch}, not in your project folder`}
+              className="flex shrink-0 items-center text-fg-muted"
             >
-              <GitBranch aria-hidden="true" className="h-3 w-3" />
-              {thread.variant.slug}
+              <Split aria-hidden="true" className="h-3 w-3" />
             </span>
           ) : null}
           {thread.is_pinned ? (

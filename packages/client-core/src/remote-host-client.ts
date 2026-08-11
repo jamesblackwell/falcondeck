@@ -25,9 +25,15 @@ import {
   type BoxKeyPair,
   type SessionCryptoState,
 } from './crypto'
-import { normalizeEventEnvelope } from './normalization'
+import {
+  parseDaemonEvents as parseRemoteDaemonEvents,
+  REMOTE_EVENT_BATCH_FEATURE,
+} from './remote-events'
+import { encryptedDaemonEventEnvelope, isLiveRealtimeEvent } from './realtime-audio'
 import {
   REMOTE_SESSION_STORAGE_VERSION,
+  relayBacklogWouldOverflow,
+  relayReconnectDelayMs,
   type PersistedRemoteSession,
 } from './remote-session'
 import type {
@@ -73,19 +79,6 @@ export function encryptedRpcErrorMessage(payload: unknown) {
     if (typeof message === 'string') return message
   }
   return 'Remote action failed'
-}
-
-function parseDaemonEvent(payload: unknown): EventEnvelope | null {
-  if (
-    typeof payload === 'object' &&
-    payload !== null &&
-    'kind' in payload &&
-    'event' in payload &&
-    (payload as { kind?: string }).kind === 'daemon-event'
-  ) {
-    return normalizeEventEnvelope((payload as { event: EventEnvelope }).event)
-  }
-  return null
 }
 
 function relayHttpBase(relayUrl: string) {
@@ -169,10 +162,10 @@ export type RemoteHostClientCallbacks = {
   onPresence?: (presence: MachinePresence | null) => void
   // Ordered, decrypted daemon events. The caller applies them to its
   // snapshot/thread state (see applySnapshotEvent and friends).
-  onEvents?: (events: EventEnvelope[]) => void
+  onEvents?: (events: EventEnvelope[]) => void | Promise<void>
   // Relay history was truncated (or the parked buffer overflowed): derived
   // state is no longer trustworthy and must be rebuilt from snapshot.current.
-  onHistoryTruncated?: () => void
+  onHistoryTruncated?: () => Promise<void>
   // Session credentials changed (data key installed, cursor advanced) —
   // persist the new value.
   onSessionChanged?: (session: PersistedRemoteSession) => void
@@ -201,8 +194,11 @@ export class RemoteHostClient {
   private parkedEncryptedUpdates: RelayUpdate[] = []
   private evictedWhileParked = false
   private pendingTruncationNextSeq: number | null = null
+  private snapshotRecoveryRequired = false
+  private snapshotRecoveryPromise: Promise<void> | null = null
   private flushInProgress = false
   private rpcCounter = 0
+  private ephemeralChain: Promise<void> = Promise.resolve()
   private cursor = 0
   private readonly pendingRpc = new Map<
     string,
@@ -363,6 +359,13 @@ export class RemoteHostClient {
             this.reconnectAttempt = 0
           }, RELAY_BACKOFF_RESET_MS)
           this.setStatus(this.sessionCrypto ? 'encrypted' : 'connected')
+          this.send({
+            type: 'ephemeral',
+            body: {
+              kind: 'client-capabilities',
+              features: [REMOTE_EVENT_BATCH_FEATURE],
+            },
+          })
           this.send({ type: 'sync', after_seq: this.cursor })
           this.startBootstrapRecovery()
         }
@@ -397,7 +400,11 @@ export class RemoteHostClient {
   }
 
   private scheduleReconnect() {
+    // Invalidate any decrypt/flush work that is still awaiting an async
+    // boundary on the connection that just failed.
+    this.generation += 1
     this.clearTimers()
+    this.socket?.close()
     this.socket = null
     if (!this.running) return
     this.setStatus('disconnected')
@@ -406,14 +413,50 @@ export class RemoteHostClient {
     this.parkedEncryptedUpdates = []
     this.evictedWhileParked = false
     this.pendingTruncationNextSeq = null
+    this.snapshotRecoveryRequired = false
+    this.snapshotRecoveryPromise = null
     this.pendingUpdates = []
-    const base = Math.min(1000 * 2 ** this.reconnectAttempt, 10_000)
+    const delay = relayReconnectDelayMs(this.reconnectAttempt)
     this.reconnectAttempt += 1
-    const delay = Math.round(base * (0.8 + Math.random() * 0.4))
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null
       if (this.running) this.connect()
     }, delay)
+  }
+
+  private requestSnapshotRecovery() {
+    this.snapshotRecoveryRequired = true
+    if (!this.callbacks.onHistoryTruncated) return
+    // A keyless client must consume the plaintext session-bootstrap before
+    // snapshot.current can be called over the encrypted RPC channel.
+    if (!this.sessionCrypto) return
+    const previous = this.snapshotRecoveryPromise ?? Promise.resolve()
+    this.snapshotRecoveryPromise = previous.then(() => this.callbacks.onHistoryTruncated!())
+  }
+
+  private async waitForSnapshotRecovery() {
+    while (this.snapshotRecoveryPromise) {
+      const recovery = this.snapshotRecoveryPromise
+      try {
+        await recovery
+      } catch (error) {
+        this.callbacks.onError?.(
+          error instanceof Error ? error.message : 'Failed to recover remote snapshot',
+        )
+        this.scheduleReconnect()
+        return false
+      }
+      if (this.snapshotRecoveryPromise === recovery) {
+        this.snapshotRecoveryPromise = null
+        this.snapshotRecoveryRequired = false
+      }
+    }
+    if (this.snapshotRecoveryRequired) {
+      this.callbacks.onError?.('Remote history was truncated but snapshot recovery is unavailable')
+      this.scheduleReconnect()
+      return false
+    }
+    return true
   }
 
   private abandonInvalidSession(message: string) {
@@ -449,6 +492,11 @@ export class RemoteHostClient {
       case 'pong':
         break
       case 'sync':
+        if (relayBacklogWouldOverflow(this.pendingUpdates.length, payload.updates.length)) {
+          this.callbacks.onError?.('Remote event backlog exceeded the safe limit')
+          this.scheduleReconnect()
+          return
+        }
         if (payload.history_truncated) {
           // Updates were lost server-side; derived state must be rebuilt.
           // The cursor is NOT advanced here: this sync's updates have not
@@ -458,12 +506,17 @@ export class RemoteHostClient {
             this.pendingTruncationNextSeq ?? 0,
             payload.next_seq,
           )
-          this.callbacks.onHistoryTruncated?.()
+          this.requestSnapshotRecovery()
         }
         this.pendingUpdates.push(...payload.updates)
         void this.flushUpdates()
         break
       case 'update':
+        if (relayBacklogWouldOverflow(this.pendingUpdates.length, 1)) {
+          this.callbacks.onError?.('Remote event backlog exceeded the safe limit')
+          this.scheduleReconnect()
+          return
+        }
         this.pendingUpdates.push(payload.update)
         void this.flushUpdates()
         break
@@ -472,8 +525,20 @@ export class RemoteHostClient {
         break
       case 'action-requested':
       case 'action-updated':
-      case 'ephemeral':
       case 'rpc-request':
+        break
+      case 'ephemeral':
+        {
+          const generation = this.generation
+        this.ephemeralChain = this.ephemeralChain
+          .then(() => this.handleEncryptedEphemeral(payload.body, generation))
+          .catch((error: unknown) => {
+            if (generation !== this.generation || !this.running) return
+            this.callbacks.onError?.(
+              error instanceof Error ? error.message : 'Failed to decrypt live daemon event',
+            )
+          })
+        }
         break
       case 'rpc-result':
         void this.resolveRpc(payload.request_id, payload.ok, payload.result ?? null, payload.error ?? null)
@@ -485,6 +550,25 @@ export class RemoteHostClient {
         }
         break
     }
+  }
+
+  private async handleEncryptedEphemeral(body: unknown, expectedGeneration: number) {
+    const envelope = encryptedDaemonEventEnvelope(body)
+    const crypto = this.sessionCrypto
+    if (
+      !envelope ||
+      !crypto ||
+      !this.running ||
+      expectedGeneration !== this.generation
+    ) return
+    const events = parseRemoteDaemonEvents(await decryptJson(crypto.dataKey, envelope))
+    if (
+      !this.running ||
+      expectedGeneration !== this.generation ||
+      crypto !== this.sessionCrypto
+    ) return
+    const liveEvents = events.filter(isLiveRealtimeEvent)
+    if (liveEvents.length > 0) this.callbacks.onEvents?.(liveEvents)
   }
 
   private async resolveRpc(
@@ -522,12 +606,20 @@ export class RemoteHostClient {
 
   private async flushUpdates() {
     if (this.flushInProgress) return
+    const flushGeneration = this.generation
     this.flushInProgress = true
     try {
       while (this.pendingUpdates.length > 0) {
+        if (flushGeneration !== this.generation || !this.running) return
+        if (
+          !(this.snapshotRecoveryRequired && !this.sessionCrypto) &&
+          !(await this.waitForSnapshotRecovery())
+        ) return
         const batch = this.pendingUpdates.splice(0)
         const daemonEvents: EventEnvelope[] = []
         let cursorChanged = false
+        let nextCursor = this.cursor
+        let deferredBootstrapSeq: number | null = null
 
         // The cursor may only advance for updates that were actually
         // consumed; otherwise a parked or failed update can never be replayed
@@ -535,8 +627,8 @@ export class RemoteHostClient {
         // them.
         const advanceCursor = (seq: number) => {
           if (this.parkedEncryptedUpdates.length > 0) return
-          if (seq > this.cursor) {
-            this.cursor = seq
+          if (seq > nextCursor) {
+            nextCursor = seq
             cursorChanged = true
           }
         }
@@ -569,18 +661,26 @@ export class RemoteHostClient {
               })
               this.sessionCrypto = bootstrapSessionCrypto(this.keyPair, update.body.material)
               this.setStatus('encrypted')
+              if (this.snapshotRecoveryRequired && !this.snapshotRecoveryPromise) {
+                this.requestSnapshotRecovery()
+              }
               if (this.parkedEncryptedUpdates.length > 0) {
                 batch.splice(index + 1, 0, ...this.parkedEncryptedUpdates)
                 this.parkedEncryptedUpdates = []
+                // Keep the cursor before the parked updates until the
+                // inserted replay window has been consumed.
+                deferredBootstrapSeq = update.seq
               }
               if (this.evictedWhileParked) {
                 // Updates were evicted while parked waiting for this key, so
                 // the drained window has a silent gap; derived state must be
                 // rebuilt from a fresh snapshot.
                 this.evictedWhileParked = false
-                this.callbacks.onHistoryTruncated?.()
+                this.requestSnapshotRecovery()
               }
-              advanceCursor(update.seq)
+              if (deferredBootstrapSeq === null) {
+                advanceCursor(update.seq)
+              }
               this.persistSession({
                 pairingId: update.body.material.pairing_id,
                 daemonPublicKey: update.body.material.daemon_public_key,
@@ -611,6 +711,15 @@ export class RemoteHostClient {
             continue
           }
 
+          // Preserve forward compatibility with durable relay body types
+          // introduced after this client. Unknown non-encrypted bodies are
+          // safely ignorable; trying to decrypt an absent envelope would
+          // stall the cursor forever on every reconnect.
+          if (update.body.t !== 'encrypted') {
+            advanceCursor(update.seq)
+            continue
+          }
+
           const crypto = this.sessionCrypto
           if (!crypto) {
             if (this.parkedEncryptedUpdates.length >= MAX_PENDING_ENCRYPTED_UPDATES) {
@@ -624,6 +733,7 @@ export class RemoteHostClient {
           let decrypted: unknown
           try {
             decrypted = await decryptJson(crypto.dataKey, update.body.envelope)
+            if (flushGeneration !== this.generation || !this.running) return
           } catch (error) {
             // Decryption failed: the cursor is not advanced for this update.
             // If nothing later in the batch decrypts either, a later sync
@@ -636,16 +746,36 @@ export class RemoteHostClient {
             continue
           }
 
+          if (flushGeneration !== this.generation || !this.running) return
           advanceCursor(update.seq)
-          const event = parseDaemonEvent(decrypted)
-          if (event) daemonEvents.push(event)
+          daemonEvents.push(...parseRemoteDaemonEvents(decrypted))
         }
 
-        if (cursorChanged) {
-          this.persistSession({})
+        if (deferredBootstrapSeq !== null) {
+          advanceCursor(deferredBootstrapSeq)
         }
+
+        if (flushGeneration !== this.generation || !this.running) return
         if (daemonEvents.length > 0) {
-          this.callbacks.onEvents?.(daemonEvents)
+          try {
+            if (!(await this.waitForSnapshotRecovery())) return
+            await this.callbacks.onEvents?.(daemonEvents)
+          } catch (error) {
+            // The cursor is intentionally still at its last acknowledged
+            // value here. Reconnect from it so an event that the host failed
+            // to apply is replayed instead of being skipped.
+            this.callbacks.onError?.(
+              error instanceof Error
+                ? error.message
+                : 'Failed to apply remote daemon events',
+            )
+            this.scheduleReconnect()
+            return
+          }
+        }
+        if (cursorChanged) {
+          this.cursor = nextCursor
+          this.persistSession({})
         }
       }
 
@@ -653,7 +783,15 @@ export class RemoteHostClient {
       // session aged out), so the per-update cursor advance above never runs;
       // adopt the truncation point here once nothing is parked, otherwise the
       // cursor stays stuck and every reconnect replays the truncation.
-      if (this.pendingTruncationNextSeq !== null && this.parkedEncryptedUpdates.length === 0) {
+      if (flushGeneration !== this.generation || !this.running) return
+      if (this.snapshotRecoveryRequired && this.sessionCrypto) {
+        if (!(await this.waitForSnapshotRecovery())) return
+      }
+      if (
+        !this.snapshotRecoveryRequired &&
+        this.pendingTruncationNextSeq !== null &&
+        this.parkedEncryptedUpdates.length === 0
+      ) {
         const truncationSeq = Math.max(this.cursor, this.pendingTruncationNextSeq - 1, 0)
         this.pendingTruncationNextSeq = null
         if (truncationSeq !== this.cursor) {
@@ -663,7 +801,7 @@ export class RemoteHostClient {
       }
     } finally {
       this.flushInProgress = false
-      if (this.pendingUpdates.length > 0) {
+      if (flushGeneration === this.generation && this.running && this.pendingUpdates.length > 0) {
         void this.flushUpdates()
       }
     }

@@ -23,12 +23,18 @@ export function deriveThreadAttentionPresentation(
   const pendingApprovalCount =
     thread.attention.pending_approval_count ||
     interactiveRequests.filter(
-      (request) => request.thread_id === thread.id && request.kind === 'approval',
+      (request) =>
+        request.workspace_id === thread.workspace_id &&
+        request.thread_id === thread.id &&
+        request.kind === 'approval',
     ).length
   const pendingQuestionCount =
     thread.attention.pending_question_count ||
     interactiveRequests.filter(
-      (request) => request.thread_id === thread.id && request.kind === 'question',
+      (request) =>
+        request.workspace_id === thread.workspace_id &&
+        request.thread_id === thread.id &&
+        request.kind === 'question',
     ).length
 
   const badgeLabel =

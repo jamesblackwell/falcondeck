@@ -7,22 +7,24 @@ import {
   MessageSquare,
   Monitor,
   Moon,
-  Palette,
   Search,
   Settings,
   SquarePen,
   Sun,
 } from 'lucide-react'
 
-import type { ProjectGroup } from '@falcondeck/client-core'
+import { compareThreads, type ProjectGroup } from '@falcondeck/client-core'
 import {
   Kbd,
   PALETTE_OPTIONS,
+  PaletteSwatch,
   cn,
+  resolveTheme,
   updateAppearance,
   useAppearance,
 } from '@falcondeck/ui'
 
+import { isComposingKeyboardEvent } from '../lib/keyboard'
 
 type PaletteItem = {
   id: string
@@ -119,6 +121,8 @@ export const CommandPalette = memo(function CommandPalette({
     if (!open) return []
     const result: PaletteItem[] = []
 
+    // Priority first (awaiting response, errors, running, unread), then recency —
+    // same ordering as the sidebar so jump-to surfaces threads that need you.
     const threads = groups
       .flatMap((group) =>
         group.threads
@@ -129,7 +133,7 @@ export const CommandPalette = memo(function CommandPalette({
             projectLabel: group.workspace.path.split('/').pop() ?? group.workspace.path,
           })),
       )
-      .sort((a, b) => Date.parse(b.thread.updated_at) - Date.parse(a.thread.updated_at))
+      .sort((a, b) => compareThreads('priority')(a.thread, b.thread))
 
     for (const { group, thread, projectLabel } of threads) {
       result.push({
@@ -185,7 +189,7 @@ export const CommandPalette = memo(function CommandPalette({
         id: `palette:${option.value}`,
         section: 'Appearance',
         label: `Color theme: ${option.label}`,
-        icon: <Palette className="h-3.5 w-3.5" />,
+        icon: <PaletteSwatch preview={option.preview[resolveTheme(appearance.theme)]} size={14} />,
         keywords: `palette color theme ${option.label}`,
         active: appearance.palette === option.value,
         run: () => updateAppearance({ palette: option.value }),
@@ -223,6 +227,7 @@ export const CommandPalette = memo(function CommandPalette({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
+      if (isComposingKeyboardEvent(event)) return
       if (event.key === 'ArrowDown') {
         event.preventDefault()
         setHighlight((current) => Math.min(current + 1, filtered.length - 1))

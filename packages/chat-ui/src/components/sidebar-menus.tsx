@@ -444,7 +444,7 @@ export const DeleteThreadDialog = memo(function DeleteThreadDialog({
 
         <p className="mt-4 text-[length:var(--fd-text-sm)] text-fg-secondary">
           {variant
-            ? `This removes the thread and deletes its isolated ${variant.kind} at ${variant.path}. Any uncommitted work there goes with it.`
+            ? `This removes the thread and deletes its isolated copy at ${variant.path}. Uncommitted work there is lost; committed work stays on branch ${variant.branch}.`
             : 'This removes the thread from FalconDeck. Archiving keeps it out of the way without deleting it.'}
         </p>
         {error ? (

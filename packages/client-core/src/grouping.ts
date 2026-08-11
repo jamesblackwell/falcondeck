@@ -69,6 +69,7 @@ export function compareThreads(mode: ThreadSortMode) {
 export function buildProjectGroups(
   workspaces: WorkspaceSummary[],
   threads: ThreadSummary[],
+  workspaceOrder: readonly string[] = [],
 ): ProjectGroup[] {
   const threadsByWorkspace = new Map<string, ThreadSummary[]>()
   for (const thread of threads) {
@@ -78,10 +79,24 @@ export function buildProjectGroups(
     threadsByWorkspace.set(thread.workspace_id, bucket)
   }
 
-  // Paths sort with localeCompare: their order is user-visible in sidebars
-  // and this is not a hot path.
+  const workspaceRanks = new Map<string, number>()
+  workspaceOrder.forEach((workspaceId, index) => {
+    if (!workspaceRanks.has(workspaceId)) workspaceRanks.set(workspaceId, index)
+  })
+
+  // Paths are the fallback for workspaces that have not been placed yet. This
+  // keeps newly connected projects predictable without disturbing saved ones.
   return [...workspaces]
-    .sort((left, right) => left.path.localeCompare(right.path))
+    .sort((left, right) => {
+      const leftRank = workspaceRanks.get(left.id)
+      const rightRank = workspaceRanks.get(right.id)
+      if (leftRank != null || rightRank != null) {
+        if (leftRank == null) return 1
+        if (rightRank == null) return -1
+        if (leftRank !== rightRank) return leftRank - rightRank
+      }
+      return left.path.localeCompare(right.path)
+    })
     .map((workspace) => ({
       workspace,
       threads: (threadsByWorkspace.get(workspace.id) ?? []).sort(compareByRecency),
@@ -92,4 +107,3 @@ export function projectLabel(path: string) {
   const parts = path.split('/').filter(Boolean)
   return parts[parts.length - 1] ?? path
 }
-
