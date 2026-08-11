@@ -234,7 +234,11 @@ export const PromptInput = memo(function PromptInput({
     null,
   );
   const optionMenuOpenedByShortcutRef = useRef(false);
-  const handledMenuRequestKeyRef = useRef(0);
+  // Seeded from the mount-time request: the composer remounts on
+  // conversation/provider switches while the request state lives above it, so
+  // a stale key must read as already-handled or every remount would replay
+  // the last shortcut and pop its menu open.
+  const handledMenuRequestKeyRef = useRef(menuRequest?.key ?? 0);
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null);
   const [activeSkillIndex, setActiveSkillIndex] = useState(0);
   const [draggedFileKind, setDraggedFileKind] = useState<

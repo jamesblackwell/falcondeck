@@ -957,17 +957,22 @@ describe("PromptInput", () => {
       },
     ];
 
+    // A request already present at mount is stale App state surviving a
+    // composer remount (project/provider switch) and must not replay, so a
+    // shortcut is simulated as a key bump on an already-mounted composer.
+    function renderWithMenuShortcut(
+      props: Partial<React.ComponentProps<typeof PromptInput>> = {},
+      menu: "model" | "permissions" = "model",
+    ) {
+      const base = { ...promptInputProps, models, ...props };
+      const view = render(<PromptInput {...base} />);
+      view.rerender(<PromptInput {...base} menuRequest={{ key: 1, menu }} />);
+      return view;
+    }
+
     it("navigates and selects with the keyboard while the caret stays in the draft", async () => {
       const onModelChange = vi.fn();
-      render(
-        <PromptInput
-          {...promptInputProps}
-          models={models}
-          selectedModelId="opus"
-          onModelChange={onModelChange}
-          menuRequest={{ key: 1, menu: "model" }}
-        />,
-      );
+      renderWithMenuShortcut({ selectedModelId: "opus", onModelChange });
 
       // Highlight starts on the selected model, not the top of the list.
       const opus = await screen.findByRole("menuitemradio", { name: "opus 5" });
@@ -999,14 +1004,7 @@ describe("PromptInput", () => {
     });
 
     it("wraps around the ends of the row list", async () => {
-      render(
-        <PromptInput
-          {...promptInputProps}
-          models={models}
-          selectedModelId="haiku"
-          menuRequest={{ key: 1, menu: "model" }}
-        />,
-      );
+      renderWithMenuShortcut({ selectedModelId: "haiku" });
       await screen.findByRole("menuitemradio", { name: "haiku 4.5" });
 
       // Up from the first model lands on the last row — the effort group.
@@ -1021,16 +1019,11 @@ describe("PromptInput", () => {
 
     it("adjusts reasoning effort with left and right on the effort row", async () => {
       const onEffortChange = vi.fn();
-      render(
-        <PromptInput
-          {...promptInputProps}
-          models={models}
-          selectedModelId="opus"
-          selectedEffort="medium"
-          onEffortChange={onEffortChange}
-          menuRequest={{ key: 1, menu: "model" }}
-        />,
-      );
+      renderWithMenuShortcut({
+        selectedModelId: "opus",
+        selectedEffort: "medium",
+        onEffortChange,
+      });
       await screen.findByRole("menuitemradio", { name: "opus 5" });
 
       // Arrow down off the models (opus → sonnet → effort), then step within it.
@@ -1054,14 +1047,7 @@ describe("PromptInput", () => {
     });
 
     it("returns focus to the draft after closing a shortcut-opened menu", async () => {
-      render(
-        <PromptInput
-          {...promptInputProps}
-          models={models}
-          selectedModelId="opus"
-          menuRequest={{ key: 1, menu: "model" }}
-        />,
-      );
+      renderWithMenuShortcut({ selectedModelId: "opus" });
 
       await screen.findByRole("menuitemradio", { name: "opus 5" });
       fireEvent.keyDown(document, { key: "Escape" });
@@ -1074,13 +1060,9 @@ describe("PromptInput", () => {
 
     it("drops requests for unavailable menus without blocking later ones", async () => {
       // permission_modes is empty, so this request must be a no-op…
-      const { rerender } = render(
-        <PromptInput
-          {...promptInputProps}
-          models={models}
-          selectedModelId="opus"
-          menuRequest={{ key: 1, menu: "permissions" }}
-        />,
+      const { rerender } = renderWithMenuShortcut(
+        { selectedModelId: "opus" },
+        "permissions",
       );
       expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument();
 
@@ -1096,6 +1078,21 @@ describe("PromptInput", () => {
       expect(
         await screen.findByRole("menuitemradio", { name: "opus 5" }),
       ).toBeInTheDocument();
+    });
+
+    it("ignores a request that predates the mount", async () => {
+      // The composer remounts on project/provider switches while the request
+      // state lives in App — a leftover key must not reopen the menu.
+      render(
+        <PromptInput
+          {...promptInputProps}
+          models={models}
+          selectedModelId="opus"
+          menuRequest={{ key: 1, menu: "model" }}
+        />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument();
     });
   });
 });
