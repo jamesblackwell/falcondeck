@@ -286,8 +286,7 @@ pub(super) async fn ingest_notification(
         }
         "turn/started" => {
             if let Some(thread_id) = extract_thread_id(&params) {
-                let turn_id = extract_string(&params, &["turnId", "turn_id"])
-                    .unwrap_or_else(|| "turn".to_string());
+                let turn_id = extract_turn_id(&params).unwrap_or_else(|| "turn".to_string());
                 let updated_at = notification_timestamp(method, &params).unwrap_or_else(Utc::now);
                 let associated_user_message = {
                     let mut workspaces = app.inner.workspaces.lock().await;
@@ -1789,6 +1788,17 @@ pub(super) async fn ingest_notification(
     }
 
     Ok(())
+}
+
+/// Codex app-server v2 nests the active turn under `turn`, while older
+/// builds exposed its id directly on the notification params. Steering must
+/// retain the provider's real id because app-server validates it through
+/// `expectedTurnId`.
+fn extract_turn_id(params: &Value) -> Option<String> {
+    params
+        .get("turn")
+        .and_then(|turn| extract_string(turn, &["id", "turnId", "turn_id"]))
+        .or_else(|| extract_string(params, &["turnId", "turn_id"]))
 }
 
 pub(super) fn parse_realtime_audio_chunk(params: &Value) -> Option<RealtimeAudioChunk> {

@@ -107,6 +107,42 @@ fn parses_codex_thread_token_usage_without_losing_cached_or_reasoning_counts() {
 }
 
 #[tokio::test]
+async fn retains_nested_codex_turn_id_for_steering() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "turn/started",
+        json!({
+            "threadId": "thread-1",
+            "turn": { "id": "019ff062-2a41-78c1-a21c-5ac71ff08574" }
+        }),
+    )
+    .await
+    .unwrap();
+
+    let summary = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_eq!(
+        summary.latest_turn_id.as_deref(),
+        Some("019ff062-2a41-78c1-a21c-5ac71ff08574")
+    );
+}
+
+#[tokio::test]
 async fn retains_streamed_realtime_assistant_and_final_user_transcripts() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(

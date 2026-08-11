@@ -1,5 +1,5 @@
 import * as Popover from '@radix-ui/react-popover'
-import { Clock, CornerUpRight, MoreHorizontal, Paperclip, Pencil, Trash2 } from 'lucide-react'
+import { Clock, MoreHorizontal, Paperclip, Pencil, Trash2 } from 'lucide-react'
 import { useState, type ReactNode } from 'react'
 
 import type { QueuedTurnSummary } from '@falcondeck/client-core'
@@ -153,6 +153,16 @@ function QueuedTurnChip({
         </span>
       ) : null}
       <span className="text-[length:var(--fd-text-xs)] text-fg-muted">queued</span>
+      <button
+        type="button"
+        disabled={!canSteer}
+        aria-disabled={!canSteer || undefined}
+        title={canSteer ? undefined : steerDisabledReason}
+        onClick={onSteer}
+        className="fd-focus-inset rounded-[var(--fd-radius-sm)] px-1 py-0.5 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:text-fg-primary disabled:cursor-not-allowed disabled:text-fg-muted disabled:opacity-60"
+      >
+        Steer
+      </button>
       <Popover.Root open={open} onOpenChange={setOpen}>
         <Popover.Trigger
           type="button"
@@ -184,16 +194,6 @@ function QueuedTurnChip({
               />
             ) : null}
             <QueuedMenuItem
-              icon={<CornerUpRight className={iconClassName} />}
-              label="Steer instead"
-              disabled={!canSteer}
-              title={canSteer ? undefined : steerDisabledReason}
-              onClick={() => {
-                setOpen(false)
-                onSteer()
-              }}
-            />
-            <QueuedMenuItem
               icon={<Trash2 className="h-3.5 w-3.5" />}
               label="Remove"
               destructive
@@ -212,8 +212,8 @@ function QueuedTurnChip({
 /**
  * Chips for turns queued behind the active one. Rendered between the
  * conversation and the composer so the user sees exactly what will fire when
- * the agent finishes, with an overflow menu to edit it in place, send one now
- * ("Steer instead"), or drop it.
+ * the agent finishes, with a direct action to steer it into the active turn
+ * and an overflow menu to edit or remove it.
  *
  * `canSteer` is the active provider's `supports_steering`, passed in rather
  * than derived here — this component never learns which providers can steer.
