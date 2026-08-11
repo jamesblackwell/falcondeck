@@ -935,6 +935,13 @@ describe("PromptInput", () => {
   describe("composer menu shortcuts", () => {
     const models = [
       {
+        id: "haiku",
+        label: "Haiku 4.5",
+        is_default: false,
+        default_reasoning_effort: null,
+        supported_reasoning_efforts: [],
+      },
+      {
         id: "opus",
         label: "Opus 5",
         is_default: true,
@@ -950,7 +957,7 @@ describe("PromptInput", () => {
       },
     ];
 
-    it("opens the model menu on request, starts on the current model, and moves with arrows", async () => {
+    it("navigates and selects with the keyboard while the caret stays in the draft", async () => {
       const onModelChange = vi.fn();
       render(
         <PromptInput
@@ -962,20 +969,88 @@ describe("PromptInput", () => {
         />,
       );
 
-      const selected = await screen.findByRole("menuitemradio", {
-        name: "opus 5",
-      });
-      await waitFor(() => expect(selected).toHaveFocus());
+      // Highlight starts on the selected model, not the top of the list.
+      const opus = await screen.findByRole("menuitemradio", { name: "opus 5" });
+      expect(screen.getByRole("menu")).toHaveAttribute(
+        "aria-activedescendant",
+        opus.id,
+      );
 
-      fireEvent.keyDown(selected, { key: "ArrowDown" });
-      const next = screen.getByRole("menuitemradio", { name: "sonnet 5" });
-      expect(next).toHaveFocus();
+      // The regression this covers: the packaged app leaves the caret in the
+      // textarea when the shortcut opens the menu, so arrows are dispatched
+      // there — not inside the popover — and must still drive the menu.
+      fireEvent.keyDown(
+        screen.getByRole("textbox", { name: "Message composer" }),
+        { key: "ArrowDown" },
+      );
+      const sonnet = screen.getByRole("menuitemradio", { name: "sonnet 5" });
+      await waitFor(() =>
+        expect(screen.getByRole("menu")).toHaveAttribute(
+          "aria-activedescendant",
+          sonnet.id,
+        ),
+      );
 
-      fireEvent.click(next);
+      fireEvent.keyDown(document, { key: "Enter" });
       expect(onModelChange).toHaveBeenCalledWith("sonnet");
       await waitFor(() =>
         expect(screen.queryByRole("menuitemradio")).not.toBeInTheDocument(),
       );
+    });
+
+    it("wraps around the ends of the row list", async () => {
+      render(
+        <PromptInput
+          {...promptInputProps}
+          models={models}
+          selectedModelId="haiku"
+          menuRequest={{ key: 1, menu: "model" }}
+        />,
+      );
+      await screen.findByRole("menuitemradio", { name: "haiku 4.5" });
+
+      // Up from the first model lands on the last row — the effort group.
+      fireEvent.keyDown(document, { key: "ArrowUp" });
+      await waitFor(() =>
+        expect(screen.getByRole("menu")).toHaveAttribute(
+          "aria-activedescendant",
+          screen.getByRole("radiogroup", { name: "Reasoning effort" }).id,
+        ),
+      );
+    });
+
+    it("adjusts reasoning effort with left and right on the effort row", async () => {
+      const onEffortChange = vi.fn();
+      render(
+        <PromptInput
+          {...promptInputProps}
+          models={models}
+          selectedModelId="opus"
+          selectedEffort="medium"
+          onEffortChange={onEffortChange}
+          menuRequest={{ key: 1, menu: "model" }}
+        />,
+      );
+      await screen.findByRole("menuitemradio", { name: "opus 5" });
+
+      // Arrow down off the models (opus → sonnet → effort), then step within it.
+      fireEvent.keyDown(document, { key: "ArrowDown" });
+      fireEvent.keyDown(document, { key: "ArrowDown" });
+      await waitFor(() =>
+        expect(screen.getByRole("menu")).toHaveAttribute(
+          "aria-activedescendant",
+          screen.getByRole("radiogroup", { name: "Reasoning effort" }).id,
+        ),
+      );
+
+      fireEvent.keyDown(document, { key: "ArrowRight" });
+      expect(onEffortChange).toHaveBeenCalledWith("high");
+
+      // Left/Right only steer effort while that row is highlighted.
+      onEffortChange.mockClear();
+      fireEvent.keyDown(document, { key: "ArrowDown" });
+      fireEvent.keyDown(document, { key: "ArrowRight" });
+      expect(onEffortChange).not.toHaveBeenCalled();
     });
 
     it("returns focus to the draft after closing a shortcut-opened menu", async () => {
@@ -988,10 +1063,8 @@ describe("PromptInput", () => {
         />,
       );
 
-      const selected = await screen.findByRole("menuitemradio", {
-        name: "opus 5",
-      });
-      fireEvent.keyDown(selected, { key: "Escape" });
+      await screen.findByRole("menuitemradio", { name: "opus 5" });
+      fireEvent.keyDown(document, { key: "Escape" });
       await waitFor(() =>
         expect(
           screen.getByRole("textbox", { name: "Message composer" }),

@@ -1,9 +1,4 @@
-import {
-  useMemo,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { Check, ChevronDown, Zap } from "lucide-react";
 
@@ -171,6 +166,7 @@ export function ModelMenu({
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const open = controlledOpen ?? uncontrolledOpen;
   const contentRef = useRef<HTMLDivElement>(null);
+  const menuId = useId();
   const [modelQuery, setModelQuery] = useState("");
   const modelSearchable = models.length >= SEARCHABLE_OPTION_THRESHOLD;
   const visibleModels = useMemo(
@@ -200,30 +196,116 @@ export function ModelMenu({
   };
 
   /**
-   * Roving Up/Down focus across every enabled row (models, effort chips, fast
-   * toggle). Radix Popover has no menu semantics of its own, so without this
-   * the popover is Tab-only.
+   * Navigable rows: every model, then the effort row and the fast toggle as
+   * single stops. Keyboard state is explicit rather than DOM focus — the
+   * popover can open without focus landing inside it (a shortcut fires while
+   * the composer keeps the caret), and roving focus alone leaves no visible
+   * highlight to navigate by.
    */
-  const handleContentKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-    const items = Array.from(
-      contentRef.current?.querySelectorAll<HTMLButtonElement>(
-        "button:not(:disabled)",
-      ) ?? [],
-    );
-    if (items.length === 0) return;
-    event.preventDefault();
-    const currentIndex = items.indexOf(
-      document.activeElement as HTMLButtonElement,
-    );
-    const nextIndex =
-      event.key === "ArrowDown"
-        ? (currentIndex + 1) % items.length
-        : currentIndex <= 0
-          ? items.length - 1
-          : currentIndex - 1;
-    items[nextIndex]?.focus();
+  const rows = useMemo(() => {
+    const list: { kind: "model" | "effort" | "fast"; id: string }[] =
+      visibleModels.map((model) => ({ kind: "model" as const, id: model.id }));
+    if (reasoningOptions.length > 0)
+      list.push({ kind: "effort", id: "effort" });
+    if (showFastRow && onFastActiveChange && fastTier !== null)
+      list.push({ kind: "fast", id: "fast" });
+    return list;
+  }, [
+    fastTier,
+    onFastActiveChange,
+    reasoningOptions.length,
+    showFastRow,
+    visibleModels,
+  ]);
+
+  const [activeIndex, setActiveIndex] = useState(0);
+  const activeRow = rows[Math.min(activeIndex, rows.length - 1)] ?? null;
+
+  /** Pointer hover and keyboard share one highlight, so they can't disagree. */
+  const activateRow = (rowId: string) => {
+    const index = rows.findIndex((row) => row.id === rowId);
+    if (index >= 0) setActiveIndex(index);
   };
+
+  // Open on the current model so the first Arrow keypress moves from where the
+  // user already is; filtering restarts at the top of the new result set.
+  useEffect(() => {
+    if (!open) return;
+    const selectedIndex = rows.findIndex(
+      (row) => row.kind === "model" && row.id === selectedModel?.id,
+    );
+    setActiveIndex(selectedIndex >= 0 ? selectedIndex : 0);
+    // Only on open: re-running as rows change would fight arrow navigation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [modelQuery]);
+
+  // Keep the highlighted row scrolled into view during long model lists.
+  useEffect(() => {
+    if (!open || !activeRow) return;
+    const row = contentRef.current?.querySelector(
+      `[data-row-id="${CSS.escape(activeRow.id)}"]`,
+    );
+    row?.scrollIntoView?.({ block: "nearest" });
+  }, [activeRow, open]);
+
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || rows.length === 0) return;
+      const inTextField = event.target instanceof HTMLInputElement;
+      const moveActive = (offset: 1 | -1) => {
+        event.preventDefault();
+        setActiveIndex((current) => {
+          const index = Math.min(current, rows.length - 1);
+          return (index + offset + rows.length) % rows.length;
+        });
+      };
+      if (event.key === "ArrowDown") return moveActive(1);
+      if (event.key === "ArrowUp") return moveActive(-1);
+      if (
+        (event.key === "ArrowRight" || event.key === "ArrowLeft") &&
+        activeRow?.kind === "effort" &&
+        !inTextField
+      ) {
+        // Left/Right walks the effort chips in place, matching how the row reads.
+        event.preventDefault();
+        const offset = event.key === "ArrowRight" ? 1 : -1;
+        const current = reasoningOptions.indexOf(selectedEffort ?? "");
+        const next =
+          reasoningOptions[
+            Math.min(
+              Math.max((current < 0 ? 0 : current) + offset, 0),
+              reasoningOptions.length - 1,
+            )
+          ];
+        if (next && next !== selectedEffort) onEffortChange(next);
+        return;
+      }
+      if (event.key === "Enter" || (event.key === " " && !inTextField)) {
+        if (!activeRow) return;
+        event.preventDefault();
+        if (activeRow.kind === "model") {
+          onModelChange(activeRow.id);
+          handleOpenChange(false);
+        } else if (activeRow.kind === "fast") {
+          onFastActiveChange?.(!isFastOn);
+        }
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        handleOpenChange(false);
+      }
+    }
+    // Capture phase: the composer's own key handling must not swallow these
+    // while the caret is still in the textarea.
+    document.addEventListener("keydown", handleKeyDown, true);
+    return () => document.removeEventListener("keydown", handleKeyDown, true);
+  });
 
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
@@ -258,21 +340,8 @@ export function ModelMenu({
           ref={contentRef}
           align="start"
           sideOffset={6}
-          onKeyDown={handleContentKeyDown}
           onCloseAutoFocus={onCloseAutoFocus}
-          onOpenAutoFocus={(event) => {
-            // With a filter field the caret belongs there (its own autoFocus);
-            // otherwise land on the current model so Up/Down starts in place.
-            if (modelSearchable) return;
-            const selected = contentRef.current?.querySelector<HTMLElement>(
-              '[role="menuitemradio"][aria-checked="true"]',
-            );
-            if (selected) {
-              event.preventDefault();
-              selected.focus();
-            }
-          }}
-          className="z-50 w-64 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+          className="z-50 w-80 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
         >
           <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
             Model
@@ -286,20 +355,33 @@ export function ModelMenu({
               autoFocus
             />
           ) : null}
-          <div role="menu" className="max-h-56 overflow-y-auto">
+          <div
+            role="menu"
+            aria-activedescendant={
+              activeRow ? `${menuId}-${activeRow.id}` : undefined
+            }
+            className="max-h-56 overflow-y-auto"
+          >
             {visibleModels.map((model) => {
               const isSelected = model.id === selectedModel?.id;
+              const isActive = activeRow?.id === model.id;
               return (
                 <button
                   key={model.id}
+                  id={`${menuId}-${model.id}`}
+                  data-row-id={model.id}
                   type="button"
                   role="menuitemradio"
                   aria-checked={isSelected}
+                  onMouseEnter={() => activateRow(model.id)}
                   onClick={() => {
                     onModelChange(model.id);
                     handleOpenChange(false);
                   }}
-                  className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-surface-2"
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors",
+                    isActive && "bg-surface-2",
+                  )}
                 >
                   <span className="min-w-0 flex-1 truncate">
                     {formatModelLabel(model.label)}
@@ -322,13 +404,20 @@ export function ModelMenu({
 
           {reasoningOptions.length > 0 ? (
             <>
-              <p className="border-t border-border-subtle px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
+              <p className="mt-1 border-t border-border-subtle px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
                 Reasoning effort
               </p>
               <div
+                id={`${menuId}-effort`}
+                data-row-id="effort"
                 role="radiogroup"
                 aria-label="Reasoning effort"
-                className="flex items-center gap-1 px-1.5 pb-1.5"
+                onMouseEnter={() => activateRow("effort")}
+                className={cn(
+                  "flex items-center gap-1 rounded-[var(--fd-radius-md)] p-1",
+                  activeRow?.kind === "effort" &&
+                    "ring-1 ring-inset ring-border-emphasis",
+                )}
               >
                 {reasoningOptions.map((option) => {
                   const isSelected = option === selectedEffort;
@@ -340,7 +429,7 @@ export function ModelMenu({
                       aria-checked={isSelected}
                       onClick={() => onEffortChange(option)}
                       className={cn(
-                        "fd-focus h-6 flex-1 rounded-[var(--fd-radius-md)] text-[length:var(--fd-text-xs)] transition-colors",
+                        "fd-focus h-6 flex-1 rounded-[var(--fd-radius-md)] px-2 text-[length:var(--fd-text-xs)] transition-colors",
                         isSelected
                           ? "bg-surface-3 text-fg-primary"
                           : "text-fg-muted hover:bg-surface-2 hover:text-fg-secondary",
@@ -357,6 +446,8 @@ export function ModelMenu({
           {showFastRow && onFastActiveChange ? (
             <div className="border-t border-border-subtle pt-1">
               <button
+                id={`${menuId}-fast`}
+                data-row-id="fast"
                 type="button"
                 role="menuitemcheckbox"
                 aria-checked={isFastOn}
@@ -367,8 +458,12 @@ export function ModelMenu({
                     ? "This model has one speed"
                     : fastTier.description || `Run on the ${fastTier.name} tier`
                 }
+                onMouseEnter={() => activateRow("fast")}
                 onClick={() => onFastActiveChange(!isFastOn)}
-                className="flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50"
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors disabled:cursor-not-allowed disabled:opacity-50",
+                  activeRow?.kind === "fast" && "bg-surface-2",
+                )}
               >
                 {/* The bolt fills in when the tier is on, so state survives without color. */}
                 <Zap
