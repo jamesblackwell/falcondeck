@@ -14,7 +14,8 @@ extra security tier.
 - Stores an encrypted, sequence-numbered update log per session so clients
   can disconnect and replay what they missed.
 - Forwards encrypted RPC calls from clients to the owning daemon.
-- Sends push notifications for attention events (optional, APNs config).
+- Sends push notifications for attention events through Expo Push Service
+  (optional; see the configuration below).
 - Serves `/dist/` — prebuilt daemon binaries used by the desktop app's
   one-click server provisioning.
 
@@ -81,5 +82,13 @@ this) with `FALCONDECK_STATE_PATH` and `FALCONDECK_SECRET_FILE` set under
   fresh snapshot, not re-pair).
 - Multiple FalconDeck installs can share one relay; sessions are isolated by
   pairing-derived keys.
-- Push notifications require APNs credentials; without them everything else
-  works, you just don't get iOS pushes.
+- Push delivery is disabled by setting `FALCONDECK_RELAY_EXPO_PUSH_URL` to an
+  empty value. By default the relay sends through Expo, which handles the
+  APNs/FCM provider credentials associated with the mobile app. Set
+  `FALCONDECK_RELAY_EXPO_ACCESS_TOKEN` if the Expo project requires
+  authenticated Push API requests. Receipt polling can be pointed at a test
+  endpoint with `FALCONDECK_RELAY_EXPO_RECEIPTS_URL`.
+- The mobile app must be installed as a physical development, ad-hoc, or
+  TestFlight build with the `expo-notifications` native configuration. Expo Go
+  and simulators are not a valid end-to-end push test. See
+  `docs/NOTIFICATIONS.md` for the release checklist.

@@ -122,7 +122,17 @@ The probe immediately exposed meaningful compatibility differences:
 |---|---:|---:|---:|---|
 | Pi | yes | 6 | 9 / 9 updates | `available_commands_update`, `session_info_update`, `user_message_chunk` |
 | OpenCode | yes | 0 | 10 / 10 updates | `available_commands_update`, `usage_update`, `user_message_chunk` |
-| Grok | no | 0 | 10 / 11 updates | `available_commands_update`, `user_message_chunk` |
+| Grok | no\* | 0 | 10 / 11 updates | `available_commands_update`, `user_message_chunk` |
+
+\*Grok's `initialize` still advertises `promptCapabilities.image: false`, but live
+probes show it accepts ACP image content blocks and performs vision. FalconDeck
+therefore treats Grok as image-capable despite the advertisement.
+
+Some Grok 1.0.0 builds support mid-turn steering through the vendor
+`x.ai/interject` ACP extension while others return `Method not found` for the
+same call. FalconDeck probes the live runtime and advertises steering only when
+that method exists. It stays disabled for generic ACP providers because the
+base ACP protocol has no equivalent method.
 
 Grok also reported local configuration, plugin-collision, and unavailable MCP
 server warnings on stderr while still completing the ACP checks. That validates

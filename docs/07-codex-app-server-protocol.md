@@ -79,193 +79,268 @@ Client                           App Server
 ## Client Requests (Client -> Server)
 
 ### Thread Management
-| Method | Params | Description |
-|---|---|---|
-| `thread/start` | `{ cwd, model?, approvalPolicy?, sandbox?, experimentalRawEvents?, persistExtendedHistory? }` | Create new thread |
-| `thread/resume` | `{ threadId }` | Resume existing thread |
-| `thread/fork` | `{ threadId }` | Fork thread into new branch |
-| `thread/list` | `{ cursor?, limit?, sortKey?, sourceKinds? }` | List threads (paginated) |
-| `thread/loaded/list` | `{ ... }` | List currently loaded threads |
-| `thread/read` | `{ ... }` | Read thread content |
-| `thread/archive` | `{ threadId }` | Archive thread |
-| `thread/unarchive` | `{ ... }` | Unarchive thread |
-| `thread/name/set` | `{ threadId, name }` | Rename thread |
-| `thread/compact/start` | `{ threadId }` | Start context compaction |
-| `thread/rollback` | `{ ... }` | Rollback thread to earlier state |
+
+| Method                 | Params                                                                                        | Description                                                                        |
+| ---------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `thread/start`         | `{ cwd, model?, approvalPolicy?, sandbox?, experimentalRawEvents?, persistExtendedHistory? }` | Create new thread                                                                  |
+| `thread/resume`        | `{ threadId }`                                                                                | Resume existing thread                                                             |
+| `thread/fork`          | `{ threadId, lastTurnId? }`                                                                   | Fork a thread, optionally retaining history through one completed turn (inclusive) |
+| `thread/list`          | `{ cursor?, limit?, sortKey?, sourceKinds? }`                                                 | List threads (paginated)                                                           |
+| `thread/loaded/list`   | `{ ... }`                                                                                     | List currently loaded threads                                                      |
+| `thread/read`          | `{ ... }`                                                                                     | Read thread content                                                                |
+| `thread/archive`       | `{ threadId }`                                                                                | Archive thread                                                                     |
+| `thread/unarchive`     | `{ ... }`                                                                                     | Unarchive thread                                                                   |
+| `thread/name/set`      | `{ threadId, name }`                                                                          | Rename thread                                                                      |
+| `thread/compact/start` | `{ threadId }`                                                                                | Start context compaction                                                           |
+| `thread/rollback`      | `{ ... }`                                                                                     | Rollback thread to earlier state                                                   |
 
 ### Turn Management
-| Method | Params | Description |
-|---|---|---|
-| `turn/start` | `{ threadId, input, cwd?, model?, effort?, approvalPolicy?, sandboxPolicy?, collaborationMode?, serviceTier? }` | Start agent turn with user message |
-| `turn/steer` | `{ threadId, expectedTurnId, input }` | Steer running turn with additional input |
-| `turn/interrupt` | `{ threadId, turnId }` | Interrupt running turn |
+
+| Method           | Params                                                                                                          | Description                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| `turn/start`     | `{ threadId, input, cwd?, model?, effort?, approvalPolicy?, sandboxPolicy?, collaborationMode?, serviceTier? }` | Start agent turn with user message       |
+| `turn/steer`     | `{ threadId, expectedTurnId, input }`                                                                           | Steer running turn with additional input |
+| `turn/interrupt` | `{ threadId, turnId }`                                                                                          | Interrupt running turn                   |
 
 ### Review
-| Method | Params | Description |
-|---|---|---|
+
+| Method         | Params                            | Description       |
+| -------------- | --------------------------------- | ----------------- |
 | `review/start` | `{ threadId, target, delivery? }` | Start code review |
 
 ### Models
-| Method | Params | Description |
-|---|---|---|
+
+| Method       | Params               | Description           |
+| ------------ | -------------------- | --------------------- |
 | `model/list` | `{ includeHidden? }` | List available models |
 
 ### Account/Auth
-| Method | Params | Description |
-|---|---|---|
-| `account/read` | `{ refreshToken? }` | Read account info and auth status |
-| `account/login/start` | `{ type: "chatgpt" }` | Start OAuth login flow |
-| `account/login/cancel` | `{ ... }` | Cancel login |
-| `account/logout` | | Logout |
-| `account/rateLimits/read` | | Read current rate limits |
+
+| Method                    | Params                | Description                       |
+| ------------------------- | --------------------- | --------------------------------- |
+| `account/read`            | `{ refreshToken? }`   | Read account info and auth status |
+| `account/login/start`     | `{ type: "chatgpt" }` | Start OAuth login flow            |
+| `account/login/cancel`    | `{ ... }`             | Cancel login                      |
+| `account/logout`          |                       | Logout                            |
+| `account/rateLimits/read` |                       | Read current rate limits          |
 
 ### Config
-| Method | Params | Description |
-|---|---|---|
-| `config/read` | `{ ... }` | Read configuration |
-| `config/value/write` | `{ ... }` | Write single config value |
-| `config/batchWrite` | `{ ... }` | Write multiple config values |
-| `configRequirements/read` | | Read config requirements |
-| `config/mcpServer/reload` | | Reload MCP server config |
+
+| Method                    | Params    | Description                  |
+| ------------------------- | --------- | ---------------------------- |
+| `config/read`             | `{ ... }` | Read configuration           |
+| `config/value/write`      | `{ ... }` | Write single config value    |
+| `config/batchWrite`       | `{ ... }` | Write multiple config values |
+| `configRequirements/read` |           | Read config requirements     |
+| `config/mcpServer/reload` |           | Reload MCP server config     |
 
 ### Skills
-| Method | Params | Description |
-|---|---|---|
-| `skills/list` | `{ cursor?, limit? }` | List available skills |
-| `skills/remote/list` | `{ ... }` | List remote skills |
-| `skills/remote/export` | `{ ... }` | Export skills |
-| `skills/config/write` | `{ ... }` | Write skills config |
+
+| Method                 | Params                | Description           |
+| ---------------------- | --------------------- | --------------------- |
+| `skills/list`          | `{ cursor?, limit? }` | List available skills |
+| `skills/remote/list`   | `{ ... }`             | List remote skills    |
+| `skills/remote/export` | `{ ... }`             | Export skills         |
+| `skills/config/write`  | `{ ... }`             | Write skills config   |
 
 ### Apps
-| Method | Params | Description |
-|---|---|---|
+
+| Method     | Params                | Description         |
+| ---------- | --------------------- | ------------------- |
 | `app/list` | `{ cursor?, limit? }` | List available apps |
 
 ### MCP
-| Method | Params | Description |
-|---|---|---|
-| `mcpServerStatus/list` | `{ cursor?, limit? }` | List MCP server status |
-| `mcpServer/oauth/login` | `{ ... }` | Start MCP server OAuth login |
+
+| Method                  | Params                | Description                  |
+| ----------------------- | --------------------- | ---------------------------- |
+| `mcpServerStatus/list`  | `{ cursor?, limit? }` | List MCP server status       |
+| `mcpServer/oauth/login` | `{ ... }`             | Start MCP server OAuth login |
 
 ### Collaboration
-| Method | Params | Description |
-|---|---|---|
-| `collaborationMode/list` | `{}` | List collaboration modes |
+
+| Method                   | Params | Description              |
+| ------------------------ | ------ | ------------------------ |
+| `collaborationMode/list` | `{}`   | List collaboration modes |
 
 ### Experimental Features
-| Method | Params | Description |
-|---|---|---|
+
+| Method                     | Params                | Description                |
+| -------------------------- | --------------------- | -------------------------- |
 | `experimentalFeature/list` | `{ cursor?, limit? }` | List experimental features |
 
 ### Utility
-| Method | Params | Description |
-|---|---|---|
-| `command/exec` | `{ ... }` | Execute shell command |
-| `feedback/upload` | `{ ... }` | Upload feedback |
-| `fuzzyFileSearch` | `{ ... }` | Fuzzy file search in workspace |
-| `externalAgentConfig/detect` | `{ ... }` | Detect external agent configs |
-| `externalAgentConfig/import` | `{ ... }` | Import external agent config |
+
+| Method                       | Params    | Description                    |
+| ---------------------------- | --------- | ------------------------------ |
+| `command/exec`               | `{ ... }` | Execute shell command          |
+| `feedback/upload`            | `{ ... }` | Upload feedback                |
+| `fuzzyFileSearch`            | `{ ... }` | Fuzzy file search in workspace |
+| `externalAgentConfig/detect` | `{ ... }` | Detect external agent configs  |
+| `externalAgentConfig/import` | `{ ... }` | Import external agent config   |
 
 ### Legacy Methods (v1 API, still available)
-| Method | Description |
-|---|---|
-| `newConversation` | Create conversation (v1) |
-| `resumeConversation` | Resume conversation (v1) |
-| `forkConversation` | Fork conversation (v1) |
-| `archiveConversation` | Archive conversation (v1) |
-| `listConversations` | List conversations (v1) |
-| `getConversationSummary` | Get conversation summary (v1) |
-| `sendUserMessage` | Send user message (v1) |
-| `sendUserTurn` | Send user turn (v1) |
-| `interruptConversation` | Interrupt conversation (v1) |
-| `addConversationListener` | Add listener (v1) |
-| `removeConversationListener` | Remove listener (v1) |
-| `gitDiffToRemote` | Git diff to remote |
-| `loginApiKey` | Login with API key |
-| `loginChatGpt` | Login via ChatGPT |
-| `getAuthStatus` | Get auth status (v1) |
-| `getUserSavedConfig` | Get user config (v1) |
-| `setDefaultModel` | Set default model (v1) |
-| `getUserAgent` | Get user agent string |
-| `userInfo` | Get user info |
-| `execOneOffCommand` | Execute one-off command |
+
+| Method                       | Description                   |
+| ---------------------------- | ----------------------------- |
+| `newConversation`            | Create conversation (v1)      |
+| `resumeConversation`         | Resume conversation (v1)      |
+| `forkConversation`           | Fork conversation (v1)        |
+| `archiveConversation`        | Archive conversation (v1)     |
+| `listConversations`          | List conversations (v1)       |
+| `getConversationSummary`     | Get conversation summary (v1) |
+| `sendUserMessage`            | Send user message (v1)        |
+| `sendUserTurn`               | Send user turn (v1)           |
+| `interruptConversation`      | Interrupt conversation (v1)   |
+| `addConversationListener`    | Add listener (v1)             |
+| `removeConversationListener` | Remove listener (v1)          |
+| `gitDiffToRemote`            | Git diff to remote            |
+| `loginApiKey`                | Login with API key            |
+| `loginChatGpt`               | Login via ChatGPT             |
+| `getAuthStatus`              | Get auth status (v1)          |
+| `getUserSavedConfig`         | Get user config (v1)          |
+| `setDefaultModel`            | Set default model (v1)        |
+| `getUserAgent`               | Get user agent string         |
+| `userInfo`                   | Get user info                 |
+| `execOneOffCommand`          | Execute one-off command       |
 
 ## Server Notifications (Server -> Client)
 
 ### Thread Events
-| Method | Params Type | Description |
-|---|---|---|
-| `thread/started` | ThreadStartedNotification | Thread created/loaded |
-| `thread/status/changed` | ThreadStatusChangedNotification | Thread status changed |
-| `thread/archived` | ThreadArchivedNotification | Thread archived |
-| `thread/unarchived` | ThreadUnarchivedNotification | Thread unarchived |
-| `thread/name/updated` | ThreadNameUpdatedNotification | Thread renamed |
-| `thread/tokenUsage/updated` | ThreadTokenUsageUpdatedNotification | Token usage stats |
-| `thread/compacted` | ContextCompactedNotification | Context compaction done |
+
+| Method                      | Params Type                         | Description                                                                        |
+| --------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------- |
+| `thread/started`            | ThreadStartedNotification           | Thread created/loaded                                                              |
+| `thread/status/changed`     | ThreadStatusChangedNotification     | Thread status changed                                                              |
+| `thread/archived`           | ThreadArchivedNotification          | Thread archived                                                                    |
+| `thread/unarchived`         | ThreadUnarchivedNotification        | Thread unarchived                                                                  |
+| `thread/name/updated`       | ThreadNameUpdatedNotification       | Thread renamed                                                                     |
+| `thread/tokenUsage/updated` | ThreadTokenUsageUpdatedNotification | Retained per-thread token/context usage, emitted independently of thread summaries |
+| `thread/compacted`          | ContextCompactedNotification        | Context compaction done                                                            |
 
 ### Turn Events
-| Method | Params Type | Description |
-|---|---|---|
-| `turn/started` | TurnStartedNotification | Turn begins (includes turn.id) |
-| `turn/completed` | TurnCompletedNotification | Turn ends (includes status, error) |
-| `turn/diff/updated` | TurnDiffUpdatedNotification | Diff updated during turn |
-| `turn/plan/updated` | TurnPlanUpdatedNotification | Plan steps updated |
+
+| Method              | Params Type                 | Description                        |
+| ------------------- | --------------------------- | ---------------------------------- |
+| `turn/started`      | TurnStartedNotification     | Turn begins (includes turn.id)     |
+| `turn/completed`    | TurnCompletedNotification   | Turn ends (includes status, error) |
+| `turn/diff/updated` | TurnDiffUpdatedNotification | Diff updated during turn           |
+| `turn/plan/updated` | TurnPlanUpdatedNotification | Plan steps updated                 |
 
 ### Item Events (Tool Execution)
-| Method | Params Type | Description |
-|---|---|---|
-| `item/started` | ItemStartedNotification | Item begins (commandExecution, fileChange, mcpToolCall, webSearch, imageView) |
-| `item/completed` | ItemCompletedNotification | Item ends (includes status, exitCode) |
-| `rawResponseItem/completed` | RawResponseItemCompletedNotification | Raw response item completed |
+
+| Method                              | Params Type                                     | Description                                                                                                                           |
+| ----------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `item/started`                      | ItemStartedNotification                         | Item begins (commandExecution, fileChange, mcpToolCall, dynamicToolCall, collabAgentToolCall, subAgentActivity, webSearch, imageView) |
+| `item/completed`                    | ItemCompletedNotification                       | Item ends (includes status, exitCode)                                                                                                 |
+| `item/autoApprovalReview/started`   | ItemGuardianApprovalReviewStartedNotification   | Safety review begins for a command, patch, network, MCP, or permissions action                                                        |
+| `item/autoApprovalReview/completed` | ItemGuardianApprovalReviewCompletedNotification | Safety review ends with risk, rationale, and decision                                                                                 |
+| `rawResponseItem/completed`         | RawResponseItemCompletedNotification            | Raw response item completed                                                                                                           |
 
 ### Streaming Deltas
-| Method | Params Type | Description |
-|---|---|---|
-| `item/agentMessage/delta` | AgentMessageDeltaNotification | Streaming text from agent |
-| `item/plan/delta` | PlanDeltaNotification | Streaming plan updates |
-| `item/commandExecution/outputDelta` | CommandExecutionOutputDeltaNotification | Streaming command output |
-| `item/commandExecution/terminalInteraction` | TerminalInteractionNotification | Terminal interaction required |
-| `item/fileChange/outputDelta` | FileChangeOutputDeltaNotification | Streaming file change output |
-| `item/mcpToolCall/progress` | McpToolCallProgressNotification | MCP tool call progress |
+
+| Method                                      | Params Type                             | Description                               |
+| ------------------------------------------- | --------------------------------------- | ----------------------------------------- |
+| `item/agentMessage/delta`                   | AgentMessageDeltaNotification           | Streaming text from agent                 |
+| `item/plan/delta`                           | PlanDeltaNotification                   | Streaming plan updates                    |
+| `item/commandExecution/outputDelta`         | CommandExecutionOutputDeltaNotification | Streaming command output                  |
+| `item/commandExecution/terminalInteraction` | TerminalInteractionNotification         | Terminal interaction required             |
+| `item/fileChange/outputDelta`               | FileChangeOutputDeltaNotification       | Streaming file change output              |
+| `item/fileChange/patchUpdated`              | FileChangePatchUpdatedNotification      | Authoritative structured path/diff update |
+| `item/mcpToolCall/progress`                 | McpToolCallProgressNotification         | MCP tool call progress                    |
+
+`mcpToolCall` history/completion records preserve `server`, `tool`, `arguments`,
+`result`, `error`, `durationMs`, and `appContext`. `result.content` is an
+open-ended MCP content-block list; clients render known text/image/audio/resource
+blocks and retain unknown blocks. At the FalconDeck boundary the daemon derives
+optional `display.provider_output_summary` counts without decoding or copying
+inline media; clients use them for collapsed presentation and fall back to raw
+inspection when reading history from older daemons. `dynamicToolCall` preserves `namespace`,
+`tool`, `arguments`, ordered `contentItems`, `success`, and `durationMs`.
+`contextCompaction` is retained as its own ordered conversation item. Its
+`item/started` and `item/completed` notifications replace one stable receipt;
+turn completion settles a missing terminal notification without converting the
+operation into a generic tool call. The current provider item carries only its
+ID, so token usage remains on `thread/tokenUsage/updated`.
+
+FalconDeck treats the documented tool discriminators as an allowlist rather
+than assuming every future item is a tool. An unrecognized provider item is
+retained as one ordered `unsupported` receipt with its stable ID, observed
+content lifecycle, reason, and a payload capped at 64 KiB. Start/completion
+notifications replace the same receipt and restored history uses the same
+mapping, so future provider output cannot disappear after reconnect or be
+misrepresented as a command. Turn termination settles a still-streaming receipt
+to complete, interrupted, or error. `enteredReviewMode` and `exitedReviewMode`
+replace one structured `code_review` item by provider ID. FalconDeck retains the
+entry scope, first-observed timestamp, full Markdown findings, and observed
+lifecycle across live delivery, turn settlement, and restored history.
 
 ### Reasoning
-| Method | Params Type | Description |
-|---|---|---|
-| `item/reasoning/textDelta` | ReasoningTextDeltaNotification | Streaming reasoning text |
-| `item/reasoning/summaryTextDelta` | ReasoningSummaryTextDeltaNotification | Streaming reasoning summary |
+
+| Method                            | Params Type                           | Description                  |
+| --------------------------------- | ------------------------------------- | ---------------------------- |
+| `item/reasoning/textDelta`        | ReasoningTextDeltaNotification        | Streaming reasoning text     |
+| `item/reasoning/summaryTextDelta` | ReasoningSummaryTextDeltaNotification | Streaming reasoning summary  |
 | `item/reasoning/summaryPartAdded` | ReasoningSummaryPartAddedNotification | Reasoning summary part added |
 
+Plan deltas use the same UTF-16 replay-safe offset contract as assistant,
+reasoning, command, and MCP-progress text. A later `turn/plan/updated` payload is
+authoritative structured state. Hook start/completion notifications are retained
+as structured tool evidence. Approval auto-review notifications update one
+stable structured safety-review receipt and preserve action, risk,
+authorization, rationale, and decision metadata. `hookPrompt` fragments, targeted warnings,
+guardian warnings, model verification/reroute, and safety-buffering changes are
+retained service evidence. `terminalInteraction.stdin` is never echoed because
+it is input and may contain secrets.
+
+Workspace-level config/deprecation/MCP failures are capped retained notices in
+daemon snapshots, rather than transient events or transcript rows. Token-usage
+notifications update a separate per-thread snapshot map and unified event so
+streaming usage does not churn thread list identity.
+
+Realtime transcript notifications are projected onto ordinary stable user and
+assistant conversation items. Assistant deltas reuse the shared offset-based
+text event; final transcript payloads replace authoritatively. Error/closed
+notifications settle partial output instead of leaving it permanently busy.
+Output audio is a live-only unified lifecycle (`started`, PCM `delta`, `ended`).
+Desktop/web schedule decoded PCM16 chunks through Web Audio; iOS queues decoded
+buffers through the native React Native Audio API. The daemon sends encrypted
+audio over the relay ephemeral channel so high-rate media never enters replay,
+snapshots, or conversation persistence. Raw non-audio realtime items are
+size-bounded, labeled, inspectable cards and use the same non-replayed path.
+
 ### Account
-| Method | Params Type | Description |
-|---|---|---|
-| `account/updated` | AccountUpdatedNotification | Account info changed |
-| `account/rateLimits/updated` | AccountRateLimitsUpdatedNotification | Rate limits changed |
-| `account/login/completed` | AccountLoginCompletedNotification | Login flow completed |
+
+| Method                       | Params Type                          | Description          |
+| ---------------------------- | ------------------------------------ | -------------------- |
+| `account/updated`            | AccountUpdatedNotification           | Account info changed |
+| `account/rateLimits/updated` | AccountRateLimitsUpdatedNotification | Rate limits changed  |
+| `account/login/completed`    | AccountLoginCompletedNotification    | Login flow completed |
 
 ### Other
-| Method | Description |
-|---|---|
-| `model/rerouted` | Model was rerouted |
-| `app/list/updated` | App list changed |
-| `mcpServer/oauthLogin/completed` | MCP OAuth login done |
-| `configWarning` | Config warning |
-| `deprecationNotice` | Deprecation notice |
-| `fuzzyFileSearch/sessionUpdated` | Fuzzy search results updated |
-| `fuzzyFileSearch/sessionCompleted` | Fuzzy search completed |
-| `error` | Error notification |
+
+| Method                             | Description                  |
+| ---------------------------------- | ---------------------------- |
+| `model/rerouted`                   | Model was rerouted           |
+| `app/list/updated`                 | App list changed             |
+| `mcpServer/oauthLogin/completed`   | MCP OAuth login done         |
+| `configWarning`                    | Config warning               |
+| `deprecationNotice`                | Deprecation notice           |
+| `fuzzyFileSearch/sessionUpdated`   | Fuzzy search results updated |
+| `fuzzyFileSearch/sessionCompleted` | Fuzzy search completed       |
+| `error`                            | Error notification           |
 
 ## Server Requests (Server -> Client, requires response)
 
 These are requests the server sends TO the client, requiring a response.
 
-| Method | Params Type | Description |
-|---|---|---|
+| Method                                  | Params Type                           | Description                     |
+| --------------------------------------- | ------------------------------------- | ------------------------------- |
 | `item/commandExecution/requestApproval` | CommandExecutionRequestApprovalParams | Approve shell command execution |
-| `item/fileChange/requestApproval` | FileChangeRequestApprovalParams | Approve file modification |
-| `item/tool/requestUserInput` | ToolRequestUserInputParams | Request structured user input |
-| `skill/requestApproval` | SkillRequestApprovalParams | Approve skill execution |
-| `item/tool/call` | DynamicToolCallParams | Dynamic tool call |
-| `account/chatgptAuthTokens/refresh` | ChatgptAuthTokensRefreshParams | Refresh auth tokens |
+| `item/fileChange/requestApproval`       | FileChangeRequestApprovalParams       | Approve file modification       |
+| `item/tool/requestUserInput`            | ToolRequestUserInputParams            | Request structured user input   |
+| `skill/requestApproval`                 | SkillRequestApprovalParams            | Approve skill execution         |
+| `item/tool/call`                        | DynamicToolCallParams                 | Dynamic tool call               |
+| `account/chatgptAuthTokens/refresh`     | ChatgptAuthTokensRefreshParams        | Refresh auth tokens             |
 
 ## Approval Response Format
 
@@ -274,11 +349,18 @@ These are requests the server sends TO the client, requiring a response.
 {
   "id": <rpc_id>,
   "result": {
-    "decision": "allow" | "deny" | "always_allow",
-    "acceptSettings": { "forSession": true }
+    "decision": "accept" | "decline" | "acceptForSession"
   }
 }
 ```
+
+When `availableDecisions` is present on the request, clients expose only those
+normalized choices. `Always allow` is never shown unless the provider offers a
+persistent/session decision, and the daemon rejects unsupported decisions
+instead of silently substituting another option. Legacy requests without a
+capability set conservatively permit one-time allow or deny only. Permission
+profile requests use the same normalized UI choices but respond with the
+granted profile and `turn` or `session` scope.
 
 ## turn/start Input Format
 
@@ -313,6 +395,7 @@ These are requests the server sends TO the client, requiring a response.
 ## thread/list sourceKinds
 
 Threads have source metadata indicating where they originated:
+
 - `cli` — created from CLI
 - `vscode` — created from VS Code extension
 - `appServer` — created from app-server client
@@ -334,31 +417,32 @@ Internal sub-agent threads (e.g., memory consolidation) can be filtered from UI 
 
 ### What app-server provides that FalconDeck needs:
 
-| FalconDeck Requirement | App-server Coverage |
-|---|---|
-| Spin up sessions | `thread/start` |
-| Monitor agents | All notification events (streaming deltas, turn lifecycle) |
-| Fast thread switching | `thread/list`, `thread/resume` |
-| Code review | `review/start` |
-| Approval handling | Server-initiated `requestApproval` methods |
-| Multiple agents in same folder | `thread/start` with same `cwd` on multiple threads |
-| Session persistence | Built-in (JSONL in CODEX_HOME) |
-| Model selection | `model/list` |
-| Interrupt/cancel | `turn/interrupt` |
-| Turn steering | `turn/steer` (inject input during running turn) |
+| FalconDeck Requirement         | App-server Coverage                                        |
+| ------------------------------ | ---------------------------------------------------------- |
+| Spin up sessions               | `thread/start`                                             |
+| Monitor agents                 | All notification events (streaming deltas, turn lifecycle) |
+| Fast thread switching          | `thread/list`, `thread/resume`                             |
+| Code review                    | `review/start`                                             |
+| Approval handling              | Server-initiated `requestApproval` methods                 |
+| Multiple agents in same folder | `thread/start` with same `cwd` on multiple threads         |
+| Session persistence            | Built-in (JSONL in CODEX_HOME)                             |
+| Model selection                | `model/list`                                               |
+| Interrupt/cancel               | `turn/interrupt`                                           |
+| Turn steering                  | `turn/steer` (inject input during running turn)            |
 
 ### What FalconDeck needs beyond app-server:
 
-| Need | Solution |
-|---|---|
+| Need                         | Solution                                                                                                         |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Multiple simultaneous agents | Spawn multiple app-server processes, one per workspace (CodexMonitor pattern) OR multiple threads in one process |
-| Mobile sync | Wrap app-server events in relay protocol (Happy pattern) |
-| Claude Code support | Separate integration via Claude Agent SDK (different protocol) |
-| Unified event model | Translation layer between Codex notifications and Claude SDK events |
+| Mobile sync                  | Wrap app-server events in relay protocol (Happy pattern)                                                         |
+| Claude Code support          | Separate integration via Claude Agent SDK (different protocol)                                                   |
+| Unified event model          | Translation layer between Codex notifications and Claude SDK events                                              |
 
 ### Rust compatibility
 
 App-server communicates via stdio JSON-RPC. Rust can natively:
+
 - Spawn `codex app-server` as a subprocess via `tokio::process::Command`
 - Read/write newline-delimited JSON via `tokio::io::BufReader`
 - Correlate request/response by monotonic `id` using `HashMap<u64, oneshot::Sender>`

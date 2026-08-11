@@ -41,17 +41,37 @@ TAURI_CLI := $(ROOT)/node_modules/@tauri-apps/cli/tauri.js
 DESKTOP_NATIVE_CHECK = cd "$(DESKTOP_DIR)" && node -e "require('@tauri-apps/cli')" && node --input-type=module -e "import('rolldown').then(() => undefined, (error) => { console.error(error); process.exit(1) })"
 # The dev overlay keeps watcher-triggered relaunches from stealing focus and
 # labels the window "(dev)" so it is distinguishable from the installed app.
+# tauri.dev.conf.json sets beforeDevCommand to `vite` so we skip package.json
+# `predev` typecheck on every launch (`make typecheck` still covers that).
 TAURI_DEV = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" dev --config src-tauri/tauri.dev.conf.json
+STOP_DEV_DAEMON = cd "$(DESKTOP_DIR)" && node ./scripts/stop-dev-daemon.mjs
+RELAY_BIN := $(ROOT)/target/debug/falcondeck-relay
 # Kill anything already listening on the UI port (e.g. a stray Vite left
 # behind by an agent or background session) so dev targets always start
 # cleanly instead of failing with "Port 1420 is already in use".
+# Uses short polls instead of fixed 1s sleeps.
 FREE_UI_PORT = pids=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true); \
 	if [ -n "$$pids" ]; then \
 		echo "Freeing UI port $(UI_PORT) (killing pid(s): $$pids)"; \
 		kill $$pids 2>/dev/null || true; \
-		sleep 1; \
+		i=0; \
+		while [ $$i -lt 20 ]; do \
+			leftover=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true); \
+			[ -z "$$leftover" ] && break; \
+			sleep 0.05; \
+			i=$$((i+1)); \
+		done; \
 		leftover=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true); \
-		if [ -n "$$leftover" ]; then kill -9 $$leftover 2>/dev/null || true; sleep 1; fi; \
+		if [ -n "$$leftover" ]; then \
+			kill -9 $$leftover 2>/dev/null || true; \
+			i=0; \
+			while [ $$i -lt 20 ]; do \
+				leftover=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true); \
+				[ -z "$$leftover" ] && break; \
+				sleep 0.05; \
+				i=$$((i+1)); \
+			done; \
+		fi; \
 	fi
 # Local installs use release+incremental so small Rust edits rebuild in a few
 # seconds instead of re-optimizing the whole crate (~20s → ~3s typical).
@@ -82,7 +102,7 @@ help:
 		'Run things:' \
 		'  make dev              Start relay, remote web, and the desktop app' \
 		'  make desktop-dev      Start the Tauri desktop app (frees a stuck UI port first)' \
-		'  make desktop-dev-stop Stop the reusable desktop dev daemon' \
+		'  make desktop-dev-stop Stop the reusable desktop dev daemon (left running across make dev)' \
 		'  make mobile-dev       Open Simulator and run the FalconDeck iOS app locally' \
 		'  make mobile-dev-stop  Stop the background Expo dev server used by mobile-dev' \
 		'  make dev-mobile       Alias for make mobile-dev' \
@@ -165,29 +185,70 @@ site-prepare:
 			$(ROOT_NPM) install; \
 		fi
 
+# Reuses a healthy relay/remote-web already on the configured ports, and leaves
+# the stamp-checked desktop dev daemon running across restarts (stop explicitly
+# with `make desktop-dev-stop`). Starts sidecar services in parallel and polls
+# for readiness instead of fixed sleeps.
 dev: desktop-prepare remote-web-prepare
 	@set -e; \
-		$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true; \
 		$(FREE_UI_PORT); \
+		remote_web_pid=""; \
+		relay_pid=""; \
 		if lsof -ti tcp:$(REMOTE_WEB_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 			echo "Using existing remote web client on port $(REMOTE_WEB_PORT)"; \
-			remote_web_pid=""; \
 		else \
-			$(REMOTE_NPM) run dev -- --host 0.0.0.0 --port $(REMOTE_WEB_PORT) & \
+			echo "Starting remote web client on port $(REMOTE_WEB_PORT)"; \
+			cd "$(REMOTE_WEB_DIR)" && npm run dev -- --host 0.0.0.0 --port $(REMOTE_WEB_PORT) & \
 			remote_web_pid=$$!; \
 		fi; \
-		relay_pid=""; \
 		if lsof -ti tcp:$(RELAY_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 			echo "Using existing relay on port $(RELAY_PORT)"; \
 		else \
-			FALCONDECK_RELAY_BIND=$(RELAY_BIND_HOST):$(RELAY_PORT) $(CARGO) run -p falcondeck-relay & \
+			echo "Starting relay on $(RELAY_BIND_HOST):$(RELAY_PORT)"; \
+			( \
+				$(CARGO) build -q -p falcondeck-relay \
+				&& FALCONDECK_RELAY_BIND=$(RELAY_BIND_HOST):$(RELAY_PORT) exec "$(RELAY_BIN)" \
+			) & \
 			relay_pid=$$!; \
-			sleep 2; \
-			if ! kill -0 $$relay_pid 2>/dev/null; then \
-				wait $$relay_pid; \
+		fi; \
+		if [ -n "$$remote_web_pid" ]; then \
+			i=0; \
+			while [ $$i -lt 100 ]; do \
+				if lsof -ti tcp:$(REMOTE_WEB_PORT) -sTCP:LISTEN >/dev/null 2>&1; then break; fi; \
+				if ! kill -0 $$remote_web_pid 2>/dev/null; then \
+					echo "Remote web client failed to start"; \
+					wait $$remote_web_pid; \
+					exit 1; \
+				fi; \
+				sleep 0.05; \
+				i=$$((i+1)); \
+			done; \
+			if ! lsof -ti tcp:$(REMOTE_WEB_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+				echo "Remote web client did not open port $(REMOTE_WEB_PORT) in time"; \
+				kill $$remote_web_pid 2>/dev/null || true; \
+				exit 1; \
 			fi; \
 		fi; \
-		trap 'if [ -n "$$remote_web_pid" ]; then kill $$remote_web_pid 2>/dev/null || true; fi; if [ -n "$$relay_pid" ]; then kill $$relay_pid 2>/dev/null || true; fi; $(NPM) run tauri:dev:stop >/dev/null 2>&1 || true' EXIT INT TERM; \
+		if [ -n "$$relay_pid" ]; then \
+			i=0; \
+			# A cold Rust build can take several minutes before the relay binds. \
+			while [ $$i -lt 6000 ]; do \
+				if lsof -ti tcp:$(RELAY_PORT) -sTCP:LISTEN >/dev/null 2>&1; then break; fi; \
+				if ! kill -0 $$relay_pid 2>/dev/null; then \
+					echo "Relay failed to start"; \
+					wait $$relay_pid; \
+					exit 1; \
+				fi; \
+				sleep 0.05; \
+				i=$$((i+1)); \
+			done; \
+			if ! lsof -ti tcp:$(RELAY_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
+				echo "Relay did not open port $(RELAY_PORT) in time"; \
+				kill $$relay_pid 2>/dev/null || true; \
+				exit 1; \
+			fi; \
+		fi; \
+		trap 'if [ -n "$$remote_web_pid" ]; then kill $$remote_web_pid 2>/dev/null || true; fi; if [ -n "$$relay_pid" ]; then kill $$relay_pid 2>/dev/null || true; fi' EXIT INT TERM; \
 		$(TAURI_DEV)
 
 mobile-dev: mobile-prepare
@@ -297,13 +358,13 @@ mobile-test: mobile-prepare
 
 test-mobile: mobile-test
 
+# Leaves a healthy stamp-checked daemon running across restarts for faster loops.
 desktop-dev: desktop-prepare
-	@$(NPM) run tauri:dev:stop >/dev/null 2>&1 || true
 	@$(FREE_UI_PORT)
 	@$(TAURI_DEV)
 
 desktop-dev-stop: desktop-prepare
-	@$(NPM) run tauri:dev:stop
+	@$(STOP_DEV_DAEMON)
 
 desktop-install: desktop-brand-assets
 	@set -e; \
@@ -338,7 +399,7 @@ desktop-install: desktop-brand-assets
 		echo "Installed $(APPLICATIONS_APP)"
 
 frontend-dev: desktop-prepare
-	$(NPM) run dev
+	cd "$(DESKTOP_DIR)" && npx vite --port $(UI_PORT) --strictPort
 
 remote-web-dev: remote-web-prepare
 	$(REMOTE_NPM) run dev -- --host 0.0.0.0 --port $(REMOTE_WEB_PORT)
