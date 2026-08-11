@@ -6,8 +6,10 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    AgentProvider, ConversationItem, InteractiveRequestKind, ServiceLevel, ThreadAgentParams,
+    AgentProvider, ApprovalDecision, ContentLifecycle, ConversationItem, InteractiveRequestKind,
+    InteractiveRequestOutcome, InteractiveRequestResolution, ServiceLevel, ThreadAgentParams,
     ThreadAttention, ThreadAttentionLevel, ThreadStatus, ThreadSummary, UnifiedEvent,
+    merge_conversation_citations,
 };
 use serde_json::Value;
 use tokio::{
@@ -22,14 +24,16 @@ use super::{
     AppState, ManagedThread, ManagedWorkspace, PendingServerRequest,
     agent_helpers::{
         SUBAGENT_ACTIVITY_KEPT_STEPS, append_claude_text_delta, claude_parent_tool_use_id,
-        extract_claude_error, extract_claude_service_message, extract_claude_text_chunk,
-        extract_claude_tool_event, format_subagent_activity, is_claude_text_block_start,
-        merge_claude_assistant_text,
+        claude_stream_message_id, claude_tool_result_image_items, extract_claude_error,
+        extract_claude_service_message, extract_claude_text_chunk, extract_claude_thinking_chunk,
+        extract_claude_tool_event, format_subagent_activity, is_claude_message_start,
+        is_claude_text_block_start, merge_claude_assistant_text,
     },
     conversation_helpers::{
-        build_ai_thread_title_prompt, is_placeholder_thread_title, is_provisional_thread_title,
-        normalize_generated_thread_title, settle_running_tool_call_items,
-        should_generate_ai_thread_title, tool_display_metadata, with_renderable_attachment_previews,
+        ToolSettlement, build_ai_thread_title_prompt, is_placeholder_thread_title,
+        is_provisional_thread_title, normalize_generated_thread_title, sanitize_conversation_item,
+        settle_content_items, settle_tool_call_items, should_generate_ai_thread_title,
+        terminal_assistant_receipt, tool_display_metadata, with_renderable_attachment_previews,
     },
 };
 use crate::{
@@ -51,25 +55,89 @@ struct AiThreadTitleInput {
 }
 
 impl AppState {
-    /// Closes transient tool activity once an agent reports that its turn has
-    /// ended, even if the per-tool completion notification was lost.
-    pub(super) async fn settle_running_tool_calls(
+    /// Closes transient content, tools, and response requests once an agent
+    /// reports that its turn ended, even if an item-level terminal event was lost.
+    pub(super) async fn settle_turn_items(
         &self,
         workspace_id: &str,
         thread_id: &str,
         settled_at: chrono::DateTime<Utc>,
+        settlement: ToolSettlement,
     ) {
-        let updated = {
+        let cancelled_request_ids = {
+            let mut requests = self.inner.interactive_requests.lock().await;
+            let mut ids = Vec::new();
+            requests.retain(|(request_workspace_id, request_id), pending| {
+                let belongs_to_turn = request_workspace_id == workspace_id
+                    && pending.request.thread_id.as_deref() == Some(thread_id);
+                if belongs_to_turn {
+                    ids.push(request_id.clone());
+                }
+                !belongs_to_turn
+            });
+            ids
+        };
+        if !cancelled_request_ids.is_empty() {
+            let senders = {
+                let mut approvals = self.inner.claude_approvals.lock().await;
+                cancelled_request_ids
+                    .iter()
+                    .filter_map(|request_id| {
+                        approvals.remove(&(workspace_id.to_string(), request_id.clone()))
+                    })
+                    .collect::<Vec<_>>()
+            };
+            for sender in senders {
+                let _ = sender.send(ApprovalDecision::Deny);
+            }
+        }
+        let (updated, terminal_receipt) = {
             let mut workspaces = self.inner.workspaces.lock().await;
-            let Some(thread) = workspaces
+            if let Some(thread) = workspaces
                 .get_mut(workspace_id)
                 .and_then(|workspace| workspace.threads.get_mut(thread_id))
-            else {
-                return;
-            };
-            settle_running_tool_call_items(&mut thread.items, settled_at)
+            {
+                let mut updated = settle_tool_call_items(&mut thread.items, settled_at, settlement);
+                let content_terminal = match settlement {
+                    ToolSettlement::Completed => ContentLifecycle::Complete,
+                    ToolSettlement::Failed => ContentLifecycle::Error,
+                    ToolSettlement::Interrupted => ContentLifecycle::Interrupted,
+                };
+                updated.extend(settle_content_items(
+                    &mut thread.items,
+                    content_terminal,
+                    settled_at,
+                ));
+                let terminal_receipt = terminal_assistant_receipt(
+                    &thread.items,
+                    content_terminal,
+                    settled_at,
+                    thread.summary.latest_turn_id.as_deref(),
+                );
+                for item in &mut thread.items {
+                    if let ConversationItem::InteractiveRequest {
+                        id,
+                        resolved,
+                        resolution,
+                        ..
+                    } = item
+                        && !*resolved
+                        && cancelled_request_ids.contains(id)
+                    {
+                        *resolved = true;
+                        *resolution = Some(InteractiveRequestResolution {
+                            outcome: InteractiveRequestOutcome::Cancelled,
+                            resolved_at: settled_at,
+                        });
+                        updated.push(item.clone());
+                    }
+                }
+                (updated, terminal_receipt)
+            } else {
+                (Vec::new(), None)
+            }
         };
-        if updated.is_empty() {
+        if updated.is_empty() && terminal_receipt.is_none() && cancelled_request_ids.is_empty() {
             return;
         }
         for item in updated {
@@ -77,6 +145,22 @@ impl AppState {
                 Some(workspace_id.to_string()),
                 Some(thread_id.to_string()),
                 UnifiedEvent::ConversationItemUpdated { item },
+            );
+        }
+        if let Some(item) = terminal_receipt {
+            // Use the normal insertion path so identity indexes, unread
+            // attention, relay emission, and reconnect snapshots all agree.
+            let _ = self
+                .push_conversation_item(workspace_id, thread_id, item, true)
+                .await;
+        }
+        if !cancelled_request_ids.is_empty() {
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread_id.to_string()),
+                UnifiedEvent::Snapshot {
+                    snapshot: self.snapshot().await,
+                },
             );
         }
         let _ = self.persist_local_state().await;
@@ -435,8 +519,16 @@ impl AppState {
         stdout: Option<tokio::process::ChildStdout>,
         stderr: Option<tokio::process::ChildStderr>,
     ) {
-        let assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
+        // Assistant prose and thinking accumulate per API message, so text
+        // that follows a tool call starts a fresh conversation item below the
+        // tool card instead of merging into the pre-tool prose. Items are
+        // keyed by the stream's message id when present (matching hydration,
+        // which keys by `message.id`), with a fresh id per boundary otherwise.
+        let mut assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
+        let mut assistant_message_key: Option<String> = None;
         let mut assistant_text = String::new();
+        let mut assistant_citations = Vec::new();
+        let mut reasoning_text = String::new();
         // Set when a new text content block opens mid-turn; the next delta
         // starts a fresh paragraph rather than continuing the previous one.
         let mut assistant_block_break_pending = false;
@@ -454,7 +546,17 @@ impl AppState {
             let thread_id = thread_id.clone();
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                loop {
+                    // A read error (e.g. invalid UTF-8) must not end the loop:
+                    // an undrained pipe eventually wedges the CLI mid-turn.
+                    let line = match lines.next_line().await {
+                        Ok(Some(line)) => line,
+                        Ok(None) => break,
+                        Err(error) => {
+                            tracing::warn!("failed to read claude stderr line: {error}");
+                            continue;
+                        }
+                    };
                     let message = line.trim();
                     if message.is_empty() {
                         continue;
@@ -487,11 +589,22 @@ impl AppState {
             let (line_tx, mut line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
             tokio::spawn(async move {
                 let mut lines = tokio::io::BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    // A dropped receiver means the monitor is done with events;
-                    // keep reading so a late write cannot fill the buffer or
-                    // SIGPIPE the CLI mid-shutdown.
-                    let _ = line_tx.send(line);
+                loop {
+                    match lines.next_line().await {
+                        // A dropped receiver means the monitor is done with
+                        // events; keep reading so a late write cannot fill the
+                        // buffer or SIGPIPE the CLI mid-shutdown.
+                        Ok(Some(line)) => {
+                            let _ = line_tx.send(line);
+                        }
+                        Ok(None) => break,
+                        // A read error (e.g. invalid UTF-8) must not stop the
+                        // drain: the pipe still needs emptying or the CLI
+                        // wedges, and later lines may parse fine.
+                        Err(error) => {
+                            tracing::warn!("failed to read claude stdout line: {error}");
+                        }
+                    }
                 }
             });
             loop {
@@ -573,13 +686,14 @@ impl AppState {
                                     status: "running".to_string(),
                                     output: Some(output.clone()),
                                     exit_code: None,
-                                    display: tool_display_metadata(
+                                    display: Box::new(tool_display_metadata(
                                         &title,
                                         &tool_kind,
                                         "running",
                                         None,
                                         Some(&output),
-                                    ),
+                                    )),
+                                    detail: None,
                                     created_at: Utc::now(),
                                     completed_at: None,
                                 };
@@ -589,11 +703,78 @@ impl AppState {
                             }
                             continue;
                         }
+                        // The CLI is authoritative about which session it is
+                        // writing to. A mismatch with the daemon's assumed id
+                        // would make PreToolUse hook lookups (keyed by session
+                        // id) silently miss this thread.
+                        if let Some(init_session_id) = claude_init_session_id(&value) {
+                            let mut assumed: Option<Option<String>> = None;
+                            let _ = self
+                                .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                                    if thread.native_session_id.as_deref()
+                                        != Some(init_session_id.as_str())
+                                    {
+                                        assumed = Some(thread.native_session_id.clone());
+                                        thread.native_session_id = Some(init_session_id.clone());
+                                    }
+                                })
+                                .await;
+                            if let Some(assumed) = assumed {
+                                tracing::warn!(
+                                    "claude session id mismatch: daemon assumed {assumed:?}, CLI reported {init_session_id}"
+                                );
+                            }
+                        }
+                        // Message boundary: start a fresh assistant item (and
+                        // thinking item) for each API message.
+                        if let Some(message_id) = claude_stream_message_id(&value) {
+                            if assistant_message_key.as_deref() != Some(message_id.as_str()) {
+                                assistant_message_key = Some(message_id.clone());
+                                assistant_id = message_id;
+                                assistant_text.clear();
+                                assistant_citations.clear();
+                                reasoning_text.clear();
+                                assistant_block_break_pending = false;
+                            }
+                        } else if is_claude_message_start(&value) {
+                            assistant_message_key = None;
+                            assistant_id = format!("claude-assistant-{}", Uuid::new_v4().simple());
+                            assistant_text.clear();
+                            assistant_citations.clear();
+                            reasoning_text.clear();
+                            assistant_block_break_pending = false;
+                        }
+                        // Not part of the text else-if chain: a complete
+                        // assistant echo can carry thinking and text blocks in
+                        // one line, and thinking-only lines match nothing below.
+                        if let Some(chunk) = extract_claude_thinking_chunk(&value)
+                            && !chunk.text.is_empty()
+                        {
+                            reasoning_text = if chunk.is_delta {
+                                append_claude_text_delta(&reasoning_text, &chunk.text)
+                            } else {
+                                merge_claude_assistant_text(&reasoning_text, &chunk.text)
+                            };
+                            saw_agent_output = true;
+                            let item = ConversationItem::Reasoning {
+                                id: format!("{assistant_id}-reasoning"),
+                                summary: None,
+                                content: reasoning_text.clone(),
+                                lifecycle: ContentLifecycle::Streaming,
+                                duration_ms: None,
+                                created_at: Utc::now(),
+                            };
+                            let _ = self
+                                .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                .await;
+                        }
                         if is_claude_text_block_start(&value) {
                             assistant_block_break_pending = !assistant_text.is_empty();
                         }
                         if let Some(chunk) = extract_claude_text_chunk(&value) {
-                            assistant_text = if chunk.is_delta {
+                            assistant_text = if chunk.text.is_empty() {
+                                assistant_text
+                            } else if chunk.is_delta {
                                 if std::mem::take(&mut assistant_block_break_pending) {
                                     format!(
                                         "{}\n\n{}",
@@ -607,10 +788,19 @@ impl AppState {
                                 assistant_block_break_pending = false;
                                 merge_claude_assistant_text(&assistant_text, &chunk.text)
                             };
+                            merge_conversation_citations(
+                                &mut assistant_citations,
+                                chunk.citations,
+                                &assistant_id,
+                            );
                             saw_agent_output = true;
                             let item = ConversationItem::AssistantMessage {
                                 id: assistant_id.clone(),
                                 text: assistant_text.clone(),
+                                phase: None,
+                                memory_citation: None,
+                                citations: assistant_citations.clone(),
+                                lifecycle: ContentLifecycle::Streaming,
                                 created_at: Utc::now(),
                             };
                             let _ = self
@@ -645,6 +835,7 @@ impl AppState {
                             } else {
                                 Some(Utc::now())
                             };
+                            let tool_id = tool_event.id.clone();
                             let item = ConversationItem::ToolCall {
                                 id: tool_event.id,
                                 title: title.clone(),
@@ -652,19 +843,27 @@ impl AppState {
                                 status: tool_event.status.clone(),
                                 output: tool_event.output.clone(),
                                 exit_code: None,
-                                display: tool_display_metadata(
+                                display: Box::new(tool_display_metadata(
                                     &title,
                                     &tool_kind,
                                     &tool_event.status,
                                     None,
                                     tool_event.output.as_deref(),
-                                ),
+                                )),
+                                detail: None,
                                 created_at: Utc::now(),
                                 completed_at,
                             };
                             let _ = self
                                 .push_conversation_item(&workspace_id, &thread_id, item, true)
                                 .await;
+                            for item in
+                                claude_tool_result_image_items(&tool_id, &title, &tool_event.images)
+                            {
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
+                            }
                         } else if let Some(message) = extract_claude_service_message(&value) {
                             let _ = self.emit_service(
                                 Some(workspace_id.clone()),
@@ -763,6 +962,16 @@ impl AppState {
             );
         }
         let final_error = turn_error.clone();
+        let settled_at = Utc::now();
+        let tool_settlement = if was_interrupted {
+            ToolSettlement::Interrupted
+        } else if final_error.is_some() {
+            ToolSettlement::Failed
+        } else {
+            ToolSettlement::Completed
+        };
+        self.settle_turn_items(&workspace_id, &thread_id, settled_at, tool_settlement)
+            .await;
         let _ = self
             .with_thread_mut(&workspace_id, &thread_id, |thread| {
                 thread.status = if final_error.is_some() {
@@ -771,7 +980,7 @@ impl AppState {
                     ThreadStatus::Idle
                 };
                 thread.last_error = final_error.clone();
-                thread.updated_at = Utc::now();
+                thread.updated_at = settled_at;
             })
             .await;
         if let Ok(thread) = self.thread_summary(&workspace_id, &thread_id).await {
@@ -806,9 +1015,10 @@ impl AppState {
         &self,
         workspace_id: &str,
         thread_id: &str,
-        item: ConversationItem,
+        mut item: ConversationItem,
         update_existing: bool,
     ) -> Result<(), DaemonError> {
+        sanitize_conversation_item(&mut item);
         let mut workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(workspace_id)
@@ -822,7 +1032,10 @@ impl AppState {
         let existing_index = match &item {
             ConversationItem::AssistantMessage { .. } => thread.assistant_items.get(id).copied(),
             ConversationItem::Reasoning { .. } => thread.reasoning_items.get(id).copied(),
-            ConversationItem::ToolCall { .. } => thread.tool_items.get(id).copied(),
+            ConversationItem::Plan { .. } => thread.plan_items.get(id).copied(),
+            ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
+                thread.tool_items.get(id).copied()
+            }
             _ => thread
                 .items
                 .iter()
@@ -869,7 +1082,10 @@ impl AppState {
             ConversationItem::Reasoning { .. } => {
                 thread.reasoning_items.insert(id.to_string(), index);
             }
-            ConversationItem::ToolCall { .. } => {
+            ConversationItem::Plan { .. } => {
+                thread.plan_items.insert(id.to_string(), index);
+            }
+            ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
                 thread.tool_items.insert(id.to_string(), index);
             }
             _ => {}
@@ -908,6 +1124,7 @@ impl AppState {
         workspace_id: &str,
         thread_id: &str,
         request_id: &str,
+        resolution: Option<InteractiveRequestResolution>,
     ) -> Result<(), DaemonError> {
         let mut workspaces = self.inner.workspaces.lock().await;
         let workspace = workspaces
@@ -923,8 +1140,16 @@ impl AppState {
         }) else {
             return Ok(());
         };
-        if let ConversationItem::InteractiveRequest { resolved, .. } = &mut thread.items[index] {
+        if let ConversationItem::InteractiveRequest {
+            resolved,
+            resolution: stored_resolution,
+            ..
+        } = &mut thread.items[index]
+        {
             *resolved = true;
+            if resolution.is_some() {
+                *stored_resolution = resolution;
+            }
         }
         let item = thread.items[index].clone();
         drop(workspaces);
@@ -946,6 +1171,7 @@ impl ManagedThread {
             items: Vec::new(),
             assistant_items: HashMap::new(),
             reasoning_items: HashMap::new(),
+            plan_items: HashMap::new(),
             tool_items: HashMap::new(),
             manual_title: false,
             ai_title_generated,
@@ -966,7 +1192,10 @@ impl ManagedThread {
                 ConversationItem::Reasoning { .. } => {
                     thread.reasoning_items.insert(id, index);
                 }
-                ConversationItem::ToolCall { .. } => {
+                ConversationItem::Plan { .. } => {
+                    thread.plan_items.insert(id, index);
+                }
+                ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
                     thread.tool_items.insert(id, index);
                 }
                 _ => {}
@@ -991,6 +1220,13 @@ fn conversation_item_identity(item: &ConversationItem) -> &str {
         ConversationItem::UserMessage { id, .. }
         | ConversationItem::AssistantMessage { id, .. }
         | ConversationItem::Reasoning { id, .. }
+        | ConversationItem::CodeReview { id, .. }
+        | ConversationItem::ContextCompaction { id, .. }
+        | ConversationItem::Artifact { id, .. }
+        | ConversationItem::Unsupported { id, .. }
+        | ConversationItem::Image { id, .. }
+        | ConversationItem::WebSearch { id, .. }
+        | ConversationItem::FileChange { id, .. }
         | ConversationItem::ToolCall { id, .. }
         | ConversationItem::Plan { id, .. }
         | ConversationItem::Diff { id, .. }
@@ -1063,10 +1299,47 @@ fn claude_result_is_error(value: &Value) -> Option<bool> {
     )
 }
 
+/// Session id the CLI reports in its `system:init` event — authoritative over
+/// whatever id the daemon passed on the command line.
+fn claude_init_session_id(value: &Value) -> Option<String> {
+    if value.get("type").and_then(Value::as_str) != Some("system")
+        || value.get("subtype").and_then(Value::as_str) != Some("init")
+    {
+        return None;
+    }
+    value
+        .get("session_id")
+        .or_else(|| value.get("sessionId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn init_event_yields_the_cli_reported_session_id() {
+        assert_eq!(
+            claude_init_session_id(&json!({
+                "type": "system",
+                "subtype": "init",
+                "session_id": "abc-123"
+            }))
+            .as_deref(),
+            Some("abc-123")
+        );
+        for value in [
+            json!({ "type": "system", "subtype": "init" }),
+            json!({ "type": "system", "subtype": "compact", "session_id": "abc" }),
+            json!({ "type": "result", "session_id": "abc" }),
+        ] {
+            assert_eq!(claude_init_session_id(&value), None, "{value}");
+        }
+    }
 
     #[test]
     fn recognizes_the_terminal_result_event() {

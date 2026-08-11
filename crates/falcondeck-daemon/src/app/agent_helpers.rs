@@ -1,10 +1,14 @@
 use falcondeck_core::{
-    AgentProvider, ImageInput, SelectedSkillReference, SkillSummary, ThreadIsolation, TurnInputItem,
+    AgentProvider, ConversationCitation, ConversationCitationLocator, ImageInput,
+    SelectedSkillReference, SkillSummary, ThreadIsolation, TurnInputItem,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::{codex::extract_string, skills::canonical_skill_alias};
+use crate::{
+    app::conversation_helpers::should_suppress_tool_output, codex::extract_string,
+    skills::canonical_skill_alias,
+};
 
 #[derive(Debug, Clone)]
 pub(super) struct ResolvedSelectedSkill {
@@ -295,6 +299,9 @@ where
 /// Assistant text pulled from one Claude stream line.
 pub(crate) struct ClaudeTextChunk {
     pub text: String,
+    /// Citation objects explicitly attached to this content by Claude. Search
+    /// tool calls alone never populate this field.
+    pub citations: Vec<ConversationCitation>,
     /// True for incremental token deltas, which must be concatenated
     /// verbatim. Whole-message echoes (complete `assistant` messages and the
     /// final `result`) instead supersede or dedupe against what is already
@@ -306,13 +313,15 @@ impl ClaudeTextChunk {
     fn delta(text: String) -> Self {
         Self {
             text,
+            citations: Vec::new(),
             is_delta: true,
         }
     }
 
-    fn full(text: String) -> Self {
+    fn full(text: String, citations: Vec<ConversationCitation>) -> Self {
         Self {
             text,
+            citations,
             is_delta: false,
         }
     }
@@ -336,8 +345,11 @@ pub(crate) fn extract_claude_text_chunk(value: &Value) -> Option<ClaudeTextChunk
         {
             return None;
         }
-        return extract_string(value, &["result"]).map(ClaudeTextChunk::full);
+        return extract_string(value, &["result"])
+            .map(|text| ClaudeTextChunk::full(text, Vec::new()));
     }
+
+    let citations = extract_claude_citations(value);
 
     // Token deltas are checked first: `content_block_delta` carries its text
     // under `delta.text`, and treating it as a whole message would re-join
@@ -360,23 +372,170 @@ pub(crate) fn extract_claude_text_chunk(value: &Value) -> Option<ClaudeTextChunk
         return Some(ClaudeTextChunk::delta(text));
     }
     if let Some(text) = extract_string(event, &["text"]) {
-        return Some(ClaudeTextChunk::full(text));
+        return Some(ClaudeTextChunk::full(text, citations));
     }
     if let Some(text) = value
         .get("message")
         .and_then(claude_message_text)
         .filter(|text| !text.is_empty())
     {
-        return Some(ClaudeTextChunk::full(text));
+        return Some(ClaudeTextChunk::full(text, citations));
     }
     if let Some(text) = extract_string(value, &["completion"]) {
         return Some(ClaudeTextChunk::delta(text));
     }
-    extract_string(value, &["text"]).map(ClaudeTextChunk::full)
+    if let Some(text) = extract_string(value, &["text"]) {
+        return Some(ClaudeTextChunk::full(text, citations));
+    }
+    (!citations.is_empty()).then(|| ClaudeTextChunk::full(String::new(), citations))
 }
 
-pub(crate) fn extract_claude_text_delta(value: &Value) -> Option<String> {
-    extract_claude_text_chunk(value).map(|chunk| chunk.text)
+/// Thinking content pulled from one Claude stream line: `thinking_delta`
+/// stream events plus complete `thinking` content blocks (assistant echoes
+/// and session-file records). Delta/full semantics match [`ClaudeTextChunk`].
+pub(crate) fn extract_claude_thinking_chunk(value: &Value) -> Option<ClaudeTextChunk> {
+    if matches!(
+        extract_string(value, &["type"]).as_deref(),
+        Some("user") | Some("result")
+    ) {
+        return None;
+    }
+    let event = claude_event_value(value);
+    for delta in [event.get("delta"), value.get("delta")]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(text) = extract_string(delta, &["thinking"]) {
+            return Some(ClaudeTextChunk::delta(text));
+        }
+    }
+    value
+        .get("message")
+        .and_then(claude_message_thinking)
+        .map(|text| ClaudeTextChunk::full(text, Vec::new()))
+}
+
+/// Message id of the API message a stream line belongs to: complete
+/// `assistant` echoes carry it as `message.id`, `message_start` events under
+/// `event.message.id`. Deltas carry none and belong to the current message.
+pub(crate) fn claude_stream_message_id(value: &Value) -> Option<String> {
+    if extract_string(value, &["type"]).as_deref() == Some("assistant") {
+        return value
+            .get("message")
+            .and_then(|message| extract_string(message, &["id"]));
+    }
+    if is_claude_message_start(value) {
+        return claude_event_value(value)
+            .get("message")
+            .and_then(|message| extract_string(message, &["id"]));
+    }
+    None
+}
+
+pub(crate) fn is_claude_message_start(value: &Value) -> bool {
+    extract_string(claude_event_value(value), &["type"]).as_deref() == Some("message_start")
+}
+
+fn extract_claude_citations(value: &Value) -> Vec<ConversationCitation> {
+    fn non_empty_string(entry: &Value, key: &str) -> Option<String> {
+        entry
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    fn locator(entry: &Value, kind: &str) -> Option<ConversationCitationLocator> {
+        let integer = |key: &str| entry.get(key).and_then(Value::as_u64);
+        let file_id = non_empty_string(entry, "file_id");
+        match kind {
+            "web_search_result_location" => Some(ConversationCitationLocator::WebSearch {
+                encrypted_index: non_empty_string(entry, "encrypted_index")?,
+            }),
+            "search_result_location" => Some(ConversationCitationLocator::SearchResult {
+                search_result_index: integer("search_result_index")?,
+                start_block_index: integer("start_block_index")?,
+                end_block_index: integer("end_block_index")?,
+            }),
+            "char_location" => Some(ConversationCitationLocator::Char {
+                document_index: integer("document_index")?,
+                start_char_index: integer("start_char_index")?,
+                end_char_index: integer("end_char_index")?,
+                file_id,
+            }),
+            "page_location" => Some(ConversationCitationLocator::Page {
+                document_index: integer("document_index")?,
+                start_page_number: integer("start_page_number")?,
+                end_page_number: integer("end_page_number")?,
+                file_id,
+            }),
+            "content_block_location" => Some(ConversationCitationLocator::ContentBlock {
+                document_index: integer("document_index")?,
+                start_block_index: integer("start_block_index")?,
+                end_block_index: integer("end_block_index")?,
+                file_id,
+            }),
+            _ => None,
+        }
+    }
+
+    fn push_from_array(output: &mut Vec<ConversationCitation>, value: Option<&Value>) {
+        let Some(entries) = value.and_then(Value::as_array) else {
+            return;
+        };
+        for entry in entries {
+            let Some(kind) = extract_string(entry, &["type"]).filter(|kind| !kind.is_empty())
+            else {
+                continue;
+            };
+            let locator = locator(entry, &kind);
+            let citation = ConversationCitation {
+                id: None,
+                kind,
+                url: extract_string(entry, &["url"]),
+                source: extract_string(entry, &["source"]),
+                title: extract_string(entry, &["title", "document_title"]),
+                cited_text: extract_string(entry, &["cited_text"]),
+                locator,
+            };
+            if (citation.url.is_some()
+                || citation.source.is_some()
+                || citation.title.is_some()
+                || citation.cited_text.is_some())
+                && !output.contains(&citation)
+            {
+                output.push(citation);
+            }
+        }
+    }
+
+    let mut citations = Vec::new();
+    if let Some(content) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    {
+        for block in content {
+            push_from_array(&mut citations, block.get("citations"));
+        }
+    }
+    let event = claude_event_value(value);
+    push_from_array(
+        &mut citations,
+        event
+            .get("content_block")
+            .and_then(|block| block.get("citations")),
+    );
+    for delta in [event.get("delta"), value.get("delta")]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(citation) = delta.get("citation") {
+            push_from_array(&mut citations, Some(&Value::Array(vec![citation.clone()])));
+        }
+    }
+    citations
 }
 
 /// Appends one streamed token delta verbatim. Whitespace inside deltas is
@@ -439,13 +598,31 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         let id = extract_string(tool_result, &["tool_use_id", "toolUseId", "id"])
             .unwrap_or_else(|| format!("tool-{}", Uuid::new_v4().simple()));
         let title = claude_tool_result_title(value, tool_result);
-        let output = claude_tool_result_output(value, tool_result);
+        let output = if title
+            .as_deref()
+            .is_some_and(|title| should_suppress_tool_output(title, ""))
+        {
+            None
+        } else {
+            claude_tool_result_output(value, tool_result)
+        };
+        // A failed tool is still delivered as an ordinary tool_result — only
+        // the is_error flag (or an "Error:" toolUseResult string) says so.
+        let failed = tool_result
+            .get("is_error")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || value
+                .get("toolUseResult")
+                .and_then(Value::as_str)
+                .is_some_and(|result| result.trim_start().starts_with("Error:"));
         return Some(ClaudeToolEvent {
             id,
             title: title.clone(),
             tool_kind: title,
-            status: "completed".to_string(),
+            status: if failed { "failed" } else { "completed" }.to_string(),
             output,
+            images: claude_tool_result_images(value, tool_result),
         });
     }
 
@@ -464,6 +641,7 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
             title: Some(title),
             status: "running".to_string(),
             output: None,
+            images: Vec::new(),
         });
     }
 
@@ -488,6 +666,7 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
                 title: Some(title),
                 status: "running".to_string(),
                 output: None,
+                images: Vec::new(),
             });
         }
     }
@@ -509,15 +688,20 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
     } else {
         "running"
     };
-    let output = extract_string(event, &["output", "text"])
-        .or_else(|| stringify_claude_value(event.get("result")))
-        .or_else(|| stringify_claude_value(value.get("toolUseResult")));
+    let output = if should_suppress_tool_output(&title, name.as_deref().unwrap_or_default()) {
+        None
+    } else {
+        extract_string(event, &["output", "text"])
+            .or_else(|| stringify_claude_value(event.get("result")))
+            .or_else(|| stringify_claude_value(value.get("toolUseResult")))
+    };
     Some(ClaudeToolEvent {
         id,
         tool_kind: name.or_else(|| Some(title.clone())),
         title: Some(title),
         status: status.to_string(),
         output,
+        images: claude_tool_result_images(value, event),
     })
 }
 
@@ -528,6 +712,94 @@ pub(crate) struct ClaudeToolEvent {
     pub tool_kind: Option<String>,
     pub status: String,
     pub output: Option<String>,
+    /// Base64 images carried by the tool_result (screenshots, image reads).
+    pub images: Vec<ClaudeToolResultImage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ClaudeToolResultImage {
+    pub media_type: String,
+    pub data: String,
+}
+
+/// Collects base64 image blocks from a tool_result (and its session-file
+/// `toolUseResult` mirror). Text extraction drops these, which previously
+/// meant a screenshot the model saw left no trace in the transcript.
+fn claude_tool_result_images(value: &Value, tool_result: &Value) -> Vec<ClaudeToolResultImage> {
+    // Persisted thread items embed these as data URLs, so keep hard budgets:
+    // enough for real screenshots, small enough not to bloat state files.
+    const MAX_IMAGES: usize = 4;
+    const MAX_ENCODED_CHARS: usize = 5_000_000;
+    let mut images = Vec::new();
+    let sources = [
+        tool_result.get("content"),
+        value.pointer("/toolUseResult/content"),
+    ];
+    for blocks in sources.into_iter().flatten().filter_map(Value::as_array) {
+        for block in blocks {
+            if images.len() >= MAX_IMAGES {
+                return images;
+            }
+            if extract_string(block, &["type"]).as_deref() != Some("image") {
+                continue;
+            }
+            let Some(source) = block.get("source") else {
+                continue;
+            };
+            if extract_string(source, &["type"]).as_deref() != Some("base64") {
+                continue;
+            }
+            let Some(data) = source
+                .get("data")
+                .and_then(Value::as_str)
+                .filter(|data| !data.is_empty() && data.len() <= MAX_ENCODED_CHARS)
+            else {
+                continue;
+            };
+            let media_type = extract_string(source, &["media_type", "mediaType"])
+                .unwrap_or_else(|| "image/png".to_string());
+            let image = ClaudeToolResultImage {
+                media_type,
+                data: data.to_string(),
+            };
+            // The stream event and the session-file mirror can both carry the
+            // same block; keep one.
+            if !images.contains(&image) {
+                images.push(image);
+            }
+        }
+    }
+    images
+}
+
+/// Builds renderable image items for a tool result's base64 images, keyed
+/// deterministically per tool call so re-emits replace rather than duplicate.
+pub(crate) fn claude_tool_result_image_items(
+    tool_id: &str,
+    title: &str,
+    images: &[ClaudeToolResultImage],
+) -> Vec<falcondeck_core::ConversationItem> {
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let id = format!("{tool_id}-image-{index}");
+            falcondeck_core::ConversationItem::Image {
+                id: id.clone(),
+                title: Some(title.to_string()),
+                image: falcondeck_core::ConversationImage {
+                    id: format!("{id}-asset"),
+                    name: None,
+                    mime_type: Some(image.media_type.clone()),
+                    url: format!("data:{};base64,{}", image.media_type, image.data),
+                    local_path: None,
+                    alt_text: None,
+                },
+                lifecycle: falcondeck_core::ContentLifecycle::Complete,
+                created_at: chrono::Utc::now(),
+            }
+        })
+        .collect()
 }
 
 pub(super) fn extract_claude_service_message(value: &Value) -> Option<String> {
@@ -600,7 +872,7 @@ pub(crate) fn extract_claude_user_message_text(value: &Value) -> Option<String> 
     }
 
     if let Some(text) = extract_string(value, &["text"]) {
-        return Some(text);
+        return accept_claude_user_text(text);
     }
 
     let message = value.get("message")?;
@@ -608,7 +880,7 @@ pub(crate) fn extract_claude_user_message_text(value: &Value) -> Option<String> 
         if let Some(text) = content.as_str() {
             let trimmed = text.trim();
             if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+                return accept_claude_user_text(trimmed.to_string());
             }
         }
         if let Some(items) = content.as_array() {
@@ -627,12 +899,24 @@ pub(crate) fn extract_claude_user_message_text(value: &Value) -> Option<String> 
                 .join("");
             let trimmed = combined.trim();
             if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+                return accept_claude_user_text(trimmed.to_string());
             }
         }
     }
 
-    extract_string(message, &["text"])
+    extract_string(message, &["text"]).and_then(accept_claude_user_text)
+}
+
+/// Claude records slash-command envelopes, their captured stdout, and
+/// interrupt notices as user messages. They are session bookkeeping, not
+/// something the user typed, and must neither render as user bubbles nor seed
+/// provisional titles and previews.
+fn accept_claude_user_text(text: String) -> Option<String> {
+    let probe = text.trim_start();
+    let internal = probe.starts_with("<command-name>")
+        || probe.starts_with("<local-command-stdout>")
+        || probe.starts_with("[Request interrupted");
+    (!internal).then_some(text)
 }
 
 pub(crate) fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> String {
@@ -640,19 +924,23 @@ pub(crate) fn merge_claude_assistant_text(current: &str, next_chunk: &str) -> St
     if current.is_empty() {
         return next_chunk.to_string();
     }
-    if next_chunk.is_empty() || current == next_chunk {
+    // Echo checks compare trimmed text: accumulated deltas often end in
+    // trailing whitespace the whole-message echo lacks ("Done.\n" vs "Done."),
+    // and a missed match here renders the reply twice.
+    let current_trimmed = current.trim_end();
+    if next_chunk.is_empty() || current_trimmed == next_chunk {
         return current.to_string();
     }
     if next_chunk.len() > 24 && current.contains(next_chunk) {
         return current.to_string();
     }
-    if next_chunk.starts_with(current) {
+    if next_chunk.starts_with(current_trimmed) {
         return next_chunk.to_string();
     }
     // The stream repeats full message text after deltas (complete `assistant`
     // messages, then the final `result`). If the accumulated text already ends
     // with this chunk it is an echo, not new output.
-    if current.ends_with(next_chunk) {
+    if current_trimmed.ends_with(next_chunk) {
         return current.to_string();
     }
     if let Some(overlap) = longest_suffix_prefix_overlap(current, next_chunk) {
@@ -862,6 +1150,9 @@ fn longest_suffix_prefix_overlap(current: &str, next: &str) -> Option<usize> {
     let max = current.len().min(next.len());
     (16..=max)
         .rev()
+        // Byte offsets inside a multibyte char are not sliceable; skipping
+        // them keeps the scan panic-free on non-ASCII text.
+        .filter(|size| next.is_char_boundary(*size))
         .find(|size| current.ends_with(&next[..*size]))
 }
 
@@ -890,6 +1181,27 @@ fn claude_message_text(value: &Value) -> Option<String> {
         // block's first word onto the previous block's final sentence. The
         // separator must match the one the delta path inserts at block starts,
         // or these whole-message echoes stop deduping against accumulated text.
+        Some(parts.join("\n\n"))
+    }
+}
+
+fn claude_message_thinking(value: &Value) -> Option<String> {
+    let content = value.get("content")?.as_array()?;
+    let mut parts = Vec::new();
+    for item in content {
+        if extract_string(item, &["type"]).as_deref() != Some("thinking") {
+            continue;
+        }
+        if let Some(text) = extract_string(item, &["thinking"]) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                parts.push(trimmed.to_string());
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
         Some(parts.join("\n\n"))
     }
 }
@@ -957,6 +1269,261 @@ mod service_message_tests {
         assert_eq!(
             extract_claude_service_message(&event).as_deref(),
             Some("Context low — auto-compacting the conversation")
+        );
+    }
+}
+
+#[cfg(test)]
+mod tool_result_status_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_result_line(block_extra: Value, tool_use_result: Value) -> Value {
+        let mut block = json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_1",
+            "content": "boom"
+        });
+        block
+            .as_object_mut()
+            .unwrap()
+            .extend(block_extra.as_object().unwrap().clone());
+        let mut line = json!({
+            "type": "user",
+            "message": { "role": "user", "content": [block] }
+        });
+        if !tool_use_result.is_null() {
+            line.as_object_mut()
+                .unwrap()
+                .insert("toolUseResult".to_string(), tool_use_result);
+        }
+        line
+    }
+
+    #[test]
+    fn tool_result_is_error_flag_maps_to_failed() {
+        let event =
+            extract_claude_tool_event(&tool_result_line(json!({ "is_error": true }), Value::Null))
+                .unwrap();
+        assert_eq!(event.status, "failed");
+        assert_eq!(event.id, "toolu_1");
+    }
+
+    #[test]
+    fn error_prefixed_tool_use_result_string_maps_to_failed() {
+        let event = extract_claude_tool_event(&tool_result_line(
+            json!({}),
+            json!("Error: ENOENT: no such file"),
+        ))
+        .unwrap();
+        assert_eq!(event.status, "failed");
+    }
+
+    #[test]
+    fn successful_tool_results_stay_completed() {
+        for line in [
+            tool_result_line(json!({}), Value::Null),
+            tool_result_line(json!({ "is_error": false }), Value::Null),
+            tool_result_line(json!({}), json!("42 tests passed")),
+        ] {
+            let event = extract_claude_tool_event(&line).unwrap();
+            assert_eq!(event.status, "completed", "{line}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod user_message_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn user_line(content: Value) -> Value {
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": content }
+        })
+    }
+
+    #[test]
+    fn claude_internal_user_records_yield_no_message() {
+        for content in [
+            "<command-name>/clear</command-name>\n<command-message>clear</command-message>",
+            "<local-command-stdout>(no content)</local-command-stdout>",
+            "[Request interrupted by user]",
+            "[Request interrupted by user for tool use]",
+        ] {
+            assert_eq!(
+                extract_claude_user_message_text(&user_line(json!(content))),
+                None,
+                "{content} must not become a user message"
+            );
+        }
+    }
+
+    #[test]
+    fn real_user_prompts_still_pass() {
+        assert_eq!(
+            extract_claude_user_message_text(&user_line(json!("fix the login bug"))).as_deref(),
+            Some("fix the login bug")
+        );
+        assert_eq!(
+            extract_claude_user_message_text(&user_line(
+                json!([{ "type": "text", "text": "and add a test" }])
+            ))
+            .as_deref(),
+            Some("and add a test")
+        );
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn thinking_deltas_are_incremental_chunks() {
+        let line = json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": "thinking_delta", "thinking": "Let me check" }
+            }
+        });
+        let chunk = extract_claude_thinking_chunk(&line).unwrap();
+        assert!(chunk.is_delta);
+        assert_eq!(chunk.text, "Let me check");
+    }
+
+    #[test]
+    fn complete_thinking_blocks_are_full_chunks() {
+        let line = json!({
+            "type": "assistant",
+            "message": {
+                "id": "msg_1",
+                "content": [
+                    { "type": "thinking", "thinking": "hmm, tests first", "signature": "sig" },
+                    { "type": "text", "text": "Running the tests." }
+                ]
+            }
+        });
+        let chunk = extract_claude_thinking_chunk(&line).unwrap();
+        assert!(!chunk.is_delta);
+        assert_eq!(chunk.text, "hmm, tests first");
+        // The same line still yields its text blocks as assistant prose.
+        assert_eq!(
+            extract_claude_text_chunk(&line).unwrap().text,
+            "Running the tests."
+        );
+    }
+
+    #[test]
+    fn non_thinking_lines_yield_no_thinking_chunk() {
+        for line in [
+            json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": { "type": "text_delta", "text": "prose" }
+                }
+            }),
+            json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": { "type": "signature_delta", "signature": "sig" }
+                }
+            }),
+            json!({ "type": "user", "message": { "content": "thinking about it" } }),
+            json!({ "type": "result", "result": "done" }),
+        ] {
+            assert!(extract_claude_thinking_chunk(&line).is_none(), "{line}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod message_boundary_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn assistant_echoes_and_message_starts_carry_the_message_id() {
+        let echo = json!({
+            "type": "assistant",
+            "message": { "id": "msg_a", "content": [{ "type": "text", "text": "hi" }] }
+        });
+        assert_eq!(claude_stream_message_id(&echo).as_deref(), Some("msg_a"));
+
+        let start = json!({
+            "type": "stream_event",
+            "event": { "type": "message_start", "message": { "id": "msg_b" } }
+        });
+        assert_eq!(claude_stream_message_id(&start).as_deref(), Some("msg_b"));
+        assert!(is_claude_message_start(&start));
+    }
+
+    #[test]
+    fn deltas_and_user_lines_are_not_message_boundaries() {
+        for line in [
+            json!({
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "delta": { "type": "text_delta", "text": "hi" }
+                }
+            }),
+            // User records may carry a uuid/id but never open an assistant
+            // message.
+            json!({
+                "type": "user",
+                "uuid": "record-1",
+                "message": { "role": "user", "content": "hello" }
+            }),
+            json!({ "type": "result", "result": "done" }),
+        ] {
+            assert_eq!(claude_stream_message_id(&line), None, "{line}");
+            assert!(!is_claude_message_start(&line), "{line}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod merge_text_tests {
+    use super::*;
+
+    #[test]
+    fn whole_message_echoes_dedupe_across_trailing_whitespace() {
+        // Accumulated deltas often end in a newline the echo lacks.
+        assert_eq!(merge_claude_assistant_text("Done.\n", "Done."), "Done.\n");
+        assert_eq!(
+            merge_claude_assistant_text("All tests pass.\n\n", "All tests pass."),
+            "All tests pass.\n\n"
+        );
+        // And an echo that extends the accumulated text supersedes it.
+        assert_eq!(
+            merge_claude_assistant_text("Done.\n", "Done. Committing next."),
+            "Done. Committing next."
+        );
+    }
+
+    #[test]
+    fn distinct_chunks_still_join() {
+        assert_eq!(
+            merge_claude_assistant_text("First point.", "Second point."),
+            "First point.\n\nSecond point."
+        );
+    }
+
+    #[test]
+    fn overlap_scan_survives_multibyte_text() {
+        // Byte offsets 16..max land inside '—' here; slicing them panicked.
+        let current = "The fix is ready — see the notes below for details";
+        let next = "ready — see the notes below for details and next steps";
+        assert_eq!(
+            merge_claude_assistant_text(current, next),
+            "The fix is ready — see the notes below for details and next steps"
         );
     }
 }

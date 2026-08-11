@@ -50,6 +50,30 @@ pub(super) fn parse_models(value: &Value) -> Vec<ModelSummary> {
         .collect()
 }
 
+pub(super) fn parse_collaboration_modes(value: &Value) -> Vec<CollaborationModeSummary> {
+    value
+        .get("result")
+        .and_then(|result| result.get("data"))
+        .or_else(|| value.get("data"))
+        .or_else(|| value.get("modes"))
+        .or_else(|| value.as_array().map(|_| value))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let mode = extract_string(entry, &["mode", "id"])?;
+            Some(CollaborationModeSummary {
+                id: mode.clone(),
+                label: extract_string(entry, &["name", "label"]).unwrap_or_else(|| mode.clone()),
+                mode: Some(mode),
+                model_id: extract_string(entry, &["model", "modelId", "model_id"]),
+                reasoning_effort: extract_string(entry, &["reasoningEffort", "reasoning_effort"]),
+                is_native: true,
+            })
+        })
+        .collect()
+}
+
 /// Service tiers a model can run on beyond the standard tier. The app-server
 /// names each tier for display ("Fast") and keys it by the id the turn request
 /// takes back ("priority"); `additionalSpeedTiers` is its deprecated

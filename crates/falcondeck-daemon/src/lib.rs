@@ -104,6 +104,19 @@ impl EmbeddedDaemonHandle {
         self.state.active_thread_count().await
     }
 
+    /// Waits until persisted daemon state has finished restoring.
+    ///
+    /// The local HTTP listener intentionally becomes available before this
+    /// work completes. Integration tests and other embedded callers that need
+    /// restored state, rather than only API readiness, can synchronize on the
+    /// stronger boundary explicitly.
+    pub async fn wait_until_restored(&mut self) -> Result<(), tokio::task::JoinError> {
+        if let Some(restore_task) = self.restore_task.take() {
+            restore_task.await?;
+        }
+        Ok(())
+    }
+
     /// Stops the daemon and waits for the server task to exit.
     pub async fn shutdown(mut self) -> Result<(), std::io::Error> {
         if let Some(restore_task) = self.restore_task.take() {
@@ -119,6 +132,10 @@ impl EmbeddedDaemonHandle {
 
 /// Starts the daemon in-process and returns a handle for interacting with it.
 pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle, DaemonError> {
+    // reqwest and tokio-tungstenite may enable different rustls crypto
+    // backends in the final desktop binary. Pick one before any relay TLS
+    // connection is created; otherwise rustls panics in a background worker.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let provider_bins = config.resolved_provider_bins();
     let state = AppState::new_with_state_path(
         "0.1.0".to_string(),
@@ -190,6 +207,12 @@ pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn daemon_installs_a_rustls_crypto_provider() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
 
     #[test]
     fn legacy_binary_fields_fill_in_the_provider_map() {

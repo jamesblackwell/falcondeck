@@ -11,8 +11,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use falcondeck_core::{
     AccountStatus, AccountSummary, AgentCapabilitySummary, AgentProvider, CollaborationModeSummary,
-    ConversationItem, ImageInput, ModelSummary, ReasoningEffortSummary, ThreadAgentParams,
-    ThreadAttention, ThreadStatus, ThreadSummary,
+    ContentLifecycle, ConversationItem, ImageInput, ModelSummary, ReasoningEffortSummary,
+    ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary, merge_conversation_citations,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -26,8 +26,9 @@ use crate::agent_binary::preferred_command_path;
 use crate::agent_binary::{missing_binary_message, resolve_agent_binary};
 use crate::app::agent_helpers::claude_image_reference;
 use crate::app::agent_helpers::{
-    append_claude_text_delta, extract_claude_assistant_message_id, extract_claude_text_chunk,
-    extract_claude_tool_event, extract_claude_user_message_text, merge_claude_assistant_text,
+    append_claude_text_delta, claude_tool_result_image_items, extract_claude_assistant_message_id,
+    extract_claude_text_chunk, extract_claude_thinking_chunk, extract_claude_tool_event,
+    extract_claude_user_message_text, merge_claude_assistant_text,
 };
 use crate::app::conversation_helpers::tool_display_metadata;
 use crate::error::DaemonError;
@@ -193,7 +194,7 @@ impl ClaudeRuntime {
 
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_turn(
-        &self,
+        self: &Arc<Self>,
         thread_id: &str,
         session_id: Option<&str>,
         prompt: &str,
@@ -305,14 +306,7 @@ impl ClaudeRuntime {
         // appended; it is closed at the terminal `result` event (or when the
         // turn is torn down), which is what lets the CLI exit.
         let input = Arc::new(TurnInput::new(child.stdin.take()));
-        {
-            // Write off-task so a CLI that never reads stdin cannot wedge
-            // spawn_turn.
-            let input = Arc::clone(&input);
-            tokio::spawn(async move {
-                let _ = input.write_line(&input_line).await;
-            });
-        }
+        let writer_input = Arc::clone(&input);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let generation = self
@@ -326,6 +320,27 @@ impl ClaudeRuntime {
                 input,
             },
         );
+        {
+            // Write off-task so a CLI that never reads stdin cannot wedge
+            // spawn_turn. If the write fails the CLI never got its prompt and
+            // will just sit there; stop it (generation-checked, so a
+            // replacement turn is never touched) so the monitor observes an
+            // exit and reports the failure instead of hanging until the
+            // watchdog.
+            let runtime = Arc::clone(self);
+            let thread_id = thread_id.to_string();
+            tokio::spawn(async move {
+                if let Err(error) = writer_input.write_line(&input_line).await {
+                    tracing::warn!("failed to send initial prompt to claude turn: {error}");
+                    let mut active = runtime.active_turns.lock().await;
+                    if let Some(turn) = active.get_mut(&thread_id)
+                        && turn.generation == generation
+                    {
+                        let _ = request_graceful_stop(&mut turn.child);
+                    }
+                }
+            });
+        }
 
         // An interrupt that raced this spawn found no active entry and left
         // its flag behind; the user's stop wins, so signal the fresh child
@@ -1139,6 +1154,29 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         .or(updated_at);
         let created_at = extract_datetime(&value, &["created_at", "createdAt", "timestamp"])
             .unwrap_or_else(Utc::now);
+        // isMeta marks Claude-internal bookkeeping (caveats, command
+        // envelopes, compaction notes) recorded in the session file; it is not
+        // transcript content and must not seed items, titles, or previews.
+        if value
+            .get("isMeta")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if let Some(chunk) = extract_claude_thinking_chunk(&value) {
+            // Deliberately not `continue`: one assistant record can carry
+            // thinking and text blocks together.
+            let id = extract_claude_assistant_message_id(&value)
+                .unwrap_or_else(|| format!("assistant-{}", created_at.timestamp_millis()));
+            upsert_hydrated_reasoning(
+                &mut items,
+                &format!("{id}-reasoning"),
+                created_at,
+                &chunk.text,
+                chunk.is_delta,
+            );
+        }
         if let Some(chunk) = extract_claude_text_chunk(&value) {
             let id = extract_claude_assistant_message_id(&value)
                 .unwrap_or_else(|| format!("assistant-{}", created_at.timestamp_millis()));
@@ -1148,6 +1186,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
                 created_at,
                 &chunk.text,
                 chunk.is_delta,
+                &chunk.citations,
             );
             continue;
         }
@@ -1177,6 +1216,11 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
                 tool_event.output.as_deref(),
                 created_at,
             );
+            for image_item in
+                claude_tool_result_image_items(&tool_event.id, &title, &tool_event.images)
+            {
+                items.push(image_item);
+            }
             continue;
         }
         if let Some(text) = extract_claude_user_message_text(&value) {
@@ -1185,6 +1229,8 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
                     .unwrap_or_else(|| format!("user-{}", created_at.timestamp_millis())),
                 text,
                 attachments: Vec::new(),
+                turn_id: None,
+                previous_turn_id: None,
                 created_at,
             });
         }
@@ -1249,22 +1295,68 @@ fn upsert_hydrated_assistant_message(
     created_at: DateTime<Utc>,
     text: &str,
     is_delta: bool,
+    incoming_citations: &[falcondeck_core::ConversationCitation],
 ) {
-    if let Some(ConversationItem::AssistantMessage { text: existing, .. }) = items
+    if let Some(ConversationItem::AssistantMessage {
+        text: existing,
+        citations,
+        ..
+    }) = items
         .iter_mut()
         .find(|item| matches!(item, ConversationItem::AssistantMessage { id: existing_id, .. } if existing_id == id))
     {
-        *existing = if is_delta {
-            append_claude_text_delta(existing, text)
+        if !text.is_empty() {
+            *existing = if is_delta {
+                append_claude_text_delta(existing, text)
+            } else {
+                merge_claude_assistant_text(existing, text)
+            };
+        }
+        merge_conversation_citations(citations, incoming_citations.iter().cloned(), id);
+        return;
+    }
+
+    let mut citations = Vec::new();
+    merge_conversation_citations(&mut citations, incoming_citations.iter().cloned(), id);
+    items.push(ConversationItem::AssistantMessage {
+        id: id.to_string(),
+        text: text.trim().to_string(),
+        phase: None,
+        memory_citation: None,
+        citations,
+        lifecycle: ContentLifecycle::Complete,
+        created_at,
+    });
+}
+
+fn upsert_hydrated_reasoning(
+    items: &mut Vec<ConversationItem>,
+    id: &str,
+    created_at: DateTime<Utc>,
+    text: &str,
+    is_delta: bool,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(ConversationItem::Reasoning { content, .. }) = items
+        .iter_mut()
+        .find(|item| matches!(item, ConversationItem::Reasoning { id: existing_id, .. } if existing_id == id))
+    {
+        *content = if is_delta {
+            append_claude_text_delta(content, text)
         } else {
-            merge_claude_assistant_text(existing, text)
+            merge_claude_assistant_text(content, text)
         };
         return;
     }
 
-    items.push(ConversationItem::AssistantMessage {
+    items.push(ConversationItem::Reasoning {
         id: id.to_string(),
-        text: text.trim().to_string(),
+        summary: None,
+        content: text.trim().to_string(),
+        lifecycle: ContentLifecycle::Complete,
+        duration_ms: None,
         created_at,
     });
 }
@@ -1301,7 +1393,7 @@ fn upsert_hydrated_tool_call(
         *existing_kind = tool_kind.to_string();
         *existing_status = status.to_string();
         *existing_output = output.map(ToOwned::to_owned);
-        *existing_display = display;
+        **existing_display = display;
         *existing_completed_at = completed_at;
         return;
     }
@@ -1313,7 +1405,8 @@ fn upsert_hydrated_tool_call(
         status: status.to_string(),
         output: output.map(ToOwned::to_owned),
         exit_code: None,
-        display,
+        display: Box::new(display),
+        detail: None,
         created_at,
         completed_at,
     });
@@ -1407,6 +1500,50 @@ mod tests {
         assert_eq!(models[2].label, "Opus 5");
         assert_eq!(models[3].id, "fable");
         assert_eq!(models[3].label, "Fable 5");
+    }
+
+    #[test]
+    fn hydrated_citation_enrichment_preserves_one_stable_source_part() {
+        let citation =
+            |title: Option<&str>, cited_text: Option<&str>| falcondeck_core::ConversationCitation {
+                id: None,
+                kind: "web_search_result_location".to_string(),
+                url: Some("https://example.com/source".to_string()),
+                source: None,
+                title: title.map(str::to_string),
+                cited_text: cited_text.map(str::to_string),
+                locator: None,
+            };
+        let created_at = Utc::now();
+        let mut items = Vec::new();
+
+        upsert_hydrated_assistant_message(
+            &mut items,
+            "answer-1",
+            created_at,
+            "Grounded answer",
+            false,
+            &[citation(None, None)],
+        );
+        upsert_hydrated_assistant_message(
+            &mut items,
+            "answer-1",
+            created_at,
+            "Grounded answer",
+            false,
+            &[citation(Some("Example"), Some("Supporting evidence"))],
+        );
+
+        let ConversationItem::AssistantMessage { citations, .. } = &items[0] else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].id.as_deref(), Some("answer-1:citation:0"));
+        assert_eq!(citations[0].title.as_deref(), Some("Example"));
+        assert_eq!(
+            citations[0].cited_text.as_deref(),
+            Some("Supporting evidence")
+        );
     }
 
     #[test]
@@ -1523,7 +1660,11 @@ mod tests {
         assert_eq!(hydrated.items.len(), 4);
         assert!(matches!(
             hydrated.items.get(1),
-            Some(ConversationItem::AssistantMessage { text, .. }) if text == "world"
+            Some(ConversationItem::AssistantMessage {
+                text,
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            }) if text == "world"
         ));
         assert!(matches!(
             hydrated.items.get(2),
@@ -1535,6 +1676,152 @@ mod tests {
         assert!(matches!(
             hydrated.items.get(3),
             Some(ConversationItem::UserMessage { text, .. }) if text == "and now commit it"
+        ));
+    }
+
+    #[test]
+    fn hydration_skips_meta_and_internal_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir
+            .path()
+            .join("44444444-4444-4444-8444-444444444444.jsonl");
+        let record = |content: Value, extra: Value| {
+            let mut line = json!({
+                "sessionId": "44444444-4444-4444-8444-444444444444",
+                "cwd": "/tmp/project",
+                "type": "user",
+                "message": { "role": "user", "content": content },
+                "created_at": "2026-03-19T10:00:00Z"
+            });
+            line.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            line.to_string()
+        };
+        fs::write(
+            &session_path,
+            [
+                record(
+                    json!("Caveat: the messages below were generated by the user while running local commands."),
+                    json!({ "isMeta": true }),
+                ),
+                record(
+                    json!("<command-name>/clear</command-name>\n<command-message>clear</command-message>"),
+                    json!({}),
+                ),
+                record(json!("<local-command-stdout>(no content)</local-command-stdout>"), json!({})),
+                record(json!("[Request interrupted by user]"), json!({})),
+                record(json!("fix the login bug"), json!({})),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.items.len(), 1, "{:?}", hydrated.items);
+        assert!(matches!(
+            hydrated.items.first(),
+            Some(ConversationItem::UserMessage { text, .. }) if text == "fix the login bug"
+        ));
+        // Internal records must not seed provisional titles or previews.
+        assert_eq!(hydrated.summary.title, "fix the login bug");
+        assert_eq!(
+            hydrated.summary.last_message_preview.as_deref(),
+            Some("fix the login bug")
+        );
+    }
+
+    #[test]
+    fn hydrates_thinking_blocks_as_reasoning_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.jsonl");
+        fs::write(
+            &session_path,
+            json!({
+                "session_id": "55555555-5555-4555-8555-555555555555",
+                "cwd": "/tmp/project",
+                "type": "assistant",
+                "message": {
+                    "id": "msg_think",
+                    "role": "assistant",
+                    "content": [
+                        { "type": "thinking", "thinking": "The bug is in the retry loop.", "signature": "sig" },
+                        { "type": "text", "text": "Fixing the retry loop." }
+                    ]
+                },
+                "created_at": "2026-03-19T10:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.items.len(), 2, "{:?}", hydrated.items);
+        assert!(matches!(
+            hydrated.items.first(),
+            Some(ConversationItem::Reasoning {
+                id,
+                content,
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            }) if id == "msg_think-reasoning" && content == "The bug is in the retry loop."
+        ));
+        assert!(matches!(
+            hydrated.items.get(1),
+            Some(ConversationItem::AssistantMessage { id, text, .. })
+                if id == "msg_think" && text == "Fixing the retry loop."
+        ));
+    }
+
+    #[test]
+    fn hydrates_failed_tool_results_as_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.jsonl");
+        fs::write(
+            &session_path,
+            [
+                json!({
+                    "session_id": "66666666-6666-4666-8666-666666666666",
+                    "cwd": "/tmp/project",
+                    "type": "assistant",
+                    "message": {
+                        "id": "msg_1",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "toolu_bash",
+                            "name": "Bash",
+                            "input": { "command": "cargo test" }
+                        }]
+                    },
+                    "created_at": "2026-03-19T10:00:00Z"
+                })
+                .to_string(),
+                json!({
+                    "session_id": "66666666-6666-4666-8666-666666666666",
+                    "cwd": "/tmp/project",
+                    "type": "user",
+                    "message": {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_bash",
+                            "content": "test failed",
+                            "is_error": true
+                        }]
+                    },
+                    "created_at": "2026-03-19T10:00:01Z"
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert!(matches!(
+            hydrated.items.first(),
+            Some(ConversationItem::ToolCall { status, .. }) if status == "failed"
         ));
     }
 

@@ -290,9 +290,16 @@ async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
     let relay_base = spawn_relay(&relay_dir).await;
     let client = reqwest::Client::new();
 
-    let daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
+    let mut daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
         .await
         .unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        daemon.wait_until_restored(),
+    )
+    .await
+    .expect("initial daemon state restoration timed out")
+    .expect("initial daemon state restoration task failed");
     let remote = client
         .post(format!("{}/api/remote/pairing", daemon.base_url()))
         .json(&StartRemotePairingRequest {
@@ -313,7 +320,7 @@ async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
         &LocalBoxKeyPair::generate(),
     )
     .await;
-    let first_status = wait_for_connected(&client, &daemon.base_url()).await;
+    let first_status = wait_for_connected(&client, &daemon.base_url(), "initial pairing").await;
     assert_eq!(
         first_status
             .presence
@@ -325,10 +332,30 @@ async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
     assert!(first_status.pairing.is_none());
     daemon.shutdown().await.unwrap();
 
-    let restarted = spawn_embedded(test_config_with_state_path(state_path))
+    let persisted_after_shutdown: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(&state_path)
+            .await
+            .expect("shutdown should leave a persisted daemon state file"),
+    )
+    .expect("persisted daemon state should be valid JSON");
+    assert_eq!(
+        persisted_after_shutdown.pointer("/remote/device_id"),
+        Some(&serde_json::Value::String(claim.device_id.clone())),
+        "shutdown must durably retain the trusted remote before restart: {persisted_after_shutdown}"
+    );
+
+    let mut restarted = spawn_embedded(test_config_with_state_path(state_path))
         .await
         .unwrap();
-    let restored_status = wait_for_connected(&client, &restarted.base_url()).await;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        restarted.wait_until_restored(),
+    )
+    .await
+    .expect("restarted daemon state restoration timed out")
+    .expect("restarted daemon state restoration task failed");
+    let restored_status =
+        wait_for_connected(&client, &restarted.base_url(), "restart restoration").await;
     let restored_presence = restored_status
         .presence
         .as_ref()
@@ -372,7 +399,7 @@ async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstra
     )
     .await;
 
-    wait_for_connected(&client, &daemon.base_url()).await;
+    wait_for_connected(&client, &daemon.base_url(), "additional pairing").await;
 
     let second_remote = client
         .post(format!("{}/api/remote/pairing", daemon.base_url()))
@@ -463,7 +490,7 @@ async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral
     )
     .await;
 
-    wait_for_connected(&client, &daemon.base_url()).await;
+    wait_for_connected(&client, &daemon.base_url(), "keyless bootstrap").await;
 
     // The initial connect already publishes a bootstrap for the paired
     // device; remember how many exist so the re-request is distinguishable.
@@ -601,8 +628,14 @@ async fn claim_pairing_with_challenge(
 async fn wait_for_connected(
     client: &reqwest::Client,
     daemon_base_url: &str,
+    phase: &str,
 ) -> RemoteStatusResponse {
-    for _ in 0..40 {
+    // A full workspace test run can briefly starve the bridge task while
+    // native integration binaries start in parallel. Keep this bounded, but
+    // allow the production reconnect supervisor enough time for more than one
+    // backoff attempt before diagnosing a failure.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
         let status = client
             .get(format!("{daemon_base_url}/api/remote/status"))
             .send()
@@ -614,9 +647,11 @@ async fn wait_for_connected(
         if status.status == falcondeck_core::RemoteConnectionStatus::Connected {
             return status;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if tokio::time::Instant::now() >= deadline {
+            panic!("daemon never connected to relay during {phase}; last status: {status:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("daemon never connected to relay");
 }
 
 async fn wait_for_trusted_device_count(

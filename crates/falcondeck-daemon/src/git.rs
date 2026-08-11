@@ -223,7 +223,12 @@ pub async fn git_checkout(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(DaemonError::Rpc(
-            stderr.trim().lines().last().unwrap_or("git checkout failed").to_string(),
+            stderr
+                .trim()
+                .lines()
+                .last()
+                .unwrap_or("git checkout failed")
+                .to_string(),
         ));
     }
 

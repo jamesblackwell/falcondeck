@@ -58,7 +58,13 @@ fn project_dir_name(project_path: &str) -> String {
         .unwrap_or_default();
     let sanitized: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     if sanitized.is_empty() {
         "project".to_string()
@@ -80,7 +86,9 @@ pub async fn create(project_path: &str, slug: &str) -> Result<ThreadVariant, Dae
         )));
     }
 
-    let destination = variants_root()?.join(project_dir_name(project_path)).join(slug);
+    let destination = variants_root()?
+        .join(project_dir_name(project_path))
+        .join(slug);
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).await.map_err(|error| {
             DaemonError::Rpc(format!("failed to create the variants directory: {error}"))
@@ -129,8 +137,13 @@ pub async fn create(project_path: &str, slug: &str) -> Result<ThreadVariant, Dae
 ///
 /// The branch is deliberately left behind — it holds the work, and merge-back
 /// has not shipped yet, so deleting it would be the only way to lose an
-/// isolated thread's changes irrecoverably.
+/// isolated thread's changes irrecoverably. A worktree variant's branch
+/// already lives in the project repository; a clone's branch exists only
+/// inside the checkout being deleted, so it is fetched across first.
 pub async fn remove(project_path: &str, variant: &ThreadVariant) {
+    if variant.kind == ThreadVariantKind::Clone {
+        preserve_clone_branch(project_path, variant).await;
+    }
     if variant.kind == ThreadVariantKind::Worktree {
         let removed = run_git(
             project_path,
@@ -158,8 +171,44 @@ pub async fn remove(project_path: &str, variant: &ThreadVariant) {
     }
 }
 
+/// Copies a clone variant's branch into the project repository before the
+/// clone is deleted, so committed work survives thread deletion exactly as it
+/// does for worktree variants. Skipped when the branch tip is an object the
+/// project repository already has — no new commits means fetching would only
+/// litter the branch list with an empty `falcondeck/…` entry.
+async fn preserve_clone_branch(project_path: &str, variant: &ThreadVariant) {
+    let Ok(tip) = run_git(&variant.path, &["rev-parse", &variant.branch]).await else {
+        return;
+    };
+    let tip = tip.trim().to_string();
+    if run_git(
+        project_path,
+        &["cat-file", "-e", &format!("{tip}^{{commit}}")],
+    )
+    .await
+    .is_ok()
+    {
+        return;
+    }
+    let refspec = format!("{}:{}", variant.branch, variant.branch);
+    if let Err(error) = run_git(
+        project_path,
+        &["fetch", "--no-tags", &variant.path, &refspec],
+    )
+    .await
+    {
+        tracing::warn!(
+            branch = %variant.branch,
+            %error,
+            "failed to preserve isolated copy branch before deletion"
+        );
+    }
+}
+
 async fn is_git_repository(project_path: &str) -> bool {
-    run_git(project_path, &["rev-parse", "--git-dir"]).await.is_ok()
+    run_git(project_path, &["rev-parse", "--git-dir"])
+        .await
+        .is_ok()
 }
 
 /// Attempts a copy-on-write copy of the working tree, trying each platform's
@@ -217,18 +266,14 @@ async fn add_worktree(
     )
     .await
     .map(|_| ())
-    .map_err(|error| {
-        DaemonError::Rpc(format!("failed to create an isolated worktree: {error}"))
-    })
+    .map_err(|error| DaemonError::Rpc(format!("failed to create an isolated worktree: {error}")))
 }
 
 async fn switch_to_new_branch(variant_path: &str, branch: &str) -> Result<(), DaemonError> {
     run_git(variant_path, &["switch", "-c", branch])
         .await
         .map(|_| ())
-        .map_err(|error| {
-            DaemonError::Rpc(format!("failed to branch the isolated copy: {error}"))
-        })
+        .map_err(|error| DaemonError::Rpc(format!("failed to branch the isolated copy: {error}")))
 }
 
 /// Copies untracked files matching [`UNTRACKED_ALLOWLIST`] into a worktree
@@ -258,7 +303,13 @@ async fn copy_untracked_allowlist(project_path: &str, destination: &Path) {
 /// what keeps `node_modules` from producing a six-figure listing.
 async fn untracked_allowlist_matches(project_path: &str) -> Vec<String> {
     let listings = [
-        vec!["ls-files", "-z", "--others", "--exclude-standard", "--directory"],
+        vec![
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+            "--directory",
+        ],
         vec![
             "ls-files",
             "-z",
@@ -293,7 +344,9 @@ async fn untracked_allowlist_matches(project_path: &str) -> Vec<String> {
 
 /// Matches a file name against the allowlist's leading/trailing wildcards.
 fn matches_allowlist(name: &str) -> bool {
-    UNTRACKED_ALLOWLIST.iter().any(|pattern| match_glob(pattern, name))
+    UNTRACKED_ALLOWLIST
+        .iter()
+        .any(|pattern| match_glob(pattern, name))
 }
 
 /// Minimal glob: `*` matches any run of characters. The allowlist is a fixed,
@@ -340,14 +393,19 @@ mod tests {
 
     async fn init_repo(path: &Path) {
         run_git(path.to_str().unwrap(), &["init"]).await.unwrap();
-        run_git(path.to_str().unwrap(), &["config", "user.email", "t@example.com"])
-            .await
-            .unwrap();
+        run_git(
+            path.to_str().unwrap(),
+            &["config", "user.email", "t@example.com"],
+        )
+        .await
+        .unwrap();
         run_git(path.to_str().unwrap(), &["config", "user.name", "Test"])
             .await
             .unwrap();
         fs::write(path.join("README.md"), "hello\n").await.unwrap();
-        run_git(path.to_str().unwrap(), &["add", "."]).await.unwrap();
+        run_git(path.to_str().unwrap(), &["add", "."])
+            .await
+            .unwrap();
         run_git(path.to_str().unwrap(), &["commit", "-m", "initial"])
             .await
             .unwrap();
@@ -378,6 +436,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removing_a_clone_variant_preserves_its_committed_work() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+        init_repo(repo).await;
+        let repo_path = repo.to_str().unwrap();
+
+        // Simulate a clone variant: an independent full copy on its own branch
+        // with a commit the project repository has never seen.
+        let clone_dir = tempdir().unwrap();
+        let clone = clone_dir.path().join("clone");
+        run_git(repo_path, &["clone", repo_path, clone.to_str().unwrap()])
+            .await
+            .unwrap();
+        let clone_path = clone.to_str().unwrap().to_string();
+        run_git(&clone_path, &["switch", "-c", "falcondeck/test1234"])
+            .await
+            .unwrap();
+        fs::write(clone.join("WORK.md"), "isolated work\n")
+            .await
+            .unwrap();
+        run_git(&clone_path, &["add", "."]).await.unwrap();
+        run_git(&clone_path, &["commit", "-m", "isolated work"])
+            .await
+            .unwrap();
+
+        let variant = ThreadVariant {
+            slug: "test1234".to_string(),
+            path: clone_path,
+            branch: "falcondeck/test1234".to_string(),
+            kind: ThreadVariantKind::Clone,
+        };
+        remove(repo_path, &variant).await;
+
+        assert!(!clone.exists(), "checkout must be deleted");
+        let subject = run_git(
+            repo_path,
+            &["log", "-1", "--format=%s", "falcondeck/test1234"],
+        )
+        .await
+        .expect("branch must survive in the project repository");
+        assert_eq!(subject.trim(), "isolated work");
+    }
+
+    #[tokio::test]
+    async fn removing_a_clone_variant_with_no_new_commits_leaves_no_branch() {
+        let temp_dir = tempdir().unwrap();
+        let repo = temp_dir.path();
+        init_repo(repo).await;
+        let repo_path = repo.to_str().unwrap();
+
+        let clone_dir = tempdir().unwrap();
+        let clone = clone_dir.path().join("clone");
+        run_git(repo_path, &["clone", repo_path, clone.to_str().unwrap()])
+            .await
+            .unwrap();
+        let clone_path = clone.to_str().unwrap().to_string();
+        run_git(&clone_path, &["switch", "-c", "falcondeck/empty123"])
+            .await
+            .unwrap();
+
+        let variant = ThreadVariant {
+            slug: "empty123".to_string(),
+            path: clone_path,
+            branch: "falcondeck/empty123".to_string(),
+            kind: ThreadVariantKind::Clone,
+        };
+        remove(repo_path, &variant).await;
+
+        assert!(
+            run_git(repo_path, &["rev-parse", "--verify", "falcondeck/empty123"])
+                .await
+                .is_err(),
+            "an untouched variant must not litter the branch list"
+        );
+    }
+
+    #[tokio::test]
     async fn untracked_allowlist_finds_gitignored_env_files() {
         let temp_dir = tempdir().unwrap();
         let repo = temp_dir.path();
@@ -386,7 +521,9 @@ mod tests {
             .await
             .unwrap();
         fs::write(repo.join(".env"), "SECRET=1\n").await.unwrap();
-        fs::create_dir_all(repo.join("node_modules/pkg")).await.unwrap();
+        fs::create_dir_all(repo.join("node_modules/pkg"))
+            .await
+            .unwrap();
         fs::write(repo.join("node_modules/pkg/index.js"), "//\n")
             .await
             .unwrap();

@@ -36,16 +36,56 @@ pub struct FalconDeckPreferences {
     /// Schema version for the on-disk preferences file.
     #[serde(default = "default_preferences_version")]
     pub version: u32,
+    /// User-defined order for workspaces in project navigation.
+    #[serde(default)]
+    pub workspace_order: Vec<String>,
     /// Conversation and thread display preferences.
     #[serde(default)]
     pub conversation: ConversationPreferences,
+    /// Notifications and cross-device attention policy.
+    #[serde(default)]
+    pub notifications: NotificationPreferences,
 }
 
 impl Default for FalconDeckPreferences {
     fn default() -> Self {
         Self {
             version: default_preferences_version(),
+            workspace_order: Vec::new(),
             conversation: ConversationPreferences::default(),
+            notifications: NotificationPreferences::default(),
+        }
+    }
+}
+
+/// User-configurable policy for agent attention notifications.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationPreferences {
+    /// Master switch for agent attention notifications.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Notify when an agent finishes a turn successfully.
+    #[serde(default = "default_true")]
+    pub notify_on_turn_complete: bool,
+    /// Notify when an agent needs an approval or answer.
+    #[serde(default = "default_true")]
+    pub notify_on_input_required: bool,
+    /// Notify when an agent turn fails.
+    #[serde(default = "default_true")]
+    pub notify_on_error: bool,
+    /// Suppress remote-device pushes while the desktop client is actively open.
+    #[serde(default = "default_true")]
+    pub suppress_when_desktop_active: bool,
+}
+
+impl Default for NotificationPreferences {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            notify_on_turn_complete: true,
+            notify_on_input_required: true,
+            notify_on_error: true,
+            suppress_when_desktop_active: true,
         }
     }
 }
@@ -129,9 +169,45 @@ pub enum ToolDetailsMode {
 /// Partial preferences update payload accepted by the daemon API.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpdatePreferencesRequest {
+    /// Optional workspace order update for project navigation.
+    #[serde(default)]
+    pub workspace_order: Option<Vec<String>>,
     /// Optional conversation preference updates.
     #[serde(default)]
     pub conversation: Option<ConversationPreferencesPatch>,
+    /// Optional notification preference updates.
+    #[serde(default)]
+    pub notifications: Option<NotificationPreferencesPatch>,
+}
+
+/// Partial update payload for notification preferences.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NotificationPreferencesPatch {
+    /// Optional master switch update.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// Optional completed-turn notification update.
+    #[serde(default)]
+    pub notify_on_turn_complete: Option<bool>,
+    /// Optional approval/question notification update.
+    #[serde(default)]
+    pub notify_on_input_required: Option<bool>,
+    /// Optional failed-turn notification update.
+    #[serde(default)]
+    pub notify_on_error: Option<bool>,
+    /// Optional desktop-active suppression update.
+    #[serde(default)]
+    pub suppress_when_desktop_active: Option<bool>,
+}
+
+/// Update sent by a local client to advertise whether the desktop UI is active.
+/// The daemon treats an active state as a short lease and expires it when the
+/// client stops heartbeating, so a crashed desktop cannot suppress pushes
+/// forever.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientActivityRequest {
+    /// Whether the desktop client is currently visible and usable.
+    pub active: bool,
 }
 
 /// Partial update payload for conversation preferences.
@@ -198,6 +274,32 @@ pub struct ToolCallDisplay {
     /// Best-effort structured counts parsed from a provider's test-run output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub test_summary: Option<ToolTestSummary>,
+    /// Cheap provider-output signals for transcript grouping and collapsed rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_output_summary: Option<ToolProviderOutputSummary>,
+}
+
+/// Provider-independent counts derived without decoding the retained raw output.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ToolProviderOutputSummary {
+    /// Canonical text blocks already represented by structured tool detail.
+    #[serde(default)]
+    pub text_blocks: u64,
+    /// Renderable image blocks.
+    #[serde(default)]
+    pub images: u64,
+    /// Renderable audio blocks.
+    #[serde(default)]
+    pub audio: u64,
+    /// Provider reference links.
+    #[serde(default)]
+    pub resource_links: u64,
+    /// Embedded resources with stable URIs.
+    #[serde(default)]
+    pub embedded_resources: u64,
+    /// Structured result objects outside the ordered content list.
+    #[serde(default)]
+    pub structured_results: u64,
 }
 
 /// Provider-independent summary of a test run. Raw output remains authoritative.
@@ -469,6 +571,7 @@ impl Default for ToolCallDisplay {
             history_mode: ToolHistoryMode::Full,
             summary_hint: None,
             test_summary: None,
+            provider_output_summary: None,
         }
     }
 }
@@ -680,6 +783,9 @@ pub struct StartThreadRequest {
     pub provider: Option<AgentProvider>,
     /// Optional model identifier override for the new thread.
     pub model_id: Option<String>,
+    /// Optional native collaboration mode for the new thread.
+    #[serde(default)]
+    pub collaboration_mode_id: Option<String>,
     /// Optional approval policy for the new thread.
     pub approval_policy: Option<String>,
     /// Optional Codex sandbox mode for the new thread.
@@ -763,6 +869,9 @@ pub struct UpdateThreadRequest {
     /// Reasoning effort override for future turns; absent leaves it unchanged.
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     pub reasoning_effort: Option<Option<String>>,
+    /// Collaboration mode override for future turns; explicit `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub collaboration_mode_id: Option<Option<String>>,
     /// Service tier override for future turns; explicit `null` clears it.
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     pub service_tier: Option<Option<String>>,
@@ -772,6 +881,9 @@ pub struct UpdateThreadRequest {
     /// Claude permission mode override; explicit `null` clears it.
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     pub permission_mode: Option<Option<String>>,
+    /// Codex approval policy override; explicit `null` clears it.
+    #[serde(default, deserialize_with = "deserialize_explicit_option")]
+    pub approval_policy: Option<Option<String>>,
     /// Codex sandbox mode override; explicit `null` clears it.
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     pub sandbox_mode: Option<Option<String>>,
@@ -858,18 +970,21 @@ pub struct ConversationImage {
     pub alt_text: Option<String>,
 }
 
-/// Provider-native action represented by a web-search conversation item.
+/// Open-ended provider-native action represented by a web-search item.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum WebSearchActionKind {
-    /// Search the web for one or more queries.
-    Search,
-    /// Open a result page directly.
-    OpenPage,
-    /// Find text within a previously opened page.
-    FindInPage,
-    /// A provider action newer than this protocol version.
-    Other,
+#[serde(transparent)]
+pub struct WebSearchActionKind(String);
+
+impl WebSearchActionKind {
+    /// Creates an action kind without discarding provider extensions.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// Returns the normalized known action or raw provider extension.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// Structured web research activity emitted by an agent.
@@ -879,7 +994,8 @@ pub struct ConversationWebSearch {
     pub id: String,
     /// Provider's top-level display query.
     pub query: String,
-    /// Typed provider action.
+    /// Open-ended provider action. Known values are `search`, `open_page`, and
+    /// `find_in_page`; newer values remain intact for forward-compatible UI.
     pub action_kind: WebSearchActionKind,
     /// All search queries when a batched search action supplied them.
     #[serde(default)]
@@ -947,6 +1063,10 @@ pub struct ConversationMemoryCitation {
 /// is intentionally represented elsewhere.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConversationCitation {
+    /// Stable FalconDeck identity assigned when this evidence first joins an
+    /// assistant message. Older daemon history may omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Provider citation discriminator, for example
     /// `web_search_result_location` or `search_result_location`.
     pub kind: String,
@@ -962,6 +1082,175 @@ pub struct ConversationCitation {
     /// Exact supporting excerpt supplied by the provider.
     #[serde(default)]
     pub cited_text: Option<String>,
+    /// Provider location metadata used to preserve citation identity and show
+    /// the exact document, page, block, or search-result range when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locator: Option<ConversationCitationLocator>,
+}
+
+/// Provider-native location of one assistant citation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConversationCitationLocator {
+    /// Citation emitted by Anthropic's server-side web-search tool.
+    WebSearch {
+        /// Opaque provider reference stable across streamed citation updates.
+        encrypted_index: String,
+    },
+    /// Citation into a provider-supplied search-result content block array.
+    SearchResult {
+        /// Zero-based search-result position in provider context.
+        search_result_index: u64,
+        /// Inclusive zero-based first content block.
+        start_block_index: u64,
+        /// Exclusive zero-based end content block.
+        end_block_index: u64,
+    },
+    /// Character range within a cited document.
+    Char {
+        /// Zero-based document position in provider context.
+        document_index: u64,
+        /// Inclusive zero-based character offset.
+        start_char_index: u64,
+        /// Exclusive zero-based character offset.
+        end_char_index: u64,
+        /// Provider file identity, when the source is an uploaded file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
+    /// Page range within a cited document.
+    Page {
+        /// Zero-based document position in provider context.
+        document_index: u64,
+        /// Inclusive one-based first page.
+        start_page_number: u64,
+        /// Inclusive one-based last page.
+        end_page_number: u64,
+        /// Provider file identity, when the source is an uploaded file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
+    /// Content-block range within a cited document.
+    ContentBlock {
+        /// Zero-based document position in provider context.
+        document_index: u64,
+        /// Inclusive zero-based first content block.
+        start_block_index: u64,
+        /// Exclusive zero-based end content block.
+        end_block_index: u64,
+        /// Provider file identity, when the source is an uploaded file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+    },
+}
+
+impl ConversationCitation {
+    /// Returns whether two provider payloads describe the same ordered source
+    /// part, including legacy evidence that predates stable citation ids.
+    pub fn shares_identity_with(&self, other: &Self) -> bool {
+        if self.kind.trim() != other.kind.trim() {
+            return false;
+        }
+
+        if let (Some(left), Some(right)) = (non_empty(&self.id), non_empty(&other.id)) {
+            return left == right;
+        }
+        if let (Some(left), Some(right)) = (&self.locator, &other.locator) {
+            return left == right;
+        }
+
+        let left_references = [non_empty(&self.url), non_empty(&self.source)];
+        let right_references = [non_empty(&other.url), non_empty(&other.source)];
+        if left_references
+            .iter()
+            .flatten()
+            .any(|left| right_references.iter().flatten().any(|right| left == right))
+        {
+            return true;
+        }
+
+        let either_has_reference = left_references.iter().flatten().next().is_some()
+            || right_references.iter().flatten().next().is_some();
+        if either_has_reference {
+            return false;
+        }
+
+        if let (Some(left), Some(right)) = (non_empty(&self.title), non_empty(&other.title)) {
+            return left == right;
+        }
+        matches!(
+            (non_empty(&self.cited_text), non_empty(&other.cited_text)),
+            (Some(left), Some(right)) if left == right
+        )
+    }
+
+    /// Applies newer provider metadata without clearing evidence omitted by a
+    /// partial citation delta or changing the part's stable identity.
+    pub fn merge_metadata_from(&mut self, next: &Self) {
+        if self.id.is_none() {
+            self.id = next.id.clone();
+        }
+        merge_non_empty(&mut self.url, &next.url);
+        merge_non_empty(&mut self.source, &next.source);
+        merge_non_empty(&mut self.title, &next.title);
+        merge_non_empty(&mut self.cited_text, &next.cited_text);
+        if next.locator.is_some() {
+            self.locator = next.locator.clone();
+        }
+    }
+}
+
+fn non_empty(value: &Option<String>) -> Option<&str> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn merge_non_empty(current: &mut Option<String>, next: &Option<String>) {
+    if non_empty(next).is_some() {
+        *current = next.clone();
+    }
+}
+
+/// Upserts provider citations in first-seen order and assigns stable ids to
+/// legacy or streamed evidence before it crosses the client protocol.
+pub fn merge_conversation_citations(
+    citations: &mut Vec<ConversationCitation>,
+    incoming: impl IntoIterator<Item = ConversationCitation>,
+    id_prefix: &str,
+) {
+    for (index, citation) in citations.iter_mut().enumerate() {
+        if citation.id.is_none() {
+            citation.id = Some(format!("{id_prefix}:citation:{index}"));
+        }
+    }
+
+    for mut citation in incoming {
+        if let Some(existing) = citations
+            .iter_mut()
+            .find(|existing| existing.shares_identity_with(&citation))
+        {
+            existing.merge_metadata_from(&citation);
+            continue;
+        }
+
+        if citation.id.is_none() {
+            let mut index = citations.len();
+            loop {
+                let candidate = format!("{id_prefix}:citation:{index}");
+                if citations
+                    .iter()
+                    .all(|existing| existing.id.as_deref() != Some(candidate.as_str()))
+                {
+                    citation.id = Some(candidate);
+                    break;
+                }
+                index += 1;
+            }
+        }
+        citations.push(citation);
+    }
 }
 
 /// Normalized provider availability for a skill entry.
@@ -1228,6 +1517,12 @@ pub struct SendTurnRequest {
     /// back to the queue.
     #[serde(default)]
     pub steer: bool,
+    /// Client-chosen id for the user message item this turn creates. Lets a
+    /// client render the message optimistically and have the daemon's echo
+    /// land on the same id instead of duplicating. Ignored unless it looks
+    /// like a well-formed `user-*` id.
+    #[serde(default)]
+    pub user_item_id: Option<String>,
 }
 
 /// Request payload used to start a code review flow.
@@ -1446,14 +1741,23 @@ impl AgentCapabilitySummary {
             supports_images: true,
             supports_skills: true,
             supports_interrupt: true,
-            supports_steering: false,
+            supports_steering: true,
             supports_forking: true,
             sandbox_modes: vec![
                 "read-only".to_string(),
                 "workspace-write".to_string(),
                 "danger-full-access".to_string(),
             ],
-            permission_modes: Vec::new(),
+            // Codex app-server approvalPolicy values. `default` is the UI
+            // provider-default choice and is translated to the daemon's safe
+            // `on-request` fallback when sent on the wire.
+            permission_modes: vec![
+                "default".to_string(),
+                "untrusted".to_string(),
+                "on-failure".to_string(),
+                "on-request".to_string(),
+                "never".to_string(),
+            ],
         }
     }
 
@@ -1474,7 +1778,9 @@ impl AgentCapabilitySummary {
                 "default".to_string(),
                 "acceptEdits".to_string(),
                 "auto".to_string(),
+                "manual".to_string(),
                 "dontAsk".to_string(),
+                "plan".to_string(),
                 "bypassPermissions".to_string(),
             ],
         }
@@ -1817,6 +2123,9 @@ pub struct ThreadPlan {
 /// Single step within a thread plan.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlanStep {
+    /// Provider-stable step identifier when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     /// Human-readable step description.
     pub step: String,
     /// Current status for the step.
@@ -1836,6 +2145,11 @@ pub struct InteractiveRequest {
     pub method: String,
     /// High-level request kind.
     pub kind: InteractiveRequestKind,
+    /// Exact normalized approval decisions offered by the provider. `None`
+    /// denotes a legacy request; `Some([])` means the provider offered no
+    /// supported decision and must remain visibly non-actionable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_decisions: Option<Vec<ApprovalDecision>>,
     /// Short user-facing title.
     pub title: String,
     /// Optional user-facing detail text.
@@ -1888,6 +2202,25 @@ pub struct InteractiveQuestionOption {
     pub label: String,
     /// Helper text describing the option.
     pub description: String,
+}
+
+/// Provider-authored artifact metadata and bounded preview evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationArtifact {
+    /// Human-readable artifact title.
+    pub title: String,
+    /// Open-ended provider artifact discriminator.
+    pub artifact_kind: String,
+    /// Provider reference or externally openable URL, when supplied.
+    pub url: Option<String>,
+    /// MIME type supplied by the provider, when known.
+    pub mime_type: Option<String>,
+    /// Provider version label, when the artifact is versioned.
+    pub version: Option<String>,
+    /// Text preview supplied inline by the provider, when available.
+    pub content: Option<String>,
+    /// Size-bounded provider artifact payload retained for inspection.
+    pub payload: Value,
 }
 
 /// Conversation items stored in thread history.
@@ -1943,7 +2276,67 @@ pub enum ConversationItem {
         /// Streaming and terminal state for this reasoning block.
         #[serde(default)]
         lifecycle: ContentLifecycle,
+        /// Provider-reported or authoritatively derived elapsed time.
+        #[serde(default)]
+        duration_ms: Option<u64>,
         /// Timestamp when the item was created.
+        created_at: DateTime<Utc>,
+    },
+    /// Provider-authored code review and its lifecycle.
+    CodeReview {
+        /// Stable provider item identifier shared by review entry and result.
+        id: String,
+        /// Target or scope being reviewed, when supplied on entry.
+        #[serde(default)]
+        subject: Option<String>,
+        /// Full provider-authored review findings, when available.
+        #[serde(default)]
+        content: String,
+        /// Running and terminal state for the review operation.
+        #[serde(default)]
+        lifecycle: ContentLifecycle,
+        /// Timestamp when review mode was first observed or restored.
+        created_at: DateTime<Utc>,
+    },
+    /// Provider context compaction lifecycle receipt.
+    ContextCompaction {
+        /// Stable provider item identifier.
+        id: String,
+        /// Running or terminal state of the compaction operation.
+        #[serde(default)]
+        lifecycle: ToolLifecycle,
+        /// Timestamp when compaction started or was restored.
+        created_at: DateTime<Utc>,
+        /// Timestamp when compaction reached a terminal state.
+        #[serde(default)]
+        completed_at: Option<DateTime<Utc>>,
+    },
+    /// Provider-authored artifact preview or generated deliverable.
+    Artifact {
+        /// Stable provider item identifier.
+        id: String,
+        /// Structured artifact presentation data.
+        artifact: ConversationArtifact,
+        /// Creating, streaming, ready, interrupted, or failed state.
+        #[serde(default)]
+        lifecycle: ContentLifecycle,
+        /// Timestamp when the artifact was first observed or restored.
+        created_at: DateTime<Utc>,
+    },
+    /// Forward-compatible provider output not understood by this FalconDeck version.
+    Unsupported {
+        /// Stable provider item identifier.
+        id: String,
+        /// Provider-native item discriminator.
+        output_kind: String,
+        /// Human-readable explanation of why the generic receipt is shown.
+        reason: String,
+        /// Size-bounded provider JSON retained for inspection and future clients.
+        payload: Value,
+        /// Streaming and terminal state observed for the provider item.
+        #[serde(default)]
+        lifecycle: ContentLifecycle,
+        /// Timestamp when the item was first observed or restored.
         created_at: DateTime<Utc>,
     },
     /// Image generated or viewed by the agent.
@@ -2003,9 +2396,10 @@ pub enum ConversationItem {
         output: Option<String>,
         /// Optional process exit code.
         exit_code: Option<i32>,
-        /// Display metadata derived by the daemon.
+        /// Display metadata derived by the daemon. Boxed so rich provider
+        /// summaries do not inflate every ordinary transcript item.
         #[serde(default)]
-        display: ToolCallDisplay,
+        display: Box<ToolCallDisplay>,
         /// Provider-native structured metadata used by specialized renderers.
         /// Boxed so rare, metadata-heavy tools do not inflate every item in a
         /// long conversation vector.
@@ -2049,8 +2443,9 @@ pub enum ConversationItem {
     InteractiveRequest {
         /// Stable item identifier.
         id: String,
-        /// Interactive request payload.
-        request: InteractiveRequest,
+        /// Interactive request payload. Boxed so rare prompt metadata does not
+        /// inflate every ordinary transcript item in long thread vectors.
+        request: Box<InteractiveRequest>,
         /// Timestamp when the item was created.
         created_at: DateTime<Utc>,
         /// Whether the request has already been resolved.
@@ -3077,6 +3472,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn codex_capabilities_include_steering() {
+        assert!(AgentCapabilitySummary::codex().supports_steering);
+    }
+
+    #[test]
     fn serializes_unified_event() {
         let snapshot = DaemonSnapshot {
             daemon: DaemonInfo {
@@ -3127,6 +3527,102 @@ mod tests {
             !json.contains("do-not-retain-this"),
             "resolution leaked answer: {json}"
         );
+    }
+
+    #[test]
+    fn interactive_approval_capabilities_preserve_legacy_and_explicit_empty_states() {
+        let legacy: InteractiveRequest = serde_json::from_value(serde_json::json!({
+            "request_id": "legacy",
+            "workspace_id": "workspace-1",
+            "thread_id": "thread-1",
+            "method": "approval/request",
+            "kind": "approval",
+            "title": "Allow tests?",
+            "detail": null,
+            "command": "npm test",
+            "path": null,
+            "turn_id": null,
+            "item_id": null,
+            "questions": [],
+            "created_at": "2026-08-09T12:00:00Z"
+        }))
+        .unwrap();
+        assert_eq!(legacy.approval_decisions, None);
+        assert!(
+            serde_json::to_value(&legacy).unwrap()["approval_decisions"].is_null(),
+            "legacy capability field should stay omitted"
+        );
+
+        let mut explicit_json = serde_json::to_value(&legacy).unwrap();
+        explicit_json
+            .as_object_mut()
+            .unwrap()
+            .insert("approval_decisions".to_string(), serde_json::json!([]));
+        let explicit_empty: InteractiveRequest = serde_json::from_value(explicit_json).unwrap();
+        assert_eq!(explicit_empty.approval_decisions, Some(Vec::new()));
+        assert_eq!(
+            serde_json::to_value(explicit_empty).unwrap()["approval_decisions"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn unsupported_conversation_item_has_a_stable_tagged_shape() {
+        let item = ConversationItem::Unsupported {
+            id: "future-1".to_string(),
+            output_kind: "artifactPreview".to_string(),
+            reason: "Unsupported".to_string(),
+            payload: serde_json::json!({ "title": "Prototype" }),
+            lifecycle: ContentLifecycle::Streaming,
+            created_at: "2026-08-09T10:00:00Z".parse().unwrap(),
+        };
+        let json = serde_json::to_value(item).unwrap();
+
+        assert_eq!(json["kind"], "unsupported");
+        assert_eq!(json["output_kind"], "artifactPreview");
+        assert_eq!(json["lifecycle"], "streaming");
+        assert_eq!(json["payload"]["title"], "Prototype");
+    }
+
+    #[test]
+    fn artifact_conversation_item_has_a_stable_tagged_shape() {
+        let item = ConversationItem::Artifact {
+            id: "artifact-1".to_string(),
+            artifact: ConversationArtifact {
+                title: "Prototype".to_string(),
+                artifact_kind: "preview".to_string(),
+                url: Some("https://example.com/prototype".to_string()),
+                mime_type: Some("text/html".to_string()),
+                version: Some("v2".to_string()),
+                content: Some("<main>Prototype</main>".to_string()),
+                payload: serde_json::json!({ "title": "Prototype" }),
+            },
+            lifecycle: ContentLifecycle::Complete,
+            created_at: "2026-08-09T10:00:00Z".parse().unwrap(),
+        };
+        let json = serde_json::to_value(item).unwrap();
+
+        assert_eq!(json["kind"], "artifact");
+        assert_eq!(json["artifact"]["title"], "Prototype");
+        assert_eq!(json["artifact"]["version"], "v2");
+        assert_eq!(json["lifecycle"], "complete");
+    }
+
+    #[test]
+    fn code_review_item_has_a_stable_tagged_shape() {
+        let item = ConversationItem::CodeReview {
+            id: "review-1".to_string(),
+            subject: Some("current changes".to_string()),
+            content: "## Findings".to_string(),
+            lifecycle: ContentLifecycle::Complete,
+            created_at: "2026-08-09T10:00:00Z".parse().unwrap(),
+        };
+        let json = serde_json::to_value(item).unwrap();
+
+        assert_eq!(json["kind"], "code_review");
+        assert_eq!(json["subject"], "current changes");
+        assert_eq!(json["content"], "## Findings");
+        assert_eq!(json["lifecycle"], "complete");
     }
 
     #[test]

@@ -85,6 +85,8 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                     }),
                     text: extract_string(payload, &["message"]).unwrap_or_default(),
                     attachments: session_entry_attachments(payload),
+                    turn_id: None,
+                    previous_turn_id: None,
                     created_at,
                 },
             }),
@@ -95,6 +97,10 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                         format!("session-agent-{}", created_at.timestamp_millis())
                     }),
                     text: extract_string(payload, &["message"]).unwrap_or_default(),
+                    phase: None,
+                    memory_citation: None,
+                    citations: Vec::new(),
+                    lifecycle: ContentLifecycle::Complete,
                     created_at,
                 },
             }),
@@ -110,12 +116,20 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                 match role.as_str() {
                     "assistant" => Some(SessionHydratedItem {
                         kind: SessionHydratedItemKind::AssistantMessageFromResponse,
-                        item: ConversationItem::AssistantMessage {
-                            id: extract_string(payload, &["id"]).unwrap_or_else(|| {
-                                format!("response-assistant-{}", created_at.timestamp_millis())
-                            }),
-                            text,
-                            created_at,
+                        item: {
+                            let (phase, memory_citation) =
+                                codex_assistant_message_metadata(payload);
+                            ConversationItem::AssistantMessage {
+                                id: extract_string(payload, &["id"]).unwrap_or_else(|| {
+                                    format!("response-assistant-{}", created_at.timestamp_millis())
+                                }),
+                                text,
+                                phase,
+                                memory_citation,
+                                citations: Vec::new(),
+                                lifecycle: ContentLifecycle::Complete,
+                                created_at,
+                            }
                         },
                     }),
                     "user" => None,
@@ -145,6 +159,8 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                         .get("content")
                         .and_then(|content| thread_item_text(Some(content)))
                         .unwrap_or_default(),
+                    lifecycle: ContentLifecycle::Complete,
+                    duration_ms: None,
                     created_at,
                 },
             }),

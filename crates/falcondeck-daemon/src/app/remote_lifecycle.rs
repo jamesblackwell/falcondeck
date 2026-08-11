@@ -132,6 +132,19 @@ impl AppState {
         workspace_id: &str,
         thread_id: Option<String>,
     ) {
+        let preferences = self.preferences().await.notifications;
+        let enabled_for_kind = match kind {
+            "turn-complete" => preferences.notify_on_turn_complete,
+            "approval" | "question" => preferences.notify_on_input_required,
+            "turn-error" => preferences.notify_on_error,
+            _ => preferences.enabled,
+        };
+        if !preferences.enabled || !enabled_for_kind {
+            return;
+        }
+        if preferences.suppress_when_desktop_active && self.desktop_is_active() {
+            return;
+        }
         let command_tx = { self.inner.remote.lock().await.command_tx.clone() };
         if let Some(command_tx) = command_tx {
             let _ = command_tx.send(super::RemoteBridgeCommand::NotifyAttention {

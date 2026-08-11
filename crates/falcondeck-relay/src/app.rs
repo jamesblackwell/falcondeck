@@ -22,6 +22,11 @@ use crate::error::RelayError;
 
 const PEER_QUEUE_CAPACITY: usize = 256;
 const WS_TICKET_TTL_SECONDS: i64 = 30;
+/// Keep replay responses small enough that a slow client can process a
+/// reconnect incrementally. A single unusually large encrypted update is
+/// still sent on its own; the websocket's 16 MiB cap remains the final guard.
+const WS_SYNC_CHUNK_MAX_UPDATES: usize = 128;
+const WS_SYNC_CHUNK_MAX_BYTES: usize = 512 << 10;
 /// How long a claim challenge stays valid; challenges are single-use and a
 /// new challenge request replaces any outstanding one for the pairing.
 const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
@@ -29,11 +34,19 @@ const PENDING_RPC_TTL_SECONDS: i64 = 30;
 /// Default Expo Push API endpoint; override (or disable with an empty value)
 /// via `FALCONDECK_RELAY_EXPO_PUSH_URL`.
 const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
+/// Expo receipt endpoint; receipt polling catches device tokens that expire
+/// after the initial ticket has been accepted.
+const EXPO_RECEIPTS_URL: &str = "https://exp.host/--/api/v2/push/getReceipts";
+const PUSH_RECEIPT_DELAY_SECONDS: u64 = 15;
 /// Minimum spacing between pushes for the same session/kind/thread.
 const PUSH_DEDUPE_SECONDS: i64 = 60;
 /// Request timeout for push delivery so a stalled endpoint cannot pin the
 /// dispatch task.
 const PUSH_REQUEST_TIMEOUT_SECONDS: u64 = 15;
+const PUSH_MAX_ATTEMPTS: usize = 3;
+const PUSH_RETRY_BASE_MS: u64 = 500;
+/// Expo accepts up to 100 messages per HTTP request.
+const EXPO_MAX_MESSAGES_PER_REQUEST: usize = 100;
 /// Each dispatched action enqueues two messages into the daemon peer
 /// channel (`ActionRequested` + the `ActionStatus` update broadcast), so
 /// cap dispatch passes well below `PEER_QUEUE_CAPACITY / 2` to keep
@@ -45,6 +58,68 @@ const MAX_ACTIONS_PER_DISPATCH: usize = 64;
 const PRUNE_INTERVAL_SECONDS: u64 = 60;
 /// Upper bound on client-chosen RPC request identifiers.
 const MAX_RPC_REQUEST_ID_LENGTH: usize = 128;
+
+fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
+    let chunks = chunk_replay_updates(response.updates);
+    if chunks.is_empty() {
+        return vec![RelayServerMessage::Sync {
+            updates: Vec::new(),
+            next_seq: response.next_seq,
+            history_truncated: response.cursor.history_truncated,
+        }];
+    }
+
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, updates)| {
+            let next_seq = if response.cursor.history_truncated {
+                updates
+                    .last()
+                    .and_then(|update| update.seq.checked_add(1))
+                    .unwrap_or(response.next_seq)
+            } else {
+                response.next_seq
+            };
+            RelayServerMessage::Sync {
+                updates,
+                next_seq,
+                // Truncation is a property of the sync request, not of every
+                // chunk. Reporting it once keeps clients from repeatedly
+                // rebuilding their snapshot while still preserving the old
+                // wire shape for small histories.
+                history_truncated: index == 0 && response.cursor.history_truncated,
+            }
+        })
+        .collect()
+}
+
+fn chunk_replay_updates(updates: Vec<RelayUpdate>) -> Vec<Vec<RelayUpdate>> {
+    let mut chunks = Vec::new();
+    let mut chunk = Vec::new();
+    let mut chunk_bytes = 0usize;
+
+    for update in updates {
+        let update_bytes = serde_json::to_vec(&update)
+            .map(|encoded| encoded.len())
+            .unwrap_or(0);
+        let would_exceed_limits = !chunk.is_empty()
+            && (chunk.len() >= WS_SYNC_CHUNK_MAX_UPDATES
+                || chunk_bytes.saturating_add(update_bytes) > WS_SYNC_CHUNK_MAX_BYTES);
+        if would_exceed_limits {
+            chunks.push(chunk);
+            chunk = Vec::new();
+            chunk_bytes = 0;
+        }
+        chunk_bytes = chunk_bytes.saturating_add(update_bytes);
+        chunk.push(update);
+    }
+
+    if !chunk.is_empty() {
+        chunks.push(chunk);
+    }
+    chunks
+}
 
 #[derive(Debug, Clone)]
 pub struct RetentionConfig {
@@ -87,6 +162,12 @@ struct InnerState {
     /// Push endpoint resolved once at startup; an empty value disables
     /// push delivery.
     push_endpoint: String,
+    /// Optional EAS access token for projects that enable authenticated Expo
+    /// Push API access.
+    push_access_token: Option<String>,
+    /// Receipt endpoint resolved once at startup, with an override retained
+    /// for local relay integration tests.
+    push_receipts_endpoint: String,
 }
 
 struct Store {
@@ -397,6 +478,11 @@ impl AppState {
             .unwrap_or_else(|_| reqwest::Client::new());
         let push_endpoint = std::env::var("FALCONDECK_RELAY_EXPO_PUSH_URL")
             .unwrap_or_else(|_| EXPO_PUSH_URL.to_string());
+        let push_receipts_endpoint = std::env::var("FALCONDECK_RELAY_EXPO_RECEIPTS_URL")
+            .unwrap_or_else(|_| EXPO_RECEIPTS_URL.to_string());
+        let push_access_token = std::env::var("FALCONDECK_RELAY_EXPO_ACCESS_TOKEN")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
         Self {
             inner: Arc::new(InnerState {
                 version,
@@ -413,6 +499,8 @@ impl AppState {
                 needs_flush,
                 push_client,
                 push_endpoint,
+                push_access_token,
+                push_receipts_endpoint,
             }),
         }
     }
@@ -1269,19 +1357,8 @@ impl AppState {
                     .await;
             }
             RelayClientMessage::Sync { after_seq } => {
-                let response = self
-                    .session_updates_for_ws(session_id, after_seq.unwrap_or(0))
+                self.send_sync_to_peer(session_id, peer_id, after_seq.unwrap_or(0))
                     .await?;
-                self.send_to_peer(
-                    session_id,
-                    peer_id,
-                    RelayServerMessage::Sync {
-                        updates: response.updates,
-                        next_seq: response.next_seq,
-                        history_truncated: response.cursor.history_truncated,
-                    },
-                )
-                .await;
             }
             RelayClientMessage::Update { body } => {
                 // Only the daemon writes durable updates; a client peer must
@@ -1968,7 +2045,10 @@ impl AppState {
                     .await?;
             }
             None => {
-                self.inner.backend.remove_device(session_id, device_id).await?;
+                self.inner
+                    .backend
+                    .remove_device(session_id, device_id)
+                    .await?;
                 self.persist_device_state(&session, None, PersistMode::Immediate)
                     .await?;
             }
@@ -2088,46 +2168,84 @@ impl AppState {
             "turn-error" => ("FalconDeck", "An agent turn failed"),
             _ => ("FalconDeck", "An agent needs your attention"),
         };
-        let messages = recipients
-            .iter()
-            .map(|token| {
-                serde_json::json!({
-                    "to": token,
-                    "title": title,
-                    "body": body,
-                    "sound": "default",
-                    "priority": "high",
-                    "data": {
-                        "sessionId": session_id,
-                        "workspaceId": workspace_id,
-                        "threadId": thread_id,
-                        "kind": kind,
-                    },
+        for recipient_chunk in recipients.chunks(EXPO_MAX_MESSAGES_PER_REQUEST) {
+            let chunk_recipients = recipient_chunk.to_vec();
+            let messages = chunk_recipients
+                .iter()
+                .map(|token| {
+                    serde_json::json!({
+                        "to": token,
+                        "title": title,
+                        "body": body,
+                        "sound": "default",
+                        "priority": "high",
+                        "channelId": "default",
+                        "ttl": 86400,
+                        "data": {
+                            "sessionId": session_id,
+                            "workspaceId": workspace_id,
+                            "threadId": thread_id,
+                            "kind": kind,
+                        },
+                    })
                 })
-            })
-            .collect::<Vec<_>>();
-        let session_id = session_id.to_string();
-        let state = self.clone();
-        let client = self.inner.push_client.clone();
-        tokio::spawn(async move {
-            match client.post(&endpoint).json(&messages).send().await {
-                Ok(response) if !response.status().is_success() => {
-                    warn!(
-                        session_id,
-                        status = %response.status(),
-                        "push notification delivery was rejected"
-                    );
+                .collect::<Vec<_>>();
+            let session_id = session_id.to_string();
+            let state = self.clone();
+            let client = self.inner.push_client.clone();
+            let access_token = self.inner.push_access_token.clone();
+            let endpoint = endpoint.clone();
+            tokio::spawn(async move {
+                for attempt in 0..PUSH_MAX_ATTEMPTS {
+                    let mut request = client.post(&endpoint).json(&messages);
+                    if let Some(access_token) = access_token.as_deref() {
+                        request = request.bearer_auth(access_token);
+                    }
+                    match request.send().await {
+                        Ok(response)
+                            if response.status().as_u16() == 429
+                                || response.status().is_server_error() =>
+                        {
+                            if attempt + 1 < PUSH_MAX_ATTEMPTS {
+                                tokio::time::sleep(std::time::Duration::from_millis(
+                                    PUSH_RETRY_BASE_MS * 2u64.saturating_pow(attempt as u32),
+                                ))
+                                .await;
+                                continue;
+                            }
+                            warn!(
+                                session_id,
+                                status = %response.status(),
+                                "push notification delivery failed after retries"
+                            );
+                        }
+                        Ok(response) if !response.status().is_success() => {
+                            warn!(
+                                session_id,
+                                status = %response.status(),
+                                "push notification delivery was rejected"
+                            );
+                        }
+                        Ok(response) => {
+                            state
+                                .handle_push_tickets(&session_id, &chunk_recipients, response)
+                                .await;
+                        }
+                        Err(_error) if attempt + 1 < PUSH_MAX_ATTEMPTS => {
+                            tokio::time::sleep(std::time::Duration::from_millis(
+                                PUSH_RETRY_BASE_MS * 2u64.saturating_pow(attempt as u32),
+                            ))
+                            .await;
+                            continue;
+                        }
+                        Err(error) => {
+                            warn!(session_id, %error, "failed to deliver push notification after retries");
+                        }
+                    }
+                    break;
                 }
-                Ok(response) => {
-                    state
-                        .handle_push_tickets(&session_id, &recipients, response)
-                        .await;
-                }
-                Err(error) => {
-                    warn!(session_id, %error, "failed to deliver push notification");
-                }
-            }
-        });
+            });
+        }
     }
 
     /// Best-effort parse of the Expo push response: tickets come back in
@@ -2147,6 +2265,11 @@ impl AppState {
                 return;
             }
         };
+        let receipt_tickets = tickets
+            .iter()
+            .zip(recipients)
+            .filter_map(|(ticket, token)| ticket.id.clone().map(|id| (id, token.clone())))
+            .collect::<Vec<_>>();
         let dead_tokens = tickets
             .iter()
             .zip(recipients)
@@ -2160,15 +2283,82 @@ impl AppState {
             })
             .map(|(_, token)| token.clone())
             .collect::<Vec<_>>();
-        if dead_tokens.is_empty() {
+        if !dead_tokens.is_empty() {
+            warn!(
+                session_id,
+                count = dead_tokens.len(),
+                "clearing push tokens for unregistered devices"
+            );
+            self.clear_dead_push_tokens(session_id, &dead_tokens).await;
+        }
+        if receipt_tickets.is_empty() {
             return;
         }
-        warn!(
-            session_id,
-            count = dead_tokens.len(),
-            "clearing push tokens for unregistered devices"
-        );
-        self.clear_dead_push_tokens(session_id, &dead_tokens).await;
+
+        let state = self.clone();
+        let session_id = session_id.to_string();
+        tokio::spawn(async move {
+            state.poll_push_receipts(&session_id, receipt_tickets).await;
+        });
+    }
+
+    async fn poll_push_receipts(&self, session_id: &str, tickets: Vec<(String, String)>) {
+        tokio::time::sleep(std::time::Duration::from_secs(PUSH_RECEIPT_DELAY_SECONDS)).await;
+
+        let ids = tickets.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+        let mut request = self
+            .inner
+            .push_client
+            .post(&self.inner.push_receipts_endpoint)
+            .json(&serde_json::json!({ "ids": ids }));
+        if let Some(access_token) = self.inner.push_access_token.as_deref() {
+            request = request.bearer_auth(access_token);
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                warn!(session_id, %error, "failed to fetch push receipts");
+                return;
+            }
+        };
+        if !response.status().is_success() {
+            warn!(
+                session_id,
+                status = %response.status(),
+                "push receipt request was rejected"
+            );
+            return;
+        }
+
+        let receipts = match response.json::<ExpoReceiptResponse>().await {
+            Ok(parsed) => parsed.data,
+            Err(error) => {
+                warn!(session_id, %error, "failed to parse push receipt response");
+                return;
+            }
+        };
+        let dead_tokens = tickets
+            .iter()
+            .filter_map(|(id, token)| {
+                let receipt = receipts.get(id)?;
+                (receipt.status.as_deref() == Some("error")
+                    && receipt
+                        .details
+                        .as_ref()
+                        .and_then(|details| details.error.as_deref())
+                        == Some("DeviceNotRegistered"))
+                .then_some(token.clone())
+            })
+            .collect::<Vec<_>>();
+        if !dead_tokens.is_empty() {
+            warn!(
+                session_id,
+                count = dead_tokens.len(),
+                "clearing push tokens for devices rejected by push receipt"
+            );
+            self.clear_dead_push_tokens(session_id, &dead_tokens).await;
+        }
     }
 
     async fn clear_dead_push_tokens(&self, session_id: &str, dead_tokens: &[String]) {
@@ -2391,12 +2581,12 @@ impl AppState {
         }
     }
 
-    async fn session_updates_for_ws(
+    fn session_updates_for_ws_locked(
         &self,
+        store: &Store,
         session_id: &str,
         after_seq: u64,
     ) -> Result<RelayUpdatesResponse, RelayError> {
-        let store = self.inner.store.lock().await;
         let session = store
             .data
             .sessions
@@ -2430,17 +2620,56 @@ impl AppState {
         })
     }
 
+    async fn send_sync_to_peer(
+        &self,
+        session_id: &str,
+        peer_id: &str,
+        after_seq: u64,
+    ) -> Result<(), RelayError> {
+        // Keep history selection and queue insertion under the same lock as
+        // append_update_locked's live fanout. This closes the only window in
+        // which a newer live update could jump ahead of replay chunks.
+        let store = self.inner.store.lock().await;
+        let response = self.session_updates_for_ws_locked(&store, session_id, after_seq)?;
+        let Some(tx) = store
+            .live_sessions
+            .get(session_id)
+            .and_then(|live| live.peers.get(peer_id))
+            .map(|peer| peer.tx.clone())
+        else {
+            return Ok(());
+        };
+        for message in sync_messages(response) {
+            self.queue_message(session_id, peer_id, &tx, message);
+        }
+        Ok(())
+    }
+
     async fn send_to_peer(&self, session_id: &str, peer_id: &str, message: RelayServerMessage) {
-        let tx = {
-            let store = self.inner.store.lock().await;
-            store
-                .live_sessions
-                .get(session_id)
-                .and_then(|live| live.peers.get(peer_id))
-                .map(|peer| peer.tx.clone())
+        self.send_messages_to_peer(session_id, peer_id, vec![message])
+            .await;
+    }
+
+    /// Enqueue a group of messages while holding the peer-map lock. This is
+    /// used by ordinary control fanout; replay has the stronger history
+    /// selection + enqueue fence in `send_sync_to_peer`.
+    async fn send_messages_to_peer(
+        &self,
+        session_id: &str,
+        peer_id: &str,
+        messages: Vec<RelayServerMessage>,
+    ) {
+        let store = self.inner.store.lock().await;
+        let Some(tx) = store
+            .live_sessions
+            .get(session_id)
+            .and_then(|live| live.peers.get(peer_id))
+            .map(|peer| peer.tx.clone())
+        else {
+            return;
         };
 
-        if let Some(tx) = tx {
+        for message in messages {
             self.queue_message(session_id, peer_id, &tx, message);
         }
     }
@@ -2834,9 +3063,17 @@ struct ExpoPushResponse {
 #[derive(Debug, Deserialize)]
 struct ExpoPushTicket {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     details: Option<ExpoPushTicketDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExpoReceiptResponse {
+    #[serde(default)]
+    data: HashMap<String, ExpoPushTicket>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3132,7 +3369,85 @@ fn generate_pairing_code(state: &PersistedState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{namespaced_rpc_request_id, push_dedupe_key, strip_rpc_request_id_namespace};
+    use chrono::Utc;
+    use falcondeck_core::{
+        EncryptedEnvelope, EncryptionVariant, MachinePresence, RelayUpdate, RelayUpdateBody,
+        RelayUpdatesResponse, SyncCursor,
+    };
+
+    use super::{
+        chunk_replay_updates, namespaced_rpc_request_id, push_dedupe_key,
+        strip_rpc_request_id_namespace, sync_messages,
+    };
+
+    fn test_update(seq: u64) -> RelayUpdate {
+        RelayUpdate {
+            id: format!("update-{seq}"),
+            seq,
+            body: RelayUpdateBody::Encrypted {
+                envelope: EncryptedEnvelope {
+                    encryption_variant: EncryptionVariant::DataKeyV1,
+                    ciphertext: "ciphertext".to_string(),
+                },
+            },
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn replay_chunks_bound_update_count_and_preserve_order() {
+        let updates = (1..=129).map(test_update).collect::<Vec<_>>();
+        let chunks = chunk_replay_updates(updates);
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 128);
+        assert_eq!(chunks[1].len(), 1);
+        assert_eq!(chunks[0].first().map(|update| update.seq), Some(1));
+        assert_eq!(chunks[1].first().map(|update| update.seq), Some(129));
+    }
+
+    #[test]
+    fn replay_sync_reports_truncation_once_across_chunks() {
+        let response = RelayUpdatesResponse {
+            session_id: "session-1".to_string(),
+            updates: (1..=129).map(test_update).collect(),
+            next_seq: 130,
+            cursor: SyncCursor {
+                session_id: "session-1".to_string(),
+                next_seq: 130,
+                last_acknowledged_seq: 0,
+                requires_bootstrap: true,
+                history_truncated: true,
+            },
+            presence: MachinePresence {
+                session_id: "session-1".to_string(),
+                daemon_connected: false,
+                last_seen_at: None,
+            },
+        };
+
+        let messages = sync_messages(response);
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            &messages[0],
+            falcondeck_core::RelayServerMessage::Sync {
+                history_truncated: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &messages[1],
+            falcondeck_core::RelayServerMessage::Sync {
+                next_seq: 130,
+                history_truncated: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &messages[0],
+            falcondeck_core::RelayServerMessage::Sync { next_seq: 129, .. }
+        ));
+    }
 
     #[test]
     fn push_dedupe_key_separates_kinds_on_the_same_thread() {

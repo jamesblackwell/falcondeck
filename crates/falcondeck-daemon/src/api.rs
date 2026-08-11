@@ -14,7 +14,7 @@ use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ApprovalResponseRequest, ConnectWorkspaceRequest, ForkThreadRequest,
+    ApprovalResponseRequest, ClientActivityRequest, ConnectWorkspaceRequest, ForkThreadRequest,
     InteractiveResponseRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
     SnapshotRequest, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
     ThreadDetailMode, ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest,
@@ -95,6 +95,7 @@ pub fn router(state: AppState) -> Router {
             "/api/preferences",
             get(preferences).patch(update_preferences),
         )
+        .route("/api/client-activity", post(client_activity))
         .route("/api/remote/status", get(remote_status))
         .route("/api/remote/pairing", post(start_remote_pairing))
         .route(
@@ -222,6 +223,14 @@ async fn update_preferences(
     Json(request): Json<UpdatePreferencesRequest>,
 ) -> Result<Json<falcondeck_core::FalconDeckPreferences>, DaemonError> {
     Ok(Json(state.update_preferences(request).await?))
+}
+
+async fn client_activity(
+    State(state): State<AppState>,
+    Json(request): Json<ClientActivityRequest>,
+) -> StatusCode {
+    state.set_desktop_activity(request.active);
+    StatusCode::NO_CONTENT
 }
 
 async fn remote_status(

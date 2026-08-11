@@ -12,9 +12,9 @@ use std::{
 
 use chrono::Utc;
 use falcondeck_core::{
-    AccountStatus, AccountSummary, AgentProvider, CollaborationModeSummary, ConversationItem,
-    ImageInput, ModelSummary, ReasoningEffortSummary, ServiceTierSummary, ThreadAgentParams,
-    ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
+    AccountStatus, AccountSummary, AgentProvider, CollaborationModeSummary, ContentLifecycle,
+    ConversationItem, ImageInput, ModelSummary, ReasoningEffortSummary, ServiceTierSummary,
+    ThreadAgentParams, ThreadAttention, ThreadPlan, ThreadStatus, ThreadSummary,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -28,7 +28,20 @@ use tracing::warn;
 use crate::agent_binary::{missing_binary_message, preferred_command_path, resolve_agent_binary};
 use crate::skills::canonical_skill_alias;
 use crate::{
-    app::{AppState, conversation_helpers::tool_display_metadata},
+    app::{
+        AppState,
+        conversation_helpers::{
+            codex_artifact_conversation_item, codex_assistant_conversation_item,
+            codex_assistant_message_metadata, codex_context_compaction_conversation_item,
+            codex_file_change_conversation_item, codex_hook_prompt_conversation_item,
+            codex_image_conversation_item, codex_plan_conversation_item,
+            codex_reasoning_conversation_item, codex_review_mode_conversation_item,
+            codex_tool_call_detail, codex_tool_call_output, codex_tool_call_title,
+            codex_web_search_conversation_item, content_lifecycle_for_status,
+            merge_code_review_item, sanitize_conversation_item, terminal_assistant_receipt,
+            tool_display_metadata, unsupported_conversation_item,
+        },
+    },
     error::DaemonError,
 };
 
@@ -36,7 +49,7 @@ mod session_file;
 mod thread_list;
 
 use session_file::hydrate_thread_items_from_session_file;
-use thread_list::{parse_models, parse_threads};
+use thread_list::{parse_collaboration_modes, parse_models, parse_threads};
 
 pub struct CodexBootstrap {
     pub session: Arc<CodexSession>,
@@ -68,6 +81,98 @@ pub struct HydratedThread {
 /// requests (`turn/start`, `turn/interrupt`, ...) are not timed out here —
 /// they are protected by the disconnect drain in `read_stdout` instead.
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Remove terminal control sequences from provider stderr before it crosses
+/// the daemon/client boundary. Codex uses ANSI styling even when stderr is
+/// piped, and displaying those bytes directly produces replacement glyphs in
+/// browser and native clients.
+fn strip_terminal_control_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars();
+
+    while let Some(character) = chars.next() {
+        if character != '\u{1b}' {
+            if !character.is_control() || matches!(character, '\n' | '\r' | '\t') {
+                output.push(character);
+            }
+            continue;
+        }
+
+        match chars.next() {
+            // CSI sequences, including Codex's colour/style sequences such as
+            // ESC[31m and ESC[0m, end at the first byte in the final range.
+            Some('[') => {
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            }
+            // OSC sequences can end with BEL or the two-byte ST sequence.
+            Some(']') => {
+                while let Some(next) = chars.next() {
+                    if next == '\u{7}' {
+                        break;
+                    }
+                    if next == '\u{1b}' && chars.next() == Some('\\') {
+                        break;
+                    }
+                }
+            }
+            // DCS, SOS, PM, and APC sequences also use ST as their terminator.
+            Some('P' | 'X' | '^' | '_') => {
+                while let Some(next) = chars.next() {
+                    if next == '\u{1b}' && chars.next() == Some('\\') {
+                        break;
+                    }
+                }
+            }
+            // Character-set designators consume one additional byte.
+            Some('(' | ')') => {
+                let _ = chars.next();
+            }
+            Some(_) | None => {}
+        }
+    }
+
+    output
+}
+
+/// Map Codex's stderr log level to the daemon's service severity. Structured
+/// logs and human-readable tracing output both contain a standalone level
+/// token, so this remains tolerant of Codex's formatting changes.
+fn codex_stderr_level(line: &str) -> falcondeck_core::ServiceLevel {
+    let upper = line.to_ascii_uppercase();
+    let has_token = |expected: &str| {
+        upper
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token == expected)
+    };
+
+    if has_token("ERROR") {
+        falcondeck_core::ServiceLevel::Error
+    } else if has_token("WARN") || has_token("WARNING") {
+        falcondeck_core::ServiceLevel::Warning
+    } else {
+        falcondeck_core::ServiceLevel::Info
+    }
+}
+
+fn is_non_fatal_codex_cache_diagnostic(line: &str) -> bool {
+    // Codex falls back to its models endpoint when an older cache snapshot
+    // cannot be decoded. Depending on when it discovers the stale schema, it
+    // reports either a load failure or a TTL-renewal failure. Neither indicates
+    // a failed app-server startup, so do not surface this exact compatibility
+    // diagnostic as an application error.
+    //
+    // Match the models-manager target loosely: older Codex builds log under
+    // `codex_models_manager::cache`, newer ones under `::manager`.
+    let from_models_manager = line.contains("codex_models_manager");
+    from_models_manager
+        && line.contains("missing field `base_instructions`")
+        && (line.contains("failed to load models cache")
+            || line.contains("failed to renew cache TTL"))
+}
 
 pub struct CodexSession {
     workspace_id: String,
@@ -159,14 +264,17 @@ impl CodexSession {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let message = line.trim().to_string();
+                    let message = strip_terminal_control_sequences(line.trim());
                     if message.is_empty() {
+                        continue;
+                    }
+                    if is_non_fatal_codex_cache_diagnostic(&message) {
                         continue;
                     }
                     let _ = state.emit_service(
                         Some(workspace_id.clone()),
                         None,
-                        falcondeck_core::ServiceLevel::Info,
+                        codex_stderr_level(&message),
                         message,
                         Some("stderr".to_string()),
                     );
@@ -185,7 +293,7 @@ impl CodexSession {
                         "clientInfo": {
                             "name": "falcondeck",
                             "title": "FalconDeck",
-                            "version": "0.1.0"
+                            "version": env!("CARGO_PKG_VERSION")
                         },
                         "capabilities": {
                             "experimentalApi": true
@@ -203,9 +311,18 @@ impl CodexSession {
                 .send_control_request("model/list", json!({}))
                 .await?;
             let models = parse_models(&models_value);
-            // `collaborationMode/list` was removed from the Codex app-server
-            // protocol; the daemon no longer surfaces collaboration modes.
-            let collaboration_modes = Vec::new();
+            // Experimental and absent from some older app-server releases, so
+            // mode discovery must not make the otherwise-stable bootstrap fail.
+            let collaboration_modes = match session
+                .send_control_request("collaborationMode/list", json!({}))
+                .await
+            {
+                Ok(value) => parse_collaboration_modes(&value),
+                Err(error) => {
+                    warn!("Codex collaboration modes unavailable: {error}");
+                    Vec::new()
+                }
+            };
             let threads_value = session
                 .send_control_request(
                     "thread/list",
@@ -284,10 +401,15 @@ impl CodexSession {
     pub async fn provider_metadata(&self) -> Result<CodexProviderMetadata, DaemonError> {
         let account_value = self.send_control_request("account/read", json!({})).await?;
         let models_value = self.send_control_request("model/list", json!({})).await?;
+        let collaboration_modes = self
+            .send_control_request("collaborationMode/list", json!({}))
+            .await
+            .map(|value| parse_collaboration_modes(&value))
+            .unwrap_or_default();
         Ok(CodexProviderMetadata {
             account: parse_account(&account_value),
             models: parse_models(&models_value),
-            collaboration_modes: Vec::new(),
+            collaboration_modes,
         })
     }
 
@@ -657,7 +779,7 @@ fn extract_thread_record(value: &Value) -> Option<&Value> {
     walk(value)
 }
 
-fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
+pub(crate) fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
     let Some(thread) = extract_thread_record(value) else {
         return Vec::new();
     };
@@ -668,17 +790,69 @@ fn hydrate_thread_items(value: &Value) -> Vec<ConversationItem> {
         .unwrap_or_default();
 
     let mut items = Vec::new();
+    let mut previous_turn_id = None;
     for turn in turns {
+        let turn_start_index = items.len();
+        let turn_id = extract_string(&turn, &["id"]);
+        let turn_lifecycle = content_lifecycle_for_status(
+            extract_string(&turn, &["status"]).as_deref(),
+            ContentLifecycle::Complete,
+        );
         let turn_items = turn
             .get("items")
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        let mut saw_user_message = false;
         for item in turn_items {
-            if let Some(converted) = build_conversation_item_from_thread_item(&item) {
-                items.push(converted);
+            let is_user_message = extract_string(&item, &["type"])
+                .is_some_and(|item_type| item_type == "userMessage");
+            let editable_turn_id = (!saw_user_message).then_some(turn_id.as_deref()).flatten();
+            if let Some(mut converted) = build_conversation_item_from_thread_item(
+                &item,
+                editable_turn_id,
+                previous_turn_id.as_deref(),
+                turn_lifecycle,
+            ) {
+                let existing_review_index = match &converted {
+                    ConversationItem::CodeReview { id, .. } => items[turn_start_index..]
+                        .iter()
+                        .position(|entry| {
+                            matches!(entry, ConversationItem::CodeReview { id: existing, .. } if existing == id)
+                        })
+                        .map(|index| turn_start_index + index),
+                    _ => None,
+                };
+                if let Some(index) = existing_review_index {
+                    let existing = items[index].clone();
+                    merge_code_review_item(&existing, &mut converted);
+                    items[index] = converted;
+                } else {
+                    items.push(converted);
+                }
             }
+            saw_user_message |= is_user_message;
         }
+        let terminal_at = extract_datetime_or_timestamp(
+            &turn,
+            &["completedAt", "completed_at", "startedAt", "started_at"],
+        )
+        .or_else(|| {
+            items[turn_start_index..]
+                .iter()
+                .filter_map(conversation_item_created_at)
+                .max()
+        })
+        .unwrap_or_else(Utc::now);
+        if let Some(receipt) = terminal_assistant_receipt(
+            &items[turn_start_index..],
+            turn_lifecycle,
+            terminal_at,
+            turn_id.as_deref(),
+        ) {
+            items.push(receipt);
+        }
+        previous_turn_id = turn_id;
     }
 
     items
@@ -766,14 +940,19 @@ fn thread_status_from_turn_status(status: &str) -> ThreadStatus {
     }
 }
 
-fn build_conversation_item_from_thread_item(item: &Value) -> Option<ConversationItem> {
+fn build_conversation_item_from_thread_item(
+    item: &Value,
+    turn_id: Option<&str>,
+    previous_turn_id: Option<&str>,
+    turn_lifecycle: ContentLifecycle,
+) -> Option<ConversationItem> {
     let id = extract_string(item, &["id"])?;
     let item_type = extract_string(item, &["type"])?;
     let created_at =
         extract_datetime(item, &["createdAt", "created_at", "timestamp"]).unwrap_or_else(Utc::now);
 
     match item_type.as_str() {
-        "userMessage" => {
+        "userMessage" | "user_message" => {
             let content = item
                 .get("content")
                 .and_then(Value::as_array)
@@ -784,22 +963,85 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
                 id,
                 text,
                 attachments,
+                turn_id: turn_id.map(str::to_string),
+                previous_turn_id: previous_turn_id.map(str::to_string),
                 created_at,
             })
         }
-        "agentMessage" => Some(ConversationItem::AssistantMessage {
-            id,
-            text: extract_string(item, &["text"]).unwrap_or_default(),
+        "agentMessage" | "agent_message" => codex_assistant_conversation_item(
+            item,
             created_at,
-        }),
-        "reasoning" => Some(ConversationItem::Reasoning {
-            id,
-            summary: thread_item_text(item.get("summary")),
-            content: thread_item_text(item.get("content")).unwrap_or_default(),
+            content_lifecycle_for_status(
+                extract_string(item, &["status"]).as_deref(),
+                turn_lifecycle,
+            ),
+        ),
+        "reasoning" | "reasoningSummary" | "reasoning_summary" => {
+            codex_reasoning_conversation_item(item, created_at, turn_lifecycle, None)
+        }
+        "hookPrompt" | "hook_prompt" => codex_hook_prompt_conversation_item(item, created_at),
+        "plan" => codex_plan_conversation_item(item, created_at),
+        "imageGeneration" | "image_generation" | "imageView" | "image_view" => {
+            codex_image_conversation_item(
+                item,
+                created_at,
+                content_lifecycle_for_status(
+                    extract_string(item, &["status"]).as_deref(),
+                    turn_lifecycle,
+                ),
+            )
+        }
+        "webSearch" | "web_search" => codex_web_search_conversation_item(
+            item,
             created_at,
-        }),
-        "commandExecution" | "fileChange" | "webSearch" | "imageView" | "contextCompaction" => {
-            let output = extract_string(item, &["output", "stdout", "result", "detail", "query"]);
+            content_lifecycle_for_status(
+                extract_string(item, &["status"]).as_deref(),
+                turn_lifecycle,
+            ),
+        ),
+        "fileChange" | "file_change" => codex_file_change_conversation_item(
+            item,
+            created_at,
+            "completed",
+            extract_datetime_or_timestamp(item, &["completedAt", "completed_at"]),
+        ),
+        "contextCompaction" | "context_compaction" => codex_context_compaction_conversation_item(
+            item,
+            created_at,
+            crate::app::conversation_helpers::tool_lifecycle(
+                extract_string(item, &["status"])
+                    .as_deref()
+                    .unwrap_or("completed"),
+                None,
+                falcondeck_core::ToolActivityKind::Context,
+            ),
+            extract_datetime_or_timestamp(item, &["completedAt", "completed_at"]),
+        ),
+        "commandExecution"
+        | "command_execution"
+        | "mcpToolCall"
+        | "mcp_tool_call"
+        | "dynamicToolCall"
+        | "dynamic_tool_call"
+        | "collabAgentToolCall"
+        | "collab_agent_tool_call"
+        | "subAgentActivity"
+        | "sub_agent_activity"
+        | "sleep" => {
+            let output = codex_tool_call_output(item).or_else(|| {
+                extract_string(
+                    item,
+                    &[
+                        "aggregatedOutput",
+                        "aggregated_output",
+                        "output",
+                        "stdout",
+                        "result",
+                        "detail",
+                        "query",
+                    ],
+                )
+            });
             let status =
                 extract_string(item, &["status"]).unwrap_or_else(|| "completed".to_string());
             let exit_code = item
@@ -808,34 +1050,43 @@ fn build_conversation_item_from_thread_item(item: &Value) -> Option<Conversation
                 .and_then(Value::as_i64)
                 .map(|value| value as i32);
             let title = restored_tool_title(item, &item_type);
-            Some(ConversationItem::ToolCall {
+            let mut conversation_item = ConversationItem::ToolCall {
                 id,
                 title: title.clone(),
                 tool_kind: item_type.clone(),
                 status: status.clone(),
                 output: output.clone(),
                 exit_code,
-                display: tool_display_metadata(
+                display: Box::new(tool_display_metadata(
                     &title,
                     &item_type,
                     &status,
                     exit_code,
                     output.as_deref(),
-                ),
+                )),
+                detail: codex_tool_call_detail(item).map(Box::new),
                 created_at,
                 completed_at: extract_datetime_or_timestamp(item, &["completedAt", "completed_at"]),
-            })
+            };
+            sanitize_conversation_item(&mut conversation_item);
+            Some(conversation_item)
         }
-        "enteredReviewMode" | "exitedReviewMode" => Some(ConversationItem::Service {
-            id,
-            level: falcondeck_core::ServiceLevel::Info,
-            message: if item_type == "enteredReviewMode" {
-                "Review mode enabled".to_string()
-            } else {
-                "Review mode completed".to_string()
-            },
-            created_at,
-        }),
+        "enteredReviewMode" | "entered_review_mode" | "exitedReviewMode" | "exited_review_mode" => {
+            codex_review_mode_conversation_item(item, created_at, turn_lifecycle)
+        }
+        "artifactPreview" | "artifact_preview" | "artifact" => {
+            codex_artifact_conversation_item(item, created_at, turn_lifecycle)
+        }
+        _ if crate::app::conversation_helpers::should_surface_tool_item(&item_type) => {
+            unsupported_conversation_item(
+                item,
+                created_at,
+                content_lifecycle_for_status(
+                    extract_string(item, &["status"]).as_deref(),
+                    turn_lifecycle,
+                ),
+            )
+        }
         _ => None,
     }
 }
@@ -973,20 +1224,18 @@ fn extract_unix_timestamp(value: &Value, keys: &[&str]) -> Option<chrono::DateTi
 fn thread_item_text(value: Option<&Value>) -> Option<String> {
     let value = value?;
     if let Some(text) = value.as_str() {
-        let trimmed = text.trim();
-        return (!trimmed.is_empty()).then(|| trimmed.to_string());
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
     }
-    if let Some(parts) = value.as_array() {
-        let joined = parts
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        return (!joined.is_empty()).then_some(joined);
-    }
-    None
+    let joined = value
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!joined.is_empty()).then_some(joined)
 }
 
 fn thread_tool_title(item_type: &str) -> String {
@@ -1002,6 +1251,9 @@ fn thread_tool_title(item_type: &str) -> String {
 }
 
 fn restored_tool_title(item: &Value, item_type: &str) -> String {
+    if let Some(title) = codex_tool_call_title(item) {
+        return title;
+    }
     if let Some(title) = extract_string(item, &["title", "label", "command"]) {
         return title;
     }
@@ -1071,6 +1323,13 @@ fn conversation_item_created_at(item: &ConversationItem) -> Option<chrono::DateT
         ConversationItem::UserMessage { created_at, .. }
         | ConversationItem::AssistantMessage { created_at, .. }
         | ConversationItem::Reasoning { created_at, .. }
+        | ConversationItem::CodeReview { created_at, .. }
+        | ConversationItem::ContextCompaction { created_at, .. }
+        | ConversationItem::Artifact { created_at, .. }
+        | ConversationItem::Unsupported { created_at, .. }
+        | ConversationItem::Image { created_at, .. }
+        | ConversationItem::WebSearch { created_at, .. }
+        | ConversationItem::FileChange { created_at, .. }
         | ConversationItem::ToolCall { created_at, .. }
         | ConversationItem::Plan { created_at, .. }
         | ConversationItem::Diff { created_at, .. }
@@ -1119,7 +1378,9 @@ pub fn parse_thread_plan(value: &Value) -> Option<ThreadPlan> {
             let step = extract_string(entry, &["step"])?;
             let status =
                 extract_string(entry, &["status"]).unwrap_or_else(|| "pending".to_string());
-            Some(falcondeck_core::PlanStep { step, status })
+            let id = extract_string(entry, &["id", "stepId", "step_id"])
+                .filter(|value| !value.trim().is_empty());
+            Some(falcondeck_core::PlanStep { id, step, status })
         })
         .collect::<Vec<_>>();
 
@@ -1166,6 +1427,86 @@ mod tests {
         ]));
         assert_eq!(models.len(), 1);
         assert!(models[0].is_default);
+    }
+
+    #[test]
+    fn parses_current_collaboration_mode_masks() {
+        let modes = parse_collaboration_modes(&json!({
+            "data": [
+                {"name": "Plan", "mode": "plan", "model": null, "reasoning_effort": "medium"},
+                {"name": "Default", "mode": "default", "model": null, "reasoning_effort": null}
+            ]
+        }));
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes[0].id, "plan");
+        assert_eq!(modes[0].label, "Plan");
+        assert_eq!(modes[0].reasoning_effort.as_deref(), Some("medium"));
+        assert!(modes[0].is_native);
+    }
+
+    #[test]
+    fn strips_ansi_sequences_from_codex_stderr() {
+        let raw = "\u{1b}[2m2026-08-09T10:52:51.408419Z\u{1b}[0m \u{1b}[31mERROR\u{1b}[0m codex_models_manager::cache: failed to load models cache";
+        assert_eq!(
+            strip_terminal_control_sequences(raw),
+            "2026-08-09T10:52:51.408419Z ERROR codex_models_manager::cache: failed to load models cache"
+        );
+    }
+
+    #[test]
+    fn maps_codex_stderr_log_levels_to_service_severity() {
+        assert_eq!(
+            codex_stderr_level(
+                r#"{"timestamp":"2026-08-09T10:52:51Z","level":"ERROR","target":"codex_models_manager::cache"}"#
+            ),
+            falcondeck_core::ServiceLevel::Error
+        );
+        assert_eq!(
+            codex_stderr_level("2026-08-09T10:52:51Z WARN codex_core::plugins: retrying"),
+            falcondeck_core::ServiceLevel::Warning
+        );
+        assert_eq!(
+            codex_stderr_level("codex app-server started"),
+            falcondeck_core::ServiceLevel::Info
+        );
+    }
+
+    #[test]
+    fn suppresses_non_fatal_models_cache_schema_diagnostics() {
+        assert!(is_non_fatal_codex_cache_diagnostic(
+            "2026-08-10T09:17:33.337763Z ERROR codex_models_manager::cache: failed to load models cache: missing field `base_instructions` at line 94 column 5"
+        ));
+        assert!(is_non_fatal_codex_cache_diagnostic(
+            "2026-08-10T09:17:33.337763Z ERROR codex_models_manager::cache: failed to renew cache TTL: missing field `base_instructions` at line 94 column 5"
+        ));
+        // Newer Codex builds log under `::manager` instead of `::cache`.
+        assert!(is_non_fatal_codex_cache_diagnostic(
+            "2026-08-10T15:12:07.789333Z ERROR codex_models_manager::manager: failed to renew cache TTL: missing field `base_instructions` at line 94 column 5"
+        ));
+        assert!(is_non_fatal_codex_cache_diagnostic(
+            r#"{"timestamp":"2026-08-10T09:17:33Z","level":"ERROR","fields":{"message":"failed to renew cache TTL: missing field `base_instructions` at line 94 column 5"},"target":"codex_models_manager::cache"}"#
+        ));
+        assert!(is_non_fatal_codex_cache_diagnostic(
+            r#"{"timestamp":"2026-08-10T15:12:07Z","level":"ERROR","fields":{"message":"failed to renew cache TTL: missing field `base_instructions` at line 94 column 5"},"target":"codex_models_manager::manager"}"#
+        ));
+    }
+
+    #[test]
+    fn keeps_other_codex_cache_failures_visible() {
+        assert!(!is_non_fatal_codex_cache_diagnostic(
+            "2026-08-10T09:17:33.337763Z ERROR codex_models_manager::cache: failed to refresh available models: network unavailable"
+        ));
+        assert!(!is_non_fatal_codex_cache_diagnostic(
+            "2026-08-10T09:17:33.337763Z ERROR codex_models_manager::cache: failed to renew cache TTL: permission denied"
+        ));
+        assert!(!is_non_fatal_codex_cache_diagnostic(
+            "2026-08-10T15:12:07.789333Z ERROR codex_models_manager::manager: failed to renew cache TTL: permission denied"
+        ));
+        // Message alone (without models-manager target) is not suppressed —
+        // only Codex's known cache-schema compatibility noise is filtered.
+        assert!(!is_non_fatal_codex_cache_diagnostic(
+            "failed to renew cache TTL: missing field `base_instructions` at line 94 column 5"
+        ));
     }
 
     #[test]
@@ -1221,9 +1562,10 @@ mod tests {
     fn parses_plan_steps() {
         let plan = parse_thread_plan(&json!({
             "explanation": "Work in slices",
-            "plan": [{"step": "Build daemon", "status": "in_progress"}]
+            "plan": [{"id": "step-1", "step": "Build daemon", "status": "in_progress"}]
         }))
         .unwrap();
+        assert_eq!(plan.steps[0].id.as_deref(), Some("step-1"));
         assert_eq!(plan.steps[0].step, "Build daemon");
     }
 
@@ -1506,6 +1848,7 @@ mod tests {
                                     "type": "reasoning",
                                     "summary": ["Looking at git state"],
                                     "content": ["Collecting commit history"],
+                                    "durationMs": 1250,
                                     "createdAt": "2026-03-16T10:00:01Z"
                                 },
                                 {
@@ -1513,7 +1856,16 @@ mod tests {
                                     "type": "commandExecution",
                                     "command": "git status --short",
                                     "status": "completed",
-                                    "output": "ok",
+                                    "aggregatedOutput": "ok",
+                                    "cwd": "/workspace/falcondeck",
+                                    "commandActions": [{
+                                        "type": "listFiles",
+                                        "command": "git status --short",
+                                        "path": "."
+                                    }],
+                                    "processId": "4242",
+                                    "durationMs": 19,
+                                    "source": "agent",
                                     "createdAt": "2026-03-16T10:00:02Z",
                                     "completedAt": "2026-03-16T10:00:03Z"
                                 },
@@ -1521,7 +1873,128 @@ mod tests {
                                     "id": "assistant-1",
                                     "type": "agentMessage",
                                     "text": "Here are the recent commits.",
+                                    "phase": "final_answer",
+                                    "memoryCitation": {
+                                        "entries": [{
+                                            "path": "docs/PLATFORM.md",
+                                            "lineStart": 170,
+                                            "lineEnd": 178,
+                                            "note": "Defines replay identity."
+                                        }],
+                                        "threadIds": ["thread-earlier"]
+                                    },
                                     "createdAt": "2026-03-16T10:00:04Z"
+                                },
+                                {
+                                    "id": "search-1",
+                                    "type": "webSearch",
+                                    "query": "React AI chat streaming",
+                                    "action": {
+                                        "type": "openPage",
+                                        "url": "https://example.com/chat"
+                                    },
+                                    "createdAt": "2026-03-16T10:00:04.500Z"
+                                },
+                                {
+                                    "id": "image-1",
+                                    "type": "imageGeneration",
+                                    "status": "completed",
+                                    "result": "aGVsbG8=",
+                                    "revisedPrompt": "A visual summary of the recent commits",
+                                    "createdAt": "2026-03-16T10:00:05Z"
+                                },
+                                {
+                                    "id": "patch-1",
+                                    "type": "fileChange",
+                                    "status": "completed",
+                                    "changes": [{
+                                        "path": "src/old.rs",
+                                        "kind": { "type": "update", "move_path": "src/new.rs" },
+                                        "diff": "@@ -1 +1 @@\n-old\n+new"
+                                    }],
+                                    "createdAt": "2026-03-16T10:00:06Z",
+                                    "completedAt": "2026-03-16T10:00:07Z"
+                                },
+                                {
+                                    "id": "mcp-1",
+                                    "type": "mcpToolCall",
+                                    "server": "notion",
+                                    "tool": "search",
+                                    "arguments": {"query": "streaming"},
+                                    "result": {
+                                        "content": [{"type": "text", "text": "Found 3 pages"}],
+                                        "structuredContent": {"count": 3}
+                                    },
+                                    "status": "completed",
+                                    "durationMs": 42,
+                                    "appContext": {
+                                        "connectorId": "notion",
+                                        "appName": "Notion",
+                                        "actionName": "Search"
+                                    },
+                                    "createdAt": "2026-03-16T10:00:08Z",
+                                    "completedAt": "2026-03-16T10:00:09Z"
+                                },
+                                {
+                                    "id": "dynamic-1",
+                                    "type": "dynamicToolCall",
+                                    "namespace": "visualize",
+                                    "tool": "render",
+                                    "arguments": {"prompt": "radar"},
+                                    "contentItems": [
+                                        {"type": "inputText", "text": "Rendered"},
+                                        {"type": "inputImage", "imageUrl": "data:image/png;base64,aGVsbG8="}
+                                    ],
+                                    "success": true,
+                                    "status": "completed",
+                                    "durationMs": 84,
+                                    "createdAt": "2026-03-16T10:00:10Z",
+                                    "completedAt": "2026-03-16T10:00:11Z"
+                                },
+                                {
+                                    "id": "collab-1",
+                                    "type": "collabAgentToolCall",
+                                    "tool": "spawnAgent",
+                                    "status": "completed",
+                                    "senderThreadId": "thread-parent",
+                                    "receiverThreadIds": ["thread-child"],
+                                    "prompt": "Audit accessibility",
+                                    "model": "gpt-5.6-terra",
+                                    "reasoningEffort": "high",
+                                    "agentsStates": {
+                                        "thread-child": {"status": "completed", "message": "Audit complete"}
+                                    },
+                                    "createdAt": "2026-03-16T10:00:12Z",
+                                    "completedAt": "2026-03-16T10:00:13Z"
+                                },
+                                {
+                                    "id": "subagent-1",
+                                    "type": "subAgentActivity",
+                                    "kind": "interacted",
+                                    "agentThreadId": "thread-child",
+                                    "agentPath": "qa/mobile",
+                                    "createdAt": "2026-03-16T10:00:14Z"
+                                },
+                                {
+                                    "id": "plan-1",
+                                    "type": "plan",
+                                    "text": "Audit the remaining output schema.",
+                                    "createdAt": "2026-03-16T10:00:15Z"
+                                },
+                                {
+                                    "id": "hook-1",
+                                    "type": "hookPrompt",
+                                    "fragments": [
+                                        {"text": "Run the accessibility checks.", "hookRunId": "run-1"},
+                                        {"text": "Preserve exact failures.", "hookRunId": "run-2"}
+                                    ],
+                                    "createdAt": "2026-03-16T10:00:16Z"
+                                },
+                                {
+                                    "id": "sleep-1",
+                                    "type": "sleep",
+                                    "durationMs": 2500,
+                                    "createdAt": "2026-03-16T10:00:17Z"
                                 }
                             ]
                         }]
@@ -1530,7 +2003,7 @@ mod tests {
             }
         }));
 
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 14);
         match &items[0] {
             ConversationItem::UserMessage {
                 text, attachments, ..
@@ -1545,10 +2018,16 @@ mod tests {
         }
         match &items[1] {
             ConversationItem::Reasoning {
-                summary, content, ..
+                summary,
+                content,
+                lifecycle,
+                duration_ms,
+                ..
             } => {
                 assert_eq!(summary.as_deref(), Some("Looking at git state"));
                 assert_eq!(content, "Collecting commit history");
+                assert_eq!(*lifecycle, ContentLifecycle::Complete);
+                assert_eq!(*duration_ms, Some(1250));
             }
             other => panic!("expected reasoning item, got {other:?}"),
         }
@@ -1557,14 +2036,391 @@ mod tests {
                 title,
                 output,
                 display,
+                detail,
                 ..
             } => {
                 assert_eq!(title, "git status --short");
                 assert_eq!(output.as_deref(), Some("ok"));
                 assert_eq!(display.history_mode, ToolHistoryMode::Summary);
+                assert!(matches!(
+                    detail.as_deref(),
+                    Some(falcondeck_core::ToolCallDetail::CommandExecution {
+                        command,
+                        cwd,
+                        actions,
+                        process_id: Some(process_id),
+                        duration_ms: Some(19),
+                        source: Some(source),
+                    }) if command == "git status --short"
+                        && cwd == "/workspace/falcondeck"
+                        && actions[0].action_kind == "listFiles"
+                        && actions[0].path.as_deref() == Some(".")
+                        && process_id == "4242"
+                        && source == "agent"
+                ));
             }
             other => panic!("expected tool item, got {other:?}"),
         }
+        assert!(matches!(
+            &items[3],
+            ConversationItem::AssistantMessage {
+                text,
+                phase: Some(falcondeck_core::AssistantMessagePhase::FinalAnswer),
+                memory_citation: Some(citation),
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            } if text == "Here are the recent commits."
+                && citation.entries[0].path == "docs/PLATFORM.md"
+                && citation.thread_ids == vec!["thread-earlier"]
+        ));
+        assert!(matches!(
+            &items[4],
+            ConversationItem::WebSearch {
+                search,
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            } if search.query == "React AI chat streaming"
+                && search.url.as_deref() == Some("https://example.com/chat")
+        ));
+        assert!(matches!(
+            &items[5],
+            ConversationItem::Image {
+                image,
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            } if image.url == "data:image/png;base64,aGVsbG8="
+                && image.alt_text.as_deref() == Some("A visual summary of the recent commits")
+        ));
+        assert!(matches!(
+            &items[6],
+            ConversationItem::FileChange {
+                changes,
+                lifecycle: falcondeck_core::ToolLifecycle::Succeeded,
+                ..
+            } if changes[0].path == "src/old.rs"
+                && changes[0].move_path.as_deref() == Some("src/new.rs")
+                && changes[0].diff.contains("+new")
+        ));
+        assert!(matches!(
+            &items[7],
+            ConversationItem::ToolCall {
+                title,
+                output: Some(output),
+                detail,
+                ..
+            } if title == "Notion · Search"
+                && output == "Found 3 pages"
+                && matches!(detail.as_deref(), Some(falcondeck_core::ToolCallDetail::Mcp {
+                    server,
+                    tool,
+                    duration_ms: Some(42),
+                    app_context: Some(context),
+                    ..
+                }) if server == "notion" && tool == "search" && context.connector_id == "notion")
+        ));
+        assert!(matches!(
+            &items[8],
+            ConversationItem::ToolCall {
+                title,
+                output: Some(output),
+                detail,
+                ..
+            } if title == "visualize · render"
+                && output == "Rendered"
+                && matches!(detail.as_deref(), Some(falcondeck_core::ToolCallDetail::Dynamic {
+                    tool,
+                    namespace: Some(namespace),
+                    content_items,
+                    success: Some(true),
+                    duration_ms: Some(84),
+                    ..
+                }) if tool == "render" && namespace == "visualize" && content_items.len() == 2)
+        ));
+        assert!(matches!(
+            &items[9],
+            ConversationItem::ToolCall {
+                title,
+                detail,
+                ..
+            } if title == "Spawn sub-agent"
+                && matches!(detail.as_deref(), Some(falcondeck_core::ToolCallDetail::CollabAgent {
+                    tool,
+                    receiver_thread_ids,
+                    agent_states,
+                    ..
+                }) if tool == "spawnAgent"
+                    && receiver_thread_ids == &vec!["thread-child"]
+                    && agent_states["thread-child"].message.as_deref() == Some("Audit complete"))
+        ));
+        assert!(matches!(
+            &items[10],
+            ConversationItem::ToolCall {
+                title,
+                detail,
+                ..
+            } if title == "Sub-agent interacted"
+                && matches!(detail.as_deref(), Some(falcondeck_core::ToolCallDetail::SubagentActivity {
+                    activity,
+                    agent_thread_id,
+                    agent_path,
+                }) if activity == "interacted"
+                    && agent_thread_id == "thread-child"
+                    && agent_path == "qa/mobile")
+        ));
+        assert!(matches!(
+            &items[11],
+            ConversationItem::Plan { plan, .. }
+                if plan.explanation.as_deref() == Some("Audit the remaining output schema.")
+                    && plan.steps.is_empty()
+        ));
+        assert!(matches!(
+            &items[12],
+            ConversationItem::Service { message, .. }
+                if message == "Run the accessibility checks.\nPreserve exact failures."
+        ));
+        assert!(matches!(
+            &items[13],
+            ConversationItem::ToolCall { title, tool_kind, .. }
+                if title == "Wait 2.5s" && tool_kind == "sleep"
+        ));
+    }
+
+    #[test]
+    fn hydrates_empty_failed_turn_as_a_visible_terminal_receipt() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-failed",
+                    "status": "failed",
+                    "completedAt": "2026-08-09T12:00:02Z",
+                    "items": [{
+                        "id": "user-failed",
+                        "type": "userMessage",
+                        "createdAt": "2026-08-09T12:00:00Z",
+                        "content": [{"type": "text", "text": "Try this"}]
+                    }]
+                }]
+            }
+        }));
+
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[1],
+            ConversationItem::AssistantMessage {
+                id,
+                text,
+                lifecycle: ContentLifecycle::Error,
+                ..
+            } if id == "falcondeck-turn-receipt-turn-failed" && text.is_empty()
+        ));
+    }
+
+    #[test]
+    fn hydrates_context_compaction_as_a_first_class_receipt() {
+        let items = hydrate_thread_items(&json!({
+            "result": {
+                "thread": {
+                    "turns": [{
+                        "status": "completed",
+                        "items": [{
+                            "id": "compact-1",
+                            "type": "contextCompaction",
+                            "status": "completed",
+                            "createdAt": "2026-08-09T10:00:00Z",
+                            "completedAt": "2026-08-09T10:00:02Z"
+                        }]
+                    }]
+                }
+            }
+        }));
+
+        assert!(matches!(
+            items.as_slice(),
+            [ConversationItem::ContextCompaction {
+                id,
+                lifecycle: falcondeck_core::ToolLifecycle::Succeeded,
+                completed_at: Some(_),
+                ..
+            }] if id == "compact-1"
+        ));
+    }
+
+    #[test]
+    fn hydrates_provider_artifacts_as_typed_receipts() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "status": "completed",
+                    "items": [{
+                        "id": "future-1",
+                        "type": "artifactPreview",
+                        "status": "completed",
+                        "createdAt": "2026-08-09T10:00:00Z",
+                        "artifact": { "title": "Prototype", "url": "asset://prototype" }
+                    }]
+                }]
+            }
+        }));
+
+        assert!(matches!(
+            items.as_slice(),
+            [ConversationItem::Artifact {
+                id,
+                artifact,
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            }] if id == "future-1"
+                && artifact.title == "Prototype"
+                && artifact.url.as_deref() == Some("asset://prototype")
+                && artifact.payload.pointer("/title") == Some(&json!("Prototype"))
+        ));
+    }
+
+    #[test]
+    fn preserves_review_mode_output_during_hydration() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "status": "completed",
+                    "items": [
+                        {
+                            "id": "review-1",
+                            "type": "enteredReviewMode",
+                            "review": "current changes",
+                            "createdAt": "2026-08-09T10:00:00Z"
+                        },
+                        {
+                            "id": "review-1",
+                            "type": "exitedReviewMode",
+                            "review": "## Findings\n\n- One high-priority finding.",
+                            "createdAt": "2026-08-09T10:00:03Z"
+                        }
+                    ]
+                }]
+            }
+        }));
+
+        assert!(matches!(
+            items.as_slice(),
+            [ConversationItem::CodeReview {
+                subject: Some(subject),
+                content,
+                lifecycle: ContentLifecycle::Complete,
+                created_at,
+                ..
+            }] if subject == "current changes"
+                && content == "## Findings\n\n- One high-priority finding."
+                && created_at.to_rfc3339() == "2026-08-09T10:00:00+00:00"
+        ));
+    }
+
+    #[test]
+    fn restores_partial_content_lifecycle_from_the_provider_turn() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-stopped",
+                    "status": "canceled",
+                    "completedAt": "2026-08-09T12:00:02Z",
+                    "items": [
+                        {
+                            "id": "user-stopped",
+                            "type": "userMessage",
+                            "createdAt": "2026-08-09T12:00:00Z",
+                            "content": [{"type": "text", "text": "Start this"}]
+                        },
+                        {
+                            "id": "assistant-stopped",
+                            "type": "agentMessage",
+                            "createdAt": "2026-08-09T12:00:01Z",
+                            "text": "Partial answer"
+                        }
+                    ]
+                }]
+            }
+        }));
+
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            &items[1],
+            ConversationItem::AssistantMessage {
+                text,
+                lifecycle: ContentLifecycle::Interrupted,
+                ..
+            } if text == "Partial answer"
+        ));
+    }
+
+    #[test]
+    fn does_not_invent_a_receipt_for_an_empty_successful_turn() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-complete",
+                    "status": "completed",
+                    "items": [{
+                        "id": "user-complete",
+                        "type": "userMessage",
+                        "createdAt": "2026-08-09T12:00:00Z",
+                        "content": [{"type": "text", "text": "Do nothing"}]
+                    }]
+                }]
+            }
+        }));
+
+        assert_eq!(items.len(), 1);
+        assert!(matches!(items[0], ConversationItem::UserMessage { .. }));
+    }
+
+    #[test]
+    fn hydrates_user_messages_with_safe_edit_fork_boundaries() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [
+                    {
+                        "id": "turn-1",
+                        "items": [{
+                            "id": "user-1",
+                            "type": "userMessage",
+                            "content": [{"type": "text", "text": "First"}]
+                        }, {
+                            "id": "user-steer",
+                            "type": "userMessage",
+                            "content": [{"type": "text", "text": "Steer"}]
+                        }]
+                    },
+                    {
+                        "id": "turn-2",
+                        "items": [{
+                            "id": "user-2",
+                            "type": "userMessage",
+                            "content": [{"type": "text", "text": "Second"}]
+                        }]
+                    }
+                ]
+            }
+        }));
+
+        assert!(matches!(
+            &items[0],
+            ConversationItem::UserMessage {
+                turn_id: Some(turn_id),
+                previous_turn_id: None,
+                ..
+            } if turn_id == "turn-1"
+        ));
+        assert!(matches!(
+            &items[1],
+            ConversationItem::UserMessage { turn_id: None, .. }
+        ));
+        assert!(matches!(
+            &items[2],
+            ConversationItem::UserMessage {
+                turn_id: Some(turn_id),
+                previous_turn_id: Some(previous_turn_id),
+                ..
+            } if turn_id == "turn-2" && previous_turn_id == "turn-1"
+        ));
     }
 
     #[test]
@@ -1607,6 +2463,8 @@ mod tests {
                     id: "reasoning-1".to_string(),
                     summary: Some("Thinking".to_string()),
                     content: "Working".to_string(),
+                    lifecycle: ContentLifecycle::Complete,
+                    duration_ms: None,
                     created_at: Utc::now(),
                 },
                 ConversationItem::ToolCall {
@@ -1616,19 +2474,24 @@ mod tests {
                     status: "completed".to_string(),
                     output: Some("done".to_string()),
                     exit_code: Some(0),
-                    display: tool_display_metadata(
+                    display: Box::new(tool_display_metadata(
                         "git status --short",
                         "commandExecution",
                         "completed",
                         Some(0),
                         Some("done"),
-                    ),
+                    )),
+                    detail: None,
                     created_at: Utc::now(),
                     completed_at: Some(Utc::now()),
                 },
                 ConversationItem::AssistantMessage {
                     id: "assistant-1".to_string(),
                     text: "Here are the recent changes in this project.".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                    citations: Vec::new(),
+                    lifecycle: ContentLifecycle::Complete,
                     created_at: Utc::now(),
                 },
             ],
@@ -1674,6 +2537,10 @@ mod tests {
             &[ConversationItem::AssistantMessage {
                 id: "assistant-1".to_string(),
                 text: "Fresh message".to_string(),
+                phase: None,
+                memory_citation: None,
+                citations: Vec::new(),
+                lifecycle: ContentLifecycle::Complete,
                 created_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T10:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),

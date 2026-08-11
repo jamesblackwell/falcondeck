@@ -19,6 +19,7 @@ pub enum AcpUpdateDisposition {
 pub enum AcpSessionUpdateKind<'a> {
     AgentMessageChunk,
     AgentThoughtChunk,
+    ConfigOptionUpdate,
     CurrentModeUpdate,
     ToolCall,
     ToolCallUpdate,
@@ -36,6 +37,9 @@ impl<'a> AcpSessionUpdateKind<'a> {
         match kind {
             "agent_message_chunk" => Self::AgentMessageChunk,
             "agent_thought_chunk" => Self::AgentThoughtChunk,
+            // `config_options_update` appeared in early/community adapters;
+            // accept it as a compatibility alias for the stable singular form.
+            "config_option_update" | "config_options_update" => Self::ConfigOptionUpdate,
             "current_mode_update" => Self::CurrentModeUpdate,
             "tool_call" => Self::ToolCall,
             "tool_call_update" => Self::ToolCallUpdate,
@@ -53,6 +57,7 @@ impl<'a> AcpSessionUpdateKind<'a> {
         match self {
             Self::AgentMessageChunk => "agent_message_chunk",
             Self::AgentThoughtChunk => "agent_thought_chunk",
+            Self::ConfigOptionUpdate => "config_option_update",
             Self::CurrentModeUpdate => "current_mode_update",
             Self::ToolCall => "tool_call",
             Self::ToolCallUpdate => "tool_call_update",
@@ -68,14 +73,16 @@ impl<'a> AcpSessionUpdateKind<'a> {
     /// Returns how production ingestion treats this update kind.
     pub fn disposition(self) -> AcpUpdateDisposition {
         match self {
-            Self::AgentMessageChunk | Self::ToolCall | Self::ToolCallUpdate | Self::Plan => {
-                AcpUpdateDisposition::Projected
-            }
-            Self::AgentThoughtChunk | Self::CurrentModeUpdate => AcpUpdateDisposition::Consumed,
-            Self::AvailableCommandsUpdate
+            Self::AgentMessageChunk
+            | Self::AgentThoughtChunk
+            | Self::ToolCall
+            | Self::ToolCallUpdate
+            | Self::Plan
             | Self::SessionInfoUpdate
             | Self::UsageUpdate
-            | Self::UserMessageChunk => AcpUpdateDisposition::KnownUnhandled,
+            | Self::UserMessageChunk => AcpUpdateDisposition::Projected,
+            Self::ConfigOptionUpdate | Self::CurrentModeUpdate => AcpUpdateDisposition::Consumed,
+            Self::AvailableCommandsUpdate => AcpUpdateDisposition::KnownUnhandled,
             Self::Unknown(_) => AcpUpdateDisposition::Unknown,
         }
     }
@@ -93,11 +100,15 @@ mod tests {
         );
         assert_eq!(
             AcpSessionUpdateKind::classify("agent_thought_chunk").disposition(),
+            AcpUpdateDisposition::Projected
+        );
+        assert_eq!(
+            AcpSessionUpdateKind::classify("config_option_update").disposition(),
             AcpUpdateDisposition::Consumed
         );
         assert_eq!(
             AcpSessionUpdateKind::classify("usage_update").disposition(),
-            AcpUpdateDisposition::KnownUnhandled
+            AcpUpdateDisposition::Projected
         );
         assert_eq!(
             AcpSessionUpdateKind::classify("future_update").disposition(),

@@ -7,9 +7,9 @@
 //! comparing provider ids at every call site.
 //!
 //! Backend handles are deliberately not stored on the enum: the three attach at
-//! different times (Codex and Claude when the workspace connects, ACP lazily on
-//! the first turn), so each operation resolves the handle it needs when it
-//! needs it and nothing is spawned just to answer "which backend is this?".
+//! different times (Codex and Claude when the workspace connects, ACP during
+//! metadata hydration or on the first turn), so each operation resolves the
+//! handle it needs when it needs it.
 
 use std::{path::Path, sync::OnceLock};
 
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use super::{
     AppState,
-    acp_threads::start_acp_turn,
+    acp_threads::{start_acp_turn, steer_acp_turn},
     agent_helpers::{ResolvedSelectedSkill, claude_prompt_from_inputs, codex_inputs},
     workspace_ops::{sandbox_policy_payload, send_turn},
 };
@@ -117,7 +117,14 @@ impl ProviderRuntime {
         match self {
             Self::Codex => AgentCapabilitySummary::codex(),
             Self::Claude => AgentCapabilitySummary::claude(),
-            Self::Acp(_) => AgentCapabilitySummary::acp_minimal(),
+            Self::Acp(provider) => {
+                let mut capabilities = AgentCapabilitySummary::acp_minimal();
+                capabilities.supports_images = crate::acp::acp_supports_images(
+                    provider.as_str(),
+                    capabilities.supports_images,
+                );
+                capabilities
+            }
         }
     }
 
@@ -154,8 +161,8 @@ impl ProviderRuntime {
                 title: "New Claude thread".to_string(),
                 native_session_id: None,
             }),
-            // ACP providers open their session lazily on the first turn; the
-            // thread exists daemon-side immediately.
+            // ACP providers open their conversation session on the first turn;
+            // metadata discovery uses a separate short-lived session.
             Self::Acp(provider) => Ok(StartedThread {
                 thread_id: format!("{}-thread-{}", provider.as_str(), Uuid::new_v4().simple()),
                 title: "New thread".to_string(),
@@ -186,6 +193,15 @@ impl ProviderRuntime {
                     }
                 }
 
+                let collaboration_mode = codex_collaboration_mode_payload(
+                    app,
+                    spec.workspace_id,
+                    spec.thread.agent.collaboration_mode_id.as_deref(),
+                    spec.thread.agent.model_id.as_deref(),
+                    spec.thread.agent.reasoning_effort.as_deref(),
+                )
+                .await?;
+
                 session
                     .send_request(
                         "turn/start",
@@ -195,6 +211,7 @@ impl ProviderRuntime {
                             "cwd": cwd,
                             "model": spec.requested_model_id,
                             "effort": spec.requested_reasoning_effort,
+                            "collaborationMode": collaboration_mode,
                             "sandboxPolicy": sandbox_policy_payload(
                                 spec.thread.agent.sandbox_mode.as_deref()
                             ),
@@ -263,6 +280,7 @@ impl ProviderRuntime {
                     spec.thread_id,
                     provider,
                     spec.inputs,
+                    spec.selected_skills,
                 )
                 .await
             }
@@ -278,6 +296,23 @@ impl ProviderRuntime {
         spec: TurnSpec<'_>,
     ) -> Result<(), DaemonError> {
         match self {
+            Self::Codex => {
+                let turn_id = spec.thread.latest_turn_id.as_deref().ok_or_else(|| {
+                    DaemonError::BadRequest("no active Codex turn to steer".to_string())
+                })?;
+                let session = app.session_for(spec.workspace_id).await?;
+                session
+                    .send_request(
+                        "turn/steer",
+                        json!({
+                            "threadId": spec.thread_id,
+                            "input": codex_inputs(spec.inputs, spec.selected_skills),
+                            "expectedTurnId": turn_id,
+                        }),
+                    )
+                    .await?;
+                Ok(())
+            }
             Self::Claude => {
                 let runtime = app.claude_runtime_for(spec.workspace_id).await?;
                 let images = spec
@@ -296,9 +331,17 @@ impl ProviderRuntime {
                     )
                     .await
             }
-            Self::Codex | Self::Acp(_) => Err(DaemonError::BadRequest(
-                "provider does not support steering a running turn".to_string(),
-            )),
+            Self::Acp(provider) => {
+                steer_acp_turn(
+                    app,
+                    spec.workspace_id,
+                    spec.thread_id,
+                    provider,
+                    spec.inputs,
+                    spec.selected_skills,
+                )
+                .await
+            }
         }
     }
 
@@ -452,6 +495,39 @@ impl ProviderRuntime {
     }
 }
 
+async fn codex_collaboration_mode_payload(
+    app: &AppState,
+    workspace_id: &str,
+    mode_id: Option<&str>,
+    model_id: Option<&str>,
+    reasoning_effort: Option<&str>,
+) -> Result<serde_json::Value, DaemonError> {
+    let Some(mode_id) = mode_id.map(str::trim).filter(|mode| !mode.is_empty()) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let modes = app.collaboration_modes(workspace_id).await?;
+    let mode = modes
+        .iter()
+        .find(|candidate| candidate.id == mode_id)
+        .ok_or_else(|| {
+            DaemonError::BadRequest(format!(
+                "Codex collaboration mode '{mode_id}' is not available"
+            ))
+        })?;
+    let model =
+        mode.model_id.as_deref().or(model_id).ok_or_else(|| {
+            DaemonError::BadRequest("Codex collaboration mode needs a model".into())
+        })?;
+    Ok(json!({
+        "mode": mode.mode.as_deref().unwrap_or(&mode.id),
+        "settings": {
+            "model": model,
+            "reasoning_effort": mode.reasoning_effort.as_deref().or(reasoning_effort),
+            "developer_instructions": null
+        }
+    }))
+}
+
 impl AppState {
     /// Binary name or path configured for a provider. Providers with no
     /// explicit mapping fall back to their id as the command name, which is
@@ -528,6 +604,7 @@ fn claude_goal_turn(workspace_id: &str, thread_id: &str, text: &str) -> SendTurn
         permission_mode: None,
         sandbox_mode: None,
         steer: false,
+        user_item_id: None,
     }
 }
 
@@ -633,5 +710,15 @@ mod tests {
             .default_capabilities();
         assert!(!capabilities.supports_goals);
         assert!(capabilities.supports_interrupt);
+        // Grok advertises image:false over ACP but still accepts image blocks.
+        assert!(capabilities.supports_images);
+        // Steering is enabled only after the live ACP runtime proves that its
+        // vendor interjection method exists.
+        assert!(!capabilities.supports_steering);
+        let opencode_caps =
+            ProviderRuntime::for_provider(&AgentProvider::new("opencode".to_string()))
+                .default_capabilities();
+        assert!(!opencode_caps.supports_images);
+        assert!(!opencode_caps.supports_steering);
     }
 }

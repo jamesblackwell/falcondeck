@@ -182,9 +182,9 @@ pub fn claude_mcp_config_json(servers: &[McpServerConfig]) -> Option<String> {
     serde_json::to_string_pretty(&json!({ "mcpServers": Value::Object(map) })).ok()
 }
 
-/// `mcpServers` array for an ACP `session/new` request. HTTP servers are
-/// skipped: the ACP baseline transports stdio servers only.
-pub fn acp_mcp_servers(servers: &[McpServerConfig]) -> Value {
+/// `mcpServers` array for an ACP session lifecycle request. Stdio is mandatory
+/// in ACP; HTTP entries are included only after the agent advertises support.
+pub fn acp_mcp_servers(servers: &[McpServerConfig], supports_http: bool) -> Value {
     let entries = servers
         .iter()
         .filter_map(|server| match &server.transport {
@@ -197,8 +197,17 @@ pub fn acp_mcp_servers(servers: &[McpServerConfig]) -> Value {
                     .map(|(name, value)| json!({ "name": name, "value": value }))
                     .collect::<Vec<_>>(),
             })),
+            McpTransport::Http { url, headers } if supports_http => Some(json!({
+                "type": "http",
+                "name": server.name,
+                "url": url,
+                "headers": headers
+                    .iter()
+                    .map(|(name, value)| json!({ "name": name, "value": value }))
+                    .collect::<Vec<_>>(),
+            })),
             McpTransport::Http { .. } => {
-                tracing::info!(server = %server.name, "skipping http MCP server for ACP provider");
+                tracing::info!(server = %server.name, "skipping http MCP server: ACP provider did not advertise HTTP transport");
                 None
             }
         })
@@ -473,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn acp_servers_are_stdio_only_with_env_pairs() {
+    fn acp_servers_follow_negotiated_transports_and_use_name_value_pairs() {
         let servers = vec![
             McpServerConfig {
                 name: "local".into(),
@@ -487,16 +496,26 @@ mod tests {
                 name: "remote".into(),
                 transport: McpTransport::Http {
                     url: "https://x".into(),
-                    headers: BTreeMap::new(),
+                    headers: BTreeMap::from([(
+                        "Authorization".to_string(),
+                        "Bearer x".to_string(),
+                    )]),
                 },
             },
         ];
-        let value = acp_mcp_servers(&servers);
+        let value = acp_mcp_servers(&servers, false);
         let list = value.as_array().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0]["name"], "local");
         assert_eq!(list[0]["env"][0]["name"], "A");
         assert_eq!(list[0]["env"][0]["value"], "1");
+
+        let value = acp_mcp_servers(&servers, true);
+        let list = value.as_array().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[1]["type"], "http");
+        assert_eq!(list[1]["url"], "https://x");
+        assert_eq!(list[1]["headers"][0]["name"], "Authorization");
     }
 
     #[test]

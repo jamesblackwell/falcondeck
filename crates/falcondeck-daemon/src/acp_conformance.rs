@@ -463,37 +463,36 @@ impl AdapterProcess {
                 let should_cancel =
                     update.get("sessionUpdate").and_then(Value::as_str) == Some("tool_call");
                 self.updates.push(update);
-                if should_cancel {
-                    if let Some((session_id, sent)) = cancel.as_mut() {
-                        if !**sent {
-                            self.write(&json!({
-                                "jsonrpc": "2.0",
-                                "method": "session/cancel",
-                                "params": { "sessionId": session_id }
-                            }))
-                            .await?;
-                            **sent = true;
-                        }
-                    }
+                if should_cancel
+                    && let Some((session_id, sent)) = cancel.as_mut()
+                    && !**sent
+                {
+                    self.write(&json!({
+                        "jsonrpc": "2.0",
+                        "method": "session/cancel",
+                        "params": { "sessionId": session_id }
+                    }))
+                    .await?;
+                    **sent = true;
                 }
                 continue;
             }
-            if message.get("method").and_then(Value::as_str) == Some("session/request_permission") {
-                if let Some(raw_id) = message.get("id").cloned() {
-                    self.answer_permission(raw_id, message.get("params").unwrap_or(&Value::Null))
-                        .await?;
-                    continue;
-                }
-            }
-            if let Some(raw_id) = message.get("id").cloned() {
-                if message.get("method").is_some() {
-                    self.write(&json!({
-                        "jsonrpc": "2.0",
-                        "id": raw_id,
-                        "error": { "code": -32601, "message": "method not supported by conformance probe" }
-                    }))
+            if message.get("method").and_then(Value::as_str) == Some("session/request_permission")
+                && let Some(raw_id) = message.get("id").cloned()
+            {
+                self.answer_permission(raw_id, message.get("params").unwrap_or(&Value::Null))
                     .await?;
-                }
+                continue;
+            }
+            if let Some(raw_id) = message.get("id").cloned()
+                && message.get("method").is_some()
+            {
+                self.write(&json!({
+                    "jsonrpc": "2.0",
+                    "id": raw_id,
+                    "error": { "code": -32601, "message": "method not supported by conformance probe" }
+                }))
+                .await?;
             }
         }
     }
@@ -583,6 +582,11 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
                 "clientCapabilities": {
                     "fs": { "readTextFile": false, "writeTextFile": false },
                     "terminal": false
+                },
+                "clientInfo": {
+                    "name": "falcondeck-conformance",
+                    "title": "FalconDeck ACP Conformance Probe",
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             }),
         )

@@ -1,23 +1,33 @@
-//! App-side integration for generic ACP providers: lazy runtime spawn, the
-//! event pump translating [`AcpEvent`]s into conversation items, and the turn
-//! lifecycle for ACP-backed threads.
+//! App-side integration for generic ACP providers: metadata hydration and
+//! fallback runtime spawn, the event pump translating [`AcpEvent`]s into
+//! conversation items, and the turn lifecycle for ACP-backed threads.
 
 use std::sync::Arc;
 
 use chrono::Utc;
 use falcondeck_core::{
-    AgentProvider, ApprovalDecision, ConversationItem, InteractiveRequest, InteractiveRequestKind,
-    ThreadStatus, TurnInputItem, UnifiedEvent,
+    AgentProvider, ApprovalDecision, ContentLifecycle, ConversationFileChange, ConversationItem,
+    InteractiveRequest, InteractiveRequestKind, ServiceLevel, ThreadStatus, ThreadTokenUsage,
+    TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use crate::acp::{AcpEvent, AcpRuntime};
+use crate::acp::{AcpDiffContent, AcpEvent, AcpRuntime, AcpToolMemory};
 use crate::error::DaemonError;
 
-use super::conversation_helpers::tool_display_metadata;
+use super::agent_helpers::ResolvedSelectedSkill;
+use super::conversation_helpers::{ToolSettlement, tool_display_metadata};
 use super::provider_runtime::ProviderRuntime;
 use super::{AppState, PendingServerRequest};
+
+struct AcpToolItem<'a> {
+    call_id: &'a str,
+    title: &'a str,
+    kind: &'a str,
+    status: &'a str,
+    output: Option<&'a str>,
+}
 
 impl AppState {
     /// Re-reads `providers.json` so provider edits apply without a daemon
@@ -30,6 +40,121 @@ impl AppState {
             .unwrap_or_default()
     }
 
+    /// Hydrates ACP model/config catalogs after workspace attach. ACP agents
+    /// are still started lazily per provider, but discovery runs in the
+    /// background so a new-thread composer gets its model picker before the
+    /// first prompt whenever the provider can answer session/new.
+    pub(super) fn schedule_acp_metadata_hydration(&self, workspace_id: &str) {
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        tokio::spawn(async move {
+            for config in app.fresh_acp_provider_configs() {
+                let provider = AgentProvider::new(config.id.clone());
+                if let Err(error) = app.acp_runtime_for(&workspace_id, &provider).await {
+                    tracing::info!(
+                        provider = %config.id,
+                        %error,
+                        "ACP provider metadata hydration skipped"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Rehydrates a restored ACP thread's transcript in the background.
+    ///
+    /// ACP threads survive a daemon restart only as persisted summaries —
+    /// their items live in the agent's own session store. Codex/Claude
+    /// transcripts are re-read from provider session files at connect; the
+    /// ACP equivalent is `session/load`, whose replay flows through the
+    /// event pump and repopulates the thread. Called from the thread-detail
+    /// read path so a restored thread fills in when opened instead of
+    /// sitting empty until its next prompt.
+    pub(super) fn schedule_acp_thread_hydration(&self, workspace_id: &str, thread_id: &str) {
+        {
+            let mut started = self
+                .inner
+                .acp_hydrations_started
+                .lock()
+                .expect("acp hydration set poisoned");
+            if !started.insert((workspace_id.to_string(), thread_id.to_string())) {
+                return;
+            }
+        }
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            let (provider, native_session, cwd) = {
+                let workspaces = app.inner.workspaces.lock().await;
+                let Some(workspace) = workspaces.get(&workspace_id) else {
+                    return;
+                };
+                let Some(thread) = workspace.threads.get(&thread_id) else {
+                    return;
+                };
+                // A running thread is already streaming into its items; an
+                // empty-items check alone could race the first user message.
+                if !thread.items.is_empty()
+                    || matches!(thread.summary.status, ThreadStatus::Running)
+                {
+                    return;
+                }
+                let Some(native_session) = thread.summary.native_session_id.clone() else {
+                    return;
+                };
+                (
+                    thread.summary.provider.clone(),
+                    native_session,
+                    thread
+                        .summary
+                        .working_directory(&workspace.summary.path)
+                        .to_string(),
+                )
+            };
+            let runtime = match app.acp_runtime_for(&workspace_id, &provider).await {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    tracing::info!(
+                        provider = %provider,
+                        thread = %thread_id,
+                        %error,
+                        "ACP thread hydration skipped: runtime unavailable"
+                    );
+                    return;
+                }
+            };
+            // A live session for this thread means the transcript is already
+            // authoritative in memory; replaying it would duplicate history.
+            if runtime.session_for_thread(&thread_id).await.is_some() {
+                return;
+            }
+            if let Err(error) = runtime
+                .load_session(&thread_id, &native_session, &cwd)
+                .await
+            {
+                tracing::info!(
+                    provider = %provider,
+                    thread = %thread_id,
+                    %error,
+                    "ACP thread hydration failed; transcript stays empty until next prompt"
+                );
+                return;
+            }
+            // The replay has no turn end: settle the streamed lifecycles and
+            // reset the runtime's accumulators so the next real turn starts
+            // fresh items instead of extending replayed ones.
+            runtime.end_turn(&native_session).await;
+            app.settle_turn_items(
+                &workspace_id,
+                &thread_id,
+                Utc::now(),
+                ToolSettlement::Completed,
+            )
+            .await;
+        });
+    }
+
     /// Returns the live ACP runtime for a provider in a workspace, spawning
     /// and initializing the agent process on first use.
     pub(super) async fn acp_runtime_for(
@@ -37,6 +162,30 @@ impl AppState {
         workspace_id: &str,
         provider: &AgentProvider,
     ) -> Result<Arc<AcpRuntime>, DaemonError> {
+        {
+            let workspaces = self.inner.workspaces.lock().await;
+            if let Some(runtime) = workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.acp_runtimes.get(provider))
+                && !runtime.is_closed()
+            {
+                return Ok(Arc::clone(runtime));
+            }
+        }
+
+        let gate = {
+            let mut gates = self.inner.acp_runtime_gates.lock().await;
+            Arc::clone(
+                gates
+                    .entry((workspace_id.to_string(), provider.clone()))
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _gate = gate.lock().await;
+
+        // Metadata hydration and first-turn startup can arrive together. The
+        // second caller must reuse the process created by the first one after
+        // waiting on the keyed gate.
         {
             let workspaces = self.inner.workspaces.lock().await;
             if let Some(runtime) = workspaces
@@ -69,6 +218,16 @@ impl AppState {
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let runtime = AcpRuntime::connect(config, &workspace_path, events_tx).await?;
+        if let Err(error) = runtime.ensure_workspace_metadata(&workspace_path).await {
+            // Some ACP agents require auth or do not implement session/new
+            // configuration. Keep the provider selectable and let its first
+            // real turn retry discovery instead of failing workspace attach.
+            tracing::info!(
+                provider = %runtime.config.id,
+                %error,
+                "ACP metadata discovery unavailable"
+            );
+        }
 
         {
             let mut workspaces = self.inner.workspaces.lock().await;
@@ -92,6 +251,12 @@ impl AppState {
                 {
                     Some(index) => &mut workspace.summary.agents[index],
                     None => {
+                        let mut capabilities =
+                            falcondeck_core::AgentCapabilitySummary::acp_minimal();
+                        capabilities.supports_images = crate::acp::acp_supports_images(
+                            provider.as_str(),
+                            capabilities.supports_images,
+                        );
                         workspace
                             .summary
                             .agents
@@ -105,8 +270,7 @@ impl AppState {
                                 models: Vec::new(),
                                 collaboration_modes: Vec::new(),
                                 skills: Vec::new(),
-                                capabilities: falcondeck_core::AgentCapabilitySummary::acp_minimal(
-                                ),
+                                capabilities,
                             });
                         workspace.summary.agents.last_mut().expect("just pushed")
                     }
@@ -119,6 +283,10 @@ impl AppState {
                 let models = runtime.advertised_models().await;
                 if !models.is_empty() {
                     agent.models = models;
+                }
+                let collaboration_modes = runtime.advertised_collaboration_modes().await;
+                if !collaboration_modes.is_empty() {
+                    agent.collaboration_modes = collaboration_modes;
                 }
             }
         }
@@ -165,22 +333,158 @@ impl AppState {
         event: AcpEvent,
     ) -> Result<(), DaemonError> {
         match event {
-            AcpEvent::MessageDelta { session_id, text } => {
+            AcpEvent::MessageDelta {
+                session_id,
+                message_id,
+                text,
+            } => {
                 let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
                     return Ok(());
                 };
-                let (item_id, full_text) = runtime.append_assistant_text(&session_id, &text).await;
+                let (item_id, full_text) = runtime
+                    .append_assistant_text(&session_id, message_id.as_deref(), &text)
+                    .await;
                 self.push_conversation_item(
                     workspace_id,
                     &thread_id,
                     ConversationItem::AssistantMessage {
                         id: item_id,
                         text: full_text,
+                        phase: None,
+                        memory_citation: None,
+                        citations: Vec::new(),
+                        lifecycle: ContentLifecycle::Streaming,
                         created_at: Utc::now(),
                     },
                     true,
                 )
                 .await?;
+            }
+            AcpEvent::UserMessageDelta {
+                session_id,
+                message_id,
+                text,
+            } => {
+                let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
+                    return Ok(());
+                };
+                let (item_id, full_text) = runtime
+                    .append_user_text(&session_id, message_id.as_deref(), &text)
+                    .await;
+                let is_submitted_message_echo = {
+                    let workspaces = self.inner.workspaces.lock().await;
+                    workspaces
+                        .get(workspace_id)
+                        .and_then(|workspace| workspace.threads.get(&thread_id))
+                        .is_some_and(|thread| {
+                            latest_user_message_contains_echo(&thread.items, &full_text)
+                        })
+                };
+                if is_submitted_message_echo {
+                    return Ok(());
+                }
+                self.push_conversation_item(
+                    workspace_id,
+                    &thread_id,
+                    ConversationItem::UserMessage {
+                        id: item_id,
+                        text: full_text,
+                        attachments: Vec::new(),
+                        turn_id: None,
+                        previous_turn_id: None,
+                        created_at: Utc::now(),
+                    },
+                    true,
+                )
+                .await?;
+            }
+            AcpEvent::ThoughtDelta {
+                session_id,
+                message_id,
+                text,
+            } => {
+                let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
+                    return Ok(());
+                };
+                let (item_id, content) = runtime
+                    .append_thought_text(&session_id, message_id.as_deref(), &text)
+                    .await;
+                self.push_conversation_item(
+                    workspace_id,
+                    &thread_id,
+                    ConversationItem::Reasoning {
+                        id: item_id,
+                        summary: None,
+                        content,
+                        lifecycle: ContentLifecycle::Streaming,
+                        duration_ms: None,
+                        created_at: Utc::now(),
+                    },
+                    true,
+                )
+                .await?;
+            }
+            AcpEvent::SessionInfo { session_id, title } => {
+                let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
+                    return Ok(());
+                };
+                let Some(title) = title.filter(|title| !title.trim().is_empty()) else {
+                    return Ok(());
+                };
+                let thread = {
+                    let mut workspaces = self.inner.workspaces.lock().await;
+                    let Some(thread) = workspaces
+                        .get_mut(workspace_id)
+                        .and_then(|workspace| workspace.threads.get_mut(&thread_id))
+                    else {
+                        return Ok(());
+                    };
+                    if thread.manual_title {
+                        return Ok(());
+                    }
+                    thread.summary.title = title;
+                    thread.summary.updated_at = Utc::now();
+                    thread.ai_title_generated = true;
+                    thread.summary.clone()
+                };
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+            }
+            AcpEvent::Usage {
+                session_id,
+                used,
+                size,
+            } => {
+                let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
+                    return Ok(());
+                };
+                // ACP reports context fill, not an input/output split; claiming
+                // it all as input tokens would misreport any breakdown UI.
+                let usage = ThreadTokenUsage {
+                    total: TokenUsageBreakdown {
+                        total_tokens: used,
+                        input_tokens: 0,
+                        cached_input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_output_tokens: 0,
+                    },
+                    last: None,
+                    model_context_window: Some(size),
+                    updated_at: Some(Utc::now()),
+                };
+                self.inner
+                    .thread_token_usage
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(thread_id.clone(), usage.clone());
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id),
+                    UnifiedEvent::ThreadTokenUsageUpdated { usage },
+                );
             }
             AcpEvent::ToolCall {
                 session_id,
@@ -188,22 +492,42 @@ impl AppState {
                 title,
                 kind,
                 status,
+                output,
+                diffs,
             } => {
                 let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
                     return Ok(());
                 };
-                runtime.remember_tool(&call_id, &title, &kind).await;
+                // A tool call is a message boundary: agents without message
+                // ids (Grok) would otherwise merge post-tool text into the
+                // pre-tool bubble, stranding the final answer above the tools.
+                runtime.break_stream_items(&session_id).await;
+                runtime
+                    .remember_tool(
+                        &call_id,
+                        AcpToolMemory {
+                            session_id: session_id.clone(),
+                            title: title.clone(),
+                            kind: kind.clone(),
+                            output: output.clone(),
+                        },
+                    )
+                    .await;
                 let status = normalize_acp_tool_status(&status);
                 self.push_acp_tool_item(
                     workspace_id,
                     &thread_id,
-                    &call_id,
-                    &title,
-                    &kind,
-                    &status,
-                    None,
+                    AcpToolItem {
+                        call_id: &call_id,
+                        title: &title,
+                        kind: &kind,
+                        status: &status,
+                        output: output.as_deref(),
+                    },
                 )
                 .await?;
+                self.push_acp_diff_items(workspace_id, &thread_id, &call_id, &status, &diffs)
+                    .await?;
             }
             AcpEvent::ToolCallUpdate {
                 session_id,
@@ -211,34 +535,55 @@ impl AppState {
                 title,
                 status,
                 output,
+                diffs,
             } => {
                 let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
                     return Ok(());
                 };
-                let (known_title, kind) = runtime
-                    .tool_identity(&call_id)
-                    .await
-                    .unwrap_or_else(|| ("Tool call".to_string(), "other".to_string()));
+                let remembered = runtime.tool_memory(&call_id).await;
+                let (known_title, kind, known_output) = remembered.map_or_else(
+                    || ("Tool call".to_string(), "other".to_string(), None),
+                    |memory| (memory.title, memory.kind, memory.output),
+                );
                 let title = title
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or(known_title);
-                runtime.remember_tool(&call_id, &title, &kind).await;
+                // tool_call_update is a partial update: an absent content
+                // field means "unchanged", so a status-only completion must
+                // not erase output streamed by earlier updates.
+                let output = output.or(known_output);
+                runtime
+                    .remember_tool(
+                        &call_id,
+                        AcpToolMemory {
+                            session_id: session_id.clone(),
+                            title: title.clone(),
+                            kind: kind.clone(),
+                            output: output.clone(),
+                        },
+                    )
+                    .await;
                 let status = normalize_acp_tool_status(status.as_deref().unwrap_or("in_progress"));
                 self.push_acp_tool_item(
                     workspace_id,
                     &thread_id,
-                    &call_id,
-                    &title,
-                    &kind,
-                    &status,
-                    output.as_deref(),
+                    AcpToolItem {
+                        call_id: &call_id,
+                        title: &title,
+                        kind: &kind,
+                        status: &status,
+                        output: output.as_deref(),
+                    },
                 )
                 .await?;
+                self.push_acp_diff_items(workspace_id, &thread_id, &call_id, &status, &diffs)
+                    .await?;
             }
             AcpEvent::Plan { session_id, plan } => {
                 let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
                     return Ok(());
                 };
+                let plan_item_id = runtime.current_plan_item_id(&session_id).await;
                 let thread = self
                     .upsert_thread(workspace_id, &thread_id, |thread| {
                         thread.latest_plan = Some(plan.clone());
@@ -249,7 +594,7 @@ impl AppState {
                     workspace_id,
                     &thread_id,
                     ConversationItem::Plan {
-                        id: format!("plan-{thread_id}"),
+                        id: plan_item_id,
                         plan,
                         created_at: Utc::now(),
                     },
@@ -267,15 +612,77 @@ impl AppState {
                 request_id,
                 title,
                 detail,
-                options: _,
+                options,
             } => {
                 let thread_id = runtime.thread_for_session(&session_id).await;
+                // A thread whose permission mode is blanket approval must
+                // never stall on a banner. Harness-side toggles (for example
+                // Grok's session/new `yoloMode` meta) are advisory at best —
+                // agents still ask, and resumed sessions lose the toggle
+                // entirely — so the daemon answers on the user's behalf here,
+                // where every request funnels through regardless of harness.
+                if let Some(thread_id) = thread_id.as_deref() {
+                    let permission_mode = {
+                        let workspaces = self.inner.workspaces.lock().await;
+                        workspaces
+                            .get(workspace_id)
+                            .and_then(|workspace| workspace.threads.get(thread_id))
+                            .and_then(|thread| thread.summary.agent.permission_mode.clone())
+                    };
+                    if permission_mode
+                        .as_deref()
+                        .is_some_and(crate::acp::is_blanket_approval_mode)
+                    {
+                        // Prefer the standing grant so the agent stops asking
+                        // for this tool; fall back to a one-shot allow.
+                        let decision = if options.iter().any(|o| o.kind == "allow_always") {
+                            Some(ApprovalDecision::AlwaysAllow)
+                        } else if options.iter().any(|o| o.kind == "allow_once") {
+                            Some(ApprovalDecision::Allow)
+                        } else {
+                            // Reject-only option lists cannot express consent;
+                            // surface those to the user rather than denying.
+                            None
+                        };
+                        if let Some(decision) = decision {
+                            match runtime.respond_permission(&request_id, decision).await {
+                                Ok(()) => {
+                                    tracing::info!(
+                                        thread = %thread_id,
+                                        "auto-approved ACP permission request per thread permission mode"
+                                    );
+                                    return Ok(());
+                                }
+                                Err(error) => tracing::warn!(
+                                    thread = %thread_id,
+                                    %error,
+                                    "failed to auto-approve ACP permission request; surfacing it"
+                                ),
+                            }
+                        }
+                    }
+                }
+                let mut approval_decisions = Vec::new();
+                for option in &options {
+                    let decision = match option.kind.as_str() {
+                        "allow_once" => Some(ApprovalDecision::Allow),
+                        "allow_always" => Some(ApprovalDecision::AlwaysAllow),
+                        kind if kind.starts_with("reject") => Some(ApprovalDecision::Deny),
+                        _ => None,
+                    };
+                    if let Some(decision) = decision
+                        && !approval_decisions.contains(&decision)
+                    {
+                        approval_decisions.push(decision);
+                    }
+                }
                 let request = InteractiveRequest {
                     request_id: request_id.clone(),
                     workspace_id: workspace_id.to_string(),
                     thread_id: thread_id.clone(),
                     method: "session/request_permission".to_string(),
                     kind: InteractiveRequestKind::Approval,
+                    approval_decisions: Some(approval_decisions),
                     title,
                     detail,
                     command: None,
@@ -286,10 +693,10 @@ impl AppState {
                     created_at: Utc::now(),
                 };
                 self.inner.interactive_requests.lock().await.insert(
-                    (workspace_id.to_string(), request_id),
+                    (workspace_id.to_string(), request_id.clone()),
                     PendingServerRequest {
                         raw_id: Value::Null,
-                        request,
+                        request: request.clone(),
                         params: Value::Null,
                     },
                 );
@@ -302,9 +709,35 @@ impl AppState {
                         .await?;
                     self.emit(
                         Some(workspace_id.to_string()),
-                        Some(thread_id),
+                        Some(thread_id.clone()),
                         UnifiedEvent::ThreadUpdated { thread },
                     );
+                    // Mirror the Claude/Codex approval surfacing: without the
+                    // event, attention ping, and transcript item, an ACP
+                    // approval never reaches phones and leaves no receipt in
+                    // history after it is answered.
+                    self.emit(
+                        Some(workspace_id.to_string()),
+                        Some(thread_id.clone()),
+                        UnifiedEvent::InteractiveRequest {
+                            request: request.clone(),
+                        },
+                    );
+                    self.notify_remote_attention("approval", workspace_id, Some(thread_id.clone()))
+                        .await;
+                    self.push_conversation_item(
+                        workspace_id,
+                        &thread_id,
+                        ConversationItem::InteractiveRequest {
+                            id: request_id.clone(),
+                            request: Box::new(request),
+                            created_at: Utc::now(),
+                            resolved: false,
+                            resolution: None,
+                        },
+                        false,
+                    )
+                    .await?;
                 }
                 self.emit(
                     Some(workspace_id.to_string()),
@@ -314,10 +747,35 @@ impl AppState {
                     },
                 );
             }
-            AcpEvent::TurnEnded { session_id } => {
+            AcpEvent::TurnEnded {
+                session_id,
+                stop_reason,
+            } => {
                 if let Some(thread_id) = runtime.thread_for_session(&session_id).await {
-                    self.settle_running_tool_calls(workspace_id, &thread_id, Utc::now())
+                    let settlement = match stop_reason.as_deref() {
+                        None => ToolSettlement::Failed,
+                        Some("cancelled") => ToolSettlement::Interrupted,
+                        Some(_) => ToolSettlement::Completed,
+                    };
+                    self.settle_turn_items(workspace_id, &thread_id, Utc::now(), settlement)
                         .await;
+                    // A turn the agent cut short would otherwise be
+                    // indistinguishable from a normal completion — the user
+                    // just sees the agent "stop mid-answer".
+                    if let Some(notice) = acp_stop_reason_notice(stop_reason.as_deref()) {
+                        self.push_conversation_item(
+                            workspace_id,
+                            &thread_id,
+                            ConversationItem::Service {
+                                id: format!("acp-stop-{}", uuid::Uuid::new_v4().simple()),
+                                level: ServiceLevel::Warning,
+                                message: notice,
+                                created_at: Utc::now(),
+                            },
+                            true,
+                        )
+                        .await?;
+                    }
                 }
                 runtime.end_turn(&session_id).await;
             }
@@ -335,6 +793,13 @@ impl AppState {
                             }
                         })
                         .await;
+                    self.settle_turn_items(
+                        workspace_id,
+                        &thread_id,
+                        Utc::now(),
+                        ToolSettlement::Failed,
+                    )
+                    .await;
                 }
                 self.emit(
                     Some(workspace_id.to_string()),
@@ -348,30 +813,71 @@ impl AppState {
         Ok(())
     }
 
-    async fn push_acp_tool_item(
+    /// Projects `diff` content blocks from an ACP tool call into real
+    /// file-change items, matching what Codex/Claude edits produce, instead
+    /// of dropping them. Item ids are deterministic per call+path so later
+    /// updates of the same tool call replace rather than duplicate.
+    async fn push_acp_diff_items(
         &self,
         workspace_id: &str,
         thread_id: &str,
         call_id: &str,
-        title: &str,
-        kind: &str,
         status: &str,
-        output: Option<&str>,
+        diffs: &[AcpDiffContent],
     ) -> Result<(), DaemonError> {
-        let display = tool_display_metadata(title, kind, status, None, output);
+        for (index, diff) in diffs.iter().enumerate() {
+            let change_kind = if diff.old_text.is_none() {
+                "add"
+            } else {
+                "update"
+            };
+            let lifecycle =
+                tool_display_metadata("File change", "edit", status, None, None).lifecycle;
+            self.push_conversation_item(
+                workspace_id,
+                thread_id,
+                ConversationItem::FileChange {
+                    id: format!("acp-diff-{call_id}-{index}"),
+                    changes: vec![ConversationFileChange {
+                        path: diff.path.clone(),
+                        change_kind: change_kind.to_string(),
+                        diff: simple_unified_diff(diff.old_text.as_deref(), &diff.new_text),
+                        move_path: None,
+                    }],
+                    status: status.to_string(),
+                    lifecycle,
+                    created_at: Utc::now(),
+                    completed_at: (status == "completed" || status == "failed").then(Utc::now),
+                },
+                true,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn push_acp_tool_item(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        item: AcpToolItem<'_>,
+    ) -> Result<(), DaemonError> {
+        let display = tool_display_metadata(item.title, item.kind, item.status, None, item.output);
         self.push_conversation_item(
             workspace_id,
             thread_id,
             ConversationItem::ToolCall {
-                id: call_id.to_string(),
-                title: title.to_string(),
-                tool_kind: kind.to_string(),
-                status: status.to_string(),
-                output: output.map(ToOwned::to_owned),
+                id: item.call_id.to_string(),
+                title: item.title.to_string(),
+                tool_kind: item.kind.to_string(),
+                status: item.status.to_string(),
+                output: item.output.map(ToOwned::to_owned),
                 exit_code: None,
-                display,
+                display: Box::new(display),
+                detail: None,
                 created_at: Utc::now(),
-                completed_at: (status == "completed" || status == "failed").then(Utc::now),
+                completed_at: (item.status == "completed" || item.status == "failed")
+                    .then(Utc::now),
             },
             true,
         )
@@ -395,6 +901,43 @@ impl AppState {
         let runtime = self.acp_runtime_for(workspace_id, &provider).await?;
         runtime.respond_permission(request_id, decision).await
     }
+}
+
+fn latest_user_message_contains_echo(items: &[ConversationItem], echoed_text: &str) -> bool {
+    if echoed_text.is_empty() {
+        return false;
+    }
+    let Some(ConversationItem::UserMessage { text, .. }) = items.last() else {
+        return false;
+    };
+    text.starts_with(echoed_text)
+        || echoed_text
+            .strip_prefix(text.as_str())
+            .is_some_and(is_attachment_placeholder_remainder)
+}
+
+/// Whether `remainder` is only the placeholder labels that
+/// `acp_content_block_text` substitutes for non-text prompt blocks
+/// ("[image: image/png]", "[audio]", "[resource: file://…]") plus whitespace.
+/// Providers that echo the submitted prompt (Grok) include its attachment
+/// blocks, so the echo can be longer than the locally recorded message, which
+/// never carries these placeholders.
+fn is_attachment_placeholder_remainder(remainder: &str) -> bool {
+    let mut rest = remainder.trim_start();
+    while let Some(after_open) = rest.strip_prefix('[') {
+        let Some((label, after_close)) = after_open.split_once(']') else {
+            return false;
+        };
+        if !(label == "image"
+            || label == "audio"
+            || label.starts_with("image:")
+            || label.starts_with("resource:"))
+        {
+            return false;
+        }
+        rest = after_close.trim_start();
+    }
+    rest.is_empty()
 }
 
 /// Applies a permission-mode update to an already-open ACP session.
@@ -427,27 +970,65 @@ pub(super) async fn set_acp_thread_permission_mode(
     };
 
     let runtime = app.acp_runtime_for(workspace_id, &provider).await?;
-    let Some(mode_state) = runtime.session_mode_state(&session_id).await else {
-        return Ok(());
-    };
+    let available_modes = runtime.capability_summary().await.permission_modes;
     let desired_mode = requested_mode
         .as_deref()
-        .or_else(|| default_acp_mode(&mode_state.available));
+        .or_else(|| default_acp_mode(&available_modes));
     let Some(desired_mode) = desired_mode else {
         return Ok(());
     };
-    if !mode_state.available.iter().any(|mode| mode == desired_mode) {
+    if !available_modes.iter().any(|mode| mode == desired_mode) {
         return Err(DaemonError::BadRequest(format!(
             "permission mode '{desired_mode}' is not advertised by provider '{provider}'"
         )));
     }
-    if mode_state.current.as_deref() == Some(desired_mode) {
+    if runtime
+        .supports_session_permission_updates(&session_id)
+        .await
+    {
+        return runtime
+            .apply_session_preferences(&session_id, None, None, None, Some(desired_mode))
+            .await;
+    }
+    if let Some(mode_state) = runtime.session_mode_state(&session_id).await
+        && mode_state.available.iter().any(|mode| mode == desired_mode)
+    {
+        if mode_state.current.as_deref() == Some(desired_mode) {
+            return Ok(());
+        }
+        return runtime.set_session_mode(&session_id, desired_mode).await;
+    }
+    // No session-level lever for this harness. Blanket-approval modes are
+    // still fully honored: the daemon auto-answers permission requests from
+    // the stored thread mode, so persisting the choice is all that's needed.
+    if crate::acp::is_blanket_approval_mode(desired_mode) {
         return Ok(());
     }
-    runtime.set_session_mode(&session_id, desired_mode).await
+    Err(DaemonError::BadRequest(format!(
+        "provider '{provider}' only supports choosing permissions before the first turn"
+    )))
 }
 
 fn default_acp_mode(available_modes: &[String]) -> Option<&str> {
+    const PERMISSIVE_MODES: &[&str] = &[
+        "bypasspermissions",
+        "bypasspermission",
+        "dontask",
+        "never",
+        "alwaysapprove",
+        "alwaysallow",
+        "allowall",
+        "yolo",
+        "auto",
+    ];
+    for preferred in PERMISSIVE_MODES {
+        if let Some(mode) = available_modes.iter().find(|mode| {
+            mode.replace(['-', '_', ' '], "")
+                .eq_ignore_ascii_case(preferred)
+        }) {
+            return Some(mode.as_str());
+        }
+    }
     available_modes
         .iter()
         .find(|mode| {
@@ -460,6 +1041,68 @@ fn default_acp_mode(available_modes: &[String]) -> Option<&str> {
         })
         .map(String::as_str)
         .or_else(|| available_modes.first().map(String::as_str))
+}
+
+/// A user-facing notice for stop reasons that cut the turn short. `end_turn`
+/// and `cancelled` are unremarkable (normal completion / user interrupt).
+fn acp_stop_reason_notice(stop_reason: Option<&str>) -> Option<String> {
+    match stop_reason {
+        None | Some("end_turn") | Some("cancelled") => None,
+        Some("refusal") => Some("The agent declined to continue this turn.".to_string()),
+        Some("max_tokens") => {
+            Some("The turn stopped early: the model hit its output token limit.".to_string())
+        }
+        Some("max_turn_requests") => {
+            Some("The turn stopped early: it reached the provider's request limit.".to_string())
+        }
+        Some(other) => Some(format!("The turn ended with stop reason '{other}'.")),
+    }
+}
+
+/// Minimal unified diff for an ACP `diff` block (old/new full texts).
+/// Trims the common prefix and suffix and emits one hunk with no context
+/// lines — enough for the clients' diff renderer without a diff dependency.
+fn simple_unified_diff(old_text: Option<&str>, new_text: &str) -> String {
+    let old_lines = old_text.unwrap_or_default().lines().collect::<Vec<_>>();
+    let new_lines = new_text.lines().collect::<Vec<_>>();
+    let mut prefix = 0;
+    while prefix < old_lines.len()
+        && prefix < new_lines.len()
+        && old_lines[prefix] == new_lines[prefix]
+    {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old_lines.len() - prefix
+        && suffix < new_lines.len() - prefix
+        && old_lines[old_lines.len() - 1 - suffix] == new_lines[new_lines.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let removed = &old_lines[prefix..old_lines.len() - suffix];
+    let added = &new_lines[prefix..new_lines.len() - suffix];
+    if removed.is_empty() && added.is_empty() {
+        return String::new();
+    }
+    let hunk_start = |count: usize| if count == 0 { prefix } else { prefix + 1 };
+    let mut out = format!(
+        "@@ -{},{} +{},{} @@\n",
+        hunk_start(removed.len()),
+        removed.len(),
+        hunk_start(added.len()),
+        added.len()
+    );
+    for line in removed {
+        out.push('-');
+        out.push_str(line);
+        out.push('\n');
+    }
+    for line in added {
+        out.push('+');
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Maps ACP tool statuses onto the daemon's running/completed/failed set.
@@ -480,6 +1123,7 @@ pub(super) async fn start_acp_turn(
     thread_id: &str,
     provider: &AgentProvider,
     inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
 ) -> Result<(), DaemonError> {
     let runtime = app.acp_runtime_for(workspace_id, provider).await?;
     // A native session id persisted from a previous daemon run lets the agent
@@ -489,7 +1133,14 @@ pub(super) async fn start_acp_turn(
     // that still holds its items (agent process died, daemon alive) would
     // append the entire history a second time. That case takes session/new —
     // the agent loses its context, which is the pre-resume status quo.
-    let (known_native_session, requested_permission_mode, cwd) = {
+    let (
+        known_native_session,
+        requested_model_id,
+        requested_reasoning_effort,
+        requested_collaboration_mode,
+        requested_permission_mode,
+        cwd,
+    ) = {
         let workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces.get(workspace_id);
         let thread = workspace.and_then(|workspace| workspace.threads.get(thread_id));
@@ -497,6 +1148,9 @@ pub(super) async fn start_acp_turn(
             thread
                 .filter(|thread| thread.items.is_empty())
                 .and_then(|thread| thread.summary.native_session_id.clone()),
+            thread.and_then(|thread| thread.summary.agent.model_id.clone()),
+            thread.and_then(|thread| thread.summary.agent.reasoning_effort.clone()),
+            thread.and_then(|thread| thread.summary.agent.collaboration_mode_id.clone()),
             thread.and_then(|thread| thread.summary.agent.permission_mode.clone()),
             match (workspace, thread) {
                 (Some(workspace), Some(thread)) => thread
@@ -508,102 +1162,150 @@ pub(super) async fn start_acp_turn(
         )
     };
     let session_id = runtime
-        .ensure_session(thread_id, known_native_session.as_deref(), &cwd)
+        .ensure_session(
+            thread_id,
+            known_native_session.as_deref(),
+            &cwd,
+            requested_permission_mode.as_deref(),
+        )
         .await?;
     app.with_thread_mut(workspace_id, thread_id, |thread| {
         thread.native_session_id = Some(session_id.clone());
     })
     .await?;
 
+    // Discovery may have failed during background hydration (for example
+    // while the CLI was still authenticating). A real session response is
+    // authoritative, so publish its catalog before the turn starts.
+    let discovered_models = runtime.advertised_models().await;
+    let discovered_collaboration_modes = runtime.advertised_collaboration_modes().await;
+    let discovered_capabilities = runtime.capability_summary().await;
+    let effective_permission_mode = requested_permission_mode
+        .clone()
+        .or_else(|| default_acp_mode(&discovered_capabilities.permission_modes).map(str::to_owned));
+    let metadata_changed = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get_mut(workspace_id)
+            .and_then(|workspace| {
+                workspace
+                    .summary
+                    .agents
+                    .iter_mut()
+                    .find(|agent| &agent.provider == provider)
+            })
+            .is_some_and(|agent| {
+                let models_changed =
+                    !discovered_models.is_empty() && agent.models != discovered_models;
+                let collaboration_modes_changed = !discovered_collaboration_modes.is_empty()
+                    && agent.collaboration_modes != discovered_collaboration_modes;
+                let changed = models_changed
+                    || collaboration_modes_changed
+                    || agent.capabilities != discovered_capabilities;
+                if changed {
+                    if models_changed {
+                        agent.models = discovered_models.clone();
+                    }
+                    if collaboration_modes_changed {
+                        agent.collaboration_modes = discovered_collaboration_modes.clone();
+                    }
+                    agent.capabilities = discovered_capabilities.clone();
+                }
+                changed
+            })
+    };
+    if metadata_changed {
+        app.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: app.snapshot().await,
+            },
+        );
+    }
+
+    if requested_permission_mode.is_none()
+        && let Some(permission_mode) = effective_permission_mode.clone()
+    {
+        app.with_thread_mut(workspace_id, thread_id, |thread| {
+            thread.agent.permission_mode = Some(permission_mode);
+        })
+        .await?;
+    }
+
     // Sessions advertise permission modes (ACP session modes). Surface them
     // on the workspace agent entry so the composer shows the picker, and
     // apply the user's selection via session/set_mode before prompting.
-    if let Some(mode_state) = runtime.session_mode_state(&session_id).await {
-        if !mode_state.available.is_empty() {
-            let modes_changed = {
-                let mut workspaces = app.inner.workspaces.lock().await;
-                workspaces
-                    .get_mut(workspace_id)
-                    .and_then(|workspace| {
-                        workspace
-                            .summary
-                            .agents
-                            .iter_mut()
-                            .find(|agent| &agent.provider == provider)
-                    })
-                    .is_some_and(|agent| {
-                        if agent.capabilities.permission_modes == mode_state.available {
-                            false
-                        } else {
-                            agent.capabilities.permission_modes = mode_state.available.clone();
-                            true
-                        }
-                    })
-            };
-            if modes_changed {
-                app.emit(
-                    Some(workspace_id.to_string()),
-                    None,
-                    UnifiedEvent::Snapshot {
-                        snapshot: app.snapshot().await,
-                    },
-                );
-            }
-        }
-        if let Some(desired) = requested_permission_mode
-            .as_deref()
-            .filter(|mode| mode_state.available.iter().any(|id| id == mode))
-            .filter(|mode| mode_state.current.as_deref() != Some(mode))
-            && let Err(error) = runtime.set_session_mode(&session_id, desired).await
-        {
-            tracing::warn!(
-                provider = %runtime.config.id,
-                %error,
-                "failed to apply ACP session mode; continuing with agent default"
+    if let Some(mode_state) = runtime.session_mode_state(&session_id).await
+        && !mode_state.available.is_empty()
+    {
+        let modes_changed = {
+            let mut workspaces = app.inner.workspaces.lock().await;
+            workspaces
+                .get_mut(workspace_id)
+                .and_then(|workspace| {
+                    workspace
+                        .summary
+                        .agents
+                        .iter_mut()
+                        .find(|agent| &agent.provider == provider)
+                })
+                .is_some_and(|agent| {
+                    let modes = mode_state
+                        .available
+                        .iter()
+                        .map(|id| falcondeck_core::CollaborationModeSummary {
+                            id: id.clone(),
+                            label: id.clone(),
+                            mode: Some(id.clone()),
+                            model_id: None,
+                            reasoning_effort: None,
+                            is_native: true,
+                        })
+                        .collect::<Vec<_>>();
+                    if agent.collaboration_modes == modes {
+                        false
+                    } else {
+                        agent.collaboration_modes = modes;
+                        true
+                    }
+                })
+        };
+        if modes_changed {
+            app.emit(
+                Some(workspace_id.to_string()),
+                None,
+                UnifiedEvent::Snapshot {
+                    snapshot: app.snapshot().await,
+                },
             );
         }
     }
 
-    let text = inputs
-        .iter()
-        .filter_map(|input| match input {
-            TurnInputItem::Text { text, .. } => Some(text.as_str()),
-            TurnInputItem::Image(_) => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    let mut content = Vec::new();
-    if !text.trim().is_empty() {
-        content.push(serde_json::json!({ "type": "text", "text": text }));
+    if let Err(error) = runtime
+        .apply_session_preferences(
+            &session_id,
+            requested_model_id.as_deref(),
+            requested_reasoning_effort.as_deref(),
+            requested_collaboration_mode.as_deref(),
+            effective_permission_mode.as_deref(),
+        )
+        .await
+    {
+        tracing::warn!(
+            provider = %runtime.config.id,
+            %error,
+            "failed to apply ACP session configuration; continuing with provider defaults"
+        );
     }
-    let supports_images = runtime.capability_summary().await.supports_images;
-    let mut encoded_budget = crate::acp::MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES;
-    for input in inputs {
-        let TurnInputItem::Image(image) = input else {
-            continue;
-        };
-        if supports_images {
-            // Falls back to a text reference on oversize/unreadable files, so
-            // the attachment is never silently dropped.
-            content.push(crate::acp::acp_image_content_block(image, &mut encoded_budget).await);
-        } else {
-            let reference = image
-                .local_path
-                .as_deref()
-                .or(image.name.as_deref())
-                .unwrap_or("attachment");
-            content.push(serde_json::json!({
-                "type": "text",
-                "text": format!("[attached image: {reference}]"),
-            }));
-        }
-    }
+
+    let content = acp_turn_content(&runtime, inputs, selected_skills).await;
 
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
     tokio::spawn(async move {
-        let outcome = runtime.prompt(&session_id, content).await;
+        let outcome = runtime.prompt(&session_id, content.blocks).await;
         let (status, error) = match &outcome {
             Ok(stop_reason) if stop_reason == "cancelled" => (ThreadStatus::Idle, None),
             Ok(_) => (ThreadStatus::Idle, None),
@@ -630,18 +1332,207 @@ pub(super) async fn start_acp_turn(
     Ok(())
 }
 
+/// Injects a message into a running ACP turn where the provider exposes a
+/// compatible vendor extension.
+pub(super) async fn steer_acp_turn(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    provider: &AgentProvider,
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> Result<(), DaemonError> {
+    let runtime = app.acp_runtime_for(workspace_id, provider).await?;
+    let session_id = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .and_then(|thread| thread.summary.native_session_id.clone())
+            .ok_or_else(|| DaemonError::BadRequest("no active ACP session to steer".to_string()))?
+    };
+    let content = acp_turn_content(&runtime, inputs, selected_skills).await;
+    runtime
+        .interject(&session_id, &content.text, content.blocks)
+        .await
+}
+
+struct AcpTurnContent {
+    text: String,
+    blocks: Vec<Value>,
+}
+
+async fn acp_turn_content(
+    runtime: &AcpRuntime,
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> AcpTurnContent {
+    let mut text = inputs
+        .iter()
+        .filter_map(|input| match input {
+            TurnInputItem::Text { text, .. } => Some(text.as_str()),
+            TurnInputItem::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    // ACP agents have no native skill surface; fold selected skills into the
+    // prompt as file references (as the Claude path does) so a selection is
+    // never silently dropped.
+    let skill_preambles = selected_skills
+        .iter()
+        .filter_map(|skill| {
+            skill
+                .summary
+                .provider_translations
+                .claude
+                .as_ref()
+                .and_then(|translation| translation.prompt_reference_path.as_deref())
+                .map(|path| {
+                    format!(
+                        "Use the FalconDeck skill defined at {path}. Follow it as the governing skill for this request."
+                    )
+                })
+                .or_else(|| {
+                    Some(format!(
+                        "Apply the FalconDeck skill named '{}' to this request.",
+                        skill.summary.label
+                    ))
+                })
+        })
+        .collect::<Vec<_>>();
+    if !skill_preambles.is_empty() {
+        let preamble = skill_preambles.join("\n");
+        text = if text.trim().is_empty() {
+            preamble
+        } else {
+            format!("{preamble}\n\n{text}")
+        };
+    }
+    let mut content = Vec::new();
+    if !text.trim().is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": &text }));
+    }
+    let supports_images = runtime.capability_summary().await.supports_images;
+    let mut encoded_budget = crate::acp::MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES;
+    for input in inputs {
+        let TurnInputItem::Image(image) = input else {
+            continue;
+        };
+        if supports_images {
+            // Falls back to a text reference on oversize/unreadable files, so
+            // the attachment is never silently dropped.
+            content.push(crate::acp::acp_image_content_block(image, &mut encoded_budget).await);
+        } else {
+            let reference = image
+                .local_path
+                .as_deref()
+                .or(image.name.as_deref())
+                .unwrap_or("attachment");
+            content.push(serde_json::json!({
+                "type": "text",
+                "text": format!("[attached image: {reference}]"),
+            }));
+        }
+    }
+
+    AcpTurnContent {
+        text,
+        blocks: content,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::default_acp_mode;
+    use chrono::Utc;
+
+    use super::{default_acp_mode, latest_user_message_contains_echo};
+    use falcondeck_core::ConversationItem;
+
+    fn user_message(text: &str) -> ConversationItem {
+        ConversationItem::UserMessage {
+            id: "submitted-user-message".to_string(),
+            text: text.to_string(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        }
+    }
 
     #[test]
-    fn default_acp_mode_prefers_a_named_default() {
+    fn latest_user_message_contains_echo_matches_partial_provider_echo() {
+        let items = vec![user_message("Inspect the attached screenshot")];
+
+        assert!(latest_user_message_contains_echo(&items, "Inspect the"));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_preserves_replayed_user_history() {
+        assert!(!latest_user_message_contains_echo(
+            &[],
+            "A replayed historical prompt"
+        ));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_tolerates_attachment_placeholders() {
+        let items = vec![user_message("Add a copy prompt option to this menu.")];
+
+        assert!(latest_user_message_contains_echo(
+            &items,
+            "Add a copy prompt option to this menu. [image: image/png][image: image/png]"
+        ));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_matches_attachment_only_prompt_echo() {
+        let items = vec![user_message("")];
+
+        assert!(latest_user_message_contains_echo(
+            &items,
+            "[image: image/png]"
+        ));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_rejects_textual_remainder() {
+        let items = vec![user_message("Add a copy prompt option")];
+
+        assert!(!latest_user_message_contains_echo(
+            &items,
+            "Add a copy prompt option but this is a different message"
+        ));
+    }
+
+    #[test]
+    fn latest_user_message_contains_echo_does_not_match_after_agent_activity() {
+        let items = vec![
+            user_message("Previous prompt"),
+            ConversationItem::AssistantMessage {
+                id: "assistant-message".to_string(),
+                text: "Previous answer".to_string(),
+                phase: None,
+                memory_citation: None,
+                citations: Vec::new(),
+                lifecycle: falcondeck_core::ContentLifecycle::Complete,
+                created_at: Utc::now(),
+            },
+        ];
+
+        assert!(!latest_user_message_contains_echo(
+            &items,
+            "Previous prompt"
+        ));
+    }
+
+    #[test]
+    fn default_acp_mode_prefers_a_permissive_mode() {
         let modes = vec![
             "plan".to_string(),
             "default".to_string(),
             "yolo".to_string(),
         ];
-        assert_eq!(default_acp_mode(&modes), Some("default"));
+        assert_eq!(default_acp_mode(&modes), Some("yolo"));
     }
 
     #[test]

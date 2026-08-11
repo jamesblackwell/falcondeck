@@ -11,7 +11,7 @@
 //! daemon state file declares `{ id: { command: [...], label: "..." } }` and
 //! each entry becomes a selectable provider with no Rust changes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -22,22 +22,56 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::time::{Duration, timeout};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use falcondeck_core::{AgentProvider, ApprovalDecision, ImageInput, PlanStep, ThreadPlan};
+use falcondeck_core::{
+    AgentProvider, ApprovalDecision, CollaborationModeSummary, ImageInput, ModelSummary, PlanStep,
+    ReasoningEffortSummary, ThreadPlan,
+};
 
 use crate::acp_protocol::AcpSessionUpdateKind;
-use crate::agent_binary::resolve_agent_binary;
+use crate::agent_binary::{preferred_command_path, resolve_agent_binary};
 use crate::error::DaemonError;
 
 /// Largest raw image file embedded inline for an ACP prompt, mirroring the
 /// Claude path's per-image cap.
 const MAX_ACP_IMAGE_BYTES: u64 = 3_500_000;
 
+const ACP_PROTOCOL_VERSION: u64 = 1;
+const ACP_SETUP_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Total encoded-image budget per turn, mirroring the Claude path: without it
 /// many individually-legal images could produce a single stdin line in the
 /// hundreds of megabytes.
 pub const MAX_ACP_TOTAL_ENCODED_IMAGE_BYTES: usize = 10_000_000;
+
+/// Whether FalconDeck should treat an ACP provider as image-capable.
+///
+/// Prefer the agent's advertised `promptCapabilities.image` flag. Grok Build
+/// currently advertises `image: false` over ACP while still accepting image
+/// content blocks and performing vision (verified against grok 1.0.0). Tiny
+/// images may still be dropped at runtime with an `image_dropped` notice.
+pub fn acp_supports_images(provider: &str, advertised: bool) -> bool {
+    advertised || provider.eq_ignore_ascii_case("grok")
+}
+
+/// Whether a provider is known to have builds with a steering extension.
+/// Actual support is probed because Grok 1.0.0 builds exist both with and
+/// without `x.ai/interject`.
+fn acp_may_support_steering(provider: &str) -> bool {
+    provider.eq_ignore_ascii_case("grok")
+}
+
+fn acp_interject_probe_supported(outcome: &Result<Value, DaemonError>) -> bool {
+    match outcome {
+        Ok(_) => true,
+        Err(DaemonError::Rpc(message)) => {
+            !message.to_ascii_lowercase().contains("method not found")
+        }
+        Err(_) => false,
+    }
+}
 
 /// Builds an ACP content block for a local image attachment: an `image` block
 /// (`{type, data, mimeType}`) when the file is readable, a recognized image
@@ -142,6 +176,11 @@ pub struct AcpProviderConfig {
     pub label: String,
     /// Command line to spawn, e.g. ["grok", "agent", "stdio"].
     pub command: Vec<String>,
+    /// Provider-specific environment overrides, matching the configuration
+    /// surface used by ACP clients such as Zed. The subprocess still inherits
+    /// the daemon environment for keys not listed here.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -300,11 +339,176 @@ pub struct AcpPermissionOption {
     pub kind: String,
 }
 
+/// Whether a permission mode means "the user already approved everything".
+///
+/// Providers spell this differently ("bypassPermissions", "always-approve",
+/// "yolo", …). Threads carrying such a mode never surface approval banners:
+/// the daemon answers `session/request_permission` itself, which keeps the
+/// promise even when a harness ignores its own session-level toggle.
+pub fn is_blanket_approval_mode(mode: &str) -> bool {
+    matches!(
+        mode.replace(['-', '_', ' '], "")
+            .to_ascii_lowercase()
+            .as_str(),
+        "bypasspermissions"
+            | "bypasspermission"
+            | "alwaysapprove"
+            | "alwaysallow"
+            | "allowall"
+            | "yolo"
+            | "never"
+            | "dontask"
+    )
+}
+
+fn permission_option_for_decision<'a>(
+    options: &'a [AcpPermissionOption],
+    decision: &ApprovalDecision,
+) -> Option<&'a AcpPermissionOption> {
+    let wanted = match decision {
+        ApprovalDecision::Allow => "allow_once",
+        ApprovalDecision::AlwaysAllow => "allow_always",
+        ApprovalDecision::Deny => "reject_once",
+    };
+    options
+        .iter()
+        .find(|option| option.kind == wanted)
+        .or_else(|| {
+            matches!(decision, ApprovalDecision::Deny)
+                .then(|| {
+                    options
+                        .iter()
+                        .find(|option| option.kind.starts_with("reject"))
+                })
+                .flatten()
+        })
+}
+
+/// Projects one ACP content block to displayable text. Text passes through;
+/// other block kinds degrade to a labeled reference instead of vanishing —
+/// a chunk that produces no event at all reads as a hole in the transcript.
+fn acp_content_block_text(block: &Value) -> Option<String> {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        Some("image") => Some(
+            block
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .map_or_else(|| "[image]".to_string(), |mime| format!("[image: {mime}]")),
+        ),
+        Some("audio") => Some("[audio]".to_string()),
+        Some("resource_link") => block
+            .get("uri")
+            .and_then(Value::as_str)
+            .map(|uri| format!("[resource: {uri}]")),
+        Some("resource") => block
+            .pointer("/resource/text")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .or_else(|| {
+                block
+                    .pointer("/resource/uri")
+                    .and_then(Value::as_str)
+                    .map(|uri| format!("[resource: {uri}]"))
+            }),
+        // Legacy adapters emit bare `{ "text": ... }` blocks with no type.
+        _ => block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+    }
+}
+
+/// Splits an ACP tool-call `content` array into displayable output text and
+/// structured `diff` blocks (the standard way ACP agents report file edits).
+fn acp_tool_content(update: &Value) -> (Option<String>, Vec<AcpDiffContent>) {
+    let mut texts = Vec::new();
+    let mut diffs = Vec::new();
+    for item in update
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match item.get("type").and_then(Value::as_str) {
+            Some("content") => {
+                if let Some(text) = item.get("content").and_then(acp_content_block_text) {
+                    texts.push(text);
+                }
+            }
+            Some("diff") => {
+                if let Some(path) = item
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .filter(|path| !path.trim().is_empty())
+                {
+                    diffs.push(AcpDiffContent {
+                        path: path.to_string(),
+                        old_text: item
+                            .get("oldText")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned),
+                        new_text: item
+                            .get("newText")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                    });
+                }
+            }
+            Some("terminal") => {}
+            // Loose shapes seen from early adapters: a nested content block
+            // or a bare text field.
+            _ => {
+                if let Some(text) = item
+                    .pointer("/content/text")
+                    .or_else(|| item.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    texts.push(text.to_string());
+                }
+            }
+        }
+    }
+    let output = texts.join("\n");
+    ((!output.is_empty()).then_some(output), diffs)
+}
+
 /// Normalized events the runtime emits toward the app layer.
 #[derive(Debug)]
 pub enum AcpEvent {
     /// Streaming assistant text for a session.
-    MessageDelta { session_id: String, text: String },
+    MessageDelta {
+        session_id: String,
+        message_id: Option<String>,
+        text: String,
+    },
+    /// Streaming agent reasoning/thought text for a session.
+    ThoughtDelta {
+        session_id: String,
+        message_id: Option<String>,
+        text: String,
+    },
+    /// Agent-supplied session metadata, currently used for native titles.
+    SessionInfo {
+        session_id: String,
+        title: Option<String>,
+    },
+    /// Current context usage reported by the agent.
+    Usage {
+        session_id: String,
+        used: u64,
+        size: u64,
+    },
+    /// User history replayed by `session/load`.
+    UserMessageDelta {
+        session_id: String,
+        message_id: Option<String>,
+        text: String,
+    },
     /// A tool call started or was announced.
     ToolCall {
         session_id: String,
@@ -312,6 +516,8 @@ pub enum AcpEvent {
         title: String,
         kind: String,
         status: String,
+        output: Option<String>,
+        diffs: Vec<AcpDiffContent>,
     },
     /// A tool call changed status or produced output.
     ToolCallUpdate {
@@ -320,6 +526,7 @@ pub enum AcpEvent {
         title: Option<String>,
         status: Option<String>,
         output: Option<String>,
+        diffs: Vec<AcpDiffContent>,
     },
     /// The agent published or updated its plan.
     Plan {
@@ -335,14 +542,42 @@ pub enum AcpEvent {
         options: Vec<AcpPermissionOption>,
     },
     /// The agent finished a prompt turn; ordered after that turn's deltas.
-    TurnEnded { session_id: String },
+    /// `stop_reason` is the agent-reported reason (`end_turn`, `cancelled`,
+    /// `refusal`, ...); `None` means the prompt request itself failed.
+    TurnEnded {
+        session_id: String,
+        stop_reason: Option<String>,
+    },
     /// The agent process died or the stream broke.
     Fatal { message: String },
 }
 
 struct PendingPermission {
     raw_id: Value,
+    session_id: String,
     options: Vec<AcpPermissionOption>,
+}
+
+/// Remembered identity and last-known output for an announced tool call.
+/// ACP `tool_call_update` is a partial update — absent fields mean
+/// "unchanged" — so the runtime must carry state between updates or a
+/// status-only completion would erase previously streamed output.
+#[derive(Debug, Clone)]
+pub struct AcpToolMemory {
+    pub session_id: String,
+    pub title: String,
+    pub kind: String,
+    pub output: Option<String>,
+}
+
+/// A `diff` content block from an ACP tool call: the agent's report of a
+/// file mutation, carried separately from textual output so the app layer
+/// can project it as a real file-change item instead of dropping it.
+#[derive(Debug, Clone)]
+pub struct AcpDiffContent {
+    pub path: String,
+    pub old_text: Option<String>,
+    pub new_text: String,
 }
 
 /// A live ACP agent process serving one workspace.
@@ -361,15 +596,39 @@ pub struct AcpRuntime {
     permission_requests: Mutex<HashMap<String, PendingPermission>>,
     /// Per-session accumulating assistant item for the current turn.
     current_items: Mutex<HashMap<String, (String, String)>>,
-    /// Tool titles/kinds by call id, for enriching status updates.
-    current_tools: Mutex<HashMap<String, (String, String)>>,
+    /// Per-session accumulating reasoning item for the current turn.
+    current_thought_items: Mutex<HashMap<String, (String, String)>>,
+    current_user_items: Mutex<HashMap<String, (String, String)>>,
+    /// Per-session plan item identity for the current turn. Plan updates within
+    /// a turn replace one item, while a later turn keeps its own history row.
+    current_plan_items: Mutex<HashMap<String, String>>,
+    /// Tool identity and last-known output by call id. ACP updates are
+    /// partial, so status-only updates must not erase earlier output.
+    current_tools: Mutex<HashMap<String, AcpToolMemory>>,
+    /// Bounded tail of the agent's stderr, surfaced when the process dies.
+    stderr_tail: Mutex<VecDeque<String>>,
     /// Session modes advertised via session/new (or session/load), by
-    /// session id. Backs the permission-mode picker for ACP providers.
+    /// session id. This is the legacy ACP mode surface; configOptions are
+    /// preferred when an agent implements the stabilized protocol.
     session_modes: Mutex<HashMap<String, SessionModeState>>,
+    /// Config option ids and categories for each live ACP session.
+    session_configurations: Mutex<HashMap<String, AcpSessionConfiguration>>,
+    /// Model catalog learned from session/new. ACP initialize commonly has no
+    /// model list, so this is intentionally separate from initialize_result.
+    discovered_models: Mutex<Vec<ModelSummary>>,
+    /// Permission-like modes learned from ACP config options. Grok also has a
+    /// documented provider-specific fallback when it does not advertise them.
+    discovered_permission_modes: Mutex<Vec<String>>,
+    /// Agent behavior modes (for example OpenCode build/plan).
+    discovered_collaboration_modes: Mutex<Vec<CollaborationModeSummary>>,
+    /// Prevents multiple callers from creating discovery sessions concurrently.
+    discovery_gate: Mutex<()>,
+    metadata_discovered: AtomicBool,
     /// Session-update kinds already diagnosed for this process. Adapters can
     /// emit thousands of chunks, so protocol drift is logged once per kind.
     reported_update_kinds: Mutex<HashSet<String>>,
     initialize_result: Mutex<Option<Value>>,
+    supports_steering: AtomicBool,
     closed: AtomicBool,
     events: mpsc::UnboundedSender<AcpEvent>,
 }
@@ -382,6 +641,388 @@ pub struct SessionModeState {
     pub available: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct AcpSessionConfiguration {
+    model_config_id: Option<String>,
+    reasoning_config_id: Option<String>,
+    permission_config_id: Option<String>,
+    collaboration_config_id: Option<String>,
+}
+
+impl AcpSessionConfiguration {
+    fn is_empty(&self) -> bool {
+        self.model_config_id.is_none()
+            && self.reasoning_config_id.is_none()
+            && self.permission_config_id.is_none()
+            && self.collaboration_config_id.is_none()
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedSessionMetadata {
+    models: Vec<ModelSummary>,
+    reasoning_efforts: Vec<ReasoningEffortSummary>,
+    default_reasoning_effort: Option<String>,
+    permission_modes: Vec<String>,
+    collaboration_modes: Vec<CollaborationModeSummary>,
+    configuration: AcpSessionConfiguration,
+}
+
+fn string_field(value: &Value, names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_str))
+        .map(ToOwned::to_owned)
+}
+
+fn option_value(value: &Value) -> Option<String> {
+    string_field(value, &["value", "id", "modelId", "model_id"])
+}
+
+fn reasoning_option(value: &Value) -> Option<ReasoningEffortSummary> {
+    let reasoning_effort = option_value(value)?;
+    Some(ReasoningEffortSummary {
+        reasoning_effort,
+        description: string_field(value, &["description", "label", "name"]).unwrap_or_default(),
+    })
+}
+
+fn reasoning_options(value: Option<&Value>) -> Vec<ReasoningEffortSummary> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(reasoning_option)
+        .collect()
+}
+
+fn is_reasoning_id(value: &str) -> bool {
+    matches!(
+        value
+            .replace(['-', '_', ' '], "")
+            .to_ascii_lowercase()
+            .as_str(),
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+    )
+}
+
+fn looks_like_reasoning(options: &[ReasoningEffortSummary]) -> bool {
+    !options.is_empty()
+        && options.iter().all(|option| {
+            is_reasoning_id(&option.reasoning_effort)
+                || option.description.to_ascii_lowercase().contains("thinking")
+                || option
+                    .description
+                    .to_ascii_lowercase()
+                    .contains("reasoning")
+                || option.description.to_ascii_lowercase().contains("effort")
+        })
+}
+
+fn model_summary(
+    value: &Value,
+    current_model_id: Option<&str>,
+    global_reasoning_efforts: &[ReasoningEffortSummary],
+) -> Option<ModelSummary> {
+    let id = string_field(value, &["modelId", "model_id", "id", "model", "value"])?;
+    let meta = value.get("_meta");
+    let model_reasoning_efforts = reasoning_options(
+        value
+            .get("reasoningEfforts")
+            .or_else(|| meta.and_then(|meta| meta.get("reasoningEfforts"))),
+    );
+    let default_reasoning_effort = string_field(
+        value,
+        &["defaultReasoningEffort", "default_reasoning_effort"],
+    )
+    .or_else(|| {
+        meta.and_then(|meta| string_field(meta, &["reasoningEffort", "defaultReasoningEffort"]))
+    });
+    Some(ModelSummary {
+        label: string_field(value, &["name", "label", "displayName", "display_name"])
+            .unwrap_or_else(|| id.clone()),
+        is_default: value
+            .get("default")
+            .or_else(|| value.get("isDefault"))
+            .and_then(Value::as_bool)
+            .unwrap_or(current_model_id == Some(id.as_str())),
+        id,
+        default_reasoning_effort,
+        supported_reasoning_efforts: if model_reasoning_efforts.is_empty() {
+            global_reasoning_efforts.to_vec()
+        } else {
+            model_reasoning_efforts
+        },
+        service_tiers: Vec::new(),
+        default_service_tier: None,
+    })
+}
+
+fn dedupe_models(models: impl IntoIterator<Item = ModelSummary>) -> Vec<ModelSummary> {
+    let mut seen = HashSet::new();
+    models
+        .into_iter()
+        .filter(|model| seen.insert(model.id.clone()))
+        .collect()
+}
+
+fn parse_initialize_models(init: &Value) -> Vec<ModelSummary> {
+    let entries = init.get("models").and_then(Value::as_array).or_else(|| {
+        init.pointer("/agentCapabilities/models")
+            .and_then(Value::as_array)
+    });
+    let current = init.get("currentModelId").and_then(Value::as_str);
+    dedupe_models(
+        entries
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| model_summary(entry, current, &[])),
+    )
+}
+
+/// ACP method capabilities use `{}` in the current v1 schema, while older
+/// adapters commonly advertised booleans. Accept both representations.
+fn capability_enabled(value: Option<&Value>) -> bool {
+    match value {
+        Some(Value::Bool(enabled)) => *enabled,
+        Some(Value::Object(_)) => true,
+        _ => false,
+    }
+}
+
+fn parse_session_metadata(result: &Value) -> ParsedSessionMetadata {
+    let mut parsed = ParsedSessionMetadata::default();
+    let mut current_model_id = None;
+
+    if let Some(models) = result.get("models") {
+        current_model_id = models.get("currentModelId").and_then(Value::as_str);
+        if let Some(entries) = models.get("availableModels").and_then(Value::as_array) {
+            parsed.models.extend(
+                entries
+                    .iter()
+                    .filter_map(|entry| model_summary(entry, current_model_id, &[])),
+            );
+        }
+    }
+
+    if let Some(entries) = result.get("configOptions").and_then(Value::as_array) {
+        for option in entries {
+            let Some(category) = option.get("category").and_then(Value::as_str) else {
+                continue;
+            };
+            let option_id = option
+                .get("id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let choices = option
+                .get("options")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            match category {
+                "model" => {
+                    if current_model_id.is_none() {
+                        current_model_id = option.get("currentValue").and_then(Value::as_str);
+                    }
+                    parsed.models.extend(
+                        choices
+                            .iter()
+                            .filter_map(|choice| model_summary(choice, current_model_id, &[])),
+                    );
+                    parsed.configuration.model_config_id = option_id;
+                }
+                "thought_level" => {
+                    if parsed.default_reasoning_effort.is_none() {
+                        parsed.default_reasoning_effort = option
+                            .get("currentValue")
+                            .and_then(Value::as_str)
+                            .map(ToOwned::to_owned);
+                    }
+                    parsed
+                        .reasoning_efforts
+                        .extend(reasoning_options(Some(&Value::Array(choices))));
+                    parsed.configuration.reasoning_config_id = option_id;
+                }
+                "mode" => {
+                    let modes = choices.iter().filter_map(option_value).collect::<Vec<_>>();
+                    let effort_options = modes
+                        .iter()
+                        .map(|mode| Value::String(mode.clone()))
+                        .collect::<Vec<_>>();
+                    let effort_options = effort_options
+                        .iter()
+                        .map(|value| ReasoningEffortSummary {
+                            reasoning_effort: value.as_str().unwrap_or_default().to_string(),
+                            description: String::new(),
+                        })
+                        .collect::<Vec<_>>();
+                    if looks_like_reasoning(&effort_options) {
+                        if parsed.default_reasoning_effort.is_none() {
+                            parsed.default_reasoning_effort = option
+                                .get("currentValue")
+                                .and_then(Value::as_str)
+                                .map(ToOwned::to_owned);
+                        }
+                        parsed
+                            .reasoning_efforts
+                            .extend(reasoning_options(Some(&Value::Array(choices))));
+                        parsed.configuration.reasoning_config_id = option_id;
+                    } else {
+                        parsed
+                            .collaboration_modes
+                            .extend(choices.iter().filter_map(|choice| {
+                                let id = option_value(choice)?;
+                                Some(CollaborationModeSummary {
+                                    label: string_field(choice, &["label", "name"])
+                                        .unwrap_or_else(|| id.clone()),
+                                    id: id.clone(),
+                                    mode: Some(id),
+                                    model_id: None,
+                                    reasoning_effort: None,
+                                    is_native: true,
+                                })
+                            }));
+                        parsed.configuration.collaboration_config_id = option_id;
+                    }
+                }
+                "permission" | "permissions" => {
+                    parsed
+                        .permission_modes
+                        .extend(choices.iter().filter_map(option_value));
+                    parsed.configuration.permission_config_id = option_id;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Grok exposes reasoning choices in a provider metadata extension rather
+    // than ACP configOptions. Treat these as reasoning, not permissions.
+    if let Some(entries) = result.get("metaOptions").and_then(Value::as_array) {
+        let choices = entries
+            .iter()
+            .filter(|entry| entry.get("category").and_then(Value::as_str) == Some("mode"))
+            .filter_map(|entry| {
+                Some(json!({
+                    "value": option_value(entry)?,
+                    "label": string_field(entry, &["label", "name"]).unwrap_or_default(),
+                }))
+            })
+            .collect::<Vec<_>>();
+        if parsed.default_reasoning_effort.is_none() {
+            parsed.default_reasoning_effort = entries
+                .iter()
+                .find(|entry| entry.get("selected").and_then(Value::as_bool) == Some(true))
+                .and_then(option_value);
+        }
+        parsed
+            .reasoning_efforts
+            .extend(reasoning_options(Some(&Value::Array(choices))));
+    }
+
+    if let Some(modes) = result.get("modes") {
+        let current = modes.get("currentModeId").and_then(Value::as_str);
+        let choices = modes
+            .get("availableModes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let effort_options = choices
+            .iter()
+            .filter_map(|entry| {
+                Some(ReasoningEffortSummary {
+                    reasoning_effort: entry.get("id").and_then(Value::as_str)?.to_string(),
+                    description: string_field(entry, &["description", "name", "label"])
+                        .unwrap_or_default(),
+                })
+            })
+            .collect::<Vec<_>>();
+        if looks_like_reasoning(&effort_options) {
+            if parsed.default_reasoning_effort.is_none() {
+                parsed.default_reasoning_effort = current.map(ToOwned::to_owned);
+            }
+            parsed.reasoning_efforts.extend(effort_options);
+        } else if let Some(entries) = modes.get("availableModes").and_then(Value::as_array) {
+            parsed
+                .collaboration_modes
+                .extend(entries.iter().filter_map(|entry| {
+                    let id = entry.get("id").and_then(Value::as_str)?.to_string();
+                    Some(CollaborationModeSummary {
+                        label: string_field(entry, &["name", "label"])
+                            .unwrap_or_else(|| id.clone()),
+                        id: id.clone(),
+                        mode: Some(id),
+                        model_id: None,
+                        reasoning_effort: None,
+                        is_native: true,
+                    })
+                }));
+        }
+        if current_model_id.is_none() {
+            let _ = current;
+        }
+    }
+
+    parsed.reasoning_efforts = dedupe_reasoning_efforts(parsed.reasoning_efforts);
+    parsed.permission_modes.sort();
+    parsed.permission_modes.dedup();
+    let reasoning = parsed.reasoning_efforts.clone();
+    let default_reasoning_effort = parsed.default_reasoning_effort.clone();
+    parsed.models = dedupe_models(parsed.models.into_iter().map(|mut model| {
+        if model.supported_reasoning_efforts.is_empty() {
+            model.supported_reasoning_efforts = reasoning.clone();
+        }
+        if model.default_reasoning_effort.is_none() {
+            model.default_reasoning_effort = default_reasoning_effort.clone();
+        }
+        if !model.is_default && current_model_id == Some(model.id.as_str()) {
+            model.is_default = true;
+        }
+        model
+    }));
+    parsed
+}
+
+fn dedupe_reasoning_efforts(
+    efforts: impl IntoIterator<Item = ReasoningEffortSummary>,
+) -> Vec<ReasoningEffortSummary> {
+    let mut seen = HashSet::new();
+    efforts
+        .into_iter()
+        .filter(|effort| seen.insert(effort.reasoning_effort.clone()))
+        .collect()
+}
+
+fn is_reasoning_mode_block(modes: &Value) -> bool {
+    let entries = modes
+        .get("availableModes")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let options = entries
+        .iter()
+        .filter_map(|entry| {
+            Some(ReasoningEffortSummary {
+                reasoning_effort: entry.get("id").and_then(Value::as_str)?.to_string(),
+                description: string_field(entry, &["description", "name", "label"])
+                    .unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    looks_like_reasoning(&options)
+}
+
+fn apply_provider_environment(
+    command: &mut Command,
+    executable: &str,
+    provider_env: &HashMap<String, String>,
+) {
+    if let Some(path) = preferred_command_path(executable) {
+        command.env("PATH", path);
+    }
+    command.envs(provider_env);
+}
+
 impl AcpRuntime {
     /// Spawns the agent command and completes the `initialize` handshake.
     pub async fn connect(
@@ -391,12 +1032,13 @@ impl AcpRuntime {
     ) -> Result<Arc<Self>, DaemonError> {
         let executable = resolve_agent_binary(&config.command[0], &config.command[0]).executable;
         let mut command = Command::new(&executable);
+        apply_provider_environment(&mut command, &executable, &config.env);
         command
             .args(&config.command[1..])
             .current_dir(workspace_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
 
         let mut child = command.spawn().map_err(|error| {
@@ -413,6 +1055,7 @@ impl AcpRuntime {
             .stdout
             .take()
             .ok_or_else(|| DaemonError::Process("ACP child process has no stdout".to_string()))?;
+        let stderr = child.stderr.take();
 
         let runtime = Arc::new(Self {
             provider: AgentProvider::new(config.id.clone()),
@@ -426,29 +1069,93 @@ impl AcpRuntime {
             threads_by_session: Mutex::new(HashMap::new()),
             permission_requests: Mutex::new(HashMap::new()),
             current_items: Mutex::new(HashMap::new()),
+            current_thought_items: Mutex::new(HashMap::new()),
+            current_user_items: Mutex::new(HashMap::new()),
+            current_plan_items: Mutex::new(HashMap::new()),
             current_tools: Mutex::new(HashMap::new()),
+            stderr_tail: Mutex::new(VecDeque::new()),
             session_modes: Mutex::new(HashMap::new()),
+            session_configurations: Mutex::new(HashMap::new()),
+            discovered_models: Mutex::new(Vec::new()),
+            discovered_permission_modes: Mutex::new(Vec::new()),
+            discovered_collaboration_modes: Mutex::new(Vec::new()),
+            discovery_gate: Mutex::new(()),
+            metadata_discovered: AtomicBool::new(false),
             reported_update_kinds: Mutex::new(HashSet::new()),
             initialize_result: Mutex::new(None),
+            supports_steering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             events,
         });
 
         tokio::spawn(Self::read_loop(Arc::clone(&runtime), stdout));
+        if let Some(stderr) = stderr {
+            tokio::spawn(Self::stderr_loop(Arc::clone(&runtime), stderr));
+        }
 
-        let init = runtime
-            .request(
+        let init = match timeout(
+            ACP_SETUP_TIMEOUT,
+            runtime.request(
                 "initialize",
                 json!({
-                    "protocolVersion": 1,
+                    "protocolVersion": ACP_PROTOCOL_VERSION,
                     "clientCapabilities": {
                         "fs": { "readTextFile": false, "writeTextFile": false },
                         "terminal": false
+                    },
+                    "clientInfo": {
+                        "name": "falcondeck",
+                        "title": "FalconDeck",
+                        "version": env!("CARGO_PKG_VERSION")
                     }
                 }),
-            )
-            .await?;
+            ),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                runtime.closed.store(true, Ordering::Release);
+                let _ = runtime.child.lock().await.kill().await;
+                return Err(DaemonError::Process(format!(
+                    "ACP provider '{}' timed out during initialize",
+                    runtime.config.id
+                )));
+            }
+        };
+        let negotiated_version = init.get("protocolVersion").and_then(Value::as_u64);
+        if negotiated_version != Some(ACP_PROTOCOL_VERSION) {
+            runtime.closed.store(true, Ordering::Release);
+            let _ = runtime.child.lock().await.kill().await;
+            return Err(DaemonError::Rpc(format!(
+                "ACP provider '{}' negotiated unsupported protocol version {} (FalconDeck supports {})",
+                runtime.config.id,
+                negotiated_version
+                    .map_or_else(|| "missing".to_string(), |version| version.to_string()),
+                ACP_PROTOCOL_VERSION
+            )));
+        }
         *runtime.initialize_result.lock().await = Some(init);
+        if acp_may_support_steering(runtime.provider.as_str()) {
+            let outcome = timeout(
+                ACP_SETUP_TIMEOUT,
+                runtime.request(
+                    "x.ai/interject",
+                    json!({
+                        "sessionId": "falcondeck-capability-probe",
+                        "text": "probe",
+                        "content": [{ "type": "text", "text": "probe" }],
+                    }),
+                ),
+            )
+            .await;
+            let supported = outcome
+                .as_ref()
+                .is_ok_and(acp_interject_probe_supported);
+            runtime
+                .supports_steering
+                .store(supported, Ordering::Release);
+        }
         Ok(runtime)
     }
 
@@ -471,58 +1178,149 @@ impl AcpRuntime {
     /// the pre-connection `acp_minimal()` placeholder on the agent entry.
     pub async fn capability_summary(&self) -> falcondeck_core::AgentCapabilitySummary {
         let init = self.initialize_result.lock().await;
-        let supports_images = init
+        let advertised_images = init
             .as_ref()
             .and_then(|init| init.pointer("/agentCapabilities/promptCapabilities/image"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let supports_images = acp_supports_images(self.provider.as_str(), advertised_images);
+        let discovered_permission_modes = self.discovered_permission_modes.lock().await.clone();
+        let permission_modes = if discovered_permission_modes.is_empty()
+            && self.provider.as_str().eq_ignore_ascii_case("grok")
+        {
+            // Grok documents these session-level controls but its ACP
+            // session/new response currently only exposes model/reasoning
+            // meta-options. The daemon translates the choice to Grok's
+            // `_meta.yoloMode`/`_meta.autoMode` fields when creating a session.
+            vec![
+                "default".to_string(),
+                "auto".to_string(),
+                "always-approve".to_string(),
+            ]
+        } else {
+            discovered_permission_modes
+        };
         falcondeck_core::AgentCapabilitySummary {
             supports_interrupt: true,
             supports_images,
+            supports_steering: self.supports_steering.load(Ordering::Acquire),
+            permission_modes,
             ..falcondeck_core::AgentCapabilitySummary::default()
         }
     }
 
-    /// Models advertised in the `initialize` response, when the agent exposes
-    /// a catalog (`models` or `agentCapabilities/models`). Baseline ACP has no
-    /// model listing, so an empty result is the common case.
-    pub async fn advertised_models(&self) -> Vec<falcondeck_core::ModelSummary> {
+    /// Models advertised by the provider. ACP model catalogs are commonly
+    /// returned from session/new rather than initialize, so the discovered
+    /// catalog wins and initialize remains a compatibility fallback.
+    pub async fn advertised_models(&self) -> Vec<ModelSummary> {
+        let discovered = self.discovered_models.lock().await.clone();
+        if !discovered.is_empty() {
+            return discovered;
+        }
         let init = self.initialize_result.lock().await;
-        let Some(init) = init.as_ref() else {
-            return Vec::new();
-        };
-        let entries = init.get("models").and_then(Value::as_array).or_else(|| {
-            init.pointer("/agentCapabilities/models")
-                .and_then(Value::as_array)
-        });
-        entries
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| {
-                let id = entry
-                    .get("modelId")
-                    .or_else(|| entry.get("id"))
-                    .and_then(Value::as_str)?
-                    .to_string();
-                Some(falcondeck_core::ModelSummary {
-                    label: entry
-                        .get("name")
-                        .or_else(|| entry.get("label"))
-                        .and_then(Value::as_str)
-                        .unwrap_or(&id)
-                        .to_string(),
-                    id,
-                    is_default: entry
-                        .get("default")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false),
-                    default_reasoning_effort: None,
-                    supported_reasoning_efforts: Vec::new(),
-                    service_tiers: Vec::new(),
-                    default_service_tier: None,
-                })
-            })
-            .collect()
+        init.as_ref()
+            .map(parse_initialize_models)
+            .unwrap_or_default()
+    }
+
+    pub async fn advertised_collaboration_modes(&self) -> Vec<CollaborationModeSummary> {
+        self.discovered_collaboration_modes.lock().await.clone()
+    }
+
+    /// Opens one short-lived ACP session to discover model, reasoning, and
+    /// permission configuration. ACP clients cannot populate a model picker
+    /// from initialize alone because many agents only publish these options
+    /// in the session/new result.
+    pub async fn ensure_workspace_metadata(&self, cwd: &str) -> Result<(), DaemonError> {
+        if self.metadata_discovered.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _gate = self.discovery_gate.lock().await;
+        if self.metadata_discovered.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mcp_servers = crate::connectors::acp_mcp_servers(
+            &crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+            self.supports_http_mcp().await,
+        );
+        let result = timeout(
+            ACP_SETUP_TIMEOUT,
+            self.request(
+                "session/new",
+                json!({ "cwd": cwd, "mcpServers": mcp_servers }),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            DaemonError::Process(format!(
+                "ACP provider '{}' timed out while discovering session configuration",
+                self.config.id
+            ))
+        })??;
+        let session_id = result
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                DaemonError::Rpc("ACP discovery session returned no sessionId".to_string())
+            })?
+            .to_string();
+        self.capture_session_metadata(&session_id, &result).await;
+        if self.supports_session_delete().await {
+            let _ = self
+                .request("session/delete", json!({ "sessionId": session_id }))
+                .await;
+        }
+        self.metadata_discovered.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    async fn supports_session_delete(&self) -> bool {
+        capability_enabled(
+            self.initialize_result
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|init| init.pointer("/agentCapabilities/sessionCapabilities/delete")),
+        )
+    }
+
+    async fn supports_http_mcp(&self) -> bool {
+        capability_enabled(
+            self.initialize_result
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|init| init.pointer("/agentCapabilities/mcpCapabilities/http")),
+        )
+    }
+
+    async fn capture_session_metadata(&self, session_id: &str, result: &Value) {
+        let parsed = parse_session_metadata(result);
+        let mut models = self.discovered_models.lock().await;
+        if !parsed.models.is_empty() {
+            *models = dedupe_models(parsed.models.clone());
+        }
+        drop(models);
+        if !parsed.permission_modes.is_empty() {
+            *self.discovered_permission_modes.lock().await = parsed.permission_modes.clone();
+        }
+        if !parsed.collaboration_modes.is_empty() {
+            *self.discovered_collaboration_modes.lock().await = parsed.collaboration_modes.clone();
+        }
+        // `session/load` commonly returns null after replaying updates. Do not
+        // let that empty response erase configuration learned from an earlier
+        // config_option_update notification during the replay.
+        if !parsed.configuration.is_empty() {
+            self.session_configurations
+                .lock()
+                .await
+                .insert(session_id.to_string(), parsed.configuration);
+        }
+        if let Some(modes) = result.get("modes")
+            && !is_reasoning_mode_block(modes)
+        {
+            self.capture_session_modes(session_id, Some(modes)).await;
+        }
     }
 
     async fn write_message(&self, message: &Value) -> Result<(), DaemonError> {
@@ -551,13 +1349,18 @@ impl AcpRuntime {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (sender, receiver) = oneshot::channel();
         self.pending.lock().await.insert(id, sender);
-        self.write_message(&json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": method,
-            "params": params
-        }))
-        .await?;
+        if let Err(error) = self
+            .write_message(&json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": method,
+                "params": params
+            }))
+            .await
+        {
+            self.pending.lock().await.remove(&id);
+            return Err(error);
+        }
         receiver.await.map_err(|_| {
             DaemonError::Process(format!(
                 "ACP provider '{}' closed mid-request",
@@ -595,43 +1398,24 @@ impl AcpRuntime {
         thread_id: &str,
         known_native_session: Option<&str>,
         cwd: &str,
+        permission_mode: Option<&str>,
     ) -> Result<String, DaemonError> {
         if let Some(existing) = self.sessions.lock().await.get(thread_id) {
             return Ok(existing.clone());
         }
-        let mcp_servers = crate::connectors::acp_mcp_servers(&crate::connectors::load_mcp_servers(
-            &self.workspace_path,
-            &self.config.id,
-        ));
+        let mcp_servers = crate::connectors::acp_mcp_servers(
+            &crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+            self.supports_http_mcp().await,
+        );
 
         if let Some(native_session) = known_native_session
             .map(str::trim)
             .filter(|id| !id.is_empty())
             && self.supports_load_session().await
         {
-            // The agent replays the conversation as session/update
-            // notifications DURING the session/load request, so the
-            // session→thread mapping must exist before the request goes out
-            // or the event pump drops the entire replayed history.
-            self.register_session(thread_id, native_session).await;
-            let loaded = self
-                .request(
-                    "session/load",
-                    json!({
-                        "sessionId": native_session,
-                        "cwd": cwd,
-                        "mcpServers": mcp_servers.clone()
-                    }),
-                )
-                .await;
-            match loaded {
-                Ok(result) => {
-                    self.capture_session_modes(native_session, result.get("modes"))
-                        .await;
-                    return Ok(native_session.to_string());
-                }
+            match self.load_session(thread_id, native_session, cwd).await {
+                Ok(()) => return Ok(native_session.to_string()),
                 Err(error) => {
-                    self.unregister_session(thread_id, native_session).await;
                     tracing::info!(
                         provider = %self.config.id,
                         %error,
@@ -641,29 +1425,88 @@ impl AcpRuntime {
             }
         }
 
-        let result = self
-            .request(
-                "session/new",
-                json!({
-                    "cwd": cwd,
-                    "mcpServers": mcp_servers
-                }),
-            )
-            .await?;
+        let mut params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+        if self.provider.as_str().eq_ignore_ascii_case("grok") {
+            match permission_mode {
+                Some(mode) if is_blanket_approval_mode(mode) => {
+                    params["_meta"] = json!({ "yoloMode": true });
+                }
+                Some(mode) if mode.eq_ignore_ascii_case("auto") => {
+                    params["_meta"] = json!({ "autoMode": true });
+                }
+                _ => {}
+            }
+        }
+        let result = self.request("session/new", params).await?;
         let session_id = result
             .get("sessionId")
             .and_then(Value::as_str)
             .ok_or_else(|| DaemonError::Rpc("ACP session/new returned no sessionId".to_string()))?
             .to_string();
         self.register_session(thread_id, &session_id).await;
-        self.capture_session_modes(&session_id, result.get("modes"))
-            .await;
+        self.capture_session_metadata(&session_id, &result).await;
         Ok(session_id)
+    }
+
+    /// Resumes a persisted session with `session/load`, replaying its history
+    /// through the event pump. Unlike [`Self::ensure_session`] there is no
+    /// fresh-session fallback: a failure leaves the runtime untouched so a
+    /// later turn can retry (or fall back) itself. Used both by the turn path
+    /// and to rehydrate a restored thread's transcript when it is opened.
+    pub async fn load_session(
+        &self,
+        thread_id: &str,
+        native_session: &str,
+        cwd: &str,
+    ) -> Result<(), DaemonError> {
+        if !self.supports_load_session().await {
+            return Err(DaemonError::Process(format!(
+                "ACP provider '{}' does not support session/load",
+                self.config.id
+            )));
+        }
+        let mcp_servers = crate::connectors::acp_mcp_servers(
+            &crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+            self.supports_http_mcp().await,
+        );
+        // The agent replays the conversation as session/update
+        // notifications DURING the session/load request, so the
+        // session→thread mapping must exist before the request goes out
+        // or the event pump drops the entire replayed history.
+        self.register_session(thread_id, native_session).await;
+        let loaded = self
+            .request(
+                "session/load",
+                json!({
+                    "sessionId": native_session,
+                    "cwd": cwd,
+                    "mcpServers": mcp_servers
+                }),
+            )
+            .await;
+        match loaded {
+            Ok(result) => {
+                self.capture_session_metadata(native_session, &result).await;
+                Ok(())
+            }
+            Err(error) => {
+                self.unregister_session(thread_id, native_session).await;
+                Err(error)
+            }
+        }
+    }
+
+    /// The ACP session id currently registered for a thread, if any.
+    pub async fn session_for_thread(&self, thread_id: &str) -> Option<String> {
+        self.sessions.lock().await.get(thread_id).cloned()
     }
 
     /// Records the modes block from a session/new or session/load response.
     async fn capture_session_modes(&self, session_id: &str, modes: Option<&Value>) {
         let Some(modes) = modes else { return };
+        if is_reasoning_mode_block(modes) {
+            return;
+        }
         let current = modes
             .get("currentModeId")
             .and_then(Value::as_str)
@@ -693,19 +1536,132 @@ impl AcpRuntime {
         self.session_modes.lock().await.get(session_id).cloned()
     }
 
+    /// Whether this existing session exposes a protocol method for changing
+    /// its permission mode. Some adapters (notably Grok) only accept this as
+    /// `session/new` metadata and cannot change it after the session starts.
+    pub async fn supports_session_permission_updates(&self, session_id: &str) -> bool {
+        self.session_configurations
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|configuration| configuration.permission_config_id.is_some())
+    }
+
     /// Switches the session's mode via `session/set_mode`.
     pub async fn set_session_mode(
         &self,
         session_id: &str,
         mode_id: &str,
     ) -> Result<(), DaemonError> {
-        self.request(
-            "session/set_mode",
-            json!({ "sessionId": session_id, "modeId": mode_id }),
+        // Bounded: these run inside turn start, where an unresponsive adapter
+        // would otherwise leave the thread stuck Running forever.
+        timeout(
+            ACP_SETUP_TIMEOUT,
+            self.request(
+                "session/set_mode",
+                json!({ "sessionId": session_id, "modeId": mode_id }),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| {
+            DaemonError::Rpc(format!(
+                "ACP provider '{}' timed out during session/set_mode",
+                self.config.id
+            ))
+        })??;
         if let Some(state) = self.session_modes.lock().await.get_mut(session_id) {
             state.current = Some(mode_id.to_string());
+        }
+        Ok(())
+    }
+
+    async fn set_config_option(
+        &self,
+        session_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), DaemonError> {
+        let result = timeout(
+            ACP_SETUP_TIMEOUT,
+            self.request(
+                "session/set_config_option",
+                json!({ "sessionId": session_id, "configId": config_id, "value": value }),
+            ),
+        )
+        .await
+        .map_err(|_| {
+            DaemonError::Rpc(format!(
+                "ACP provider '{}' timed out during session/set_config_option",
+                self.config.id
+            ))
+        })??;
+        // The response is authoritative and may change dependent model or
+        // reasoning options, not merely the selected value.
+        self.capture_session_metadata(session_id, &result).await;
+        Ok(())
+    }
+
+    /// Applies the normalized model/reasoning choices to an ACP session. New
+    /// ACP agents generally use session/set_config_option; the legacy methods
+    /// remain as fallbacks for older adapters.
+    pub async fn apply_session_preferences(
+        &self,
+        session_id: &str,
+        model_id: Option<&str>,
+        reasoning_effort: Option<&str>,
+        collaboration_mode: Option<&str>,
+        permission_mode: Option<&str>,
+    ) -> Result<(), DaemonError> {
+        let configuration = self
+            .session_configurations
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(model_id) = model_id {
+            if let Some(config_id) = configuration.model_config_id.as_deref() {
+                self.set_config_option(session_id, config_id, model_id)
+                    .await?;
+            } else {
+                self.request(
+                    "session/set_model",
+                    json!({ "sessionId": session_id, "modelId": model_id }),
+                )
+                .await?;
+            }
+        }
+        if let Some(reasoning_effort) = reasoning_effort
+            && let Some(config_id) = configuration.reasoning_config_id.as_deref()
+        {
+            self.set_config_option(session_id, config_id, reasoning_effort)
+                .await?;
+        }
+        if let Some(collaboration_mode) = collaboration_mode {
+            if let Some(config_id) = configuration.collaboration_config_id.as_deref() {
+                self.set_config_option(session_id, config_id, collaboration_mode)
+                    .await?;
+            } else if let Some(state) = self.session_mode_state(session_id).await
+                && state
+                    .available
+                    .iter()
+                    .any(|mode| mode == collaboration_mode)
+                && state.current.as_deref() != Some(collaboration_mode)
+            {
+                self.set_session_mode(session_id, collaboration_mode)
+                    .await?;
+            }
+        }
+        if let Some(permission_mode) = permission_mode {
+            if let Some(config_id) = configuration.permission_config_id.as_deref() {
+                self.set_config_option(session_id, config_id, permission_mode)
+                    .await?;
+            } else if let Some(state) = self.session_mode_state(session_id).await
+                && state.available.iter().any(|mode| mode == permission_mode)
+                && state.current.as_deref() != Some(permission_mode)
+            {
+                self.set_session_mode(session_id, permission_mode).await?;
+            }
         }
         Ok(())
     }
@@ -764,24 +1720,73 @@ impl AcpRuntime {
                 }),
             )
             .await;
+        // The turn is over; any permission request the agent left unanswered
+        // can never be acted on, so resolve it as cancelled rather than
+        // leaving the agent (and our map) holding a dead request.
+        self.cancel_pending_permissions(session_id).await;
+        let stop_reason = result.as_ref().ok().map(|result| {
+            result
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("end_turn")
+                .to_string()
+        });
         let _ = self.events.send(AcpEvent::TurnEnded {
             session_id: session_id.to_string(),
+            stop_reason: stop_reason.clone(),
         });
-        let result = result?;
-        Ok(result
-            .get("stopReason")
-            .and_then(Value::as_str)
-            .unwrap_or("end_turn")
-            .to_string())
+        result?;
+        Ok(stop_reason.unwrap_or_else(|| "end_turn".to_string()))
+    }
+
+    /// Injects content into Grok's running ACP turn using its vendor
+    /// `x.ai/interject` extension.
+    pub async fn interject(
+        &self,
+        session_id: &str,
+        text: &str,
+        content: Vec<Value>,
+    ) -> Result<(), DaemonError> {
+        if !self.supports_steering.load(Ordering::Acquire) {
+            return Err(DaemonError::BadRequest(format!(
+                "ACP provider '{}' does not support steering",
+                self.provider
+            )));
+        }
+        self.request(
+            "x.ai/interject",
+            json!({
+                "sessionId": session_id,
+                "text": text,
+                "content": content,
+            }),
+        )
+        .await?;
+        Ok(())
     }
 
     /// Appends assistant text for the session's current turn, creating the
     /// turn's item on first delta. Returns the item id and full text so far.
-    pub async fn append_assistant_text(&self, session_id: &str, chunk: &str) -> (String, String) {
+    pub async fn append_assistant_text(
+        &self,
+        session_id: &str,
+        message_id: Option<&str>,
+        chunk: &str,
+    ) -> (String, String) {
+        self.current_user_items.lock().await.remove(session_id);
+        self.current_thought_items.lock().await.remove(session_id);
         let mut items = self.current_items.lock().await;
+        let requested_id = message_id.map(|id| format!("acp-msg-{id}"));
+        if requested_id
+            .as_ref()
+            .is_some_and(|id| items.get(session_id).is_some_and(|entry| &entry.0 != id))
+        {
+            items.remove(session_id);
+        }
         let entry = items.entry(session_id.to_string()).or_insert_with(|| {
             (
-                format!("acp-msg-{}", uuid::Uuid::new_v4().simple()),
+                requested_id
+                    .unwrap_or_else(|| format!("acp-msg-{}", uuid::Uuid::new_v4().simple())),
                 String::new(),
             )
         });
@@ -789,21 +1794,106 @@ impl AcpRuntime {
         (entry.0.clone(), entry.1.clone())
     }
 
+    /// Accumulates one replayed user message, respecting ACP message IDs when
+    /// supplied and using assistant chunks as boundaries when they are not.
+    pub async fn append_user_text(
+        &self,
+        session_id: &str,
+        message_id: Option<&str>,
+        chunk: &str,
+    ) -> (String, String) {
+        self.current_items.lock().await.remove(session_id);
+        let mut items = self.current_user_items.lock().await;
+        let requested_id = message_id.map(|id| format!("acp-user-{id}"));
+        if requested_id
+            .as_ref()
+            .is_some_and(|id| items.get(session_id).is_some_and(|entry| &entry.0 != id))
+        {
+            items.remove(session_id);
+        }
+        let entry = items.entry(session_id.to_string()).or_insert_with(|| {
+            (
+                requested_id
+                    .unwrap_or_else(|| format!("acp-user-{}", uuid::Uuid::new_v4().simple())),
+                String::new(),
+            )
+        });
+        merge_assistant_chunk(&mut entry.1, chunk);
+        (entry.0.clone(), entry.1.clone())
+    }
+
+    /// Closes the in-progress assistant text and reasoning stream items so
+    /// the next chunk opens a fresh conversation item. Agents that omit
+    /// `messageId` (Grok) give ACP clients no message boundaries; without an
+    /// explicit break at each tool call, every text chunk of a turn merges
+    /// into the turn's first bubble and the final answer lands above the
+    /// tool calls instead of at the end of the transcript.
+    pub async fn break_stream_items(&self, session_id: &str) {
+        self.current_items.lock().await.remove(session_id);
+        self.current_thought_items.lock().await.remove(session_id);
+    }
+
+    /// Accumulates streamed ACP thought text into one reasoning item.
+    pub async fn append_thought_text(
+        &self,
+        session_id: &str,
+        message_id: Option<&str>,
+        chunk: &str,
+    ) -> (String, String) {
+        self.current_items.lock().await.remove(session_id);
+        let mut items = self.current_thought_items.lock().await;
+        let requested_id = message_id.map(|id| format!("acp-thought-{id}"));
+        if requested_id
+            .as_ref()
+            .is_some_and(|id| items.get(session_id).is_some_and(|entry| &entry.0 != id))
+        {
+            items.remove(session_id);
+        }
+        let entry = items.entry(session_id.to_string()).or_insert_with(|| {
+            (
+                requested_id
+                    .unwrap_or_else(|| format!("acp-thought-{}", uuid::Uuid::new_v4().simple())),
+                String::new(),
+            )
+        });
+        merge_assistant_chunk(&mut entry.1, chunk);
+        (entry.0.clone(), entry.1.clone())
+    }
+
+    /// Returns the stable plan item id for this session's current turn.
+    pub async fn current_plan_item_id(&self, session_id: &str) -> String {
+        let mut items = self.current_plan_items.lock().await;
+        items
+            .entry(session_id.to_string())
+            .or_insert_with(|| format!("acp-plan-{}", uuid::Uuid::new_v4().simple()))
+            .clone()
+    }
+
     /// Ends the current turn for a session so the next one gets a fresh item.
     pub async fn end_turn(&self, session_id: &str) {
         self.current_items.lock().await.remove(session_id);
-    }
-
-    /// Records a tool call's identity for later status updates.
-    pub async fn remember_tool(&self, call_id: &str, title: &str, kind: &str) {
+        self.current_thought_items.lock().await.remove(session_id);
+        self.current_user_items.lock().await.remove(session_id);
+        self.current_plan_items.lock().await.remove(session_id);
+        // Tool calls never span turns; dropping their memory here keeps the
+        // map bounded over a long-lived agent process.
         self.current_tools
             .lock()
             .await
-            .insert(call_id.to_string(), (title.to_string(), kind.to_string()));
+            .retain(|_, memory| memory.session_id != session_id);
     }
 
-    /// Looks up a previously announced tool call's identity.
-    pub async fn tool_identity(&self, call_id: &str) -> Option<(String, String)> {
+    /// Records a tool call's identity and last-known output for later
+    /// partial updates.
+    pub async fn remember_tool(&self, call_id: &str, memory: AcpToolMemory) {
+        self.current_tools
+            .lock()
+            .await
+            .insert(call_id.to_string(), memory);
+    }
+
+    /// Looks up a previously announced tool call's identity and output.
+    pub async fn tool_memory(&self, call_id: &str) -> Option<AcpToolMemory> {
         self.current_tools.lock().await.get(call_id).cloned()
     }
 
@@ -812,10 +1902,40 @@ impl AcpRuntime {
         self.sessions.lock().await.keys().cloned().collect()
     }
 
-    /// Cancels the in-flight turn for a session.
+    /// Cancels the in-flight turn for a session. The ACP contract requires
+    /// the client to resolve any outstanding permission requests as
+    /// `cancelled` once it cancels the turn; agents may block their prompt
+    /// future on those responses.
     pub async fn cancel(&self, session_id: &str) -> Result<(), DaemonError> {
         self.notify("session/cancel", json!({ "sessionId": session_id }))
-            .await
+            .await?;
+        self.cancel_pending_permissions(session_id).await;
+        Ok(())
+    }
+
+    /// Resolves every pending permission request for a session with the
+    /// `cancelled` outcome and forgets it.
+    pub async fn cancel_pending_permissions(&self, session_id: &str) {
+        let drained = {
+            let mut requests = self.permission_requests.lock().await;
+            let ids = requests
+                .iter()
+                .filter(|(_, pending)| pending.session_id == session_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| requests.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        for pending in drained {
+            let _ = self
+                .write_message(&json!({
+                    "jsonrpc": "2.0",
+                    "id": pending.raw_id,
+                    "result": { "outcome": { "outcome": "cancelled" } }
+                }))
+                .await;
+        }
     }
 
     /// Answers a pending `session/request_permission` with a user decision.
@@ -824,37 +1944,23 @@ impl AcpRuntime {
         request_id: &str,
         decision: ApprovalDecision,
     ) -> Result<(), DaemonError> {
-        let pending = self
-            .permission_requests
-            .lock()
-            .await
-            .remove(request_id)
-            .ok_or_else(|| DaemonError::NotFound("ACP permission request not found".to_string()))?;
-        let wanted = match decision {
-            ApprovalDecision::Allow => "allow_once",
-            ApprovalDecision::AlwaysAllow => "allow_always",
-            ApprovalDecision::Deny => "reject_once",
+        // Validate before removing: a decision the agent's options cannot
+        // express must leave the request pending (and answerable), not strand
+        // the agent waiting on a response that will never come.
+        let pending = {
+            let mut requests = self.permission_requests.lock().await;
+            let pending = requests.get(request_id).ok_or_else(|| {
+                DaemonError::NotFound("ACP permission request not found".to_string())
+            })?;
+            if permission_option_for_decision(&pending.options, &decision).is_none() {
+                return Err(DaemonError::Rpc(format!(
+                    "ACP permission request did not offer {decision:?}"
+                )));
+            }
+            requests.remove(request_id).expect("entry checked above")
         };
-        let fallback_prefix = match decision {
-            ApprovalDecision::Deny => "reject",
-            _ => "allow",
-        };
-        let option = pending
-            .options
-            .iter()
-            .find(|option| option.kind == wanted)
-            .or_else(|| {
-                pending
-                    .options
-                    .iter()
-                    .find(|option| option.kind.starts_with(fallback_prefix))
-            })
-            .or(pending.options.first());
-        let Some(option) = option else {
-            return Err(DaemonError::Rpc(
-                "ACP permission request offered no options".to_string(),
-            ));
-        };
+        let option = permission_option_for_decision(&pending.options, &decision)
+            .expect("validated while holding the lock");
         self.write_message(&json!({
             "jsonrpc": "2.0",
             "id": pending.raw_id,
@@ -887,24 +1993,65 @@ impl AcpRuntime {
             runtime.handle_message(message).await;
         }
         runtime.closed.store(true, Ordering::Release);
+        let stderr_tail = runtime.stderr_summary().await;
+        let detail = if stderr_tail.is_empty() {
+            String::new()
+        } else {
+            format!(": {stderr_tail}")
+        };
         let mut pending = runtime.pending.lock().await;
         for (_, sender) in pending.drain() {
             let _ = sender.send(Err(DaemonError::Process(format!(
-                "ACP provider '{}' exited",
+                "ACP provider '{}' exited{detail}",
                 runtime.config.id
             ))));
         }
         let _ = runtime.events.send(AcpEvent::Fatal {
-            message: format!("{} agent process exited", runtime.config.label),
+            message: format!("{} agent process exited{detail}", runtime.config.label),
         });
+    }
+
+    /// Retains the last few stderr lines so a dying agent's diagnostics
+    /// (auth failures, panics) survive into the Fatal message instead of
+    /// vanishing with the process.
+    async fn stderr_loop(runtime: Arc<Self>, stderr: tokio::process::ChildStderr) {
+        const MAX_LINES: usize = 20;
+        const MAX_LINE_CHARS: usize = 500;
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let line = line.trim_end();
+            if line.is_empty() {
+                continue;
+            }
+            tracing::debug!(provider = %runtime.config.id, stderr = %line, "ACP agent stderr");
+            let mut tail = runtime.stderr_tail.lock().await;
+            let mut stored = line.to_string();
+            if stored.chars().count() > MAX_LINE_CHARS {
+                stored = stored.chars().take(MAX_LINE_CHARS).collect();
+            }
+            tail.push_back(stored);
+            while tail.len() > MAX_LINES {
+                tail.pop_front();
+            }
+        }
+    }
+
+    /// The retained stderr tail as one displayable string.
+    async fn stderr_summary(&self) -> String {
+        let tail = self.stderr_tail.lock().await;
+        tail.iter().cloned().collect::<Vec<_>>().join("\n")
     }
 
     async fn handle_message(&self, message: Value) {
         let has_id = message.get("id").is_some();
         let has_method = message.get("method").is_some();
         if has_id && !has_method {
-            // Response to one of our requests.
-            let Some(id) = message.get("id").and_then(Value::as_i64) else {
+            // Response to one of our requests. Some adapters echo numeric ids
+            // back as strings; accept both rather than stranding the caller.
+            let Some(id) = message.get("id").and_then(|id| {
+                id.as_i64()
+                    .or_else(|| id.as_str().and_then(|value| value.parse::<i64>().ok()))
+            }) else {
                 return;
             };
             let Some(sender) = self.pending.lock().await.remove(&id) else {
@@ -967,14 +2114,31 @@ impl AcpRuntime {
         let classified = AcpSessionUpdateKind::classify(kind);
         let event = match classified {
             AcpSessionUpdateKind::AgentMessageChunk => update
-                .pointer("/content/text")
-                .and_then(Value::as_str)
+                .get("content")
+                .and_then(acp_content_block_text)
                 .map(|text| AcpEvent::MessageDelta {
                     session_id: session_id.to_string(),
-                    text: text.to_string(),
+                    message_id: update
+                        .get("messageId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    text,
                 }),
-            // Thought chunks are internal reasoning; fold them away for now.
-            AcpSessionUpdateKind::AgentThoughtChunk => None,
+            AcpSessionUpdateKind::AgentThoughtChunk => update
+                .get("content")
+                .and_then(acp_content_block_text)
+                .map(|text| AcpEvent::ThoughtDelta {
+                    session_id: session_id.to_string(),
+                    message_id: update
+                        .get("messageId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    text,
+                }),
+            AcpSessionUpdateKind::ConfigOptionUpdate => {
+                self.capture_session_metadata(session_id, update).await;
+                None
+            }
             // The agent switched modes on its own (or confirmed ours).
             AcpSessionUpdateKind::CurrentModeUpdate => {
                 if let Some(mode_id) = update.get("currentModeId").and_then(Value::as_str)
@@ -990,6 +2154,7 @@ impl AcpRuntime {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
+                let (output, diffs) = acp_tool_content(update);
                 Some(AcpEvent::ToolCall {
                     session_id: session_id.to_string(),
                     call_id,
@@ -1008,6 +2173,8 @@ impl AcpRuntime {
                         .and_then(Value::as_str)
                         .unwrap_or("pending")
                         .to_string(),
+                    output,
+                    diffs,
                 })
             }
             AcpSessionUpdateKind::ToolCallUpdate => {
@@ -1016,21 +2183,7 @@ impl AcpRuntime {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let output = update
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(|item| {
-                                item.pointer("/content/text")
-                                    .or_else(|| item.get("text"))
-                                    .and_then(Value::as_str)
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    })
-                    .filter(|text| !text.is_empty());
+                let (output, diffs) = acp_tool_content(update);
                 Some(AcpEvent::ToolCallUpdate {
                     session_id: session_id.to_string(),
                     call_id,
@@ -1043,6 +2196,7 @@ impl AcpRuntime {
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned),
                     output,
+                    diffs,
                 })
             }
             AcpSessionUpdateKind::Plan => {
@@ -1060,7 +2214,14 @@ impl AcpRuntime {
                                     .and_then(Value::as_str)
                                     .unwrap_or("pending")
                                     .to_string();
+                                let id = entry
+                                    .get("id")
+                                    .or_else(|| entry.get("entryId"))
+                                    .and_then(Value::as_str)
+                                    .filter(|value| !value.trim().is_empty())
+                                    .map(ToOwned::to_owned);
                                 Some(PlanStep {
+                                    id,
                                     step: content,
                                     status,
                                 })
@@ -1076,13 +2237,37 @@ impl AcpRuntime {
                     },
                 })
             }
-            AcpSessionUpdateKind::AvailableCommandsUpdate
-            | AcpSessionUpdateKind::SessionInfoUpdate
-            | AcpSessionUpdateKind::UsageUpdate
-            | AcpSessionUpdateKind::UserMessageChunk => {
+            AcpSessionUpdateKind::AvailableCommandsUpdate => {
                 self.report_unprojected_update(classified, false).await;
                 None
             }
+            AcpSessionUpdateKind::SessionInfoUpdate => Some(AcpEvent::SessionInfo {
+                session_id: session_id.to_string(),
+                title: update
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+            }),
+            AcpSessionUpdateKind::UsageUpdate => update
+                .get("used")
+                .and_then(Value::as_u64)
+                .zip(update.get("size").and_then(Value::as_u64))
+                .map(|(used, size)| AcpEvent::Usage {
+                    session_id: session_id.to_string(),
+                    used,
+                    size,
+                }),
+            AcpSessionUpdateKind::UserMessageChunk => update
+                .get("content")
+                .and_then(acp_content_block_text)
+                .map(|text| AcpEvent::UserMessageDelta {
+                    session_id: session_id.to_string(),
+                    message_id: update
+                        .get("messageId")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    text,
+                }),
             AcpSessionUpdateKind::Unknown(_) => {
                 self.report_unprojected_update(classified, true).await;
                 None
@@ -1124,6 +2309,25 @@ impl AcpRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // A request from a session no thread owns (discovery session, or a
+        // rolled-back session/load) could never be answered by a user;
+        // surfacing it would create an immortal banner while the agent hangs.
+        if self
+            .threads_by_session
+            .lock()
+            .await
+            .get(&session_id)
+            .is_none()
+        {
+            let _ = self
+                .write_message(&json!({
+                    "jsonrpc": "2.0",
+                    "id": raw_id,
+                    "result": { "outcome": { "outcome": "cancelled" } }
+                }))
+                .await;
+            return;
+        }
         let request_id = format!("acp-perm-{}", uuid::Uuid::new_v4().simple());
         let options = params
             .get("options")
@@ -1157,6 +2361,7 @@ impl AcpRuntime {
             request_id.clone(),
             PendingPermission {
                 raw_id,
+                session_id: session_id.clone(),
                 options: options.clone(),
             },
         );
@@ -1173,6 +2378,172 @@ impl AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn command_path(command: &Command) -> Option<String> {
+        command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, value)| value)
+            .map(|value| value.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn provider_environment_adds_executable_directory_to_path() {
+        let mut command = Command::new("/opt/homebrew/bin/pi-acp");
+
+        apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &HashMap::new());
+
+        let path = command_path(&command).expect("PATH should be set");
+        let first = std::env::split_paths(&path).next();
+        assert_eq!(first.as_deref(), Some(Path::new("/opt/homebrew/bin")));
+    }
+
+    #[test]
+    fn provider_environment_preserves_explicit_path_override() {
+        let mut command = Command::new("/opt/homebrew/bin/pi-acp");
+        let provider_env = HashMap::from([("PATH".to_string(), "/custom/bin".to_string())]);
+
+        apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &provider_env);
+
+        assert_eq!(command_path(&command).as_deref(), Some("/custom/bin"));
+    }
+
+    #[test]
+    fn permission_selection_never_substitutes_a_different_semantic_choice() {
+        let options = vec![
+            AcpPermissionOption {
+                option_id: "once".to_string(),
+                kind: "allow_once".to_string(),
+            },
+            AcpPermissionOption {
+                option_id: "deny".to_string(),
+                kind: "reject_once".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            permission_option_for_decision(&options, &ApprovalDecision::Allow)
+                .map(|option| option.option_id.as_str()),
+            Some("once")
+        );
+        assert_eq!(
+            permission_option_for_decision(&options, &ApprovalDecision::Deny)
+                .map(|option| option.option_id.as_str()),
+            Some("deny")
+        );
+        assert!(permission_option_for_decision(&options, &ApprovalDecision::AlwaysAllow).is_none());
+    }
+
+    #[test]
+    fn method_capabilities_accept_current_objects_and_legacy_booleans() {
+        assert!(capability_enabled(Some(&json!({}))));
+        assert!(capability_enabled(Some(&json!(true))));
+        assert!(!capability_enabled(Some(&json!(false))));
+        assert!(!capability_enabled(Some(&Value::Null)));
+        assert!(!capability_enabled(None));
+    }
+
+    #[test]
+    fn pi_session_config_normalizes_models_and_thinking_levels() {
+        let parsed = parse_session_metadata(&json!({
+            "sessionId": "pi-session",
+            "configOptions": [
+                {
+                    "id": "model",
+                    "category": "model",
+                    "currentValue": "openrouter/kimi",
+                    "options": [
+                        { "value": "openrouter/kimi", "name": "Kimi" },
+                        { "value": "openai/gpt", "name": "GPT" }
+                    ]
+                },
+                {
+                    "id": "thought_level",
+                    "category": "thought_level",
+                    "currentValue": "medium",
+                    "options": [
+                        { "value": "off", "name": "Thinking: off" },
+                        { "value": "medium", "name": "Thinking: medium" }
+                    ]
+                }
+            ]
+        }));
+        assert_eq!(parsed.models.len(), 2);
+        assert_eq!(parsed.models[0].id, "openrouter/kimi");
+        assert!(parsed.models[0].is_default);
+        assert_eq!(
+            parsed.models[0].default_reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            parsed.models[0]
+                .supported_reasoning_efforts
+                .iter()
+                .map(|effort| effort.reasoning_effort.as_str())
+                .collect::<Vec<_>>(),
+            vec!["off", "medium"]
+        );
+        assert!(parsed.permission_modes.is_empty());
+    }
+
+    #[test]
+    fn agent_modes_are_collaboration_modes_not_permissions() {
+        let parsed = parse_session_metadata(&json!({
+            "sessionId": "opencode-session",
+            "configOptions": [{
+                "id": "mode",
+                "category": "mode",
+                "currentValue": "build",
+                "options": [
+                    { "value": "build", "name": "Build" },
+                    { "value": "plan", "name": "Plan" }
+                ]
+            }]
+        }));
+
+        assert!(parsed.permission_modes.is_empty());
+        assert_eq!(
+            parsed
+                .collaboration_modes
+                .iter()
+                .map(|mode| mode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["build", "plan"]
+        );
+        assert_eq!(
+            parsed.configuration.collaboration_config_id.as_deref(),
+            Some("mode")
+        );
+    }
+
+    #[test]
+    fn grok_session_metadata_keeps_effort_out_of_permission_modes() {
+        let parsed = parse_session_metadata(&json!({
+            "models": {
+                "currentModelId": "grok-4.5",
+                "availableModels": [{
+                    "modelId": "grok-4.5",
+                    "name": "Grok 4.5",
+                    "_meta": {
+                        "reasoningEffort": "high",
+                        "reasoningEfforts": [
+                            { "id": "low", "label": "Low Effort" },
+                            { "id": "high", "label": "High Effort" }
+                        ]
+                    }
+                }]
+            },
+            "metaOptions": [
+                { "id": "high", "category": "mode", "label": "High Effort" },
+                { "id": "low", "category": "mode", "label": "Low Effort" }
+            ]
+        }));
+        assert_eq!(parsed.models[0].id, "grok-4.5");
+        assert!(parsed.models[0].is_default);
+        assert_eq!(parsed.reasoning_efforts.len(), 2);
+        assert!(parsed.permission_modes.is_empty());
+    }
 
     #[test]
     fn loads_and_filters_provider_configs() {
@@ -1207,6 +2578,33 @@ mod tests {
     fn missing_config_file_yields_no_providers() {
         let dir = tempfile::tempdir().unwrap();
         assert!(load_acp_provider_configs(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn grok_image_capability_overrides_false_advertisement() {
+        assert!(super::acp_supports_images("grok", false));
+        assert!(super::acp_supports_images("Grok", true));
+        assert!(!super::acp_supports_images("opencode", false));
+        assert!(super::acp_supports_images("opencode", true));
+        assert!(!super::acp_supports_images("gemini", false));
+    }
+
+    #[test]
+    fn only_grok_acp_is_probed_for_vendor_steering() {
+        assert!(super::acp_may_support_steering("grok"));
+        assert!(super::acp_may_support_steering("Grok"));
+        assert!(!super::acp_may_support_steering("opencode"));
+        assert!(!super::acp_may_support_steering("pi"));
+    }
+
+    #[test]
+    fn interject_probe_rejects_missing_method_but_accepts_known_method_errors() {
+        assert!(!super::acp_interject_probe_supported(&Err(
+            DaemonError::Rpc("Method not found (grok)".to_string())
+        )));
+        assert!(super::acp_interject_probe_supported(&Err(
+            DaemonError::Rpc("session not found: probe (grok)".to_string())
+        )));
     }
 }
 
