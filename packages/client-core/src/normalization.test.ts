@@ -300,6 +300,38 @@ describe("malformed conversation output normalization", () => {
     ]);
   });
 
+  it("accepts daemon wire attachments that carry no type discriminant", () => {
+    // The daemon serializes ImageInput without a `type` field; normalization
+    // must brand it rather than drop the attachment.
+    const item = normalizeConversationItem({
+      kind: "user_message",
+      id: "user-1",
+      text: "See attached",
+      attachments: [
+        {
+          id: "att-1",
+          name: "shot.png",
+          mime_type: "image/png",
+          url: "data:image/png;base64,aGk=",
+          local_path: "/tmp/att-1.png",
+        },
+        { type: "video", id: "other", url: "https://example.com/clip.mp4" },
+      ],
+      created_at: "2026-08-09T12:00:00Z",
+    });
+
+    expect(item.kind === "user_message" ? item.attachments : null).toEqual([
+      {
+        type: "image",
+        id: "att-1",
+        name: "shot.png",
+        mime_type: "image/png",
+        url: "data:image/png;base64,aGk=",
+        local_path: "/tmp/att-1.png",
+      },
+    ]);
+  });
+
   it("normalizes file-change destinations before renderers consume them", () => {
     const item = normalizeConversationItem({
       kind: "file_change",

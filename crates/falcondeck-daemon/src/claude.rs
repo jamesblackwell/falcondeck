@@ -28,7 +28,8 @@ use crate::app::agent_helpers::claude_image_reference;
 use crate::app::agent_helpers::{
     append_claude_text_delta, claude_tool_result_image_items, extract_claude_assistant_message_id,
     extract_claude_text_chunk, extract_claude_thinking_chunk, extract_claude_tool_event,
-    extract_claude_user_message_text, merge_claude_assistant_text,
+    extract_claude_user_message_images, extract_claude_user_message_text,
+    merge_claude_assistant_text,
 };
 use crate::app::conversation_helpers::tool_display_metadata;
 use crate::error::DaemonError;
@@ -1223,12 +1224,14 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
             }
             continue;
         }
-        if let Some(text) = extract_claude_user_message_text(&value) {
+        let user_text = extract_claude_user_message_text(&value);
+        let user_images = extract_claude_user_message_images(&value);
+        if user_text.is_some() || !user_images.is_empty() {
             items.push(ConversationItem::UserMessage {
                 id: extract_string(&value, &["uuid", "id"])
                     .unwrap_or_else(|| format!("user-{}", created_at.timestamp_millis())),
-                text,
-                attachments: Vec::new(),
+                text: user_text.unwrap_or_default(),
+                attachments: user_images,
                 turn_id: None,
                 previous_turn_id: None,
                 created_at,
@@ -1677,6 +1680,65 @@ mod tests {
             hydrated.items.get(3),
             Some(ConversationItem::UserMessage { text, .. }) if text == "and now commit it"
         ));
+    }
+
+    #[test]
+    fn hydrates_pasted_images_as_user_attachments() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.jsonl");
+        fs::write(
+            &session_path,
+            json!({
+                "session_id": "22222222-2222-4222-8222-222222222222",
+                "cwd": "/tmp/project",
+                "type": "user",
+                "uuid": "user-1",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "what is in this screenshot?" },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aGVsbG8="
+                            }
+                        }
+                    ]
+                },
+                "created_at": "2026-03-19T10:00:00Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.items.len(), 1, "{:?}", hydrated.items);
+        let Some(ConversationItem::UserMessage {
+            text, attachments, ..
+        }) = hydrated.items.first()
+        else {
+            panic!("expected user message, got {:?}", hydrated.items);
+        };
+        assert_eq!(text, "what is in this screenshot?");
+        assert_eq!(attachments.len(), 1);
+        let image = &attachments[0];
+        assert_eq!(image.mime_type.as_deref(), Some("image/png"));
+        assert_eq!(image.url, "data:image/png;base64,aGVsbG8=");
+        assert!(image.local_path.is_none());
+        // Deterministic content-hash id: restarts must map the same image
+        // back to the same materialized attachment file.
+        let again = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        let Some(ConversationItem::UserMessage {
+            attachments: again_attachments,
+            ..
+        }) = again.items.first()
+        else {
+            panic!("expected user message");
+        };
+        assert_eq!(again_attachments[0].id, image.id);
+        assert!(image.id.starts_with("claude-img-"));
     }
 
     #[test]

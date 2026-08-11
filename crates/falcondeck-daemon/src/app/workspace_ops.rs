@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
@@ -216,13 +216,14 @@ pub(super) async fn connect_workspace_internal(
                 .collect::<HashMap<_, _>>()
         })
         .unwrap_or_default();
-    let threads = merge_hydrated_threads_with_persisted_state(
+    let mut threads = merge_hydrated_threads_with_persisted_state(
         threads,
         &persisted_thread_states,
         &workspace_id,
         persisted_workspace_ref.and_then(|workspace| workspace.updated_at),
         now,
     );
+    materialize_hydrated_image_attachments(app, &workspace_id, &mut threads).await;
     let current_thread_id = persisted_workspace_ref
         .and_then(|workspace| workspace.current_thread_id.as_deref())
         .and_then(|thread_id| {
@@ -1015,14 +1016,7 @@ async fn persist_inline_image_attachment(
         image.mime_type.as_deref(),
         &parsed.media_type,
     );
-    let attachments_root = app
-        .inner
-        .state_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("attachments")
-        .join(sanitized_attachment_path_segment(workspace_id, "workspace"))
-        .join(sanitized_attachment_path_segment(thread_id, "thread"));
+    let attachments_root = thread_attachments_root(app, workspace_id, thread_id);
     tokio::fs::create_dir_all(&attachments_root).await?;
 
     let file_path = attachments_root.join(format!(
@@ -1033,6 +1027,67 @@ async fn persist_inline_image_attachment(
     tokio::fs::write(&file_path, parsed.bytes).await?;
 
     Ok(file_path.to_string_lossy().to_string())
+}
+
+fn thread_attachments_root(app: &AppState, workspace_id: &str, thread_id: &str) -> PathBuf {
+    app.inner
+        .state_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("attachments")
+        .join(sanitized_attachment_path_segment(workspace_id, "workspace"))
+        .join(sanitized_attachment_path_segment(thread_id, "thread"))
+}
+
+/// Materializes data-URL attachments recovered from provider session logs into
+/// the thread's attachment directory, keeping hydrated transcripts as compact
+/// in memory as live sends. Hydration mints deterministic content-hash ids, so
+/// repeated restarts converge on the same file instead of accumulating copies.
+async fn materialize_hydrated_image_attachments(
+    app: &AppState,
+    workspace_id: &str,
+    threads: &mut [crate::codex::HydratedThread],
+) {
+    for thread in threads.iter_mut() {
+        let thread_id = thread.summary.id.clone();
+        for item in thread.items.iter_mut() {
+            let ConversationItem::UserMessage { attachments, .. } = item else {
+                continue;
+            };
+            for image in attachments.iter_mut() {
+                if image.local_path.is_some() || !image.url.trim_start().starts_with("data:") {
+                    continue;
+                }
+                let Ok(parsed) = parse_image_data_url(&image.url) else {
+                    continue;
+                };
+                let extension = image_file_extension(
+                    image.name.as_deref(),
+                    image.mime_type.as_deref(),
+                    &parsed.media_type,
+                );
+                let root = thread_attachments_root(app, workspace_id, &thread_id);
+                let file_path = root.join(format!(
+                    "{}.{}",
+                    sanitized_attachment_file_stem(&image.id),
+                    extension
+                ));
+                if !tokio::fs::try_exists(&file_path).await.unwrap_or(false) {
+                    if tokio::fs::create_dir_all(&root).await.is_err() {
+                        continue;
+                    }
+                    if tokio::fs::write(&file_path, &parsed.bytes).await.is_err() {
+                        // Leave the inline data URL in place; the image still
+                        // renders, it just isn't file-backed.
+                        continue;
+                    }
+                }
+                let path_string = file_path.to_string_lossy().to_string();
+                image.url = path_string.clone();
+                image.local_path = Some(path_string);
+            }
+        }
+    }
 }
 
 struct ParsedImageDataUrl {

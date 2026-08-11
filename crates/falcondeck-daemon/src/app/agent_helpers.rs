@@ -907,6 +907,76 @@ pub(crate) fn extract_claude_user_message_text(value: &Value) -> Option<String> 
     extract_string(message, &["text"]).and_then(accept_claude_user_text)
 }
 
+/// Recovers pasted image attachments from a Claude session-log user message.
+///
+/// Tool-result messages are skipped: images inside them belong to the
+/// assistant's tool output, not to the user's prompt. Base64 blocks come back
+/// as inline data URLs so the hydrator can materialize them to disk; url
+/// blocks pass through as-is.
+pub(crate) fn extract_claude_user_message_images(value: &Value) -> Vec<ImageInput> {
+    if extract_string(value, &["type"]).as_deref() != Some("user") {
+        return Vec::new();
+    }
+    let Some(blocks) = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    if blocks
+        .iter()
+        .any(|block| extract_string(block, &["type"]).as_deref() == Some("tool_result"))
+    {
+        return Vec::new();
+    }
+
+    blocks
+        .iter()
+        .filter(|block| extract_string(block, &["type"]).as_deref() == Some("image"))
+        .filter_map(|block| {
+            let source = block.get("source")?;
+            let media_type = extract_string(source, &["media_type"])
+                .filter(|media_type| media_type.starts_with("image/"));
+            match extract_string(source, &["type"]).as_deref() {
+                Some("base64") => {
+                    let data = extract_string(source, &["data"])?;
+                    let media_type = media_type.unwrap_or_else(|| "image/png".to_string());
+                    Some(ImageInput {
+                        id: format!("claude-img-{:016x}", fnv1a_64(data.as_bytes())),
+                        name: None,
+                        mime_type: Some(media_type.clone()),
+                        url: format!("data:{media_type};base64,{data}"),
+                        local_path: None,
+                    })
+                }
+                Some("url") => {
+                    let url = extract_string(source, &["url"])?;
+                    Some(ImageInput {
+                        id: format!("claude-img-{:016x}", fnv1a_64(url.as_bytes())),
+                        name: None,
+                        mime_type: media_type,
+                        url,
+                        local_path: None,
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Stable 64-bit FNV-1a hash used to mint deterministic attachment ids, so
+/// re-hydration across daemon restarts maps an image back to the same file.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// Claude records slash-command envelopes, their captured stdout, and
 /// interrupt notices as user messages. They are session bookkeeping, not
 /// something the user typed, and must neither render as user bubbles nor seed

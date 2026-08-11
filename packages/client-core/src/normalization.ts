@@ -11,6 +11,7 @@ import type {
   DaemonSnapshot,
   EventEnvelope,
   FalconDeckPreferences,
+  ImageInput,
   InteractiveRequest,
   InteractiveRequestOutcome,
   ThreadHandle,
@@ -812,13 +813,17 @@ export function normalizeConversationItem(value: unknown): ConversationItem {
     return {
       ...item,
       attachments: Array.isArray(item.attachments)
-        ? item.attachments.filter(
-            (attachment) =>
-              attachment &&
-              attachment.type === "image" &&
-              typeof attachment.id === "string" &&
-              typeof attachment.url === "string",
-          )
+        ? (item.attachments as Array<Record<string, unknown> | null>)
+            .filter(
+              (attachment): attachment is Record<string, unknown> =>
+                !!attachment &&
+                // The daemon's ImageInput carries no `type` discriminant on
+                // the wire; only reject attachments claiming another type.
+                (attachment.type === "image" || attachment.type === undefined) &&
+                typeof attachment.id === "string" &&
+                typeof attachment.url === "string",
+            )
+            .map((attachment) => ({ ...attachment, type: "image" }) as ImageInput)
         : [],
     };
   }
