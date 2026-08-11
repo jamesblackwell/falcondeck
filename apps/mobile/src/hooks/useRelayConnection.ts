@@ -191,6 +191,7 @@ export function useRelayConnection() {
     const requestGeneration = snapshotRequestGeneration.current + 1
     snapshotRequestGeneration.current = requestGeneration
     snapshotRequestInFlight.current = true
+    relay._setSyncing(true)
     pendingSnapshotEvents.current = []
     pendingSnapshotEventSeqs.current.clear()
     snapshotRaceOverflowed.current = false
@@ -260,6 +261,7 @@ export function useRelayConnection() {
         snapshotRetryTimer.current = null
       }
       relay._setError(null)
+      relay._setSyncing(false, true)
     } catch (e) {
       if (requestGeneration !== snapshotRequestGeneration.current) return
       relay._setError(e instanceof Error ? e.message : 'Failed to load snapshot')
@@ -277,6 +279,9 @@ export function useRelayConnection() {
     } finally {
       if (requestGeneration === snapshotRequestGeneration.current) {
         snapshotRequestInFlight.current = false
+        // The sync indicator tracks the whole catch-up, not this one RPC: a
+        // queued refetch or error retry means the list is still stale.
+        relay._setSyncing(shouldRefetch || snapshotRetryTimer.current !== null)
         pendingSnapshotEvents.current = []
         pendingSnapshotEventSeqs.current.clear()
         snapshotRaceOverflowed.current = false
@@ -546,6 +551,7 @@ export function useRelayConnection() {
     relayFlushGeneration.current += 1
     snapshotRequestGeneration.current += 1
     snapshotRequestInFlight.current = false
+    relay._setSyncing(false)
     pendingSnapshotEvents.current = []
     snapshotEventSeqs.clear()
     snapshotRaceOverflowed.current = false
@@ -622,6 +628,7 @@ export function useRelayConnection() {
       relayFlushGeneration.current += 1
       snapshotRequestGeneration.current += 1
       snapshotRequestInFlight.current = false
+      relay._setSyncing(false)
       pendingSnapshotEvents.current = []
       snapshotEventSeqs.clear()
       snapshotRaceOverflowed.current = false

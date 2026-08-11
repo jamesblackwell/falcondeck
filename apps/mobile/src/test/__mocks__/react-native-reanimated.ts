@@ -36,6 +36,18 @@ export const Easing = {
   linear: (t: any) => t,
 }
 export const KeyboardState = { OPEN: 1, CLOSED: 0 }
+// Layout animation builders are chainable in the real library; components pass
+// the built descriptor straight to Animated.View, so any object will do.
+function layoutAnimationBuilder() {
+  const builder: any = {}
+  for (const method of ['duration', 'delay', 'easing', 'springify', 'withInitialValues', 'build']) {
+    builder[method] = () => builder
+  }
+  return builder
+}
+export const FadeIn = layoutAnimationBuilder()
+export const FadeOut = layoutAnimationBuilder()
+export const LinearTransition = layoutAnimationBuilder()
 const Animated = {
   View,
   createAnimatedComponent: (c: any) => c,

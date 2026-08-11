@@ -59,7 +59,15 @@ import { useKeyboardVisible } from "@/hooks/useKeyboardVisible";
 import { useConversationPresentation } from "@/hooks/useRenderBlocks";
 import { useScrollToBottom } from "@/hooks/useScrollToBottom";
 import { useResponseCompletionAnnouncement } from "@/hooks/useResponseCompletionAnnouncement";
-import { ActivityDiamond, Button, Text, EmptyState, ErrorBanner } from "@/components/ui";
+import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
+import {
+  ActivityDiamond,
+  Button,
+  Text,
+  EmptyState,
+  ErrorBanner,
+  SyncBanner,
+} from "@/components/ui";
 import {
   ChatInput,
   InteractiveRequestBanner,
@@ -86,6 +94,7 @@ import {
   triggerAgentCompletionHaptic,
   triggerThreadSelectionHaptic,
 } from "@/lib/haptics";
+import { sessionSendBlockReason } from "@/lib/session-status";
 
 const keyExtractor = (block: ConversationRenderBlock) => block.id;
 const EMPTY_QUEUED_TURNS: QueuedTurnSummary[] = [];
@@ -149,6 +158,7 @@ export default function HomeScreen() {
       sessionId: s.sessionId,
     })),
   );
+  const syncStatus = useSessionSyncStatus();
   const {
     attachments,
     draft,
@@ -1128,6 +1138,8 @@ export default function HomeScreen() {
         </View>
       </View>
 
+      <SyncBanner status={syncStatus} />
+
       <ErrorBanner message={error} onDismiss={handleDismissError} />
 
       {operationalNotice ? (
@@ -1275,7 +1287,7 @@ export default function HomeScreen() {
             isSubmitting
               ? "Message is being sent"
               : !isEncrypted
-                ? "Reconnect to send"
+                ? (sessionSendBlockReason(syncStatus) ?? "Reconnect to send")
                 : (attachmentSendBlockReason ?? undefined)
           }
           attachments={attachments}

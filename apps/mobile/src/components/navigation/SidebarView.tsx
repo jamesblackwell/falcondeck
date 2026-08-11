@@ -14,9 +14,10 @@ import * as Haptics from 'expo-haptics'
 
 import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
 
-import { Text, Button, EmptyState, Input, NativeSheet } from '@/components/ui'
+import { Text, Button, EmptyState, Input, NativeSheet, SyncBanner } from '@/components/ui'
 import { SessionListItem } from '@/components/chat'
 import { useCollapsible } from '@/components/chat/useCollapsible'
+import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
 import { useThreadActions } from '@/hooks/useThreadActions'
 import { buildSidebarRows, SHOW_MORE_STEP, type SidebarRow } from './sidebarRows'
 
@@ -109,6 +110,9 @@ export const SidebarView = memo(function SidebarView({
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
   const { archiveThread, renameThread, setThreadPinned } = useThreadActions()
+  // The sidebar is where "New thread" lives, so it is where the boot-time wait
+  // has to be visible: without this the button looks broken for ~10s.
+  const syncStatus = useSessionSyncStatus()
 
   const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set())
   const [visibleThreadCounts, setVisibleThreadCounts] = useState<Map<string, number>>(
@@ -446,9 +450,17 @@ export const SidebarView = memo(function SidebarView({
         </View>
       ) : null}
 
+      <SyncBanner status={syncStatus} />
+
       <View style={styles.list}>
         {rows.length === 0 ? (
-          <EmptyState title="No projects" description="Connect from your desktop to get started" />
+          // 'offline' is a dead end rather than a wait, so it keeps the
+          // regular empty state; the banner above already explains it.
+          syncStatus.isBusy && syncStatus.stage !== 'offline' ? (
+            <EmptyState title="Loading your projects…" description={syncStatus.detail} />
+          ) : (
+            <EmptyState title="No projects" description="Connect from your desktop to get started" />
+          )
         ) : (
           <FlashList
             data={rows}

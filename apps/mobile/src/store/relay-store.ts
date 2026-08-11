@@ -89,6 +89,10 @@ export interface RelayState {
   error: string | null
   isConnected: boolean
   isEncrypted: boolean
+  /** A snapshot RPC is in flight — the project/thread list is still catching up. */
+  isSyncing: boolean
+  /** A snapshot has landed at least once since launch (or unpair). */
+  hasSyncedOnce: boolean
 }
 
 interface RelayActions {
@@ -101,6 +105,7 @@ interface RelayActions {
   _setConnectionStatus: (status: ConnectionStatus) => void
   _setMachinePresence: (presence: MachinePresence | null) => void
   _setError: (error: string | null) => void
+  _setSyncing: (isSyncing: boolean, synced?: boolean) => void
   _getSocket: () => WebSocket | null
   _setSocket: (socket: WebSocket | null) => void
   _getSessionCrypto: () => SessionCryptoState | null
@@ -201,6 +206,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   error: null,
   isConnected: false,
   isEncrypted: false,
+  isSyncing: false,
+  hasSyncedOnce: false,
 
   setRelayUrl: (url) => set({ relayUrl: url }),
   setPairingCode: (code) => set({ pairingCode: code.toUpperCase() }),
@@ -481,6 +488,8 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       error: null,
       isConnected: false,
       isEncrypted: false,
+      isSyncing: false,
+      hasSyncedOnce: false,
     })
 
     socket?.close()
@@ -499,6 +508,11 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   },
   _setMachinePresence: (presence) => set({ machinePresence: presence }),
   _setError: (error) => set({ error }),
+  // `synced` is only true when a snapshot actually landed: a failed fetch must
+  // not flip hasSyncedOnce, or the banner would disappear while the retry
+  // backoff is still running and nothing has loaded.
+  _setSyncing: (isSyncing, synced = false) =>
+    set({ isSyncing, ...(synced ? { hasSyncedOnce: true } : null) }),
   _getSocket: () => _socket,
   _setSocket: (socket) => { _socket = socket },
   _getSessionCrypto: () => _sessionCrypto,
