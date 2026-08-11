@@ -20,6 +20,10 @@ export type ShortcutCommandId =
   | 'decreaseTextSize'
   | 'resetTextSize'
   | 'focusComposer'
+  | 'openHarnessMenu'
+  | 'openPermissionMenu'
+  | 'openSandboxMenu'
+  | 'openModelMenu'
   | 'stopTurn'
   | 'sendMessage'
   | 'invertFollowUp'
@@ -60,6 +64,10 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'decreaseTextSize', label: 'Decrease text size', description: 'Decrease the interface text scale', category: 'View', context: 'global', defaults: ['Mod+-'] },
   { id: 'resetTextSize', label: 'Reset text size', description: 'Restore the default interface text scale', category: 'View', context: 'global', defaults: ['Mod+0'] },
   { id: 'focusComposer', label: 'Focus prompt', description: 'Move focus to the prompt composer', category: 'Composer', context: 'global', defaults: ['Shift+Escape'] },
+  { id: 'openHarnessMenu', label: 'Choose agent', description: 'Open the agent picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+A'] },
+  { id: 'openPermissionMenu', label: 'Choose permission mode', description: 'Open the permission mode picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+P'] },
+  { id: 'openSandboxMenu', label: 'Choose sandbox mode', description: 'Open the sandbox picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+S'] },
+  { id: 'openModelMenu', label: 'Choose model', description: 'Open the model and reasoning picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+M'] },
   { id: 'stopTurn', label: 'Stop response', description: 'Interrupt the running agent turn', category: 'Conversation', context: 'global', defaults: ['Mod+.'] },
   { id: 'sendMessage', label: 'Send message', description: 'Send now, or use the default follow-up behavior while running', category: 'Composer', context: 'composer', defaults: ['Enter'] },
   { id: 'invertFollowUp', label: 'Invert Queue / Steer', description: 'Use the opposite follow-up behavior for this message', category: 'Composer', context: 'composer', defaults: ['Mod+Enter'] },

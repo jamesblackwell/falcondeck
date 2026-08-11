@@ -36,6 +36,15 @@ describe('keyboard shortcuts', () => {
     expect(commandForEvent('global', key('Enter', { metaKey: true }))).toBeNull()
   })
 
+  it('maps Ctrl+Shift chords to the composer option menus', () => {
+    expect(commandForEvent('global', key('A', { ctrlKey: true, shiftKey: true }))).toBe('openHarnessMenu')
+    expect(commandForEvent('global', key('P', { ctrlKey: true, shiftKey: true }))).toBe('openPermissionMenu')
+    expect(commandForEvent('global', key('S', { ctrlKey: true, shiftKey: true }))).toBe('openSandboxMenu')
+    expect(commandForEvent('global', key('M', { ctrlKey: true, shiftKey: true }))).toBe('openModelMenu')
+    // The Command-based palette chord must stay distinct from Ctrl+Shift+P.
+    expect(commandForEvent('global', key('P', { metaKey: true, shiftKey: true }))).toBe('commandPalette')
+  })
+
   it('persists explicit unbinding and supports reset', () => {
     setShortcutBindings('toggleSidebar', [])
     expect(bindingsFor('toggleSidebar')).toEqual([])
