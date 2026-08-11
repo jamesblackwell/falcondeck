@@ -50,6 +50,7 @@ pub struct ClaudeProviderMetadata {
     pub capabilities: AgentCapabilitySummary,
 }
 
+#[derive(Clone)]
 pub struct HydratedClaudeThread {
     pub summary: ThreadSummary,
     pub items: Vec<ConversationItem>,
@@ -166,7 +167,13 @@ impl ClaudeRuntime {
         let models = curated_models();
         let collaboration_modes = Vec::new();
         let capabilities = default_capabilities();
-        let threads = hydrate_threads(&workspace_path);
+        // Hydration reads and parses every session file for the workspace —
+        // potentially hundreds of megabytes of JSONL — so it must not run
+        // inline on a runtime worker where it would stall the event pump for
+        // every other streaming thread.
+        let threads = tokio::task::spawn_blocking(move || hydrate_threads(&workspace_path))
+            .await
+            .unwrap_or_default();
 
         Ok(ClaudeBootstrap {
             runtime,
@@ -1101,7 +1108,65 @@ fn collect_session_files(root: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
+/// A fully parsed session file, cached keyed by (mtime, len) so re-opening a
+/// workspace does not re-parse megabytes of unchanged JSONL. Session files are
+/// append-only, so any write changes the length and invalidates the entry.
+/// The cwd stays alongside the thread rather than being filtered during
+/// parsing so one cached parse can answer lookups from any workspace.
+#[derive(Clone)]
+struct ParsedSessionFile {
+    cwd: String,
+    thread: HydratedClaudeThread,
+}
+
+struct SessionFileCacheEntry {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    session: Option<ParsedSessionFile>,
+}
+
+static SESSION_FILE_CACHE: OnceLock<std::sync::Mutex<HashMap<PathBuf, SessionFileCacheEntry>>> =
+    OnceLock::new();
+
 fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<HydratedClaudeThread> {
+    let session = match fs::metadata(path) {
+        Ok(metadata) => {
+            let modified = metadata.modified().ok();
+            let len = metadata.len();
+            let cache = SESSION_FILE_CACHE.get_or_init(Default::default);
+            let cached = cache.lock().ok().and_then(|entries| {
+                entries.get(path).and_then(|entry| {
+                    (entry.modified == modified && entry.len == len)
+                        .then(|| entry.session.clone())
+                })
+            });
+            match cached {
+                Some(session) => session,
+                None => {
+                    let session = parse_session_file(path);
+                    if let Ok(mut entries) = cache.lock() {
+                        entries.insert(
+                            path.to_path_buf(),
+                            SessionFileCacheEntry {
+                                modified,
+                                len,
+                                session: session.clone(),
+                            },
+                        );
+                    }
+                    session
+                }
+            }
+        }
+        // Unstat-able files can't be validated against a cache entry; parse
+        // fresh (which will almost certainly fail to open too).
+        Err(_) => parse_session_file(path),
+    };
+    let session = session?;
+    (session.cwd == workspace_path).then_some(session.thread)
+}
+
+fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
     let file_updated_at = fs::metadata(path)
         .ok()
         .and_then(|metadata| metadata.modified().ok())
@@ -1240,9 +1305,6 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
     }
 
     let cwd = cwd?;
-    if cwd != workspace_path {
-        return None;
-    }
     let session_id = session_id
         .or_else(|| {
             path.file_stem()
@@ -1289,7 +1351,10 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
         variant: None,
     };
 
-    Some(HydratedClaudeThread { summary, items })
+    Some(ParsedSessionFile {
+        cwd,
+        thread: HydratedClaudeThread { summary, items },
+    })
 }
 
 fn upsert_hydrated_assistant_message(
@@ -1547,6 +1612,40 @@ mod tests {
             citations[0].cited_text.as_deref(),
             Some("Supporting evidence")
         );
+    }
+
+    #[test]
+    fn session_file_cache_refreshes_on_append_and_filters_per_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_path = dir.path().join("session.jsonl");
+        let record = |text: &str| {
+            json!({
+                "session_id": "33333333-3333-4333-8333-333333333333",
+                "cwd": "/tmp/project",
+                "type": "user",
+                "message": { "role": "user", "content": text },
+                "created_at": "2026-03-19T10:00:00Z"
+            })
+            .to_string()
+        };
+        fs::write(&session_path, record("first")).unwrap();
+
+        let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(hydrated.items.len(), 1);
+
+        // The cached parse must still be filtered by the requested workspace,
+        // not returned wholesale to whoever asks.
+        assert!(hydrate_thread_from_file(&session_path, "/tmp/other").is_none());
+
+        // Appending grows the file, which must invalidate the cache entry even
+        // when the mtime's coarse granularity makes it look unchanged.
+        let mut contents = fs::read_to_string(&session_path).unwrap();
+        contents.push('\n');
+        contents.push_str(&record("second"));
+        fs::write(&session_path, contents).unwrap();
+
+        let rehydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
+        assert_eq!(rehydrated.items.len(), 2, "{:?}", rehydrated.items);
     }
 
     #[test]
