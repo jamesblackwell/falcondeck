@@ -341,7 +341,7 @@ export function ModelMenu({
           align="start"
           sideOffset={6}
           onCloseAutoFocus={onCloseAutoFocus}
-          className="z-50 w-80 rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+          className="z-50 w-[32rem] max-w-[calc(100vw-2rem)] rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
         >
           <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
             Model
