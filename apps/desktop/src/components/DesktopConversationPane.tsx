@@ -1,16 +1,25 @@
-import type { ComponentProps, ReactNode } from 'react'
+import { useMemo, type ComponentProps, type ReactNode } from 'react'
 
+import { currentTurnPlan } from '@falcondeck/client-core'
 import type {
   ConversationItem,
   FalconDeckPreferences,
   InteractiveRequest,
   InteractiveResponsePayload,
   RemoteStatusResponse,
+  ServiceNotice,
   ThreadSummary,
   TrustedDevice,
   WorkspaceSummary,
 } from '@falcondeck/client-core'
-import { Conversation, PromptInput, QueuedTurns, type OpenFileDiff } from '@falcondeck/chat-ui'
+import {
+  Conversation,
+  OperationalNotice,
+  PlanBar,
+  PromptInput,
+  QueuedTurns,
+  type OpenFileDiff,
+} from '@falcondeck/chat-ui'
 
 import { InteractiveRequestBar } from './InteractiveRequestBar'
 import { ConversationFindBar } from './ConversationFindBar'
@@ -31,8 +40,14 @@ type DesktopConversationPaneProps = {
   preferences: FalconDeckPreferences | null
   conversationEmptyState: ReactNode
   isSending: boolean
+  sendingLabel?: string | null
   isThreadDetailPending: boolean
+  hasOlderMessages?: boolean
+  isLoadingOlderMessages?: boolean
+  onLoadOlderMessages?: () => void
   interactiveRequests: InteractiveRequest[]
+  operationalNotice: ServiceNotice | null
+  onDismissOperationalNotice: (noticeId: string) => void
   findRequestKey?: number
   onStartPairing: () => void
   onRevokeDevice?: (device: TrustedDevice) => void
@@ -41,6 +56,7 @@ type DesktopConversationPaneProps = {
     request: InteractiveRequest,
     response: InteractiveResponsePayload,
   ) => void
+  promptInputKey?: string
   promptInputProps: ComponentProps<typeof PromptInput>
   onRemoveQueuedTurn?: (queuedId: string) => void
   onSteerQueuedTurn?: (queuedId: string) => void
@@ -49,6 +65,9 @@ type DesktopConversationPaneProps = {
   onOpenFile?: OpenFileDiff | null
   headerControls?: ReactNode
   onNewThread?: () => void
+  onEditResend?: (item: Extract<ConversationItem, { kind: 'user_message' }>) => void
+  editResendUnavailableReason?: string | null
+  onRetryResponse?: (item: Extract<ConversationItem, { kind: 'user_message' }>) => void
 }
 
 export function DesktopConversationPane({
@@ -65,13 +84,20 @@ export function DesktopConversationPane({
   preferences,
   conversationEmptyState,
   isSending,
+  sendingLabel = null,
   isThreadDetailPending,
+  hasOlderMessages = false,
+  isLoadingOlderMessages = false,
+  onLoadOlderMessages,
   interactiveRequests,
+  operationalNotice,
+  onDismissOperationalNotice,
   findRequestKey = 0,
   onStartPairing,
   onRevokeDevice,
   revokingDeviceId,
   onInteractiveResponse,
+  promptInputKey,
   promptInputProps,
   onRemoveQueuedTurn,
   onSteerQueuedTurn,
@@ -80,7 +106,13 @@ export function DesktopConversationPane({
   onOpenFile,
   headerControls,
   onNewThread,
+  onEditResend,
+  editResendUnavailableReason,
+  onRetryResponse,
 }: DesktopConversationPaneProps) {
+  // The live plan is pinned above the composer instead of scrolling away with
+  // the rest of the turn; the transcript skips the same item.
+  const pinnedPlan = useMemo(() => currentTurnPlan(conversationItems), [conversationItems])
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface-1">
       <SessionHeader
@@ -101,6 +133,9 @@ export function DesktopConversationPane({
         />
         {headerControls}
       </SessionHeader>
+      {operationalNotice ? (
+        <OperationalNotice notice={operationalNotice} onDismiss={onDismissOperationalNotice} />
+      ) : null}
       <ConversationFindBar requestKey={findRequestKey} />
       <Conversation
         threadKey={
@@ -109,14 +144,24 @@ export function DesktopConversationPane({
             : selectedWorkspaceId
         }
         items={conversationItems}
+        exportTitle={selectedThread?.title}
         preferences={preferences}
         emptyState={conversationEmptyState}
         isSending={isSending}
+        sendingLabel={sendingLabel}
         isThinking={selectedThread?.status === 'running'}
         isWaitingForInput={selectedThread?.status === 'waiting_for_input'}
         isLoading={isThreadDetailPending}
+        hasOlder={hasOlderMessages}
+        isLoadingOlder={isLoadingOlderMessages}
+        onLoadOlder={onLoadOlderMessages}
         onOpenFile={onOpenFile}
+        onEditResend={onEditResend}
+        editResendUnavailableReason={editResendUnavailableReason}
+        onRetryResponse={onRetryResponse}
+        pinnedPlanId={pinnedPlan?.itemId ?? null}
       />
+      {pinnedPlan ? <PlanBar plan={pinnedPlan.plan} threadKey={selectedThreadId} /> : null}
       <InteractiveRequestBar requests={interactiveRequests} onRespond={onInteractiveResponse} />
       {selectedThread && onRemoveQueuedTurn && onSteerQueuedTurn ? (
         <QueuedTurns
@@ -127,7 +172,7 @@ export function DesktopConversationPane({
           onEdit={onEditQueuedTurn}
         />
       ) : null}
-      <PromptInput {...promptInputProps} />
+      <PromptInput key={promptInputKey} {...promptInputProps} />
     </section>
   )
 }

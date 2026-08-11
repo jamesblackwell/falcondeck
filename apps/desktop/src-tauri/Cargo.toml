@@ -14,6 +14,7 @@ tauri-build = { version = "2.6.3", features = [] }
 falcondeck-core = { path = "../../../crates/falcondeck-core" }
 falcondeck-daemon = { path = "../../../crates/falcondeck-daemon" }
 open = "5.3.3"
+rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs"] }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.11.5", features = [] }

@@ -164,25 +164,25 @@ describe('persisted composer state', () => {
 })
 
 describe('resolvePersistedMode', () => {
-  it('keeps a remembered mode only while the provider still advertises it', () => {
+  it('keeps a remembered mode and defaults Codex sandboxes to full access', () => {
     const modes = ['default', 'acceptEdits', 'bypassPermissions']
     expect(resolvePersistedMode('bypassPermissions', modes)).toBe('bypassPermissions')
     expect(resolvePersistedMode('dontAsk', modes)).toBeNull()
-    expect(resolvePersistedMode(null, modes)).toBeNull()
+    expect(resolvePersistedMode(null, ['read-only', 'danger-full-access'])).toBe('danger-full-access')
     expect(resolvePersistedMode(undefined, [])).toBeNull()
     expect(resolvePersistedMode('default', modes)).toBeNull()
   })
 
-  it('defaults new permission selections to bypass when the harness offers it', () => {
+  it('defaults new permission selections to the strongest advertised mode', () => {
     const modes = ['default', 'acceptEdits', 'bypassPermissions']
     expect(preferredPermissionMode(modes)).toBe('bypassPermissions')
     expect(resolvePermissionMode(null, modes)).toBe('bypassPermissions')
     expect(resolvePermissionMode('default', modes)).toBeNull()
-    expect(resolvePermissionMode('bypassPermissions', [])).toBe('bypassPermissions')
+    expect(resolvePermissionMode('bypassPermissions', [])).toBeNull()
     expect(resolvePermissionMode('stale-mode', modes)).toBe('bypassPermissions')
   })
 
-  it('uses common permissive ACP ids without hard-coding a provider', () => {
+  it('recognizes permissive ACP mode names without guessing unknown modes', () => {
     expect(preferredPermissionMode(['default', 'yolo'])).toBe('yolo')
     expect(preferredPermissionMode(['default', 'plan'])).toBeNull()
   })

@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   ChevronDown,
   Copy,
-  LoaderCircle,
   Lock,
   Monitor,
   RadioTower,
@@ -14,7 +13,7 @@ import { QRCodeSVG } from 'qrcode.react'
 import * as Popover from '@radix-ui/react-popover'
 
 import type { RemoteStatusResponse, TrustedDevice } from '@falcondeck/client-core'
-import { Button, CopyButton, StatusIndicator, useToast } from '@falcondeck/ui'
+import { ActivityDiamond, Button, CopyButton, StatusIndicator, useToast } from '@falcondeck/ui'
 
 import { openExternalUrl } from '../api'
 import { formatCountdown, useMillisUntil } from '../pairing-expiry'
@@ -140,7 +139,7 @@ function ExpiredPairingCard({
         className="w-full"
       >
         {isStartingRemote ? (
-          <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+          <ActivityDiamond tone="current" />
         ) : (
           <RefreshCw className="h-3.5 w-3.5" />
         )}
@@ -267,7 +266,7 @@ export function RemotePairingPopover({
                   className="w-full"
                 >
                   {isStartingRemote ? (
-                    <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+                    <ActivityDiamond tone="current" />
                   ) : (
                     <Monitor className="h-3.5 w-3.5" />
                   )}
@@ -296,7 +295,7 @@ export function RemotePairingPopover({
               <div className="rounded-[var(--fd-radius-md)] bg-surface-2 px-3 py-2.5">
                 {status === 'connecting' ? (
                   <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)] text-fg-secondary">
-                    <LoaderCircle className="h-3.5 w-3.5 animate-spin text-accent" />
+                    <ActivityDiamond />
                     Reconnecting to relay…
                   </div>
                 ) : (
@@ -328,7 +327,7 @@ export function RemotePairingPopover({
                             disabled={revokingDeviceId != null}
                           >
                             {revokingDeviceId === d.device_id ? (
-                              <LoaderCircle className="h-3 w-3 animate-spin" />
+                              <ActivityDiamond size="xs" tone="current" />
                             ) : (
                               <Trash2 className="h-3 w-3" />
                             )}
@@ -358,7 +357,7 @@ export function RemotePairingPopover({
                 className="fd-focus flex w-full items-center justify-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-2 hover:text-fg-secondary"
               >
                 {isStartingRemote ? (
-                  <LoaderCircle className="h-3 w-3 animate-spin" />
+                  <ActivityDiamond size="xs" tone="current" />
                 ) : (
                   <RefreshCw className="h-3 w-3" />
                 )}

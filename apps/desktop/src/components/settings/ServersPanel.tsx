@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { DEFAULT_REMOTE_RELAY_URL } from '@falcondeck/client-core'
 import {
+  ActivityDiamond,
   Badge,
   Button,
   Card,
@@ -15,7 +16,6 @@ import {
 import {
   FolderPlus,
   Globe,
-  LoaderCircle,
   Plus,
   RefreshCw,
   Server,
@@ -173,7 +173,7 @@ function ServerRow({
       }
       return (await response.json()) as { ok: boolean; pairing_code: string | null; output: string }
     },
-    [baseUrl, host.sshPort, host.sshTarget, onToast],
+    [baseUrl, host.relayUrl, host.sshPort, host.sshTarget, onToast],
   )
 
   const handleRestart = useCallback(async () => {
@@ -294,7 +294,7 @@ function ServerRow({
             onClick={() => void handleRestart()}
           >
             {busy === 'restart' ? (
-              <LoaderCircle className="h-4 w-4 animate-spin" />
+              <ActivityDiamond size="md" tone="current" />
             ) : (
               <RefreshCw className="h-4 w-4" />
             )}
@@ -315,7 +315,7 @@ function ServerRow({
             The relay no longer accepts this pairing. Re-pair to reconnect.
           </span>
           <Button size="sm" disabled={busy !== null} onClick={() => void handleRepair()}>
-            {busy === 'repair' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : 'Re-pair'}
+            {busy === 'repair' ? <ActivityDiamond size="md" tone="current" /> : 'Re-pair'}
           </Button>
         </div>
       ) : null}
@@ -331,7 +331,7 @@ function ServerRow({
             }}
           />
           <Button size="sm" disabled={busy === 'project' || !projectPath.trim()} onClick={() => void handleAddProject()}>
-            {busy === 'project' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : 'Add project'}
+            {busy === 'project' ? <ActivityDiamond size="md" tone="current" /> : 'Add project'}
           </Button>
         </div>
       ) : null}
@@ -518,7 +518,7 @@ function AddServerFlow({
       {mode === 'ssh' ? (
         sshHosts === null ? (
           <div className="flex items-center gap-2 py-4 text-[length:var(--fd-text-sm)] text-fg-muted">
-            <LoaderCircle className="h-4 w-4 animate-spin" /> Reading ~/.ssh/config…
+            <ActivityDiamond size="md" /> Reading ~/.ssh/config…
           </div>
         ) : sshHosts.length === 0 ? (
           <p className="py-2 text-[length:var(--fd-text-sm)] text-fg-muted">
@@ -625,7 +625,7 @@ function AddServerFlow({
         <div className="rounded-[var(--fd-radius-md)] bg-surface-3 px-3 py-2">
           <div className="flex items-center gap-2 text-[length:var(--fd-text-sm)] text-fg-secondary">
             {provisioning.status === 'running' ? (
-              <LoaderCircle className="h-4 w-4 animate-spin" />
+              <ActivityDiamond size="md" />
             ) : null}
             {provisioning.status === 'failed' ? (
               <span className="text-[color:var(--color-danger,#e5484d)]">
@@ -653,7 +653,7 @@ function AddServerFlow({
             disabled={isSubmitting || !pairingCode.trim()}
             onClick={() => void handlePairWithCode()}
           >
-            {isSubmitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : 'Connect'}
+            {isSubmitting ? <ActivityDiamond size="md" tone="current" /> : 'Connect'}
           </Button>
         ) : (
           <Button
@@ -661,7 +661,7 @@ function AddServerFlow({
             disabled={isSubmitting || !target || !baseUrl}
             onClick={() => void handleProvision()}
           >
-            {isSubmitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : 'Connect'}
+            {isSubmitting ? <ActivityDiamond size="md" tone="current" /> : 'Connect'}
           </Button>
         )}
       </div>

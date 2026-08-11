@@ -32,7 +32,21 @@ export async function restartDesktopApp() {
   await invoke('restart_app')
 }
 
+function isSafeExternalUrl(url: string) {
+  const lower = url.toLowerCase()
+  return (
+    lower.startsWith('https://') ||
+    lower.startsWith('http://') ||
+    lower.startsWith('mailto:') ||
+    lower.startsWith('tel:')
+  )
+}
+
 export async function openExternalUrl(url: string) {
+  if (!isSafeExternalUrl(url)) {
+    throw new Error('FalconDeck can only open http, https, mailto, or tel links.')
+  }
+
   if (isTauriDesktop()) {
     const { invoke } = await import('@tauri-apps/api/core')
     await invoke('open_external_url', { url })

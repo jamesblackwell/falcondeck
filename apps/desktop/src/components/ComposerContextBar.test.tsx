@@ -40,7 +40,7 @@ describe('ComposerContextBar', () => {
       />,
     )
 
-    expect(screen.getByRole('combobox', { name: 'Project' })).toHaveTextContent('falcondeck')
+    expect(screen.getByRole('button', { name: 'Project' })).toHaveTextContent('falcondeck')
     expect(screen.getByRole('combobox', { name: 'Work in' })).toHaveTextContent('Project folder')
     expect(screen.getByRole('button', { name: 'Git branch' })).toHaveTextContent('main')
   })
@@ -102,5 +102,36 @@ describe('ComposerContextBar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Git branch' }))
     fireEvent.click(screen.getByRole('menuitemradio', { name: /main/ }))
     expect(onCheckoutBranch).not.toHaveBeenCalled()
+  })
+
+  it('filters long project and branch menus without changing short menus', () => {
+    const workspaces = Array.from({ length: 9 }, (_, index) =>
+      workspace(`ws-${index}`, `/Users/dev/project-${index}`),
+    )
+    render(
+      <ComposerContextBar
+        {...baseProps}
+        workspaces={workspaces}
+        selectedWorkspace={workspaces[0] ?? null}
+        branches={{
+          current: 'main',
+          branches: ['main', 'develop', 'release', 'staging', 'feature/auth', 'feature/chat', 'fix/ios', 'fix/web', 'docs/readme'],
+        }}
+        onCheckoutBranch={vi.fn()}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    const projectSearch = screen.getByRole('searchbox', { name: 'Search projects' })
+    fireEvent.change(projectSearch, { target: { value: 'project-8' } })
+    expect(screen.getByRole('menuitemradio', { name: /project-8/ })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitemradio', { name: /project-1/ })).not.toBeInTheDocument()
+
+    fireEvent.keyDown(projectSearch, { key: 'Escape' })
+    fireEvent.click(screen.getByRole('button', { name: 'Git branch' }))
+    const branchSearch = screen.getByRole('searchbox', { name: 'Search branches' })
+    fireEvent.change(branchSearch, { target: { value: 'ios' } })
+    expect(screen.getByRole('menuitemradio', { name: 'fix/ios' })).toBeInTheDocument()
+    expect(screen.queryByRole('menuitemradio', { name: 'fix/web' })).not.toBeInTheDocument()
   })
 })

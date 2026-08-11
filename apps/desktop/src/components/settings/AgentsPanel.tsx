@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import {
+  ActivityDiamond,
   Badge,
   Button,
   Card,
@@ -10,7 +11,7 @@ import {
   CardTitle,
   Input,
 } from '@falcondeck/ui'
-import { Bot, LoaderCircle, Plus, Trash2, X } from 'lucide-react'
+import { Bot, Plus, Trash2, X } from 'lucide-react'
 
 type ProviderEntry = {
   label?: string
@@ -248,7 +249,7 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
             // "No custom agents yet" is a claim about the daemon's answer, so
             // it must not be made before the answer arrives.
             <div className="flex items-center justify-center gap-2 px-2 py-10 text-[length:var(--fd-text-sm)] text-fg-muted">
-              <LoaderCircle aria-hidden="true" className="h-4 w-4 animate-spin text-accent" />
+              <ActivityDiamond size="md" />
               Loading agents…
             </div>
           ) : !overview || overview.resolved.length === 0 ? (
@@ -378,7 +379,7 @@ function AddAgentForm({
             }
           }}
         >
-          {isBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
+          {isBusy ? <ActivityDiamond size="md" tone="current" /> : null}
           Add agent
         </Button>
       </div>

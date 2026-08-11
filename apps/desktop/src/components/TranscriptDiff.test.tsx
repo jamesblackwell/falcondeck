@@ -108,4 +108,21 @@ describe('transcript diff rendering', () => {
     fireEvent.click(screen.getByText('Show 27 more lines'))
     expect(screen.getByText('line 39')).toBeTruthy()
   })
+
+  it('keeps pathological diffs bounded after expansion', () => {
+    const longDiff = [
+      'diff --git a/src/huge.ts b/src/huge.ts',
+      '--- a/src/huge.ts',
+      '+++ b/src/huge.ts',
+      '@@ -1,1100 +1,1100 @@',
+      ...Array.from({ length: 1_100 }, (_, index) => `+line ${index + 1}`),
+    ].join('\n')
+
+    renderTranscript([toolCall({ id: 'tool-huge', output: longDiff })])
+    fireEvent.click(screen.getByText('Show 986 more lines'))
+
+    expect(screen.getByText('line 999')).toBeVisible()
+    expect(screen.queryByText('line 1000')).toBeNull()
+    expect(screen.getByRole('status')).toHaveTextContent('complete diff')
+  })
 })

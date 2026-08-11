@@ -1,4 +1,4 @@
-import { LoaderCircle } from 'lucide-react'
+import { ActivityDiamond } from '@falcondeck/ui'
 
 export function ProjectImportOverlay() {
   return (
@@ -6,7 +6,7 @@ export function ProjectImportOverlay() {
       <div className="w-full max-w-md rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-6 shadow-[var(--fd-shadow-lg)]">
         <div className="flex items-start gap-3">
           <div className="mt-0.5 rounded-full bg-surface-3 p-2 text-accent">
-            <LoaderCircle className="h-5 w-5 animate-spin" />
+            <ActivityDiamond size="lg" tone="current" />
           </div>
           <div className="space-y-1">
             <h2 className="text-[length:var(--fd-text-lg)] font-medium text-fg-primary">

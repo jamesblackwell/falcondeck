@@ -73,7 +73,9 @@ export function useAppUpdater() {
   // 15s timeout on each move, turning a four-hourly check into a hot loop
   // against GitHub Releases.
   const statusRef = useRef(state.status)
-  statusRef.current = state.status
+  useEffect(() => {
+    statusRef.current = state.status
+  }, [state.status])
   const unsupportedMessage = 'Automatic updates are only available in the packaged FalconDeck desktop app.'
   const devModeMessage = 'Updater checks are disabled in development builds.'
 

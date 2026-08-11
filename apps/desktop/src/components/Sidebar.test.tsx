@@ -188,6 +188,119 @@ describe('DesktopSidebar', () => {
     expect(waiting.compareDocumentPosition(idle)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 
+  it('trails an out-of-window selected chat below the five most recent', () => {
+    const threads = Array.from({ length: 8 }, (_, index) =>
+      thread({
+        id: `thread-${index}`,
+        title: `Chat ${index}`,
+        // Descending recency: Chat 0 is newest, Chat 7 is oldest.
+        updated_at: `2026-03-${String(20 - index).padStart(2, '0')}T10:00:00Z`,
+      }),
+    )
+
+    renderSidebar({
+      groups: [{ workspace: workspace(), threads }],
+      selectedThreadId: 'thread-7',
+    })
+
+    const projectsSection = screen.getByRole('region', { name: 'Projects' })
+    for (const index of [0, 1, 2, 3, 4]) {
+      expect(within(projectsSection).getByText(`Chat ${index}`)).toBeInTheDocument()
+    }
+    // The chats between the window and the selection stay hidden.
+    expect(within(projectsSection).queryByText('Chat 5')).not.toBeInTheDocument()
+    expect(within(projectsSection).queryByText('Chat 6')).not.toBeInTheDocument()
+    expect(within(projectsSection).getByText('Chat 7')).toBeInTheDocument()
+
+    fireEvent.click(within(projectsSection).getByText('Show more'))
+    expect(within(projectsSection).getByText('Chat 5')).toBeInTheDocument()
+    expect(within(projectsSection).getAllByText('Chat 7')).toHaveLength(1)
+  })
+
+  it('keeps the five most recent chats visible after the selection moves back in', () => {
+    const threads = Array.from({ length: 8 }, (_, index) =>
+      thread({
+        id: `thread-${index}`,
+        title: `Chat ${index}`,
+        updated_at: `2026-03-${String(20 - index).padStart(2, '0')}T10:00:00Z`,
+      }),
+    )
+    const groups: ProjectGroup[] = [{ workspace: workspace(), threads }]
+
+    const { rerender } = render(
+      <DesktopSidebar
+        groups={groups}
+        selectedWorkspaceId="workspace-1"
+        selectedThreadId="thread-7"
+        onSelectWorkspace={() => {}}
+        onSelectThread={() => {}}
+      />,
+    )
+
+    rerender(
+      <DesktopSidebar
+        groups={groups}
+        selectedWorkspaceId="workspace-1"
+        selectedThreadId="thread-1"
+        onSelectWorkspace={() => {}}
+        onSelectThread={() => {}}
+      />,
+    )
+
+    const projectsSection = screen.getByRole('region', { name: 'Projects' })
+    for (const index of [0, 1, 2, 3, 4]) {
+      expect(within(projectsSection).getByText(`Chat ${index}`)).toBeInTheDocument()
+    }
+    expect(within(projectsSection).queryByText('Chat 7')).not.toBeInTheDocument()
+  })
+
+  it('reorders projects by dragging across the project rows', () => {
+    const onWorkspaceOrderChange = vi.fn().mockResolvedValue(undefined)
+    const first = workspace({ id: 'workspace-a', path: '/Users/james/alpha' })
+    const second = workspace({ id: 'workspace-b', path: '/Users/james/beta' })
+
+    renderSidebar({
+      groups: [
+        { workspace: first, threads: [thread({ workspace_id: first.id })] },
+        { workspace: second, threads: [thread({ workspace_id: second.id, id: 'thread-b' })] },
+      ],
+      onWorkspaceOrderChange,
+    })
+
+    const firstRow = document.querySelector('[data-workspace-drag-id="workspace-a"]')
+    const secondRow = document.querySelector('[data-workspace-drag-id="workspace-b"]')
+    if (!(firstRow instanceof HTMLElement) || !(secondRow instanceof HTMLElement)) {
+      throw new Error('Expected draggable workspace rows')
+    }
+    Object.defineProperty(firstRow, 'setPointerCapture', { value: vi.fn() })
+    Object.defineProperty(firstRow, 'hasPointerCapture', { value: vi.fn(() => true) })
+    Object.defineProperty(firstRow, 'releasePointerCapture', { value: vi.fn() })
+    Object.defineProperty(secondRow, 'getBoundingClientRect', {
+      value: () => ({ top: 100, bottom: 140, height: 40, left: 0, right: 300, width: 300 }),
+    })
+
+    fireEvent.pointerDown(firstRow, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    })
+    fireEvent.pointerMove(firstRow, {
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 150,
+    })
+    expect(document.querySelector('[data-workspace-drop-indicator="true"]')).toBeInTheDocument()
+    fireEvent.pointerUp(firstRow, { pointerId: 1, isPrimary: true, button: 0 })
+
+    expect(onWorkspaceOrderChange).toHaveBeenCalledWith(['workspace-b', 'workspace-a'])
+    expect(screen.getByText('beta').compareDocumentPosition(screen.getByText('alpha'))).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
+  })
+
   it('changes the chat sort from the Projects heading menu', async () => {
     const onThreadSortChange = vi.fn()
     renderSidebar({ threadSort: 'last_updated', onThreadSortChange })
@@ -293,8 +406,9 @@ describe('DesktopSidebar', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete' }))
 
     const dialog = await screen.findByRole('dialog')
-    expect(dialog).toHaveTextContent('deletes its isolated worktree')
+    expect(dialog).toHaveTextContent('deletes its isolated copy')
     expect(dialog).toHaveTextContent('/Users/james/.falcondeck/worktrees/fix-login')
+    expect(dialog).toHaveTextContent('committed work stays on branch fd/fix-login')
   })
 
   it('leaves the delete item out when deletion is unavailable', () => {

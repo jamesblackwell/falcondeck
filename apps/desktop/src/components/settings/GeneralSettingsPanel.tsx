@@ -4,9 +4,9 @@ import type {
   WorkspaceSummary,
 } from '@falcondeck/client-core'
 import { normalizePreferences } from '@falcondeck/client-core'
-import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, cn } from '@falcondeck/ui'
+import { ActivityDiamond, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, cn } from '@falcondeck/ui'
 
-import { Download, FolderSync, LoaderCircle, RotateCcw } from 'lucide-react'
+import { Download, FolderSync, RotateCcw } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 import { PreferenceToggle } from './PreferenceToggle'
@@ -60,7 +60,7 @@ export function GeneralSettingsPanel({
           }
         : {
             label: 'Check for updates',
-            icon: isChecking ? LoaderCircle : FolderSync,
+            icon: FolderSync,
             onClick: onCheckForUpdates,
             disabled: isChecking || isDownloading,
           }
@@ -139,7 +139,11 @@ export function GeneralSettingsPanel({
                 </p>
               </div>
               <Button type="button" onClick={primaryAction.onClick} disabled={primaryAction.disabled}>
-                <primaryAction.icon className={cn('h-4 w-4', (isChecking || isDownloading) && 'animate-spin')} />
+                {isChecking || isDownloading ? (
+                  <ActivityDiamond size="md" tone="current" />
+                ) : (
+                  <primaryAction.icon className="h-4 w-4" />
+                )}
                 {primaryAction.label}
               </Button>
             </div>
@@ -174,6 +178,54 @@ export function GeneralSettingsPanel({
               </div>
             ) : null}
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Notifications</CardTitle>
+          <CardDescription>
+            Keep attention signals useful across desktop and mobile. These preferences are stored
+            by the daemon and sync to every paired client.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <PreferenceToggle
+            label="Agent attention notifications"
+            description="Allow FalconDeck to notify paired devices about important agent events."
+            enabled={current.notifications.enabled}
+            onToggle={(next) => onUpdatePreferences({ notifications: { enabled: next } })}
+          />
+          <PreferenceToggle
+            label="Completed turns"
+            description="Notify when an agent finishes a turn while you are away from this desktop."
+            enabled={current.notifications.notify_on_turn_complete}
+            onToggle={(next) =>
+              onUpdatePreferences({ notifications: { notify_on_turn_complete: next } })
+            }
+          />
+          <PreferenceToggle
+            label="Approvals and questions"
+            description="Notify when an agent is blocked waiting for your decision or answer."
+            enabled={current.notifications.notify_on_input_required}
+            onToggle={(next) =>
+              onUpdatePreferences({ notifications: { notify_on_input_required: next } })
+            }
+          />
+          <PreferenceToggle
+            label="Failed turns"
+            description="Notify when an agent turn ends with an error that may need investigation."
+            enabled={current.notifications.notify_on_error}
+            onToggle={(next) => onUpdatePreferences({ notifications: { notify_on_error: next } })}
+          />
+          <PreferenceToggle
+            label="Suppress pushes while desktop is active"
+            description="Avoid sending a phone push while this desktop window is focused; the activity lease expires automatically when it is not."
+            enabled={current.notifications.suppress_when_desktop_active}
+            onToggle={(next) =>
+              onUpdatePreferences({ notifications: { suppress_when_desktop_active: next } })
+            }
+          />
         </CardContent>
       </Card>
 
@@ -287,13 +339,13 @@ export function GeneralSettingsPanel({
           />
           <PreferenceToggle
             label="Auto-open errors"
-            description="Expand errors immediately so debugging does not hide behind compact mode."
+            description="Surface and expand failed calls immediately. Off folds them in with everything else — the agent still explains failures that blocked it."
             enabled={current.conversation.auto_expand.errors}
             onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { errors: next } } })}
           />
           <PreferenceToggle
             label="Auto-open failed tests"
-            description="Keep failing test runs visible even when successful inspection bursts are collapsed."
+            description="Keep failing test runs visible and expanded even when successful inspection bursts are collapsed."
             enabled={current.conversation.auto_expand.failed_tests}
             onToggle={(next) => onUpdatePreferences({ conversation: { auto_expand: { failed_tests: next } } })}
           />

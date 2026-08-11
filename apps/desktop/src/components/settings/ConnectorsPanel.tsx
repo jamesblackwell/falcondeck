@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import {
+  ActivityDiamond,
   Badge,
   Button,
   Card,
@@ -11,7 +12,7 @@ import {
   Input,
   cn,
 } from '@falcondeck/ui'
-import { ClipboardPaste, Globe, LoaderCircle, Plug, Plus, Trash2, X } from 'lucide-react'
+import { ClipboardPaste, Globe, Plug, Plus, Trash2, X } from 'lucide-react'
 
 export type ConnectorEntry = {
   command?: string | null
@@ -273,7 +274,7 @@ export function ConnectorsPanel({ baseUrl, workspaces, onToast }: ConnectorsPane
 
           {isLoading && !ready ? (
             <div className="flex items-center gap-2 px-2 py-6 text-[length:var(--fd-text-sm)] text-fg-muted">
-              <LoaderCircle className="h-4 w-4 animate-spin" /> Loading connectors…
+              <ActivityDiamond size="md" /> Loading connectors…
             </div>
           ) : loadError ? (
             <div className="flex items-center gap-3 px-2 py-4">
@@ -481,7 +482,7 @@ function ImportJsonForm({
             }
           }}
         >
-          {isBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
+          {isBusy ? <ActivityDiamond size="md" tone="current" /> : null}
           Import
         </Button>
       </div>
@@ -582,7 +583,7 @@ function AddConnectorForm({
             }
           }}
         >
-          {isBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
+          {isBusy ? <ActivityDiamond size="md" tone="current" /> : null}
           Add server
         </Button>
       </div>

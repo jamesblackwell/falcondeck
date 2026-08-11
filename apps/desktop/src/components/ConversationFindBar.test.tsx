@@ -1,7 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
-import { ConversationFindBar, findTranscriptMatches } from './ConversationFindBar'
+import { ConversationFindBar } from './ConversationFindBar'
+import { findTranscriptMatches } from './conversation-find'
 
 describe('ConversationFindBar', () => {
   it('opens on request and searches forward or backward', () => {

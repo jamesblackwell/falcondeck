@@ -1,9 +1,9 @@
 import { memo, useEffect, useMemo, useState, type KeyboardEvent } from 'react'
-import { ArrowLeft, Check, LoaderCircle, Pencil, RotateCcw, Save, X } from 'lucide-react'
+import { ArrowLeft, Check, Pencil, RotateCcw, Save, X } from 'lucide-react'
 
 import { HighlightedFileLine, languageFromPath, useShikiTokens } from '@falcondeck/chat-ui'
 import type { WorkspaceFileResponse } from '@falcondeck/client-core'
-import { Button } from '@falcondeck/ui'
+import { ActivityDiamond, Button } from '@falcondeck/ui'
 
 import { FileTypeIcon } from './FileTypeIcon'
 
@@ -91,7 +91,7 @@ export const FileView = memo(function FileView({
                 className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-accent hover:bg-accent-muted disabled:text-fg-faint"
               >
                 {isSaving ? (
-                  <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+                  <ActivityDiamond tone="current" />
                 ) : isDirty ? (
                   <Save aria-hidden="true" className="h-3.5 w-3.5" />
                 ) : (
@@ -117,7 +117,11 @@ export const FileView = memo(function FileView({
           aria-label="Reload file"
           className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
         >
-          <RotateCcw aria-hidden="true" className={`h-3.5 w-3.5 ${isLoading ? 'animate-spin' : ''}`} />
+          {isLoading ? (
+            <ActivityDiamond tone="current" />
+          ) : (
+            <RotateCcw aria-hidden="true" className="h-3.5 w-3.5" />
+          )}
         </button>
       </div>
 
@@ -128,7 +132,7 @@ export const FileView = memo(function FileView({
       ) : null}
       <div className="min-h-0 flex-1 overflow-auto">
         {isLoading ? (
-          <LoaderCircle className="mx-auto mt-8 h-5 w-5 animate-spin text-fg-faint" />
+          <ActivityDiamond size="lg" className="mx-auto mt-8 flex" />
         ) : file?.is_binary ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
             Binary files cannot be displayed

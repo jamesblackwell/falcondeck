@@ -1,19 +1,23 @@
 import {
   defaultProviderLabel,
+  interactiveResolutionFromResponse,
   workspaceAccount,
   workspaceProviderLabel,
   type AgentProvider,
   type ConversationItem,
+  type InteractiveResponsePayload,
   type WorkspaceSummary,
 } from '@falcondeck/client-core'
 
 export function markInteractiveRequestResolved(
   items: ConversationItem[],
   requestId: string,
+  response: InteractiveResponsePayload,
 ): ConversationItem[] {
+  const resolution = interactiveResolutionFromResponse(response)
   return items.map((item) =>
     item.kind === 'interactive_request' && item.id === requestId
-      ? { ...item, resolved: true }
+      ? { ...item, resolved: true, resolution }
       : item,
   )
 }

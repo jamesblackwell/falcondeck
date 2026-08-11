@@ -90,4 +90,26 @@ describe('tool card tiers', () => {
     expect(toggle.closest('[data-tool-tier]')).not.toHaveAttribute('data-tool-tier', 'confirm')
     expect(toggle).toBeEnabled()
   })
+
+  it('summarizes test counts without replacing authoritative output', () => {
+    renderTool(toolCall({
+      artifact_kind: 'test',
+      activity_kind: 'test',
+      lifecycle: 'failed',
+      is_error: true,
+      test_summary: {
+        framework: 'vitest', total: 43, passed: 42, failed: 1, skipped: 0,
+        suites_total: 5, suites_passed: 4, suites_failed: 1, duration_ms: 1_240,
+      },
+    }, {
+      title: 'npm test', status: 'failed', exit_code: 1,
+      output: 'FAIL src/markdown.test.tsx\nExpected safe link',
+    }))
+
+    expect(screen.getByRole('button', { name: 'Toggle npm test details, Failed, 1 failed' })).toBeVisible()
+    expect(screen.getByRole('region', {
+      name: 'Test results, Vitest, 42 passed, 1 failed, 0 skipped, 4 suites passed, 1 suite failed, 1.2 s',
+    })).toBeVisible()
+    expect(screen.getByText(/Expected safe link/)).toBeVisible()
+  })
 })

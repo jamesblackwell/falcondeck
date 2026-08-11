@@ -95,12 +95,18 @@ fn dev_daemon_source_stamp() -> Result<String, String> {
     collect_dev_daemon_inputs(&root.join("crates/falcondeck-daemon"), &mut files)?;
     files.sort();
 
+    // Fingerprint path + mtime + length only. Full-content hashing was multi-MB
+    // of IO on every ensure_dev_daemon() call; mtimes catch normal edit/rebuild
+    // loops and are enough for the reusable-dev-daemon restart decision.
     let mut hasher = DefaultHasher::new();
     for path in files {
         path.strip_prefix(&root).unwrap_or(&path).hash(&mut hasher);
-        fs::read(&path)
-            .map_err(|error| format!("failed to fingerprint {path:?}: {error}"))?
-            .hash(&mut hasher);
+        let meta = fs::metadata(&path)
+            .map_err(|error| format!("failed to fingerprint {path:?}: {error}"))?;
+        meta.len().hash(&mut hasher);
+        if let Ok(modified) = meta.modified() {
+            modified.hash(&mut hasher);
+        }
     }
     Ok(format!("{:016x}", hasher.finish()))
 }
@@ -167,11 +173,7 @@ fn stop_dev_daemon_process() -> Result<(), String> {
             // Kill whichever process actually listens on the daemon port —
             // this catches orphans the pid file doesn't know about.
             let listener = Command::new("lsof")
-                .args([
-                    "-ti",
-                    &format!("tcp:{DEFAULT_DAEMON_PORT}"),
-                    "-sTCP:LISTEN",
-                ])
+                .args(["-ti", &format!("tcp:{DEFAULT_DAEMON_PORT}"), "-sTCP:LISTEN"])
                 .stdin(Stdio::null())
                 .stderr(Stdio::null())
                 .output()
@@ -247,21 +249,66 @@ fn ensure_dev_daemon() -> Result<String, String> {
             let _ = std::fs::remove_file(dev_pid_path());
             let repo_root = repo_root()?;
             let state_path = dev_state_path();
-            let child = Command::new("cargo")
-                .args([
-                    "run",
-                    "-p",
-                    "falcondeck-daemon",
-                    "--",
-                    &format!("--port={DEFAULT_DAEMON_PORT}"),
-                ])
-                .env("FALCONDECK_STATE_PATH", state_path)
-                .current_dir(repo_root)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|error| format!("failed to spawn dev daemon: {error}"))?;
+            let binary = repo_root.join("target/debug/falcondeck-daemon");
+            // Warm restart: stamp still matches and the debug binary exists →
+            // skip cargo entirely. Cold / after source changes: build then exec
+            // so the recorded pid becomes the daemon (not a cargo wrapper).
+            let binary_is_current =
+                binary.is_file() && expected_stamp.is_some() && expected_stamp == running_stamp;
+            let child = {
+                #[cfg(windows)]
+                {
+                    let _ = (binary_is_current, &binary);
+                    Command::new("cargo")
+                        .args([
+                            "run",
+                            "-p",
+                            "falcondeck-daemon",
+                            "--",
+                            &format!("--port={DEFAULT_DAEMON_PORT}"),
+                        ])
+                        .env("FALCONDECK_STATE_PATH", &state_path)
+                        .current_dir(&repo_root)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn()
+                        .map_err(|error| format!("failed to spawn dev daemon: {error}"))?
+                }
+                #[cfg(not(windows))]
+                {
+                    if binary_is_current {
+                        Command::new(&binary)
+                            .args([&format!("--port={DEFAULT_DAEMON_PORT}")])
+                            .env("FALCONDECK_STATE_PATH", &state_path)
+                            .current_dir(&repo_root)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn()
+                            .map_err(|error| format!("failed to spawn dev daemon: {error}"))?
+                    } else {
+                        Command::new("sh")
+                            .args([
+                                "-c",
+                                &format!(
+                                    "cargo build -q -p falcondeck-daemon && exec \"$1\" --port={DEFAULT_DAEMON_PORT}"
+                                ),
+                                "falcondeck-dev-daemon",
+                                binary.to_str().ok_or_else(|| {
+                                    "dev daemon binary path is not valid UTF-8".to_string()
+                                })?,
+                            ])
+                            .env("FALCONDECK_STATE_PATH", &state_path)
+                            .current_dir(&repo_root)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .spawn()
+                            .map_err(|error| format!("failed to spawn dev daemon: {error}"))?
+                    }
+                }
+            };
             if let Some(parent) = dev_pid_path().parent() {
                 std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
@@ -272,7 +319,7 @@ fn ensure_dev_daemon() -> Result<String, String> {
             }
         }
 
-        // `cargo run` may have to recompile the daemon after a source change
+        // First-time builds may recompile the daemon after a source change
         // (and can be stuck behind the tauri watcher's own build lock), so
         // give it a realistic window, not seconds. The frontend keeps showing
         // its connecting state while this blocks.
@@ -421,19 +468,46 @@ async fn restart_app(app: AppHandle, state: tauri::State<'_, DesktopState>) -> R
     app.restart();
 }
 
+fn is_safe_external_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("tel:")
+}
+
 #[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
-    if !url.starts_with("https://") && !url.starts_with("http://") {
-        return Err("FalconDeck can only open http or https links.".to_string());
+    if !is_safe_external_url(&url) {
+        return Err("FalconDeck can only open http, https, mailto, or tel links.".to_string());
     }
 
     open::that_detached(url).map_err(|error| error.to_string())
 }
 
 pub fn run() {
+    // The updater enables rustls' Ring provider while the daemon enables
+    // AWS-LC. With both compiled, rustls deliberately refuses to guess and
+    // otherwise panics on the first relay/updater TLS connection.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(DesktopState::default())
+        .on_page_load(|webview, payload| {
+            eprintln!(
+                "FalconDeck webview '{}' page {:?}: {}",
+                webview.label(),
+                payload.event(),
+                payload.url()
+            );
+        })
+        .on_web_content_process_terminate(|webview| {
+            eprintln!(
+                "FalconDeck webview '{}' content process terminated",
+                webview.label()
+            );
+        })
         .setup(|app| {
             #[cfg(desktop)]
             app.handle()
@@ -468,8 +542,7 @@ pub fn run() {
             }
 
             let state = app_handle.state::<DesktopState>();
-            let active_thread_count =
-                tauri::async_runtime::block_on(active_thread_count(&state));
+            let active_thread_count = tauri::async_runtime::block_on(active_thread_count(&state));
             if active_thread_count == 0 {
                 return;
             }
@@ -499,13 +572,9 @@ pub fn run() {
                     }
                 });
         }
-        RunEvent::Exit => {
-            if !cfg!(debug_assertions) {
-                let state = app_handle.state::<DesktopState>();
-                tauri::async_runtime::block_on(async move {
-                    shutdown_embedded_daemon(state).await
-                });
-            }
+        RunEvent::Exit if !cfg!(debug_assertions) => {
+            let state = app_handle.state::<DesktopState>();
+            tauri::async_runtime::block_on(async move { shutdown_embedded_daemon(state).await });
         }
         _ => {}
     });

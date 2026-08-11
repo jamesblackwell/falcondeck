@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import {
-  applyEventToThreadDetail,
+  applyEventsToThreadDetail,
   applySnapshotEvent,
   createDaemonApiClient,
+  mergeThreadDetailPage,
+  THREAD_DETAIL_TAIL_LIMIT,
   reconcileSnapshotSelection,
   type DaemonSnapshot,
   type EventEnvelope,
   type RemoteStatusResponse,
   type ThreadDetail,
 } from '@falcondeck/client-core'
+import { realtimeAudioPlayer } from '@falcondeck/chat-ui'
 
 import { detectApiBaseUrl } from '../api'
 import { performanceTracingEnabled, recordPerformance } from '../performance'
@@ -117,8 +120,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       return next
     })
     setThreadDetail((c) => {
-      let next = c
-      for (const event of events) next = applyEventToThreadDetail(next, event)
+      const next = applyEventsToThreadDetail(c, events)
       if (next) {
         threadDetailCacheRef.current.set(
           threadCacheKey(next.workspace.id, next.thread.id),
@@ -130,19 +132,25 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       // sync so switching threads renders fresh data from memory. The loaded
       // detail's cache entry was already written above from `next` — applying
       // the same event to it a second time would just burn allocations.
+      const cacheEvents = new Map<string, EventEnvelope[]>()
       for (const event of events) {
         if (event.workspace_id && event.thread_id) {
           const cacheKey = threadCacheKey(event.workspace_id, event.thread_id)
           const isLoadedDetail =
             next !== null && threadCacheKey(next.workspace.id, next.thread.id) === cacheKey
           if (!isLoadedDetail) {
-            const cached = threadDetailCacheRef.current.get(cacheKey)
-            if (cached) {
-              const updated = applyEventToThreadDetail(cached, event)
-              if (updated && updated !== cached) {
-                threadDetailCacheRef.current.set(cacheKey, updated)
-              }
-            }
+            const grouped = cacheEvents.get(cacheKey) ?? []
+            grouped.push(event)
+            cacheEvents.set(cacheKey, grouped)
+          }
+        }
+      }
+      for (const [cacheKey, groupedEvents] of cacheEvents) {
+        const cached = threadDetailCacheRef.current.get(cacheKey)
+        if (cached) {
+          const updated = applyEventsToThreadDetail(cached, groupedEvents)
+          if (updated && updated !== cached) {
+            threadDetailCacheRef.current.set(cacheKey, updated)
           }
         }
       }
@@ -156,7 +164,20 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     recordPerformance('falcondeck:event-flush', startedAt, { eventCount: events.length })
   }, [])
 
+  const clearPendingEvents = useCallback(() => {
+    if (eventFrameRef.current !== null) {
+      window.cancelAnimationFrame(eventFrameRef.current)
+      eventFrameRef.current = null
+    }
+    if (eventTimerRef.current !== null) {
+      window.clearTimeout(eventTimerRef.current)
+      eventTimerRef.current = null
+    }
+    pendingEventsRef.current = []
+  }, [])
+
   const handleEvent = useCallback((event: EventEnvelope) => {
+    realtimeAudioPlayer.handleEvent(event)
     pendingEventsRef.current.push(event)
     if (eventFrameRef.current !== null || eventTimerRef.current !== null) return
     // requestAnimationFrame can be suspended for a hidden webview. Continue
@@ -169,17 +190,18 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
   }, [flushEvents])
 
-  useEffect(() => () => {
-    if (eventFrameRef.current !== null) {
-      window.cancelAnimationFrame(eventFrameRef.current)
-      eventFrameRef.current = null
-    }
-    if (eventTimerRef.current !== null) {
-      window.clearTimeout(eventTimerRef.current)
-      eventTimerRef.current = null
-    }
-    pendingEventsRef.current = []
-  }, [])
+  useEffect(() => clearPendingEvents, [clearPendingEvents])
+
+  // Callers may merge an older page into the selected detail. Mirror every
+  // committed detail back into the switch/prefetch cache so navigating away
+  // and back cannot collapse the transcript to its former tail window.
+  useEffect(() => {
+    if (!threadDetail) return
+    threadDetailCacheRef.current.set(
+      threadCacheKey(threadDetail.workspace.id, threadDetail.thread.id),
+      threadDetail,
+    )
+  }, [threadDetail])
 
   // Bootstrap daemon connection
   useEffect(() => {
@@ -233,6 +255,11 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
             nextApi.remoteStatus(),
           ])
           if (cancelled) return
+          // A frame-batched event from the socket that just died may still be
+          // queued. It predates this authoritative reconnect snapshot and must
+          // not land afterward, briefly rolling thread status or preferences
+          // backward. The new event socket seeds itself with another snapshot.
+          clearPendingEvents()
           setSnapshot(nextSnapshot)
           setRemoteStatus(nextRemoteStatus)
           setConnectionError(null)
@@ -289,7 +316,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       }
       teardownSocket()
     }
-  }, [handleEvent])
+  }, [clearPendingEvents, handleEvent])
 
   const externalWorkspaceIds = useMemo(() => {
     const ids = new Set<string>()
@@ -388,6 +415,13 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     }
   }, [selectedThreadId, selectedWorkspaceId])
 
+  // A detail error belongs to the selection that produced it. Do not let a
+  // failed previous thread load turn the fresh-thread surface into an error
+  // state when the user starts over or switches to another thread.
+  useLayoutEffect(() => {
+    setThreadDetailError(null)
+  }, [selectedThreadId, selectedWorkspaceId])
+
 
   useLayoutEffect(() => {
     if (!selectedWorkspaceId || !selectedThreadId) {
@@ -464,11 +498,17 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     setThreadDetailError(null)
     const startedAt = performanceTracingEnabled ? performance.now() : 0
     void api
-      .threadDetail(selectedWorkspaceId, selectedThreadId)
+      .threadDetail(selectedWorkspaceId, selectedThreadId, {
+        mode: 'tail',
+        limit: THREAD_DETAIL_TAIL_LIMIT,
+      })
       .then((detail) => {
         if (cancelled) return
-        threadDetailCacheRef.current.set(cacheKey, detail)
-        setThreadDetail(detail)
+        setThreadDetail((current) => {
+          const merged = mergeThreadDetailPage(current, detail, 'refresh')
+          threadDetailCacheRef.current.set(cacheKey, merged)
+          return merged
+        })
         recordPerformance('falcondeck:thread-detail', startedAt, {
           cached: Boolean(cachedDetail),
           itemCount: detail.items.length,
@@ -529,7 +569,10 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
         threadDetailPrefetchRef.current.add(cacheKey)
         void api
-          .threadDetail(target.workspaceId, target.threadId)
+          .threadDetail(target.workspaceId, target.threadId, {
+            mode: 'tail',
+            limit: THREAD_DETAIL_TAIL_LIMIT,
+          })
           .then((detail) => {
             threadDetailCacheRef.current.set(cacheKey, detail)
           })

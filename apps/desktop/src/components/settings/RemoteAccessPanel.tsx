@@ -1,9 +1,9 @@
 import { useMemo } from 'react'
 
 import type { TrustedDevice } from '@falcondeck/client-core'
-import { Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, CopyButton } from '@falcondeck/ui'
+import { ActivityDiamond, Badge, Button, Card, CardContent, CardDescription, CardHeader, CardTitle, CopyButton } from '@falcondeck/ui'
 
-import { ExternalLink, LaptopMinimal, LoaderCircle, Radio, RefreshCw, Smartphone, Trash2 } from 'lucide-react'
+import { ExternalLink, LaptopMinimal, Radio, RefreshCw, Smartphone, Trash2 } from 'lucide-react'
 
 import type { SettingsViewProps } from '../SettingsView'
 import { useMillisUntil } from '../../pairing-expiry'
@@ -72,7 +72,7 @@ function TrustedDeviceRow({
           disabled={isRemovingDevice || device.status === 'revoked'}
         >
           {revokingDeviceId === device.device_id ? (
-            <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+            <ActivityDiamond tone="current" />
           ) : (
             <Trash2 className="h-3.5 w-3.5" />
           )}
@@ -145,7 +145,7 @@ export function RemoteAccessPanel({
               disabled={isStartingRemote || remoteControlsDisabled}
             >
               {isStartingRemote ? (
-                <LoaderCircle className="h-4 w-4 animate-spin" />
+                <ActivityDiamond size="md" tone="current" />
               ) : (
                 <Radio className="h-4 w-4" />
               )}

@@ -124,6 +124,28 @@ describe('QueuedTurns', () => {
     expect(screen.queryByRole('textbox', { name: 'Edit queued message' })).toBeNull()
   })
 
+  it('does not save a queued edit while an IME candidate is being composed', () => {
+    const onEdit = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={queuedTurns}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onEdit={onEdit}
+      />,
+    )
+
+    openMenu()
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Edit message' }))
+    const editor = screen.getByRole('textbox', { name: 'Edit queued message' })
+    fireEvent.change(editor, { target: { value: '編集中' } })
+    fireEvent.keyDown(editor, { key: 'Enter', keyCode: 229, isComposing: true })
+
+    expect(onEdit).not.toHaveBeenCalled()
+    expect(editor).toBeInTheDocument()
+  })
+
   // Outside-click dismissal is Radix's own concern and does not fire reliably
   // under jsdom; Escape covers that the menu is a real dismissable layer.
   it('closes the menu on Escape', () => {

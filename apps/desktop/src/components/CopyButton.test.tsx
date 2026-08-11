@@ -59,4 +59,19 @@ describe('CopyButton', () => {
     })
     window.removeEventListener('unhandledrejection', onError)
   })
+
+  it('does not claim newly streamed text is already on the clipboard', async () => {
+    stubClipboard(() => Promise.resolve())
+    const view = render(<CopyButton text="Partial response" />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Copy' }))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Copied' })).toBeInTheDocument()
+    })
+
+    view.rerender(<CopyButton text="Partial response with more tokens" />)
+
+    expect(screen.getByRole('button', { name: 'Copy' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Copied' })).not.toBeInTheDocument()
+  })
 })

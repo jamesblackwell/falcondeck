@@ -9,6 +9,7 @@ import {
   bytesToBase64,
   conversationItemsForSelection,
   decryptJson,
+  deriveThreadAttentionPresentation,
   deriveIdentityKeyPair,
   encryptJson,
   generateBoxKeyPair,
@@ -28,22 +29,38 @@ import {
   upsertConversationItem,
   verifyPairingClaimChallenge,
   formatModelLabel,
+  filesToImageInputs,
   modelFastTier,
   anyModelHasFastTier,
   resolveServiceTier,
   serviceTierForTurn,
+  threadForSelection,
   STANDARD_SERVICE_TIER,
   workspaceAgentCapabilities,
   workspaceProviderOptions,
   type ConversationItem,
   type ModelSummary,
   type EventEnvelope,
+  type InteractiveRequest,
   type PersistedRemoteSession,
   type SessionKeyMaterial,
   type ThreadDetail,
   type ThreadSummary,
   type WorkspaceSummary,
 } from '@falcondeck/client-core'
+
+describe('client-core image inputs', () => {
+  it('rejects unsupported files explicitly instead of silently discarding them', async () => {
+    const files = [{ name: 'notes.txt', type: 'text/plain' }] as unknown as FileList
+    let message = ''
+    try {
+      await filesToImageInputs(files)
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error)
+    }
+    expect(message).toBe('Only image attachments are supported. notes.txt was not attached.')
+  })
+})
 
 function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary {
   return {
@@ -194,11 +211,48 @@ describe('client-core provider normalization', () => {
       supports_skills: false,
       supports_interrupt: false,
       supports_steering: false,
+      supports_forking: false,
       sandbox_modes: ['sealed'],
       permission_modes: [],
     })
     // A provider the workspace never mentions reports nothing.
     expect(workspaceAgentCapabilities(normalized, 'codex').supports_goals).toBe(false)
+  })
+})
+
+describe('selection boundaries', () => {
+  it('does not resolve a thread from another workspace', () => {
+    const alpha = thread({ id: 'shared-thread', workspace_id: 'alpha' })
+    const beta = thread({ id: 'shared-thread', workspace_id: 'beta' })
+
+    expect(threadForSelection([alpha, beta], 'alpha', 'shared-thread')).toBe(alpha)
+    expect(threadForSelection([alpha, beta], 'gamma', 'shared-thread')).toBeNull()
+    expect(threadForSelection([alpha, beta], 'alpha', null)).toBeNull()
+  })
+
+  it('does not count another workspace\'s pending request as thread attention', () => {
+    const threadInAlpha = thread({ id: 'shared-thread', workspace_id: 'alpha' })
+    const foreignApproval = {
+      request_id: 'approval-1',
+      workspace_id: 'beta',
+      thread_id: 'shared-thread',
+      method: 'tool.call',
+      kind: 'approval',
+      approval_decisions: ['allow', 'deny'] as const,
+      title: 'Run command',
+      detail: null,
+      command: null,
+      path: null,
+      turn_id: null,
+      item_id: null,
+      questions: [],
+      created_at: '2026-03-15T10:00:00Z',
+    } satisfies InteractiveRequest
+
+    expect(
+      deriveThreadAttentionPresentation(threadInAlpha, [foreignApproval])
+        .pendingApprovalCount,
+    ).toBe(0)
   })
 })
 
@@ -259,18 +313,29 @@ describe('client-core conversation helpers', () => {
     expect(updated[1]).toMatchObject({ id: 'a', text: 'updated' })
   })
 
-  it('appends newer items without scanning the full array', () => {
-    const spy = vi.spyOn(Array.prototype, 'findIndex')
+  // Identity must be checked even for newer timestamps: Claude/ACP re-emit
+  // whole items with a fresh created_at on every update, so an unchecked
+  // "newer → append" fast path duplicates streaming items. The batched frame
+  // path amortizes this scan through its identity map.
+  it('appends newer items and dedupes re-emitted ones with fresh timestamps', () => {
     const items = [assistantMessage('a', '2026-03-15T10:00:00Z', 'first')]
 
-    const updated = upsertConversationItem(
+    const appended = upsertConversationItem(
       items,
       assistantMessage('b', '2026-03-15T10:01:00Z', 'second'),
     )
+    expect(appended.map((item) => item.id)).toEqual(['a', 'b'])
 
-    expect(updated.map((item) => item.id)).toEqual(['a', 'b'])
-    expect(spy).not.toHaveBeenCalled()
-    spy.mockRestore()
+    const restamped = upsertConversationItem(
+      appended,
+      assistantMessage('a', '2026-03-15T10:02:00Z', 'first updated'),
+    )
+    expect(restamped.map((item) => item.id)).toEqual(['a', 'b'])
+    expect(restamped[0]).toMatchObject({
+      id: 'a',
+      text: 'first updated',
+      created_at: '2026-03-15T10:00:00Z',
+    })
   })
 
   it('updates an earlier item with a tied timestamp without duplicating it', () => {
@@ -441,6 +506,79 @@ describe('client-core conversation helpers', () => {
     )
   })
 
+  it('retains and deduplicates workspace service notices outside transcripts', () => {
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace()],
+      threads: [thread()],
+      interactive_requests: [],
+      service_notices: [],
+      preferences: normalizePreferences(null),
+    }
+    const event: EventEnvelope = {
+      seq: 5,
+      emitted_at: '2026-03-15T10:11:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: null,
+      event: {
+        type: 'service',
+        level: 'warning',
+        message: 'Configuration will change in the next release.',
+        raw_method: 'deprecationNotice',
+        notice: {
+          id: 'notice-1',
+          workspace_id: 'workspace-1',
+          level: 'warning',
+          message: 'Configuration will change in the next release.',
+          raw_method: 'deprecationNotice',
+          created_at: '2026-03-15T10:11:00Z',
+        },
+      },
+    }
+
+    const withNotice = applySnapshotEvent(snapshot, event)
+    expect(withNotice?.service_notices).toHaveLength(1)
+    expect(applySnapshotEvent(withNotice, event)).toBe(withNotice)
+  })
+
+  it('updates token usage independently of thread state', () => {
+    const snapshot = {
+      daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
+      workspaces: [workspace()],
+      threads: [thread()],
+      interactive_requests: [],
+      preferences: normalizePreferences(null),
+    }
+    const event: EventEnvelope = {
+      seq: 6,
+      emitted_at: '2026-03-15T10:12:00Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: {
+        type: 'thread-token-usage-updated',
+        usage: {
+          total: {
+            total_tokens: 116_000,
+            input_tokens: 100_000,
+            cached_input_tokens: 50_000,
+            output_tokens: 12_000,
+            reasoning_output_tokens: 4_000,
+          },
+          last: null,
+          model_context_window: 128_000,
+          updated_at: '2026-03-15T10:12:00Z',
+        },
+      },
+    }
+
+    const updated = applySnapshotEvent(snapshot, event)
+    expect(updated?.threads).toBe(snapshot.threads)
+    expect(updated?.thread_token_usage?.['thread-1']).toMatchObject({
+      total: { total_tokens: 116_000 },
+      model_context_window: 128_000,
+    })
+  })
+
   it('inserts a missing thread on thread-updated instead of dropping the event', () => {
     const snapshot = {
       daemon: { version: '0.1.0', started_at: '2026-03-15T10:00:00Z' },
@@ -542,7 +680,7 @@ describe('client-core conversation helpers', () => {
       is_partial: false,
     }
     // Simulates a daemon payload whose tool_call display is missing entirely;
-    // normalizeEventEnvelope does not repair conversation-item payloads.
+    // the shared event normalizer repairs it before insertion.
     const rawItem = {
       kind: 'tool_call',
       id: 'tool-1',
@@ -628,6 +766,51 @@ describe('client-core conversation helpers', () => {
       artifact_kind: 'approval_related',
       activity_kind: 'approval',
     })
+  })
+
+  it('hides skill markdown bodies from normalized history and live events', () => {
+    const skillItem = {
+      kind: 'tool_call',
+      id: 'skill-read-1',
+      title: 'Read /project/.agents/skills/review/SKILL.md',
+      tool_kind: 'read',
+      status: 'completed',
+      output: '# Review\n\nPrivate instructions',
+      exit_code: 0,
+      display: {
+        is_read_only: true,
+        has_side_effect: false,
+        is_error: false,
+        artifact_kind: 'command_output',
+        activity_kind: 'read',
+        history_mode: 'summary',
+        summary_hint: null,
+      },
+      created_at: '2026-03-15T10:06:00Z',
+      completed_at: '2026-03-15T10:06:01Z',
+    } satisfies ConversationItem
+
+    expect(normalizeConversationItem(skillItem)).toMatchObject({ output: null })
+
+    const detail: ThreadDetail = {
+      workspace: workspace(),
+      thread: thread(),
+      items: [],
+      has_older: false,
+      oldest_item_id: null,
+      newest_item_id: null,
+      is_partial: false,
+    }
+    const event: EventEnvelope = {
+      seq: 10,
+      emitted_at: '2026-03-15T10:06:01Z',
+      workspace_id: 'workspace-1',
+      thread_id: 'thread-1',
+      event: { type: 'conversation-item-added', item: skillItem },
+    }
+
+    const inserted = applyEventToThreadDetail(detail, event)?.items[0]
+    expect(inserted?.kind === 'tool_call' ? inserted.output : 'missing').toBeNull()
   })
 
   it('returns no conversation items for a new thread composer', () => {

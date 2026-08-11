@@ -1,7 +1,6 @@
 import { memo, useDeferredValue, useMemo, useState } from 'react'
 import {
   GitBranch,
-  LoaderCircle,
   RefreshCw,
   ScanSearch,
   Search,
@@ -9,6 +8,7 @@ import {
 } from 'lucide-react'
 
 import type { GitStatusEntry } from '@falcondeck/client-core'
+import { ActivityDiamond } from '@falcondeck/ui'
 
 import { FileTreeView } from './FileTreeView'
 import { FileTypeIcon } from './FileTypeIcon'
@@ -106,7 +106,7 @@ export const FileListView = memo(function FileListView({
               className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
             >
               {isReviewPending ? (
-                <LoaderCircle aria-hidden="true" className="h-3.5 w-3.5 animate-spin" />
+                <ActivityDiamond tone="current" />
               ) : (
                 <ScanSearch aria-hidden="true" className="h-3.5 w-3.5" />
               )}
@@ -121,10 +121,11 @@ export const FileListView = memo(function FileListView({
             aria-busy={activeLoading}
             className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
           >
-            <RefreshCw
-              aria-hidden="true"
-              className={`h-3.5 w-3.5 ${activeLoading ? 'animate-spin' : ''}`}
-            />
+            {activeLoading ? (
+              <ActivityDiamond tone="current" />
+            ) : (
+              <RefreshCw aria-hidden="true" className="h-3.5 w-3.5" />
+            )}
           </button>
         </div>
 
@@ -185,7 +186,7 @@ export const FileListView = memo(function FileListView({
           filteredEntries.length === 0 ? (
             <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
               {isLoading ? (
-                <LoaderCircle className="mx-auto h-5 w-5 animate-spin text-fg-faint" />
+                <ActivityDiamond size="lg" className="mx-auto flex" />
               ) : deferredQuery ? (
                 'No matching changes'
               ) : (
@@ -226,7 +227,7 @@ export const FileListView = memo(function FileListView({
             </div>
           )
         ) : isFilesLoading && files.length === 0 ? (
-          <LoaderCircle className="mx-auto mt-8 h-5 w-5 animate-spin text-fg-faint" />
+          <ActivityDiamond size="lg" className="mx-auto mt-8 flex" />
         ) : filteredFiles.length === 0 ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
             {deferredQuery ? 'No matching files' : 'No files found'}

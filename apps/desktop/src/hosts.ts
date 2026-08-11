@@ -11,8 +11,12 @@ import {
   normalizeThreadDetail,
   normalizeThreadHandle,
   normalizeThreadSummary,
+  mergeThreadDetailPage,
+  removeConversationItem,
+  upsertConversationItem,
   RemoteHostClient,
   DEFAULT_REMOTE_RELAY_URL,
+  type ConversationItem,
   type DaemonSnapshot,
   type EventEnvelope,
   type GitDiffResponse,
@@ -27,6 +31,7 @@ import {
   type SetThreadGoalPayload,
   type StartThreadPayload,
   type ThreadDetail,
+  type ThreadDetailRequest,
   type ThreadHandle,
   type ForkThreadPayload,
   type ThreadSummary,
@@ -134,7 +139,11 @@ export type WorkspaceScopedApi = {
     requestId: string,
     response: InteractiveResponsePayload,
   ): Promise<{ ok: boolean; message?: string | null }>
-  threadDetail(workspaceId: string, threadId: string): Promise<ThreadDetail>
+  threadDetail(
+    workspaceId: string,
+    threadId: string,
+    request?: Omit<ThreadDetailRequest, 'workspace_id' | 'thread_id'>,
+  ): Promise<ThreadDetail>
   connectWorkspace(path: string): Promise<WorkspaceSummary>
   removeWorkspace(workspaceId: string): Promise<unknown>
   gitStatus(workspaceId: string, threadId?: string | null): Promise<GitStatusResponse>
@@ -168,6 +177,13 @@ export class HostConnection {
   private readonly detailCache = new Map<string, ThreadDetail>()
   private readonly onChange: () => void
   private readonly onPersist: () => void
+  private snapshotRequestInFlight = false
+  private snapshotRefreshPromise: Promise<void> | null = null
+  private pendingSnapshotEvents: Array<{
+    events: EventEnvelope[]
+    resolve: () => void
+    reject: (error: Error) => void
+  }> = []
 
   constructor(host: StoredHost, onChange: () => void, onPersist: () => void) {
     this.host = host
@@ -186,7 +202,7 @@ export class HostConnection {
         this.status = status
         if (status === 'encrypted') {
           this.lastError = null
-          void this.refreshSnapshot()
+          void this.refreshSnapshot().catch(() => {})
         }
         this.onChange()
       },
@@ -194,11 +210,12 @@ export class HostConnection {
         this.presence = presence
         this.onChange()
       },
-      onEvents: (events) => this.applyEvents(events),
-      onHistoryTruncated: () => {
+      onEvents: (events) => this.applyEventsWithSnapshotBarrier(events),
+      onHistoryTruncated: async () => {
         this.snapshot = null
         this.detailCache.clear()
-        void this.refreshSnapshot()
+        this.onChange()
+        await this.refreshSnapshot()
       },
       onSessionChanged: (session) => {
         this.host.session = session
@@ -229,6 +246,12 @@ export class HostConnection {
     this.presence = null
     this.snapshot = null
     this.detailCache.clear()
+    const stopError = new Error('Host connection stopped')
+    for (const pending of this.pendingSnapshotEvents.splice(0)) {
+      pending.reject(stopError)
+    }
+    this.snapshotRequestInFlight = false
+    this.snapshotRefreshPromise = null
     this.onChange()
   }
 
@@ -248,26 +271,84 @@ export class HostConnection {
     this.onChange()
   }
 
-  private async refreshSnapshot() {
-    const client = this.client
-    if (!client) return
-    try {
-      const raw = await client.rpc('snapshot.current', {})
-      this.snapshot = normalizeDaemonSnapshot(raw)
-      this.onChange()
-    } catch (error) {
-      this.lastError = error instanceof Error ? error.message : 'Failed to load host snapshot'
-      this.onChange()
+  private applyEventsWithSnapshotBarrier(events: EventEnvelope[]): Promise<void> {
+    if (!this.snapshotRequestInFlight) {
+      this.applyEvents(events)
+      return Promise.resolve()
     }
+    return new Promise<void>((resolve, reject) => {
+      this.pendingSnapshotEvents.push({ events, resolve, reject })
+    })
   }
 
-  async threadDetail(workspaceId: string, threadId: string): Promise<ThreadDetail> {
+  private refreshSnapshot(): Promise<void> {
+    if (this.snapshotRefreshPromise) return this.snapshotRefreshPromise
+    const client = this.client
+    if (!client) return Promise.resolve()
+
+    this.snapshotRequestInFlight = true
+    const refresh = (async () => {
+      try {
+        const raw = await client.rpc('snapshot.current', {})
+        this.snapshot = normalizeDaemonSnapshot(raw)
+        this.onChange()
+        const pending = this.pendingSnapshotEvents.splice(0)
+        for (const entry of pending) {
+          this.applyEvents(entry.events)
+          entry.resolve()
+        }
+      } catch (error) {
+        const reason = error instanceof Error ? error : new Error('Failed to load host snapshot')
+        this.lastError = reason.message
+        this.onChange()
+        for (const entry of this.pendingSnapshotEvents.splice(0)) {
+          entry.reject(reason)
+        }
+        throw reason
+      } finally {
+        this.snapshotRequestInFlight = false
+      }
+    })()
+    this.snapshotRefreshPromise = refresh
+    refresh.then(
+      () => {
+        if (this.snapshotRefreshPromise === refresh) this.snapshotRefreshPromise = null
+      },
+      () => {
+        if (this.snapshotRefreshPromise === refresh) this.snapshotRefreshPromise = null
+      },
+    )
+    return refresh
+  }
+
+  async threadDetail(
+    workspaceId: string,
+    threadId: string,
+    request: Omit<ThreadDetailRequest, 'workspace_id' | 'thread_id'> = {},
+  ): Promise<ThreadDetail> {
     const key = `${workspaceId}:${threadId}`
     const client = this.client
     if (!client) throw new Error('Host is not connected')
-    const detail = normalizeThreadDetail(
-      await client.rpc('thread.detail', { workspaceId, threadId }),
+    const page = normalizeThreadDetail(
+      await client.rpc('thread.detail', {
+        workspace_id: workspaceId,
+        thread_id: threadId,
+        ...request,
+      }),
     )
+    const current = this.detailCache.get(key)
+    if (
+      request.mode === 'before' &&
+      current &&
+      current.oldest_item_id !== request.before_item_id
+    ) {
+      return current
+    }
+    const detail = request.mode === 'before'
+      ? mergeThreadDetailPage(current, page, 'prepend')
+      : request.mode === 'tail'
+        ? mergeThreadDetailPage(current, page, 'refresh')
+        : page
     this.detailCache.set(key, detail)
     this.onChange()
     return detail
@@ -275,6 +356,54 @@ export class HostConnection {
 
   cachedThreadDetail(workspaceId: string, threadId: string): ThreadDetail | null {
     return this.detailCache.get(`${workspaceId}:${threadId}`) ?? null
+  }
+
+  /**
+   * Seeds the cache for a just-created thread so the detail effect renders it
+   * without a loading state (and doesn't null the transcript while fetching).
+   * A cache entry that already exists wins — it may hold streamed items.
+   */
+  seedThreadDetail(detail: ThreadDetail) {
+    const key = `${detail.workspace.id}:${detail.thread.id}`
+    if (this.detailCache.has(key)) return
+    this.detailCache.set(key, detail)
+    this.onChange()
+  }
+
+  /**
+   * Inserts a client-local (optimistic) item into the cached transcript. The
+   * cache is authoritative for remote threads — App-level state is re-synced
+   * from it on every host notification — so an optimistic item must live here
+   * to survive until the daemon's echo replaces it by id.
+   */
+  upsertLocalItem(workspaceId: string, threadId: string, item: ConversationItem) {
+    const key = `${workspaceId}:${threadId}`
+    const cached = this.detailCache.get(key)
+    if (!cached) return
+    const items = upsertConversationItem(cached.items, item)
+    this.detailCache.set(key, {
+      ...cached,
+      items,
+      oldest_item_id: items[0]?.id ?? cached.oldest_item_id,
+      newest_item_id: items.at(-1)?.id ?? cached.newest_item_id,
+    })
+    this.onChange()
+  }
+
+  /** Removes a client-local item again (send failed or landed in the queue). */
+  removeLocalItem(workspaceId: string, threadId: string, itemId: string) {
+    const key = `${workspaceId}:${threadId}`
+    const cached = this.detailCache.get(key)
+    if (!cached) return
+    const items = removeConversationItem(cached.items, itemId)
+    if (items === cached.items) return
+    this.detailCache.set(key, {
+      ...cached,
+      items,
+      oldest_item_id: items[0]?.id ?? null,
+      newest_item_id: items.at(-1)?.id ?? null,
+    })
+    this.onChange()
   }
 
   private rpc<T>(method: string, params: Record<string, unknown>): Promise<T> {
@@ -344,7 +473,8 @@ export class HostConnection {
           requestId,
           response,
         }),
-      threadDetail: (workspaceId, threadId) => this.threadDetail(workspaceId, threadId),
+      threadDetail: (workspaceId, threadId, request) =>
+        this.threadDetail(workspaceId, threadId, request),
       connectWorkspace: async (path) => {
         const workspace = (await this.rpc('workspace.connect', { path })) as WorkspaceSummary
         await this.refreshSnapshot()

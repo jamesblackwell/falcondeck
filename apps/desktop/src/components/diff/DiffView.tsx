@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react'
-import { ArrowLeft, ChevronDown, ChevronUp, FileCode2, LoaderCircle } from 'lucide-react'
+import { ArrowLeft, ChevronDown, ChevronUp, FileCode2 } from 'lucide-react'
 
 import {
   buildDiffFileRows,
@@ -9,7 +9,7 @@ import {
   parseUnifiedDiff,
   useShikiTokens,
 } from '@falcondeck/chat-ui'
-import { Button } from '@falcondeck/ui'
+import { ActivityDiamond, Button } from '@falcondeck/ui'
 
 export type DiffViewProps = {
   filePath: string
@@ -90,7 +90,7 @@ export const DiffView = memo(function DiffView({
       <div className="min-h-0 flex-1 overflow-auto">
         {isLoading ? (
           <div className="flex items-center justify-center p-8">
-            <LoaderCircle className="h-5 w-5 animate-spin text-fg-faint" />
+            <ActivityDiamond size="lg" />
           </div>
         ) : error ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-danger">{error}</div>
