@@ -85,73 +85,86 @@ impl AppState {
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
         tokio::spawn(async move {
-            let (provider, native_session, cwd) = {
-                let workspaces = app.inner.workspaces.lock().await;
-                let Some(workspace) = workspaces.get(&workspace_id) else {
-                    return;
+            async {
+                let (provider, native_session, cwd) = {
+                    let workspaces = app.inner.workspaces.lock().await;
+                    let Some(workspace) = workspaces.get(&workspace_id) else {
+                        return;
+                    };
+                    let Some(thread) = workspace.threads.get(&thread_id) else {
+                        return;
+                    };
+                    // A running thread is already streaming into its items; an
+                    // empty-items check alone could race the first user message.
+                    if !thread.items.is_empty()
+                        || matches!(thread.summary.status, ThreadStatus::Running)
+                    {
+                        return;
+                    }
+                    let Some(native_session) = thread.summary.native_session_id.clone() else {
+                        return;
+                    };
+                    (
+                        thread.summary.provider.clone(),
+                        native_session,
+                        thread
+                            .summary
+                            .working_directory(&workspace.summary.path)
+                            .to_string(),
+                    )
                 };
-                let Some(thread) = workspace.threads.get(&thread_id) else {
-                    return;
+                let runtime = match app.acp_runtime_for(&workspace_id, &provider).await {
+                    Ok(runtime) => runtime,
+                    Err(error) => {
+                        tracing::info!(
+                            provider = %provider,
+                            thread = %thread_id,
+                            %error,
+                            "ACP thread hydration skipped: runtime unavailable"
+                        );
+                        return;
+                    }
                 };
-                // A running thread is already streaming into its items; an
-                // empty-items check alone could race the first user message.
-                if !thread.items.is_empty()
-                    || matches!(thread.summary.status, ThreadStatus::Running)
-                {
+                // A live session for this thread means the transcript is already
+                // authoritative in memory; replaying it would duplicate history.
+                if runtime.session_for_thread(&thread_id).await.is_some() {
                     return;
                 }
-                let Some(native_session) = thread.summary.native_session_id.clone() else {
-                    return;
-                };
-                (
-                    thread.summary.provider.clone(),
-                    native_session,
-                    thread
-                        .summary
-                        .working_directory(&workspace.summary.path)
-                        .to_string(),
-                )
-            };
-            let runtime = match app.acp_runtime_for(&workspace_id, &provider).await {
-                Ok(runtime) => runtime,
-                Err(error) => {
+                if let Err(error) = runtime
+                    .load_session(&thread_id, &native_session, &cwd)
+                    .await
+                {
                     tracing::info!(
                         provider = %provider,
                         thread = %thread_id,
                         %error,
-                        "ACP thread hydration skipped: runtime unavailable"
+                        "ACP thread hydration failed; transcript stays empty until next prompt"
                     );
                     return;
                 }
-            };
-            // A live session for this thread means the transcript is already
-            // authoritative in memory; replaying it would duplicate history.
-            if runtime.session_for_thread(&thread_id).await.is_some() {
-                return;
+                // The replay has no turn end: settle the streamed lifecycles and
+                // reset the runtime's accumulators so the next real turn starts
+                // fresh items instead of extending replayed ones.
+                runtime.end_turn(&native_session).await;
+                app.settle_turn_items(
+                    &workspace_id,
+                    &thread_id,
+                    Utc::now(),
+                    ToolSettlement::Completed,
+                )
+                .await;
             }
-            if let Err(error) = runtime
-                .load_session(&thread_id, &native_session, &cwd)
-                .await
-            {
-                tracing::info!(
-                    provider = %provider,
-                    thread = %thread_id,
-                    %error,
-                    "ACP thread hydration failed; transcript stays empty until next prompt"
-                );
-                return;
-            }
-            // The replay has no turn end: settle the streamed lifecycles and
-            // reset the runtime's accumulators so the next real turn starts
-            // fresh items instead of extending replayed ones.
-            runtime.end_turn(&native_session).await;
-            app.settle_turn_items(
-                &workspace_id,
-                &thread_id,
-                Utc::now(),
-                ToolSettlement::Completed,
-            )
             .await;
+
+            // This set tracks in-flight hydration, not permanent attempts.
+            // Failed startup/load operations must be retryable on a later
+            // detail read, while successful replays are naturally skipped by
+            // the non-empty item/session checks above.
+            app.inner
+                .acp_hydrations_started
+                .lock()
+                .expect("acp hydration set poisoned")
+                .remove(&(workspace_id, thread_id));
         });
     }
 

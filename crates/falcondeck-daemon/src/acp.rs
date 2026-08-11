@@ -593,6 +593,11 @@ pub struct AcpRuntime {
     sessions: Mutex<HashMap<String, String>>,
     /// ACP session id -> thread id
     threads_by_session: Mutex<HashMap<String, String>>,
+    /// Per-thread gates serialize restored-session loading with the first
+    /// post-restart turn. Without this, background hydration and a prompt can
+    /// issue two concurrent `session/load` requests; one may fail and replace
+    /// the recoverable session with a fresh one.
+    session_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     permission_requests: Mutex<HashMap<String, PendingPermission>>,
     /// Per-session accumulating assistant item for the current turn.
     current_items: Mutex<HashMap<String, (String, String)>>,
@@ -1067,6 +1072,7 @@ impl AcpRuntime {
             pending: Mutex::new(HashMap::new()),
             sessions: Mutex::new(HashMap::new()),
             threads_by_session: Mutex::new(HashMap::new()),
+            session_gates: Mutex::new(HashMap::new()),
             permission_requests: Mutex::new(HashMap::new()),
             current_items: Mutex::new(HashMap::new()),
             current_thought_items: Mutex::new(HashMap::new()),
@@ -1391,8 +1397,8 @@ impl AcpRuntime {
     /// and the agent negotiated `loadSession`, the session is resumed with
     /// `session/load` — the agent replays the conversation through
     /// `session/update` notifications, which repopulates the (empty after
-    /// restart) in-memory thread history. Any load failure falls back to a
-    /// fresh session.
+    /// restart) in-memory thread history. If the persisted session is truly
+    /// unavailable, the serialized caller falls back to a fresh session.
     pub async fn ensure_session(
         &self,
         thread_id: &str,
@@ -1400,6 +1406,8 @@ impl AcpRuntime {
         cwd: &str,
         permission_mode: Option<&str>,
     ) -> Result<String, DaemonError> {
+        let gate = self.session_gate(thread_id).await;
+        let _guard = gate.lock().await;
         if let Some(existing) = self.sessions.lock().await.get(thread_id) {
             return Ok(existing.clone());
         }
@@ -1413,7 +1421,10 @@ impl AcpRuntime {
             .filter(|id| !id.is_empty())
             && self.supports_load_session().await
         {
-            match self.load_session(thread_id, native_session, cwd).await {
+            match self
+                .load_session_locked(thread_id, native_session, cwd)
+                .await
+            {
                 Ok(()) => return Ok(native_session.to_string()),
                 Err(error) => {
                     tracing::info!(
@@ -1459,6 +1470,21 @@ impl AcpRuntime {
         native_session: &str,
         cwd: &str,
     ) -> Result<(), DaemonError> {
+        let gate = self.session_gate(thread_id).await;
+        let _guard = gate.lock().await;
+        if self.sessions.lock().await.contains_key(thread_id) {
+            return Ok(());
+        }
+        self.load_session_locked(thread_id, native_session, cwd)
+            .await
+    }
+
+    async fn load_session_locked(
+        &self,
+        thread_id: &str,
+        native_session: &str,
+        cwd: &str,
+    ) -> Result<(), DaemonError> {
         if !self.supports_load_session().await {
             return Err(DaemonError::Process(format!(
                 "ACP provider '{}' does not support session/load",
@@ -1494,6 +1520,15 @@ impl AcpRuntime {
                 Err(error)
             }
         }
+    }
+
+    async fn session_gate(&self, thread_id: &str) -> Arc<Mutex<()>> {
+        let mut gates = self.session_gates.lock().await;
+        Arc::clone(
+            gates
+                .entry(thread_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
     }
 
     /// The ACP session id currently registered for a thread, if any.
