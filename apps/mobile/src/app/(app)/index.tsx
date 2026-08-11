@@ -72,7 +72,6 @@ import {
   QueuedTurns,
   ThinkingIndicator,
   OperationalNoticeBanner,
-  ConversationShareButton,
 } from "@/components/chat";
 import { ConnectionHeader } from "@/components/navigation";
 import {
@@ -775,10 +774,6 @@ export default function HomeScreen() {
     useRelayStore.getState()._setError(null);
   }, []);
 
-  const handleConversationShareError = useCallback((message: string) => {
-    useRelayStore.getState()._setError(message);
-  }, []);
-
   const handleOpenDrawer = useCallback(() => {
     navigation.dispatch(DrawerActions.openDrawer());
   }, [navigation]);
@@ -1109,14 +1104,6 @@ export default function HomeScreen() {
           </Text>
         </Pressable>
         <View style={styles.headerRight}>
-          {selectedThread && conversationItems.length > 0 ? (
-            <ConversationShareButton
-              items={conversationItems}
-              title={selectedThread.title}
-              partial={selectedThreadHistory.hasOlder}
-              onError={handleConversationShareError}
-            />
-          ) : null}
           {selectedThread ? (
             <Pressable
               onPress={handleNewThreadFromCurrent}
