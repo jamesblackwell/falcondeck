@@ -61,6 +61,52 @@ describe('AgentsPanel recommended agents', () => {
     })
   })
 
+  it('configures OpenCode with its built-in ACP command', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(emptyOverview), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            providers: { opencode: { label: 'OpenCode', command: ['opencode', 'acp'] } },
+            resolved: [
+              {
+                id: 'opencode',
+                label: 'OpenCode',
+                command: ['opencode', 'acp'],
+                binary_found: true,
+                reserved: false,
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+    const onToast = vi.fn()
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={onToast} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Configure OpenCode' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(request.body as string)).toEqual({
+      providers: { opencode: { label: 'OpenCode', command: ['opencode', 'acp'] } },
+    })
+    expect(onToast).toHaveBeenCalledWith({
+      variant: 'success',
+      title: 'OpenCode configured',
+      description: 'FalconDeck will run opencode acp on this host.',
+    })
+  })
+
   it('shows the complete local install command before Pi is configured', async () => {
     vi.stubGlobal(
       'fetch',
@@ -78,6 +124,24 @@ describe('AgentsPanel recommended agents', () => {
       await screen.findByText(
         'npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp',
       ),
+    ).toBeVisible()
+  })
+
+  it('shows the official OpenCode install command before it is configured', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify(emptyOverview), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    )
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+
+    expect(
+      await screen.findByText('curl -fsSL https://opencode.ai/install | bash'),
     ).toBeVisible()
   })
 })

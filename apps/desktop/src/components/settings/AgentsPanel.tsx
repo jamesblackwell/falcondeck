@@ -47,6 +47,13 @@ const BUILT_IN_AGENTS = [
 
 const RECOMMENDED_AGENTS = [
   {
+    id: 'opencode',
+    label: 'OpenCode',
+    detail: 'Full OpenCode harness experience through its built-in ACP server',
+    command: ['opencode', 'acp'],
+    installCommand: 'curl -fsSL https://opencode.ai/install | bash',
+  },
+  {
     id: 'pi',
     label: 'Pi',
     detail: 'Minimal, extensible coding harness through the maintained pi-acp adapter',

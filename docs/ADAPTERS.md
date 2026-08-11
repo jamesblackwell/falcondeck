@@ -186,3 +186,27 @@ conversation stream, remote transport, and capability-gated presentation. Keep
 Pi on the ACP path unless a concrete Pi feature proves impossible to represent
 there; do not add a `ProviderRuntime::Pi` branch merely to make the provider
 look built in.
+
+## OpenCode
+
+OpenCode ships its own ACP server, so it needs no third-party bridge. Choose
+**Settings → Agents → Recommended → Configure OpenCode**, which writes:
+
+```json
+{
+  "providers": {
+    "opencode": {
+      "label": "OpenCode",
+      "command": ["opencode", "acp"]
+    }
+  }
+}
+```
+
+FalconDeck also searches OpenCode's install-script location
+(`~/.opencode/bin`) when launched as a desktop app, where the interactive shell
+PATH is often unavailable. The ACP integration covers streamed text and
+reasoning, tool calls and diffs, permission requests, images, interruption,
+MCP servers, model/config discovery, and persisted session reload. OpenCode
+continues to own its agents, permissions, project rules, tools, formatters,
+linters, and provider authentication.

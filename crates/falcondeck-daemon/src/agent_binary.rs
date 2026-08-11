@@ -158,6 +158,9 @@ fn resolve_from_known_locations(
     if let Ok(home) = env::var("HOME") {
         candidates.push(PathBuf::from(&home).join(".local/bin").join(bin_name));
         candidates.push(PathBuf::from(&home).join(".cargo/bin").join(bin_name));
+        // OpenCode's recommended install script keeps its standalone binary
+        // here without necessarily adding the directory to GUI app PATHs.
+        candidates.push(PathBuf::from(&home).join(".opencode/bin").join(bin_name));
     }
 
     #[cfg(target_os = "macos")]
@@ -240,6 +243,7 @@ fn build_preferred_command_path(
         let home = PathBuf::from(home);
         push_unique_path(&mut entries, home.join(".local/bin"));
         push_unique_path(&mut entries, home.join(".cargo/bin"));
+        push_unique_path(&mut entries, home.join(".opencode/bin"));
     }
 
     #[cfg(target_os = "macos")]
@@ -322,6 +326,7 @@ mod tests {
         assert_eq!(entries[0], PathBuf::from("/opt/homebrew/bin"));
         assert!(entries.contains(&PathBuf::from("/Users/example/.local/bin")));
         assert!(entries.contains(&PathBuf::from("/Users/example/.cargo/bin")));
+        assert!(entries.contains(&PathBuf::from("/Users/example/.opencode/bin")));
         assert!(entries.contains(&PathBuf::from("/usr/local/bin")));
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
     }
