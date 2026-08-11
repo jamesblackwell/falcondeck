@@ -2,12 +2,16 @@ use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
-    ConversationItem, ImageInput, SetThreadGoalRequest, ThreadDetail, ThreadDetailMode,
-    ThreadDetailRequest, ThreadGoal, ThreadIsolation, TurnInputItem,
+    ConversationItem, ForkThreadRequest, ImageInput, InteractiveRequestResolution,
+    SetThreadGoalRequest, ThreadDetail, ThreadDetailMode, ThreadDetailRequest, ThreadGoal,
+    ThreadIsolation, TurnInputItem,
 };
 use uuid::Uuid;
 
 use super::*;
+
+const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 3_500_000;
+const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES: u64 = 10_000_000;
 
 pub(super) async fn connect_workspace(
     app: &AppState,
@@ -84,7 +88,11 @@ pub(super) async fn connect_workspace_internal(
                     let should_refresh_metadata = workspace.has_runtime();
                     drop(workspaces);
                     if should_refresh_metadata {
-                        return refresh_connected_workspace_metadata(app, &existing_id).await;
+                        let result = refresh_connected_workspace_metadata(app, &existing_id).await;
+                        if result.is_ok() {
+                            app.schedule_acp_metadata_hydration(&existing_id);
+                        }
+                        return result;
                     }
                     app.persist_local_state().await?;
                     return Ok(summary);
@@ -97,8 +105,22 @@ pub(super) async fn connect_workspace_internal(
             None
         }
     };
-    let workspace_id =
-        existing_workspace_id.unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()));
+    // No live entry to inherit from: prefer the persisted id so remote
+    // clients' cached snapshots keep addressing this workspace across daemon
+    // restarts; mint a fresh uuid only for brand-new (or colliding) ids.
+    let workspace_id = match existing_workspace_id {
+        Some(id) => id,
+        None => {
+            let persisted_id = persisted_workspace_ref
+                .and_then(|workspace| workspace.id.clone())
+                .filter(|id| !id.is_empty());
+            let reusable_id = match persisted_id {
+                Some(id) => (!app.inner.workspaces.lock().await.contains_key(&id)).then_some(id),
+                None => None,
+            };
+            reusable_id.unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()))
+        }
+    };
     // A failure to bootstrap one provider must not brick the workspace for the
     // other: keep the workspace usable and report the broken provider through
     // its agent summary instead.
@@ -322,21 +344,27 @@ pub(super) async fn connect_workspace_internal(
                 .collect(),
         },
     );
-    app.inner.saved_workspaces.lock().await.insert(
-        path_string,
-        persisted_workspace_ref
-            .cloned()
-            .unwrap_or(PersistedWorkspaceState {
-                path: summary.path.clone(),
-                current_thread_id: summary.current_thread_id.clone(),
-                updated_at: Some(summary.updated_at),
-                default_provider: Some(summary.default_provider.clone()),
-                last_error: None,
-                archived_thread_ids: Vec::new(),
-                pinned_thread_ids: Vec::new(),
-                thread_states: Vec::new(),
-            }),
-    );
+    let mut saved_workspace = persisted_workspace_ref
+        .cloned()
+        .unwrap_or(PersistedWorkspaceState {
+            path: summary.path.clone(),
+            id: None,
+            current_thread_id: summary.current_thread_id.clone(),
+            updated_at: Some(summary.updated_at),
+            default_provider: Some(summary.default_provider.clone()),
+            last_error: None,
+            archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
+            thread_states: Vec::new(),
+        });
+    // The saved record must carry the id the workspace actually connected
+    // under, not whatever a pre-migration state file had.
+    saved_workspace.id = Some(workspace_id.clone());
+    app.inner
+        .saved_workspaces
+        .lock()
+        .await
+        .insert(path_string, saved_workspace);
 
     app.emit(
         Some(workspace_id.clone()),
@@ -347,6 +375,7 @@ pub(super) async fn connect_workspace_internal(
     );
 
     app.persist_local_state().await?;
+    app.schedule_acp_metadata_hydration(&workspace_id);
 
     {
         let app = app.clone();
@@ -408,7 +437,9 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
         }
         // Contested sessions (legacy duplicated state) go to the most recently
         // updated claimant; the rest restore without a transcript.
-        let owner = session_owners.entry(session_id.to_string()).or_insert(state);
+        let owner = session_owners
+            .entry(session_id.to_string())
+            .or_insert(state);
         if state.updated_at > owner.updated_at {
             *owner = state;
         }
@@ -465,7 +496,11 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 status: restored_status,
                 updated_at: state
                     .updated_at
-                    .max(adopted.as_ref().map(|transcript| transcript.summary.updated_at))
+                    .max(
+                        adopted
+                            .as_ref()
+                            .map(|transcript| transcript.summary.updated_at),
+                    )
                     .or(workspace_updated_at)
                     .unwrap_or(now),
                 last_message_preview: adopted
@@ -490,6 +525,32 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
         });
     }
     threads_out
+}
+
+/// Local testing defaults: keep every built-in harness from stopping for a
+/// permission prompt when a client omits an explicit mode.
+fn default_permission_mode(provider: &AgentProvider) -> Option<&'static str> {
+    if provider == &AgentProvider::CODEX {
+        Some("never")
+    } else if provider == &AgentProvider::CLAUDE {
+        Some("bypassPermissions")
+    } else if provider.as_str().eq_ignore_ascii_case("grok") {
+        Some("always-approve")
+    } else {
+        None
+    }
+}
+
+fn default_sandbox_mode(provider: &AgentProvider) -> Option<&'static str> {
+    (provider == &AgentProvider::CODEX).then_some("danger-full-access")
+}
+
+fn default_approval_policy(provider: &AgentProvider) -> &'static str {
+    if provider == &AgentProvider::CODEX {
+        "never"
+    } else {
+        "on-request"
+    }
 }
 
 pub(super) async fn start_thread(
@@ -525,9 +586,26 @@ pub(super) async fn start_thread(
             workspace_path,
         )
     };
-    let approval_policy = request
+    let permission_mode = request
+        .permission_mode
+        .clone()
+        .or_else(|| default_permission_mode(&provider).map(str::to_owned));
+    let sandbox_mode = request
+        .sandbox_mode
+        .clone()
+        .or_else(|| default_sandbox_mode(&provider).map(str::to_owned));
+    let mut approval_policy = request
         .approval_policy
-        .unwrap_or_else(|| "on-request".to_string());
+        .clone()
+        .unwrap_or_else(|| default_approval_policy(&provider).to_string());
+    if provider == AgentProvider::CODEX
+        && request.approval_policy.is_none()
+        && let Some(permission_mode) = permission_mode
+            .as_deref()
+            .filter(|mode| !mode.eq_ignore_ascii_case("default"))
+    {
+        approval_policy = permission_mode.to_string();
+    }
     let model_id = request.model_id.clone().or(default_model_id);
 
     // The checkout has to exist before the backend opens its thread, because
@@ -548,7 +626,7 @@ pub(super) async fn start_thread(
             StartThreadSpec {
                 workspace_id: &request.workspace_id,
                 model_id: model_id.as_deref(),
-                sandbox_mode: request.sandbox_mode.as_deref(),
+                sandbox_mode: sandbox_mode.as_deref(),
                 approval_policy: &approval_policy,
                 cwd,
             },
@@ -592,11 +670,11 @@ pub(super) async fn start_thread(
         agent: ThreadAgentParams {
             model_id,
             reasoning_effort: None,
-            collaboration_mode_id: None,
+            collaboration_mode_id: request.collaboration_mode_id,
             approval_policy: Some(approval_policy),
             service_tier: None,
-            permission_mode: request.permission_mode,
-            sandbox_mode: request.sandbox_mode,
+            permission_mode,
+            sandbox_mode,
         },
         attention: ThreadAttention::default(),
         is_archived: false,
@@ -625,6 +703,106 @@ pub(super) async fn start_thread(
         },
     );
 
+    Ok(ThreadHandle {
+        workspace: workspace_summary,
+        thread,
+    })
+}
+
+pub(super) async fn fork_thread(
+    app: &AppState,
+    request: ForkThreadRequest,
+) -> Result<ThreadHandle, DaemonError> {
+    let last_turn_id = request.last_turn_id.trim();
+    if last_turn_id.is_empty() {
+        return Err(DaemonError::BadRequest(
+            "a completed fork boundary is required".to_string(),
+        ));
+    }
+    let source = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(&request.workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let source = workspace
+            .threads
+            .get(&request.thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        if source.summary.provider != AgentProvider::CODEX {
+            return Err(DaemonError::BadRequest(
+                "this provider does not support conversation forks".to_string(),
+            ));
+        }
+        if thread_is_busy(&source.summary.status) {
+            return Err(DaemonError::BadRequest(
+                "wait for the active turn to finish before branching".to_string(),
+            ));
+        }
+        if source.summary.variant.is_some() {
+            return Err(DaemonError::BadRequest(
+                "branching isolated threads is not supported yet".to_string(),
+            ));
+        }
+        source.summary.clone()
+    };
+
+    let session = app.session_for(&request.workspace_id).await?;
+    let result = session
+        .send_request(
+            "thread/fork",
+            json!({
+                "threadId": request.thread_id,
+                "lastTurnId": last_turn_id,
+            }),
+        )
+        .await?;
+    let thread_id = extract_thread_id(&result)
+        .ok_or_else(|| DaemonError::Rpc("thread/fork did not return a thread id".to_string()))?;
+    let items = crate::codex::hydrate_thread_items(&result);
+    let retained_preview = items.iter().rev().find_map(|item| match item {
+        ConversationItem::UserMessage { text, .. }
+        | ConversationItem::AssistantMessage { text, .. } => Some(truncate_preview(text, 160)),
+        _ => None,
+    });
+    let now = Utc::now();
+    let mut thread = source;
+    thread.id = thread_id.clone();
+    thread.native_session_id = Some(thread_id.clone());
+    thread.status = ThreadStatus::Idle;
+    thread.updated_at = now;
+    thread.latest_turn_id = Some(last_turn_id.to_string());
+    thread.last_message_preview = retained_preview;
+    thread.latest_plan = None;
+    thread.latest_diff = None;
+    thread.last_tool = None;
+    thread.last_error = None;
+    thread.attention = ThreadAttention::default();
+    thread.is_archived = false;
+    thread.is_pinned = false;
+    thread.queued_turns.clear();
+
+    let workspace_summary = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(&request.workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        workspace.summary.current_thread_id = Some(thread_id.clone());
+        workspace.summary.updated_at = now;
+        workspace.threads.insert(
+            thread_id.clone(),
+            ManagedThread::with_items(thread.clone(), items),
+        );
+        workspace.summary.clone()
+    };
+
+    app.emit(
+        Some(request.workspace_id.clone()),
+        Some(thread_id),
+        UnifiedEvent::ThreadStarted {
+            thread: thread.clone(),
+        },
+    );
+    let _ = app.persist_local_state().await;
     Ok(ThreadHandle {
         workspace: workspace_summary,
         thread,
@@ -733,12 +911,14 @@ async fn normalize_turn_inputs(
     inputs: &[TurnInputItem],
 ) -> Result<Vec<TurnInputItem>, DaemonError> {
     let mut normalized = Vec::with_capacity(inputs.len());
+    let mut total_image_bytes = 0;
 
     for input in inputs {
         match input {
             TurnInputItem::Text { .. } => normalized.push(input.clone()),
             TurnInputItem::Image(image) => normalized.push(TurnInputItem::Image(
-                normalize_image_input(app, workspace_id, thread_id, image).await?,
+                normalize_image_input(app, workspace_id, thread_id, image, &mut total_image_bytes)
+                    .await?,
             )),
         }
     }
@@ -751,6 +931,7 @@ async fn normalize_image_input(
     workspace_id: &str,
     thread_id: &str,
     image: &ImageInput,
+    total_image_bytes: &mut u64,
 ) -> Result<ImageInput, DaemonError> {
     let image_url = image.url.trim();
 
@@ -764,6 +945,9 @@ async fn normalize_image_input(
         // (e.g. the iOS app) send their own device paths alongside an inline
         // payload, and those must fall through to be materialized here.
         if tokio::fs::try_exists(local_path).await.unwrap_or(false) {
+            if let Ok(metadata) = tokio::fs::metadata(local_path).await {
+                record_image_attachment_size(image, metadata.len(), total_image_bytes)?;
+            }
             let mut normalized = image.clone();
             normalized.url = compact_image_reference_url(image, local_path);
             return Ok(normalized);
@@ -771,8 +955,9 @@ async fn normalize_image_input(
     }
 
     if image_url.starts_with("data:") {
+        let parsed = parse_image_data_url_with_budget(&image.url, image, total_image_bytes)?;
         let local_path =
-            persist_inline_image_attachment(app, workspace_id, thread_id, image).await?;
+            persist_inline_image_attachment(app, workspace_id, thread_id, image, parsed).await?;
         let mut normalized = image.clone();
         normalized.url = local_path.clone();
         normalized.local_path = Some(local_path);
@@ -780,6 +965,9 @@ async fn normalize_image_input(
     }
 
     if Path::new(image_url).is_absolute() {
+        if let Ok(metadata) = tokio::fs::metadata(image_url).await {
+            record_image_attachment_size(image, metadata.len(), total_image_bytes)?;
+        }
         let mut normalized = image.clone();
         normalized.local_path = Some(image_url.to_string());
         normalized.url = image_url.to_string();
@@ -789,13 +977,39 @@ async fn normalize_image_input(
     Ok(image.clone())
 }
 
+fn record_image_attachment_size(
+    image: &ImageInput,
+    bytes: u64,
+    total_image_bytes: &mut u64,
+) -> Result<(), DaemonError> {
+    let label = image
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Image");
+    if bytes > MAX_IMAGE_ATTACHMENT_BYTES {
+        return Err(DaemonError::BadRequest(format!(
+            "{label} is too large. Images must be 3.5 MB or smaller."
+        )));
+    }
+    let next_total = total_image_bytes.saturating_add(bytes);
+    if next_total > MAX_TOTAL_IMAGE_ATTACHMENT_BYTES {
+        return Err(DaemonError::BadRequest(
+            "Those images are too large together. Attach no more than 10 MB at once.".to_string(),
+        ));
+    }
+    *total_image_bytes = next_total;
+    Ok(())
+}
+
 async fn persist_inline_image_attachment(
     app: &AppState,
     workspace_id: &str,
     thread_id: &str,
     image: &ImageInput,
+    parsed: ParsedImageDataUrl,
 ) -> Result<String, DaemonError> {
-    let parsed = parse_image_data_url(&image.url)?;
     let extension = image_file_extension(
         image.name.as_deref(),
         image.mime_type.as_deref(),
@@ -826,7 +1040,7 @@ struct ParsedImageDataUrl {
     bytes: Vec<u8>,
 }
 
-fn parse_image_data_url(url: &str) -> Result<ParsedImageDataUrl, DaemonError> {
+fn image_data_url_parts(url: &str) -> Result<(String, &str), DaemonError> {
     let value = url
         .trim()
         .strip_prefix("data:")
@@ -848,11 +1062,38 @@ fn parse_image_data_url(url: &str) -> Result<ParsedImageDataUrl, DaemonError> {
         ));
     }
 
+    Ok((media_type, encoded))
+}
+
+fn parse_image_data_url(url: &str) -> Result<ParsedImageDataUrl, DaemonError> {
+    let (media_type, encoded) = image_data_url_parts(url)?;
+
     let bytes = BASE64.decode(encoded).map_err(|error| {
         DaemonError::BadRequest(format!("invalid image attachment base64 payload: {error}"))
     })?;
 
     Ok(ParsedImageDataUrl { media_type, bytes })
+}
+
+fn parse_image_data_url_with_budget(
+    url: &str,
+    image: &ImageInput,
+    total_image_bytes: &mut u64,
+) -> Result<ParsedImageDataUrl, DaemonError> {
+    let (_, encoded) = image_data_url_parts(url)?;
+    let padding = if encoded.ends_with("==") {
+        2
+    } else if encoded.ends_with('=') {
+        1
+    } else {
+        0
+    };
+    let encoded_len = u64::try_from(encoded.len()).unwrap_or(u64::MAX);
+    let decoded_upper_bound = (encoded_len.saturating_add(3) / 4)
+        .saturating_mul(3)
+        .saturating_sub(padding);
+    record_image_attachment_size(image, decoded_upper_bound, total_image_bytes)?;
+    parse_image_data_url(url)
 }
 
 fn image_file_extension(
@@ -967,7 +1208,10 @@ const MAX_QUEUED_TURNS: usize = 20;
 
 /// Whether the thread is mid-turn, and so cannot take a fresh dispatch.
 fn thread_is_busy(status: &ThreadStatus) -> bool {
-    matches!(status, ThreadStatus::Running | ThreadStatus::WaitingForInput)
+    matches!(
+        status,
+        ThreadStatus::Running | ThreadStatus::WaitingForInput
+    )
 }
 
 /// Injects the message into the thread's running turn when the caller asked to
@@ -984,35 +1228,33 @@ async fn try_steer_turn(
     }
     let Some((thread, provider, selected_skills)) = ({
         let workspaces = app.inner.workspaces.lock().await;
-        workspaces
-            .get(&request.workspace_id)
-            .and_then(|workspace| {
-                let thread = workspace.threads.get(&request.thread_id)?;
-                if !thread_is_busy(&thread.summary.status) {
-                    return None;
-                }
-                let provider = thread.summary.provider.clone();
-                let supports_steering = workspace
-                    .summary
-                    .agents
-                    .iter()
-                    .find(|agent| agent.provider == provider)
-                    .is_some_and(|agent| agent.capabilities.supports_steering);
-                if !supports_steering {
-                    return None;
-                }
-                let selected_skills = resolve_selected_skills(
-                    &workspace.summary.skills,
-                    &request.selected_skills,
-                    &provider,
-                );
-                Some((thread.summary.clone(), provider, selected_skills))
-            })
+        workspaces.get(&request.workspace_id).and_then(|workspace| {
+            let thread = workspace.threads.get(&request.thread_id)?;
+            if !thread_is_busy(&thread.summary.status) {
+                return None;
+            }
+            let provider = thread.summary.provider.clone();
+            let supports_steering = workspace
+                .summary
+                .agents
+                .iter()
+                .find(|agent| agent.provider == provider)
+                .is_some_and(|agent| agent.capabilities.supports_steering);
+            if !supports_steering {
+                return None;
+            }
+            let selected_skills = resolve_selected_skills(
+                &workspace.summary.skills,
+                &request.selected_skills,
+                &provider,
+            );
+            Some((thread.summary.clone(), provider, selected_skills))
+        })
     }) else {
         return Ok(None);
     };
 
-    ProviderRuntime::for_provider(&provider)
+    if let Err(error) = ProviderRuntime::for_provider(&provider)
         .steer(
             app,
             TurnSpec {
@@ -1021,24 +1263,30 @@ async fn try_steer_turn(
                 thread: &thread,
                 inputs: normalized_inputs,
                 selected_skills: &selected_skills,
-                approval_policy: request
-                    .approval_policy
-                    .as_deref()
-                    .unwrap_or("on-request"),
+                approval_policy: request.approval_policy.as_deref().unwrap_or("on-request"),
                 requested_model_id: request.model_id.as_deref(),
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
                 requires_resume: false,
             },
         )
-        .await?;
+        .await
+    {
+        return if steer_error_downgrades_to_queue(&error) {
+            Ok(None)
+        } else {
+            Err(error)
+        };
+    }
 
     // Appended only once the message is actually in the agent's input: a
     // transcript entry for a write that failed would be a lie.
     app.push_conversation_item(
         &request.workspace_id,
         &request.thread_id,
-        build_user_message_item(normalized_inputs),
+        // Steering shares the already-running provider turn and therefore has
+        // no independent fork boundary. Keep the edit action unavailable.
+        build_user_message_item(normalized_inputs, request.user_item_id.as_deref(), None, None),
         false,
     )
     .await?;
@@ -1056,6 +1304,35 @@ async fn try_steer_turn(
         ok: true,
         message: Some("steered".to_string()),
     }))
+}
+
+/// Whether a failed steer attempt means "the steer is unavailable" rather
+/// than "the send is invalid". The turn can end between the busy check and
+/// the stdin write, or the pipe can be dying or wedged — those races are
+/// downgraded, never rejected, so the message falls through to the queue or a
+/// fresh dispatch. Matched by message because the provider seams currently
+/// expose app-server and Claude failures through shared error variants;
+/// anything else (no runtime attached, unknown workspace) still fails the
+/// send outright.
+pub(super) fn steer_error_downgrades_to_queue(error: &DaemonError) -> bool {
+    match error {
+        DaemonError::BadRequest(message) => {
+            message.contains("no active Codex turn to steer")
+                || message.contains("no active claude turn to steer")
+                || message.contains("no active ACP session to steer")
+                || message.contains("no longer accepting input")
+        }
+        DaemonError::Process(message) => {
+            message.contains("timed out writing to claude turn")
+                || message.contains("failed to write to claude turn")
+        }
+        DaemonError::Rpc(message) => {
+            message.contains("activeTurnNotSteerable")
+                || message.contains("expectedTurnId")
+                || message.contains("no active turn")
+        }
+        _ => false,
+    }
 }
 
 /// Queues the request when the thread is busy. Returns `Ok(None)` when the
@@ -1473,12 +1750,7 @@ pub(super) async fn send_turn(
         return Ok(queued);
     }
 
-    let approval_policy = request
-        .approval_policy
-        .unwrap_or_else(|| "on-request".to_string());
-
-    let user_message = build_user_message_item(&inputs);
-    let (thread, requires_resume, provider, selected_skills) = {
+    let (thread, requires_resume, provider, selected_skills, previous_turn_id, approval_policy) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(&request.workspace_id)
@@ -1521,6 +1793,36 @@ pub(super) async fn send_turn(
                     variant: None,
                 })
             });
+        let permission_mode = request
+            .permission_mode
+            .clone()
+            .or_else(|| managed.summary.agent.permission_mode.clone())
+            .or_else(|| default_permission_mode(&provider).map(str::to_owned));
+        let sandbox_mode = request
+            .sandbox_mode
+            .clone()
+            .or_else(|| managed.summary.agent.sandbox_mode.clone())
+            .or_else(|| default_sandbox_mode(&provider).map(str::to_owned));
+        let mut approval_policy = request
+            .approval_policy
+            .clone()
+            .or_else(|| managed.summary.agent.approval_policy.clone())
+            .unwrap_or_else(|| default_approval_policy(&provider).to_string());
+        if provider == AgentProvider::CODEX
+            && let Some(requested_mode) = request
+                .permission_mode
+                .as_deref()
+                .filter(|mode| !mode.eq_ignore_ascii_case("default"))
+        {
+            approval_policy = requested_mode.to_string();
+        } else if provider == AgentProvider::CODEX
+            && request.approval_policy.is_none()
+            && let Some(permission_mode) = permission_mode
+                .as_deref()
+                .filter(|mode| !mode.eq_ignore_ascii_case("default"))
+        {
+            approval_policy = permission_mode.to_string();
+        }
         managed.summary.provider = provider.clone();
         managed.summary.status = ThreadStatus::Running;
         managed.summary.agent.model_id = request.model_id.clone().or(managed
@@ -1539,16 +1841,8 @@ pub(super) async fn send_turn(
             .agent
             .service_tier
             .clone());
-        managed.summary.agent.permission_mode = request.permission_mode.clone().or(managed
-            .summary
-            .agent
-            .permission_mode
-            .clone());
-        managed.summary.agent.sandbox_mode = request.sandbox_mode.clone().or(managed
-            .summary
-            .agent
-            .sandbox_mode
-            .clone());
+        managed.summary.agent.permission_mode = permission_mode;
+        managed.summary.agent.sandbox_mode = sandbox_mode;
         let selected_skills = resolve_selected_skills(
             &workspace.summary.skills,
             &request.selected_skills,
@@ -1565,13 +1859,22 @@ pub(super) async fn send_turn(
         workspace.summary.current_thread_id = Some(managed.summary.id.clone());
         workspace.summary.default_provider = provider.clone();
         workspace.summary.updated_at = now;
+        let previous_turn_id = managed.summary.latest_turn_id.clone();
         (
             managed.summary.clone(),
             managed.requires_resume,
             provider,
             selected_skills,
+            previous_turn_id,
+            approval_policy,
         )
     };
+    let user_message = build_user_message_item(
+        &inputs,
+        request.user_item_id.as_deref(),
+        None,
+        previous_turn_id,
+    );
     app.push_conversation_item(
         &request.workspace_id,
         &request.thread_id,
@@ -1607,13 +1910,21 @@ pub(super) async fn send_turn(
 
     if let Err(error) = start_result {
         let error_message = error.to_string();
+        let failed_at = Utc::now();
         let _ = app
             .with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
                 thread.status = ThreadStatus::Error;
                 thread.last_error = Some(error_message.clone());
-                thread.updated_at = Utc::now();
+                thread.updated_at = failed_at;
             })
             .await;
+        app.settle_turn_items(
+            &request.workspace_id,
+            &request.thread_id,
+            failed_at,
+            ToolSettlement::Failed,
+        )
+        .await;
         // A failed start must not strand messages queued behind it.
         app.dispatch_next_queued_turn(&request.workspace_id, &request.thread_id);
         if let Ok(thread) = app
@@ -1686,6 +1997,9 @@ pub(super) async fn update_thread(
         if let Some(reasoning_effort) = request.reasoning_effort.clone() {
             thread.summary.agent.reasoning_effort = reasoning_effort;
         }
+        if let Some(collaboration_mode_id) = request.collaboration_mode_id.clone() {
+            thread.summary.agent.collaboration_mode_id = collaboration_mode_id;
+        }
         if let Some(service_tier) = request.service_tier.clone() {
             thread.summary.agent.service_tier = service_tier;
         }
@@ -1696,6 +2010,9 @@ pub(super) async fn update_thread(
             thread.summary.agent.permission_mode =
                 permission_mode.filter(|mode| !mode.eq_ignore_ascii_case("default"));
         }
+        if let Some(approval_policy) = request.approval_policy.clone() {
+            thread.summary.agent.approval_policy = approval_policy;
+        }
         if let Some(sandbox_mode) = request.sandbox_mode.clone() {
             thread.summary.agent.sandbox_mode = sandbox_mode;
         }
@@ -1704,8 +2021,10 @@ pub(super) async fn update_thread(
         let is_pin_only_update = request.title.is_none()
             && request.model_id.is_none()
             && request.reasoning_effort.is_none()
+            && request.collaboration_mode_id.is_none()
             && request.service_tier.is_none()
             && request.permission_mode.is_none()
+            && request.approval_policy.is_none()
             && request.sandbox_mode.is_none()
             && request.pinned.is_some();
         if !is_pin_only_update {
@@ -1765,8 +2084,20 @@ pub(super) fn codex_approval_response(
         };
     }
     // commandExecution / fileChange requestApproval decision enums.
+    let available = params
+        .get("availableDecisions")
+        .or_else(|| params.get("available_decisions"))
+        .and_then(Value::as_array);
     let decision = match decision {
         ApprovalDecision::Allow => "accept",
+        ApprovalDecision::Deny
+            if available.is_some_and(|decisions| {
+                !decisions.iter().any(|value| value == "decline")
+                    && decisions.iter().any(|value| value == "cancel")
+            }) =>
+        {
+            "cancel"
+        }
         ApprovalDecision::Deny => "decline",
         ApprovalDecision::AlwaysAllow => "acceptForSession",
     };
@@ -1974,12 +2305,33 @@ pub(super) async fn remove_workspace(
     })
 }
 
+/// Whether any still-pending interactive request targets this thread. Checked
+/// after a response removes its own entry: restoring `Running` while a second
+/// concurrent request is still waiting on the user would misreport the thread
+/// and hide the remaining prompt.
+async fn thread_has_pending_interactive_request(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> bool {
+    app.inner
+        .interactive_requests
+        .lock()
+        .await
+        .iter()
+        .any(|((request_workspace, _), pending)| {
+            request_workspace == workspace_id
+                && pending.request.thread_id.as_deref() == Some(thread_id)
+        })
+}
+
 pub(super) async fn respond_to_interactive_request(
     app: &AppState,
     workspace_id: String,
     request_id: String,
     response: InteractiveResponsePayload,
 ) -> Result<CommandResponse, DaemonError> {
+    let resolution = InteractiveRequestResolution::from_response(&response, Utc::now());
     let pending = {
         let requests = app.inner.interactive_requests.lock().await;
         requests
@@ -1987,6 +2339,7 @@ pub(super) async fn respond_to_interactive_request(
             .cloned()
             .ok_or_else(|| DaemonError::NotFound("interactive request not found".to_string()))?
     };
+    validate_interactive_response(&pending.request, &response)?;
     let request_key = (workspace_id.clone(), request_id.clone());
     // Claude approvals resolve through the hook handler's oneshot; the Codex
     // session must not be touched for them.
@@ -2011,17 +2364,27 @@ pub(super) async fn respond_to_interactive_request(
             .await
             .remove(&request_key);
         if let Some(thread_id) = pending.request.thread_id {
+            let still_waiting =
+                thread_has_pending_interactive_request(app, &workspace_id, &thread_id).await;
             app.with_thread_mut(&workspace_id, &thread_id, |thread| {
                 // Only revive threads that are actually waiting on this
                 // approval; the turn may have died in the meantime and
-                // forcing Running back would leave a permanent spinner.
-                if matches!(thread.status, ThreadStatus::WaitingForInput) {
+                // forcing Running back would leave a permanent spinner. And
+                // another pending request may still target this thread —
+                // answering one of two concurrent approvals must keep it
+                // waiting for the other.
+                if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
                     thread.status = ThreadStatus::Running;
                 }
             })
             .await?;
-            app.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
-                .await?;
+            app.resolve_interactive_request_item(
+                &workspace_id,
+                &thread_id,
+                &request_id,
+                Some(resolution),
+            )
+            .await?;
         }
         app.emit(
             Some(workspace_id),
@@ -2054,14 +2417,21 @@ pub(super) async fn respond_to_interactive_request(
             .await
             .remove(&request_key);
         if let Some(thread_id) = pending.request.thread_id {
+            let still_waiting =
+                thread_has_pending_interactive_request(app, &workspace_id, &thread_id).await;
             app.with_thread_mut(&workspace_id, &thread_id, |thread| {
-                if matches!(thread.status, ThreadStatus::WaitingForInput) {
+                if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
                     thread.status = ThreadStatus::Running;
                 }
             })
             .await?;
-            app.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
-                .await?;
+            app.resolve_interactive_request_item(
+                &workspace_id,
+                &thread_id,
+                &request_id,
+                Some(resolution),
+            )
+            .await?;
         }
         app.emit(
             Some(workspace_id),
@@ -2126,16 +2496,24 @@ pub(super) async fn respond_to_interactive_request(
         .remove(&(workspace_id.clone(), request_id.clone()));
 
     if let Some(thread_id) = pending.request.thread_id {
+        let still_waiting =
+            thread_has_pending_interactive_request(app, &workspace_id, &thread_id).await;
         app.with_thread_mut(&workspace_id, &thread_id, |thread| {
             // See the Claude branch above: never force Running onto a thread
-            // whose turn already ended.
-            if matches!(thread.status, ThreadStatus::WaitingForInput) {
+            // whose turn already ended or that another pending request still
+            // holds in WaitingForInput.
+            if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
                 thread.status = ThreadStatus::Running;
             }
         })
         .await?;
-        app.resolve_interactive_request_item(&workspace_id, &thread_id, &request_id)
-            .await?;
+        app.resolve_interactive_request_item(
+            &workspace_id,
+            &thread_id,
+            &request_id,
+            Some(resolution),
+        )
+        .await?;
     }
 
     app.emit(
@@ -2150,6 +2528,70 @@ pub(super) async fn respond_to_interactive_request(
         ok: true,
         message: Some("response sent".to_string()),
     })
+}
+
+fn validate_interactive_response(
+    request: &InteractiveRequest,
+    response: &InteractiveResponsePayload,
+) -> Result<(), DaemonError> {
+    match (&request.kind, response) {
+        (InteractiveRequestKind::Approval, InteractiveResponsePayload::Approval { decision }) => {
+            let supported = if let Some(decisions) = &request.approval_decisions {
+                decisions.contains(decision)
+            } else {
+                // Old persisted requests predate capability advertisement.
+                matches!(decision, ApprovalDecision::Allow | ApprovalDecision::Deny)
+            };
+            if supported {
+                Ok(())
+            } else {
+                Err(DaemonError::BadRequest(
+                    "interactive approval decision was not offered by the provider".to_string(),
+                ))
+            }
+        }
+        (InteractiveRequestKind::Approval, _) => Err(DaemonError::BadRequest(
+            "interactive approval requires an approval response".to_string(),
+        )),
+        (InteractiveRequestKind::Question, InteractiveResponsePayload::Question { answers }) => {
+            if request.questions.is_empty() {
+                return Err(DaemonError::BadRequest(
+                    "interactive question did not provide any questions".to_string(),
+                ));
+            }
+            let expected_ids = request
+                .questions
+                .iter()
+                .map(|question| question.id.as_str())
+                .collect::<std::collections::HashSet<_>>();
+            if expected_ids.len() != request.questions.len() {
+                return Err(DaemonError::BadRequest(
+                    "interactive question contains duplicate question identifiers".to_string(),
+                ));
+            }
+            if answers
+                .keys()
+                .any(|question_id| !expected_ids.contains(question_id.as_str()))
+            {
+                return Err(DaemonError::BadRequest(
+                    "interactive response contains an unknown question identifier".to_string(),
+                ));
+            }
+            if request.questions.iter().any(|question| {
+                answers.get(&question.id).is_none_or(|values| {
+                    values.is_empty() || values.iter().any(|value| value.trim().is_empty())
+                })
+            }) {
+                return Err(DaemonError::BadRequest(
+                    "every interactive question requires a non-empty answer".to_string(),
+                ));
+            }
+            Ok(())
+        }
+        (InteractiveRequestKind::Question, _) => Err(DaemonError::BadRequest(
+            "interactive question requires question answers".to_string(),
+        )),
+    }
 }
 
 pub(super) async fn collaboration_modes(
@@ -2447,10 +2889,19 @@ pub(super) async fn thread_detail(
     let workspace_summary = workspace.summary.clone();
     let thread_summary = thread.summary.clone();
     let mut detail = thread_detail_window(&thread.items, request)?;
-    if !thread_is_busy(&thread.summary.status) {
-        settle_running_tool_call_items(&mut detail.items, Utc::now());
-    }
+    settle_thread_detail_tool_items(&mut detail.items, &thread.summary.status, Utc::now());
+    // A restored ACP thread carries only its summary; the transcript lives in
+    // the agent's session store. Kick off a background session/load replay so
+    // opening the thread fills it in instead of showing an empty conversation.
+    let needs_acp_hydration = thread.items.is_empty()
+        && thread.summary.native_session_id.is_some()
+        && thread.summary.provider != AgentProvider::CODEX
+        && thread.summary.provider != AgentProvider::CLAUDE
+        && !matches!(thread.summary.status, ThreadStatus::Running);
     drop(workspaces);
+    if needs_acp_hydration {
+        app.schedule_acp_thread_hydration(&request.workspace_id, &request.thread_id);
+    }
     let items = with_renderable_attachment_previews_for_items(detail.items).await;
 
     Ok(ThreadDetail {
@@ -2462,6 +2913,22 @@ pub(super) async fn thread_detail(
         newest_item_id: detail.newest_item_id,
         is_partial: detail.is_partial,
     })
+}
+
+/// Projects stale transient tools using the containing thread's terminal
+/// outcome. This is a read-path safety net only; authoritative stored items
+/// are settled by the normal terminal turn handlers.
+fn settle_thread_detail_tool_items(
+    items: &mut [ConversationItem],
+    thread_status: &ThreadStatus,
+    settled_at: chrono::DateTime<Utc>,
+) {
+    let settlement = match thread_status {
+        ThreadStatus::Idle => ToolSettlement::Completed,
+        ThreadStatus::Error => ToolSettlement::Failed,
+        ThreadStatus::Running | ThreadStatus::WaitingForInput => return,
+    };
+    settle_tool_call_items(items, settled_at, settlement);
 }
 
 struct ThreadDetailWindow {
@@ -2529,6 +2996,13 @@ fn conversation_item_id(item: &ConversationItem) -> &str {
         ConversationItem::UserMessage { id, .. }
         | ConversationItem::AssistantMessage { id, .. }
         | ConversationItem::Reasoning { id, .. }
+        | ConversationItem::CodeReview { id, .. }
+        | ConversationItem::ContextCompaction { id, .. }
+        | ConversationItem::Artifact { id, .. }
+        | ConversationItem::Unsupported { id, .. }
+        | ConversationItem::Image { id, .. }
+        | ConversationItem::WebSearch { id, .. }
+        | ConversationItem::FileChange { id, .. }
         | ConversationItem::ToolCall { id, .. }
         | ConversationItem::Plan { id, .. }
         | ConversationItem::Diff { id, .. }
@@ -2580,10 +3054,167 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn omitted_harness_modes_use_local_permissive_defaults() {
+        assert_eq!(
+            default_permission_mode(&AgentProvider::CODEX),
+            Some("never")
+        );
+        assert_eq!(
+            default_sandbox_mode(&AgentProvider::CODEX),
+            Some("danger-full-access")
+        );
+        assert_eq!(
+            default_permission_mode(&AgentProvider::CLAUDE),
+            Some("bypassPermissions")
+        );
+        assert_eq!(
+            default_permission_mode(&AgentProvider::new("grok")),
+            Some("always-approve")
+        );
+    }
+
+    fn question_request(question_ids: &[&str]) -> InteractiveRequest {
+        InteractiveRequest {
+            request_id: "request-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            thread_id: Some("thread-1".to_string()),
+            method: "item/tool/requestUserInput".to_string(),
+            kind: InteractiveRequestKind::Question,
+            approval_decisions: Some(Vec::new()),
+            title: "Answer question".to_string(),
+            detail: None,
+            command: None,
+            path: None,
+            turn_id: Some("turn-1".to_string()),
+            item_id: Some("item-1".to_string()),
+            questions: question_ids
+                .iter()
+                .map(|id| falcondeck_core::InteractiveQuestion {
+                    id: (*id).to_string(),
+                    header: "Question".to_string(),
+                    question: "Choose a value".to_string(),
+                    is_other: false,
+                    is_secret: false,
+                    options: None,
+                })
+                .collect(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn interactive_response_accepts_complete_question_answers() {
+        let response = InteractiveResponsePayload::Question {
+            answers: HashMap::from([("region".to_string(), vec!["London".to_string()])]),
+        };
+
+        assert!(validate_interactive_response(&question_request(&["region"]), &response).is_ok());
+    }
+
+    fn approval_request(decisions: Option<Vec<ApprovalDecision>>) -> InteractiveRequest {
+        InteractiveRequest {
+            kind: InteractiveRequestKind::Approval,
+            approval_decisions: decisions,
+            title: "Allow tests?".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            command: Some("npm test".to_string()),
+            questions: Vec::new(),
+            ..question_request(&[])
+        }
+    }
+
+    #[test]
+    fn interactive_response_rejects_decisions_the_provider_did_not_offer() {
+        let request = approval_request(Some(vec![ApprovalDecision::Allow, ApprovalDecision::Deny]));
+        let response = InteractiveResponsePayload::Approval {
+            decision: ApprovalDecision::AlwaysAllow,
+        };
+
+        let error = validate_interactive_response(&request, &response)
+            .expect_err("unsupported persistent approval must fail");
+        assert_eq!(
+            error.to_string(),
+            "interactive approval decision was not offered by the provider"
+        );
+    }
+
+    #[test]
+    fn legacy_interactive_approvals_allow_once_or_deny_but_not_persistence() {
+        let request = approval_request(None);
+        for decision in [ApprovalDecision::Allow, ApprovalDecision::Deny] {
+            assert!(
+                validate_interactive_response(
+                    &request,
+                    &InteractiveResponsePayload::Approval { decision },
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_interactive_response(
+                &request,
+                &InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::AlwaysAllow,
+                },
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn interactive_response_rejects_missing_question_answers() {
+        let response = InteractiveResponsePayload::Question {
+            answers: HashMap::new(),
+        };
+
+        let error = validate_interactive_response(&question_request(&["region"]), &response)
+            .expect_err("missing answer must fail");
+        assert_eq!(
+            error.to_string(),
+            "every interactive question requires a non-empty answer"
+        );
+    }
+
+    #[test]
+    fn interactive_response_rejects_unknown_question_identifiers() {
+        let response = InteractiveResponsePayload::Question {
+            answers: HashMap::from([
+                ("region".to_string(), vec!["London".to_string()]),
+                ("injected".to_string(), vec!["value".to_string()]),
+            ]),
+        };
+
+        let error = validate_interactive_response(&question_request(&["region"]), &response)
+            .expect_err("unknown identifier must fail");
+        assert_eq!(
+            error.to_string(),
+            "interactive response contains an unknown question identifier"
+        );
+    }
+
+    #[test]
+    fn interactive_response_rejects_blank_secret_without_echoing_it() {
+        let response = InteractiveResponsePayload::Question {
+            answers: HashMap::from([("token".to_string(), vec!["   ".to_string()])]),
+        };
+
+        let error = validate_interactive_response(&question_request(&["token"]), &response)
+            .expect_err("blank answer must fail");
+        assert_eq!(
+            error.to_string(),
+            "every interactive question requires a non-empty answer"
+        );
+    }
+
     fn assistant_message(id: &str) -> ConversationItem {
         ConversationItem::AssistantMessage {
             id: id.to_string(),
             text: format!("message {id}"),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
             created_at: Utc::now(),
         }
     }
@@ -2803,35 +3434,38 @@ mod tests {
                 .threads
                 .get_mut("thread-1")
                 .unwrap();
-            thread.queued_requests.push(super::super::QueuedTurnRequest {
-                id: "queued-1".to_string(),
-                request: SendTurnRequest {
-                    workspace_id: "workspace-1".to_string(),
-                    thread_id: "thread-1".to_string(),
-                    inputs: vec![
-                        TurnInputItem::Text {
-                            id: None,
-                            text: "original words".to_string(),
-                        },
-                        TurnInputItem::Image(ImageInput {
-                            id: "img-1".to_string(),
-                            name: None,
-                            mime_type: Some("image/png".to_string()),
-                            url: "file:///tmp/img.png".to_string(),
-                            local_path: Some("/tmp/img.png".to_string()),
-                        }),
-                    ],
-                    selected_skills: Vec::new(),
-                    provider: None,
-                    model_id: None,
-                    reasoning_effort: None,
-                    approval_policy: None,
-                    service_tier: None,
-                    permission_mode: None,
-                    sandbox_mode: None,
-                    steer: false,
-                },
-            });
+            thread
+                .queued_requests
+                .push(super::super::QueuedTurnRequest {
+                    id: "queued-1".to_string(),
+                    request: SendTurnRequest {
+                        workspace_id: "workspace-1".to_string(),
+                        thread_id: "thread-1".to_string(),
+                        inputs: vec![
+                            TurnInputItem::Text {
+                                id: None,
+                                text: "original words".to_string(),
+                            },
+                            TurnInputItem::Image(ImageInput {
+                                id: "img-1".to_string(),
+                                name: None,
+                                mime_type: Some("image/png".to_string()),
+                                url: "file:///tmp/img.png".to_string(),
+                                local_path: Some("/tmp/img.png".to_string()),
+                            }),
+                        ],
+                        selected_skills: Vec::new(),
+                        provider: None,
+                        model_id: None,
+                        reasoning_effort: None,
+                        user_item_id: None,
+                        approval_policy: None,
+                        service_tier: None,
+                        permission_mode: None,
+                        sandbox_mode: None,
+                        steer: false,
+                    },
+                });
             thread
                 .summary
                 .queued_turns
@@ -2863,7 +3497,10 @@ mod tests {
         // The attachment materialized at queue time must ride along untouched.
         assert!(matches!(&queued.request.inputs[1], TurnInputItem::Image(_)));
         let entry = &thread.summary.queued_turns[0];
-        assert_eq!((entry.preview.as_str(), entry.text.as_str()), ("new words", "new words"));
+        assert_eq!(
+            (entry.preview.as_str(), entry.text.as_str()),
+            ("new words", "new words")
+        );
 
         drop(workspaces);
         let missing = edit_queued_turn(&app, "workspace-1", "thread-1", "queued-2", "x").await;
@@ -3025,6 +3662,7 @@ mod tests {
             url: "data:image/png;base64,aGVsbG8=".to_string(),
             local_path: Some(diagram_path.clone()),
         };
+        let mut total_image_bytes = 0;
 
         let normalized = normalize_image_input(
             &AppState::new_with_state_path(
@@ -3035,12 +3673,16 @@ mod tests {
             "workspace-1",
             "thread-1",
             &image,
+            &mut total_image_bytes,
         )
         .await
         .unwrap();
 
         assert_eq!(normalized.url, diagram_path);
-        assert_eq!(normalized.local_path.as_deref(), Some(diagram_path.as_str()));
+        assert_eq!(
+            normalized.local_path.as_deref(),
+            Some(diagram_path.as_str())
+        );
     }
 
     #[tokio::test]
@@ -3056,13 +3698,97 @@ mod tests {
             local_path: None,
         };
 
-        let local_path =
-            persist_inline_image_attachment(&app, "../../workspace", "../../thread", &image)
-                .await
-                .unwrap();
+        let parsed = parse_image_data_url(&image.url).unwrap();
+        let local_path = persist_inline_image_attachment(
+            &app,
+            "../../workspace",
+            "../../thread",
+            &image,
+            parsed,
+        )
+        .await
+        .unwrap();
 
         assert!(Path::new(&local_path).starts_with(temp_dir.path().join("attachments")));
         assert!(!local_path.contains("../"));
+    }
+
+    #[test]
+    fn rejects_oversized_images_before_materializing_them() {
+        let image = ImageInput {
+            id: "large".to_string(),
+            name: Some("panorama.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: String::new(),
+            local_path: None,
+        };
+        let mut total = 0;
+
+        let error =
+            record_image_attachment_size(&image, MAX_IMAGE_ATTACHMENT_BYTES + 1, &mut total)
+                .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("panorama.png is too large. Images must be 3.5 MB or smaller.")
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_inline_images_are_not_written_to_disk() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "0.1.0".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        let image = ImageInput {
+            id: "large".to_string(),
+            name: Some("panorama.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: format!(
+                "data:image/png;base64,{}",
+                BASE64.encode(vec![0_u8; MAX_IMAGE_ATTACHMENT_BYTES as usize + 1])
+            ),
+            local_path: None,
+        };
+
+        let error = normalize_turn_inputs(
+            &app,
+            "workspace-1",
+            "thread-1",
+            &[TurnInputItem::Image(image)],
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("panorama.png is too large. Images must be 3.5 MB or smaller.")
+        );
+        assert!(!temp_dir.path().join("attachments").exists());
+    }
+
+    #[test]
+    fn rejects_image_batches_over_the_aggregate_budget() {
+        let image = ImageInput {
+            id: "batch".to_string(),
+            name: Some("batch.png".to_string()),
+            mime_type: Some("image/png".to_string()),
+            url: String::new(),
+            local_path: None,
+        };
+        let mut total = MAX_TOTAL_IMAGE_ATTACHMENT_BYTES - 1;
+
+        let error = record_image_attachment_size(&image, 2, &mut total).unwrap_err();
+
+        assert!(
+            error.to_string().contains(
+                "Those images are too large together. Attach no more than 10 MB at once."
+            )
+        );
     }
 
     #[test]
@@ -3134,6 +3860,54 @@ mod tests {
         assert_eq!(detail.oldest_item_id.as_deref(), Some("msg-2"));
         assert_eq!(detail.newest_item_id.as_deref(), Some("msg-3"));
         assert!(detail.is_partial);
+    }
+
+    #[test]
+    fn thread_detail_projects_stale_tools_with_the_thread_outcome() {
+        let pending_file_change = || ConversationItem::FileChange {
+            id: "patch-1".to_string(),
+            changes: Vec::new(),
+            status: "awaiting_approval".to_string(),
+            lifecycle: falcondeck_core::ToolLifecycle::AwaitingApproval,
+            created_at: Utc::now(),
+            completed_at: None,
+        };
+        let settled_at = Utc::now();
+
+        let mut failed_items = vec![pending_file_change()];
+        settle_thread_detail_tool_items(&mut failed_items, &ThreadStatus::Error, settled_at);
+        assert!(matches!(
+            &failed_items[0],
+            ConversationItem::FileChange {
+                status,
+                lifecycle: falcondeck_core::ToolLifecycle::Failed,
+                completed_at: Some(completed_at),
+                ..
+            } if status == "failed" && *completed_at == settled_at
+        ));
+
+        let mut idle_items = vec![pending_file_change()];
+        settle_thread_detail_tool_items(&mut idle_items, &ThreadStatus::Idle, settled_at);
+        assert!(matches!(
+            &idle_items[0],
+            ConversationItem::FileChange {
+                status,
+                lifecycle: falcondeck_core::ToolLifecycle::Succeeded,
+                ..
+            } if status == "completed"
+        ));
+
+        let mut running_items = vec![pending_file_change()];
+        settle_thread_detail_tool_items(&mut running_items, &ThreadStatus::Running, settled_at);
+        assert!(matches!(
+            &running_items[0],
+            ConversationItem::FileChange {
+                status,
+                lifecycle: falcondeck_core::ToolLifecycle::AwaitingApproval,
+                completed_at: None,
+                ..
+            } if status == "awaiting_approval"
+        ));
     }
 
     #[test]

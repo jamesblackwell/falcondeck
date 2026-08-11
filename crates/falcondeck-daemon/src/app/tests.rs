@@ -3,24 +3,716 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use falcondeck_core::{
-    AgentProvider, ConversationItem, ImageInput, InteractiveRequest, InteractiveRequestKind,
-    SnapshotRequest, ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary,
-    ToolActivityKind, ToolArtifactKind, ToolHistoryMode, TurnInputItem, UpdateThreadRequest,
-    WorkspaceStatus,
-    WorkspaceSummary,
+    AgentProvider, ContentLifecycle, ConversationItem, ImageInput, InteractiveRequest,
+    InteractiveRequestKind, InteractiveRequestOutcome, SnapshotRequest, ThreadAgentParams,
+    ThreadAttention, ThreadStatus, ThreadSummary, ToolActivityKind, ToolArtifactKind,
+    ToolCallDetail, ToolHistoryMode, ToolLifecycle, TurnInputItem, UpdateThreadRequest,
+    WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tokio::time::{Duration as TokioDuration, sleep};
 
 use super::{
     AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
-    claude_prompt_from_inputs, codex_inputs, conversation_helpers::tool_display_metadata,
-    encode_base64, notification_timestamp, should_surface_tool_item,
-    workspace_status_after_account_update,
+    claude_prompt_from_inputs, codex_inputs,
+    conversation_helpers::{
+        ToolSettlement, codex_artifact_conversation_item, is_known_tool_item,
+        tool_display_metadata, unsupported_conversation_item,
+    },
+    encode_base64, notification_timestamp,
+    notifications::{
+        codex_guardian_review_conversation_item, codex_thread_status, ingest_notification,
+        parse_realtime_audio_chunk, parse_thread_token_usage, realtime_conversation_item,
+    },
+    should_surface_tool_item, workspace_status_after_account_update,
 };
+
+#[test]
+fn maps_codex_thread_status_and_waiting_flags() {
+    assert_eq!(
+        codex_thread_status(&json!({ "status": { "type": "idle" } })),
+        ThreadStatus::Idle,
+    );
+    assert_eq!(
+        codex_thread_status(&json!({ "status": { "type": "active", "activeFlags": [] } })),
+        ThreadStatus::Running,
+    );
+    assert_eq!(
+        codex_thread_status(&json!({
+            "status": { "type": "active", "activeFlags": ["waitingOnApproval"] }
+        })),
+        ThreadStatus::WaitingForInput,
+    );
+    assert_eq!(
+        codex_thread_status(&json!({ "status": { "type": "systemError" } })),
+        ThreadStatus::Error,
+    );
+}
+
+#[tokio::test]
+async fn retains_workspace_service_notices_in_snapshots() {
+    let app = AppState::new("test".to_string(), HashMap::new());
+    app.emit_service(
+        Some("workspace-1".to_string()),
+        None,
+        falcondeck_core::ServiceLevel::Warning,
+        "Configuration will change".to_string(),
+        Some("deprecationNotice".to_string()),
+    )
+    .expect("emit notice");
+
+    let snapshot = app.snapshot().await;
+    assert!(matches!(
+        snapshot.service_notices.as_slice(),
+        [notice]
+            if notice.workspace_id == "workspace-1"
+                && notice.message == "Configuration will change"
+                && notice.raw_method.as_deref() == Some("deprecationNotice")
+    ));
+}
+
+#[test]
+fn parses_codex_thread_token_usage_without_losing_cached_or_reasoning_counts() {
+    let usage = parse_thread_token_usage(&json!({
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "tokenUsage": {
+            "total": {
+                "totalTokens": 92_000,
+                "inputTokens": 80_000,
+                "cachedInputTokens": 50_000,
+                "outputTokens": 10_000,
+                "reasoningOutputTokens": 2_000
+            },
+            "last": {
+                "totalTokens": 5_000,
+                "inputTokens": 4_000,
+                "cachedInputTokens": 2_500,
+                "outputTokens": 800,
+                "reasoningOutputTokens": 200
+            },
+            "modelContextWindow": 128_000
+        }
+    }))
+    .expect("token usage");
+
+    assert_eq!(usage.total.total_tokens, 92_000);
+    assert_eq!(usage.total.cached_input_tokens, 50_000);
+    assert_eq!(usage.total.reasoning_output_tokens, 2_000);
+    assert_eq!(usage.last.expect("last usage").output_tokens, 800);
+    assert_eq!(usage.model_context_window, Some(128_000));
+}
+
+#[tokio::test]
+async fn retains_streamed_realtime_assistant_and_final_user_transcripts() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+
+    for delta in ["Hello ", "from voice"] {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            "thread/realtime/transcript/delta",
+            json!({ "threadId": "thread-1", "role": "assistant", "delta": delta }),
+        )
+        .await
+        .unwrap();
+    }
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/realtime/transcript/done",
+        json!({
+            "threadId": "thread-1",
+            "role": "assistant",
+            "text": "Hello from voice"
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/realtime/transcript/delta",
+        json!({ "threadId": "thread-1", "role": "user", "delta": "Ship it" }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/realtime/transcript/done",
+        json!({ "threadId": "thread-1", "role": "user", "text": "Ship it" }),
+    )
+    .await
+    .unwrap();
+
+    let workspaces = app.inner.workspaces.lock().await;
+    let items = &workspaces["workspace-1"].threads["thread-1"].items;
+    assert!(matches!(
+        &items[0],
+        ConversationItem::AssistantMessage { text, lifecycle, .. }
+            if text == "Hello from voice" && *lifecycle == ContentLifecycle::Complete
+    ));
+    assert!(matches!(
+        &items[1],
+        ConversationItem::UserMessage { text, attachments, .. }
+            if text == "Ship it" && attachments.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn preserves_context_compaction_lifecycle_without_tool_events() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+    let mut events = app.subscribe();
+
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "item/started",
+        json!({
+            "threadId": "thread-1",
+            "timestamp": "2026-08-09T10:00:00Z",
+            "item": { "id": "compact-1", "type": "contextCompaction" }
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "item/completed",
+        json!({
+            "threadId": "thread-1",
+            "timestamp": "2026-08-09T10:00:02Z",
+            "item": { "id": "compact-1", "type": "contextCompaction" }
+        }),
+    )
+    .await
+    .unwrap();
+
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        falcondeck_core::UnifiedEvent::ConversationItemAdded {
+            item: ConversationItem::ContextCompaction {
+                lifecycle: falcondeck_core::ToolLifecycle::Running,
+                ..
+            }
+        }
+    )));
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        falcondeck_core::UnifiedEvent::ConversationItemUpdated {
+            item: ConversationItem::ContextCompaction {
+                lifecycle: falcondeck_core::ToolLifecycle::Succeeded,
+                ..
+            }
+        }
+    )));
+    assert!(!emitted.iter().any(|envelope| matches!(
+        envelope.event,
+        falcondeck_core::UnifiedEvent::ToolCallStart { .. }
+            | falcondeck_core::UnifiedEvent::ToolCallEnd { .. }
+    )));
+
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(matches!(
+        workspaces["workspace-1"].threads["thread-1"].items.as_slice(),
+        [ConversationItem::ContextCompaction {
+            lifecycle: falcondeck_core::ToolLifecycle::Succeeded,
+            created_at,
+            completed_at: Some(completed_at),
+            ..
+        }] if created_at.to_rfc3339() == "2026-08-09T10:00:00+00:00"
+            && completed_at.to_rfc3339() == "2026-08-09T10:00:02+00:00"
+    ));
+}
+
+#[tokio::test]
+async fn preserves_live_reasoning_content_and_derives_duration() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "item/started",
+        json!({
+            "threadId": "thread-1",
+            "timestamp": "2026-08-09T10:00:00Z",
+            "item": {
+                "id": "reasoning-1",
+                "type": "reasoning",
+                "status": "inProgress",
+                "summary": ["Inspecting the renderer"],
+                "content": ["Reading the current implementation"]
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "item/completed",
+        json!({
+            "threadId": "thread-1",
+            "timestamp": "2026-08-09T10:00:02.500Z",
+            "item": {
+                "id": "reasoning-1",
+                "type": "reasoning",
+                "status": "completed"
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(matches!(
+        workspaces["workspace-1"].threads["thread-1"].items.as_slice(),
+        [ConversationItem::Reasoning {
+            summary: Some(summary),
+            content,
+            lifecycle: ContentLifecycle::Complete,
+            duration_ms: Some(2500),
+            created_at,
+            ..
+        }] if summary == "Inspecting the renderer"
+            && content == "Reading the current implementation"
+            && created_at.to_rfc3339() == "2026-08-09T10:00:00+00:00"
+    ));
+}
+
+#[tokio::test]
+async fn preserves_artifact_lifecycle_without_tool_events() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+    let mut events = app.subscribe();
+
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "item/started",
+        json!({
+            "threadId": "thread-1",
+            "timestamp": "2026-08-09T10:00:00Z",
+            "item": { "id": "future-1", "type": "artifactPreview", "status": "inProgress" }
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "item/completed",
+        json!({
+            "threadId": "thread-1",
+            "timestamp": "2026-08-09T10:00:02Z",
+            "item": {
+                "id": "future-1",
+                "type": "artifactPreview",
+                "status": "completed",
+                "artifact": { "title": "Prototype" }
+            }
+        }),
+    )
+    .await
+    .unwrap();
+
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(!emitted.iter().any(|envelope| matches!(
+        envelope.event,
+        falcondeck_core::UnifiedEvent::ToolCallStart { .. }
+            | falcondeck_core::UnifiedEvent::ToolCallEnd { .. }
+    )));
+
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(matches!(
+        workspaces["workspace-1"].threads["thread-1"].items.as_slice(),
+        [ConversationItem::Artifact {
+            artifact,
+            lifecycle: ContentLifecycle::Complete,
+            created_at,
+            ..
+        }] if created_at.to_rfc3339() == "2026-08-09T10:00:00+00:00"
+            && artifact.title == "Prototype"
+            && artifact.payload.pointer("/title") == Some(&json!("Prototype"))
+    ));
+}
+
+#[tokio::test]
+async fn preserves_code_review_subject_and_findings_across_live_replacement() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+    let mut events = app.subscribe();
+
+    for (method, timestamp, item) in [
+        (
+            "item/started",
+            "2026-08-09T10:00:00Z",
+            json!({ "id": "review-1", "type": "enteredReviewMode", "review": "current changes" }),
+        ),
+        (
+            "item/started",
+            "2026-08-09T10:00:02Z",
+            json!({ "id": "review-1", "type": "exitedReviewMode", "review": "## Findings\n\n- Fix the race." }),
+        ),
+        (
+            "item/completed",
+            "2026-08-09T10:00:03Z",
+            json!({ "id": "review-1", "type": "exitedReviewMode", "review": "## Findings\n\n- Fix the race." }),
+        ),
+    ] {
+        ingest_notification(
+            &app,
+            "workspace-1",
+            method,
+            json!({ "threadId": "thread-1", "timestamp": timestamp, "item": item }),
+        )
+        .await
+        .unwrap();
+    }
+
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(!emitted.iter().any(|envelope| matches!(
+        envelope.event,
+        falcondeck_core::UnifiedEvent::ToolCallStart { .. }
+            | falcondeck_core::UnifiedEvent::ToolCallEnd { .. }
+    )));
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(matches!(
+        workspaces["workspace-1"].threads["thread-1"].items.as_slice(),
+        [ConversationItem::CodeReview {
+            subject: Some(subject),
+            content,
+            lifecycle: ContentLifecycle::Complete,
+            created_at,
+            ..
+        }] if subject == "current changes"
+            && content == "## Findings\n\n- Fix the race."
+            && created_at.to_rfc3339() == "2026-08-09T10:00:00+00:00"
+    ));
+}
+
+#[tokio::test]
+async fn emits_bounded_realtime_audio_lifecycle_without_retaining_pcm() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+    let mut events = app.subscribe();
+
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/realtime/started",
+        json!({
+            "threadId": "thread-1",
+            "realtimeSessionId": "voice-1",
+            "version": "v2"
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/realtime/outputAudio/delta",
+        json!({
+            "threadId": "thread-1",
+            "audio": {
+                "itemId": "item-1",
+                "data": "AAA=",
+                "sampleRate": 24_000,
+                "numChannels": 1,
+                "samplesPerChannel": 1
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    ingest_notification(
+        &app,
+        "workspace-1",
+        "thread/realtime/closed",
+        json!({ "threadId": "thread-1", "reason": null }),
+    )
+    .await
+    .unwrap();
+
+    assert!(matches!(
+        events.recv().await.unwrap().event,
+        falcondeck_core::UnifiedEvent::RealtimeAudioStarted { session_id }
+            if session_id.as_deref() == Some("voice-1")
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap().event,
+        falcondeck_core::UnifiedEvent::RealtimeAudioDelta { audio }
+            if audio.item_id.as_deref() == Some("item-1")
+                && audio.sample_rate == 24_000
+                && audio.num_channels == 1
+                && audio.samples_per_channel == Some(1)
+    ));
+    assert!(matches!(
+        events.recv().await.unwrap().event,
+        falcondeck_core::UnifiedEvent::RealtimeAudioEnded {
+            reason: None,
+            interrupted: false
+        }
+    ));
+
+    let snapshot = app.snapshot().await;
+    assert!(snapshot.service_notices.iter().all(|notice| {
+        notice.raw_method.as_deref() != Some("thread/realtime/outputAudio/delta")
+    }));
+}
+
+#[test]
+fn rejects_invalid_realtime_audio_metadata() {
+    assert!(
+        parse_realtime_audio_chunk(&json!({
+            "audio": { "data": "AAA=", "sampleRate": 0, "numChannels": 1 }
+        }))
+        .is_none()
+    );
+    assert!(
+        parse_realtime_audio_chunk(&json!({
+            "audio": { "data": "AAA=", "sampleRate": 24_000, "numChannels": 0 }
+        }))
+        .is_none()
+    );
+}
+
+#[test]
+fn projects_and_bounds_unstable_realtime_items() {
+    let handoff = realtime_conversation_item(&json!({
+        "id": "handoff-1",
+        "type": "handoff_request",
+        "message": "Please continue this request in Codex."
+    }));
+    assert_eq!(handoff.id, "handoff-1");
+    assert_eq!(handoff.title, "Voice handoff requested");
+    assert_eq!(
+        handoff.summary.as_deref(),
+        Some("Please continue this request in Codex.")
+    );
+
+    let oversized = realtime_conversation_item(&json!({
+        "type": "future_event",
+        "data": "x".repeat(70 * 1024)
+    }));
+    assert_eq!(oversized.payload.get("truncated"), Some(&json!(true)));
+}
+
+#[test]
+fn bounds_unsupported_provider_item_payloads() {
+    let item = unsupported_conversation_item(
+        &json!({
+            "id": "future-oversized",
+            "type": "futureEvent",
+            "data": "x".repeat(70 * 1024)
+        }),
+        Utc::now(),
+        ContentLifecycle::Complete,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        item,
+        ConversationItem::Unsupported { payload, .. }
+            if payload.get("truncated") == Some(&json!(true))
+    ));
+}
+
+#[test]
+fn bounds_provider_artifact_payloads() {
+    let item = codex_artifact_conversation_item(
+        &json!({
+            "id": "artifact-oversized",
+            "type": "artifactPreview",
+            "artifact": { "title": "Prototype", "content": "x".repeat(70 * 1024) }
+        }),
+        Utc::now(),
+        ContentLifecycle::Complete,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        item,
+        ConversationItem::Artifact { artifact, .. }
+            if artifact.content.is_none()
+                && artifact.payload.get("truncated") == Some(&json!(true))
+    ));
+}
+
+#[test]
+fn maps_guardian_review_lifecycle_and_structured_rationale() {
+    let item = codex_guardian_review_conversation_item(&json!({
+        "threadId": "thread-1",
+        "turnId": "turn-1",
+        "startedAtMs": 1_781_000_000_000_i64,
+        "completedAtMs": 1_781_000_000_125_i64,
+        "reviewId": "review-7",
+        "targetItemId": "command-4",
+        "decisionSource": "agent",
+        "review": {
+            "status": "denied",
+            "riskLevel": "high",
+            "userAuthorization": "low",
+            "rationale": "The command would overwrite production data."
+        },
+        "action": {
+            "type": "command",
+            "source": "shell",
+            "command": "deploy --force",
+            "cwd": "/workspace"
+        }
+    }))
+    .expect("guardian review");
+
+    let ConversationItem::ToolCall {
+        id, status, detail, ..
+    } = item
+    else {
+        panic!("expected guardian review tool call");
+    };
+    assert!(id == "guardian-review-review-7" && status == "denied");
+    assert!(matches!(
+        detail.as_deref(),
+        Some(ToolCallDetail::GuardianReview {
+                action,
+                action_kind,
+                target_item_id: Some(target_item_id),
+                status: review_status,
+                risk_level: Some(risk),
+                user_authorization: Some(user_authorization),
+                rationale: Some(rationale),
+                decision_source: Some(decision_source),
+                duration_ms: Some(125),
+                ..
+            }) if action == "deploy --force"
+            && action_kind == "command"
+            && target_item_id == "command-4"
+            && review_status == "denied"
+            && risk == "high"
+            && user_authorization == "low"
+            && rationale.contains("overwrite production")
+            && decision_source == "agent"
+    ));
+}
+
+#[test]
+fn maps_every_guardian_review_terminal_state_without_losing_identity() {
+    for (review_status, tool_status) in [
+        ("inProgress", "running"),
+        ("approved", "completed"),
+        ("denied", "denied"),
+        ("timedOut", "interrupted"),
+        ("aborted", "interrupted"),
+    ] {
+        let item = codex_guardian_review_conversation_item(&json!({
+            "reviewId": "stable-review",
+            "review": { "status": review_status },
+            "action": { "type": "networkAccess", "url": "https://example.com" }
+        }))
+        .expect("guardian review state");
+
+        assert!(matches!(
+            item,
+            ConversationItem::ToolCall {
+                id,
+                status,
+                detail: Some(detail),
+                ..
+            } if id == "guardian-review-stable-review"
+                && status == tool_status
+                && matches!(
+                    detail.as_ref(),
+                    ToolCallDetail::GuardianReview {
+                        review_id,
+                        status,
+                        ..
+                    } if review_id == "stable-review" && status == review_status
+                )
+        ));
+    }
+}
 
 #[test]
 fn parses_thread_goal_notifications() {
@@ -99,6 +791,14 @@ fn codex_approval_responses_match_app_server_protocol() {
         ),
         json!({ "decision": "decline" })
     );
+    assert_eq!(
+        codex_approval_response(
+            "item/commandExecution/requestApproval",
+            &json!({ "availableDecisions": ["cancel"] }),
+            &ApprovalDecision::Deny
+        ),
+        json!({ "decision": "cancel" })
+    );
 
     // Permission approvals echo the requested profile back as the grant.
     let params = json!({
@@ -166,6 +866,8 @@ fn filters_internal_codex_item_kinds_from_tool_timeline() {
     assert!(!should_surface_tool_item("agentMessage"));
     assert!(!should_surface_tool_item("reasoning"));
     assert!(should_surface_tool_item("commandExecution"));
+    assert!(is_known_tool_item("commandExecution"));
+    assert!(!is_known_tool_item("artifactPreview"));
 }
 
 #[test]
@@ -259,10 +961,175 @@ fn uses_notification_timestamps_when_available() {
     assert_eq!(fallback.to_rfc3339(), "2026-03-18T10:15:29+00:00");
 }
 
+#[tokio::test]
+async fn terminal_turn_cancels_orphaned_interactive_requests() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+    let created_at = Utc::now();
+    let request = InteractiveRequest {
+        request_id: "orphaned-request".to_string(),
+        workspace_id: "workspace-1".to_string(),
+        thread_id: Some("thread-1".to_string()),
+        method: "item/commandExecution/requestApproval".to_string(),
+        kind: InteractiveRequestKind::Approval,
+        approval_decisions: None,
+        title: "Allow deployment?".to_string(),
+        detail: None,
+        command: Some("deploy".to_string()),
+        path: None,
+        turn_id: Some("turn-1".to_string()),
+        item_id: Some("tool-1".to_string()),
+        questions: Vec::new(),
+        created_at,
+    };
+    app.inner.interactive_requests.lock().await.insert(
+        ("workspace-1".to_string(), request.request_id.clone()),
+        super::PendingServerRequest {
+            raw_id: json!("raw-request"),
+            request: request.clone(),
+            params: Value::Null,
+        },
+    );
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        ConversationItem::InteractiveRequest {
+            id: request.request_id.clone(),
+            request: Box::new(request),
+            created_at,
+            resolved: false,
+            resolution: None,
+        },
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mut events = app.subscribe();
+    let settled_at = created_at + Duration::seconds(3);
+    app.settle_turn_items(
+        "workspace-1",
+        "thread-1",
+        settled_at,
+        ToolSettlement::Failed,
+    )
+    .await;
+
+    assert!(app.snapshot().await.interactive_requests.is_empty());
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        falcondeck_core::UnifiedEvent::ConversationItemUpdated {
+            item: ConversationItem::InteractiveRequest {
+                resolved: true,
+                resolution: Some(resolution),
+                ..
+            },
+        } if resolution.outcome == InteractiveRequestOutcome::Cancelled
+    )));
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        falcondeck_core::UnifiedEvent::Snapshot { snapshot }
+            if snapshot.interactive_requests.is_empty()
+    )));
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(matches!(
+        workspaces["workspace-1"].threads["thread-1"].items.as_slice(),
+        [ConversationItem::InteractiveRequest {
+            resolved: true,
+            resolution: Some(resolution),
+            ..
+        }] if resolution.outcome == InteractiveRequestOutcome::Cancelled
+            && resolution.resolved_at == settled_at
+    ));
+}
+
+#[tokio::test]
+async fn terminal_turn_emits_and_retains_an_empty_interrupted_receipt() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+    let created_at = Utc::now();
+    app.push_conversation_item(
+        "workspace-1",
+        "thread-1",
+        ConversationItem::UserMessage {
+            id: "user-before-stop".to_string(),
+            text: "Start, then stop".to_string(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
+            created_at,
+        },
+        false,
+    )
+    .await
+    .unwrap();
+
+    let mut events = app.subscribe();
+    let settled_at = created_at + Duration::seconds(1);
+    app.settle_turn_items(
+        "workspace-1",
+        "thread-1",
+        settled_at,
+        ToolSettlement::Interrupted,
+    )
+    .await;
+
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert!(emitted.iter().any(|envelope| matches!(
+        &envelope.event,
+        falcondeck_core::UnifiedEvent::ConversationItemAdded {
+            item: ConversationItem::AssistantMessage {
+                id,
+                text,
+                lifecycle: ContentLifecycle::Interrupted,
+                ..
+            },
+        } if id == "falcondeck-turn-receipt-user-before-stop" && text.is_empty()
+    )));
+
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(matches!(
+        workspaces["workspace-1"].threads["thread-1"].items.as_slice(),
+        [
+            ConversationItem::UserMessage { .. },
+            ConversationItem::AssistantMessage {
+                id,
+                lifecycle: ContentLifecycle::Interrupted,
+                ..
+            },
+        ] if id == "falcondeck-turn-receipt-user-before-stop"
+    ));
+}
+
 #[test]
 fn extracts_nested_claude_stream_text_and_result_payloads() {
     assert_eq!(
-        super::extract_claude_text_delta(&json!({
+        super::extract_claude_text_chunk(&json!({
             "type": "stream_event",
             "event": {
                 "type": "content_block_delta",
@@ -271,28 +1138,31 @@ fn extracts_nested_claude_stream_text_and_result_payloads() {
                     "text": "hi"
                 }
             }
-        })),
+        }))
+        .map(|chunk| chunk.text),
         Some("hi".to_string())
     );
 
     assert_eq!(
-        super::extract_claude_text_delta(&json!({
+        super::extract_claude_text_chunk(&json!({
             "type": "assistant",
             "message": {
                 "content": [
                     { "type": "text", "text": "hello" }
                 ]
             }
-        })),
+        }))
+        .map(|chunk| chunk.text),
         Some("hello".to_string())
     );
 
     assert_eq!(
-        super::extract_claude_text_delta(&json!({
+        super::extract_claude_text_chunk(&json!({
             "type": "result",
             "subtype": "success",
             "result": "done"
-        })),
+        }))
+        .map(|chunk| chunk.text),
         Some("done".to_string())
     );
 }
@@ -300,12 +1170,13 @@ fn extracts_nested_claude_stream_text_and_result_payloads() {
 #[test]
 fn error_results_are_not_treated_as_assistant_text() {
     assert_eq!(
-        super::extract_claude_text_delta(&json!({
+        super::extract_claude_text_chunk(&json!({
             "type": "result",
             "subtype": "error_during_execution",
             "is_error": true,
             "result": "Something broke"
-        })),
+        }))
+        .map(|chunk| chunk.text),
         None
     );
 }
@@ -399,11 +1270,102 @@ fn multi_block_assistant_messages_join_as_paragraphs() {
         ]}
     }))
     .expect("full chunk");
-    assert_eq!(echo.text, "Let me check the list.\n\nAlso updating the comment:");
+    assert_eq!(
+        echo.text,
+        "Let me check the list.\n\nAlso updating the comment:"
+    );
     assert_eq!(
         super::merge_claude_assistant_text(&echo.text, &echo.text),
         "Let me check the list.\n\nAlso updating the comment:"
     );
+}
+
+#[test]
+fn claude_provider_citations_are_preserved_without_inference() {
+    let chunk = super::extract_claude_text_chunk(&json!({
+        "type": "assistant",
+        "message": { "content": [{
+            "type": "text",
+            "text": "React 19 shipped in December 2024.",
+            "citations": [{
+                "type": "web_search_result_location",
+                "url": "https://react.dev/blog/2024/12/05/react-19",
+                "title": "React v19",
+                "cited_text": "React 19 is now stable!",
+                "encrypted_index": "opaque-provider-token"
+            }]
+        }]}
+    }))
+    .expect("assistant chunk");
+
+    assert_eq!(chunk.citations.len(), 1);
+    assert_eq!(
+        chunk.citations[0].url.as_deref(),
+        Some("https://react.dev/blog/2024/12/05/react-19")
+    );
+    assert_eq!(chunk.citations[0].title.as_deref(), Some("React v19"));
+    assert_eq!(
+        chunk.citations[0].cited_text.as_deref(),
+        Some("React 19 is now stable!")
+    );
+    assert!(matches!(
+        chunk.citations[0].locator,
+        Some(falcondeck_core::ConversationCitationLocator::WebSearch {
+            ref encrypted_index
+        }) if encrypted_index == "opaque-provider-token"
+    ));
+
+    // A search invocation is activity, not evidence. It must not manufacture
+    // an assistant citation before the provider attaches one to text.
+    assert!(
+        super::extract_claude_text_chunk(&json!({
+            "type": "assistant",
+            "message": { "content": [{
+                "type": "tool_use",
+                "name": "WebSearch",
+                "input": { "query": "React 19 release date" }
+            }]}
+        }))
+        .is_none()
+    );
+}
+
+#[test]
+fn claude_streamed_citation_delta_is_not_lost() {
+    let chunk = super::extract_claude_text_chunk(&json!({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "delta": {
+                "type": "citations_delta",
+                "citation": {
+                    "type": "search_result_location",
+                    "source": "kb://release-notes",
+                    "title": "Release notes",
+                    "cited_text": "The release is generally available.",
+                    "search_result_index": 2,
+                    "start_block_index": 4,
+                    "end_block_index": 5
+                }
+            }
+        }
+    }))
+    .expect("citation-only chunk");
+
+    assert!(chunk.text.is_empty());
+    assert_eq!(chunk.citations.len(), 1);
+    assert_eq!(
+        chunk.citations[0].source.as_deref(),
+        Some("kb://release-notes")
+    );
+    assert!(matches!(
+        chunk.citations[0].locator,
+        Some(falcondeck_core::ConversationCitationLocator::SearchResult {
+            search_result_index: 2,
+            start_block_index: 4,
+            end_block_index: 5,
+        })
+    ));
 }
 
 #[test]
@@ -425,7 +1387,8 @@ fn extracts_nested_claude_tool_use_and_result_events() {
             title: Some("Find files".to_string()),
             tool_kind: Some("Glob".to_string()),
             status: "running".to_string(),
-            output: None
+            output: None,
+            images: Vec::new()
         })
     );
 
@@ -447,9 +1410,88 @@ fn extracts_nested_claude_tool_use_and_result_events() {
             title: None,
             tool_kind: None,
             status: "completed".to_string(),
-            output: Some("match".to_string())
+            output: Some("match".to_string()),
+            images: Vec::new()
         })
     );
+}
+
+#[test]
+fn tool_result_base64_images_become_renderable_items() {
+    let event = super::extract_claude_tool_event(&json!({
+        "type": "user",
+        "message": {
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_shot",
+                    "content": [
+                        { "type": "text", "text": "screenshot taken" },
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "aGVsbG8="
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    }))
+    .expect("tool event");
+
+    assert_eq!(event.images.len(), 1);
+    assert_eq!(event.images[0].media_type, "image/png");
+
+    let items = super::claude_tool_result_image_items("toolu_shot", "Screenshot", &event.images);
+    assert_eq!(items.len(), 1);
+    let falcondeck_core::ConversationItem::Image { id, image, .. } = &items[0] else {
+        panic!("expected an image item");
+    };
+    assert_eq!(id, "toolu_shot-image-0");
+    assert_eq!(image.url, "data:image/png;base64,aGVsbG8=");
+}
+
+#[test]
+fn claude_skill_command_result_hides_the_skill_body() {
+    let event = super::extract_claude_tool_event(&json!({
+        "type": "user",
+        "message": {
+            "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_skill",
+                "content": "# Review\n\nPrivate instructions"
+            }]
+        },
+        "toolUseResult": {
+            "commandName": "review",
+            "file": { "content": "# Review\n\nPrivate instructions" }
+        }
+    }))
+    .expect("skill tool result");
+
+    assert_eq!(event.title.as_deref(), Some("Load skill: review"));
+    assert!(event.output.is_none());
+}
+
+#[test]
+fn claude_skill_file_read_result_hides_the_skill_body() {
+    let event = super::extract_claude_tool_event(&json!({
+        "type": "tool_result",
+        "tool_use_id": "toolu_skill_read",
+        "tool_name": "Read",
+        "input": { "file_path": "/project/.agents/skills/review/SKILL.md" },
+        "result": "# Review\n\nPrivate instructions"
+    }))
+    .expect("skill file read result");
+
+    assert_eq!(
+        event.title.as_deref(),
+        Some("Read /project/.agents/skills/review/SKILL.md")
+    );
+    assert!(event.output.is_none());
 }
 
 #[test]
@@ -514,6 +1556,45 @@ fn requested_permissions_output_still_marks_approval() {
 }
 
 #[test]
+fn normalizes_the_complete_tool_lifecycle_ladder() {
+    let cases = [
+        ("pending", Some(0), ToolLifecycle::Queued),
+        (
+            "awaiting-confirmation",
+            Some(0),
+            ToolLifecycle::AwaitingApproval,
+        ),
+        ("inProgress", Some(0), ToolLifecycle::Running),
+        ("completed", Some(0), ToolLifecycle::Succeeded),
+        ("failed", None, ToolLifecycle::Failed),
+        ("denied", None, ToolLifecycle::Denied),
+        ("cancelled", None, ToolLifecycle::Interrupted),
+        ("provider_magic", None, ToolLifecycle::Unknown),
+        // Exit state is authoritative even when a provider reports success.
+        ("completed", Some(9), ToolLifecycle::Failed),
+    ];
+
+    for (status, exit_code, expected) in cases {
+        let display =
+            tool_display_metadata("Run checks", "commandExecution", status, exit_code, None);
+        assert_eq!(display.lifecycle, expected, "status {status}");
+    }
+}
+
+#[test]
+fn explicit_approval_status_has_an_explicit_lifecycle() {
+    let display = tool_display_metadata(
+        "Bash npm install",
+        "commandExecution",
+        "awaiting_approval",
+        None,
+        Some("This command requested permissions to run."),
+    );
+
+    assert_eq!(display.lifecycle, ToolLifecycle::AwaitingApproval);
+}
+
+#[test]
 fn persisted_state_reads_legacy_workspace_paths() {
     let payload = json!({
         "workspaces": ["/tmp/project-a", "/tmp/project-b"],
@@ -525,6 +1606,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
         vec![
             super::PersistedWorkspaceState {
                 path: "/tmp/project-a".to_string(),
+                id: None,
                 current_thread_id: None,
                 updated_at: None,
                 default_provider: Some(AgentProvider::CODEX),
@@ -535,6 +1617,7 @@ fn persisted_state_reads_legacy_workspace_paths() {
             },
             super::PersistedWorkspaceState {
                 path: "/tmp/project-b".to_string(),
+                id: None,
                 current_thread_id: None,
                 updated_at: None,
                 default_provider: Some(AgentProvider::CODEX),
@@ -563,6 +1646,7 @@ fn persisted_state_reads_workspace_thread_selection() {
         persisted.workspaces,
         vec![super::PersistedWorkspaceState {
             path: "/tmp/project-a".to_string(),
+            id: None,
             current_thread_id: Some("thread-123".to_string()),
             updated_at: None,
             default_provider: Some(AgentProvider::CODEX),
@@ -607,6 +1691,10 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         vec![ConversationItem::AssistantMessage {
             id: "assistant-1".to_string(),
             text: "hello".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
             created_at: Utc::now(),
         }],
     );
@@ -717,9 +1805,11 @@ async fn update_thread_title_marks_thread_as_manual() {
             provider: None,
             model_id: None,
             reasoning_effort: None,
+            collaboration_mode_id: None,
             service_tier: None,
             pinned: None,
             permission_mode: None,
+            approval_policy: None,
             sandbox_mode: None,
         })
         .await
@@ -750,9 +1840,11 @@ async fn update_thread_title_marks_thread_as_manual() {
         provider: None,
         model_id: None,
         reasoning_effort: None,
+        collaboration_mode_id: None,
         service_tier: None,
         pinned: None,
         permission_mode: None,
+        approval_policy: None,
         sandbox_mode: None,
     })
     .await
@@ -765,9 +1857,11 @@ async fn update_thread_title_marks_thread_as_manual() {
             provider: None,
             model_id: None,
             reasoning_effort: None,
+            collaboration_mode_id: None,
             service_tier: None,
             pinned: Some(true),
             permission_mode: None,
+            approval_policy: None,
             sandbox_mode: None,
         })
         .await
@@ -827,6 +1921,7 @@ fn reconnect_attempt_uses_current_trusted_pairing_state() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     let pairing = super::current_pairing_for_remote_attempt(
@@ -874,6 +1969,7 @@ async fn remote_status_stops_offering_a_claimed_pairing_code() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     let status = super::build_remote_status_response(&remote);
@@ -915,6 +2011,7 @@ async fn remote_status_still_offers_an_unclaimed_pairing_code() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     let status = super::build_remote_status_response(&remote);
@@ -958,6 +2055,7 @@ fn reconnect_attempt_ignores_pending_additional_pairing_state() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     let pairing = super::current_pairing_for_remote_attempt(
@@ -993,6 +2091,7 @@ async fn finished_remote_tasks_are_pruned_before_pairing_logic() {
         pairing_watch_task: Some(finished_watch_task),
         command_tx: Some(command_tx),
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     super::prune_finished_remote_tasks(&mut remote);
@@ -1048,6 +2147,7 @@ async fn reconcile_remote_runtime_state_clears_orphaned_additional_pairing() {
         pairing_watch_task: Some(running_watch_task),
         command_tx: Some(command_tx),
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     super::reconcile_remote_runtime_state(&mut remote);
@@ -1092,6 +2192,7 @@ fn remote_status_response_hides_stale_unclaimed_pairing_without_a_live_bridge() 
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     let response = super::build_remote_status_response(&remote);
@@ -1135,6 +2236,7 @@ fn remote_status_response_hides_stale_trusted_pairing_without_a_live_bridge() {
         pairing_watch_task: None,
         command_tx: None,
         trusted_client_bundles: Vec::new(),
+        unresumed_remote: None,
     };
 
     let response = super::build_remote_status_response(&remote);
@@ -1215,6 +2317,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     let persisted = PersistedAppState {
         workspaces: vec![super::PersistedWorkspaceState {
             path: workspace_path.to_string_lossy().to_string(),
+            id: Some("workspace-persisted-a".to_string()),
             current_thread_id: Some("thread-1".to_string()),
             updated_at: Some(Utc::now() - Duration::minutes(5)),
             default_provider: Some(AgentProvider::CLAUDE),
@@ -1256,6 +2359,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
 
     let initial_snapshot = app.snapshot().await;
     assert_eq!(initial_snapshot.workspaces.len(), 1);
+    assert_eq!(initial_snapshot.workspaces[0].id, "workspace-persisted-a");
     assert_eq!(initial_snapshot.threads.len(), 1);
     assert_eq!(
         initial_snapshot.workspaces[0].status,
@@ -1299,11 +2403,87 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     let persisted_after: PersistedAppState =
         serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
     assert_eq!(persisted_after.workspaces.len(), 1);
+    assert_eq!(
+        persisted_after.workspaces[0].id.as_deref(),
+        Some("workspace-persisted-a")
+    );
     assert!(persisted_after.workspaces[0].last_error.is_some());
     assert_eq!(
         persisted_after.workspaces[0].thread_states[0].status,
         Some(ThreadStatus::Error)
     );
+}
+
+#[tokio::test]
+async fn workspace_id_survives_daemon_restarts() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-a");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    // Pre-migration state file: no id yet. The first restore mints one and
+    // persists it; every later restore must reuse it, because paired devices
+    // cache snapshots across daemon restarts and address workspaces by id.
+    let persisted = PersistedAppState {
+        workspaces: vec![super::PersistedWorkspaceState {
+            path: workspace_path.to_string_lossy().to_string(),
+            id: None,
+            current_thread_id: None,
+            updated_at: Some(Utc::now()),
+            default_provider: Some(AgentProvider::CODEX),
+            last_error: None,
+            archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
+            thread_states: Vec::new(),
+        }],
+        remote: None,
+    };
+    tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .await
+        .unwrap();
+
+    let mut minted_id = None;
+    for _ in 0..2 {
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::from([
+                (AgentProvider::CODEX, "missing-codex".to_string()),
+                (AgentProvider::CLAUDE, "missing-claude".to_string()),
+            ]),
+            PathBuf::from(&state_path),
+        );
+        app.restore_local_state().await.unwrap();
+
+        // Wait for the failed reconnect to settle so persist_local_state has
+        // written the restored workspace (with its id) back to disk.
+        for _ in 0..20 {
+            let snapshot = app.snapshot().await;
+            if matches!(snapshot.workspaces[0].status, WorkspaceStatus::Disconnected) {
+                break;
+            }
+            sleep(TokioDuration::from_millis(50)).await;
+        }
+
+        let snapshot = app.snapshot().await;
+        assert_eq!(snapshot.workspaces.len(), 1);
+        match &minted_id {
+            None => minted_id = Some(snapshot.workspaces[0].id.clone()),
+            Some(id) => assert_eq!(&snapshot.workspaces[0].id, id),
+        }
+
+        // The disconnect shows in the snapshot before the follow-up persist
+        // lands on disk, so poll the state file rather than read it once.
+        let mut persisted_id = None;
+        for _ in 0..20 {
+            let persisted_after: PersistedAppState =
+                serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+            persisted_id = persisted_after.workspaces[0].id.clone();
+            if persisted_id.as_deref() == minted_id.as_deref() {
+                break;
+            }
+            sleep(TokioDuration::from_millis(50)).await;
+        }
+        assert_eq!(persisted_id.as_deref(), minted_id.as_deref());
+    }
 }
 
 #[tokio::test]
@@ -1326,6 +2506,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
             workspace_a.to_string_lossy().to_string(),
             super::PersistedWorkspaceState {
                 path: workspace_a.to_string_lossy().to_string(),
+                id: Some("workspace-a".to_string()),
                 current_thread_id: Some("thread-a".to_string()),
                 updated_at: Some(Utc::now() - Duration::minutes(2)),
                 default_provider: Some(AgentProvider::CODEX),
@@ -1353,6 +2534,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
             workspace_b.to_string_lossy().to_string(),
             super::PersistedWorkspaceState {
                 path: workspace_b.to_string_lossy().to_string(),
+                id: Some("workspace-b".to_string()),
                 current_thread_id: Some("thread-b".to_string()),
                 updated_at: Some(Utc::now() - Duration::minutes(1)),
                 default_provider: Some(AgentProvider::CLAUDE),
@@ -2015,6 +3197,89 @@ async fn claude_pre_tool_use_approval_round_trips_through_interactive_requests()
 }
 
 #[tokio::test]
+async fn answering_one_of_two_concurrent_approvals_keeps_the_thread_waiting() {
+    let temp_dir = tempdir().unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+    insert_claude_workspace_with_session(
+        &app,
+        "workspace-1",
+        "thread-1",
+        "77777777-7777-4777-8777-777777777777",
+        temp_dir.path(),
+    )
+    .await;
+
+    let first_hook = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+                "77777777-7777-4777-8777-777777777777",
+                "Bash",
+            ))
+            .await
+        }
+    });
+    let first_id = wait_for_pending_claude_request(&app, "workspace-1").await;
+    let second_hook = tokio::spawn({
+        let app = app.clone();
+        async move {
+            app.handle_claude_pre_tool_use(claude_pre_tool_use_payload(
+                "77777777-7777-4777-8777-777777777777",
+                "Write",
+            ))
+            .await
+        }
+    });
+    let second_id = loop {
+        let requests = app.inner.interactive_requests.lock().await;
+        let other = requests
+            .keys()
+            .find(|(workspace, request)| workspace == "workspace-1" && request != &first_id)
+            .map(|(_, request)| request.clone());
+        drop(requests);
+        if let Some(id) = other {
+            break id;
+        }
+        sleep(TokioDuration::from_millis(10)).await;
+    };
+
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        first_id,
+        falcondeck_core::InteractiveResponsePayload::Approval {
+            decision: falcondeck_core::ApprovalDecision::Allow,
+        },
+    )
+    .await
+    .unwrap();
+    first_hook.await.unwrap();
+
+    // The second approval is still pending; flipping the thread back to
+    // Running now would hide the remaining prompt.
+    let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_eq!(thread.status, ThreadStatus::WaitingForInput);
+
+    app.respond_to_interactive_request(
+        "workspace-1".to_string(),
+        second_id,
+        falcondeck_core::InteractiveResponsePayload::Approval {
+            decision: falcondeck_core::ApprovalDecision::Allow,
+        },
+    )
+    .await
+    .unwrap();
+    second_hook.await.unwrap();
+
+    let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
+    assert_eq!(thread.status, ThreadStatus::Running);
+    assert!(app.inner.interactive_requests.lock().await.is_empty());
+}
+
+#[tokio::test]
 async fn claude_pre_tool_use_ignores_unknown_sessions() {
     let temp_dir = tempdir().unwrap();
     let app = AppState::new_with_state_path(
@@ -2108,7 +3373,7 @@ async fn claude_pre_tool_use_labels_subagent_tool_calls() {
     }
     app.respond_to_interactive_request(
         "workspace-1".to_string(),
-        request_id,
+        request_id.clone(),
         falcondeck_core::InteractiveResponsePayload::Approval {
             decision: falcondeck_core::ApprovalDecision::Deny,
         },
@@ -2117,6 +3382,20 @@ async fn claude_pre_tool_use_labels_subagent_tool_calls() {
     .unwrap();
     let response = hook_task.await.unwrap();
     assert_eq!(response["hookSpecificOutput"]["permissionDecision"], "deny");
+    let workspaces = app.inner.workspaces.lock().await;
+    let receipt = workspaces["workspace-1"].threads["thread-1"]
+        .items
+        .iter()
+        .find(|item| matches!(item, ConversationItem::InteractiveRequest { id, .. } if id == &request_id))
+        .expect("resolved approval receipt");
+    assert!(matches!(
+        receipt,
+        ConversationItem::InteractiveRequest {
+            resolved: true,
+            resolution: Some(resolution),
+            ..
+        } if resolution.outcome == InteractiveRequestOutcome::Denied
+    ));
 }
 
 #[tokio::test]
@@ -2209,7 +3488,7 @@ async fn claude_pre_tool_use_cleans_up_when_the_hook_client_disconnects() {
             .await;
         }
     });
-    wait_for_pending_claude_request(&app, "workspace-1").await;
+    let request_id = wait_for_pending_claude_request(&app, "workspace-1").await;
     hook_task.await.unwrap();
 
     // Cleanup runs on a spawned task; allow it a moment to land.
@@ -2225,6 +3504,18 @@ async fn claude_pre_tool_use_cleans_up_when_the_hook_client_disconnects() {
     assert!(app.inner.claude_approvals.lock().await.is_empty());
     let thread = app.thread_summary("workspace-1", "thread-1").await.unwrap();
     assert_eq!(thread.status, ThreadStatus::Running);
+    let workspaces = app.inner.workspaces.lock().await;
+    assert!(matches!(
+        workspaces["workspace-1"].threads["thread-1"]
+            .items
+            .iter()
+            .find(|item| matches!(item, ConversationItem::InteractiveRequest { id, .. } if id == &request_id)),
+        Some(ConversationItem::InteractiveRequest {
+            resolved: true,
+            resolution: Some(resolution),
+            ..
+        }) if resolution.outcome == InteractiveRequestOutcome::Cancelled
+    ));
 }
 
 #[tokio::test]
@@ -2330,6 +3621,16 @@ fn interrupt_turn_statuses_do_not_notify_remote_attention() {
     }
     for status in ["completed", "failed", ""] {
         assert!(!super::notifications::is_interrupt_turn_status(status));
+    }
+}
+
+#[test]
+fn failed_turn_statuses_are_errors_even_without_an_error_payload() {
+    for status in ["failed", "Failure", "ERROR", " errored "] {
+        assert!(super::notifications::is_failed_turn_status(status));
+    }
+    for status in ["completed", "cancelled", ""] {
+        assert!(!super::notifications::is_failed_turn_status(status));
     }
 }
 
@@ -2482,6 +3783,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         thread_id: Some(active_thread.id.clone()),
         method: "approval.respond".to_string(),
         kind: InteractiveRequestKind::Approval,
+        approval_decisions: None,
         title: "Allow active".to_string(),
         detail: None,
         command: None,
@@ -2497,6 +3799,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         thread_id: Some("thread-archived".to_string()),
         method: "approval.respond".to_string(),
         kind: InteractiveRequestKind::Approval,
+        approval_decisions: None,
         title: "Allow archived".to_string(),
         detail: None,
         command: None,
@@ -2613,6 +3916,109 @@ fn rejects_bootstrap_request_with_tampered_bundle_signature() {
 }
 
 #[tokio::test]
+async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-e");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        temp_dir.path().join("daemon-state.json"),
+    );
+
+    let workspace_id = "workspace-e".to_string();
+    let thread = ThreadSummary {
+        id: "thread-e".to_string(),
+        workspace_id: workspace_id.clone(),
+        title: "Idle thread".to_string(),
+        provider: AgentProvider::CODEX,
+        native_session_id: None,
+        status: ThreadStatus::Idle,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    let workspace = WorkspaceSummary {
+        id: workspace_id.clone(),
+        path: workspace_path.to_string_lossy().to_string(),
+        status: WorkspaceStatus::Ready,
+        agents: Vec::new(),
+        skills: Vec::new(),
+        default_provider: AgentProvider::CODEX,
+        models: Vec::new(),
+        collaboration_modes: Vec::new(),
+        account: falcondeck_core::AccountSummary::default(),
+        current_thread_id: Some("thread-e".to_string()),
+        connected_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_error: None,
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: workspace,
+            codex_session: None,
+            claude_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [("thread-e".to_string(), super::ManagedThread::new(thread))]
+                .into_iter()
+                .collect(),
+        },
+    );
+
+    let request = falcondeck_core::SendTurnRequest {
+        workspace_id: workspace_id.clone(),
+        thread_id: "thread-e".to_string(),
+        inputs: vec![falcondeck_core::TurnInputItem::Text {
+            id: None,
+            text: "optimistically rendered".to_string(),
+        }],
+        selected_skills: Vec::new(),
+        provider: None,
+        model_id: None,
+        reasoning_effort: None,
+        approval_policy: None,
+        service_tier: None,
+        permission_mode: None,
+        sandbox_mode: None,
+        steer: false,
+        user_item_id: Some("user-clientchosen42".to_string()),
+    };
+
+    // Dispatch fails (no Codex session) after the user item is committed; the
+    // echoed transcript entry must carry the client's id either way.
+    let _ = app.send_turn(request).await;
+
+    let workspaces = app.inner.workspaces.lock().await;
+    let thread = workspaces
+        .get(&workspace_id)
+        .unwrap()
+        .threads
+        .get("thread-e")
+        .unwrap();
+    let user_ids: Vec<&str> = thread
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            falcondeck_core::ConversationItem::UserMessage { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(user_ids, vec!["user-clientchosen42"]);
+}
+
+#[tokio::test]
 async fn sends_against_a_running_thread_queue_and_are_removable() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-q");
@@ -2690,6 +4096,7 @@ async fn sends_against_a_running_thread_queue_and_are_removable() {
         permission_mode: None,
         sandbox_mode: None,
         steer: false,
+        user_item_id: None,
     };
 
     // Busy thread: the send queues instead of dispatching (dispatching would
@@ -2742,7 +4149,7 @@ async fn busy_thread_app(
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
-        latest_turn_id: None,
+        latest_turn_id: Some("turn-steer-active".to_string()),
         latest_plan: None,
         latest_diff: None,
         last_tool: None,
@@ -2813,6 +4220,7 @@ fn steer_request(workspace_id: &str, steer: bool) -> falcondeck_core::SendTurnRe
         permission_mode: None,
         sandbox_mode: None,
         steer,
+        user_item_id: None,
     }
 }
 
@@ -2840,13 +4248,13 @@ async fn a_steer_falls_back_to_the_queue_when_the_provider_cannot_steer() {
     let temp_dir = tempdir().unwrap();
     let (app, workspace_id) = busy_thread_app(
         &temp_dir,
-        AgentProvider::CODEX,
-        falcondeck_core::AgentCapabilitySummary::codex(),
+        AgentProvider::new("non-steering-acp"),
+        falcondeck_core::AgentCapabilitySummary::acp_minimal(),
     )
     .await;
 
-    // Codex has no steer path; the message must be parked, not rejected and
-    // not silently dropped.
+    // Providers without a steer path park the message rather than rejecting
+    // or silently dropping it.
     let response = app
         .send_turn(steer_request(&workspace_id, true))
         .await
@@ -2855,6 +4263,37 @@ async fn a_steer_falls_back_to_the_queue_when_the_provider_cannot_steer() {
     assert_eq!(response.message.as_deref(), Some("queued"));
     let summary = &app.snapshot().await.threads[0];
     assert_eq!(summary.queued_turns.len(), 1);
+    assert_eq!(summary.status, ThreadStatus::Running);
+}
+
+#[tokio::test]
+async fn a_codex_steer_reaches_the_runtime_and_never_queues() {
+    let temp_dir = tempdir().unwrap();
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CODEX,
+        falcondeck_core::AgentCapabilitySummary::codex(),
+    )
+    .await;
+
+    // No Codex session is attached, so reaching the provider is observable as
+    // a connection error rather than the message being parked in the queue.
+    let error = app
+        .send_turn(steer_request(&workspace_id, true))
+        .await
+        .expect_err("steer must reach Codex");
+
+    assert!(
+        error
+            .to_string()
+            .contains("not currently connected to Codex"),
+        "unexpected error: {error}"
+    );
+    let summary = &app.snapshot().await.threads[0];
+    assert!(
+        summary.queued_turns.is_empty(),
+        "a Codex steer must not also queue the message"
+    );
     assert_eq!(summary.status, ThreadStatus::Running);
 }
 
@@ -2889,6 +4328,47 @@ async fn a_steer_against_a_steering_provider_reaches_the_runtime_and_never_queue
     );
     // A failed steer leaves the running turn alone.
     assert_eq!(summary.status, ThreadStatus::Running);
+}
+
+#[test]
+fn a_steer_race_where_the_turn_already_ended_downgrades_to_the_queue_path() {
+    use super::workspace_ops::steer_error_downgrades_to_queue;
+    use crate::error::DaemonError;
+
+    // The turn ending between the busy check and the stdin write, or a dying
+    // or wedged pipe, makes the steer unavailable — the send falls through to
+    // the queue instead of erroring.
+    for error in [
+        DaemonError::BadRequest("no active Codex turn to steer".to_string()),
+        DaemonError::BadRequest("no active claude turn to steer".to_string()),
+        DaemonError::BadRequest("claude turn is no longer accepting input".to_string()),
+        DaemonError::Process("timed out writing to claude turn".to_string()),
+        DaemonError::Process("failed to write to claude turn: broken pipe".to_string()),
+        DaemonError::Rpc(
+            "{\"data\":{\"activeTurnNotSteerable\":{\"turnKind\":\"review\"}}}".to_string(),
+        ),
+        DaemonError::Rpc("expectedTurnId does not match the active turn".to_string()),
+        DaemonError::Rpc("no active turn for thread".to_string()),
+    ] {
+        assert!(
+            steer_error_downgrades_to_queue(&error),
+            "{error} must fall back to the queue"
+        );
+    }
+    // A workspace that is not connected at all is a real failure and must
+    // still error the send (see the test above).
+    for error in [
+        DaemonError::BadRequest(
+            "workspace workspace-steer is not currently connected to Claude".to_string(),
+        ),
+        DaemonError::NotFound("workspace not found".to_string()),
+        DaemonError::Rpc("relay unavailable".to_string()),
+    ] {
+        assert!(
+            !steer_error_downgrades_to_queue(&error),
+            "{error} must fail the send"
+        );
+    }
 }
 
 #[tokio::test]
@@ -3014,8 +4494,8 @@ async fn a_queued_turn_cannot_be_steered_on_a_provider_without_steering() {
     let temp_dir = tempdir().unwrap();
     let (app, workspace_id) = busy_thread_app(
         &temp_dir,
-        AgentProvider::CODEX,
-        falcondeck_core::AgentCapabilitySummary::codex(),
+        AgentProvider::new("non-steering-acp"),
+        falcondeck_core::AgentCapabilitySummary::acp_minimal(),
     )
     .await;
     let queued_ids = queue_messages(&app, &workspace_id, 1).await;
@@ -3023,7 +4503,7 @@ async fn a_queued_turn_cannot_be_steered_on_a_provider_without_steering() {
     let error = app
         .steer_queued_turn(&workspace_id, "thread-steer", &queued_ids[0])
         .await
-        .expect_err("codex cannot steer");
+        .expect_err("provider cannot steer");
     assert!(
         error.to_string().contains("cannot steer"),
         "unexpected error: {error}"

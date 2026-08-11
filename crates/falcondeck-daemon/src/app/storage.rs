@@ -4,12 +4,13 @@ use std::{
     env,
     io::Write,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 #[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
-use std::sync::OnceLock;
+#[cfg(not(test))]
+use std::sync::Mutex;
 
 use falcondeck_core::{
     AgentProvider, ConversationAutoExpandPreferencesPatch, FalconDeckPreferences, ToolDetailsMode,
@@ -96,6 +97,7 @@ where
         .map(|entry| match entry {
             PersistedWorkspaceEntry::LegacyPath(path) => PersistedWorkspaceState {
                 path,
+                id: None,
                 current_thread_id: None,
                 updated_at: None,
                 default_provider: Some(AgentProvider::CODEX),
@@ -164,6 +166,20 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         preferences.version = version as u32;
     }
 
+    if let Some(workspace_order) = value.get("workspace_order").and_then(Value::as_array) {
+        for workspace_id in workspace_order.iter().filter_map(Value::as_str) {
+            let workspace_id = workspace_id.trim();
+            if !workspace_id.is_empty()
+                && !preferences
+                    .workspace_order
+                    .iter()
+                    .any(|id| id == workspace_id)
+            {
+                preferences.workspace_order.push(workspace_id.to_string());
+            }
+        }
+    }
+
     if let Some(conversation) = value.get("conversation") {
         if let Some(mode) = extract_string(conversation, &["tool_details_mode"]) {
             preferences.conversation.tool_details_mode = parse_tool_details_mode(&mode);
@@ -196,6 +212,36 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         }
     }
 
+    if let Some(notifications) = value.get("notifications") {
+        if let Some(value) = notifications.get("enabled").and_then(Value::as_bool) {
+            preferences.notifications.enabled = value;
+        }
+        if let Some(value) = notifications
+            .get("notify_on_turn_complete")
+            .and_then(Value::as_bool)
+        {
+            preferences.notifications.notify_on_turn_complete = value;
+        }
+        if let Some(value) = notifications
+            .get("notify_on_input_required")
+            .and_then(Value::as_bool)
+        {
+            preferences.notifications.notify_on_input_required = value;
+        }
+        if let Some(value) = notifications
+            .get("notify_on_error")
+            .and_then(Value::as_bool)
+        {
+            preferences.notifications.notify_on_error = value;
+        }
+        if let Some(value) = notifications
+            .get("suppress_when_desktop_active")
+            .and_then(Value::as_bool)
+        {
+            preferences.notifications.suppress_when_desktop_active = value;
+        }
+    }
+
     preferences
 }
 
@@ -203,21 +249,50 @@ pub(super) fn apply_preferences_patch(
     preferences: &mut FalconDeckPreferences,
     request: UpdatePreferencesRequest,
 ) {
-    let Some(conversation) = request.conversation else {
-        return;
-    };
+    if let Some(workspace_order) = request.workspace_order {
+        preferences.workspace_order = workspace_order
+            .into_iter()
+            .map(|workspace_id| workspace_id.trim().to_string())
+            .filter(|workspace_id| !workspace_id.is_empty())
+            .fold(Vec::new(), |mut ordered, workspace_id| {
+                if !ordered.iter().any(|existing| existing == &workspace_id) {
+                    ordered.push(workspace_id);
+                }
+                ordered
+            });
+    }
 
-    if let Some(mode) = conversation.tool_details_mode {
-        preferences.conversation.tool_details_mode = mode;
+    if let Some(conversation) = request.conversation {
+        if let Some(mode) = conversation.tool_details_mode {
+            preferences.conversation.tool_details_mode = mode;
+        }
+        if let Some(value) = conversation.group_read_only_tools {
+            preferences.conversation.group_read_only_tools = value;
+        }
+        if let Some(value) = conversation.show_expand_all_controls {
+            preferences.conversation.show_expand_all_controls = value;
+        }
+        if let Some(auto_expand) = conversation.auto_expand {
+            apply_auto_expand_patch(&mut preferences.conversation.auto_expand, auto_expand);
+        }
     }
-    if let Some(value) = conversation.group_read_only_tools {
-        preferences.conversation.group_read_only_tools = value;
-    }
-    if let Some(value) = conversation.show_expand_all_controls {
-        preferences.conversation.show_expand_all_controls = value;
-    }
-    if let Some(auto_expand) = conversation.auto_expand {
-        apply_auto_expand_patch(&mut preferences.conversation.auto_expand, auto_expand);
+
+    if let Some(notifications) = request.notifications {
+        if let Some(value) = notifications.enabled {
+            preferences.notifications.enabled = value;
+        }
+        if let Some(value) = notifications.notify_on_turn_complete {
+            preferences.notifications.notify_on_turn_complete = value;
+        }
+        if let Some(value) = notifications.notify_on_input_required {
+            preferences.notifications.notify_on_input_required = value;
+        }
+        if let Some(value) = notifications.notify_on_error {
+            preferences.notifications.notify_on_error = value;
+        }
+        if let Some(value) = notifications.suppress_when_desktop_active {
+            preferences.notifications.suppress_when_desktop_active = value;
+        }
     }
 }
 
@@ -404,16 +479,31 @@ fn secret_file_path() -> Option<std::path::PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        return Some(
+        Some(
             default_state_path()
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join("remote-secrets.json"),
-        );
+        )
     }
 
     #[cfg(not(target_os = "macos"))]
     None
+}
+
+// Secret-file updates are read-modify-write transactions. The atomic rename
+// protects readers from partial JSON, while this lock prevents concurrent
+// daemon tasks in the same process from publishing snapshots that silently
+// discard one another's entries.
+#[cfg(not(test))]
+static SECRET_FILE_TRANSACTION: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[cfg(not(test))]
+fn lock_secret_file_transaction() -> std::sync::MutexGuard<'static, ()> {
+    SECRET_FILE_TRANSACTION
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn read_secret_file(
@@ -482,6 +572,7 @@ pub(super) fn save_remote_secrets_to_secure_storage(
 ) -> Result<(), DaemonError> {
     let payload = serde_json::to_string(secrets)?;
     if let Some(path) = secret_file_path() {
+        let _transaction = lock_secret_file_transaction();
         let mut entries = read_secret_file(&path)?;
         entries.insert(secure_storage_key.to_string(), payload);
         return write_secret_file(&path, &entries);
@@ -512,6 +603,7 @@ pub(super) fn load_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<PersistedRemoteSecrets, DaemonError> {
     if let Some(path) = secret_file_path() {
+        let _transaction = lock_secret_file_transaction();
         let entries = read_secret_file(&path)?;
         let payload = entries
             .get(secure_storage_key)
@@ -535,6 +627,7 @@ pub(super) fn delete_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<(), DaemonError> {
     if let Some(path) = secret_file_path() {
+        let _transaction = lock_secret_file_transaction();
         let mut entries = read_secret_file(&path)?;
         if entries.remove(secure_storage_key).is_some() {
             write_secret_file(&path, &entries)?;
@@ -675,6 +768,7 @@ mod tests {
             vec![
                 PersistedWorkspaceState {
                     path: "/tmp/project-a".to_string(),
+                    id: None,
                     current_thread_id: None,
                     updated_at: None,
                     default_provider: Some(AgentProvider::CODEX),
@@ -685,6 +779,7 @@ mod tests {
                 },
                 PersistedWorkspaceState {
                     path: "/tmp/project-b".to_string(),
+                    id: None,
                     current_thread_id: None,
                     updated_at: None,
                     default_provider: Some(AgentProvider::CODEX),
@@ -701,6 +796,7 @@ mod tests {
     fn merges_preferences_from_partial_json_payload() {
         let preferences = merge_preferences_from_value(json!({
             "version": 3,
+            "workspace_order": ["workspace-b", "workspace-a", "workspace-b", "  "],
             "conversation": {
                 "tool_details_mode": "compact",
                 "group_read_only_tools": false,
@@ -711,10 +807,18 @@ mod tests {
                     "first_diff": false,
                     "failed_tests": true
                 }
+            },
+            "notifications": {
+                "enabled": false,
+                "notify_on_turn_complete": false,
+                "notify_on_input_required": true,
+                "notify_on_error": false,
+                "suppress_when_desktop_active": false
             }
         }));
 
         assert_eq!(preferences.version, 3);
+        assert_eq!(preferences.workspace_order, ["workspace-b", "workspace-a"]);
         assert_eq!(
             preferences.conversation.tool_details_mode,
             ToolDetailsMode::Compact
@@ -725,6 +829,35 @@ mod tests {
         assert!(preferences.conversation.auto_expand.errors);
         assert!(!preferences.conversation.auto_expand.first_diff);
         assert!(preferences.conversation.auto_expand.failed_tests);
+        assert!(!preferences.notifications.enabled);
+        assert!(!preferences.notifications.notify_on_turn_complete);
+        assert!(preferences.notifications.notify_on_input_required);
+        assert!(!preferences.notifications.notify_on_error);
+        assert!(!preferences.notifications.suppress_when_desktop_active);
+    }
+
+    #[test]
+    fn applies_notification_patch_without_requiring_conversation_patch() {
+        let mut preferences = FalconDeckPreferences::default();
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                notifications: Some(falcondeck_core::NotificationPreferencesPatch {
+                    enabled: Some(false),
+                    notify_on_turn_complete: Some(false),
+                    notify_on_input_required: None,
+                    notify_on_error: Some(false),
+                    suppress_when_desktop_active: Some(false),
+                }),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+
+        assert!(!preferences.notifications.enabled);
+        assert!(!preferences.notifications.notify_on_turn_complete);
+        assert!(preferences.notifications.notify_on_input_required);
+        assert!(!preferences.notifications.notify_on_error);
+        assert!(!preferences.notifications.suppress_when_desktop_active);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use chrono::Utc;
+use chrono::{Duration as ChronoDuration, Utc};
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
     CommandResponse, ConnectWorkspaceRequest, ContentLifecycle, ConversationItem, DaemonInfo,
@@ -72,6 +72,9 @@ pub struct AppState {
     inner: Arc<InnerState>,
 }
 
+/// Keyed `(workspace_id, provider)` startup locks for ACP agent processes.
+type AcpRuntimeGates = HashMap<(String, AgentProvider), Arc<Mutex<()>>>;
+
 struct InnerState {
     daemon: DaemonInfo,
     /// Agent binary name or path per provider id. Providers absent from the map
@@ -82,6 +85,9 @@ struct InnerState {
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
+    /// Per-workspace/provider gates prevent background metadata hydration and
+    /// a first user turn from spawning competing ACP processes.
+    acp_runtime_gates: Mutex<AcpRuntimeGates>,
     saved_workspaces: Mutex<HashMap<String, PersistedWorkspaceState>>,
     /// Serializes full state snapshots so an older concurrent snapshot cannot
     /// overwrite newer remote pairing metadata.
@@ -101,6 +107,10 @@ struct InnerState {
     claude_always_allowed_tools: Mutex<HashMap<(String, String), HashSet<String>>>,
     /// Base HTTP URL the daemon is actually reachable on after binding.
     local_base_url: OnceLock<String>,
+    /// Short-lived lease for a visible local desktop client. The lease is
+    /// refreshed by the desktop heartbeat and expires automatically if the
+    /// app crashes or is force-quit.
+    desktop_active_until: StdMutex<Option<chrono::DateTime<Utc>>>,
     preferences: Mutex<FalconDeckPreferences>,
     remote: Mutex<RemoteBridgeState>,
     /// SSH provisioning jobs keyed by job id. Progress lives only in memory:
@@ -113,13 +123,19 @@ struct InnerState {
     /// True while a deferred `persist_local_state` is scheduled; lets bursts of
     /// small changes coalesce into one write. See `schedule_persist`.
     persist_pending: AtomicBool,
+    /// Threads whose ACP transcript rehydration has been kicked off this
+    /// daemon run, keyed by (workspace_id, thread_id). One attempt per run:
+    /// a session the agent can no longer load would otherwise respawn a
+    /// replay on every open of the thread.
+    acp_hydrations_started: StdMutex<HashSet<(String, String)>>,
 }
 
 struct ManagedWorkspace {
     summary: WorkspaceSummary,
     codex_session: Option<Arc<CodexSession>>,
     claude_runtime: Option<Arc<ClaudeRuntime>>,
-    /// Live ACP agent processes keyed by provider id; spawned lazily.
+    /// Live ACP agent processes keyed by provider id; normally started by
+    /// background metadata hydration, with first-turn startup as a fallback.
     acp_runtimes: HashMap<AgentProvider, Arc<crate::acp::AcpRuntime>>,
     threads: HashMap<String, ManagedThread>,
 }
@@ -172,17 +188,24 @@ impl AppState {
         // daemon restart; live runtimes refine these entries after connect.
         self.fresh_acp_provider_configs()
             .iter()
-            .map(|config| WorkspaceAgentSummary {
-                provider: AgentProvider::new(config.id.clone()),
-                label: config.label.clone(),
-                account: falcondeck_core::AccountSummary {
-                    status: falcondeck_core::AccountStatus::Unknown,
-                    label: format!("{} not started", config.label),
-                },
-                models: Vec::new(),
-                collaboration_modes: Vec::new(),
-                skills: Vec::new(),
-                capabilities: AgentCapabilitySummary::acp_minimal(),
+            .map(|config| {
+                let mut capabilities = AgentCapabilitySummary::acp_minimal();
+                // Mirror post-handshake Grok override so paste is available
+                // before the first connect refreshes the agent entry.
+                capabilities.supports_images =
+                    crate::acp::acp_supports_images(&config.id, capabilities.supports_images);
+                WorkspaceAgentSummary {
+                    provider: AgentProvider::new(config.id.clone()),
+                    label: config.label.clone(),
+                    account: falcondeck_core::AccountSummary {
+                        status: falcondeck_core::AccountStatus::Unknown,
+                        label: format!("{} not started", config.label),
+                    },
+                    models: Vec::new(),
+                    collaboration_modes: Vec::new(),
+                    skills: Vec::new(),
+                    capabilities,
+                }
             })
             .collect()
     }
@@ -249,6 +272,11 @@ struct PersistedAppState {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct PersistedWorkspaceState {
     path: String,
+    /// Workspace id reused across daemon restarts. Remote clients cache
+    /// snapshots between connections; a restart that minted fresh ids made
+    /// every cached workspace reference dangle ("workspace not found").
+    #[serde(default)]
+    id: Option<String>,
     current_thread_id: Option<String>,
     updated_at: Option<chrono::DateTime<Utc>>,
     #[serde(default = "default_persisted_provider")]
@@ -375,6 +403,7 @@ impl AppState {
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
+                acp_runtime_gates: Mutex::new(HashMap::new()),
                 saved_workspaces: Mutex::new(HashMap::new()),
                 persistence: Mutex::new(()),
                 interactive_requests: Mutex::new(HashMap::new()),
@@ -384,6 +413,7 @@ impl AppState {
                 claude_approvals: Mutex::new(HashMap::new()),
                 claude_always_allowed_tools: Mutex::new(HashMap::new()),
                 local_base_url: OnceLock::new(),
+                desktop_active_until: StdMutex::new(None),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
@@ -401,6 +431,7 @@ impl AppState {
                 provision_jobs: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
                 persist_pending: AtomicBool::new(false),
+                acp_hydrations_started: StdMutex::new(HashSet::new()),
             }),
         }
     }
@@ -491,8 +522,7 @@ impl AppState {
                 if current.pairing.is_none() {
                     current.unresumed_remote = Some(Box::new(remote));
                     current.status = RemoteConnectionStatus::Error;
-                    current.last_error =
-                        Some(format!("failed to restore remote pairing: {error}"));
+                    current.last_error = Some(format!("failed to restore remote pairing: {error}"));
                 }
             } else if should_migrate_secure_storage {
                 self.persist_local_state().await?;
@@ -546,7 +576,22 @@ impl AppState {
     ) -> Result<WorkspaceSummary, DaemonError> {
         let path_string = normalize_workspace_path(&persisted_workspace.path);
         let now = Utc::now();
-        let workspace_id = format!("workspace-{}", Uuid::new_v4().simple());
+        let acp_agents = self.acp_agent_summaries();
+        let mut workspaces = self.inner.workspaces.lock().await;
+        // Reuse the persisted id (or an already-registered entry's id) so
+        // paired devices holding a pre-restart snapshot keep addressing this
+        // workspace; a fresh uuid is a migration/collision fallback only.
+        let workspace_id = workspaces
+            .values()
+            .find(|workspace| workspace.summary.path == path_string)
+            .map(|workspace| workspace.summary.id.clone())
+            .or_else(|| {
+                persisted_workspace
+                    .id
+                    .clone()
+                    .filter(|id| !id.is_empty() && !workspaces.contains_key(id))
+            })
+            .unwrap_or_else(|| format!("workspace-{}", Uuid::new_v4().simple()));
         let workspace_last_error = last_error
             .clone()
             .or_else(|| persisted_workspace.last_error.clone());
@@ -641,7 +686,7 @@ impl AppState {
                         capabilities: AgentCapabilitySummary::claude(),
                     },
                 ];
-                agents.extend(self.acp_agent_summaries());
+                agents.extend(acp_agents);
                 agents
             },
             skills: Vec::new(),
@@ -661,7 +706,6 @@ impl AppState {
             last_error: workspace_last_error,
         };
 
-        let mut workspaces = self.inner.workspaces.lock().await;
         if let Some(existing) = workspaces
             .values_mut()
             .find(|workspace| workspace.summary.path == path_string)
@@ -938,6 +982,28 @@ impl AppState {
         self.inner.preferences.lock().await.clone()
     }
 
+    pub fn set_desktop_activity(&self, active: bool) {
+        let mut lease = self
+            .inner
+            .desktop_active_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *lease = active.then(|| Utc::now() + ChronoDuration::seconds(45));
+    }
+
+    pub fn desktop_is_active(&self) -> bool {
+        let now = Utc::now();
+        let mut lease = self
+            .inner
+            .desktop_active_until
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if lease.is_some_and(|expires_at| expires_at <= now) {
+            *lease = None;
+        }
+        lease.is_some()
+    }
+
     pub async fn update_preferences(
         &self,
         request: UpdatePreferencesRequest,
@@ -1198,6 +1264,7 @@ impl AppState {
                 normalized_path.clone(),
                 PersistedWorkspaceState {
                     path: normalized_path,
+                    id: Some(workspace.summary.id.clone()),
                     current_thread_id: workspace.summary.current_thread_id.clone(),
                     updated_at: Some(workspace.summary.updated_at),
                     default_provider: Some(workspace.summary.default_provider.clone()),
