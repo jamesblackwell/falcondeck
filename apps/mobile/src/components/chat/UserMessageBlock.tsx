@@ -8,7 +8,6 @@ import type { ConversationItem } from "@falcondeck/client-core";
 
 import { AttachmentPreviewList } from "./AttachmentPreviewList";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import { MessageActions } from "./MessageActions";
 import { Button, Text } from "@/components/ui";
 
 type UserMessage = Extract<ConversationItem, { kind: "user_message" }>;
@@ -29,7 +28,6 @@ export const UserMessageBlock = memo(function UserMessageBlock({
   const [branchError, setBranchError] = useState<string | null>(null);
   const [showEditUnavailableReason, setShowEditUnavailableReason] =
     useState(false);
-  const hasText = item.text.trim().length > 0;
   const canEditResend = Boolean(onEditResend && item.turn_id);
   const unavailableReason = !item.turn_id
     ? "Edit and resend is unavailable because this message has no provider turn boundary."
@@ -53,7 +51,7 @@ export const UserMessageBlock = memo(function UserMessageBlock({
       <View style={styles.bubble}>
         <AttachmentPreviewList attachments={item.attachments} />
         <MarkdownRenderer text={item.text} interpretDirectives={false} />
-        {hasText || canEditResend || unavailableReason ? (
+        {canEditResend || unavailableReason ? (
           <View style={styles.actions}>
             {canEditResend ? (
               <Button
@@ -96,12 +94,6 @@ export const UserMessageBlock = memo(function UserMessageBlock({
                 onPress={() =>
                   setShowEditUnavailableReason((visible) => !visible)
                 }
-              />
-            ) : null}
-            {hasText ? (
-              <MessageActions
-                text={item.text}
-                accessibilityLabel="Copy message"
               />
             ) : null}
           </View>

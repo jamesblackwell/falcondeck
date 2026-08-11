@@ -114,8 +114,11 @@ describe("chat behavior components", () => {
     expect(textOf(user)).toContain("User text");
     expect(textOf(user)).toContain("evidence.png");
     expect(
-      user.root.findByProps({ accessibilityLabel: "Copy message" }),
-    ).toBeDefined();
+      user.root.findAllByProps({ accessibilityLabel: "Copy message" }),
+    ).toHaveLength(0);
+    expect(
+      assistant.root.findAllByProps({ accessibilityLabel: "Copy response" }),
+    ).toHaveLength(0);
     expect(textOf(userWithoutAttachment)).toContain("Second user text");
     expect(textOf(markdown)).toContain("Plain markdown text");
   });
@@ -154,8 +157,7 @@ describe("chat behavior components", () => {
     announce.mockRestore();
   });
 
-  it("copies semantic agent actions without raw or half-streamed directive syntax", async () => {
-    const copy = vi.spyOn(Clipboard, "setStringAsync").mockResolvedValue(true);
+  it("keeps transcript copy controls out of complete and streaming responses", () => {
     const complete = renderComponent(
       <AssistantMessageBlock
         item={{
@@ -168,15 +170,9 @@ describe("chat behavior components", () => {
       />,
     );
 
-    await act(async () => {
-      complete.root
-        .findByProps({ accessibilityLabel: "Copy response" })
-        .props.onPress({});
-      await Promise.resolve();
-    });
-    expect(copy).toHaveBeenLastCalledWith(
-      "Release completed.\nAgent action: git commit · cwd: /workspace/falcondeck · commit: abc123",
-    );
+    expect(
+      complete.root.findAllByProps({ accessibilityLabel: "Copy response" }),
+    ).toHaveLength(0);
 
     const streaming = renderComponent(
       <AssistantMessageBlock
@@ -189,14 +185,9 @@ describe("chat behavior components", () => {
         }}
       />,
     );
-    await act(async () => {
-      streaming.root
-        .findByProps({ accessibilityLabel: "Copy response" })
-        .props.onPress({});
-      await Promise.resolve();
-    });
-    expect(copy).toHaveBeenLastCalledWith("Saved.");
-    copy.mockRestore();
+    expect(
+      streaming.root.findAllByProps({ accessibilityLabel: "Copy response" }),
+    ).toHaveLength(0);
   });
 
   it("reports a failed response copy and keeps retry available", async () => {

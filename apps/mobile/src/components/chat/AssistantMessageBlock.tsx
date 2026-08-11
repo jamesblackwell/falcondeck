@@ -20,7 +20,6 @@ import {
   citationLocatorLabel,
   citationRenderKeys,
   citationTextPreview,
-  assistantMessageCopyText,
   contentLifecycle,
   type ConversationCitation,
   type ConversationItem,
@@ -29,7 +28,6 @@ import {
 
 import { ActivityDiamond, Text } from "@/components/ui";
 import { MarkdownRenderer } from "./MarkdownRenderer";
-import { MessageActions } from "./MessageActions";
 import { useExternalUrl } from "./useExternalUrl";
 
 type AssistantMessage = Extract<
@@ -413,12 +411,6 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
         <MemoryCitationBlock citation={item.memory_citation} />
       ) : null}
       <View style={styles.actions} accessible={false}>
-        <MessageActions
-          text={assistantMessageCopyText(
-            item.text,
-            lifecycle === "pending" || lifecycle === "streaming",
-          )}
-        />
         {lifecycle === "streaming" ? (
           <View
             style={styles.status}
