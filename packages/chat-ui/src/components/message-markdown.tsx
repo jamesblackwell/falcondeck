@@ -1,4 +1,4 @@
-import { memo, useDeferredValue, useMemo } from "react";
+import { Fragment, memo, useDeferredValue, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
@@ -40,6 +40,57 @@ function markdownDefinitionFooter(text: string) {
       return `[${node.identifier}]: ${node.url}${title ? ` "${title}"` : ""}`;
     })
     .join("\n");
+}
+
+type StreamingMarkdownBlocks = {
+  completed: string[];
+  tail: string;
+};
+
+/**
+ * Splits streamed Markdown only at blank lines outside fenced code blocks.
+ * The scan is intentionally cheaper than parsing a Markdown AST: completed
+ * blocks can then keep stable React props while only the growing tail parses
+ * again for each streamed update.
+ */
+export function splitStreamingMarkdownBlocks(
+  text: string,
+): StreamingMarkdownBlocks {
+  const completed: string[] = [];
+  let blockStart = 0;
+  let cursor = 0;
+  let fence: { marker: "`" | "~"; length: number } | null = null;
+
+  while (cursor < text.length) {
+    const newline = text.indexOf("\n", cursor);
+    const lineEnd = newline === -1 ? text.length : newline;
+    const nextLine = newline === -1 ? text.length : newline + 1;
+    const line = text.slice(cursor, lineEnd).replace(/\r$/, "");
+
+    if (fence) {
+      const closingFence = new RegExp(
+        `^ {0,3}\\${fence.marker}{${fence.length},}[\\t ]*$`,
+      );
+      if (closingFence.test(line)) fence = null;
+    } else {
+      const openingFence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (openingFence) {
+        const marker = openingFence[1][0] as "`" | "~";
+        // Backtick fence info strings cannot themselves contain backticks.
+        if (marker === "~" || !openingFence[2].includes("`")) {
+          fence = { marker, length: openingFence[1].length };
+        }
+      } else if (line.trim().length === 0) {
+        const block = text.slice(blockStart, nextLine);
+        if (block.trim()) completed.push(block);
+        blockStart = nextLine;
+      }
+    }
+
+    cursor = nextLine;
+  }
+
+  return { completed, tail: text.slice(blockStart) };
 }
 
 /**
@@ -354,6 +405,172 @@ function DirectiveChip({
   );
 }
 
+const StreamingMarkdownBlock = memo(function StreamingMarkdownBlock({
+  text,
+  definitionFooter,
+}: {
+  text: string;
+  definitionFooter: string;
+}) {
+  return renderMarkdown(
+    definitionFooter ? `${text}\n\n${definitionFooter}` : text,
+    false,
+  );
+});
+
+type StreamingContentSegment =
+  | {
+      kind: "markdown";
+      blocks: Array<{ text: string; complete: boolean; key: string }>;
+      key: string;
+    }
+  | {
+      kind: "directive";
+      name: string;
+      attrs: AgentDirectiveAttribute[];
+      unparsed: string | null;
+      key: string;
+    };
+
+function streamingContentSegments(
+  text: string,
+  interpretDirectives: boolean,
+): StreamingContentSegment[] {
+  const sourceSegments = interpretDirectives
+    ? splitAgentMessageSegments(text, true)
+    : ([{ kind: "markdown", text }] as const);
+  const result: StreamingContentSegment[] = [];
+
+  sourceSegments.forEach((segment, segmentIndex) => {
+    if (segment.kind === "directive") {
+      result.push({ ...segment, key: `directive-${segmentIndex}` });
+      return;
+    }
+
+    const blocks = splitStreamingMarkdownBlocks(segment.text);
+    const renderedBlocks = blocks.completed.map((block, blockIndex) => ({
+      text: block,
+      complete: true,
+      key: `markdown-${segmentIndex}-${blockIndex}`,
+    }));
+    if (blocks.tail.trim()) {
+      renderedBlocks.push({
+        text: blocks.tail,
+        // A directive closes the Markdown segment before it, so that segment
+        // can no longer grow during an append-only stream.
+        complete: segmentIndex < sourceSegments.length - 1,
+        key: `markdown-${segmentIndex}-tail`,
+      });
+    }
+    if (renderedBlocks.length > 0) {
+      result.push({
+        kind: "markdown",
+        blocks: renderedBlocks,
+        key: `markdown-${segmentIndex}`,
+      });
+    }
+  });
+
+  return result;
+}
+
+function StreamingMessageContent({
+  text,
+  interpretDirectives,
+}: {
+  text: string;
+  interpretDirectives: boolean;
+}) {
+  const segments = useMemo(
+    () => streamingContentSegments(text, interpretDirectives),
+    [interpretDirectives, text],
+  );
+  const completedDefinitionCache = useRef<
+    Map<string, { text: string; footer: string }>
+  >(new Map());
+
+  const definitionFooter = useMemo(() => {
+    // Reference definitions are uncommon. Avoid a second parser entirely for
+    // the normal streaming path while preserving references across blocks and
+    // directive boundaries when definitions are present.
+    if (!text.includes("]:")) return "";
+
+    const definitions: string[] = [];
+    const liveKeys = new Set<string>();
+    for (const segment of segments) {
+      if (segment.kind !== "markdown") continue;
+      for (const block of segment.blocks) {
+        if (!block.text.includes("]:")) continue;
+
+        let footer: string;
+        if (block.complete) {
+          liveKeys.add(block.key);
+          const cached = completedDefinitionCache.current.get(block.key);
+          if (cached?.text === block.text) {
+            footer = cached.footer;
+          } else {
+            footer = markdownDefinitionFooter(block.text);
+            completedDefinitionCache.current.set(block.key, {
+              text: block.text,
+              footer,
+            });
+          }
+        } else {
+          footer = markdownDefinitionFooter(block.text);
+        }
+        if (footer) definitions.push(footer);
+      }
+    }
+
+    for (const key of completedDefinitionCache.current.keys()) {
+      if (!liveKeys.has(key)) completedDefinitionCache.current.delete(key);
+    }
+    return definitions.join("\n");
+  }, [segments, text]);
+  const hasDirectives = segments.some(
+    (segment) => segment.kind === "directive",
+  );
+
+  return (
+    <>
+      {segments.map((segment) =>
+        segment.kind === "markdown" ? (
+          // Keep the wrapper that directive-bearing messages historically use
+          // so first/last block spacing remains unchanged.
+          hasDirectives ? (
+            <div key={segment.key}>
+              {segment.blocks.map((block) => (
+                <StreamingMarkdownBlock
+                  key={block.key}
+                  text={block.text}
+                  definitionFooter={definitionFooter}
+                />
+              ))}
+            </div>
+          ) : (
+            <Fragment key={segment.key}>
+              {segment.blocks.map((block) => (
+                <StreamingMarkdownBlock
+                  key={block.key}
+                  text={block.text}
+                  definitionFooter={definitionFooter}
+                />
+              ))}
+            </Fragment>
+          )
+        ) : (
+          <DirectiveChip
+            key={segment.key}
+            name={segment.name}
+            attrs={segment.attrs}
+            unparsed={segment.unparsed}
+          />
+        ),
+      )}
+    </>
+  );
+}
+
 export function renderMessageContent(
   text: string,
   highlightCode = true,
@@ -409,11 +626,17 @@ export const MessageMarkdown = memo(function MessageMarkdown({
 }) {
   const deferredText = useDeferredValue(text);
   const visibleText = defer ? deferredText : text;
-  return useMemo(
-    () =>
-      interpretDirectives
-        ? renderMessageContent(visibleText, !streaming, streaming)
-        : renderMarkdown(visibleText, !streaming),
-    [interpretDirectives, streaming, visibleText],
-  );
+  return useMemo(() => {
+    if (streaming) {
+      return (
+        <StreamingMessageContent
+          text={visibleText}
+          interpretDirectives={interpretDirectives}
+        />
+      );
+    }
+    return interpretDirectives
+      ? renderMessageContent(visibleText, true, false)
+      : renderMarkdown(visibleText, true);
+  }, [interpretDirectives, streaming, visibleText]);
 });

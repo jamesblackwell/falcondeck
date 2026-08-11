@@ -16,6 +16,7 @@ export {
   normalizeMarkdownForStreaming,
   renderMarkdown,
   renderMessageContent,
+  splitStreamingMarkdownBlocks,
 } from "./components/message-markdown";
 export * from "./components/goal-control";
 export * from "./components/composer-context-bar";

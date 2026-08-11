@@ -6,6 +6,7 @@ import {
   MessageMarkdown,
   normalizeMarkdownForStreaming,
   renderMarkdown,
+  splitStreamingMarkdownBlocks,
 } from "@falcondeck/chat-ui";
 
 describe("normalizeMarkdownForStreaming", () => {
@@ -21,6 +22,31 @@ describe("normalizeMarkdownForStreaming", () => {
       "[OpenAI](https://openai.com)",
     );
     expect(normalizeMarkdownForStreaming("[OpenAI](")).toBe("[OpenAI](");
+  });
+});
+
+describe("splitStreamingMarkdownBlocks", () => {
+  it("stabilizes completed top-level blocks and leaves the growing tail", () => {
+    expect(
+      splitStreamingMarkdownBlocks("First paragraph.\n\nSecond paragraph"),
+    ).toEqual({
+      completed: ["First paragraph.\n\n"],
+      tail: "Second paragraph",
+    });
+  });
+
+  it("does not split on blank lines inside fenced code", () => {
+    expect(
+      splitStreamingMarkdownBlocks(
+        "Before.\n\n```ts\nconst first = 1;\n\nconst second = 2;\n```\n\nAfter",
+      ),
+    ).toEqual({
+      completed: [
+        "Before.\n\n",
+        "```ts\nconst first = 1;\n\nconst second = 2;\n```\n\n",
+      ],
+      tail: "After",
+    });
   });
 });
 
@@ -262,6 +288,23 @@ describe("streaming code highlighting", () => {
 });
 
 describe("streaming agent directives", () => {
+  it("preserves reference definitions across completed streaming blocks", () => {
+    render(
+      <MessageMarkdown
+        text={
+          "Read [the docs][reference].\n\nStill streaming.\n\n[reference]: https://falcondeck.com/docs"
+        }
+        defer={false}
+        streaming
+      />,
+    );
+
+    expect(screen.getByRole("link", { name: "the docs" })).toHaveAttribute(
+      "href",
+      "https://falcondeck.com/docs",
+    );
+  });
+
   it("preserves reference definitions across directive boundaries", () => {
     render(
       <MessageMarkdown

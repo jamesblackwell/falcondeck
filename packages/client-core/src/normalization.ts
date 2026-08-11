@@ -68,6 +68,11 @@ const TOOL_LIFECYCLES = new Set<ToolLifecycle>([
   "interrupted",
 ]);
 
+// Event envelopes are immutable after normalization. Ingress normalizes once,
+// then the same envelope flows through snapshot and conversation reducers; the
+// WeakSet makes those defensive downstream calls allocation-free.
+const normalizedEventEnvelopes = new WeakSet<object>();
+
 /** Normalizes the untrusted request boundary shared by snapshots and history. */
 export function normalizeInteractiveRequest(
   value: unknown,
@@ -1396,70 +1401,87 @@ export function normalizeThreadTokenUsage(
 export function normalizeEventEnvelope(
   value: EventEnvelope | unknown,
 ): EventEnvelope {
+  if (
+    value !== null &&
+    typeof value === "object" &&
+    normalizedEventEnvelopes.has(value)
+  ) {
+    return value as EventEnvelope;
+  }
+
   const envelope = (value ?? {}) as Partial<EventEnvelope>;
   const event = envelope.event;
 
+  const markNormalized = (normalized: EventEnvelope) => {
+    if (normalized !== null && typeof normalized === "object") {
+      normalizedEventEnvelopes.add(normalized);
+    }
+    return normalized;
+  };
+
   if (event?.type === "snapshot") {
-    return {
+    return markNormalized({
       ...(envelope as EventEnvelope),
       event: {
         ...event,
         snapshot: normalizeDaemonSnapshot(event.snapshot),
       },
-    };
+    });
   }
 
   if (event?.type === "thread-started" || event?.type === "thread-updated") {
-    return {
+    return markNormalized({
       ...(envelope as EventEnvelope),
       event: {
         ...event,
         thread: normalizeThreadSummary(event.thread),
       },
-    };
+    });
   }
 
   if (event?.type === "workspace-updated") {
-    return {
+    return markNormalized({
       ...(envelope as EventEnvelope),
       event: {
         ...event,
         workspace: normalizeWorkspaceSummary(event.workspace),
       },
-    };
+    });
   }
 
   if (
     event?.type === "conversation-item-added" ||
     event?.type === "conversation-item-updated"
   ) {
-    return {
+    return markNormalized({
       ...(envelope as EventEnvelope),
       event: {
         ...event,
         item: normalizeConversationItem(event.item),
       },
-    };
+    });
   }
 
   if (event?.type === "preferences-updated") {
-    return {
+    return markNormalized({
       ...(envelope as EventEnvelope),
       event: {
         ...event,
         preferences: normalizePreferences(event.preferences),
       },
-    };
+    });
   }
 
   if (event?.type === "thread-token-usage-updated") {
     const usage = normalizeThreadTokenUsage(event.usage);
-    return usage
-      ? ({
-          ...(envelope as EventEnvelope),
-          event: { ...event, usage },
-        } as EventEnvelope)
-      : (envelope as EventEnvelope);
+    return markNormalized(
+      usage
+        ? ({
+            ...(envelope as EventEnvelope),
+            event: { ...event, usage },
+          } as EventEnvelope)
+        : (envelope as EventEnvelope),
+    );
   }
 
   if (event?.type === "service" && event.notice) {
@@ -1473,14 +1495,14 @@ export function normalizeEventEnvelope(
       typeof notice.message !== "string" ||
       typeof notice.created_at !== "string"
     ) {
-      return {
+      return markNormalized({
         ...(envelope as EventEnvelope),
         event: { ...event, notice: null },
-      };
+      });
     }
   }
 
-  return envelope as EventEnvelope;
+  return markNormalized(envelope as EventEnvelope);
 }
 
 export function normalizeToolCallDisplay(value: unknown): ToolCallDisplay {

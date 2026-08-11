@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeConversationItem,
   normalizeDaemonSnapshot,
+  normalizeEventEnvelope,
   normalizeInteractiveRequest,
   normalizeThreadDetail,
   normalizeToolCallDisplay,
@@ -38,6 +39,43 @@ describe("reasoning duration normalization", () => {
     } as unknown as ConversationItem);
 
     expect(normalized.kind).toBe("unsupported");
+  });
+});
+
+describe("event envelope normalization", () => {
+  it("returns an already-normalized envelope by identity", () => {
+    const normalized = normalizeEventEnvelope({
+      seq: 1,
+      emitted_at: "2026-08-11T10:00:00Z",
+      workspace_id: "workspace-1",
+      thread_id: "thread-1",
+      event: {
+        type: "conversation-item-added",
+        item: {
+          kind: "user_message",
+          id: "message-1",
+          text: "Hello",
+          attachments: [],
+          created_at: "2026-08-11T10:00:00Z",
+        },
+      },
+    });
+
+    expect(normalizeEventEnvelope(normalized)).toBe(normalized);
+    expect(normalizeEventEnvelope(normalized)).toBe(normalized);
+  });
+
+  it("marks no-op event types without cloning them", () => {
+    const event = {
+      seq: 2,
+      emitted_at: "2026-08-11T10:00:01Z",
+      workspace_id: "workspace-1",
+      thread_id: "thread-1",
+      event: { type: "text" as const, item_id: "message-1", delta: "!" },
+    };
+
+    expect(normalizeEventEnvelope(event)).toBe(event);
+    expect(normalizeEventEnvelope(event)).toBe(event);
   });
 });
 
