@@ -76,8 +76,6 @@ pub(super) struct TurnSpec<'a> {
     pub(super) requested_model_id: Option<&'a str>,
     pub(super) requested_reasoning_effort: Option<&'a str>,
     pub(super) service_tier: Option<&'a str>,
-    /// Set when the Codex app-server restarted under a live thread.
-    pub(super) requires_resume: bool,
 }
 
 impl ProviderRuntime {
@@ -178,21 +176,13 @@ impl ProviderRuntime {
     ) -> Result<(), DaemonError> {
         match self {
             Self::Codex => {
-                let session = app.session_for(spec.workspace_id).await?;
+                let session = app
+                    .resume_codex_thread_if_needed(spec.workspace_id, spec.thread_id)
+                    .await?;
                 let cwd = spec
                     .thread
                     .working_directory(session.workspace_path())
                     .to_string();
-                if spec.requires_resume {
-                    session.resume_thread(spec.thread_id).await?;
-                    let mut workspaces = app.inner.workspaces.lock().await;
-                    if let Some(workspace) = workspaces.get_mut(spec.workspace_id)
-                        && let Some(thread) = workspace.threads.get_mut(spec.thread_id)
-                    {
-                        thread.requires_resume = false;
-                    }
-                }
-
                 let collaboration_mode = codex_collaboration_mode_payload(
                     app,
                     spec.workspace_id,
@@ -408,7 +398,9 @@ impl ProviderRuntime {
     ) -> Result<(), DaemonError> {
         match self {
             Self::Codex => {
-                let session = app.session_for(&request.workspace_id).await?;
+                let session = app
+                    .resume_codex_thread_if_needed(&request.workspace_id, &request.thread_id)
+                    .await?;
                 session
                     .send_request(
                         "thread/goal/set",
@@ -453,7 +445,9 @@ impl ProviderRuntime {
     ) -> Result<(), DaemonError> {
         match self {
             Self::Codex => {
-                let session = app.session_for(workspace_id).await?;
+                let session = app
+                    .resume_codex_thread_if_needed(workspace_id, thread_id)
+                    .await?;
                 session
                     .send_request("thread/goal/clear", json!({ "threadId": thread_id }))
                     .await?;

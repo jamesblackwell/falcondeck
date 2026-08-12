@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { View, TextInput, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Plus, Send, Square } from 'lucide-react-native'
+import { Plus, Send, Square, Target } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import {
@@ -79,6 +79,8 @@ interface ChatInputProps {
   selectedSandboxMode?: string | null
   onSelectPermissionMode?: (mode: string | null) => void
   onSelectSandboxMode?: (mode: string | null) => void
+  /** Opens the provider goal surface after consuming an active /goal query. */
+  onGoalCommand?: () => void
   /** Lets the host focus the input imperatively, e.g. on a new conversation. */
   textInputRef?: RefObject<TextInput | null>
 }
@@ -126,6 +128,7 @@ export const ChatInput = memo(function ChatInput({
   selectedSandboxMode = null,
   onSelectPermissionMode,
   onSelectSandboxMode,
+  onGoalCommand,
   textInputRef,
 }: ChatInputProps) {
   const { theme } = useUnistyles()
@@ -164,6 +167,10 @@ export const ChatInput = memo(function ChatInput({
       return left.alias.localeCompare(right.alias)
     })
   }, [selectedProvider, skills, slashQuery?.query])
+  const showGoalCommand =
+    Boolean(onGoalCommand) &&
+    capabilities.supports_goals &&
+    'goal'.includes(slashQuery?.query.trim().toLowerCase() ?? '')
 
   const updateSlashQuery = useCallback(
     (nextValue: string, caretIndex: number) => {
@@ -259,6 +266,18 @@ export const ChatInput = memo(function ChatInput({
     },
     [onChangeText, slashQuery, value],
   )
+
+  const handleGoalCommand = useCallback(() => {
+    if (!slashQuery || !onGoalCommand) return
+    const nextValue = `${value.slice(0, slashQuery.rangeStart)}${value.slice(slashQuery.rangeEnd)}`
+    const nextCaret = slashQuery.rangeStart
+    onChangeText(nextValue)
+    selectionRangeRef.current = { start: nextCaret, end: nextCaret }
+    setCaretIndex(nextCaret)
+    setPendingSelection({ start: nextCaret, end: nextCaret })
+    setSlashQuery(null)
+    onGoalCommand()
+  }, [onChangeText, onGoalCommand, slashQuery, value])
 
   const canSend = hasContent && !disabled && !sendDisabled
   const canStop = showStop && !disabled && !sendDisabled && !isStopping
@@ -389,8 +408,33 @@ export const ChatInput = memo(function ChatInput({
         />
         {slashQuery ? (
           <View style={styles.skillMenu}>
-            {filteredSkills.length > 0 ? (
-              filteredSkills.map((skill) => {
+            {filteredSkills.length > 0 || showGoalCommand ? (
+              <>
+                {showGoalCommand ? (
+                  <Pressable
+                    style={[
+                      styles.skillItem,
+                      filteredSkills.length === 0 && styles.skillItemLast,
+                    ]}
+                    onPress={handleGoalCommand}
+                    accessibilityRole="button"
+                    accessibilityLabel="Set a goal"
+                  >
+                    <Target
+                      size={theme.iconSize.sm}
+                      color={theme.colors.fg.muted}
+                    />
+                    <View style={styles.skillItemBody}>
+                      <Text color="primary" size="sm" weight="medium">
+                        Goal
+                      </Text>
+                      <Text variant="caption" color="secondary" size="xs">
+                        Set a goal to keep pursuing
+                      </Text>
+                    </View>
+                  </Pressable>
+                ) : null}
+                {filteredSkills.map((skill) => {
                 const supported = providerSupportsSkill(skill, selectedProvider)
                 const lastItem =
                   filteredSkills[filteredSkills.length - 1]?.id === skill.id
@@ -437,7 +481,8 @@ export const ChatInput = memo(function ChatInput({
                     </View>
                   </Pressable>
                 )
-              })
+                })}
+              </>
             ) : (
               <View style={styles.skillEmpty}>
                 <Text variant="caption" color="muted">

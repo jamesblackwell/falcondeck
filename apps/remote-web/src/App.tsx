@@ -3435,13 +3435,60 @@ function RemoteApp() {
   }
 
   async function handleSetGoal(objective: string, tokenBudget: number | null) {
-    if (!selectedWorkspaceId || !selectedThreadId)
-      throw new Error("Select a thread first");
+    if (!selectedWorkspaceId || !selectedWorkspace)
+      throw new Error("Select a project first");
+    let activeThreadId = selectedThreadId;
+    if (!activeThreadId) {
+      const handle = normalizeThreadHandle(
+        await submitQueuedAction<ThreadHandle>("thread.start", {
+          workspace_id: selectedWorkspace.id,
+          provider: selectedProvider,
+          model_id: selectedModel,
+          collaboration_mode_id: selectedCollaborationMode,
+          approval_policy: approvalPolicyForProvider(
+            selectedProvider,
+            selectedPermissionMode,
+          ),
+          permission_mode: selectedPermissionMode,
+          sandbox_mode: selectedSandboxMode,
+        }),
+      );
+      activeThreadId = handle.thread.id;
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              workspaces: current.workspaces.map((workspace) =>
+                workspace.id === handle.workspace.id
+                  ? handle.workspace
+                  : workspace,
+              ),
+              threads: [
+                handle.thread,
+                ...current.threads.filter(
+                  (thread) => thread.id !== handle.thread.id,
+                ),
+              ],
+            }
+          : current,
+      );
+      setThreadDetail({
+        workspace: handle.workspace,
+        thread: handle.thread,
+        items: [],
+        has_older: false,
+        oldest_item_id: null,
+        newest_item_id: null,
+        is_partial: false,
+      });
+      setSelectedWorkspaceId(handle.workspace.id);
+      setSelectedThreadId(activeThreadId);
+    }
     applyThreadSummary(
       normalizeThreadSummary(
         await callRpc<ThreadSummary>("thread.goal.set", {
           workspace_id: selectedWorkspaceId,
-          thread_id: selectedThreadId,
+          thread_id: activeThreadId,
           objective,
           token_budget: tokenBudget,
         }),
@@ -3768,9 +3815,9 @@ function RemoteApp() {
         }
       >
         <div className="ml-auto flex items-center gap-1.5 sm:gap-2">
-          {selectedThread && activeCapabilities.supports_goals ? (
+          {selectedWorkspace && activeCapabilities.supports_goals ? (
             <GoalControl
-              goal={selectedThread.goal}
+              goal={selectedThread?.goal ?? null}
               provider={activeProvider}
               disabled={!isEncrypted}
               onSetGoal={handleSetGoal}
@@ -4079,6 +4126,17 @@ function RemoteApp() {
                 selectedThread?.status === "waiting_for_input"
               }
               isStopping={isStopping}
+              goal={
+                selectedWorkspace && activeCapabilities.supports_goals
+                  ? {
+                      goal: selectedThread?.goal ?? null,
+                      provider: activeProvider,
+                      onSetGoal: handleSetGoal,
+                      onClearGoal: handleClearGoal,
+                      onSetGoalStatus: handleSetGoalStatus,
+                    }
+                  : undefined
+              }
             />
           </div>
         </div>

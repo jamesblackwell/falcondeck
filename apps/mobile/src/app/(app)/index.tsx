@@ -197,6 +197,7 @@ export default function HomeScreen() {
     removeAttachment,
   } = useUIStore.getState();
   const {
+    startThread,
     submitTurn,
     respondApproval,
     respondInteractive,
@@ -271,8 +272,7 @@ export default function HomeScreen() {
   const queuedTurns = selectedThread?.queued_turns ?? EMPTY_QUEUED_TURNS;
   // A goal belongs to a thread, so there is nothing to set one on until one
   // exists — same gate as desktop.
-  const showGoalControl =
-    Boolean(selectedThread) && capabilities.supports_goals;
+  const showGoalControl = Boolean(workspace) && capabilities.supports_goals;
   const canEditResend = Boolean(
     selectedThread &&
     capabilities.supports_forking &&
@@ -756,14 +756,16 @@ export default function HomeScreen() {
   );
 
   const handleSetGoal = useCallback(
-    (objective: string, tokenBudget: number | null) => {
-      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve();
-      return setThreadGoal(selectedWorkspaceId, selectedThreadId, {
+    async (objective: string, tokenBudget: number | null) => {
+      if (!selectedWorkspaceId) throw new Error("Select a project first");
+      const threadId =
+        selectedThreadId ?? (await startThread()).thread.id;
+      return setThreadGoal(selectedWorkspaceId, threadId, {
         objective,
         token_budget: tokenBudget,
       });
     },
-    [selectedThreadId, selectedWorkspaceId, setThreadGoal],
+    [selectedThreadId, selectedWorkspaceId, setThreadGoal, startThread],
   );
 
   const handleClearGoal = useCallback(() => {
@@ -1311,6 +1313,7 @@ export default function HomeScreen() {
           selectedSandboxMode={selectedSandboxMode}
           onSelectPermissionMode={handlePermissionModeChange}
           onSelectSandboxMode={handleSandboxModeChange}
+          onGoalCommand={() => setIsGoalSheetOpen(true)}
         />
       </View>
 

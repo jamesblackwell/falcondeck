@@ -28,6 +28,43 @@ import { useRelayStore, useSessionStore, useUIStore } from '@/store'
 export function useSessionActions() {
   const detailRequestVersion = useRef(0)
 
+  const startThread = useCallback(async () => {
+    const relay = useRelayStore.getState()
+    const session = useSessionStore.getState()
+    const ui = useUIStore.getState()
+    const workspace = session.snapshot?.workspaces.find(
+      (entry) => entry.id === session.selectedWorkspaceId,
+    )
+    if (!workspace) throw new Error('Select a project first')
+    const provider =
+      ui.selectedProvider ?? workspace.default_provider ?? 'codex'
+    const conversationKey = ui.conversationKey
+    const handle = normalizeThreadHandle(
+      await relay._callRpc<ThreadHandle>(
+        'thread.start',
+        {
+          workspace_id: workspace.id,
+          provider,
+          model_id: ui.selectedModel,
+          approval_policy: approvalPolicyForProvider(
+            provider,
+            ui.selectedPermissionMode,
+          ),
+          permission_mode: ui.selectedPermissionMode,
+          sandbox_mode: ui.selectedSandboxMode,
+        },
+        { requestIdPrefix: 'mobile-thread' },
+      ),
+    )
+    useSessionStore.getState().applyThreadHandle(handle)
+    if (useUIStore.getState().conversationKey === conversationKey) {
+      useSessionStore
+        .getState()
+        .selectThread(handle.workspace.id, handle.thread.id)
+    }
+    return handle
+  }, [])
+
   const submitTurn = useCallback(async () => {
     const relay = useRelayStore.getState()
     const session = useSessionStore.getState()
@@ -78,34 +115,12 @@ export function useSessionActions() {
     let pendingConversationKey = submittedKey
     try {
       if (!activeThreadId) {
-        const handle = normalizeThreadHandle(
-          await relay._callRpc<ThreadHandle>(
-            'thread.start',
-            {
-              workspace_id: workspace.id,
-              provider,
-              model_id: ui.selectedModel,
-              approval_policy: approvalPolicyForProvider(
-                provider,
-                ui.selectedPermissionMode,
-              ),
-              permission_mode: ui.selectedPermissionMode,
-              sandbox_mode: ui.selectedSandboxMode,
-            },
-            { requestIdPrefix: 'mobile-thread' },
-          ),
-        )
+        const handle = await startThread()
         activeThreadId = handle.thread.id
         const branchKey = draftKeyFor(handle.workspace.id, handle.thread.id)
         ui.setIsSubmitting(true, branchKey)
         ui.setIsSubmitting(false, pendingConversationKey)
         pendingConversationKey = branchKey
-        useSessionStore.getState().applyThreadHandle(handle)
-        if (useUIStore.getState().conversationKey === submittedKey) {
-          useSessionStore
-            .getState()
-            .selectThread(handle.workspace.id, handle.thread.id)
-        }
       }
 
       // Tier-capable models get their tier stated on every turn — "fast off"
@@ -188,7 +203,7 @@ export function useSessionActions() {
     } finally {
       ui.setIsSubmitting(false, pendingConversationKey)
     }
-  }, [])
+  }, [startThread])
 
   const respondInteractive = useCallback(
     async (
@@ -484,6 +499,7 @@ export function useSessionActions() {
   )
 
   return {
+    startThread,
     submitTurn,
     respondApproval,
     respondInteractive,

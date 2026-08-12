@@ -401,6 +401,27 @@ describe('ChatInput component', () => {
     expect(textOf(r)).toContain('Run lint fixes')
   })
 
+  it('offers the built-in goal command when the provider supports goals', () => {
+    const onChangeText = vi.fn()
+    const onGoalCommand = vi.fn()
+    const r = renderComponent(
+      <ChatInput
+        value="/goal"
+        {...chatInputDefaults}
+        onChangeText={onChangeText}
+        onGoalCommand={onGoalCommand}
+        capabilities={{ ...imageCapableAgent, supports_goals: true }}
+      />,
+    )
+
+    expect(textOf(r)).toContain('Set a goal to keep pursuing')
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Set a goal' }).props.onPress()
+    })
+    expect(onChangeText).toHaveBeenCalledWith('')
+    expect(onGoalCommand).toHaveBeenCalledTimes(1)
+  })
+
   it('sizes itself natively between the min and max heights', () => {
     // Native auto-grow handles multiline sizing: no fixed height, no manual
     // scrollEnabled toggling — the input grows to maxHeight and then scrolls.

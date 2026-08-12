@@ -1391,18 +1391,90 @@ function AppInner() {
   const handleSetGoal = useCallback(
     async (objective: string, tokenBudget: number | null) => {
       const client = apiFor(selectedWorkspace?.id);
-      if (!client || !selectedWorkspace || !selectedThreadId) {
-        throw new Error("Select a thread first");
+      if (!client || !selectedWorkspace) {
+        throw new Error("Select a project first");
+      }
+      let activeThreadId = selectedThreadId;
+      if (!activeThreadId) {
+        if (selectedIsolation === "isolated") {
+          setIsPreparingIsolation(true);
+        }
+        let handle: ThreadHandle;
+        try {
+          handle = await client.startThread({
+            workspace_id: selectedWorkspace.id,
+            provider: selectedProvider,
+            model_id: selectedModel,
+            collaboration_mode_id: selectedCollaborationMode,
+            approval_policy: approvalPolicyForProvider(
+              selectedProvider,
+              selectedPermissionMode,
+            ),
+            permission_mode: selectedPermissionMode,
+            sandbox_mode: selectedSandboxMode,
+            isolation: selectedIsolation,
+          });
+        } finally {
+          setIsPreparingIsolation(false);
+        }
+        activeThreadId = handle.thread.id;
+        const detail = {
+          workspace: handle.workspace,
+          thread: handle.thread,
+          items: [],
+          has_older: false,
+          oldest_item_id: null,
+          newest_item_id: null,
+          is_partial: false,
+        };
+        remoteHosts
+          .hostForWorkspace(selectedWorkspace.id)
+          ?.seedThreadDetail(detail);
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                workspaces: current.workspaces.map((workspace) =>
+                  workspace.id === handle.workspace.id
+                    ? handle.workspace
+                    : workspace,
+                ),
+                threads: [
+                  handle.thread,
+                  ...current.threads.filter(
+                    (thread) => thread.id !== handle.thread.id,
+                  ),
+                ],
+              }
+            : current,
+        );
+        setThreadDetail(detail);
+        setSelectedThreadId(activeThreadId);
       }
       const thread = await client.setThreadGoal({
         workspace_id: selectedWorkspace.id,
-        thread_id: selectedThreadId,
+        thread_id: activeThreadId,
         objective,
         token_budget: tokenBudget,
       });
       applyThreadSummary(thread);
     },
-    [apiFor, applyThreadSummary, selectedThreadId, selectedWorkspace],
+    [
+      apiFor,
+      applyThreadSummary,
+      remoteHosts,
+      selectedCollaborationMode,
+      selectedIsolation,
+      selectedModel,
+      selectedPermissionMode,
+      selectedProvider,
+      selectedSandboxMode,
+      selectedThreadId,
+      selectedWorkspace,
+      setSelectedThreadId,
+      setSnapshot,
+      setThreadDetail,
+    ],
   );
 
   const handleClearGoal = useCallback(async () => {
@@ -3358,9 +3430,9 @@ function AppInner() {
                 },
                 // Goals live in the composer's plus menu, not the header.
                 goal:
-                  selectedThread && activeCapabilities.supports_goals
+                  selectedWorkspace && activeCapabilities.supports_goals
                     ? {
-                        goal: selectedThread.goal,
+                        goal: selectedThread?.goal ?? null,
                         provider: activeProvider,
                         onSetGoal: handleSetGoal,
                         onClearGoal: handleClearGoal,

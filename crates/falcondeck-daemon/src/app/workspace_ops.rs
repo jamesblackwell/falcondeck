@@ -1322,7 +1322,6 @@ async fn try_steer_turn(
                 requested_model_id: request.model_id.as_deref(),
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
-                requires_resume: false,
             },
         )
         .await
@@ -1805,7 +1804,7 @@ pub(super) async fn send_turn(
         return Ok(queued);
     }
 
-    let (thread, requires_resume, provider, selected_skills, previous_turn_id, approval_policy) = {
+    let (thread, provider, selected_skills, previous_turn_id, approval_policy) = {
         let mut workspaces = app.inner.workspaces.lock().await;
         let workspace = workspaces
             .get_mut(&request.workspace_id)
@@ -1917,7 +1916,6 @@ pub(super) async fn send_turn(
         let previous_turn_id = managed.summary.latest_turn_id.clone();
         (
             managed.summary.clone(),
-            managed.requires_resume,
             provider,
             selected_skills,
             previous_turn_id,
@@ -1958,7 +1956,6 @@ pub(super) async fn send_turn(
                 requested_model_id: request.model_id.as_deref(),
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
-                requires_resume,
             },
         )
         .await;
@@ -2933,6 +2930,63 @@ pub(super) async fn thread_detail(
     app: &AppState,
     request: &ThreadDetailRequest,
 ) -> Result<ThreadDetail, DaemonError> {
+    let should_refresh_codex_goal = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(&request.workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(&request.thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        thread.summary.provider == AgentProvider::CODEX
+            && (thread.requires_resume || thread.summary.goal.is_none())
+    };
+    if should_refresh_codex_goal {
+        match app
+            .resume_codex_thread_if_needed(&request.workspace_id, &request.thread_id)
+            .await
+        {
+            Ok(session) => match session
+                .send_request("thread/goal/get", json!({ "threadId": request.thread_id }))
+                .await
+            {
+                Ok(result) => {
+                    let goal = crate::codex::parse_thread_goal(&result);
+                    let mut changed = false;
+                    app.with_thread_mut(&request.workspace_id, &request.thread_id, |thread| {
+                        if thread.goal != goal {
+                            thread.goal = goal;
+                            changed = true;
+                        }
+                    })
+                    .await?;
+                    if changed {
+                        let thread = app
+                            .thread_summary(&request.workspace_id, &request.thread_id)
+                            .await?;
+                        app.emit(
+                            Some(request.workspace_id.clone()),
+                            Some(request.thread_id.clone()),
+                            UnifiedEvent::ThreadUpdated { thread },
+                        );
+                    }
+                }
+                Err(error) => tracing::debug!(
+                    workspace_id = %request.workspace_id,
+                    thread_id = %request.thread_id,
+                    %error,
+                    "could not refresh Codex thread goal"
+                ),
+            },
+            Err(error) => tracing::debug!(
+                workspace_id = %request.workspace_id,
+                thread_id = %request.thread_id,
+                %error,
+                "could not resume Codex thread for goal refresh"
+            ),
+        }
+    }
     let workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
         .get(&request.workspace_id)

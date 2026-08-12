@@ -182,6 +182,37 @@ impl AppState {
             })
     }
 
+    /// Materialize a restored Codex thread before using thread-scoped RPCs.
+    /// Goal reads and writes have the same requirement as starting a turn.
+    pub(super) async fn resume_codex_thread_if_needed(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<Arc<CodexSession>, DaemonError> {
+        let session = self.session_for(workspace_id).await?;
+        let requires_resume = {
+            let workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            workspace
+                .threads
+                .get(thread_id)
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?
+                .requires_resume
+        };
+        if requires_resume {
+            session.resume_thread(thread_id).await?;
+            let mut workspaces = self.inner.workspaces.lock().await;
+            if let Some(workspace) = workspaces.get_mut(workspace_id)
+                && let Some(thread) = workspace.threads.get_mut(thread_id)
+            {
+                thread.requires_resume = false;
+            }
+        }
+        Ok(session)
+    }
+
     pub(super) async fn claude_runtime_for(
         &self,
         workspace_id: &str,
