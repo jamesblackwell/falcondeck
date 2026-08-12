@@ -8,7 +8,8 @@ pub(super) fn hydrate_thread_items_from_session_file(
         Ok(file) => file,
         Err(_) => return Vec::new(),
     };
-    let mut items = Vec::new();
+    let mut items: Vec<SessionHydratedItem> = Vec::new();
+    let mut tool_calls_by_call_id: HashMap<String, usize> = HashMap::new();
     let mut matches_workspace = false;
 
     for line in StdBufReader::new(file).lines().map_while(Result::ok) {
@@ -36,7 +37,17 @@ pub(super) fn hydrate_thread_items_from_session_file(
             continue;
         }
 
+        if let Some((call_id, output, completed_at)) = session_tool_call_output(&value) {
+            if let Some(index) = tool_calls_by_call_id.get(&call_id).copied() {
+                apply_session_tool_call_output(&mut items[index].item, output, completed_at);
+            }
+            continue;
+        }
+
         if let Some(item) = build_session_hydrated_item_from_entry(&value) {
+            if let SessionHydratedItemKind::ToolCall { call_id } = &item.kind {
+                tool_calls_by_call_id.insert(call_id.clone(), items.len());
+            }
             items.push(item);
         }
     }
@@ -56,6 +67,7 @@ enum SessionHydratedItemKind {
     UserMessage,
     AssistantMessageFromEvent,
     AssistantMessageFromResponse,
+    ToolCall { call_id: String },
     Other,
 }
 
@@ -164,10 +176,104 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                     created_at,
                 },
             }),
+            "custom_tool_call" => {
+                let call_id = extract_string(payload, &["call_id", "callId"])?;
+                let id = extract_string(payload, &["id"]).unwrap_or_else(|| call_id.clone());
+                let name = extract_string(payload, &["name"]).unwrap_or_else(|| "Tool".to_string());
+                let status =
+                    extract_string(payload, &["status"]).unwrap_or_else(|| "completed".to_string());
+                let display = tool_display_metadata(&name, "customToolCall", &status, None, None);
+                Some(SessionHydratedItem {
+                    kind: SessionHydratedItemKind::ToolCall { call_id },
+                    item: ConversationItem::ToolCall {
+                        id,
+                        title: name,
+                        tool_kind: "customToolCall".to_string(),
+                        status,
+                        output: None,
+                        exit_code: None,
+                        display: Box::new(display),
+                        detail: None,
+                        created_at,
+                        completed_at: None,
+                    },
+                })
+            }
             _ => None,
         },
         _ => None,
     }
+}
+
+fn session_tool_call_output(
+    value: &Value,
+) -> Option<(String, Option<String>, chrono::DateTime<Utc>)> {
+    let payload = value.get("payload")?;
+    if value.get("type").and_then(Value::as_str) != Some("response_item")
+        || payload.get("type").and_then(Value::as_str) != Some("custom_tool_call_output")
+    {
+        return None;
+    }
+
+    let call_id = extract_string(payload, &["call_id", "callId"])?;
+    let output = payload.get("output").and_then(session_tool_output_text);
+    let completed_at =
+        extract_datetime_or_timestamp(value, &["timestamp", "createdAt", "created_at"])
+            .unwrap_or_else(Utc::now);
+    Some((call_id, output, completed_at))
+}
+
+fn session_tool_output_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+
+    let text = value
+        .as_array()?
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .as_str()
+                .or_else(|| entry.get("text").and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+fn apply_session_tool_call_output(
+    item: &mut ConversationItem,
+    output: Option<String>,
+    completed_at: chrono::DateTime<Utc>,
+) {
+    let ConversationItem::ToolCall {
+        title,
+        tool_kind,
+        status,
+        output: existing_output,
+        exit_code,
+        display,
+        completed_at: existing_completed_at,
+        ..
+    } = item
+    else {
+        return;
+    };
+
+    *status = "completed".to_string();
+    *existing_output = output;
+    *existing_completed_at = Some(completed_at);
+    **display = tool_display_metadata(
+        title,
+        tool_kind,
+        status,
+        *exit_code,
+        existing_output.as_deref(),
+    );
+    sanitize_conversation_item(item);
 }
 
 fn should_keep_session_hydrated_item(

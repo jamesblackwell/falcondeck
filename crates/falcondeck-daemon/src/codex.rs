@@ -1719,6 +1719,79 @@ mod tests {
     }
 
     #[test]
+    fn session_file_hydration_pairs_custom_tool_calls_with_saved_outputs() {
+        let mut file = NamedTempFile::new().unwrap();
+        for entry in [
+            json!({
+                "timestamp": "2026-08-11T10:43:29.220Z",
+                "type": "session_meta",
+                "payload": { "cwd": "/Users/james/project-a" }
+            }),
+            json!({
+                "timestamp": "2026-08-11T10:43:30.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "summary": [],
+                    "content": []
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-11T10:43:31.836Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "tool-1",
+                    "status": "completed",
+                    "call_id": "call-1",
+                    "name": "exec",
+                    "input": "const result = await tools.exec_command({ cmd: 'git status' });"
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-11T10:43:31.939Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": [
+                        { "type": "input_text", "text": "Script completed" },
+                        { "type": "input_text", "text": "M src/main.rs" }
+                    ]
+                }
+            }),
+        ] {
+            writeln!(file, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+
+        let items = hydrate_thread_items_from_session_file(
+            file.path().to_str().unwrap(),
+            "/Users/james/project-a",
+        );
+
+        assert!(matches!(
+            items.as_slice(),
+            [
+                ConversationItem::Reasoning { id: reasoning_id, .. },
+                ConversationItem::ToolCall {
+                    id: tool_id,
+                    title,
+                    status,
+                    output: Some(output),
+                    completed_at: Some(completed_at),
+                    ..
+                }
+            ] if reasoning_id == "reasoning-1"
+                && tool_id == "tool-1"
+                && title == "exec"
+                && status == "completed"
+                && output == "Script completed\nM src/main.rs"
+                && completed_at.to_rfc3339() == "2026-08-11T10:43:31.939+00:00"
+        ));
+    }
+
+    #[test]
     fn filters_internal_response_user_items_and_duplicate_assistant_session_messages() {
         let mut file = NamedTempFile::new().unwrap();
         writeln!(
