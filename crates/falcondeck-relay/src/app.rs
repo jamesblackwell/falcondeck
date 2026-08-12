@@ -60,6 +60,22 @@ const PRUNE_INTERVAL_SECONDS: u64 = 60;
 const MAX_RPC_REQUEST_ID_LENGTH: usize = 128;
 
 fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
+    // Once retention has removed any part of the requested window, the
+    // remaining tail is not a trustworthy base for client state. Sending it
+    // is actively harmful: a long-lived session can fill the peer's bounded
+    // outbound queue (and the client's bounded decrypt queue) before the
+    // authoritative snapshot RPC gets a chance to run. Tell the client where
+    // the lost window ends and let it rebuild from the daemon snapshot; live
+    // updates emitted after this marker are still delivered normally and are
+    // raced against that snapshot by the clients.
+    if response.cursor.history_truncated {
+        return vec![RelayServerMessage::Sync {
+            updates: Vec::new(),
+            next_seq: response.next_seq,
+            history_truncated: true,
+        }];
+    }
+
     let chunks = chunk_replay_updates(response.updates);
     if chunks.is_empty() {
         return vec![RelayServerMessage::Sync {
@@ -71,25 +87,10 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
 
     chunks
         .into_iter()
-        .enumerate()
-        .map(|(index, updates)| {
-            let next_seq = if response.cursor.history_truncated {
-                updates
-                    .last()
-                    .and_then(|update| update.seq.checked_add(1))
-                    .unwrap_or(response.next_seq)
-            } else {
-                response.next_seq
-            };
-            RelayServerMessage::Sync {
-                updates,
-                next_seq,
-                // Truncation is a property of the sync request, not of every
-                // chunk. Reporting it once keeps clients from repeatedly
-                // rebuilding their snapshot while still preserving the old
-                // wire shape for small histories.
-                history_truncated: index == 0 && response.cursor.history_truncated,
-            }
+        .map(|updates| RelayServerMessage::Sync {
+            updates,
+            next_seq: response.next_seq,
+            history_truncated: false,
         })
         .collect()
 }
@@ -3407,7 +3408,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_sync_reports_truncation_once_across_chunks() {
+    fn truncated_replay_sends_only_the_recovery_cursor() {
         let response = RelayUpdatesResponse {
             session_id: "session-1".to_string(),
             updates: (1..=129).map(test_update).collect(),
@@ -3427,25 +3428,15 @@ mod tests {
         };
 
         let messages = sync_messages(response);
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 1);
         assert!(matches!(
             &messages[0],
             falcondeck_core::RelayServerMessage::Sync {
+                updates,
+                next_seq: 130,
                 history_truncated: true,
                 ..
-            }
-        ));
-        assert!(matches!(
-            &messages[1],
-            falcondeck_core::RelayServerMessage::Sync {
-                next_seq: 130,
-                history_truncated: false,
-                ..
-            }
-        ));
-        assert!(matches!(
-            &messages[0],
-            falcondeck_core::RelayServerMessage::Sync { next_seq: 129, .. }
+            } if updates.is_empty()
         ));
     }
 
