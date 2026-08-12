@@ -255,6 +255,13 @@ function AppInner() {
     null,
   );
   const [isSending, setIsSending] = useState(false);
+  // The first message in a new conversation has no daemon thread id yet, so
+  // keep its optimistic transcript item keyed to the temporary composer
+  // conversation until thread.start returns.
+  const [pendingNewThreadItem, setPendingNewThreadItem] = useState<{
+    conversationKey: string;
+    item: ConversationItem;
+  } | null>(null);
   // Isolated-thread creation clones the working tree before the first turn
   // can start; a bare "Sending…" over that window reads as a hang.
   const [isPreparingIsolation, setIsPreparingIsolation] = useState(false);
@@ -563,13 +570,28 @@ function AppInner() {
     ],
   );
   const conversationItems: ConversationItem[] = useMemo(
-    () =>
-      conversationItemsForSelection(
+    () => {
+      const selectedItems = conversationItemsForSelection(
         selectedWorkspaceId,
         selectedThreadId,
         threadDetail,
-      ),
-    [selectedThreadId, selectedWorkspaceId, threadDetail],
+      );
+      if (
+        selectedThreadId ||
+        !pendingNewThreadItem ||
+        pendingNewThreadItem.conversationKey !== conversationKey
+      ) {
+        return selectedItems;
+      }
+      return [pendingNewThreadItem.item];
+    },
+    [
+      conversationKey,
+      pendingNewThreadItem,
+      selectedThreadId,
+      selectedWorkspaceId,
+      threadDetail,
+    ],
   );
   const interactiveRequests = useMemo(
     () =>
@@ -1635,6 +1657,28 @@ function AppInner() {
     // Fresh per attempt: a retried send must not reuse an id the daemon may
     // already have committed a user item under.
     const userItemId = generateUserItemId();
+    const inputs: TurnInputItem[] = [
+      ...(submittedDraft.trim()
+        ? [{ type: "text", text: submittedDraft } satisfies TurnInputItem]
+        : []),
+      ...submittedAttachments,
+    ];
+    // A send aimed at a busy thread lands in the queue chip instead, so it
+    // skips the transcript. New and idle threads can show their user item
+    // before the network round-trip that starts the turn.
+    const expectQueued =
+      !steer &&
+      (selectedThread?.status === "running" ||
+        selectedThread?.status === "waiting_for_input");
+    const optimisticItem = expectQueued
+      ? null
+      : buildOptimisticUserItem(userItemId, inputs, new Date().toISOString());
+    if (!selectedThreadId && optimisticItem) {
+      setPendingNewThreadItem({
+        conversationKey: submittedKey,
+        item: optimisticItem,
+      });
+    }
     sendingConversationKeyRef.current = submittedKey;
     sendingBaselineAgentItemIdRef.current = lastAgentItemId(conversationItems);
     setDraftForConversation(submittedKey, "");
@@ -1689,15 +1733,17 @@ function AppInner() {
             : c,
         );
         if (adopted) {
-          // The new thread is known to be empty. Render it immediately rather
-          // than showing a loading state while the detail endpoint catches up.
+          // The new thread is known to be empty. Seed the optimistic item so
+          // changing from the temporary composer key to the real thread key
+          // does not create a visible gap before the detail endpoint catches
+          // up.
           const seededDetail = {
             workspace: handle.workspace,
             thread: handle.thread,
-            items: [],
+            items: optimisticItem ? [optimisticItem] : [],
             has_older: false,
-            oldest_item_id: null,
-            newest_item_id: null,
+            oldest_item_id: optimisticItem?.id ?? null,
+            newest_item_id: optimisticItem?.id ?? null,
             is_partial: false,
           };
           // Remote threads render from the host's detail cache; without a
@@ -1706,25 +1752,11 @@ function AppInner() {
             .hostForWorkspace(selectedWorkspace.id)
             ?.seedThreadDetail(seededDetail);
           setThreadDetail(seededDetail);
+          setPendingNewThreadItem(null);
         }
       }
-      const inputs: TurnInputItem[] = [
-        ...(submittedDraft.trim()
-          ? [{ type: "text", text: submittedDraft } satisfies TurnInputItem]
-          : []),
-        ...submittedAttachments,
-      ];
       // Show the message in the transcript now; the daemon echoes it back
-      // under the same id, so the echo replaces this copy in place. A send
-      // aimed at a busy thread lands in the queue chip instead, so it skips
-      // the transcript (steering does append to the transcript).
-      const expectQueued =
-        !steer &&
-        (selectedThread?.status === "running" ||
-          selectedThread?.status === "waiting_for_input");
-      const optimisticItem = expectQueued
-        ? null
-        : buildOptimisticUserItem(userItemId, inputs, new Date().toISOString());
+      // under the same id, so the echo replaces this copy in place.
       if (optimisticItem) {
         const targetThreadId = activeThreadId;
         remoteHosts
@@ -1772,6 +1804,9 @@ function AppInner() {
       if (optimisticItem && sendResponse?.message === "queued") {
         removeOptimisticItem(selectedWorkspace.id, activeThreadId, userItemId);
       }
+      setPendingNewThreadItem((current) =>
+        current?.conversationKey === submittedKey ? null : current,
+      );
       setActionError(null);
     } catch (error) {
       // Put the unsent input back where the user now is: the thread that was
@@ -1784,6 +1819,9 @@ function AppInner() {
       if (activeThreadId) {
         removeOptimisticItem(selectedWorkspace.id, activeThreadId, userItemId);
       }
+      setPendingNewThreadItem((current) =>
+        current?.conversationKey === submittedKey ? null : current,
+      );
       restoreFailedSubmission(restoreKey, submittedDraft, submittedAttachments);
       const rawMessage =
         error instanceof Error ? error.message : "Failed to send turn";
