@@ -114,7 +114,7 @@ help:
 		'' \
 		'Build & install:' \
 		'  make install          Install desktop, mobile, and web dependencies' \
-		'  make desktop-install  Build the packaged desktop app and install it to /Applications' \
+		'  make desktop-install  Build, install, and open the packaged desktop app' \
 		'  make desktop-brand-assets Regenerate desktop icons/brand assets (skip if up to date; FORCE_BRAND=1 to force)' \
 		'  make build            Build desktop, remote web, and site bundles' \
 		'  make mobile-build     Build the iOS app via EAS (cloud, ad-hoc distribution)' \
@@ -396,7 +396,9 @@ desktop-install: desktop-brand-assets
 			echo "Ad-hoc signing FalconDeck.app for stable local macOS identity"; \
 			codesign --force --deep --sign - "$(APPLICATIONS_APP)"; \
 		fi; \
-		echo "Installed $(APPLICATIONS_APP)"
+		echo "Installed $(APPLICATIONS_APP)"; \
+		echo "Opening FalconDeck.app"; \
+		open "$(APPLICATIONS_APP)"
 
 frontend-dev: desktop-prepare
 	cd "$(DESKTOP_DIR)" && npx vite --port $(UI_PORT) --strictPort
