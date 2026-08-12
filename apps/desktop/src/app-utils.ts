@@ -62,6 +62,9 @@ export function workspaceSendBlockReason(
 
   const account = workspaceAccount(workspace, provider)
   if (account?.status === 'needs_auth') {
+    if (provider === 'claude') {
+      return 'Claude is logged out. Run `claude auth login` before sending messages.'
+    }
     return `${workspaceProviderLabel(workspace, provider)} needs authentication in this project before you can send messages.`
   }
 

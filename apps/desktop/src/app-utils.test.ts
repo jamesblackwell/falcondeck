@@ -69,7 +69,7 @@ describe('workspaceSendBlockReason', () => {
         }),
         'claude',
       ),
-    ).toBe('Claude needs authentication in this project before you can send messages.')
+    ).toBe('Claude is logged out. Run `claude auth login` before sending messages.')
   })
 })
 
