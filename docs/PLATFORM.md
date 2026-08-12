@@ -212,13 +212,14 @@ room-scoped, so every participant sees the same tools.
 
 ## 6. Extensions: the host architecture
 
-`docs/BB-ANALYSIS.md` already sketched the right shape; promoting it from
-"deliberately not scheduled" to the platform roadmap:
+`docs/EXTENSIONS.md` is the canonical architecture, authoring contract, and
+phased implementation plan. `docs/BB-ANALYSIS.md` records the research that
+informed it. The stable shape is:
 
-- **Extension host sidecar** — a Node (or Deno) process the daemon spawns,
+- **Extension host sidecar** — a Deno process the daemon spawns,
   speaking versioned JSON-RPC over stdio. The daemon stays pure Rust and never
   loads user code in-process.
-- **Manifest** — each extension declares `contributes`: RPC methods
+- **Manifest** — each extension declares `contributes`: actions and RPC methods
   (registered into the daemon's dynamic method table, §3.4, and forwarded to
   the relay so remote clients reach them), conversation item types (rendered
   via the `ext` item escape hatch, §3.3), sidebar/panel surfaces, slash
@@ -227,6 +228,9 @@ room-scoped, so every participant sees the same tools.
 - **Clients render extensions declaratively first** — schema-driven cards and
   panels — with sandboxed webviews as the later escape hatch. Declarative
   survives on mobile; webviews don't.
+- **Private state and view state are separate** — implementation data remains
+  namespaced and daemon-side; bounded non-secret projections flow through
+  snapshots and sequenced events so every client stays coherent.
 - **Trust model v1** — local, explicitly installed, listed in settings with
   their permissions. Signing/marketplace later. The `ee/` split stays
   orthogonal: extensions are the open ecosystem; `ee/` is our own commercial
@@ -258,8 +262,9 @@ Each phase is independently shippable and each unlocks the next:
 - **Phase 2 — connectors** *(shipped 2026-08-07)*: Connectors settings UI
   over `connectors.json` with paste-JSON import and per-workspace scoping,
   plus a composer tools chip ✓. Still open: skills install/enable UI.
-- **Phase 3 — extension host**: sidecar + manifest + dynamic RPC + declarative
-  cards; automation rules ship as the first first-party extension.
+- **Phase 3 — extensions**: follow `docs/EXTENSIONS.md` from manifest and
+  daemon foundations through the Deno host, declarative UI, and authoring CLI.
+  Thread Tags is the first official extension and is enabled by default.
 - **Unscheduled — rooms**: the feature itself (participants, addressing,
   per-participant status/UI) waits; its foundations ship inside Phases 0–1
   per §4a. Revisit once those land.

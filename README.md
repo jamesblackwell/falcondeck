@@ -103,7 +103,7 @@ make site-dev
 make remote-web-dev
 ```
 
-The mobile app uses Expo and has a dedicated workflow documented in [`docs/14-mobile-app.md`](docs/14-mobile-app.md). For the full architecture and agent integration paths, start with [`docs/00-architecture-overview.md`](docs/00-architecture-overview.md) and [`docs/02-agent-integration-paths.md`](docs/02-agent-integration-paths.md).
+The mobile app uses Expo and has a dedicated workflow documented in [`docs/14-mobile-app.md`](docs/14-mobile-app.md). For the full architecture and agent integration paths, start with [`docs/00-architecture-overview.md`](docs/00-architecture-overview.md) and [`docs/02-agent-integration-paths.md`](docs/02-agent-integration-paths.md). The canonical architecture and implementation plan for extending FalconDeck itself is [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md).
 
 ## Self-hosting
 
