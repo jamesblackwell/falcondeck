@@ -16,6 +16,10 @@ function key(key: string, modifiers: Partial<KeyboardEvent> = {}) {
   return { key, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, ...modifiers }
 }
 
+function optionKey(produced: string, code: string, modifiers: Partial<KeyboardEvent> = {}) {
+  return { ...key(produced, { altKey: true, ...modifiers }), code }
+}
+
 describe('keyboard shortcuts', () => {
   beforeEach(() => resetAllShortcuts())
 
@@ -34,6 +38,15 @@ describe('keyboard shortcuts', () => {
     expect(commandForEvent('global', key('k', { metaKey: true }))).toBe('commandPalette')
     expect(commandForEvent('global', key('?', { metaKey: true, shiftKey: true }))).toBe('openKeyboardShortcuts')
     expect(commandForEvent('global', key('Enter', { metaKey: true }))).toBeNull()
+  })
+
+  it('resolves Option chords from the physical key, not the composed character', () => {
+    // macOS reports ⌘⌥B as "∫"; the binding must still resolve.
+    expect(shortcutFromEvent(optionKey('∫', 'KeyB', { metaKey: true }))).toBe('Mod+Alt+B')
+    expect(commandForEvent('global', optionKey('∫', 'KeyB', { metaKey: true }))).toBe('toggleChanges')
+    expect(shortcutFromEvent(optionKey('“', 'BracketLeft'))).toBe('Alt+[')
+    // Events without a physical code still fall back to the produced key.
+    expect(shortcutFromEvent(key('b', { metaKey: true, altKey: true }))).toBe('Mod+Alt+B')
   })
 
   it('maps Ctrl+Shift chords to the composer option menus', () => {

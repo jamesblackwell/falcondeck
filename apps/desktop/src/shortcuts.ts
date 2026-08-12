@@ -175,8 +175,32 @@ export function normalizeShortcut(value: string): string {
   return [...MODIFIER_ORDER.filter((modifier) => modifiers.has(modifier)), normalizedKey].filter(Boolean).join('+')
 }
 
-function eventKey(event: Pick<KeyboardEvent, 'key' | 'shiftKey'>): string | null {
+export type ShortcutKeyEvent = Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'> & {
+  code?: string
+}
+
+// macOS composes Option with the layout, so Option+B reports key "∫" instead of "b".
+// The physical code is the only stable identity for those bindings.
+const KEY_BY_CODE: Record<string, string> = {
+  Minus: '-', Equal: '=', BracketLeft: '[', BracketRight: ']', Backslash: '\\',
+  Semicolon: ';', Quote: "'", Comma: ',', Period: '.', Slash: '/', Backquote: '`', Space: 'Space',
+}
+
+function keyFromCode(code: string | undefined): string | null {
+  if (!code) return null
+  const letter = /^Key([A-Z])$/.exec(code)
+  if (letter) return letter[1]!
+  const digit = /^Digit([0-9])$/.exec(code)
+  if (digit) return digit[1]!
+  return KEY_BY_CODE[code] ?? null
+}
+
+function eventKey(event: Pick<ShortcutKeyEvent, 'key' | 'shiftKey' | 'altKey' | 'code'>): string | null {
   if (['Meta', 'Control', 'Alt', 'Shift'].includes(event.key)) return null
+  if (event.altKey) {
+    const physical = keyFromCode(event.code)
+    if (physical) return physical
+  }
   // KeyboardEvent.key reports the produced character, so shifted punctuation
   // must be folded back to its physical key before retaining the Shift modifier.
   const shiftedPunctuation: Record<string, string> = {
@@ -191,7 +215,7 @@ function eventKey(event: Pick<KeyboardEvent, 'key' | 'shiftKey'>): string | null
   return key.length === 1 && /[a-z]/i.test(key) ? key.toUpperCase() : key
 }
 
-export function shortcutFromEvent(event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>): string | null {
+export function shortcutFromEvent(event: ShortcutKeyEvent): string | null {
   const key = eventKey(event)
   if (!key) return null
   // This registry is the Mac desktop profile: Mod intentionally means Command.
@@ -207,7 +231,7 @@ export function shortcutFromEvent(event: Pick<KeyboardEvent, 'key' | 'metaKey' |
 
 export function commandForEvent(
   context: ShortcutContext,
-  event: Pick<KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey' | 'altKey' | 'shiftKey'>,
+  event: ShortcutKeyEvent,
   settings = current,
 ): ShortcutCommandId | null {
   const shortcut = shortcutFromEvent(event)
