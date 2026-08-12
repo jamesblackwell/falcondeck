@@ -1328,7 +1328,7 @@ async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
 }
 
 #[tokio::test]
-async fn fresh_clients_are_told_history_was_truncated_after_pruning() {
+async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
     let server = spawn_server_with_retention(RetentionConfig {
         update_retention: Duration::days(7),
         max_updates_per_session: 1,
@@ -1366,20 +1366,77 @@ async fn fresh_clients_are_told_history_was_truncated_after_pruning() {
 
     trigger_prune(&server).await;
 
-    let history = get_json::<RelayUpdatesResponse>(
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::RpcRegister {
+            method: "snapshot.current".to_string(),
+        },
+    )
+    .await;
+    assert_eq!(
+        recv_server_message(&mut daemon_ws).await,
+        RelayServerMessage::RpcRegistered {
+            method: "snapshot.current".to_string(),
+        }
+    );
+
+    let client_url = ws_url_for(
         &client,
-        &format!(
-            "{}/v1/sessions/{}/updates?after_seq=0",
-            server.http_base, claim.session_id
-        ),
-        Some(&claim.client_token),
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    assert!(matches!(
+        recv_server_message(&mut client_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::Sync { after_seq: Some(0) },
     )
     .await;
 
-    // A brand-new client (after_seq=0) must learn that pruned history is
-    // unrecoverable so it bootstraps from a fresh daemon snapshot.
-    assert!(history.cursor.history_truncated);
-    assert!(history.cursor.requires_bootstrap);
+    let RelayServerMessage::Sync {
+        updates,
+        next_seq,
+        history_truncated,
+    } = recv_server_message(&mut client_ws).await
+    else {
+        panic!("expected truncated sync response");
+    };
+
+    // A retained tail is not useful after a gap: clients must replace their
+    // derived state from snapshot.current. Replaying it here previously
+    // filled the bounded outbound queue, disconnected iOS, and trapped it in
+    // an endless reconnect / "Syncing your projects" loop.
+    assert!(history_truncated);
+    assert!(updates.is_empty());
+    assert!(next_seq >= 5);
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "snapshot-after-truncation".to_string(),
+            method: "snapshot.current".to_string(),
+            params: test_envelope("snapshot-request"),
+        },
+    )
+    .await;
+
+    let RelayServerMessage::RpcRequest {
+        request_id,
+        method,
+        ..
+    } = recv_server_message(&mut daemon_ws).await
+    else {
+        panic!("expected snapshot RPC after truncated sync");
+    };
+    assert!(request_id.ends_with(":snapshot-after-truncation"));
+    assert_eq!(method, "snapshot.current");
 }
 
 #[tokio::test]

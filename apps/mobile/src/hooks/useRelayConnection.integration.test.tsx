@@ -66,6 +66,15 @@ function claimResponse(index: number) {
   }
 }
 
+function RelayConnectionHarness() {
+  useRelayConnection()
+  return null
+}
+
+function renderRelayConnection() {
+  return renderComponent(<RelayConnectionHarness />)
+}
+
 describe('useRelayConnection session rotation', () => {
   beforeEach(() => {
     TestWebSocket.instances = []
@@ -130,11 +139,7 @@ describe('useRelayConnection session rotation', () => {
     const failPendingRpcs = vi.fn()
     useRelayStore.getState()._failPendingRpcs = failPendingRpcs
 
-    function Harness() {
-      useRelayConnection()
-      return null
-    }
-    renderComponent(<Harness />)
+    renderRelayConnection()
 
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
     const oldSocket = TestWebSocket.instances[0]!
@@ -199,11 +204,7 @@ describe('useRelayConnection session rotation', () => {
       await useRelayStore.getState().claimPairing()
     })
 
-    function Harness() {
-      useRelayConnection()
-      return null
-    }
-    renderComponent(<Harness />)
+    renderRelayConnection()
     await vi.waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith(
         'https://relay.test/v1/sessions/session-1/ws-ticket',
@@ -263,11 +264,7 @@ describe('useRelayConnection session rotation', () => {
       await useRelayStore.getState().claimPairing()
     })
 
-    function Harness() {
-      useRelayConnection()
-      return null
-    }
-    renderComponent(<Harness />)
+    renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
 
     useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
@@ -354,11 +351,7 @@ describe('useRelayConnection session rotation', () => {
     })
     useSessionStore.getState().applyDaemonEvents([snapshotEvent(snapshot())])
 
-    function Harness() {
-      useRelayConnection()
-      return null
-    }
-    renderComponent(<Harness />)
+    renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
 
     useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
@@ -482,11 +475,7 @@ describe('useRelayConnection session rotation', () => {
       .fn()
       .mockReturnValue(pendingDecrypt) as typeof originalDecryptJson
 
-    function Harness() {
-      useRelayConnection()
-      return null
-    }
-    renderComponent(<Harness />)
+    renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
 
     const socket = TestWebSocket.instances[0]!
@@ -540,6 +529,78 @@ describe('useRelayConnection session rotation', () => {
     expect(useRelayStore.getState()._getLastReceivedSeq()).toBe(7)
   })
 
+  it('recovers an empty truncated replay with a snapshot and durable cursor', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'truncation-ticket' }) } as Response
+      }
+      if (url.endsWith('/push-token')) {
+        return { ok: true } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const queuedFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback)
+      return queuedFrames.length
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    useRelayStore.getState().setPairingCode('TRUNCATED')
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+    useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
+    useRelayStore.getState()._setLastReceivedSeq(0)
+
+    const callRpc = vi.fn().mockResolvedValue(snapshot())
+    useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
+
+    renderRelayConnection()
+    await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
+
+    const socket = TestWebSocket.instances[0]!
+    socket.readyState = TestWebSocket.OPEN
+    await act(async () => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          updates: [],
+          next_seq: 42,
+          history_truncated: true,
+        }),
+      })
+      await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
+        'snapshot.current',
+        expect.anything(),
+        expect.anything(),
+      ))
+      await vi.waitFor(() => expect(useRelayStore.getState()._getLastReceivedSeq()).toBe(41))
+    })
+
+    await act(async () => {
+      queuedFrames.shift()?.(performance.now())
+      await Promise.resolve()
+    })
+
+    expect(socket.close).not.toHaveBeenCalled()
+    expect(useSessionStore.getState().snapshot).not.toBeNull()
+    expect(useRelayStore.getState().hasSyncedOnce).toBe(true)
+    expect(useRelayStore.getState().isSyncing).toBe(false)
+  })
+
   it('still fetches a snapshot when the offline cache already hydrated one', async () => {
     // Warm start: the cache paints projects before the socket opens. Guarding
     // the fetch on "no snapshot" used to skip it entirely, so hasSyncedOnce
@@ -580,25 +641,20 @@ describe('useRelayConnection session rotation', () => {
     const callRpc = vi.fn().mockResolvedValue(snapshot())
     useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
 
-    function Harness() {
-      useRelayConnection()
-      return null
-    }
-    renderComponent(<Harness />)
+    renderRelayConnection()
     await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
 
     const socket = TestWebSocket.instances[0]!
     socket.readyState = TestWebSocket.OPEN
-    act(() => {
+    await act(async () => {
       socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+      await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
+        'snapshot.current',
+        expect.anything(),
+        expect.anything(),
+      ))
+      await vi.waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true))
     })
-
-    await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
-      'snapshot.current',
-      expect.anything(),
-      expect.anything(),
-    ))
-    await vi.waitFor(() => expect(useRelayStore.getState().hasSyncedOnce).toBe(true))
     expect(useRelayStore.getState().isSyncing).toBe(false)
   })
 })
