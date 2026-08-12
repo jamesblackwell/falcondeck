@@ -121,8 +121,8 @@ export const CommandPalette = memo(function CommandPalette({
     if (!open) return []
     const result: PaletteItem[] = []
 
-    // Priority first (awaiting response, errors, running, unread), then recency —
-    // same ordering as the sidebar so jump-to surfaces threads that need you.
+    // Unread first, then actionable/running status. The running bucket stays
+    // stable while streaming; settled buckets use recency, matching the sidebar.
     const threads = groups
       .flatMap((group) =>
         group.threads

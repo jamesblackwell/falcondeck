@@ -25,10 +25,20 @@ function compareByRecency(left: ThreadSummary, right: ThreadSummary): number {
   return right.updated_at < left.updated_at ? -1 : right.updated_at > left.updated_at ? 1 : 0
 }
 
+// Running turns refresh updated_at while streaming, which would make
+// neighbouring active rows trade places under the pointer. Titles are
+// human-readable and stable for the lifetime of a turn; ids make duplicate or
+// untitled chats deterministic.
+function compareByStableIdentity(left: ThreadSummary, right: ThreadSummary): number {
+  return left.title.localeCompare(right.title) || left.id.localeCompare(right.id)
+}
+
 /**
- * Lower ranks sort first: chats waiting on the user, then unseen failures,
- * then active runs, then unread. A failure that has been viewed is
- * acknowledged and falls back with the rest (mirrors the attention inbox).
+ * Lower ranks sort first within the read/unread buckets: chats waiting on the
+ * user, then failures, then active runs, then quiet chats. Unread is handled
+ * as the outer bucket by compareThreads so it cannot fall below read activity.
+ * A failure that has been viewed is acknowledged and falls back with the rest
+ * (mirrors the attention inbox).
  */
 function priorityRank(thread: ThreadSummary): number {
   const attention = deriveThreadAttentionPresentation(thread)
@@ -49,8 +59,19 @@ function priorityRank(thread: ThreadSummary): number {
 export function compareThreads(mode: ThreadSortMode) {
   return (left: ThreadSummary, right: ThreadSummary): number => {
     switch (mode) {
-      case 'priority':
-        return priorityRank(left) - priorityRank(right) || compareByRecency(left, right)
+      case 'priority': {
+        const leftAttention = deriveThreadAttentionPresentation(left)
+        const rightAttention = deriveThreadAttentionPresentation(right)
+        const leftRank = priorityRank(left)
+        const rightRank = priorityRank(right)
+        return (
+          Number(!leftAttention.unread) - Number(!rightAttention.unread) ||
+          leftRank - rightRank ||
+          (leftRank === 2
+            ? compareByStableIdentity(left, right)
+            : compareByRecency(left, right))
+        )
+      }
       case 'alphabetical': {
         const leftTitle = left.title.trim()
         const rightTitle = right.title.trim()

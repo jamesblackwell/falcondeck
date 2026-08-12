@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ThreadSummary, WorkspaceSummary } from './types'
-import { buildProjectGroups } from './grouping'
+import { buildProjectGroups, compareThreads } from './grouping'
 
 function workspace(id: string, path: string) {
   return { id, path } as WorkspaceSummary
@@ -24,5 +24,114 @@ describe('buildProjectGroups', () => {
     )
 
     expect(groups.map((group) => group.workspace.id)).toEqual(['saved-a', 'saved-b', 'new'])
+  })
+})
+
+describe('compareThreads', () => {
+  const summary = (overrides: Partial<ThreadSummary>): ThreadSummary =>
+    ({
+      id: 'thread',
+      workspace_id: 'workspace',
+      title: 'Chat',
+      status: 'idle',
+      updated_at: '2026-08-12T12:00:00Z',
+      attention: {
+        level: 'none',
+        badge_label: null,
+        unread: false,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 0,
+        last_read_seq: 0,
+      },
+      ...overrides,
+    }) as ThreadSummary
+
+  it('puts every unread chat ahead of newer read activity', () => {
+    const unread = summary({
+      id: 'unread',
+      updated_at: '2026-08-12T08:00:00Z',
+      attention: {
+        level: 'unread',
+        badge_label: null,
+        unread: true,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 1,
+        last_read_seq: 0,
+      },
+    })
+    const running = summary({ id: 'running', status: 'running' })
+    const awaitingResponse = summary({
+      id: 'awaiting-response',
+      attention: {
+        level: 'awaiting_response',
+        badge_label: 'Awaiting response',
+        unread: false,
+        pending_approval_count: 1,
+        pending_question_count: 0,
+        last_agent_activity_seq: 0,
+        last_read_seq: 0,
+      },
+    })
+
+    expect([running, awaitingResponse, unread].sort(compareThreads('priority')).map(({ id }) => id))
+      .toEqual(['unread', 'awaiting-response', 'running'])
+  })
+
+  it('keeps actionable status ordering within the unread bucket', () => {
+    const ordinaryUnread = summary({
+      id: 'ordinary-unread',
+      updated_at: '2026-08-12T11:00:00Z',
+      attention: {
+        level: 'unread',
+        badge_label: null,
+        unread: true,
+        pending_approval_count: 0,
+        pending_question_count: 0,
+        last_agent_activity_seq: 2,
+        last_read_seq: 1,
+      },
+    })
+    const unreadAwaitingResponse = summary({
+      id: 'unread-awaiting-response',
+      updated_at: '2026-08-12T09:00:00Z',
+      attention: {
+        level: 'awaiting_response',
+        badge_label: 'Awaiting response',
+        unread: true,
+        pending_approval_count: 1,
+        pending_question_count: 0,
+        last_agent_activity_seq: 2,
+        last_read_seq: 1,
+      },
+    })
+
+    expect(
+      [ordinaryUnread, unreadAwaitingResponse]
+        .sort(compareThreads('priority'))
+        .map(({ id }) => id),
+    ).toEqual(['unread-awaiting-response', 'ordinary-unread'])
+  })
+
+  it('does not reorder equal-priority chats when streaming refreshes updated_at', () => {
+    const alpha = summary({
+      id: 'alpha',
+      title: 'Alpha',
+      status: 'running',
+      updated_at: '2026-08-12T09:00:00Z',
+    })
+    const zulu = summary({
+      id: 'zulu',
+      title: 'Zulu',
+      status: 'running',
+      updated_at: '2026-08-12T10:00:00Z',
+    })
+    const compare = compareThreads('priority')
+
+    expect([zulu, alpha].sort(compare).map(({ id }) => id)).toEqual(['alpha', 'zulu'])
+
+    alpha.updated_at = '2026-08-12T11:00:00Z'
+    expect([zulu, alpha].sort(compare).map(({ id }) => id)).toEqual(['alpha', 'zulu'])
   })
 })
