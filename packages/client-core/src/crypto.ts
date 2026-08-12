@@ -365,6 +365,10 @@ export async function decryptJson<T>(dataKey: Uint8Array, envelope: EncryptedEnv
   return JSON.parse(decoder.decode(plaintext)) as T
 }
 
+export function decryptJsonBatch<T>(dataKey: Uint8Array, envelopes: EncryptedEnvelope[]) {
+  return Promise.allSettled(envelopes.map((envelope) => decryptJson<T>(dataKey, envelope)))
+}
+
 export function unwrapDataKey(keyPair: BoxKeyPair, wrapped: WrappedDataKey) {
   ensureVariant(wrapped.encryption_variant)
   const bundle = base64ToBytes(wrapped.wrapped_key)

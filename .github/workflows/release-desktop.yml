@@ -16,12 +16,16 @@ jobs:
         include:
           - platform: macos-latest
             args: --target aarch64-apple-darwin
+            target: aarch64-apple-darwin
           - platform: macos-latest
             args: --target x86_64-apple-darwin
+            target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             args: ''
+            target: x86_64-unknown-linux-gnu
           - platform: windows-latest
             args: ''
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +60,9 @@ jobs:
         env:
           FALCONDECK_UPDATER_PUBLIC_KEY: ${{ secrets.FALCONDECK_UPDATER_PUBLIC_KEY }}
         run: npm run desktop:release:prepare
+
+      - name: Prepare bundled extension runtime
+        run: npm run extension-runtime:prepare -- --target=${{ matrix.target }} --download
 
       - uses: tauri-apps/tauri-action@v0
         env:

@@ -107,7 +107,8 @@ function UserAttachment({
       type="button"
       onClick={(event) => onPreview(attachment, event.currentTarget)}
       aria-label={`Preview ${label}`}
-      className="fd-focus group/attachment relative h-20 w-20 overflow-hidden rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2"
+      title={label}
+      className="fd-focus group/attachment h-20 w-20 overflow-hidden rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2"
     >
       <img
         src={url}
@@ -117,9 +118,6 @@ function UserAttachment({
         onError={() => setFailedUrl(url)}
         className="h-full w-full object-cover transition-transform group-hover/attachment:scale-[1.03]"
       />
-      <span className="pointer-events-none absolute inset-x-0 bottom-0 truncate bg-black/75 px-1.5 py-1 text-left text-[length:var(--fd-text-2xs)] text-white">
-        {label}
-      </span>
     </button>
   ) : (
     <div
@@ -283,7 +281,10 @@ function UserMessage({
 
   return (
     <div className="group/message relative ml-auto w-fit min-w-0 max-w-2xl rounded-[var(--fd-radius-xl)] bg-surface-3 px-5 py-4">
-      <div className="max-w-none break-words text-[length:var(--fd-text-md)] text-fg-primary">
+      <div
+        data-message-selectable-content
+        className="max-w-none break-words text-[length:var(--fd-text-md)] text-fg-primary"
+      >
         <MessageMarkdown
           text={item.text}
           defer={false}
@@ -646,6 +647,7 @@ function AssistantMessage({
         </p>
       ) : null}
       <div
+        data-message-selectable-content
         className={cn(
           "max-w-none break-words text-[length:var(--fd-text-md)]",
           isCommentary ? "text-fg-secondary" : "text-fg-primary",

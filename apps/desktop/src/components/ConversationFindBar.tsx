@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronUp, Search, X } from 'lucide-react'
 
+import { CollapseRegion } from '@falcondeck/ui'
+
 import { findTranscriptMatches } from './conversation-find'
 
 export function ConversationFindBar({ requestKey }: { requestKey: number }) {
@@ -56,50 +58,50 @@ export function ConversationFindBar({ requestKey }: { requestKey: number }) {
     window.getSelection()?.removeAllRanges()
   }
 
-  if (!open) return null
-
   return (
-    <div
-      role="search"
-      aria-label="Find in chat"
-      className="z-20 flex items-center justify-end gap-1 border-b border-border-subtle bg-surface-2 px-3 py-2"
-      onKeyDown={(event) => {
-        event.stopPropagation()
-        if (event.key === 'Escape') {
-          event.preventDefault()
-          close()
-        } else if (event.key === 'Enter') {
-          event.preventDefault()
-          find(event.shiftKey)
-        }
-      }}
-    >
-      <label className="fd-focus-within flex w-full max-w-sm items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2.5">
-        <Search className="h-3.5 w-3.5 text-fg-muted" aria-hidden="true" />
-        <input
-          ref={inputRef}
-          value={query}
-          onChange={(event) => {
-            setQuery(event.target.value)
-            setFound(null)
-            matchIndexRef.current = -1
-            lastQueryRef.current = ''
-          }}
-          placeholder="Find in chat"
-          aria-label="Find text"
-          className="h-8 min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-muted"
-        />
-        {found === false ? <span className="text-[length:var(--fd-text-2xs)] text-danger">No match</span> : null}
-      </label>
-      <button type="button" className="fd-focus rounded p-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg-primary" aria-label="Previous match" onClick={() => find(true)}>
-        <ChevronUp className="h-4 w-4" />
-      </button>
-      <button type="button" className="fd-focus rounded p-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg-primary" aria-label="Next match" onClick={() => find(false)}>
-        <ChevronDown className="h-4 w-4" />
-      </button>
-      <button type="button" className="fd-focus rounded p-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg-primary" aria-label="Close find" onClick={close}>
-        <X className="h-4 w-4" />
-      </button>
-    </div>
+    <CollapseRegion open={open} className="z-20">
+      <div
+        role="search"
+        aria-label="Find in chat"
+        className="flex items-center justify-end gap-1 border-b border-border-subtle bg-surface-2 px-3 py-2"
+        onKeyDown={(event) => {
+          event.stopPropagation()
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            close()
+          } else if (event.key === 'Enter') {
+            event.preventDefault()
+            find(event.shiftKey)
+          }
+        }}
+      >
+        <label className="fd-focus-within flex w-full max-w-sm items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-2.5">
+          <Search className="h-3.5 w-3.5 text-fg-muted" aria-hidden="true" />
+          <input
+            ref={inputRef}
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value)
+              setFound(null)
+              matchIndexRef.current = -1
+              lastQueryRef.current = ''
+            }}
+            placeholder="Find in chat"
+            aria-label="Find text"
+            className="h-8 min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-muted"
+          />
+          {found === false ? <span className="text-[length:var(--fd-text-2xs)] text-danger">No match</span> : null}
+        </label>
+        <button type="button" className="fd-focus rounded p-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg-primary" aria-label="Previous match" onClick={() => find(true)}>
+          <ChevronUp className="h-4 w-4" />
+        </button>
+        <button type="button" className="fd-focus rounded p-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg-primary" aria-label="Next match" onClick={() => find(false)}>
+          <ChevronDown className="h-4 w-4" />
+        </button>
+        <button type="button" className="fd-focus rounded p-1.5 text-fg-muted hover:bg-surface-3 hover:text-fg-primary" aria-label="Close find" onClick={close}>
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </CollapseRegion>
   )
 }

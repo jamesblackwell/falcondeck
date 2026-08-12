@@ -313,6 +313,9 @@ pub(super) async fn connect_workspace_internal(
                         if state.native_session_id.is_some() {
                             thread.summary.native_session_id = state.native_session_id.clone();
                         }
+                        if state.handoff_from.is_some() {
+                            thread.summary.handoff_from = state.handoff_from.clone();
+                        }
                         thread.summary.attention.last_read_seq = state.last_read_seq;
                         thread.summary.attention.last_agent_activity_seq =
                             state.last_agent_activity_seq;
@@ -338,6 +341,12 @@ pub(super) async fn connect_workspace_internal(
                             managed.ai_title_generated = state.ai_title_generated
                                 || (!is_placeholder_thread_title(&managed.summary.title)
                                     && !is_provisional_thread_title(&managed.summary.title));
+                            managed.queued_requests = state.queued_requests.clone();
+                            managed.summary.queued_turns = state
+                                .queued_requests
+                                .iter()
+                                .map(|queued| queued.summary.clone())
+                                .collect();
                         }
                         managed
                     })
@@ -377,6 +386,13 @@ pub(super) async fn connect_workspace_internal(
 
     app.persist_local_state().await?;
     app.schedule_acp_metadata_hydration(&workspace_id);
+    for thread_id in persisted_thread_states
+        .values()
+        .filter(|state| !state.queued_requests.is_empty())
+        .map(|state| state.thread_id.clone())
+    {
+        app.dispatch_next_queued_turn(&workspace_id, &thread_id);
+    }
 
     {
         let app = app.clone();
@@ -494,6 +510,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                     .unwrap_or_else(|| "Restored thread".to_string()),
                 provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
                 native_session_id: state.native_session_id.clone(),
+                handoff_from: state.handoff_from.clone(),
                 status: restored_status,
                 updated_at: state
                     .updated_at
@@ -517,7 +534,11 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 is_archived: false,
                 is_pinned: false,
                 goal: None,
-                queued_turns: Vec::new(),
+                queued_turns: state
+                    .queued_requests
+                    .iter()
+                    .map(|queued| queued.summary.clone())
+                    .collect(),
                 variant: state.variant.clone(),
             },
             items: adopted
@@ -567,6 +588,31 @@ pub(super) async fn start_thread(
             .provider
             .clone()
             .unwrap_or_else(|| workspace.summary.default_provider.clone());
+        if let Some(handoff) = request.handoff_from.as_ref() {
+            let source = workspace.threads.get(&handoff.thread_id).ok_or_else(|| {
+                DaemonError::NotFound("handoff source thread not found".to_string())
+            })?;
+            if source.summary.provider != handoff.provider {
+                return Err(DaemonError::BadRequest(
+                    "handoff source provider does not match the source thread".to_string(),
+                ));
+            }
+            if source.summary.provider == provider {
+                return Err(DaemonError::BadRequest(
+                    "handoffs must continue in a different provider".to_string(),
+                ));
+            }
+            if thread_is_busy(&source.summary.status) {
+                return Err(DaemonError::BadRequest(
+                    "wait for the active turn to finish before handing off".to_string(),
+                ));
+            }
+            if source.summary.variant.is_some() {
+                return Err(DaemonError::BadRequest(
+                    "handoffs from isolated threads are not supported yet".to_string(),
+                ));
+            }
+        }
         let agent = workspace
             .summary
             .agents
@@ -649,6 +695,7 @@ pub(super) async fn start_thread(
         }
     };
     let now = Utc::now();
+    let is_handoff = request.handoff_from.is_some();
 
     let mut workspaces = app.inner.workspaces.lock().await;
     let workspace = workspaces
@@ -660,6 +707,7 @@ pub(super) async fn start_thread(
         title,
         provider: provider.clone(),
         native_session_id,
+        handoff_from: request.handoff_from,
         status: ThreadStatus::Idle,
         updated_at: now,
         last_message_preview: None,
@@ -685,7 +733,9 @@ pub(super) async fn start_thread(
         variant,
     };
     workspace.summary.current_thread_id = Some(thread_id.clone());
-    workspace.summary.default_provider = provider;
+    if !is_handoff {
+        workspace.summary.default_provider = provider;
+    }
     workspace.summary.updated_at = now;
     workspace
         .threads
@@ -1340,7 +1390,12 @@ async fn try_steer_turn(
         &request.thread_id,
         // Steering shares the already-running provider turn and therefore has
         // no independent fork boundary. Keep the edit action unavailable.
-        build_user_message_item(normalized_inputs, request.user_item_id.as_deref(), None, None),
+        build_user_message_item(
+            normalized_inputs,
+            request.user_item_id.as_deref(),
+            None,
+            None,
+        ),
         false,
     )
     .await?;
@@ -1429,23 +1484,25 @@ async fn try_enqueue_turn(
             .count();
         let mut stored = request.clone();
         stored.inputs = normalized_inputs.to_vec();
-        thread.queued_requests.push(super::QueuedTurnRequest {
+        let summary = falcondeck_core::QueuedTurnSummary {
             id: id.clone(),
+            preview,
+            text,
+            attachment_count,
+            queued_at: Utc::now(),
+        };
+        thread.queued_requests.push(super::QueuedTurnRequest {
+            id,
             request: stored,
+            summary: summary.clone(),
         });
-        thread
-            .summary
-            .queued_turns
-            .push(falcondeck_core::QueuedTurnSummary {
-                id,
-                preview,
-                text,
-                attachment_count,
-                queued_at: Utc::now(),
-            });
+        thread.summary.queued_turns.push(summary);
         thread.summary.updated_at = Utc::now();
         thread.summary.clone()
     };
+    // The queue is an outbox: disk commit precedes the success response. A
+    // client may safely clear its composer once this function returns.
+    app.persist_local_state().await?;
     app.emit(
         Some(request.workspace_id.clone()),
         Some(request.thread_id.clone()),
@@ -1489,6 +1546,7 @@ pub(super) async fn remove_queued_turn(
         thread.summary.updated_at = Utc::now();
         thread.summary.clone()
     };
+    app.persist_local_state().await?;
     app.emit(
         Some(workspace_id.to_string()),
         Some(thread_id.to_string()),
@@ -1568,7 +1626,10 @@ pub(super) async fn steer_queued_turn(
 
     let outcome = try_steer_turn(app, &request, &inputs).await;
     let error = match outcome {
-        Ok(Some(response)) => return Ok(response),
+        Ok(Some(response)) => {
+            app.persist_local_state().await?;
+            return Ok(response);
+        }
         // `Ok(None)` is the shared steer path declining between the checks
         // above and the injection — the turn ended, say. Restore, don't drop.
         Ok(None) => DaemonError::BadRequest(
@@ -1598,6 +1659,7 @@ pub(super) async fn steer_queued_turn(
             })
     };
     if let Some(summary) = restored {
+        app.persist_local_state().await?;
         app.emit(
             Some(workspace_id.to_string()),
             Some(thread_id.to_string()),
@@ -1660,6 +1722,8 @@ pub(super) async fn edit_queued_turn(
                 },
             ),
         }
+        queued.summary.preview = text.chars().take(140).collect::<String>();
+        queued.summary.text = text.to_string();
         if let Some(entry) = thread
             .summary
             .queued_turns
@@ -1672,6 +1736,7 @@ pub(super) async fn edit_queued_turn(
         thread.summary.updated_at = Utc::now();
         thread.summary.clone()
     };
+    app.persist_local_state().await?;
     app.emit(
         Some(workspace_id.to_string()),
         Some(thread_id.to_string()),
@@ -1680,6 +1745,69 @@ pub(super) async fn edit_queued_turn(
     Ok(CommandResponse {
         ok: true,
         message: Some("edited".to_string()),
+    })
+}
+
+/// Reorders the daemon-owned queue without reconstructing any requests, so
+/// image attachments and per-turn settings stay attached to their message.
+pub(super) async fn reorder_queued_turns(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    queued_ids: &[String],
+) -> Result<CommandResponse, DaemonError> {
+    let summary = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        if queued_ids.len() != thread.queued_requests.len()
+            || queued_ids.iter().enumerate().any(|(index, id)| {
+                queued_ids[..index].contains(id)
+                    || !thread.queued_requests.iter().any(|queued| queued.id == *id)
+            })
+        {
+            return Err(DaemonError::BadRequest(
+                "queued message order must contain every queued id exactly once".to_string(),
+            ));
+        }
+
+        let mut requests = std::mem::take(&mut thread.queued_requests);
+        thread.queued_requests = queued_ids
+            .iter()
+            .filter_map(|id| {
+                requests
+                    .iter()
+                    .position(|queued| queued.id == *id)
+                    .map(|index| requests.remove(index))
+            })
+            .collect();
+        let mut summaries = std::mem::take(&mut thread.summary.queued_turns);
+        thread.summary.queued_turns = queued_ids
+            .iter()
+            .filter_map(|id| {
+                summaries
+                    .iter()
+                    .position(|queued| queued.id == *id)
+                    .map(|index| summaries.remove(index))
+            })
+            .collect();
+        thread.summary.updated_at = Utc::now();
+        thread.summary.clone()
+    };
+    app.persist_local_state().await?;
+    app.emit(
+        Some(workspace_id.to_string()),
+        Some(thread_id.to_string()),
+        UnifiedEvent::ThreadUpdated { thread: summary },
+    );
+    Ok(CommandResponse {
+        ok: true,
+        message: Some("reordered".to_string()),
     })
 }
 
@@ -1716,6 +1844,42 @@ impl AppState {
         edit_queued_turn(self, workspace_id, thread_id, queued_id, text).await
     }
 
+    pub(crate) async fn reorder_queued_turns(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        queued_ids: &[String],
+    ) -> Result<CommandResponse, DaemonError> {
+        reorder_queued_turns(self, workspace_id, thread_id, queued_ids).await
+    }
+
+    pub(crate) async fn queued_turn_attachment(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        queued_id: &str,
+    ) -> Result<ImageInput, DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        thread
+            .queued_requests
+            .iter()
+            .find(|queued| queued.id == queued_id)
+            .and_then(|queued| {
+                queued.request.inputs.iter().find_map(|input| match input {
+                    TurnInputItem::Image(image) => Some(image.clone()),
+                    TurnInputItem::Text { .. } => None,
+                })
+            })
+            .ok_or_else(|| DaemonError::NotFound("queued image not found".to_string()))
+    }
+
     /// Dispatches the next queued turn if the thread is no longer busy.
     /// Called at every turn-end transition; safe to call spuriously — it
     /// no-ops while a turn is active or when nothing is queued. Runs as its
@@ -1737,6 +1901,7 @@ impl AppState {
                     thread.summary.status,
                     ThreadStatus::Running | ThreadStatus::WaitingForInput
                 ) || thread.queued_requests.is_empty()
+                    || thread.dispatching_request.is_some()
                 {
                     return;
                 }
@@ -1746,6 +1911,7 @@ impl AppState {
                     .queued_turns
                     .retain(|queued| queued.id != next.id);
                 thread.summary.updated_at = Utc::now();
+                thread.dispatching_request = Some(next.clone());
                 (next, thread.summary.clone())
             };
             let (next, summary) = next;
@@ -1754,10 +1920,49 @@ impl AppState {
                 Some(thread_id.clone()),
                 UnifiedEvent::ThreadUpdated { thread: summary },
             );
-            if let Err(error) = send_turn(&app, next.request).await {
-                // send_turn already marked the thread Error and emitted; the
-                // failure path below dispatches the next queued turn in line.
-                tracing::warn!(%error, thread = %thread_id, "queued turn failed to dispatch");
+            match send_turn(&app, next.request.clone()).await {
+                Ok(_) => {
+                    let mut workspaces = app.inner.workspaces.lock().await;
+                    if let Some(thread) = workspaces
+                        .get_mut(&workspace_id)
+                        .and_then(|workspace| workspace.threads.get_mut(&thread_id))
+                    {
+                        thread.dispatching_request = None;
+                    }
+                    drop(workspaces);
+                    if let Err(error) = app.persist_local_state().await {
+                        tracing::warn!(%error, thread = %thread_id, "failed to commit queued turn dispatch");
+                    }
+                }
+                Err(error) => {
+                    // Provider failures are not permission to discard authored
+                    // text. Put it back at the head of the durable queue so the
+                    // user can retry, edit, or remove it explicitly.
+                    let restored_summary = {
+                        let mut workspaces = app.inner.workspaces.lock().await;
+                        workspaces
+                            .get_mut(&workspace_id)
+                            .and_then(|workspace| workspace.threads.get_mut(&thread_id))
+                            .map(|thread| {
+                                thread.dispatching_request = None;
+                                thread.queued_requests.insert(0, next.clone());
+                                thread.summary.queued_turns.insert(0, next.summary.clone());
+                                thread.summary.updated_at = Utc::now();
+                                thread.summary.clone()
+                            })
+                    };
+                    if let Err(persist_error) = app.persist_local_state().await {
+                        tracing::warn!(%persist_error, thread = %thread_id, "failed to persist restored queued turn");
+                    }
+                    if let Some(summary) = restored_summary {
+                        app.emit(
+                            Some(workspace_id.clone()),
+                            Some(thread_id.clone()),
+                            UnifiedEvent::ThreadUpdated { thread: summary },
+                        );
+                    }
+                    tracing::warn!(%error, thread = %thread_id, "queued turn failed to dispatch and was restored");
+                }
             }
         });
     }
@@ -1830,6 +2035,7 @@ pub(super) async fn send_turn(
                     title: "Untitled thread".to_string(),
                     provider: provider.clone(),
                     native_session_id: None,
+                    handoff_from: None,
                     status: ThreadStatus::Idle,
                     updated_at: now,
                     last_message_preview: None,
@@ -1932,7 +2138,7 @@ pub(super) async fn send_turn(
         &request.workspace_id,
         &request.thread_id,
         user_message.clone(),
-        false,
+        true,
     )
     .await?;
     app.emit(
@@ -1977,8 +2183,9 @@ pub(super) async fn send_turn(
             ToolSettlement::Failed,
         )
         .await;
-        // A failed start must not strand messages queued behind it.
-        app.dispatch_next_queued_turn(&request.workspace_id, &request.thread_id);
+        // Keep queued messages parked after a provider start failure. Advancing
+        // would discard the failed head entry in the dispatch path; the queue
+        // owner restores it so the user can retry or edit it explicitly.
         if let Ok(thread) = app
             .thread_summary(&request.workspace_id, &request.thread_id)
             .await
@@ -3336,6 +3543,7 @@ mod tests {
                 title: format!("Hydrated {session_id}"),
                 provider: AgentProvider::CLAUDE,
                 native_session_id: Some(session_id.to_string()),
+                handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: Some(preview.to_string()),
@@ -3362,6 +3570,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             provider: Some(AgentProvider::CLAUDE),
             native_session_id: session_id.map(ToOwned::to_owned),
+            handoff_from: None,
             title: Some(format!("Persisted {thread_id}")),
             manual_title: false,
             ai_title_generated: true,
@@ -3371,6 +3580,7 @@ mod tests {
             last_agent_activity_seq: 0,
             variant: None,
             agent: ThreadAgentParams::default(),
+            queued_requests: Vec::new(),
         }
     }
 
@@ -3481,6 +3691,7 @@ mod tests {
             title: "Thread".to_string(),
             provider: AgentProvider::CLAUDE,
             native_session_id: None,
+            handoff_from: None,
             status: ThreadStatus::Running,
             updated_at: now,
             last_message_preview: None,
@@ -3573,6 +3784,13 @@ mod tests {
                         permission_mode: None,
                         sandbox_mode: None,
                         steer: false,
+                    },
+                    summary: falcondeck_core::QueuedTurnSummary {
+                        id: "queued-1".to_string(),
+                        preview: "original words".to_string(),
+                        text: "original words".to_string(),
+                        attachment_count: 1,
+                        queued_at: Utc::now(),
                     },
                 });
             thread

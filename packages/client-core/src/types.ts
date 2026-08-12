@@ -418,6 +418,8 @@ export type ThreadSummary = {
   title: string;
   provider: AgentProvider;
   native_session_id?: string | null;
+  /** Source thread when this thread is a cross-provider continuation. */
+  handoff_from?: ThreadHandoffSource | null;
   status: ThreadStatus;
   updated_at: string;
   last_message_preview: string | null;
@@ -433,6 +435,11 @@ export type ThreadSummary = {
   goal: ThreadGoal | null;
   queued_turns: QueuedTurnSummary[];
   variant: ThreadVariant | null;
+};
+
+export type ThreadHandoffSource = {
+  thread_id: string;
+  provider: AgentProvider;
 };
 
 /** Where a new thread's turns run. Fixed when the thread is created. */
@@ -809,6 +816,68 @@ export type DaemonSnapshot = {
   /** High-frequency usage lives outside thread summaries to avoid sidebar churn. */
   thread_token_usage?: Record<string, ThreadTokenUsage>;
   preferences: FalconDeckPreferences;
+  /** Installed extensions and bounded non-secret projections. */
+  extensions: ExtensionSnapshot;
+};
+
+export type ExtensionStatus = "disabled" | "active" | "error";
+
+export type ExtensionActionContribution = {
+  id: string;
+  title: string;
+};
+
+export type ExtensionViewContribution = {
+  id: string;
+  title?: string | null;
+  view: string;
+};
+
+export type ExtensionContributions = {
+  threadMenuActions: ExtensionActionContribution[];
+  threadDecorations: ExtensionViewContribution[];
+  sidebarFilters: ExtensionViewContribution[];
+};
+
+export type ExtensionSummary = {
+  id: string;
+  name: string;
+  version: string;
+  source: string;
+  bundled: boolean;
+  enabled: boolean;
+  status: ExtensionStatus;
+  last_error?: string | null;
+  contributes: ExtensionContributions;
+  permissions: string[];
+};
+
+export type ExtensionViewScope = {
+  kind: string;
+  id: string;
+};
+
+export type ExtensionView = {
+  extension_id: string;
+  view_id: string;
+  scope?: ExtensionViewScope | null;
+  value: unknown;
+  updated_at: string;
+};
+
+export type ExtensionSnapshot = {
+  catalog: ExtensionSummary[];
+  views: ExtensionView[];
+};
+
+export type InvokeExtensionActionPayload = {
+  target?: ExtensionViewScope | null;
+  input?: unknown;
+};
+
+export type ExtensionActionResponse = {
+  result: unknown;
+  updated_views: ExtensionView[];
 };
 
 export type ServiceNotice = {
@@ -915,6 +984,14 @@ export type EventEnvelope = {
     | { type: "thread-updated"; thread: ThreadSummary }
     | { type: "workspace-updated"; workspace: WorkspaceSummary }
     | { type: "preferences-updated"; preferences: FalconDeckPreferences }
+    | { type: "extension-catalog-updated"; catalog: ExtensionSummary[] }
+    | {
+        type: "extension-view-updated";
+        extension_id: string;
+        view_id: string;
+        scope?: ExtensionViewScope | null;
+        view?: ExtensionView | null;
+      }
     | { type: "conversation-item-added"; item: ConversationItem }
     | { type: "conversation-item-updated"; item: ConversationItem };
 };

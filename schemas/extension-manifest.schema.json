@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://falcondeck.com/schemas/extension-manifest-v1.json",
+  "title": "FalconDeck Extension Manifest v1",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "version",
+    "engines",
+    "entrypoint",
+    "contributes",
+    "permissions"
+  ],
+  "properties": {
+    "$schema": { "type": "string" },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)+$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+    },
+    "engines": {
+      "type": "object",
+      "required": ["falcondeck"],
+      "properties": {
+        "falcondeck": {
+          "type": "string",
+          "pattern": "^\\^?0\\.1(?:\\.[0-9]+)?$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "entrypoint": { "$ref": "#/$defs/packagePath" },
+    "contributes": {
+      "type": "object",
+      "properties": {
+        "threadMenuActions": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/action" }
+        },
+        "threadDecorations": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/viewContribution" }
+        },
+        "sidebarFilters": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/titledViewContribution" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "permissions": {
+      "type": "array",
+      "maxItems": 0,
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "packagePath": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "(^/|(^|/)\\.\\.(/|$)|^[A-Za-z]:)" }
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "action": {
+      "type": "object",
+      "required": ["id", "title"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 }
+      },
+      "additionalProperties": false
+    },
+    "viewContribution": {
+      "type": "object",
+      "required": ["id", "view"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "view": { "$ref": "#/$defs/identifier" }
+      },
+      "additionalProperties": false
+    },
+    "titledViewContribution": {
+      "type": "object",
+      "required": ["id", "title", "view"],
+      "properties": {
+        "id": { "$ref": "#/$defs/identifier" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "view": { "$ref": "#/$defs/identifier" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

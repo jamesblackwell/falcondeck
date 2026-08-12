@@ -127,6 +127,11 @@ export type WorkspaceScopedApi = {
     queuedId: string,
     text: string,
   ): Promise<{ ok: boolean; message?: string | null }>
+  reorderQueuedTurns(
+    workspaceId: string,
+    threadId: string,
+    queuedIds: string[],
+  ): Promise<{ ok: boolean; message?: string | null }>
   updateThread(payload: UpdateThreadPayload): Promise<ThreadHandle>
   archiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
   unarchiveThread(workspaceId: string, threadId: string): Promise<ThreadSummary>
@@ -439,6 +444,12 @@ export class HostConnection {
           thread_id: threadId,
           queued_id: queuedId,
           text,
+        }),
+      reorderQueuedTurns: (workspaceId, threadId, queuedIds) =>
+        this.rpc('thread.queue.reorder', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          queued_ids: queuedIds,
         }),
       updateThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.update', payload)),

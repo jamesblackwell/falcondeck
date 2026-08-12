@@ -9,25 +9,27 @@ import type { ProjectGroup } from '@falcondeck/client-core'
 afterEach(cleanup)
 
 describe('ConnectionHeader component', () => {
-  it('renders encrypted', () => {
+  it('renders connected as a label-free status dot', () => {
     const r = renderComponent(<ConnectionHeader connectionStatus="encrypted" isEncrypted machinePresence={{ session_id: 's1', daemon_connected: true, last_seen_at: null }} />)
-    expect(textOf(r)).toContain('Connected')
+    expect(textOf(r)).toBe('')
+    expect(r.root.findByProps({ accessibilityLabel: 'Connection: Connected' })).toBeTruthy()
   })
-  it('renders disconnected', () => {
+  it('keeps disconnected detail in its accessible label', () => {
     const r = renderComponent(<ConnectionHeader connectionStatus="disconnected" isEncrypted={false} machinePresence={null} />)
-    expect(textOf(r)).toContain('Disconnected')
+    expect(textOf(r)).toBe('')
+    expect(r.root.findByProps({ accessibilityLabel: 'Connection: Disconnected' })).toBeTruthy()
   })
-  it('renders connecting', () => {
+  it('keeps connecting detail in its accessible label', () => {
     const r = renderComponent(<ConnectionHeader connectionStatus="connecting" isEncrypted={false} machinePresence={null} />)
-    expect(textOf(r)).toContain('Connecting...')
+    expect(r.root.findByProps({ accessibilityLabel: 'Connection: Connecting...' })).toBeTruthy()
   })
-  it('renders connected not encrypted', () => {
+  it('keeps securing detail in its accessible label', () => {
     const r = renderComponent(<ConnectionHeader connectionStatus="connected" isEncrypted={false} machinePresence={{ session_id: 's1', daemon_connected: false, last_seen_at: null }} />)
-    expect(textOf(r)).toContain('Securing session...')
+    expect(r.root.findByProps({ accessibilityLabel: 'Connection: Securing session...' })).toBeTruthy()
   })
-  it('renders not_connected', () => {
+  it('keeps unpaired detail in its accessible label', () => {
     const r = renderComponent(<ConnectionHeader connectionStatus="not_connected" isEncrypted={false} machinePresence={null} />)
-    expect(textOf(r)).toContain('Not connected')
+    expect(r.root.findByProps({ accessibilityLabel: 'Connection: Not connected' })).toBeTruthy()
   })
 })
 

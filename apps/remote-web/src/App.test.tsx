@@ -69,7 +69,7 @@ describe("App", () => {
       await screen.findByRole("dialog", { name: "Command palette" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("textbox", { name: "Search threads and commands" }),
+      screen.getByRole("combobox", { name: "Search threads and commands" }),
     ).toHaveFocus();
   });
 });

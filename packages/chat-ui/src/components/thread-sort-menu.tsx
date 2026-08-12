@@ -89,7 +89,7 @@ export const ThreadSortMenu = memo(function ThreadSortMenu({
                   onChange(option.mode)
                   setOpen(false)
                 }}
-                className="fd-focus-inset flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
+                className="fd-focus-fill flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
               >
                 <Check
                   aria-hidden="true"

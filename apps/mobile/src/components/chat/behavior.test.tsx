@@ -460,9 +460,9 @@ describe("chat behavior components", () => {
     [
       "streaming",
       "Partial response",
-      "Streaming…",
-      "Response streaming",
-      "polite",
+      "Partial response",
+      undefined,
+      undefined,
     ],
     [
       "interrupted",
@@ -488,6 +488,14 @@ describe("chat behavior components", () => {
       );
 
       expect(textOf(renderer)).toContain(visibleLabel);
+      if (lifecycle === "streaming") {
+        expect(textOf(renderer)).not.toContain("Streaming…");
+        expect(
+          renderer.root.findAllByProps({
+            accessibilityLabel: "Response streaming",
+          }),
+        ).toHaveLength(0);
+      }
       if (accessibilityLabel) {
         expect(
           renderer.root.findByProps({ accessibilityLabel }).props

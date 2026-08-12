@@ -4,12 +4,64 @@ import {
   normalizeConversationItem,
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
+  normalizeExtensionSnapshot,
   normalizeInteractiveRequest,
   normalizeThreadDetail,
   normalizeToolCallDisplay,
 } from "./normalization";
 import type { ConversationItem } from "./types";
 import { providerOutputKindLabel } from "./conversation";
+
+describe("extension snapshot normalization", () => {
+  it("supplies safe defaults for older or malformed catalog fields", () => {
+    expect(
+      normalizeExtensionSnapshot({
+        catalog: [
+          { id: "example.extension", name: "Example", version: "1.0.0" },
+        ],
+        views: [],
+      }).catalog[0],
+    ).toEqual({
+      id: "example.extension",
+      name: "Example",
+      version: "1.0.0",
+      source: "unknown",
+      bundled: false,
+      enabled: false,
+      status: "disabled",
+      last_error: null,
+      contributes: {
+        threadMenuActions: [],
+        threadDecorations: [],
+        sidebarFilters: [],
+      },
+      permissions: [],
+    });
+  });
+
+  it("drops malformed scopes and contributions at the client boundary", () => {
+    const normalized = normalizeExtensionSnapshot({
+      catalog: [
+        {
+          id: "example.extension",
+          name: "Example",
+          version: "1.0.0",
+          contributes: { threadMenuActions: [{ id: "run" }] },
+        },
+      ],
+      views: [
+        {
+          extension_id: "example.extension",
+          view_id: "result",
+          scope: { kind: "thread" },
+          updated_at: "2026-08-12T00:00:00Z",
+        },
+      ],
+    });
+    expect(normalized.catalog[0]?.contributes.threadMenuActions).toEqual([]);
+    expect(normalized.views).toEqual([]);
+  });
+});
 
 describe("reasoning duration normalization", () => {
   const reasoning = {

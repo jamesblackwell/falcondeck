@@ -1,13 +1,25 @@
 import React from 'react'
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { ComponentProps } from 'react'
 
-import type { ProjectGroup, ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
+import type {
+  ProjectGroup,
+  ThreadSummary,
+  WorkspaceSummary,
+} from '@falcondeck/client-core'
 
 import { DesktopSidebar } from './Sidebar'
 
-function workspace(overrides: Partial<WorkspaceSummary> = {}): WorkspaceSummary {
+function workspace(
+  overrides: Partial<WorkspaceSummary> = {},
+): WorkspaceSummary {
   return {
     id: 'workspace-1',
     path: '/Users/james/falcondeck',
@@ -98,6 +110,21 @@ function renderSidebar(
 }
 
 describe('DesktopSidebar', () => {
+  it('clearly marks a turn that stopped when FalconDeck closed', () => {
+    renderSidebar(
+      {},
+      {
+        status: 'error',
+        last_error: 'FalconDeck was closed while this turn was running',
+      },
+    )
+
+    expect(
+      screen.getByRole('img', { name: 'Stopped when FalconDeck closed' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Stopped')).toBeInTheDocument()
+  })
+
   it('shows pinned chats above projects without duplicating them in their project', () => {
     const onSelectThread = vi.fn()
     renderSidebar({
@@ -125,8 +152,12 @@ describe('DesktopSidebar', () => {
       Node.DOCUMENT_POSITION_FOLLOWING,
     )
     expect(within(pinnedSection).getByText('Pinned chat')).toBeInTheDocument()
-    expect(within(projectsSection).queryByText('Pinned chat')).not.toBeInTheDocument()
-    expect(within(projectsSection).getByText('Project chat')).toBeInTheDocument()
+    expect(
+      within(projectsSection).queryByText('Pinned chat'),
+    ).not.toBeInTheDocument()
+    expect(
+      within(projectsSection).getByText('Project chat'),
+    ).toBeInTheDocument()
     expect(screen.getAllByText('Pinned chat')).toHaveLength(1)
 
     fireEvent.click(within(pinnedSection).getByText('Pinned chat'))
@@ -139,8 +170,16 @@ describe('DesktopSidebar', () => {
         {
           workspace: workspace(),
           threads: [
-            thread({ id: 'thread-b', title: 'Beta chat', updated_at: '2026-03-15T12:00:00Z' }),
-            thread({ id: 'thread-a', title: 'Alpha chat', updated_at: '2026-03-15T09:00:00Z' }),
+            thread({
+              id: 'thread-b',
+              title: 'Beta chat',
+              updated_at: '2026-03-15T12:00:00Z',
+            }),
+            thread({
+              id: 'thread-a',
+              title: 'Alpha chat',
+              updated_at: '2026-03-15T09:00:00Z',
+            }),
           ],
         },
       ],
@@ -151,7 +190,9 @@ describe('DesktopSidebar', () => {
     const projectsSection = screen.getByRole('region', { name: 'Projects' })
     const alpha = within(projectsSection).getByText('Alpha chat')
     const beta = within(projectsSection).getByText('Beta chat')
-    expect(alpha.compareDocumentPosition(beta)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(alpha.compareDocumentPosition(beta)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
   })
 
   it('puts chats waiting on the user first when sorting by priority', () => {
@@ -160,7 +201,11 @@ describe('DesktopSidebar', () => {
         {
           workspace: workspace(),
           threads: [
-            thread({ id: 'thread-idle', title: 'Idle chat', updated_at: '2026-03-15T12:00:00Z' }),
+            thread({
+              id: 'thread-idle',
+              title: 'Idle chat',
+              updated_at: '2026-03-15T12:00:00Z',
+            }),
             thread({
               id: 'thread-waiting',
               title: 'Waiting chat',
@@ -185,7 +230,9 @@ describe('DesktopSidebar', () => {
     const projectsSection = screen.getByRole('region', { name: 'Projects' })
     const waiting = within(projectsSection).getByText('Waiting chat')
     const idle = within(projectsSection).getByText('Idle chat')
-    expect(waiting.compareDocumentPosition(idle)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(waiting.compareDocumentPosition(idle)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    )
   })
 
   it('trails an out-of-window selected chat below the five most recent', () => {
@@ -205,16 +252,63 @@ describe('DesktopSidebar', () => {
 
     const projectsSection = screen.getByRole('region', { name: 'Projects' })
     for (const index of [0, 1, 2, 3, 4]) {
-      expect(within(projectsSection).getByText(`Chat ${index}`)).toBeInTheDocument()
+      expect(
+        within(projectsSection).getByText(`Chat ${index}`),
+      ).toBeInTheDocument()
     }
     // The chats between the window and the selection stay hidden.
-    expect(within(projectsSection).queryByText('Chat 5')).not.toBeInTheDocument()
-    expect(within(projectsSection).queryByText('Chat 6')).not.toBeInTheDocument()
+    expect(
+      within(projectsSection).queryByText('Chat 5'),
+    ).not.toBeInTheDocument()
+    expect(
+      within(projectsSection).queryByText('Chat 6'),
+    ).not.toBeInTheDocument()
     expect(within(projectsSection).getByText('Chat 7')).toBeInTheDocument()
 
     fireEvent.click(within(projectsSection).getByText('Show more'))
     expect(within(projectsSection).getByText('Chat 5')).toBeInTheDocument()
     expect(within(projectsSection).getAllByText('Chat 7')).toHaveLength(1)
+
+    // Winding the list back is available from the same row.
+    fireEvent.click(within(projectsSection).getByText('Show less'))
+    expect(
+      within(projectsSection).queryByText('Chat 5'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('offers Show less beside Show more while a project is partly expanded', () => {
+    const threads = Array.from({ length: 30 }, (_, index) =>
+      thread({
+        id: `thread-${index}`,
+        title: `Chat ${index}`,
+        updated_at: `2026-03-${String(30 - index).padStart(2, '0')}T10:00:00Z`,
+      }),
+    )
+
+    render(
+      <DesktopSidebar
+        groups={[{ workspace: workspace(), threads }]}
+        selectedWorkspaceId="workspace-1"
+        selectedThreadId="thread-0"
+        onSelectWorkspace={() => {}}
+        onSelectThread={() => {}}
+      />,
+    )
+
+    const projectsSection = screen.getByRole('region', { name: 'Projects' })
+    expect(
+      within(projectsSection).queryByText('Show less'),
+    ).not.toBeInTheDocument()
+
+    fireEvent.click(within(projectsSection).getByText('Show more'))
+    expect(within(projectsSection).getByText('Chat 14')).toBeInTheDocument()
+    // Still more to page through, and now a way back.
+    expect(within(projectsSection).getByText('Show more')).toBeInTheDocument()
+
+    fireEvent.click(within(projectsSection).getByText('Show less'))
+    expect(
+      within(projectsSection).queryByText('Chat 14'),
+    ).not.toBeInTheDocument()
   })
 
   it('keeps the five most recent chats visible after the selection moves back in', () => {
@@ -249,9 +343,79 @@ describe('DesktopSidebar', () => {
 
     const projectsSection = screen.getByRole('region', { name: 'Projects' })
     for (const index of [0, 1, 2, 3, 4]) {
-      expect(within(projectsSection).getByText(`Chat ${index}`)).toBeInTheDocument()
+      expect(
+        within(projectsSection).getByText(`Chat ${index}`),
+      ).toBeInTheDocument()
     }
-    expect(within(projectsSection).queryByText('Chat 7')).not.toBeInTheDocument()
+    expect(
+      within(projectsSection).queryByText('Chat 7'),
+    ).not.toBeInTheDocument()
+  })
+
+  // Capturing on pointerdown retargets the follow-up click to the row, which
+  // silently kills the collapse trigger nested inside it.
+  it('captures the pointer only once a project drag passes the threshold', () => {
+    const onWorkspaceOrderChange = vi.fn().mockResolvedValue(undefined)
+    const project = workspace({ id: 'workspace-a', path: '/Users/james/alpha' })
+
+    renderSidebar({
+      groups: [
+        { workspace: project, threads: [thread({ workspace_id: project.id })] },
+      ],
+      onWorkspaceOrderChange,
+    })
+
+    const row = document.querySelector(
+      '[data-workspace-drag-id="workspace-a"]',
+    ) as HTMLElement
+    const setPointerCapture = vi.fn()
+    Object.defineProperty(row, 'setPointerCapture', {
+      value: setPointerCapture,
+    })
+
+    fireEvent.pointerDown(row, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    })
+    expect(setPointerCapture).not.toHaveBeenCalled()
+
+    fireEvent.pointerMove(row, {
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 60,
+    })
+    expect(setPointerCapture).toHaveBeenCalledWith(1)
+  })
+
+  it('collapses and expands a project when its row is clicked', () => {
+    const project = workspace({ id: 'workspace-a', path: '/Users/james/alpha' })
+
+    renderSidebar({
+      groups: [
+        {
+          workspace: project,
+          threads: [
+            thread({
+              workspace_id: project.id,
+              id: 'thread-a',
+              title: 'Alpha chat',
+            }),
+          ],
+        },
+      ],
+      onWorkspaceOrderChange: vi.fn().mockResolvedValue(undefined),
+    })
+
+    const trigger = screen.getByRole('button', { name: 'alpha' })
+    expect(screen.getByText('Alpha chat')).toBeInTheDocument()
+    fireEvent.click(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(trigger)
+    expect(trigger).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('reorders projects by dragging across the project rows', () => {
@@ -262,21 +426,40 @@ describe('DesktopSidebar', () => {
     renderSidebar({
       groups: [
         { workspace: first, threads: [thread({ workspace_id: first.id })] },
-        { workspace: second, threads: [thread({ workspace_id: second.id, id: 'thread-b' })] },
+        {
+          workspace: second,
+          threads: [thread({ workspace_id: second.id, id: 'thread-b' })],
+        },
       ],
       onWorkspaceOrderChange,
     })
 
-    const firstRow = document.querySelector('[data-workspace-drag-id="workspace-a"]')
-    const secondRow = document.querySelector('[data-workspace-drag-id="workspace-b"]')
-    if (!(firstRow instanceof HTMLElement) || !(secondRow instanceof HTMLElement)) {
+    const firstRow = document.querySelector(
+      '[data-workspace-drag-id="workspace-a"]',
+    )
+    const secondRow = document.querySelector(
+      '[data-workspace-drag-id="workspace-b"]',
+    )
+    if (
+      !(firstRow instanceof HTMLElement) ||
+      !(secondRow instanceof HTMLElement)
+    ) {
       throw new Error('Expected draggable workspace rows')
     }
     Object.defineProperty(firstRow, 'setPointerCapture', { value: vi.fn() })
-    Object.defineProperty(firstRow, 'hasPointerCapture', { value: vi.fn(() => true) })
+    Object.defineProperty(firstRow, 'hasPointerCapture', {
+      value: vi.fn(() => true),
+    })
     Object.defineProperty(firstRow, 'releasePointerCapture', { value: vi.fn() })
     Object.defineProperty(secondRow, 'getBoundingClientRect', {
-      value: () => ({ top: 100, bottom: 140, height: 40, left: 0, right: 300, width: 300 }),
+      value: () => ({
+        top: 100,
+        bottom: 140,
+        height: 40,
+        left: 0,
+        right: 300,
+        width: 300,
+      }),
     })
 
     fireEvent.pointerDown(firstRow, {
@@ -292,13 +475,73 @@ describe('DesktopSidebar', () => {
       clientX: 10,
       clientY: 150,
     })
-    expect(document.querySelector('[data-workspace-drop-indicator="true"]')).toBeInTheDocument()
+    expect(
+      document.querySelector('[data-workspace-drop-indicator="true"]'),
+    ).toBeInTheDocument()
     fireEvent.pointerUp(firstRow, { pointerId: 1, isPrimary: true, button: 0 })
 
-    expect(onWorkspaceOrderChange).toHaveBeenCalledWith(['workspace-b', 'workspace-a'])
-    expect(screen.getByText('beta').compareDocumentPosition(screen.getByText('alpha'))).toBe(
-      Node.DOCUMENT_POSITION_FOLLOWING,
-    )
+    expect(onWorkspaceOrderChange).toHaveBeenCalledWith([
+      'workspace-b',
+      'workspace-a',
+    ])
+    expect(
+      screen
+        .getByText('beta')
+        .compareDocumentPosition(screen.getByText('alpha')),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  it('renders one insertion line between adjacent projects', () => {
+    const onWorkspaceOrderChange = vi.fn()
+    const groups = ['alpha', 'beta', 'charlie'].map((name) => {
+      const project = workspace({
+        id: `workspace-${name}`,
+        path: `/Users/james/${name}`,
+      })
+      return {
+        workspace: project,
+        threads: [thread({ id: `thread-${name}`, workspace_id: project.id })],
+      }
+    })
+    renderSidebar({ groups, onWorkspaceOrderChange })
+    const alpha = document.querySelector(
+      '[data-workspace-drag-id="workspace-alpha"]',
+    ) as HTMLElement
+    const beta = document.querySelector(
+      '[data-workspace-drag-id="workspace-beta"]',
+    ) as HTMLElement
+    const charlie = document.querySelector(
+      '[data-workspace-drag-id="workspace-charlie"]',
+    ) as HTMLElement
+    Object.defineProperties(alpha, {
+      setPointerCapture: { value: vi.fn() },
+      hasPointerCapture: { value: vi.fn(() => true) },
+      releasePointerCapture: { value: vi.fn() },
+    })
+    Object.defineProperty(beta, 'getBoundingClientRect', {
+      value: () => ({ top: 100, height: 40 }),
+    })
+    Object.defineProperty(charlie, 'getBoundingClientRect', {
+      value: () => ({ top: 200, height: 40 }),
+    })
+
+    fireEvent.pointerDown(alpha, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 10,
+      clientY: 10,
+    })
+    fireEvent.pointerMove(alpha, {
+      pointerId: 1,
+      isPrimary: true,
+      clientX: 10,
+      clientY: 150,
+    })
+
+    expect(
+      document.querySelectorAll('[data-workspace-drop-indicator="true"]'),
+    ).toHaveLength(1)
   })
 
   it('changes the chat sort from the Projects heading menu', async () => {
@@ -308,14 +551,12 @@ describe('DesktopSidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Sort chats' }))
 
     const menu = await screen.findByRole('menu', { name: 'Sort chats by' })
-    expect(within(menu).getByRole('menuitemradio', { name: 'Last updated' })).toHaveAttribute(
-      'aria-checked',
-      'true',
-    )
-    expect(within(menu).getByRole('menuitemradio', { name: 'Name' })).toHaveAttribute(
-      'aria-checked',
-      'false',
-    )
+    expect(
+      within(menu).getByRole('menuitemradio', { name: 'Last updated' }),
+    ).toHaveAttribute('aria-checked', 'true')
+    expect(
+      within(menu).getByRole('menuitemradio', { name: 'Name' }),
+    ).toHaveAttribute('aria-checked', 'false')
 
     fireEvent.click(within(menu).getByRole('menuitemradio', { name: 'Name' }))
     expect(onThreadSortChange).toHaveBeenCalledWith('alphabetical')
@@ -324,7 +565,9 @@ describe('DesktopSidebar', () => {
   it('leaves the sort menu out when no sort handler is provided', () => {
     renderSidebar()
 
-    expect(screen.queryByRole('button', { name: 'Sort chats' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Sort chats' }),
+    ).not.toBeInTheDocument()
   })
 
   it('collapses a project to hide its threads, and selects it on the way back open', () => {
@@ -357,7 +600,29 @@ describe('DesktopSidebar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save' }))
 
     await waitFor(() => {
-      expect(onRenameThread).toHaveBeenCalledWith('workspace-1', 'thread-1', 'Renamed thread')
+      expect(onRenameThread).toHaveBeenCalledWith(
+        'workspace-1',
+        'thread-1',
+        'Renamed thread',
+      )
+    })
+  })
+
+  it('renames a thread by double-clicking its row', async () => {
+    const { onRenameThread } = renderSidebar()
+
+    fireEvent.doubleClick(screen.getByText('Main thread'))
+
+    const input = await screen.findByRole('textbox', { name: 'Thread title' })
+    fireEvent.change(input, { target: { value: 'Renamed thread' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => {
+      expect(onRenameThread).toHaveBeenCalledWith(
+        'workspace-1',
+        'thread-1',
+        'Renamed thread',
+      )
     })
   })
 
@@ -407,8 +672,12 @@ describe('DesktopSidebar', () => {
 
     const dialog = await screen.findByRole('dialog')
     expect(dialog).toHaveTextContent('deletes its isolated copy')
-    expect(dialog).toHaveTextContent('/Users/james/.falcondeck/worktrees/fix-login')
-    expect(dialog).toHaveTextContent('committed work stays on branch fd/fix-login')
+    expect(dialog).toHaveTextContent(
+      '/Users/james/.falcondeck/worktrees/fix-login',
+    )
+    expect(dialog).toHaveTextContent(
+      'committed work stays on branch fd/fix-login',
+    )
   })
 
   it('leaves the delete item out when deletion is unavailable', () => {
@@ -416,17 +685,107 @@ describe('DesktopSidebar', () => {
 
     fireEvent.contextMenu(screen.getByText('Main thread'))
 
-    expect(screen.queryByRole('menuitem', { name: 'Delete' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('menuitem', { name: 'Delete' }),
+    ).not.toBeInTheDocument()
+  })
+
+  it('sets a thread colour directly from the context menu', async () => {
+    const onSetThreadColor = vi.fn().mockResolvedValue(undefined)
+    const red = { id: 'red', label: 'Red', color: 'red' }
+    renderSidebar({
+      threadTagOptions: [red],
+      threadTagsById: { 'thread-1': [red] },
+      onSetThreadColor,
+    })
+
+    fireEvent.contextMenu(screen.getByText('Main thread'))
+    const redChoice = await screen.findByRole('menuitemradio', { name: 'Red' })
+    expect(redChoice).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('menuitemradio', { name: 'No colour' }))
+    await waitFor(() => {
+      expect(onSetThreadColor).toHaveBeenCalledWith(
+        'workspace-1',
+        expect.objectContaining({ id: 'thread-1' }),
+        null,
+      )
+    })
+  })
+
+  it('keeps colour filters in the Projects filter menu', async () => {
+    const red = { id: 'red', label: 'Red', color: 'red' }
+    const blue = { id: 'blue', label: 'Blue', color: 'blue' }
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace(),
+          threads: [
+            thread({ id: 'red-thread', title: 'Red thread' }),
+            thread({ id: 'blue-thread', title: 'Blue thread' }),
+          ],
+        },
+        {
+          workspace: workspace({
+            id: 'workspace-2',
+            path: '/Users/james/empty-project',
+          }),
+          threads: [
+            thread({
+              id: 'untagged-thread',
+              workspace_id: 'workspace-2',
+              title: 'Untagged thread',
+            }),
+          ],
+        },
+      ],
+      threadTagOptions: [red, blue],
+      threadTagsById: {
+        'red-thread': [red],
+        'blue-thread': [blue],
+      },
+    })
+
+    expect(
+      screen.queryByRole('menuitemcheckbox', { name: 'Red' }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('Red thread')).toBeInTheDocument()
+    expect(screen.getByText('Blue thread')).toBeInTheDocument()
+    expect(screen.getByText('empty-project')).toBeInTheDocument()
+
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Filter chats by colour' }),
+    )
+    fireEvent.click(
+      await screen.findByRole('menuitemcheckbox', { name: 'Red' }),
+    )
+
+    expect(screen.getByText('Red thread')).toBeInTheDocument()
+    expect(screen.queryByText('Blue thread')).not.toBeInTheDocument()
+    expect(screen.queryByText('empty-project')).not.toBeInTheDocument()
+    expect(screen.queryByText('No threads yet')).not.toBeInTheDocument()
+    expect(
+      screen.getByTitle('Filter chats by colour (1 active)'),
+    ).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Clear' }))
+    expect(screen.getByText('Blue thread')).toBeInTheDocument()
+    expect(screen.getByText('empty-project')).toBeInTheDocument()
   })
 
   it('removes a project from the right-click menu after confirmation', async () => {
     const { onRemoveWorkspace } = renderSidebar()
 
     fireEvent.contextMenu(screen.getByText('falcondeck'))
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Remove project' }))
+    fireEvent.click(
+      await screen.findByRole('menuitem', { name: 'Remove project' }),
+    )
 
     const dialog = await screen.findByRole('dialog')
-    expect(dialog).toHaveTextContent('Threads stay in the provider’s own history')
+    expect(dialog).toHaveTextContent(
+      'Threads stay in the provider’s own history',
+    )
     expect(onRemoveWorkspace).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
@@ -476,6 +835,8 @@ describe('DesktopSidebar', () => {
 
     fireEvent.contextMenu(screen.getByText('falcondeck'))
 
-    expect(screen.queryByRole('menuitem', { name: 'Remove project' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('menuitem', { name: 'Remove project' }),
+    ).not.toBeInTheDocument()
   })
 })

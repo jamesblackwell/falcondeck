@@ -114,6 +114,7 @@ export const demoSnapshot: DaemonSnapshot = {
   workspaces: [demoWorkspace],
   threads: demoThreads,
   interactive_requests: [],
+  extensions: { catalog: [], views: [] },
   preferences: {
     version: 1,
     conversation: {

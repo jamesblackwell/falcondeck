@@ -396,6 +396,21 @@ fn normalize_existing_path(path: &Path) -> Option<String> {
         .map(|resolved| resolved.display().to_string())
 }
 
+fn bundled_deno_bin() -> Result<String, String> {
+    let executable_name = if cfg!(windows) { "deno.exe" } else { "deno" };
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let candidate = executable
+        .parent()
+        .ok_or_else(|| "FalconDeck executable has no parent directory".to_string())?
+        .join(executable_name);
+    normalize_existing_path(&candidate).ok_or_else(|| {
+        format!(
+            "bundled extension runtime is missing at {}",
+            candidate.display()
+        )
+    })
+}
+
 #[tauri::command]
 async fn ensure_daemon_running(
     state: tauri::State<'_, DesktopState>,
@@ -415,12 +430,14 @@ async fn ensure_daemon_running(
 
     let codex_bin = resolve_agent_bin("codex", "FALCONDECK_CODEX_BIN");
     let claude_bin = resolve_agent_bin("claude", "FALCONDECK_CLAUDE_BIN");
+    let deno_bin = bundled_deno_bin()?;
     let handle = spawn_embedded(DaemonConfig {
         bind_addr: "127.0.0.1:0"
             .parse::<SocketAddr>()
             .map_err(|error| error.to_string())?,
         codex_bin,
         claude_bin,
+        deno_bin,
         ..DaemonConfig::default()
     })
     .await
@@ -493,6 +510,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(DesktopState::default())
         .on_page_load(|webview, payload| {
             eprintln!(

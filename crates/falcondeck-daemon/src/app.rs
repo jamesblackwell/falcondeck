@@ -11,13 +11,15 @@ use chrono::{Duration as ChronoDuration, Utc};
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
     CommandResponse, ConnectWorkspaceRequest, ContentLifecycle, ConversationItem, DaemonInfo,
-    DaemonSnapshot, EventEnvelope, FalconDeckPreferences, ForkThreadRequest, HealthResponse,
-    InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload, PairingPublicKeyBundle,
-    RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice, SkillSummary,
-    SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget, ThreadAgentParams,
-    ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus,
-    ThreadSummary, ThreadTokenUsage, UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
-    WorkspaceAgentSummary, WorkspaceStatus, WorkspaceSummary, crypto::LocalBoxKeyPair,
+    DaemonSnapshot, EventEnvelope, ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary,
+    FalconDeckPreferences, ForkThreadRequest, HealthResponse, InteractiveRequest,
+    InteractiveRequestKind, InteractiveResponsePayload, InvokeExtensionActionRequest,
+    PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice,
+    SkillSummary, SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget,
+    ThreadAgentParams, ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle,
+    ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage, UnifiedEvent,
+    UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
+    WorkspaceSummary, crypto::LocalBoxKeyPair,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -44,6 +46,8 @@ use crate::{
 mod acp_threads;
 pub(crate) mod agent_helpers;
 pub(crate) mod conversation_helpers;
+mod extension_host;
+mod extensions;
 pub(crate) mod host_provisioning;
 mod notifications;
 mod provider_runtime;
@@ -112,6 +116,10 @@ struct InnerState {
     /// app crashes or is force-quit.
     desktop_active_until: StdMutex<Option<chrono::DateTime<Utc>>>,
     preferences: Mutex<FalconDeckPreferences>,
+    /// Installed extension catalog, private state, and synchronized projections.
+    extensions: Mutex<extensions::ExtensionRegistry>,
+    /// Lazily started Deno sidecars, isolated and serialized per extension.
+    extension_hosts: Mutex<extension_host::ExtensionHostPool>,
     remote: Mutex<RemoteBridgeState>,
     /// SSH provisioning jobs keyed by job id. Progress lives only in memory:
     /// a job is meaningless across a daemon restart, since the background task
@@ -152,9 +160,12 @@ struct ManagedThread {
     ai_title_in_flight: bool,
     requires_resume: bool,
     /// Full requests behind `summary.queued_turns`, same order, matched by
-    /// the summary entry's id. In-memory only: a queued turn does not survive
-    /// a daemon restart (neither does the turn it was waiting on).
+    /// the summary entry's id. Persisted before an enqueue is acknowledged.
     queued_requests: Vec<QueuedTurnRequest>,
+    /// Queue entry currently crossing the non-transactional provider boundary.
+    /// It stays in persisted state until the provider accepts it, so a daemon
+    /// crash can replay the message instead of silently dropping it.
+    dispatching_request: Option<QueuedTurnRequest>,
 }
 
 #[derive(Clone)]
@@ -165,10 +176,11 @@ struct RealtimeTranscriptState {
 }
 
 /// A send accepted while the thread was busy, held until the active turn ends.
-#[derive(Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 struct QueuedTurnRequest {
     id: String,
     request: SendTurnRequest,
+    summary: falcondeck_core::QueuedTurnSummary,
 }
 
 impl AppState {
@@ -301,6 +313,8 @@ struct PersistedThreadState {
     #[serde(default)]
     native_session_id: Option<String>,
     #[serde(default)]
+    handoff_from: Option<falcondeck_core::ThreadHandoffSource>,
+    #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     manual_title: bool,
@@ -324,6 +338,9 @@ struct PersistedThreadState {
     /// after a restart.
     #[serde(default)]
     agent: ThreadAgentParams,
+    /// Accepted user messages which have not crossed the provider boundary.
+    #[serde(default)]
+    queued_requests: Vec<QueuedTurnRequest>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -389,8 +406,25 @@ impl AppState {
         provider_bins: HashMap<AgentProvider, String>,
         state_path: PathBuf,
     ) -> Self {
+        let deno_bin = std::env::var("FALCONDECK_DENO_BIN").unwrap_or_else(|_| "deno".to_string());
+        Self::new_with_state_path_and_extension_runtime(
+            version,
+            provider_bins,
+            state_path,
+            deno_bin,
+        )
+    }
+
+    pub fn new_with_state_path_and_extension_runtime(
+        version: String,
+        provider_bins: HashMap<AgentProvider, String>,
+        state_path: PathBuf,
+        deno_bin: String,
+    ) -> Self {
         let (broadcaster, _) = broadcast::channel(2048);
         let preferences_path = default_preferences_path(&state_path);
+        let extension_registry = extensions::ExtensionRegistry::new(&state_path);
+        let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
         Self {
             inner: Arc::new(InnerState {
                 daemon: DaemonInfo {
@@ -415,6 +449,8 @@ impl AppState {
                 local_base_url: OnceLock::new(),
                 desktop_active_until: StdMutex::new(None),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
+                extensions: Mutex::new(extension_registry),
+                extension_hosts: Mutex::new(extension_hosts),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,
@@ -449,6 +485,7 @@ impl AppState {
     }
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
+        self.inner.extensions.lock().await.restore().await?;
         let preferences = load_preferences(&self.inner.preferences_path).await?;
         {
             let mut current = self.inner.preferences.lock().await;
@@ -621,6 +658,7 @@ impl AppState {
                     .unwrap_or_else(|| "Restored thread".to_string()),
                 provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
                 native_session_id: state.native_session_id.clone(),
+                handoff_from: state.handoff_from.clone(),
                 status,
                 updated_at: state
                     .updated_at
@@ -845,6 +883,10 @@ impl AppState {
             }
         }
 
+        let extension_hosts = self.inner.extension_hosts.lock().await.drain();
+        for host in extension_hosts {
+            host.lock().await.stop().await;
+        }
         self.persist_local_state().await
     }
 
@@ -862,6 +904,7 @@ impl AppState {
         let workspaces = self.inner.workspaces.lock().await;
         let interactive_requests = self.inner.interactive_requests.lock().await;
         let preferences = self.inner.preferences.lock().await.clone();
+        let extensions = self.inner.extensions.lock().await.snapshot();
         let service_notices = self
             .inner
             .service_notices
@@ -941,7 +984,170 @@ impl AppState {
             service_notices,
             thread_token_usage,
             preferences,
+            extensions,
         }
+    }
+
+    /// Returns the installed extension catalog and synchronized view state.
+    pub async fn extension_snapshot(&self) -> ExtensionSnapshot {
+        self.inner.extensions.lock().await.snapshot()
+    }
+
+    /// Enables or disables one installed extension without deleting its data.
+    pub async fn update_extension(
+        &self,
+        extension_id: &str,
+        enabled: bool,
+    ) -> Result<ExtensionSummary, DaemonError> {
+        if !self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .contains_extension(extension_id)
+        {
+            return Err(DaemonError::NotFound("extension not found".to_string()));
+        }
+        // Share the per-extension action gate so disable cannot interleave
+        // with an action's storage read, host call, and commit.
+        let host = self.inner.extension_hosts.lock().await.host(extension_id);
+        let mut host = host.lock().await;
+        let updated = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .update_enabled(extension_id, enabled)
+            .await?;
+        if !enabled {
+            host.stop().await;
+        }
+        drop(host);
+        if !enabled {
+            self.inner.extension_hosts.lock().await.remove(extension_id);
+        }
+        let (catalog, retained_views) = {
+            let extensions = self.inner.extensions.lock().await;
+            (
+                extensions.snapshot().catalog,
+                extensions.retained_views(extension_id),
+            )
+        };
+        self.emit(
+            None,
+            None,
+            UnifiedEvent::ExtensionCatalogUpdated { catalog },
+        );
+        // Clients only receive active views in snapshots. Remove retained views
+        // when disabling and replay them when enabling so every connected client
+        // observes the same projection without deleting extension-owned data.
+        for view in retained_views {
+            self.emit(
+                None,
+                view.scope
+                    .as_ref()
+                    .filter(|scope| scope.kind == "thread")
+                    .map(|scope| scope.id.clone()),
+                UnifiedEvent::ExtensionViewUpdated {
+                    extension_id: view.extension_id.clone(),
+                    view_id: view.view_id.clone(),
+                    scope: view.scope.clone(),
+                    view: enabled.then_some(view),
+                },
+            );
+        }
+        Ok(updated)
+    }
+
+    /// Invokes a manifest-declared action through the isolated extension host.
+    pub async fn invoke_extension_action(
+        &self,
+        extension_id: &str,
+        action_id: &str,
+        request: InvokeExtensionActionRequest,
+    ) -> Result<ExtensionActionResponse, DaemonError> {
+        extensions::ExtensionRegistry::validate_action_input(&request.input)?;
+        extensions::ExtensionRegistry::validate_action_target(request.target.as_ref())?;
+        if !self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .contains_extension(extension_id)
+        {
+            return Err(DaemonError::NotFound("extension not found".to_string()));
+        }
+        // Each extension host serializes its own code. Keep the same guard across the
+        // storage read and commit so concurrent clients cannot both derive
+        // updates from one stale snapshot and overwrite each other.
+        let host = self.inner.extension_hosts.lock().await.host(extension_id);
+        let mut host = host.lock().await;
+        let (package, storage) = {
+            let registry = self.inner.extensions.lock().await;
+            (
+                registry.package(extension_id, action_id)?,
+                registry.storage(extension_id),
+            )
+        };
+        let host_result = host
+            .invoke(
+                &package,
+                action_id,
+                request.target.as_ref(),
+                &request.input,
+                &storage,
+            )
+            .await;
+        let host_result = match host_result {
+            Ok(result) => result,
+            Err(error) => {
+                self.inner
+                    .extensions
+                    .lock()
+                    .await
+                    .mark_error(extension_id, &error.to_string())
+                    .await?;
+                let catalog = self.inner.extensions.lock().await.snapshot().catalog;
+                self.emit(
+                    None,
+                    None,
+                    UnifiedEvent::ExtensionCatalogUpdated { catalog },
+                );
+                drop(host);
+                return Err(error);
+            }
+        };
+        let updated_views = self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .commit_action(
+                extension_id,
+                host_result.storage,
+                host_result.published_views,
+            )
+            .await?;
+        drop(host);
+        for view in &updated_views {
+            self.emit(
+                None,
+                view.scope
+                    .as_ref()
+                    .filter(|scope| scope.kind == "thread")
+                    .map(|scope| scope.id.clone()),
+                UnifiedEvent::ExtensionViewUpdated {
+                    extension_id: view.extension_id.clone(),
+                    view_id: view.view_id.clone(),
+                    scope: view.scope.clone(),
+                    view: Some(view.clone()),
+                },
+            );
+        }
+        Ok(ExtensionActionResponse {
+            result: host_result.result,
+            updated_views,
+        })
     }
 
     pub async fn snapshot_with_request(&self, request: &SnapshotRequest) -> DaemonSnapshot {
@@ -974,6 +1180,11 @@ impl AppState {
                 .thread_id
                 .as_ref()
                 .is_none_or(|thread_id| visible_thread_ids.contains(thread_id))
+        });
+        snapshot.extensions.views.retain(|view| {
+            view.scope.as_ref().is_none_or(|scope| {
+                scope.kind != "thread" || visible_thread_ids.contains(&scope.id)
+            })
         });
         snapshot
     }
@@ -1248,6 +1459,7 @@ impl AppState {
                     updated_at: Some(thread.summary.updated_at),
                     provider: Some(thread.summary.provider.clone()),
                     native_session_id: thread.summary.native_session_id.clone(),
+                    handoff_from: thread.summary.handoff_from.clone(),
                     title: Some(thread.summary.title.clone()),
                     manual_title: thread.manual_title,
                     ai_title_generated: thread.ai_title_generated,
@@ -1257,6 +1469,12 @@ impl AppState {
                     last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
                     variant: thread.summary.variant.clone(),
                     agent: thread.summary.agent.clone(),
+                    queued_requests: thread
+                        .dispatching_request
+                        .iter()
+                        .chain(thread.queued_requests.iter())
+                        .cloned()
+                        .collect(),
                 })
                 .collect::<Vec<_>>();
             thread_states.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));

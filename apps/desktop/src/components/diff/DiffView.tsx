@@ -63,9 +63,9 @@ export const DiffView = memo(function DiffView({
           size="icon"
           onClick={onBack}
           aria-label="Back to changed files"
-          className="h-6 w-6"
+          className="-ml-1 shrink-0"
         >
-          <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
+          <ArrowLeft aria-hidden="true" className="h-4 w-4" />
         </Button>
         <p className="min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] font-medium text-fg-primary">
           {filePath}

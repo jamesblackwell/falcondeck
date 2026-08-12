@@ -205,7 +205,11 @@ OpenCode ships its own ACP server, so it needs no third-party bridge. Choose
 
 FalconDeck also searches OpenCode's install-script location
 (`~/.opencode/bin`) when launched as a desktop app, where the interactive shell
-PATH is often unavailable. The ACP integration covers streamed text and
+PATH is often unavailable. Packaged macOS builds also import the interactive
+login-shell environment for ACP subprocesses, so provider credentials supplied
+through variables such as `OPENROUTER_API_KEY` behave the same in FalconDeck as
+they do in OpenCode's terminal UI. Explicit `providers.json` environment values
+still win. The ACP integration covers streamed text and
 reasoning, tool calls and diffs, permission requests, images, interruption,
 MCP servers, model/config discovery, and persisted session reload. OpenCode
 continues to own its agents, permissions, project rules, tools, formatters,

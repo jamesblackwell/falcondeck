@@ -12,6 +12,7 @@ import {
 
 import {
   buildOptimisticUserItem,
+  buildHandoffPrompt,
   buildProjectGroups,
   approvalPolicyForProvider,
   composerProviderFor,
@@ -19,6 +20,9 @@ import {
   countAwaitingResponseThreads,
   conversationItemsForSelection,
   deriveThreadAttentionPresentation,
+  deriveThreadTags,
+  THREAD_TAGS_ACTION_ID,
+  THREAD_TAGS_EXTENSION_ID,
   draftKeyFor,
   editResendUnavailableReason,
   filesToImageInputs,
@@ -26,6 +30,7 @@ import {
   imageAttachmentSendBlockReason,
   latestWorkspaceNotice,
   mergeThreadDetailPage,
+  optimisticallySetThreadColor,
   removeConversationItem,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
@@ -64,13 +69,17 @@ import {
   type ThinkingDisplay,
   type ThreadSortMode,
   type ThreadSummary,
+  type ThreadTag,
   type TurnInputItem,
   type UpdatePreferencesPayload,
 } from "@falcondeck/client-core";
 import {
   ComposerContextBar,
   NewThreadState,
+  composePromptWithQuotedSelections,
+  normalizeQuotedSelection,
   type ComposerMenuRequest,
+  type QuotedSelection,
 } from "@falcondeck/chat-ui";
 import {
   ActivityDiamond,
@@ -128,11 +137,12 @@ import {
   isEditableTarget,
   useShortcutSettings,
 } from "./shortcuts";
+import { sendDesktopAttentionNotification } from "./desktop-notifications";
 
 // Stable empty array so conversations without attachments don't bust the
 // memoized PromptInput on every render.
 const NO_ATTACHMENTS: ImageInput[] = [];
-const DRAFT_PERSIST_DELAY_MS = 200;
+const NO_QUOTED_SELECTIONS: QuotedSelection[] = [];
 
 function lastAgentItemId(items: ConversationItem[]) {
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -192,9 +202,25 @@ function AppInner() {
     gitRefreshTrigger,
   } = useDaemonConnection({ externalSnapshots: hostSnapshots });
   const updater = useAppUpdater();
-  const { sidebarVisible, railVisible, toggleSidebar, toggleRail, showRail } =
-    usePanelVisibility();
+  const {
+    sidebarVisible,
+    railVisible,
+    toggleSidebar,
+    toggleRail,
+    showRail,
+    hideSidebar,
+    hideRail,
+  } = usePanelVisibility();
   const shortcutSettings = useShortcutSettings();
+  const threadTags = useMemo(
+    () => deriveThreadTags(snapshot?.extensions),
+    [snapshot?.extensions],
+  );
+  const threadTagsEnabled =
+    snapshot?.extensions.catalog.some(
+      (extension) =>
+        extension.id === THREAD_TAGS_EXTENSION_ID && extension.enabled,
+    ) ?? false;
 
   const [drafts, setDrafts] = useState<ComposerDrafts>(() =>
     readStoredDrafts(),
@@ -208,6 +234,8 @@ function AppInner() {
   >({});
   const [attachmentPreparationCounts, setAttachmentPreparationCounts] =
     useState<AttachmentPreparationCounts>({});
+  const [quotedSelectionsByConversation, setQuotedSelectionsByConversation] =
+    useState<Record<string, QuotedSelection[]>>({});
   const [selectedProvider, setSelectedProvider] =
     useState<AgentProvider>("codex");
   const [selectedModel, setSelectedModel] = useState<string | null>(null);
@@ -245,6 +273,7 @@ function AppInner() {
   const [paletteRequest, setPaletteRequest] = useState({
     key: 0,
     query: "",
+    scope: "all" as "all" | "threads",
     mode: "toggle" as "open" | "toggle" | "close",
   });
   const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0);
@@ -255,6 +284,8 @@ function AppInner() {
     null,
   );
   const [isSending, setIsSending] = useState(false);
+  const [handoffPendingProvider, setHandoffPendingProvider] =
+    useState<AgentProvider | null>(null);
   // The first message in a new conversation has no daemon thread id yet, so
   // keep its optimistic transcript item keyed to the temporary composer
   // conversation until thread.start returns.
@@ -268,6 +299,81 @@ function AppInner() {
   const [isStopping, setIsStopping] = useState(false);
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const handleSetThreadColor = useCallback(
+    async (
+      _workspaceId: string,
+      thread: ThreadSummary,
+      color: ThreadTag | null,
+    ) => {
+      if (!api) {
+        setActionError("The FalconDeck daemon is not connected");
+        return;
+      }
+      try {
+        setActionError(null);
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                extensions: optimisticallySetThreadColor(
+                  current.extensions,
+                  thread.id,
+                  color?.color ?? null,
+                ),
+              }
+            : current,
+        );
+        await api.invokeExtensionAction(
+          THREAD_TAGS_EXTENSION_ID,
+          THREAD_TAGS_ACTION_ID,
+          {
+            target: { kind: "thread", id: thread.id },
+            input: {
+              operation: "set_thread_color",
+              color: color?.color ?? null,
+            },
+          },
+        );
+      } catch (error) {
+        void api
+          .snapshot()
+          .then(setSnapshot)
+          .catch(() => {});
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to set thread colour";
+        setActionError(message);
+        toast({
+          title: "Couldn’t set thread colour",
+          description: message,
+          variant: "danger",
+        });
+      }
+    },
+    [api, setSnapshot, toast],
+  );
+
+  const handleSetExtensionEnabled = useCallback(
+    async (extensionId: string, enabled: boolean) => {
+      if (!api) throw new Error("The FalconDeck daemon is not connected");
+      const updated = await api.updateExtension(extensionId, enabled);
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              extensions: {
+                ...current.extensions,
+                catalog: current.extensions.catalog.map((extension) =>
+                  extension.id === updated.id ? updated : extension,
+                ),
+              },
+            }
+          : current,
+      );
+    },
+    [api, setSnapshot],
+  );
   const [windowFocused, setWindowFocused] = useState(
     () => document.visibilityState !== "hidden",
   );
@@ -282,6 +388,8 @@ function AppInner() {
   const selectionSeedRef = useRef<string | null>(null);
   const threadSettingsRequestRef = useRef(0);
   const notifiedAttentionRef = useRef(new Map<string, string>());
+  const pendingNotificationKeysRef = useRef(new Set<string>());
+  const announcedProjectReadinessRef = useRef<string | null>(null);
   const announcedUpdateVersionRef = useRef<string | null>(null);
   const announcedDownloadedVersionRef = useRef<string | null>(null);
   const draftsRef = useRef(drafts);
@@ -306,6 +414,8 @@ function AppInner() {
     attachmentsByConversation[conversationKey] ?? NO_ATTACHMENTS;
   const preparingAttachmentCount =
     attachmentPreparationCounts[conversationKey] ?? 0;
+  const quotedSelections =
+    quotedSelectionsByConversation[conversationKey] ?? NO_QUOTED_SELECTIONS;
 
   useLayoutEffect(() => {
     conversationKeyRef.current = conversationKey;
@@ -337,20 +447,10 @@ function AppInner() {
     setDrafts((current) => {
       const next = upsertComposerDraft(current, key, value);
       draftsRef.current = next;
+      if (next !== current) writeStoredDrafts(next);
       return next;
     });
   }, []);
-
-  // localStorage writes and whole-draft JSON serialization are synchronous.
-  // Debouncing keeps the input path free of storage work while still flushing
-  // immediately when the webview is backgrounded or closed.
-  useEffect(() => {
-    const timeout = window.setTimeout(
-      () => writeStoredDrafts(drafts),
-      DRAFT_PERSIST_DELAY_MS,
-    );
-    return () => window.clearTimeout(timeout);
-  }, [drafts]);
 
   useEffect(() => {
     const flushDrafts = () => writeStoredDrafts(draftsRef.current);
@@ -368,6 +468,43 @@ function AppInner() {
   const setDraft = useCallback(
     (value: string) => setDraftForConversation(conversationKey, value),
     [conversationKey, setDraftForConversation],
+  );
+
+  const addQuotedSelection = useCallback(
+    (text: string) => {
+      const normalized = normalizeQuotedSelection(text);
+      if (!normalized.trim()) return;
+      const selection: QuotedSelection = {
+        id:
+          typeof globalThis.crypto?.randomUUID === "function"
+            ? globalThis.crypto.randomUUID()
+            : `quote-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        text: normalized,
+      };
+      setQuotedSelectionsByConversation((current) => ({
+        ...current,
+        [conversationKey]: [...(current[conversationKey] ?? []), selection],
+      }));
+      setComposerFocusRequestKey((key) => key + 1);
+    },
+    [conversationKey],
+  );
+
+  const removeQuotedSelection = useCallback(
+    (selectionId: string) => {
+      setQuotedSelectionsByConversation((current) => {
+        const nextSelections = (current[conversationKey] ?? []).filter(
+          (selection) => selection.id !== selectionId,
+        );
+        if (nextSelections.length === (current[conversationKey] ?? []).length)
+          return current;
+        const next = { ...current };
+        if (nextSelections.length > 0) next[conversationKey] = nextSelections;
+        else delete next[conversationKey];
+        return next;
+      });
+    },
+    [conversationKey],
   );
 
   const setAttachmentsForConversation = useCallback(
@@ -410,6 +547,7 @@ function AppInner() {
         );
         const next = upsertComposerDraft(current, key, restored);
         draftsRef.current = next;
+        if (next !== current) writeStoredDrafts(next);
         return next;
       });
       setAttachmentsForConversation(key, (current) =>
@@ -569,30 +707,27 @@ function AppInner() {
       viewSnapshot?.workspaces,
     ],
   );
-  const conversationItems: ConversationItem[] = useMemo(
-    () => {
-      const selectedItems = conversationItemsForSelection(
-        selectedWorkspaceId,
-        selectedThreadId,
-        threadDetail,
-      );
-      if (
-        selectedThreadId ||
-        !pendingNewThreadItem ||
-        pendingNewThreadItem.conversationKey !== conversationKey
-      ) {
-        return selectedItems;
-      }
-      return [pendingNewThreadItem.item];
-    },
-    [
-      conversationKey,
-      pendingNewThreadItem,
-      selectedThreadId,
+  const conversationItems: ConversationItem[] = useMemo(() => {
+    const selectedItems = conversationItemsForSelection(
       selectedWorkspaceId,
+      selectedThreadId,
       threadDetail,
-    ],
-  );
+    );
+    if (
+      selectedThreadId ||
+      !pendingNewThreadItem ||
+      pendingNewThreadItem.conversationKey !== conversationKey
+    ) {
+      return selectedItems;
+    }
+    return [pendingNewThreadItem.item];
+  }, [
+    conversationKey,
+    pendingNewThreadItem,
+    selectedThreadId,
+    selectedWorkspaceId,
+    threadDetail,
+  ]);
   const interactiveRequests = useMemo(
     () =>
       selectedThreadId
@@ -602,11 +737,7 @@ function AppInner() {
               request.thread_id === selectedThreadId,
           )
         : [],
-    [
-      selectedThreadId,
-      selectedWorkspaceId,
-      viewSnapshot?.interactive_requests,
-    ],
+    [selectedThreadId, selectedWorkspaceId, viewSnapshot?.interactive_requests],
   );
   const remoteWebUrl =
     import.meta.env.VITE_FALCONDECK_REMOTE_WEB_URL ??
@@ -1035,8 +1166,18 @@ function AppInner() {
         thread,
         viewSnapshot.interactive_requests,
       );
+      const notificationEnabled =
+        viewSnapshot.preferences.notifications.enabled &&
+        (attention.level === "awaiting_response"
+          ? viewSnapshot.preferences.notifications.notify_on_input_required
+          : attention.level === "error"
+            ? viewSnapshot.preferences.notifications.notify_on_error
+            : attention.level === "unread"
+              ? viewSnapshot.preferences.notifications.notify_on_turn_complete
+              : false);
       if (
         attention.level === "none" ||
+        !notificationEnabled ||
         (windowFocused && selectedThreadId === thread.id)
       ) {
         notifiedAttentionRef.current.delete(thread.id);
@@ -1045,26 +1186,34 @@ function AppInner() {
 
       const previous = notifiedAttentionRef.current.get(thread.id);
       if (previous === attention.level) continue;
-      notifiedAttentionRef.current.set(thread.id, attention.level);
-
-      if (typeof Notification === "undefined") continue;
-      if (Notification.permission === "default") {
-        void Notification.requestPermission().catch(() => {});
-        continue;
-      }
-      if (Notification.permission !== "granted") continue;
 
       const body =
         attention.level === "awaiting_response"
           ? "The agent needs a response in this thread."
           : attention.level === "error"
             ? "The latest run ended with an error."
-            : "New activity in this thread.";
-      new Notification(thread.title || "FalconDeck thread", { body });
+            : "The latest turn finished.";
+      const notificationKey = `${thread.workspace_id}:${thread.id}:${attention.level}`;
+      if (pendingNotificationKeysRef.current.has(notificationKey)) continue;
+      pendingNotificationKeysRef.current.add(notificationKey);
+
+      void sendDesktopAttentionNotification({
+        title: thread.title || "FalconDeck thread",
+        body,
+      })
+        .then((sent) => {
+          if (sent) {
+            notifiedAttentionRef.current.set(thread.id, attention.level);
+          }
+        })
+        .finally(() => {
+          pendingNotificationKeysRef.current.delete(notificationKey);
+        });
     }
   }, [
     selectedThreadId,
     viewSnapshot?.interactive_requests,
+    viewSnapshot?.preferences,
     viewSnapshot?.threads,
     windowFocused,
   ]);
@@ -1574,6 +1723,208 @@ function AppInner() {
     ],
   );
 
+  const handleHandoffProviderSelect = useCallback(
+    async (provider: AgentProvider) => {
+      if (
+        !selectedWorkspace ||
+        !selectedThread ||
+        provider === selectedThread.provider ||
+        handoffPendingProvider
+      ) {
+        return;
+      }
+      const client = apiFor(selectedWorkspace.id);
+      if (!client) return;
+
+      let createdHandoff: ThreadHandle | null = null;
+      let handoffPrompt: string | null = null;
+      let targetLabel = provider;
+      const showHandoffThread = (handle: ThreadHandle) => {
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                workspaces: current.workspaces.map((workspace) =>
+                  workspace.id === handle.workspace.id
+                    ? handle.workspace
+                    : workspace,
+                ),
+                threads: [
+                  handle.thread,
+                  ...current.threads.filter(
+                    (thread) => thread.id !== handle.thread.id,
+                  ),
+                ],
+              }
+            : current,
+        );
+        conversationKeyRef.current = draftKeyFor(
+          handle.workspace.id,
+          handle.thread.id,
+        );
+        setSelectedWorkspaceId(handle.workspace.id);
+        setSelectedThreadId(handle.thread.id);
+        setThreadDetail({
+          workspace: handle.workspace,
+          thread: handle.thread,
+          items: [],
+          has_older: false,
+          oldest_item_id: null,
+          newest_item_id: null,
+          is_partial: false,
+        });
+      };
+
+      setHandoffPendingProvider(provider);
+      try {
+        // Read the complete source before creating anything, so failed source
+        // hydration cannot leave a destination thread behind.
+        const sourceDetail = await client.threadDetail(
+          selectedWorkspace.id,
+          selectedThread.id,
+          { mode: "full" },
+        );
+        targetLabel = workspaceProviderLabel(selectedWorkspace, provider);
+        const sourceLabel = workspaceProviderLabel(
+          selectedWorkspace,
+          selectedThread.provider,
+        );
+        const preferred = composerSelectionFor(
+          persistedComposerSelections,
+          selectedWorkspace.path,
+          provider,
+        );
+        const targetCapabilities = workspaceAgentCapabilities(
+          selectedWorkspace,
+          provider,
+        );
+        const modelId = resolveThreadModelId(
+          null,
+          selectedWorkspace,
+          preferred?.modelId,
+          provider,
+        );
+        const permissionMode = resolvePermissionMode(
+          preferred?.permissionMode,
+          targetCapabilities.permission_modes,
+        );
+        const sandboxMode = resolvePersistedMode(
+          preferred?.sandboxMode,
+          targetCapabilities.sandbox_modes,
+        );
+        handoffPrompt = buildHandoffPrompt({
+          items: sourceDetail.items,
+          sourceTitle: selectedThread.title,
+          sourceProvider: selectedThread.provider,
+          sourceProviderLabel: sourceLabel,
+        });
+        const started = await client.startThread({
+          workspace_id: selectedWorkspace.id,
+          provider,
+          model_id: modelId,
+          permission_mode: permissionMode,
+          approval_policy: approvalPolicyForProvider(provider, permissionMode),
+          sandbox_mode: sandboxMode,
+          isolation: "project_folder",
+          handoff_from: {
+            thread_id: selectedThread.id,
+            provider: selectedThread.provider,
+          },
+        });
+        createdHandoff = started;
+        const titled = await client.updateThread({
+          workspace_id: selectedWorkspace.id,
+          thread_id: started.thread.id,
+          title: `${selectedThread.title} · ${targetLabel}`,
+        });
+        createdHandoff = titled;
+        showHandoffThread(titled);
+
+        await client.sendTurn({
+          workspace_id: titled.workspace.id,
+          thread_id: titled.thread.id,
+          provider,
+          model_id: modelId,
+          permission_mode: permissionMode,
+          approval_policy: approvalPolicyForProvider(provider, permissionMode),
+          sandbox_mode: sandboxMode,
+          inputs: [
+            {
+              type: "text",
+              text: handoffPrompt,
+            },
+          ],
+        });
+        setActionError(null);
+        toast({
+          variant: "success",
+          title: `Continuing with ${targetLabel}`,
+          description:
+            "A linked thread is preparing its handoff. The original is unchanged.",
+        });
+      } catch (error: unknown) {
+        const message =
+          error instanceof Error ? error.message : "Failed to create handoff";
+        setActionError(message);
+        if (createdHandoff) {
+          showHandoffThread(createdHandoff);
+          const recoveredDetail = await client
+            .threadDetail(
+              createdHandoff.workspace.id,
+              createdHandoff.thread.id,
+              { mode: "full" },
+            )
+            .catch(() => null);
+          const summaryStarted = Boolean(
+            recoveredDetail &&
+            (recoveredDetail.items.length > 0 ||
+              recoveredDetail.thread.status === "running" ||
+              recoveredDetail.thread.status === "waiting_for_input"),
+          );
+          if (recoveredDetail) setThreadDetail(recoveredDetail);
+          if (!summaryStarted && handoffPrompt) {
+            setDraftForConversation(
+              draftKeyFor(
+                createdHandoff.workspace.id,
+                createdHandoff.thread.id,
+              ),
+              handoffPrompt,
+            );
+          }
+          toast({
+            variant: "warning",
+            title: `Linked ${targetLabel} thread created`,
+            description: summaryStarted
+              ? "FalconDeck lost confirmation after starting the summary. Check the linked thread before retrying."
+              : "The summary did not start. Its handoff prompt is ready in the composer to resend.",
+          });
+          return;
+        }
+        toast({
+          variant: "danger",
+          title: "Failed to create handoff",
+          description: message,
+        });
+      } finally {
+        setHandoffPendingProvider(null);
+      }
+    },
+    [
+      apiFor,
+      handoffPendingProvider,
+      persistedComposerSelections,
+      selectedThread,
+      selectedWorkspace,
+      setActionError,
+      setDraftForConversation,
+      setSelectedThreadId,
+      setSelectedWorkspaceId,
+      setSnapshot,
+      setThreadDetail,
+      toast,
+    ],
+  );
+
   const handleAddProject = useCallback(async () => {
     if (!api) return;
     setIsAddingProject(true);
@@ -1597,7 +1948,8 @@ function AppInner() {
       const nextSnapshot = await api.snapshot();
       setSnapshot(nextSnapshot);
       setSelectedWorkspaceId(workspace.id);
-      setSelectedThreadId(workspace.current_thread_id);
+      setSelectedThreadId(null);
+      setThreadDetail(null);
       setActionError(null);
     } catch (error) {
       const msg =
@@ -1612,7 +1964,78 @@ function AppInner() {
       setIsImportingProjectSessions(false);
       setIsAddingProject(false);
     }
-  }, [api, setSnapshot, setSelectedThreadId, setSelectedWorkspaceId, toast]);
+  }, [
+    api,
+    setSnapshot,
+    setSelectedThreadId,
+    setSelectedWorkspaceId,
+    setThreadDetail,
+    toast,
+  ]);
+
+  const handleAddRemoteProject = useCallback(
+    async (hostId: string, path: string) => {
+      const connection = remoteHosts.manager.connection(hostId);
+      const host = remoteHosts.hosts.find((entry) => entry.id === hostId);
+      if (!connection) {
+        throw new Error(
+          host ? `${host.name} is not connected` : "Server is not connected",
+        );
+      }
+      setIsAddingProject(true);
+      setIsImportingProjectSessions(true);
+      try {
+        const workspace = await connection.api().connectWorkspace(path);
+        setSelectedWorkspaceId(workspace.id);
+        setSelectedThreadId(null);
+        setThreadDetail(null);
+        setActionError(null);
+        toast({
+          variant: "success",
+          title: "Project added",
+          description: host ? `${path} on ${host.name}` : path,
+        });
+      } catch (error) {
+        const msg =
+          error instanceof Error
+            ? error.message
+            : "Failed to add remote project";
+        setActionError(msg);
+        toast({
+          variant: "danger",
+          title: "Failed to add remote project",
+          description: msg,
+        });
+        throw error instanceof Error ? error : new Error(msg);
+      } finally {
+        setIsImportingProjectSessions(false);
+        setIsAddingProject(false);
+      }
+    },
+    [
+      remoteHosts.hosts,
+      remoteHosts.manager,
+      setActionError,
+      setSelectedThreadId,
+      setSelectedWorkspaceId,
+      setThreadDetail,
+      toast,
+    ],
+  );
+
+  const composerRemoteHosts = useMemo(
+    () =>
+      remoteHosts.hosts
+        .filter((host) => host.enabled)
+        .map((host) => ({
+          id: host.id,
+          name: host.name,
+          connected:
+            host.status === "encrypted" &&
+            (host.presence?.daemon_connected ?? false),
+        })),
+    [remoteHosts.hosts],
+  );
 
   const handleRemoveWorkspace = useCallback(
     async (workspaceId: string) => {
@@ -1688,28 +2111,37 @@ function AppInner() {
     });
   }
 
-  async function handleSubmit(steer = false) {
+  async function handleSubmit(
+    steer = false,
+    override?: { text: string; preserveComposer: boolean },
+  ) {
     if ((attachmentPreparationCountsRef.current[conversationKey] ?? 0) > 0) {
       setActionError("Wait for image preparation to finish before sending.");
       return;
     }
+    const submittedSelections = override ? [] : quotedSelections;
+    const submittedUserDraft = override?.text ?? draft;
+    const submittedDraft = composePromptWithQuotedSelections(
+      submittedUserDraft,
+      submittedSelections,
+    );
     const client = apiFor(selectedWorkspace?.id);
     if (
       !client ||
       !selectedWorkspace ||
-      (!draft.trim() && attachments.length === 0)
+      (!submittedDraft.trim() &&
+        (override ? 0 : attachments.length) === 0)
     )
       return;
-    const submittedDraft = draft;
-    const submittedAttachments = attachments;
+    const submittedAttachments = override ? NO_ATTACHMENTS : attachments;
     const submittedSkills = selectedSkillsFromText(
-      submittedDraft,
+      submittedUserDraft,
       selectedWorkspace.skills ?? [],
     );
     const activeProvider = selectedThread?.provider ?? selectedProvider;
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(selectedWorkspace, activeProvider),
-      attachments.length,
+      submittedAttachments.length,
     );
     const blockReason =
       workspaceSendBlockReason(selectedWorkspace, activeProvider) ??
@@ -1718,9 +2150,10 @@ function AppInner() {
       setActionError(blockReason);
       toast({
         variant: "danger",
-        title: imageBlockReason && blockReason === imageBlockReason
-          ? "Image attachments unavailable"
-          : "Project not ready",
+        title:
+          imageBlockReason && blockReason === imageBlockReason
+            ? "Image attachments unavailable"
+            : "Project not ready",
         description: blockReason,
       });
       return;
@@ -1753,10 +2186,9 @@ function AppInner() {
     }
     sendingConversationKeyRef.current = submittedKey;
     sendingBaselineAgentItemIdRef.current = lastAgentItemId(conversationItems);
-    setDraftForConversation(submittedKey, "");
-    setAttachmentsForConversation(submittedKey, () => []);
     setIsSending(true);
     let activeThreadId = selectedThreadId;
+    let pendingComposerKey = submittedKey;
     try {
       if (!activeThreadId) {
         if (selectedIsolation === "isolated") {
@@ -1781,6 +2213,30 @@ function AppInner() {
           selectedWorkspace.id,
           activeThreadId,
         );
+        if (!override?.preserveComposer) {
+          // Copy first, then delete: a crash between these writes can leave a
+          // duplicate draft, never a missing one.
+          setDraftForConversation(startedConversationKey, submittedUserDraft);
+          setAttachmentsForConversation(
+            startedConversationKey,
+            () => submittedAttachments,
+          );
+          if (submittedSelections.length > 0) {
+            setQuotedSelectionsByConversation((current) => ({
+              ...current,
+              [startedConversationKey]: submittedSelections,
+            }));
+          }
+          setDraftForConversation(submittedKey, "");
+          setAttachmentsForConversation(submittedKey, () => []);
+          setQuotedSelectionsByConversation((current) => {
+            if (!(submittedKey in current)) return current;
+            const next = { ...current };
+            delete next[submittedKey];
+            return next;
+          });
+          pendingComposerKey = startedConversationKey;
+        }
         const adopted = conversationKeyRef.current === submittedKey;
         if (adopted) {
           conversationKeyRef.current = startedConversationKey;
@@ -1833,7 +2289,11 @@ function AppInner() {
         const targetThreadId = activeThreadId;
         remoteHosts
           .hostForWorkspace(selectedWorkspace.id)
-          ?.upsertLocalItem(selectedWorkspace.id, targetThreadId, optimisticItem);
+          ?.upsertLocalItem(
+            selectedWorkspace.id,
+            targetThreadId,
+            optimisticItem,
+          );
         setThreadDetail((current) => {
           if (!current || current.thread.id !== targetThreadId) return current;
           const items = upsertConversationItem(current.items, optimisticItem);
@@ -1876,6 +2336,19 @@ function AppInner() {
       if (optimisticItem && sendResponse?.message === "queued") {
         removeOptimisticItem(selectedWorkspace.id, activeThreadId, userItemId);
       }
+      // Keep authored input in durable draft storage until the daemon has
+      // accepted it. A process crash or lost response can therefore duplicate
+      // a retry, but it cannot erase the user's words.
+      if (!override?.preserveComposer) {
+        setDraftForConversation(pendingComposerKey, "");
+        setAttachmentsForConversation(pendingComposerKey, () => []);
+        setQuotedSelectionsByConversation((current) => {
+          if (!(pendingComposerKey in current)) return current;
+          const next = { ...current };
+          delete next[pendingComposerKey];
+          return next;
+        });
+      }
       setPendingNewThreadItem((current) =>
         current?.conversationKey === submittedKey ? null : current,
       );
@@ -1894,7 +2367,38 @@ function AppInner() {
       setPendingNewThreadItem((current) =>
         current?.conversationKey === submittedKey ? null : current,
       );
-      restoreFailedSubmission(restoreKey, submittedDraft, submittedAttachments);
+      if (!override?.preserveComposer) {
+        if (restoreKey !== submittedKey) {
+          setDraftForConversation(submittedKey, "");
+          setAttachmentsForConversation(submittedKey, () => []);
+          setQuotedSelectionsByConversation((current) => {
+            if (!(submittedKey in current)) return current;
+            const next = { ...current };
+            delete next[submittedKey];
+            return next;
+          });
+        }
+        restoreFailedSubmission(
+          restoreKey,
+          submittedUserDraft,
+          submittedAttachments,
+        );
+        if (submittedSelections.length > 0) {
+          setQuotedSelectionsByConversation((current) => {
+            const existing = current[restoreKey] ?? [];
+            const existingIds = new Set(existing.map((selection) => selection.id));
+            return {
+              ...current,
+              [restoreKey]: [
+                ...submittedSelections.filter(
+                  (selection) => !existingIds.has(selection.id),
+                ),
+                ...existing,
+              ],
+            };
+          });
+        }
+      }
       const rawMessage =
         error instanceof Error ? error.message : "Failed to send turn";
       const msg = normalizeSendError(rawMessage, activeProvider);
@@ -2099,6 +2603,25 @@ function AppInner() {
     selectedProvider,
     draft,
     attachments,
+    quotedSelections,
+    selectedModel,
+    selectedEffort,
+    selectedServiceTier,
+    selectedPermissionMode,
+    selectedSandboxMode,
+    selectedIsolation,
+  ]);
+
+  const handleContinueInterruptedTurn = useCallback(() => {
+    void handleSubmit(false, { text: "Continue", preserveComposer: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    api,
+    apiFor,
+    selectedWorkspace,
+    selectedThread,
+    selectedThreadId,
+    selectedProvider,
     selectedModel,
     selectedEffort,
     selectedServiceTier,
@@ -2124,6 +2647,7 @@ function AppInner() {
     selectedProvider,
     draft,
     attachments,
+    quotedSelections,
     selectedModel,
     selectedEffort,
     selectedServiceTier,
@@ -2473,6 +2997,43 @@ function AppInner() {
         toast({
           variant: "danger",
           title: "Failed to edit queued message",
+          description: msg,
+        });
+      }
+    },
+    [
+      api,
+      apiFor,
+      selectedThreadId,
+      selectedWorkspaceId,
+      setSnapshot,
+      toast,
+      workspaceHostIndex,
+    ],
+  );
+
+  const handleReorderQueuedTurns = useCallback(
+    async (queuedIds: string[]) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return;
+      const client = apiFor(selectedWorkspaceId);
+      if (!client) return;
+      try {
+        await client.reorderQueuedTurns(
+          selectedWorkspaceId,
+          selectedThreadId,
+          queuedIds,
+        );
+        if (!workspaceHostIndex.has(selectedWorkspaceId) && api) {
+          setSnapshot(await api.snapshot());
+        }
+      } catch (error: unknown) {
+        const msg =
+          error instanceof Error
+            ? error.message
+            : "Failed to reorder queued messages";
+        toast({
+          variant: "danger",
+          title: "Failed to reorder queued messages",
           description: msg,
         });
       }
@@ -2921,6 +3482,23 @@ function AppInner() {
     () => workspaceProviderOptions(selectedWorkspace),
     [selectedWorkspace],
   );
+  const handoffProviderOptions = useMemo(
+    () =>
+      selectedThread
+        ? providerOptions.filter(
+            (option) => option.provider !== selectedThread.provider,
+          )
+        : [],
+    [providerOptions, selectedThread],
+  );
+  const handoffDisabledReason = handoffPendingProvider
+    ? "Creating the linked handoff thread…"
+    : selectedThread?.status === "running" ||
+        selectedThread?.status === "waiting_for_input"
+      ? "Wait for the current turn to finish before handing off"
+      : selectedThread?.variant
+        ? "Handoffs from isolated threads are not supported yet"
+        : null;
   const activeCapabilities = useMemo(
     () => workspaceAgentCapabilities(selectedWorkspace, activeProvider),
     [activeProvider, selectedWorkspace],
@@ -2945,6 +3523,43 @@ function AppInner() {
     attachments.length,
   );
   const isComposerDisabled = workspaceComposerDisabled(selectedWorkspace);
+
+  // Project readiness belongs to the app-level notification system, not the
+  // composer. Keeping the composer free of transient transport copy preserves
+  // room for the user's draft and makes all project states surface the same
+  // way. The key prevents snapshot refreshes from repeating the toast.
+  useEffect(() => {
+    if (!selectedWorkspace || !sendBlockReason) {
+      announcedProjectReadinessRef.current = null;
+      return;
+    }
+
+    const noticeKey = [
+      selectedWorkspace.id,
+      activeProvider,
+      selectedWorkspace.status,
+      sendBlockReason,
+    ].join(":");
+    if (announcedProjectReadinessRef.current === noticeKey) return;
+    announcedProjectReadinessRef.current = noticeKey;
+
+    const variant =
+      selectedWorkspace.status === "error" ||
+      selectedWorkspace.status === "disconnected"
+        ? "danger"
+        : selectedWorkspace.status === "needs_auth"
+          ? "warning"
+          : "default";
+    const title =
+      selectedWorkspace.status === "connecting"
+        ? "Project reconnecting"
+        : selectedWorkspace.status === "needs_auth"
+          ? "Authentication needed"
+          : "Project not ready";
+
+    toast({ variant, title, description: sendBlockReason });
+  }, [activeProvider, selectedWorkspace, sendBlockReason, toast]);
+
   const workspaces = useMemo(
     () => viewSnapshot?.workspaces ?? [],
     [viewSnapshot?.workspaces],
@@ -3026,6 +3641,7 @@ function AppInner() {
           setPaletteRequest((current) => ({
             key: current.key + 1,
             query: "",
+            scope: "all",
             mode: "toggle",
           }));
           break;
@@ -3033,6 +3649,7 @@ function AppInner() {
           setPaletteRequest((current) => ({
             key: current.key + 1,
             query: "",
+            scope: "threads",
             mode: "open",
           }));
           break;
@@ -3215,6 +3832,7 @@ function AppInner() {
             onOpenSettings={handleOpenSettings}
             openRequestKey={paletteRequest.key}
             initialQuery={paletteRequest.query}
+            initialScope={paletteRequest.scope}
             requestMode={paletteRequest.mode}
           />
         </Suspense>
@@ -3243,6 +3861,11 @@ function AppInner() {
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
             errors={sidebarErrors}
+            threadTagsById={threadTags.byThreadId}
+            threadTagOptions={threadTags.tags}
+            onSetThreadColor={
+              threadTagsEnabled ? handleSetThreadColor : undefined
+            }
           />
         }
         main={
@@ -3276,6 +3899,8 @@ function AppInner() {
                 onCheckForUpdates={handleCheckForUpdates}
                 onDownloadUpdate={handleDownloadUpdate}
                 onRestartToInstallUpdate={handleRestartToInstallUpdate}
+                extensions={snapshot?.extensions ?? { catalog: [], views: [] }}
+                onSetExtensionEnabled={handleSetExtensionEnabled}
                 onClose={() => setIsSettingsOpen(false)}
               />
             </Suspense>
@@ -3317,6 +3942,10 @@ function AppInner() {
               onRemoveQueuedTurn={handleRemoveQueuedTurn}
               onSteerQueuedTurn={handleSteerQueuedTurn}
               onEditQueuedTurn={handleEditQueuedTurn}
+              onReorderQueuedTurns={handleReorderQueuedTurns}
+              queuedAttachmentBaseUrl={
+                isRemoteWorkspaceSelected ? null : baseUrl
+              }
               canSteerQueuedTurn={activeCapabilities.supports_steering}
               // Remote-host workspaces have no local checkout, so the rail has
               // no diff to show and file paths stay plain text there.
@@ -3346,6 +3975,10 @@ function AppInner() {
                   ? handleRetryResponse
                   : undefined
               }
+              onContinueInterruptedTurn={handleContinueInterruptedTurn}
+              quotedSelections={quotedSelections}
+              onQuoteSelection={addQuotedSelection}
+              onRemoveQuotedSelection={removeQuotedSelection}
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,
@@ -3372,6 +4005,11 @@ function AppInner() {
                 capabilities: activeCapabilities,
                 providerLocked: Boolean(selectedThread),
                 showProviderSelector: !selectedThread,
+                handoffProviders: handoffProviderOptions,
+                onHandoffProviderSelect: selectedThread
+                  ? handleHandoffProviderSelect
+                  : undefined,
+                handoffDisabledReason,
                 models,
                 selectedModelId: selectedModel,
                 onModelChange: handleModelChange,
@@ -3403,6 +4041,13 @@ function AppInner() {
                     uncommittedCount={uncommittedCount}
                     onCheckoutBranch={handleCheckoutBranch}
                     isCheckoutPending={isCheckoutPending}
+                    workspaceHosts={workspaceHostBadges}
+                    remoteHosts={composerRemoteHosts}
+                    onAddLocalProject={handleAddProject}
+                    onAddRemoteProject={handleAddRemoteProject}
+                    isAddingProject={
+                      isAddingProject || isImportingProjectSessions
+                    }
                   />
                 ),
                 disabled: isComposerDisabled,
@@ -3413,8 +4058,7 @@ function AppInner() {
                   Boolean(attachmentSendBlockReason) ||
                   isSending ||
                   preparingAttachmentCount > 0,
-                sendDisabledReason:
-                  attachmentSendBlockReason ?? sendBlockReason ?? undefined,
+                sendDisabledReason: attachmentSendBlockReason ?? undefined,
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone
                 // stale or was never noticed.
@@ -3472,6 +4116,8 @@ function AppInner() {
         }
         sidebarVisible={sidebarVisible}
         railVisible={railVisible}
+        onSidebarCollapsedByDrag={hideSidebar}
+        onRailCollapsedByDrag={hideRail}
       />
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
     </>

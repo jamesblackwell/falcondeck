@@ -45,6 +45,8 @@ pub struct DaemonConfig {
     pub codex_bin: String,
     /// Executable name or path used for Claude-backed sessions. See `codex_bin`.
     pub claude_bin: String,
+    /// Executable name or path used for the sandboxed extension runtime.
+    pub deno_bin: String,
     /// Optional persisted state location for daemon-local state.
     pub state_path: Option<PathBuf>,
 }
@@ -59,6 +61,7 @@ impl Default for DaemonConfig {
             provider_bins: HashMap::new(),
             codex_bin: "codex".to_string(),
             claude_bin: "claude".to_string(),
+            deno_bin: "deno".to_string(),
             state_path: None,
         }
     }
@@ -137,7 +140,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // connection is created; otherwise rustls panics in a background worker.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let provider_bins = config.resolved_provider_bins();
-    let state = AppState::new_with_state_path(
+    let state = AppState::new_with_state_path_and_extension_runtime(
         "0.1.0".to_string(),
         provider_bins,
         config.state_path.unwrap_or_else(|| {
@@ -151,6 +154,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
                     )
                 })
         }),
+        config.deno_bin,
     );
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;

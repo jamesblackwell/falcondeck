@@ -1,5 +1,6 @@
 export * from "./components/interactive-request-card";
 export * from "./components/interactive-request-bar";
+export * from "./components/interrupted-turn-notice";
 export * from "./components/code-block";
 export * from "./components/diff-block";
 export * from "./components/diff-lines";
@@ -9,6 +10,7 @@ export * from "./lib/file-diff-context";
 export * from "./lib/shiki";
 export * from "./lib/realtime-audio-player";
 export * from "./lib/tool-file-path";
+export * from "./lib/quoted-selection";
 export * from "./components/message";
 export * from "./components/operational-notice";
 export {

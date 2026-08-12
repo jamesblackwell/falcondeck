@@ -12,6 +12,7 @@ import {
   buildPairingPublicKeyBundle,
   bytesToBase64,
   decryptJson,
+  decryptJsonBatch,
   deriveIdentityKeyPair,
   encryptJson,
   generateBoxKeyPair,
@@ -730,25 +731,33 @@ export class RemoteHostClient {
             continue
           }
 
-          let decrypted: unknown
-          try {
-            decrypted = await decryptJson(crypto.dataKey, update.body.envelope)
-            if (flushGeneration !== this.generation || !this.running) return
-          } catch (error) {
-            // Decryption failed: the cursor is not advanced for this update.
-            // If nothing later in the batch decrypts either, a later sync
-            // replays it; if a later update does decrypt, the cursor advances
-            // past this one — skipping a single undecryptable update beats
-            // stalling the stream.
-            this.callbacks.onError?.(
-              error instanceof Error ? error.message : 'Failed to decrypt relay update',
-            )
-            continue
+          const encryptedRun = [update]
+          const envelopes = [update.body.envelope]
+          while (true) {
+            const nextUpdate = batch[index + 1]
+            if (!nextUpdate || nextUpdate.body.t !== 'encrypted') break
+            encryptedRun.push(nextUpdate)
+            envelopes.push(nextUpdate.body.envelope)
+            index += 1
           }
-
+          const decryptedRun = await decryptJsonBatch<unknown>(crypto.dataKey, envelopes)
           if (flushGeneration !== this.generation || !this.running) return
-          advanceCursor(update.seq)
-          daemonEvents.push(...parseRemoteDaemonEvents(decrypted))
+
+          decryptedRun.forEach((result, runIndex) => {
+            const encryptedUpdate = encryptedRun[runIndex]!
+            if (result.status === 'rejected') {
+              // Decryption failed: leave this update behind the cursor unless
+              // a later update succeeds, matching the single-update path.
+              this.callbacks.onError?.(
+                result.reason instanceof Error
+                  ? result.reason.message
+                  : 'Failed to decrypt relay update',
+              )
+              return
+            }
+            advanceCursor(encryptedUpdate.seq)
+            daemonEvents.push(...parseRemoteDaemonEvents(result.value))
+          })
         }
 
         if (deferredBootstrapSeq !== null) {

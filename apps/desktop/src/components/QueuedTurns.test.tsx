@@ -18,26 +18,20 @@ function openMenu() {
 }
 
 describe('QueuedTurns', () => {
-  it('offers Steer instead and Remove behind the overflow menu', () => {
+  it('offers Steer and Remove directly on each queued row', () => {
     const onSteer = vi.fn()
     const onRemove = vi.fn()
     render(
       <QueuedTurns queuedTurns={queuedTurns} canSteer onSteer={onSteer} onRemove={onRemove} />,
     )
 
-    expect(screen.queryByRole('menu')).toBeNull()
-    openMenu()
-
-    const steer = screen.getByRole('menuitem', { name: 'Steer instead' })
+    const steer = screen.getByRole('button', { name: 'Steer' })
     expect(steer).not.toBeDisabled()
     fireEvent.click(steer)
     expect(onSteer).toHaveBeenCalledWith('queued-1')
     expect(onRemove).not.toHaveBeenCalled()
-    // Acting on an item closes the menu.
-    expect(screen.queryByRole('menu')).toBeNull()
 
-    openMenu()
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Remove' }))
+    fireEvent.click(screen.getByRole('button', { name: /Remove queued message/ }))
     expect(onRemove).toHaveBeenCalledWith('queued-1')
   })
 
@@ -51,17 +45,81 @@ describe('QueuedTurns', () => {
         onRemove={vi.fn()}
       />,
     )
-    openMenu()
-
     // Disabled rather than hidden, so the capability gap is legible.
-    const steer = screen.getByRole('menuitem', { name: 'Steer instead' })
+    const steer = screen.getByRole('button', { name: 'Steer' })
     expect(steer).toBeDisabled()
     expect(steer).toHaveAttribute('title', 'This agent cannot take a message mid-turn.')
     fireEvent.click(steer)
     expect(onSteer).not.toHaveBeenCalled()
 
     // Remove still works without steering support.
-    expect(screen.getByRole('menuitem', { name: 'Remove' })).not.toBeDisabled()
+    expect(screen.getByRole('button', { name: /Remove queued message/ })).not.toBeDisabled()
+  })
+
+  it('shows an attachment thumbnail when a preview URL is available', () => {
+    render(
+      <QueuedTurns
+        queuedTurns={[{ ...queuedTurns[0]!, attachment_count: 1 }]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        getAttachmentPreviewUrl={(id) => `http://daemon.test/${id}.png`}
+      />,
+    )
+
+    expect(document.querySelector('img')).toHaveAttribute(
+      'src',
+      'http://daemon.test/queued-1.png',
+    )
+  })
+
+  it('reorders queued rows with drag and drop', () => {
+    const onReorder = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    const first = document.querySelector('[data-queued-turn-id="queued-1"]')!
+    const second = document.querySelector('[data-queued-turn-id="queued-2"]')!
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
+    fireEvent.dragStart(first, { dataTransfer })
+    fireEvent.dragOver(second, { dataTransfer, clientY: 1 })
+    fireEvent.drop(second, { dataTransfer, clientY: 1 })
+    fireEvent.dragEnd(first, { dataTransfer })
+
+    expect(onReorder).toHaveBeenCalledWith(['queued-2', 'queued-1'])
+  })
+
+  it('cancels a queued reorder when the drag ends outside the list', () => {
+    const onReorder = vi.fn()
+    render(
+      <QueuedTurns
+        queuedTurns={[
+          queuedTurns[0]!,
+          { ...queuedTurns[0]!, id: 'queued-2', preview: 'second message' },
+        ]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onReorder={onReorder}
+      />,
+    )
+    const first = document.querySelector('[data-queued-turn-id="queued-1"]')!
+    const second = document.querySelector('[data-queued-turn-id="queued-2"]')!
+    const dataTransfer = { effectAllowed: '', dropEffect: '', setData: vi.fn() }
+    fireEvent.dragStart(first, { dataTransfer })
+    fireEvent.dragOver(second, { dataTransfer })
+    fireEvent.dragEnd(first, { dataTransfer })
+
+    expect(onReorder).not.toHaveBeenCalled()
   })
 
   it('hides Edit message unless an edit handler is wired up', () => {

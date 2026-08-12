@@ -4,6 +4,7 @@ import {
   ImagePlus,
   Plug,
   Plus,
+  Quote,
   Send,
   Square,
   Target,
@@ -56,6 +57,7 @@ import {
 } from "./attachment-preview";
 import { GoalPanel, type GoalPanelProps } from "./goal-control";
 import { isComposingKeyboardEvent } from "../lib/keyboard";
+import type { QuotedSelection } from "../lib/quoted-selection";
 
 /** Composer option menus that app-level shortcuts can open. */
 export type ComposerMenu = "provider" | "permissions" | "sandbox" | "model";
@@ -92,6 +94,10 @@ export type PromptInputProps = {
   capabilities?: AgentCapabilitySummary;
   providerLocked?: boolean;
   showProviderSelector?: boolean;
+  /** Cross-provider destinations shown behind the model menu's handoff step. */
+  handoffProviders?: ProviderOption[];
+  onHandoffProviderSelect?: (provider: AgentProvider) => void;
+  handoffDisabledReason?: string | null;
   models: ModelSummary[];
   selectedModelId: string | null;
   onModelChange: (value: string) => void;
@@ -143,10 +149,12 @@ export type PromptInputProps = {
   onConnectorsClick?: () => void;
   /**
    * Thread goal wiring. When passed, the plus menu gains a Goal entry that
-   * opens the set/clear surface in place. Omitted when the thread's provider
-   * has no goal support (or no thread is selected yet).
+   * opens the set/clear surface in place. Hosts may create the thread lazily
+   * from onSetGoal; omit only when the selected provider has no goal support.
    */
   goal?: Omit<GoalPanelProps, "onDone">;
+  quotedSelections?: readonly QuotedSelection[];
+  onRemoveQuotedSelection?: (selectionId: string) => void;
 };
 
 const PROMPT_INPUT_MIN_HEIGHT = 52;
@@ -171,6 +179,8 @@ const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
   { provider: "codex", label: "Codex" },
   { provider: "claude", label: "Claude" },
 ];
+const EMPTY_HANDOFF_PROVIDER_OPTIONS: ProviderOption[] = [];
+const EMPTY_QUOTED_SELECTIONS: readonly QuotedSelection[] = [];
 
 /** Keeps a disabled picker mounted when the host passes no handler for it. */
 const noopModeChange = () => {};
@@ -193,6 +203,9 @@ export const PromptInput = memo(function PromptInput({
   capabilities = NO_AGENT_CAPABILITIES,
   providerLocked = false,
   showProviderSelector = true,
+  handoffProviders = EMPTY_HANDOFF_PROVIDER_OPTIONS,
+  onHandoffProviderSelect,
+  handoffDisabledReason = null,
   models,
   selectedModelId,
   onModelChange,
@@ -221,6 +234,8 @@ export const PromptInput = memo(function PromptInput({
   connectorCount = 0,
   onConnectorsClick,
   goal,
+  quotedSelections = EMPTY_QUOTED_SELECTIONS,
+  onRemoveQuotedSelection,
 }: PromptInputProps) {
   const textareaId = useId();
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -247,7 +262,10 @@ export const PromptInput = memo(function PromptInput({
   const [attachmentInputNotice, setAttachmentInputNotice] = useState<
     string | null
   >(null);
-  const hasContent = value.trim().length > 0 || attachments.length > 0;
+  const hasContent =
+    value.trim().length > 0 ||
+    attachments.length > 0 ||
+    quotedSelections.length > 0;
   const isPreparingAttachments = preparingAttachmentCount > 0;
   const canAttachImages =
     Boolean(onPickImages) && capabilities.supports_images && !disabled;
@@ -709,6 +727,36 @@ export const PromptInput = memo(function PromptInput({
             ) : null}
           </div>
         ) : null}
+        {quotedSelections.length > 0 ? (
+          <div className="border-b border-border-subtle px-4 py-3">
+            <div className="mb-2 flex items-center gap-2 text-[length:var(--fd-text-xs)] font-medium text-fg-muted">
+              <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+              {quotedSelections.length} selected {quotedSelections.length === 1 ? "excerpt" : "excerpts"}
+            </div>
+            <div className="flex max-h-48 flex-col gap-2 overflow-y-auto">
+              {quotedSelections.map((selection, index) => (
+                <div
+                  key={selection.id}
+                  className="group/quote flex items-start gap-2 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 px-3 py-2 shadow-sm"
+                >
+                  <blockquote className="line-clamp-2 min-w-0 flex-1 whitespace-pre-wrap border-l-2 border-accent pl-2 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary">
+                    {selection.text}
+                  </blockquote>
+                  {onRemoveQuotedSelection ? (
+                    <button
+                      type="button"
+                      onClick={() => onRemoveQuotedSelection(selection.id)}
+                      aria-label={`Remove selected excerpt ${index + 1}`}
+                      className="fd-focus inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-fg-muted transition-colors hover:bg-surface-4 hover:text-fg-primary"
+                    >
+                      <X aria-hidden="true" className="h-3.5 w-3.5" />
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
 
         {/* Textarea */}
         <label htmlFor={textareaId} className="sr-only">
@@ -1053,6 +1101,9 @@ export const PromptInput = memo(function PromptInput({
                 showFastRow={
                   Boolean(onServiceTierChange) && anyModelHasFastTier(models)
                 }
+                handoffProviders={handoffProviders}
+                onHandoffProviderSelect={onHandoffProviderSelect}
+                handoffDisabledReason={handoffDisabledReason}
                 disabled={disabled}
                 {...optionMenuProps("model")}
               />

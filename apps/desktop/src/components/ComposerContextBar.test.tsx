@@ -1,5 +1,5 @@
 import React from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ComposerContextBar } from '@falcondeck/chat-ui'
@@ -21,16 +21,20 @@ function workspace(id: string, path: string): WorkspaceSummary {
   } as unknown as WorkspaceSummary
 }
 
+const localWorkspace = workspace('ws-1', '/Users/dev/falcondeck')
+const otherLocal = workspace('ws-2', '/Users/dev/lucidpic')
+const remoteWorkspace = workspace('ws-remote', '/home/forge/projects/quizgecko')
+
 const baseProps = {
-  workspaces: [workspace('ws-1', '/Users/dev/falcondeck'), workspace('ws-2', '/Users/dev/lucidpic')],
-  selectedWorkspace: workspace('ws-1', '/Users/dev/falcondeck'),
+  workspaces: [localWorkspace, otherLocal],
+  selectedWorkspace: localWorkspace,
   onSelectWorkspace: vi.fn(),
   selectedIsolation: 'project_folder' as const,
   onIsolationChange: vi.fn(),
 }
 
 describe('ComposerContextBar', () => {
-  it('shows the project, isolation, and branch chips for a git workspace', () => {
+  it('shows the project, location, isolation, and branch chips for a git workspace', () => {
     render(
       <ComposerContextBar
         {...baseProps}
@@ -41,8 +45,67 @@ describe('ComposerContextBar', () => {
     )
 
     expect(screen.getByRole('button', { name: 'Project' })).toHaveTextContent('falcondeck')
+    expect(screen.getByText('Local')).toBeInTheDocument()
     expect(screen.getByRole('combobox', { name: 'Work in' })).toHaveTextContent('Project folder')
     expect(screen.getByRole('button', { name: 'Git branch' })).toHaveTextContent('main')
+  })
+
+  it('labels remote projects with the host name and a host location chip', () => {
+    render(
+      <ComposerContextBar
+        {...baseProps}
+        workspaces={[localWorkspace, remoteWorkspace]}
+        selectedWorkspace={remoteWorkspace}
+        workspaceHosts={{
+          'ws-remote': { name: 'quizgecko-ops-2', connected: true },
+        }}
+        remoteHosts={[{ id: 'host-1', name: 'quizgecko-ops-2', connected: true }]}
+        onAddRemoteProject={vi.fn()}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Project' })).toHaveTextContent('quizgecko')
+    // Location chip next to the project picker.
+    expect(screen.getByTitle('Runs on quizgecko-ops-2')).toHaveTextContent('quizgecko-ops-2')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    expect(
+      screen.getByRole('menuitemradio', { name: 'quizgecko quizgecko-ops-2' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('menuitem', { name: 'New remote project' })).toBeInTheDocument()
+  })
+
+  it('adds a remote project path on the selected host', async () => {
+    const onAddRemoteProject = vi.fn().mockResolvedValue(undefined)
+    render(
+      <ComposerContextBar
+        {...baseProps}
+        remoteHosts={[{ id: 'host-1', name: 'quizgecko-ops-2', connected: true }]}
+        onAddRemoteProject={onAddRemoteProject}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New remote project' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Remote project path' }), {
+      target: { value: '/home/forge/projects/miner' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Add project' }))
+
+    await waitFor(() => {
+      expect(onAddRemoteProject).toHaveBeenCalledWith('host-1', '/home/forge/projects/miner')
+    })
+  })
+
+  it('offers New project for local folder pick when wired', () => {
+    const onAddLocalProject = vi.fn()
+    render(
+      <ComposerContextBar {...baseProps} onAddLocalProject={onAddLocalProject} />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    fireEvent.click(screen.getByRole('menuitem', { name: 'New project' }))
+    expect(onAddLocalProject).toHaveBeenCalled()
   })
 
   it('hides the branch chip when the workspace has no branch data', () => {

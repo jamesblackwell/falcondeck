@@ -18,6 +18,12 @@ turn-lifecycle, and service/error events. A future calm attention screen can
 consume those same primitives and retain richer history; push payloads should
 remain small and generic.
 
+The packaged macOS desktop app delivers these attention events through the
+Tauri native notification plugin, so FalconDeck is registered with macOS
+Notification Center under its app bundle identity. Desktop delivery follows
+the same daemon-owned notification preferences as mobile; browser previews do
+not attempt native delivery.
+
 ## Current flow
 
 ```text
@@ -86,6 +92,10 @@ notification so stale task completions do not arrive indefinitely.
 5. Reconnect the mobile app and confirm no duplicate push is generated while
    it is live; toggle preferences on each client and verify the other client
    reflects the update.
+6. On macOS, restart the packaged desktop app after installing a build with
+   native notifications, trigger an approval/question or completed turn while
+   FalconDeck is unfocused, and confirm FalconDeck appears in System Settings
+   > Notifications with the configured alert style.
 
 Quiz Gecko's existing Laravel notification stack uses direct FCM tokens and
 `NotificationChannels\\Fcm\\FcmChannel`. It is a separate product path and

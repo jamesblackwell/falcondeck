@@ -5,6 +5,72 @@ import { describe, expect, it, vi } from 'vitest'
 import { Conversation } from '@falcondeck/chat-ui'
 
 describe('Conversation empty state', () => {
+  it('offers selected assistant text as composer context', () => {
+    const onQuoteSelection = vi.fn()
+    render(
+      <Conversation
+        items={[
+          {
+            kind: 'assistant_message',
+            id: 'assistant-selectable',
+            text: 'Choose this phrase',
+            lifecycle: 'complete',
+            created_at: '2026-08-12T12:00:00Z',
+          },
+        ]}
+        onQuoteSelection={onQuoteSelection}
+      />,
+    )
+
+    const phrase = screen.getByText('Choose this phrase')
+    const range = document.createRange()
+    range.selectNodeContents(phrase)
+    Object.defineProperty(range, 'getBoundingClientRect', {
+      value: () => ({ left: 20, top: 80, width: 120, height: 20, right: 140, bottom: 100 }),
+    })
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+
+    fireEvent.mouseUp(screen.getByRole('log', { name: 'Conversation' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add selected text to chat' }))
+
+    expect(onQuoteSelection).toHaveBeenCalledWith('Choose this phrase')
+  })
+
+  it('dismisses the add-to-chat action when the browser selection is cleared', () => {
+    render(
+      <Conversation
+        items={[
+          {
+            kind: 'user_message',
+            id: 'user-selectable',
+            text: 'Keep this selection',
+            attachments: [],
+            created_at: '2026-08-12T12:00:00Z',
+          },
+        ]}
+        onQuoteSelection={vi.fn()}
+      />,
+    )
+
+    const phrase = screen.getByText('Keep this selection')
+    const range = document.createRange()
+    range.selectNodeContents(phrase)
+    Object.defineProperty(range, 'getBoundingClientRect', {
+      value: () => ({ left: 20, top: 80, width: 120, height: 20, right: 140, bottom: 100 }),
+    })
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    fireEvent.mouseUp(screen.getByRole('log', { name: 'Conversation' }))
+
+    expect(screen.getByRole('button', { name: 'Add selected text to chat' })).toBeInTheDocument()
+    selection?.removeAllRanges()
+    fireEvent(document, new Event('selectionchange'))
+    expect(screen.queryByRole('button', { name: 'Add selected text to chat' })).toBeNull()
+  })
+
   it('exposes transcript semantics without turning each token into a live announcement', () => {
     render(<Conversation items={[]} isThinking />)
 

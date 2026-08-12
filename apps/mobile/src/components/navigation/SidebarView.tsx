@@ -12,14 +12,14 @@ import { FlashList } from '@shopify/flash-list'
 import { ChevronDown, ChevronRight, Settings, SquarePen, X } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
-import type { ProjectGroup, ThreadSummary } from '@falcondeck/client-core'
+import type { ProjectGroup, ThreadSummary, ThreadTag } from '@falcondeck/client-core'
 
-import { Text, Button, EmptyState, Input, NativeSheet, SyncBanner } from '@/components/ui'
+import { Text, Button, EmptyState, SyncBanner } from '@/components/ui'
 import { SessionListItem } from '@/components/chat'
 import { useCollapsible } from '@/components/chat/useCollapsible'
 import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
-import { useThreadActions } from '@/hooks/useThreadActions'
 import { buildSidebarRows, SHOW_MORE_STEP, type SidebarRow } from './sidebarRows'
+import { ThreadOptionsSheet } from './ThreadOptionsSheet'
 
 interface SidebarViewProps {
   groups: ProjectGroup[]
@@ -29,6 +29,7 @@ interface SidebarViewProps {
   onOpenSettings?: () => void
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
   onClose?: () => void
+  threadTagsById?: Record<string, ThreadTag[]>
 }
 
 // Rotating one chevron rather than swapping two icons, so the open/close
@@ -106,10 +107,10 @@ export const SidebarView = memo(function SidebarView({
   onNewThread,
   onOpenSettings,
   onClose,
+  threadTagsById,
 }: SidebarViewProps) {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
-  const { archiveThread, renameThread, setThreadPinned } = useThreadActions()
   // The sidebar is where "New thread" lives, so it is where the boot-time wait
   // has to be visible: without this the button looks broken for ~10s.
   const syncStatus = useSessionSyncStatus()
@@ -122,10 +123,6 @@ export const SidebarView = memo(function SidebarView({
     workspaceId: string
     thread: ThreadSummary
   } | null>(null)
-  const [sheetMode, setSheetMode] = useState<'menu' | 'rename'>('menu')
-  const [renameValue, setRenameValue] = useState('')
-  const [pendingAction, setPendingAction] = useState<'archive' | 'rename' | 'pin' | null>(null)
-  const [actionError, setActionError] = useState<string | null>(null)
 
   const rows = useMemo(
     () => buildSidebarRows(groups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId),
@@ -172,77 +169,11 @@ export const SidebarView = memo(function SidebarView({
   const openThreadOptions = useCallback((workspaceId: string, thread: ThreadSummary) => {
     void Haptics.selectionAsync()
     setOptionsTarget({ workspaceId, thread })
-    setSheetMode('menu')
-    setRenameValue(thread.title)
-    setActionError(null)
   }, [])
 
   const closeThreadOptions = useCallback(() => {
     setOptionsTarget(null)
-    setRenameValue('')
-    setPendingAction(null)
-    setActionError(null)
-    setSheetMode('menu')
   }, [])
-
-  const handleArchiveThread = useCallback(async () => {
-    if (!optionsTarget) return
-    setPendingAction('archive')
-    setActionError(null)
-    try {
-      await archiveThread(optionsTarget.workspaceId, optionsTarget.thread.id)
-      closeThreadOptions()
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'Failed to archive thread')
-    } finally {
-      setPendingAction(null)
-    }
-  }, [archiveThread, closeThreadOptions, optionsTarget])
-
-  const handleStartRename = useCallback(() => {
-    void Haptics.selectionAsync()
-    setSheetMode('rename')
-    setActionError(null)
-  }, [])
-
-  const handleTogglePin = useCallback(async () => {
-    if (!optionsTarget) return
-    void Haptics.selectionAsync()
-    setPendingAction('pin')
-    setActionError(null)
-    try {
-      await setThreadPinned(
-        optionsTarget.workspaceId,
-        optionsTarget.thread.id,
-        !optionsTarget.thread.is_pinned,
-      )
-      closeThreadOptions()
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'Failed to update pin')
-    } finally {
-      setPendingAction(null)
-    }
-  }, [closeThreadOptions, optionsTarget, setThreadPinned])
-
-  const handleRenameThread = useCallback(async () => {
-    if (!optionsTarget) return
-    const nextTitle = renameValue.trim()
-    if (!nextTitle) {
-      setActionError('Title cannot be empty')
-      return
-    }
-
-    setPendingAction('rename')
-    setActionError(null)
-    try {
-      await renameThread(optionsTarget.workspaceId, optionsTarget.thread.id, nextTitle)
-      closeThreadOptions()
-    } catch (e) {
-      setActionError(e instanceof Error ? e.message : 'Failed to rename thread')
-    } finally {
-      setPendingAction(null)
-    }
-  }, [closeThreadOptions, optionsTarget, renameThread, renameValue])
 
   const renderRow = useCallback(
     ({ item }: { item: SidebarRow }) => {
@@ -327,6 +258,7 @@ export const SidebarView = memo(function SidebarView({
             isSelected={selectedThreadId === item.thread.id}
             onSelectThread={onSelectThread}
             onOpenThreadOptions={openThreadOptions}
+            tags={threadTagsById?.[item.thread.id]}
           />
         </CollapsibleRow>
       )
@@ -340,96 +272,9 @@ export const SidebarView = memo(function SidebarView({
       theme.iconSize.xs,
       toggleWorkspaceCollapse,
       handleOverflowPress,
+      threadTagsById,
     ],
   )
-
-  const renderSheetContent = () => {
-    if (!optionsTarget) return null
-    const isRenaming = sheetMode === 'rename'
-    return (
-      <View>
-        <View style={styles.sheetHandle} />
-        <Text variant="label" color="primary" weight="semibold" style={styles.sheetTitle}>
-          {isRenaming ? 'Rename thread' : 'Thread options'}
-        </Text>
-        <Text variant="caption" color="muted" numberOfLines={1} style={styles.sheetSubtitle}>
-          {optionsTarget.thread.title || 'New thread'}
-        </Text>
-
-        {isRenaming ? (
-          <>
-            <Input
-              value={renameValue}
-              onChangeText={setRenameValue}
-              placeholder="Thread title"
-              autoFocus
-              selectTextOnFocus
-              style={styles.renameInput}
-            />
-            {actionError ? (
-              <Text variant="caption" color="danger" style={styles.errorText}>
-                {actionError}
-              </Text>
-            ) : null}
-            <View style={styles.sheetActions}>
-              <Button
-                variant="ghost"
-                label="Cancel"
-                onPress={closeThreadOptions}
-                disabled={pendingAction === 'rename'}
-              />
-              <Button
-                label="Save"
-                onPress={() => void handleRenameThread()}
-                loading={pendingAction === 'rename'}
-                disabled={!renameValue.trim()}
-              />
-            </View>
-          </>
-        ) : (
-          <>
-            <Pressable
-              style={styles.sheetItem}
-              accessibilityRole="button"
-              onPress={() => void handleTogglePin()}
-              disabled={pendingAction === 'pin'}
-            >
-              <Text variant="label" color="primary">
-                {optionsTarget.thread.is_pinned ? 'Unpin' : 'Pin'}
-              </Text>
-              <ChevronRight size={14} color={theme.colors.fg.muted} />
-            </Pressable>
-            <Pressable
-              style={styles.sheetItem}
-              accessibilityRole="button"
-              onPress={handleStartRename}
-            >
-              <Text variant="label" color="primary">
-                Rename
-              </Text>
-              <ChevronRight size={14} color={theme.colors.fg.muted} />
-            </Pressable>
-            <Pressable
-              style={[styles.sheetItem, styles.dangerRow]}
-              accessibilityRole="button"
-              onPress={() => void handleArchiveThread()}
-              disabled={pendingAction === 'archive'}
-            >
-              <Text variant="label" color="danger">
-                Archive
-              </Text>
-              <ChevronRight size={14} color={theme.colors.danger.default} />
-            </Pressable>
-            {actionError ? (
-              <Text variant="caption" color="danger" style={styles.errorText}>
-                {actionError}
-              </Text>
-            ) : null}
-          </>
-        )}
-      </View>
-    )
-  }
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -489,13 +334,11 @@ export const SidebarView = memo(function SidebarView({
       ) : null}
 
       {optionsTarget ? (
-        <NativeSheet
+        <ThreadOptionsSheet
+          workspaceId={optionsTarget.workspaceId}
+          thread={optionsTarget.thread}
           onClose={closeThreadOptions}
-          accessibilityLabel="Close thread options"
-          contentStyle={styles.sheetContent}
-        >
-          {renderSheetContent()}
-        </NativeSheet>
+        />
       ) : null}
     </View>
   )
@@ -577,51 +420,5 @@ const styles = StyleSheet.create((theme) => ({
   },
   chevronFlipped: {
     transform: [{ rotate: '180deg' }],
-  },
-  sheetContent: {
-    paddingHorizontal: theme.spacing[4],
-  },
-  sheetHandle: {
-    width: theme.spacing[8] + theme.spacing[1],
-    height: theme.spacing[1],
-    borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.border.emphasis,
-    alignSelf: 'center',
-    marginTop: theme.spacing[2],
-    marginBottom: theme.spacing[2],
-  },
-  sheetTitle: {
-    paddingHorizontal: theme.spacing[2],
-  },
-  sheetSubtitle: {
-    paddingHorizontal: theme.spacing[2],
-    marginBottom: theme.spacing[2],
-  },
-  sheetItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    minHeight: theme.minTouchTarget,
-    paddingVertical: theme.spacing[3],
-    paddingHorizontal: theme.spacing[2],
-    borderRadius: theme.radius.lg,
-    backgroundColor: theme.colors.surface[2],
-    marginBottom: theme.spacing[2],
-  },
-  dangerRow: {
-    backgroundColor: theme.colors.danger.muted,
-  },
-  renameInput: {
-    marginTop: theme.spacing[2],
-  },
-  sheetActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: theme.spacing[2],
-    marginTop: theme.spacing[3],
-  },
-  errorText: {
-    marginTop: theme.spacing[1],
-    paddingHorizontal: theme.spacing[2],
   },
 }))

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { decryptJson, encryptJson } from './crypto'
+import { decryptJson, decryptJsonBatch, encryptJson } from './crypto'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -30,5 +30,22 @@ describe('AES session key reuse', () => {
     await encryptJson(secondKey, { value: 3 })
 
     expect(importKey).toHaveBeenCalledTimes(2)
+  })
+
+  it('decrypts batches in order while isolating malformed envelopes', async () => {
+    const key = new Uint8Array(32).fill(41)
+    const [first, third] = await Promise.all([
+      encryptJson(key, { value: 1 }),
+      encryptJson(key, { value: 3 }),
+    ])
+    const results = await decryptJsonBatch<{ value: number }>(key, [
+      first,
+      { ...first, ciphertext: 'malformed' },
+      third,
+    ])
+
+    expect(results[0]).toMatchObject({ status: 'fulfilled', value: { value: 1 } })
+    expect(results[1]).toMatchObject({ status: 'rejected' })
+    expect(results[2]).toMatchObject({ status: 'fulfilled', value: { value: 3 } })
   })
 })

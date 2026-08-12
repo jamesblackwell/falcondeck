@@ -1,5 +1,6 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{
         Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -15,10 +16,10 @@ use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ApprovalResponseRequest, ClientActivityRequest, ConnectWorkspaceRequest, ForkThreadRequest,
-    InteractiveResponseRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
-    SnapshotRequest, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
-    ThreadDetailMode, ThreadDetailRequest, UnifiedEvent, UpdatePreferencesRequest,
-    UpdateThreadRequest,
+    InteractiveResponseRequest, InvokeExtensionActionRequest, MarkThreadReadRequest,
+    SendTurnRequest, SetThreadGoalRequest, SnapshotRequest, StartRemotePairingRequest,
+    StartReviewRequest, StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
+    UpdateExtensionRequest, UpdatePreferencesRequest, UpdateThreadRequest,
 };
 
 use crate::{
@@ -153,8 +154,16 @@ pub fn router(state: AppState) -> Router {
             delete(remove_queued_turn).patch(edit_queued_turn),
         )
         .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/reorder",
+            post(reorder_queued_turns),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/{queued_id}/steer",
             post(steer_queued_turn),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/queue/{queued_id}/attachment-preview",
+            get(queued_turn_attachment_preview),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/review",
@@ -173,6 +182,15 @@ pub fn router(state: AppState) -> Router {
             get(read_connectors).put(update_connectors),
         )
         .route("/api/providers", get(read_providers).put(update_providers))
+        .route("/api/extensions", get(extensions))
+        .route(
+            "/api/extensions/{extension_id}",
+            axum::routing::patch(update_extension),
+        )
+        .route(
+            "/api/extensions/{extension_id}/actions/{action_id}",
+            post(invoke_extension_action),
+        )
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
         .route("/api/workspaces/{workspace_id}/files", get(workspace_files))
@@ -223,6 +241,34 @@ async fn update_preferences(
     Json(request): Json<UpdatePreferencesRequest>,
 ) -> Result<Json<falcondeck_core::FalconDeckPreferences>, DaemonError> {
     Ok(Json(state.update_preferences(request).await?))
+}
+
+async fn extensions(State(state): State<AppState>) -> Json<falcondeck_core::ExtensionSnapshot> {
+    Json(state.extension_snapshot().await)
+}
+
+async fn update_extension(
+    State(state): State<AppState>,
+    Path(extension_id): Path<String>,
+    Json(request): Json<UpdateExtensionRequest>,
+) -> Result<Json<falcondeck_core::ExtensionSummary>, DaemonError> {
+    Ok(Json(
+        state
+            .update_extension(&extension_id, request.enabled)
+            .await?,
+    ))
+}
+
+async fn invoke_extension_action(
+    State(state): State<AppState>,
+    Path((extension_id, action_id)): Path<(String, String)>,
+    Json(request): Json<InvokeExtensionActionRequest>,
+) -> Result<Json<falcondeck_core::ExtensionActionResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .invoke_extension_action(&extension_id, &action_id, request)
+            .await?,
+    ))
 }
 
 async fn client_activity(
@@ -561,6 +607,80 @@ async fn edit_queued_turn(
 }
 
 #[derive(serde::Deserialize)]
+struct ReorderQueuedTurnsRequest {
+    queued_ids: Vec<String>,
+}
+
+async fn reorder_queued_turns(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(request): Json<ReorderQueuedTurnsRequest>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .reorder_queued_turns(&workspace_id, &thread_id, &request.queued_ids)
+            .await?,
+    ))
+}
+
+async fn queued_turn_attachment_preview(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id, queued_id)): Path<(String, String, String)>,
+) -> Result<Response, DaemonError> {
+    let attachment = state
+        .queued_turn_attachment(&workspace_id, &thread_id, &queued_id)
+        .await?;
+    let path = attachment
+        .local_path
+        .as_deref()
+        .or_else(|| {
+            std::path::Path::new(&attachment.url)
+                .is_absolute()
+                .then_some(attachment.url.as_str())
+        })
+        .ok_or_else(|| DaemonError::NotFound("queued image preview unavailable".to_string()))?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| DaemonError::NotFound("queued image preview unavailable".to_string()))?;
+    // Queue inputs originate at the client, so neither the declared MIME nor
+    // an arbitrary local path is proof that the file is an image. Confirm a
+    // raster signature before exposing daemon-readable bytes over HTTP.
+    let mime = queued_attachment_preview_mime_type(&bytes)
+        .ok_or_else(|| DaemonError::NotFound("queued image preview unavailable".to_string()))?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, mime)
+        .header(header::CACHE_CONTROL, "private, max-age=60")
+        .body(Body::from(bytes))
+        .map_err(|error| DaemonError::Process(error.to_string()))
+}
+
+fn queued_attachment_preview_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("image/bmp")
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        Some("image/tiff")
+    } else if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && matches!(
+            &bytes[8..12],
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1"
+        )
+    {
+        Some("image/heic")
+    } else {
+        None
+    }
+}
+
+#[derive(serde::Deserialize)]
 struct ConnectorsQuery {
     workspace_id: Option<String>,
 }
@@ -800,7 +920,7 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::is_loopback_host;
+    use super::{is_loopback_host, queued_attachment_preview_mime_type};
 
     #[test]
     fn accepts_loopback_hosts_with_and_without_ports() {
@@ -821,5 +941,18 @@ mod tests {
         assert!(!is_loopback_host("[2001:db8::1]:4520"));
         assert!(!is_loopback_host("[::1]evil"));
         assert!(!is_loopback_host(""));
+    }
+
+    #[test]
+    fn queued_attachment_previews_require_image_bytes() {
+        assert_eq!(
+            queued_attachment_preview_mime_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            queued_attachment_preview_mime_type(b"\xff\xd8\xffrest"),
+            Some("image/jpeg")
+        );
+        assert_eq!(queued_attachment_preview_mime_type(b"not an image"), None);
     }
 }

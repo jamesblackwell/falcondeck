@@ -20,7 +20,8 @@ export type WorkspaceGroupProps = {
   onSelect: () => void
   onNewThread?: () => void
   onOpenContextMenu?: (position: { x: number; y: number }) => void
-  dragHandleProps?: React.HTMLAttributes<HTMLDivElement> & React.RefAttributes<HTMLDivElement>
+  dragHandleProps?: React.HTMLAttributes<HTMLDivElement> &
+    React.RefAttributes<HTMLDivElement>
   children: React.ReactNode
 }
 
@@ -46,7 +47,9 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
     [onSelect],
   )
 
-  const FolderIcon = host ? Globe : FolderClosed
+  const hostLabel = host
+    ? `${host.name} · ${host.connected ? 'Connected' : 'Offline'}`
+    : undefined
 
   return (
     <Collapsible.Root asChild open={isOpen} onOpenChange={handleOpenChange}>
@@ -64,9 +67,11 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
           className={cn(
             'group flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5',
             'transition-colors duration-[var(--fd-duration-fast)]',
-            isSelected
-              ? 'bg-surface-2 text-fg-primary'
-              : 'text-fg-secondary hover:bg-surface-2 hover:text-fg-primary',
+            // The project row is a header, not a selection target — the
+            // selected thread inside it already carries the highlight, so this
+            // row only shifts text weight.
+            isSelected ? 'text-fg-primary' : 'text-fg-secondary',
+            'hover:bg-interactive-hover hover:text-fg-primary active:bg-interactive-active',
             dragHandleProps?.className,
           )}
         >
@@ -74,37 +79,64 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
             {/* Folder and chevron are stacked so they can crossfade on hover
                 while the chevron keeps rotating through the open/close toggle. */}
             <span className="relative h-4 w-4 shrink-0">
-              <FolderIcon
+              <span
                 aria-hidden="true"
                 className={cn(
-                  'absolute inset-0 h-4 w-4 text-fg-muted transition-opacity duration-[var(--fd-duration-fast)]',
+                  'absolute inset-0 transition-opacity duration-[var(--fd-duration-fast)]',
                   isOpen ? 'opacity-100 group-hover:opacity-0' : 'opacity-0',
                 )}
-              />
+              >
+                <FolderClosed className="absolute inset-0 h-4 w-4 text-fg-muted" />
+                {/* Remote workspaces get a small globe badge on the folder
+                    instead of a separate icon or a second subtitle line. */}
+                {host ? (
+                  <Globe
+                    className={cn(
+                      'absolute -bottom-px -right-px h-2.5 w-2.5',
+                      host.connected
+                        ? 'text-fg-muted'
+                        : 'text-fg-muted opacity-60',
+                    )}
+                  />
+                ) : null}
+              </span>
               <ChevronRight
                 aria-hidden="true"
                 className={cn(
                   'absolute inset-0 h-4 w-4 text-fg-muted',
                   'transition-[transform,opacity] duration-[var(--fd-duration-normal)] ease-[var(--fd-ease-default)]',
-                  isOpen ? 'rotate-90 opacity-0 group-hover:opacity-100' : 'rotate-0 opacity-100',
+                  isOpen
+                    ? 'rotate-90 opacity-0 group-hover:opacity-100'
+                    : 'rotate-0 opacity-100',
                 )}
               />
             </span>
-            <span className="min-w-0 flex-1">
-              <span className="block truncate text-[length:var(--fd-text-sm)] font-medium">
+            <span className="flex min-w-0 flex-1 items-center gap-2">
+              <span className="truncate text-[length:var(--fd-text-sm)] font-medium">
                 {pathLabel}
               </span>
+              {/* Host sits quietly at the right edge of the same row: muted
+                  name plus a small connection dot, no extra line. */}
               {host ? (
-                <span className="mt-0.5 flex items-center gap-1.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+                <span
+                  title={hostLabel}
+                  className={cn(
+                    'ml-auto flex min-w-0 shrink items-center gap-1.5 text-[length:var(--fd-text-xs)] text-fg-muted',
+                    host.connected ? null : 'opacity-60',
+                  )}
+                >
+                  <span className="truncate">{host.name}</span>
                   <span
                     aria-hidden="true"
                     className={cn(
                       'h-1.5 w-1.5 shrink-0 rounded-full',
-                      host.connected ? 'bg-[var(--color-success,#30a46c)]' : 'bg-fg-muted',
+                      host.connected
+                        ? 'bg-[var(--color-success,#30a46c)]'
+                        : 'bg-fg-muted',
                     )}
                   />
-                  <span className="truncate">
-                    {host.name} · {host.connected ? 'Connected' : 'Offline'}
+                  <span className="sr-only">
+                    {host.connected ? 'Connected' : 'Offline'}
                   </span>
                 </span>
               ) : null}
@@ -113,6 +145,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
           {onNewThread ? (
             <button
               type="button"
+              data-no-workspace-drag="true"
               onClick={onNewThread}
               title={`Start new thread in ${pathLabel}`}
               aria-label={`Start new thread in ${pathLabel}`}

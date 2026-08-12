@@ -696,6 +696,149 @@ pub struct DaemonSnapshot {
     /// Global FalconDeck preferences persisted by the daemon.
     #[serde(default)]
     pub preferences: FalconDeckPreferences,
+    /// Installed extensions and their synchronized client-facing projections.
+    #[serde(default)]
+    pub extensions: ExtensionSnapshot,
+}
+
+/// Installed extension catalog plus bounded client-facing view state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ExtensionSnapshot {
+    /// Extensions known to this daemon.
+    pub catalog: Vec<ExtensionSummary>,
+    /// Latest non-secret view state published by enabled extensions.
+    pub views: Vec<ExtensionView>,
+}
+
+/// Client-visible state for an installed extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionSummary {
+    /// Globally unique extension id.
+    pub id: String,
+    /// User-facing extension name.
+    pub name: String,
+    /// Installed semantic version.
+    pub version: String,
+    /// Bundled, local-path, or packed-archive source label.
+    pub source: String,
+    /// Whether this package ships with FalconDeck.
+    pub bundled: bool,
+    /// Whether FalconDeck should activate the extension.
+    pub enabled: bool,
+    /// Current lifecycle state.
+    pub status: ExtensionStatus,
+    /// Latest activation or action failure.
+    #[serde(default)]
+    pub last_error: Option<String>,
+    /// Named UI and action contribution points.
+    #[serde(default)]
+    pub contributes: ExtensionContributions,
+    /// Capabilities requested by the manifest.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+}
+
+/// Extension lifecycle visible in Settings and diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionStatus {
+    /// Installed but not activated.
+    #[default]
+    Disabled,
+    /// Ready to handle actions.
+    Active,
+    /// Activation or execution failed without affecting the daemon.
+    Error,
+}
+
+/// Stable named surfaces an extension contributes to FalconDeck clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionContributions {
+    /// Actions shown in a thread context menu.
+    #[serde(default)]
+    pub thread_menu_actions: Vec<ExtensionActionContribution>,
+    /// Decorations rendered on thread rows.
+    #[serde(default)]
+    pub thread_decorations: Vec<ExtensionViewContribution>,
+    /// Filters made available above the thread list.
+    #[serde(default)]
+    pub sidebar_filters: Vec<ExtensionViewContribution>,
+}
+
+/// Declared action contribution.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionActionContribution {
+    /// Identifier unique within the extension.
+    pub id: String,
+    /// User-facing action title.
+    pub title: String,
+}
+
+/// Declared contribution bound to synchronized view state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionViewContribution {
+    /// Identifier unique within the extension.
+    pub id: String,
+    /// User-facing title when the host surface has one.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Manifest-declared view id consumed by the contribution.
+    pub view: String,
+}
+
+/// Bounded non-secret extension state synchronized to clients.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionView {
+    /// Publishing extension id.
+    pub extension_id: String,
+    /// Manifest-declared view id.
+    pub view_id: String,
+    /// Optional entity scope; absent means daemon-global.
+    #[serde(default)]
+    pub scope: Option<ExtensionViewScope>,
+    /// JSON payload interpreted by the declared contribution.
+    pub value: Value,
+    /// Last successful publication time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Entity associated with an extension projection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct ExtensionViewScope {
+    /// Open entity kind such as `thread` or `workspace`.
+    pub kind: String,
+    /// FalconDeck entity id.
+    pub id: String,
+}
+
+/// Request to enable or disable an installed extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateExtensionRequest {
+    /// Desired activation state.
+    pub enabled: bool,
+}
+
+/// Generic invocation of a manifest-declared extension action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InvokeExtensionActionRequest {
+    /// Optional entity that initiated the action.
+    #[serde(default)]
+    pub target: Option<ExtensionViewScope>,
+    /// Action-specific, size-bounded input.
+    #[serde(default)]
+    pub input: Value,
+}
+
+/// Result returned by a generic extension action.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtensionActionResponse {
+    /// Action-specific result suitable for declarative clients.
+    #[serde(default)]
+    pub result: Value,
+    /// Projections changed by the action.
+    #[serde(default)]
+    pub updated_views: Vec<ExtensionView>,
 }
 
 /// Retained operational notice scoped to a workspace rather than a thread.
@@ -798,6 +941,20 @@ pub struct StartThreadRequest {
     /// between the project folder and an isolated copy afterwards.
     #[serde(default)]
     pub isolation: ThreadIsolation,
+    /// Source thread when this thread is a cross-provider continuation.
+    /// The source session remains unchanged; this only records navigation and
+    /// provenance for the newly created destination thread.
+    #[serde(default)]
+    pub handoff_from: Option<ThreadHandoffSource>,
+}
+
+/// Provenance for a thread created by handing work to another provider.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThreadHandoffSource {
+    /// FalconDeck thread that supplied the handoff context.
+    pub thread_id: String,
+    /// Provider that owns the source thread.
+    pub provider: AgentProvider,
 }
 
 /// Request payload used to fork a provider-owned thread at a completed turn.
@@ -1937,6 +2094,9 @@ pub struct ThreadSummary {
     /// Provider-native session identifier, if one exists.
     #[serde(default)]
     pub native_session_id: Option<String>,
+    /// Source thread when this thread was created by a cross-provider handoff.
+    #[serde(default)]
+    pub handoff_from: Option<ThreadHandoffSource>,
     /// Current lifecycle state of the thread.
     pub status: ThreadStatus,
     /// Timestamp when the thread summary last changed.
@@ -2686,6 +2846,24 @@ pub enum UnifiedEvent {
     PreferencesUpdated {
         /// Updated global preferences payload.
         preferences: FalconDeckPreferences,
+    },
+    /// Installed extension catalog or lifecycle status changed.
+    ExtensionCatalogUpdated {
+        /// Full catalog; small and replaced atomically by clients.
+        catalog: Vec<ExtensionSummary>,
+    },
+    /// An extension published or removed synchronized view state.
+    ExtensionViewUpdated {
+        /// Publishing extension id.
+        extension_id: String,
+        /// Manifest-declared view id.
+        view_id: String,
+        /// Optional entity scope.
+        #[serde(default)]
+        scope: Option<ExtensionViewScope>,
+        /// Replacement view; null removes the prior projection.
+        #[serde(default)]
+        view: Option<ExtensionView>,
     },
     /// New conversation item event.
     ConversationItemAdded {
@@ -3489,6 +3667,7 @@ mod tests {
             service_notices: Vec::new(),
             thread_token_usage: std::collections::BTreeMap::new(),
             preferences: FalconDeckPreferences::default(),
+            extensions: ExtensionSnapshot::default(),
         };
 
         let json = serde_json::to_value(UnifiedEvent::Snapshot { snapshot }).unwrap();

@@ -228,6 +228,27 @@ export function applySnapshotEvent(
         ...snapshot,
         preferences: daemonEvent.preferences,
       };
+    case "extension-catalog-updated":
+      return {
+        ...snapshot,
+        extensions: {
+          ...snapshot.extensions,
+          catalog: daemonEvent.catalog,
+        },
+      };
+    case "extension-view-updated": {
+      const sameView = (view: DaemonSnapshot["extensions"]["views"][number]) =>
+        view.extension_id === daemonEvent.extension_id &&
+        view.view_id === daemonEvent.view_id &&
+        (view.scope?.kind ?? null) === (daemonEvent.scope?.kind ?? null) &&
+        (view.scope?.id ?? null) === (daemonEvent.scope?.id ?? null);
+      const views = snapshot.extensions.views.filter((view) => !sameView(view));
+      if (daemonEvent.view) views.push(daemonEvent.view);
+      return {
+        ...snapshot,
+        extensions: { ...snapshot.extensions, views },
+      };
+    }
     case "service": {
       const notice = daemonEvent.notice;
       const notices = snapshot.service_notices ?? [];

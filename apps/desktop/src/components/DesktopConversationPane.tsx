@@ -1,6 +1,6 @@
 import { useMemo, type ComponentProps, type ReactNode } from 'react'
 
-import { currentTurnPlan } from '@falcondeck/client-core'
+import { currentTurnPlan, wasTurnInterruptedByShutdown } from '@falcondeck/client-core'
 import type {
   ConversationItem,
   FalconDeckPreferences,
@@ -14,12 +14,15 @@ import type {
 } from '@falcondeck/client-core'
 import {
   Conversation,
+  InterruptedTurnNotice,
   OperationalNotice,
   PlanBar,
   PromptInput,
   QueuedTurns,
   type OpenFileDiff,
+  type QuotedSelection,
 } from '@falcondeck/chat-ui'
+import { CollapseRegion, useLastPresent } from '@falcondeck/ui'
 
 import { InteractiveRequestBar } from './InteractiveRequestBar'
 import { ConversationFindBar } from './ConversationFindBar'
@@ -61,6 +64,8 @@ type DesktopConversationPaneProps = {
   onRemoveQueuedTurn?: (queuedId: string) => void
   onSteerQueuedTurn?: (queuedId: string) => void
   onEditQueuedTurn?: (queuedId: string, text: string) => void
+  onReorderQueuedTurns?: (queuedIds: string[]) => void
+  queuedAttachmentBaseUrl?: string | null
   canSteerQueuedTurn?: boolean
   onOpenFile?: OpenFileDiff | null
   headerControls?: ReactNode
@@ -68,7 +73,13 @@ type DesktopConversationPaneProps = {
   onEditResend?: (item: Extract<ConversationItem, { kind: 'user_message' }>) => void
   editResendUnavailableReason?: string | null
   onRetryResponse?: (item: Extract<ConversationItem, { kind: 'user_message' }>) => void
+  onContinueInterruptedTurn?: () => void
+  quotedSelections?: readonly QuotedSelection[]
+  onQuoteSelection?: (text: string) => void
+  onRemoveQuotedSelection?: (selectionId: string) => void
 }
+
+const NO_QUOTED_SELECTIONS: readonly QuotedSelection[] = []
 
 export function DesktopConversationPane({
   selectedWorkspace,
@@ -102,6 +113,8 @@ export function DesktopConversationPane({
   onRemoveQueuedTurn,
   onSteerQueuedTurn,
   onEditQueuedTurn,
+  onReorderQueuedTurns,
+  queuedAttachmentBaseUrl,
   canSteerQueuedTurn,
   onOpenFile,
   headerControls,
@@ -109,10 +122,22 @@ export function DesktopConversationPane({
   onEditResend,
   editResendUnavailableReason,
   onRetryResponse,
+  onContinueInterruptedTurn,
+  quotedSelections = NO_QUOTED_SELECTIONS,
+  onQuoteSelection,
+  onRemoveQuotedSelection,
 }: DesktopConversationPaneProps) {
   // The live plan is pinned above the composer instead of scrolling away with
   // the rest of the turn; the transcript skips the same item.
   const pinnedPlan = useMemo(() => currentTurnPlan(conversationItems), [conversationItems])
+  // Notices collapse rather than vanish, so the outgoing content has to
+  // survive the frame where its source data goes away.
+  const lastOperationalNotice = useLastPresent(operationalNotice)
+  const showInterruptedNotice = Boolean(
+    selectedThread &&
+      wasTurnInterruptedByShutdown(selectedThread) &&
+      onContinueInterruptedTurn,
+  )
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface-1">
       <SessionHeader
@@ -133,9 +158,22 @@ export function DesktopConversationPane({
         />
         {headerControls}
       </SessionHeader>
-      {operationalNotice ? (
-        <OperationalNotice notice={operationalNotice} onDismiss={onDismissOperationalNotice} />
-      ) : null}
+      <CollapseRegion open={Boolean(operationalNotice)}>
+        {lastOperationalNotice ? (
+          <OperationalNotice
+            notice={lastOperationalNotice}
+            onDismiss={onDismissOperationalNotice}
+          />
+        ) : null}
+      </CollapseRegion>
+      <CollapseRegion open={showInterruptedNotice}>
+        {onContinueInterruptedTurn ? (
+          <InterruptedTurnNotice
+            onContinue={onContinueInterruptedTurn}
+            isContinuing={isSending}
+          />
+        ) : null}
+      </CollapseRegion>
       <ConversationFindBar requestKey={findRequestKey} />
       <Conversation
         threadKey={
@@ -160,6 +198,7 @@ export function DesktopConversationPane({
         editResendUnavailableReason={editResendUnavailableReason}
         onRetryResponse={onRetryResponse}
         pinnedPlanId={pinnedPlan?.itemId ?? null}
+        onQuoteSelection={onQuoteSelection}
       />
       {pinnedPlan ? <PlanBar plan={pinnedPlan.plan} threadKey={selectedThreadId} /> : null}
       <InteractiveRequestBar requests={interactiveRequests} onRespond={onInteractiveResponse} />
@@ -170,9 +209,21 @@ export function DesktopConversationPane({
           onRemove={onRemoveQueuedTurn}
           onSteer={onSteerQueuedTurn}
           onEdit={onEditQueuedTurn}
+          onReorder={onReorderQueuedTurns}
+          getAttachmentPreviewUrl={
+            queuedAttachmentBaseUrl && selectedWorkspaceId && selectedThreadId
+              ? (queuedId) =>
+                  `${queuedAttachmentBaseUrl}/api/workspaces/${encodeURIComponent(selectedWorkspaceId)}/threads/${encodeURIComponent(selectedThreadId)}/queue/${encodeURIComponent(queuedId)}/attachment-preview`
+              : undefined
+          }
         />
       ) : null}
-      <PromptInput key={promptInputKey} {...promptInputProps} />
+      <PromptInput
+        key={promptInputKey}
+        {...promptInputProps}
+        quotedSelections={quotedSelections}
+        onRemoveQuotedSelection={onRemoveQuotedSelection}
+      />
     </section>
   )
 }

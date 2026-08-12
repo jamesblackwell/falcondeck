@@ -48,6 +48,26 @@ describe("splitStreamingMarkdownBlocks", () => {
       tail: "After",
     });
   });
+
+  it("accepts CommonMark closing-fence indentation and trailing whitespace", () => {
+    expect(
+      splitStreamingMarkdownBlocks(
+        "Before.\n\n~~~~lang\nbody\n   ~~~~~ \t\n\nAfter",
+      ),
+    ).toEqual({
+      completed: ["Before.\n\n", "~~~~lang\nbody\n   ~~~~~ \t\n\n"],
+      tail: "After",
+    });
+  });
+
+  it("does not close a fence with excess indentation or trailing content", () => {
+    const text =
+      "```ts\nbody\n    ```\n\nstill fenced\n``` suffix\n\nstill fenced";
+    expect(splitStreamingMarkdownBlocks(text)).toEqual({
+      completed: [],
+      tail: text,
+    });
+  });
 });
 
 describe("renderMarkdown links", () => {

@@ -5,7 +5,7 @@
   "identifier": "com.falcondeck.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run extension-runtime:prepare --prefix ../.. && npm run build",
     "devUrl": "http://localhost:1420",
     "frontendDist": "../dist",
     "additionalWatchFolders": [
@@ -16,6 +16,9 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
+    "externalBin": [
+      "binaries/deno"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

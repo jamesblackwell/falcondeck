@@ -1136,8 +1136,7 @@ fn hydrate_thread_from_file(path: &Path, workspace_path: &str) -> Option<Hydrate
             let cache = SESSION_FILE_CACHE.get_or_init(Default::default);
             let cached = cache.lock().ok().and_then(|entries| {
                 entries.get(path).and_then(|entry| {
-                    (entry.modified == modified && entry.len == len)
-                        .then(|| entry.session.clone())
+                    (entry.modified == modified && entry.len == len).then(|| entry.session.clone())
                 })
             });
             match cached {
@@ -1180,6 +1179,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
     let mut ai_title = None;
     let mut updated_at = None;
     let mut items = Vec::new();
+    let mut item_index = HydratedItemIndex::default();
     let mut tool_identity = HashMap::<String, (String, String)>::new();
 
     for line in reader.lines().map_while(Result::ok) {
@@ -1237,6 +1237,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
                 .unwrap_or_else(|| format!("assistant-{}", created_at.timestamp_millis()));
             upsert_hydrated_reasoning(
                 &mut items,
+                &mut item_index.reasoning,
                 &format!("{id}-reasoning"),
                 created_at,
                 &chunk.text,
@@ -1248,6 +1249,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
                 .unwrap_or_else(|| format!("assistant-{}", created_at.timestamp_millis()));
             upsert_hydrated_assistant_message(
                 &mut items,
+                &mut item_index.assistant_messages,
                 &id,
                 created_at,
                 &chunk.text,
@@ -1275,6 +1277,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
             }
             upsert_hydrated_tool_call(
                 &mut items,
+                &mut item_index.tool_calls,
                 &tool_event.id,
                 &title,
                 &tool_kind,
@@ -1334,6 +1337,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
             .unwrap_or_else(|| "Claude thread".to_string()),
         provider: AgentProvider::CLAUDE,
         native_session_id: Some(session_id),
+        handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: updated_at.or(file_updated_at).unwrap_or(now),
         last_message_preview,
@@ -1357,8 +1361,16 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
     })
 }
 
+#[derive(Default)]
+struct HydratedItemIndex {
+    assistant_messages: HashMap<String, usize>,
+    reasoning: HashMap<String, usize>,
+    tool_calls: HashMap<String, usize>,
+}
+
 fn upsert_hydrated_assistant_message(
     items: &mut Vec<ConversationItem>,
+    item_index: &mut HashMap<String, usize>,
     id: &str,
     created_at: DateTime<Utc>,
     text: &str,
@@ -1369,9 +1381,7 @@ fn upsert_hydrated_assistant_message(
         text: existing,
         citations,
         ..
-    }) = items
-        .iter_mut()
-        .find(|item| matches!(item, ConversationItem::AssistantMessage { id: existing_id, .. } if existing_id == id))
+    }) = item_index.get(id).and_then(|index| items.get_mut(*index))
     {
         if !text.is_empty() {
             *existing = if is_delta {
@@ -1386,6 +1396,7 @@ fn upsert_hydrated_assistant_message(
 
     let mut citations = Vec::new();
     merge_conversation_citations(&mut citations, incoming_citations.iter().cloned(), id);
+    item_index.insert(id.to_string(), items.len());
     items.push(ConversationItem::AssistantMessage {
         id: id.to_string(),
         text: text.trim().to_string(),
@@ -1399,6 +1410,7 @@ fn upsert_hydrated_assistant_message(
 
 fn upsert_hydrated_reasoning(
     items: &mut Vec<ConversationItem>,
+    item_index: &mut HashMap<String, usize>,
     id: &str,
     created_at: DateTime<Utc>,
     text: &str,
@@ -1407,9 +1419,8 @@ fn upsert_hydrated_reasoning(
     if text.is_empty() {
         return;
     }
-    if let Some(ConversationItem::Reasoning { content, .. }) = items
-        .iter_mut()
-        .find(|item| matches!(item, ConversationItem::Reasoning { id: existing_id, .. } if existing_id == id))
+    if let Some(ConversationItem::Reasoning { content, .. }) =
+        item_index.get(id).and_then(|index| items.get_mut(*index))
     {
         *content = if is_delta {
             append_claude_text_delta(content, text)
@@ -1419,6 +1430,7 @@ fn upsert_hydrated_reasoning(
         return;
     }
 
+    item_index.insert(id.to_string(), items.len());
     items.push(ConversationItem::Reasoning {
         id: id.to_string(),
         summary: None,
@@ -1431,6 +1443,7 @@ fn upsert_hydrated_reasoning(
 
 fn upsert_hydrated_tool_call(
     items: &mut Vec<ConversationItem>,
+    item_index: &mut HashMap<String, usize>,
     id: &str,
     title: &str,
     tool_kind: &str,
@@ -1453,9 +1466,7 @@ fn upsert_hydrated_tool_call(
         display: existing_display,
         completed_at: existing_completed_at,
         ..
-    }) = items
-        .iter_mut()
-        .find(|item| matches!(item, ConversationItem::ToolCall { id: existing_id, .. } if existing_id == id))
+    }) = item_index.get(id).and_then(|index| items.get_mut(*index))
     {
         *existing_title = title.to_string();
         *existing_kind = tool_kind.to_string();
@@ -1466,6 +1477,7 @@ fn upsert_hydrated_tool_call(
         return;
     }
 
+    item_index.insert(id.to_string(), items.len());
     items.push(ConversationItem::ToolCall {
         id: id.to_string(),
         title: title.to_string(),
@@ -1584,9 +1596,11 @@ mod tests {
             };
         let created_at = Utc::now();
         let mut items = Vec::new();
+        let mut item_index = HashMap::new();
 
         upsert_hydrated_assistant_message(
             &mut items,
+            &mut item_index,
             "answer-1",
             created_at,
             "Grounded answer",
@@ -1595,6 +1609,7 @@ mod tests {
         );
         upsert_hydrated_assistant_message(
             &mut items,
+            &mut item_index,
             "answer-1",
             created_at,
             "Grounded answer",

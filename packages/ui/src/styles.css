@@ -17,6 +17,12 @@
   --color-surface-3: var(--fd-bg-3);
   --color-surface-4: var(--fd-bg-4);
 
+  /* Interaction fills stay legible even when a custom palette compresses the
+     background scale. */
+  --color-interactive-hover: var(--fd-interactive-hover);
+  --color-interactive-selected: var(--fd-interactive-selected);
+  --color-interactive-active: var(--fd-interactive-active);
+
   --color-fg-primary: var(--fd-fg-0);
   --color-fg-secondary: var(--fd-fg-1);
   --color-fg-tertiary: var(--fd-fg-2);
@@ -61,6 +67,30 @@
   --fd-bg-2: #1a1a1f;
   --fd-bg-3: #232329;
   --fd-bg-4: #2c2c34;
+
+  /* === Interaction States ===
+     Derived from the live palette so appearance overrides retain clear row
+     hover, selection, and pressed states without hard-coded theme colors. */
+  --fd-interactive-hover: color-mix(
+    in srgb,
+    var(--fd-fg-0) 10%,
+    var(--fd-bg-1)
+  );
+  /* Selection stays neutral. Tinting the fill with the accent turns muddy
+     against the deep backgrounds (emerald-on-near-black reads as swamp green)
+     and clashes outright in the hue-heavy palettes, so a selected row is just
+     a lifted surface — pitched above hover so the two stay distinguishable
+     without an outline. */
+  --fd-interactive-selected: color-mix(
+    in srgb,
+    var(--fd-fg-0) 18%,
+    var(--fd-bg-1)
+  );
+  --fd-interactive-active: color-mix(
+    in srgb,
+    var(--fd-fg-0) 23%,
+    var(--fd-bg-1)
+  );
 
   /* === Foreground Scale === */
   /* fg-2 and below carry real copy (labels, helper text), so every step
@@ -166,8 +196,11 @@
   --fd-duration-fast: 100ms;
   --fd-duration-normal: 150ms;
   --fd-duration-slow: 250ms;
+  --fd-duration-panel: 220ms;
   --fd-ease-default: cubic-bezier(0.4, 0, 0.2, 1);
   --fd-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* Decelerating curve for the shell panels: leaves fast, settles softly. */
+  --fd-ease-panel: cubic-bezier(0.32, 0.72, 0, 1);
 
   /* === Layout === */
   --fd-sidebar-width: 280px;
@@ -184,6 +217,7 @@
     --fd-duration-fast: 0.01ms;
     --fd-duration-normal: 0.01ms;
     --fd-duration-slow: 0.01ms;
+    --fd-duration-panel: 0.01ms;
   }
 }
 
@@ -882,16 +916,40 @@ body {
   outline-offset: calc(-1 * var(--fd-focus-ring-width));
 }
 
+/* Menu and list rows show focus as a fill instead of a ring: native menus
+   highlight the active row, and an accent ring floating inside a popover reads
+   as web chrome. Pair with a `focus-visible:bg-*` utility matching the row's
+   hover fill; this class only suppresses the ring. */
+.fd-focus-fill:focus-visible {
+  outline: none;
+}
+
 /* Composite inputs put the focusable control inside a painted shell. */
 .fd-focus-within:has(:focus-visible) {
   outline: var(--fd-focus-ring-width) solid var(--fd-focus-ring-color);
   outline-offset: var(--fd-focus-ring-offset);
 }
 
+/* === Selected Row ===
+   Sidebar rows (workspaces, threads) that are the current selection. A neutral
+   fill alone — no outline — so the row reads as chosen the way a native list
+   does, in every palette and in both light and dark. */
+.fd-row-selected {
+  background-color: var(--fd-interactive-selected);
+}
+
 /* Allow selection in content areas only */
 [data-selectable], [data-selectable] * {
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* Transcript action chrome should not leak labels such as "Copy" into a
+   passage selected across rendered Markdown or code blocks. */
+[data-selectable] button,
+[data-selectable] [role="button"] {
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Prevent Radix ScrollArea table-display wrapper from expanding beyond
@@ -937,6 +995,15 @@ body {
     height: 0;
     opacity: 0;
   }
+}
+
+/* === Shell panel collapse ===
+   react-resizable-panels drives layout with inline `flex-grow`, so the
+   collapse/expand animation is a transition on that property. It is only
+   armed while the shell reports a toggle in flight — during separator drags
+   the same property changes every pointer move and must track it exactly. */
+[data-fd-shell][data-animating] [data-panel] {
+  transition: flex-grow var(--fd-duration-panel) var(--fd-ease-panel);
 }
 
 /* === Toast Animations === */

@@ -1,0 +1,8 @@
+{
+  "packages": [
+    {
+      "path": "official/thread-tags",
+      "defaultEnabled": true
+    }
+  ]
+}

@@ -87,6 +87,7 @@ Semantic colors:
 Rules:
 
 - Prefer token aliases like `bg-surface-1`, `text-fg-primary`, and `border-border-subtle` on web.
+- Use `bg-interactive-hover`, `bg-interactive-selected`, and `bg-interactive-active` for list and menu row states. These are derived from the active palette so custom themes retain clear interaction contrast.
 - On mobile, mirror the same meaning through `colors.surface`, `colors.fg`, `colors.border`, and `colors.accent`.
 - Do not introduce new brand colors without updating both token systems.
 - For a translucent accent or semantic fill, reach for the tokenized `-muted` / `-dim` variant instead of an ad hoc alpha modifier like `bg-accent/10`.

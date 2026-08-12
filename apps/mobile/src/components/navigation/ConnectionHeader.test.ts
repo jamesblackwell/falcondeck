@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { MachinePresence } from '@falcondeck/client-core'
 
-// Extract and test the connectionLabel and badge variant logic
+// Extract and test the connection label and dot state logic
 // from ConnectionHeader. These are pure functions we can test directly.
 
 function connectionLabel(status: string): string {
@@ -13,20 +13,20 @@ function connectionLabel(status: string): string {
   return 'Not connected'
 }
 
-function connectionBadgeState(
+function connectionState(
   connectionStatus: string,
   isEncrypted: boolean,
   isDesktopOnline: boolean,
-): { variant: 'success' | 'danger' | 'warning'; label: string } {
+): { connected: boolean; label: string } {
   const relayReady = connectionStatus === 'encrypted' && isEncrypted
 
   if (relayReady) {
-    if (isDesktopOnline) return { variant: 'success', label: 'Connected' }
-    return { variant: 'warning', label: 'Desktop offline' }
+    if (isDesktopOnline) return { connected: true, label: 'Connected' }
+    return { connected: false, label: 'Desktop offline' }
   }
 
   return {
-    variant: connectionStatus === 'disconnected' ? 'danger' : 'warning',
+    connected: false,
     label: connectionLabel(connectionStatus),
   }
 }
@@ -63,42 +63,42 @@ describe('ConnectionHeader logic', () => {
     })
   })
 
-  describe('connectionBadgeState', () => {
+  describe('connectionState', () => {
     it('returns connected success when relay is ready and desktop is online', () => {
-      expect(connectionBadgeState('encrypted', true, true)).toEqual({
-        variant: 'success',
+      expect(connectionState('encrypted', true, true)).toEqual({
+        connected: true,
         label: 'Connected',
       })
     })
 
     it('returns desktop offline warning when relay is ready but desktop is offline', () => {
-      expect(connectionBadgeState('encrypted', true, false)).toEqual({
-        variant: 'warning',
+      expect(connectionState('encrypted', true, false)).toEqual({
+        connected: false,
         label: 'Desktop offline',
       })
     })
 
     it('returns danger when disconnected and not encrypted', () => {
-      expect(connectionBadgeState('disconnected', false, false)).toEqual({
-        variant: 'danger',
+      expect(connectionState('disconnected', false, false)).toEqual({
+        connected: false,
         label: 'Disconnected',
       })
     })
 
     it('returns warning for connecting and claiming states', () => {
-      expect(connectionBadgeState('connecting', false, false)).toEqual({
-        variant: 'warning',
+      expect(connectionState('connecting', false, false)).toEqual({
+        connected: false,
         label: 'Connecting...',
       })
-      expect(connectionBadgeState('claiming', false, false)).toEqual({
-        variant: 'warning',
+      expect(connectionState('claiming', false, false)).toEqual({
+        connected: false,
         label: 'Pairing...',
       })
     })
 
     it('keeps disconnected state when the transport is no longer encrypted', () => {
-      expect(connectionBadgeState('disconnected', false, true)).toEqual({
-        variant: 'danger',
+      expect(connectionState('disconnected', false, true)).toEqual({
+        connected: false,
         label: 'Disconnected',
       })
     })

@@ -48,6 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         provider_bins: provider_bin_overrides(),
         codex_bin,
         claude_bin,
+        deno_bin: std::env::args()
+            .skip(1)
+            .find_map(|arg| arg.strip_prefix("--deno-bin=").map(str::to_string))
+            .unwrap_or_else(|| "deno".to_string()),
         state_path: None,
     };
 

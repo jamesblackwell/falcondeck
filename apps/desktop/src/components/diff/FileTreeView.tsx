@@ -35,7 +35,7 @@ const TreeRows = memo(function TreeRows({
           type="button"
           data-tree-row
           onClick={() => (isDirectory ? onToggle(node.path) : onSelectFile(node.path))}
-          className="fd-focus-inset flex h-7 w-full items-center gap-1.5 truncate pr-3 text-left text-[length:var(--fd-text-xs)] text-fg-secondary [contain-intrinsic-size:28px] [content-visibility:auto] hover:bg-surface-2 hover:text-fg-primary"
+          className="fd-focus-inset flex h-7 w-full items-center gap-1.5 truncate pr-3 text-left text-[length:var(--fd-text-sm)] text-fg-secondary [contain-intrinsic-size:28px] [content-visibility:auto] hover:bg-surface-2 hover:text-fg-primary"
           style={{ paddingLeft: 8 + depth * 12 }}
         >
           {isDirectory ? (

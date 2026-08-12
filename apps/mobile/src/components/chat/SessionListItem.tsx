@@ -3,7 +3,7 @@ import { Pressable, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import { deriveThreadAttentionPresentation } from '@falcondeck/client-core'
-import type { ThreadSummary } from '@falcondeck/client-core'
+import type { ThreadSummary, ThreadTag } from '@falcondeck/client-core'
 
 import { ActivityDiamond, Badge, Text } from '@/components/ui'
 import { formatRelativeTime } from './sessionListItem.utils'
@@ -15,6 +15,12 @@ interface SessionListItemProps {
   onSelectThread: (workspaceId: string, threadId: string) => void
   onOpenThreadOptions?: (workspaceId: string, thread: ThreadSummary) => void
   nowTick?: number
+  tags?: ThreadTag[]
+}
+
+const TAG_COLORS: Record<string, string> = {
+  gray: '#94a3b8', red: '#ef4444', orange: '#f97316', yellow: '#eab308',
+  green: '#22c55e', blue: '#3b82f6', purple: '#a855f7', pink: '#ec4899',
 }
 
 function SessionListItemInner({
@@ -24,6 +30,7 @@ function SessionListItemInner({
   onSelectThread,
   onOpenThreadOptions,
   nowTick = 0,
+  tags = [],
 }: SessionListItemProps) {
   const { theme } = useUnistyles()
   const presentation = useMemo(() => deriveThreadAttentionPresentation(thread), [thread])
@@ -71,6 +78,13 @@ function SessionListItemInner({
       >
         {thread.title || 'New thread'}
       </Text>
+      {tags.length > 0 ? (
+        <View style={styles.tags} accessibilityLabel={tags.map(tag => tag.label).join(', ')}>
+          {tags.slice(0, 3).map(tag => (
+            <View key={tag.id} style={[styles.tagDot, { backgroundColor: TAG_COLORS[tag.color] ?? TAG_COLORS.gray }]} />
+          ))}
+        </View>
+      ) : null}
       {presentation.showBadge ? (
         <Badge variant="success">{presentation.badgeLabel ?? 'Awaiting response'}</Badge>
       ) : (
@@ -109,6 +123,8 @@ const styles = StyleSheet.create((theme) => ({
     height: 10,
     borderRadius: theme.radius.full,
   },
+  tags: { flexDirection: 'row', gap: theme.spacing[1] },
+  tagDot: { width: 8, height: 8, borderRadius: theme.radius.full },
 }))
 
 const areEqual = (prev: SessionListItemProps, next: SessionListItemProps) =>
@@ -117,6 +133,7 @@ const areEqual = (prev: SessionListItemProps, next: SessionListItemProps) =>
   prev.isSelected === next.isSelected &&
   prev.nowTick === next.nowTick &&
   prev.onSelectThread === next.onSelectThread &&
-  prev.onOpenThreadOptions === next.onOpenThreadOptions
+  prev.onOpenThreadOptions === next.onOpenThreadOptions &&
+  prev.tags === next.tags
 
 export const SessionListItem = memo(SessionListItemInner, areEqual)

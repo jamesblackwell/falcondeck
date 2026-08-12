@@ -141,6 +141,7 @@ pub(super) fn parse_threads(
                         .unwrap_or_else(|| "Untitled thread".to_string()),
                     provider: AgentProvider::CODEX,
                     native_session_id: None,
+                    handoff_from: None,
                     status: ThreadStatus::Idle,
                     updated_at: extract_datetime_or_timestamp(
                         entry,

@@ -28,10 +28,13 @@ export function parseDaemonEvents(payload: unknown): EventEnvelope[] {
   }
   if (record.kind !== 'daemon-events' || !Array.isArray(record.events)) return []
 
-  return record.events
-    .filter((event): event is Record<string, unknown> => !!event && typeof event === 'object')
-    .map(normalizeRemoteEvent)
-    .filter((event): event is EventEnvelope => event !== null)
+  const events: EventEnvelope[] = []
+  for (const event of record.events) {
+    if (!event || typeof event !== 'object') continue
+    const normalized = normalizeRemoteEvent(event as Record<string, unknown>)
+    if (normalized) events.push(normalized)
+  }
+  return events
 }
 
 function normalizeRemoteEvent(value: Record<string, unknown>): EventEnvelope | null {

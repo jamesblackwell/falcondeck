@@ -1,0 +1,5 @@
+{
+  "imports": {
+    "@falcondeck/extension-sdk": "../packages/extension-sdk/src/index.ts"
+  }
+}

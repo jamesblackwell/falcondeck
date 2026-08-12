@@ -9,6 +9,7 @@ node_modules/
 .next/
 .expo/
 web-build/
+apps/desktop/src-tauri/binaries/deno-*
 
 # Local machine and tool output
 .claude/settings.local.json

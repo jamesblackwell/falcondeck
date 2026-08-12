@@ -356,10 +356,8 @@ impl CodexSession {
                             extract_thread_session_path(&value).or(session_path.clone())
                         {
                             if items.is_empty() {
-                                items = hydrate_thread_items_from_session_file(
-                                    &path,
-                                    &workspace_path,
-                                );
+                                items =
+                                    hydrate_thread_items_from_session_file(&path, &workspace_path);
                             } else {
                                 supplement_thread_items_with_session_tool_calls(
                                     &mut items,
@@ -2588,6 +2586,7 @@ mod tests {
                 title: "Restored".to_string(),
                 provider: AgentProvider::CODEX,
                 native_session_id: None,
+                handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,
@@ -2662,6 +2661,7 @@ mod tests {
                 title: "Restored".to_string(),
                 provider: AgentProvider::CODEX,
                 native_session_id: None,
+                handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T09:00:00Z")
                     .unwrap()
@@ -2706,6 +2706,7 @@ mod tests {
                 title: "Restored".to_string(),
                 provider: AgentProvider::CODEX,
                 native_session_id: None,
+                handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,

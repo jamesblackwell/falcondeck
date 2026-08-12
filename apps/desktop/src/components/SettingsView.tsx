@@ -6,6 +6,7 @@ import type {
   TrustedDevice,
   UpdatePreferencesPayload,
   WorkspaceSummary,
+  ExtensionSnapshot,
 } from '@falcondeck/client-core'
 
 import type { AppUpdaterState } from '../hooks/useAppUpdater'
@@ -14,6 +15,7 @@ import { AgentsPanel } from './settings/AgentsPanel'
 import { AppearanceSettingsPanel } from './settings/AppearanceSettingsPanel'
 import { ConnectorsPanel } from './settings/ConnectorsPanel'
 import { GeneralSettingsPanel } from './settings/GeneralSettingsPanel'
+import { ExtensionsPanel } from './settings/ExtensionsPanel'
 import { KeyboardShortcutsPanel } from './settings/KeyboardShortcutsPanel'
 import { RemoteAccessPanel } from './settings/RemoteAccessPanel'
 import { ServersPanel, type ServersPanelProps } from './settings/ServersPanel'
@@ -50,6 +52,8 @@ export type SettingsViewProps = {
   onDownloadUpdate: () => void
   onRestartToInstallUpdate: () => void
   onClose: () => void
+  extensions: ExtensionSnapshot
+  onSetExtensionEnabled: (extensionId: string, enabled: boolean) => Promise<void>
 }
 
 export function SettingsView(props: SettingsViewProps) {
@@ -92,6 +96,11 @@ export function SettingsView(props: SettingsViewProps) {
                 path: workspace.path,
               }))}
               onToast={props.onToast}
+            />
+          ) : activeSection === 'extensions' ? (
+            <ExtensionsPanel
+              extensions={props.extensions}
+              onSetEnabled={props.onSetExtensionEnabled}
             />
           ) : activeSection === 'general' ? (
             <GeneralSettingsPanel

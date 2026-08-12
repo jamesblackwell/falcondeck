@@ -1,0 +1,32 @@
+{
+  "$schema": "../../../schemas/extension-manifest.schema.json",
+  "id": "falcondeck.thread-tags",
+  "name": "Thread Colours",
+  "version": "0.2.0",
+  "engines": {
+    "falcondeck": "^0.1"
+  },
+  "entrypoint": "server.ts",
+  "contributes": {
+    "threadMenuActions": [
+      {
+        "id": "manage-tags",
+        "title": "Set colour"
+      }
+    ],
+    "threadDecorations": [
+      {
+        "id": "tag-chips",
+        "view": "thread-tags"
+      }
+    ],
+    "sidebarFilters": [
+      {
+        "id": "tags",
+        "title": "Colours",
+        "view": "tag-index"
+      }
+    ]
+  },
+  "permissions": []
+}

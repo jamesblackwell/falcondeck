@@ -3,6 +3,9 @@ import type {
   CollaborationModeSummary,
   DaemonSnapshot,
   EventEnvelope,
+  ExtensionActionResponse,
+  ExtensionSnapshot,
+  ExtensionSummary,
   GitBranchesResponse,
   GitDiffResponse,
   GitFileStatus,
@@ -11,6 +14,7 @@ import type {
   WorkspaceFilesResponse,
   WriteWorkspaceFilePayload,
   InteractiveResponsePayload,
+  InvokeExtensionActionPayload,
   MarkThreadReadPayload,
   RemoteStatusResponse,
   SnapshotRequest,
@@ -19,6 +23,7 @@ import type {
   ThreadDetail,
   ThreadDetailRequest,
   ThreadHandle,
+  ThreadHandoffSource,
   ThreadIsolation,
   ThreadSummary,
   TurnInputItem,
@@ -82,6 +87,8 @@ export type StartThreadPayload = {
   sandbox_mode?: string | null;
   /** Omitted means the project folder — isolation is always opt-in. */
   isolation?: ThreadIsolation;
+  /** Creates a linked destination while leaving the source thread unchanged. */
+  handoff_from?: ThreadHandoffSource | null;
 };
 
 export type ForkThreadPayload = {
@@ -124,6 +131,36 @@ export function createDaemonApiClient(baseUrl: string) {
             headers: { "content-type": "application/json" },
             body: JSON.stringify(payload),
           }),
+        ),
+      );
+    },
+    async extensions() {
+      return parseJson<ExtensionSnapshot>(
+        await fetch(`${baseUrl}/api/extensions`),
+      );
+    },
+    async updateExtension(extensionId: string, enabled: boolean) {
+      return parseJson<ExtensionSummary>(
+        await fetch(`${baseUrl}/api/extensions/${encodeURIComponent(extensionId)}`, {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        }),
+      );
+    },
+    async invokeExtensionAction(
+      extensionId: string,
+      actionId: string,
+      payload: InvokeExtensionActionPayload,
+    ) {
+      return parseJson<ExtensionActionResponse>(
+        await fetch(
+          `${baseUrl}/api/extensions/${encodeURIComponent(extensionId)}/actions/${encodeURIComponent(actionId)}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          },
         ),
       );
     },
@@ -330,6 +367,22 @@ export function createDaemonApiClient(baseUrl: string) {
             method: "PATCH",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ text }),
+          },
+        ),
+      );
+    },
+    async reorderQueuedTurns(
+      workspaceId: string,
+      threadId: string,
+      queuedIds: string[],
+    ) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(workspaceId)}/threads/${encodeURIComponent(threadId)}/queue/reorder`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ queued_ids: queuedIds }),
           },
         ),
       );

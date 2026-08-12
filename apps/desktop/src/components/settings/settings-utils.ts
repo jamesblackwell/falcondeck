@@ -4,7 +4,7 @@ import type {
   ToolDetailsMode,
   TrustedDevice,
 } from '@falcondeck/client-core'
-import { Bot, Keyboard, Palette, Plug, Server, Settings, Wifi } from 'lucide-react'
+import { Blocks, Bot, Keyboard, Palette, Plug, Server, Settings, Wifi } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 
@@ -15,6 +15,7 @@ export type SettingsSectionId =
   | 'servers'
   | 'agents'
   | 'connectors'
+  | 'extensions'
   | 'remote'
 
 export type SettingsNavItem = {
@@ -60,6 +61,12 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: 'Connectors',
     description: 'MCP servers and agent tools',
     icon: Plug,
+  },
+  {
+    id: 'extensions',
+    label: 'Extensions',
+    description: 'Add capabilities to FalconDeck',
+    icon: Blocks,
   },
   {
     id: 'remote',

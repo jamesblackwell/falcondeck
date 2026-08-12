@@ -1,12 +1,36 @@
 # FalconDeck Extensions
 
-Status: canonical architecture and implementation plan. The extension runtime
-described here is not implemented yet.
+Status: canonical architecture and implementation plan. The v0 foundation and
+Thread Colours vertical slice are implemented; later capabilities are explicitly
+tracked below. Last reconciled with the code on 2026-08-12.
 
 This document is the source of truth for code that extends FalconDeck itself.
 If implementation conflicts with it, update this document and record the
 decision before merging. Wider product context lives in `docs/PLATFORM.md`;
 the research behind this design lives in `docs/BB-ANALYSIS.md`.
+
+### Implemented baseline
+
+- bundled catalog and manifest discovery, with Thread Colours enabled by default;
+- checked-in manifest schema and machine-readable validation diagnostics;
+- daemon-owned enablement, namespaced JSON storage, bounded view projections,
+  generic action routing, snapshot fields, sequenced events, HTTP, and relay RPC;
+- a pinned Deno runtime bundled with desktop releases, with one lazy,
+  supervised, read-only TypeScript host process per active extension;
+- Extensions settings in desktop, plus synchronized projection rendering in
+  desktop, remote web, and mobile;
+- one-click Thread Colours context-menu selection, colour markers, optimistic
+  updates, and sidebar filtering on desktop
+  and remote web, with read-only colour markers on mobile;
+- persistence, size/path validation, host-contract, normalization, and shared
+  projection tests.
+
+The following planned parts are not yet public API: user/local-path install,
+permission grants beyond the baseline sandbox,
+the general declarative form renderer, migrations/transactions beyond atomic
+action commits, the full `create|test|dev|pack` CLI, archive signing/update, and
+a bundled Deno executable for standalone daemon releases. Do not document those as
+shipping behaviour until their phase gates pass.
 
 ## 1. Goal
 
@@ -109,6 +133,16 @@ Packages may contain assets and migrations. They may not import source files
 from `apps/`, `crates/`, or private `packages/` paths. CI enforces the same rule
 for official extensions.
 
+Entrypoints import the SDK by its stable bare specifier:
+
+```ts
+import { defineExtension } from "@falcondeck/extension-sdk";
+```
+
+FalconDeck supplies the import map at runtime. Repository checks use
+`--import-map=extensions/import-map.json`; authored packages must not depend on
+the SDK's monorepo source location.
+
 `extensions/catalog.json` is distribution policy owned by FalconDeck. It says
 which official packages are bundled and enabled on fresh installation. An
 extension cannot declare itself trusted or default-enabled in its manifest.
@@ -126,26 +160,30 @@ Every package contains `falcondeck.extension.json`, validated before code loads:
 {
   "$schema": "https://falcondeck.com/schemas/extension-manifest-v1.json",
   "id": "falcondeck.thread-tags",
-  "name": "Thread Tags",
-  "version": "1.0.0",
-  "engines": { "falcondeck": "^1" },
+  "name": "Thread Colours",
+  "version": "0.2.0",
+  "engines": { "falcondeck": "^0.1" },
   "entrypoint": "server.ts",
   "contributes": {
-    "threadMenuActions": [{ "id": "manage-tags", "title": "Manage tags" }],
+    "threadMenuActions": [{ "id": "manage-tags", "title": "Set colour" }],
     "threadDecorations": [{ "id": "tag-chips", "view": "thread-tags" }],
-    "sidebarFilters": [{ "id": "tags", "title": "Tags", "view": "tag-index" }]
+    "sidebarFilters": [
+      { "id": "tags", "title": "Colours", "view": "tag-index" }
+    ]
   },
   "permissions": []
 }
 ```
 
 Required properties are a globally unique reverse-domain-style id, name,
-semantic version, supported extension API range, optional backend entrypoint,
-declared contributions, and requested permissions with reasons when sensitive.
+semantic version, supported extension API range, backend entrypoint, declared
+contributions, and a permissions array. The v0.1 validator requires that array
+to be empty because capability grants are not implemented yet; an extension
+that requests an unenforced permission is rejected rather than run unsafely.
 
-Paths are package-relative, cannot traverse, and must resolve beneath the
-installed root. Unknown required fields fail validation. Unknown optional
-properties are preserved for forward compatibility.
+Paths are package-relative, cannot traverse (including through symlinks), and
+must resolve beneath the installed root. Unknown manifest and contribution
+properties fail validation so typos do not silently weaken the contract.
 
 Contribution identifiers are durable. Renaming an action, view, or setting
 requires an alias or migration because saved state may refer to it.
@@ -158,7 +196,7 @@ internal React stores:
 ```ts
 export default defineExtension({
   async activate(context) {
-    context.actions.register("manage-tags", async invocation => {
+    context.actions.register("manage-tags", async (invocation) => {
       const tags = await context.storage.get<Tag[]>("tags", []);
       // Return a declarative form or process submitted form data.
     });
@@ -166,18 +204,19 @@ export default defineExtension({
 });
 ```
 
-Initial `ExtensionContext` facets:
+The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
+`storage`, `views`, and `actions`. The remaining rows are planned capabilities:
 
-| Facet | Purpose |
-| --- | --- |
-| `extension` | Identity, installed version, API version, lifecycle signal |
-| `log` | Structured, attributed diagnostics with redaction |
-| `storage` | Namespaced private storage and transactions |
-| `views` | Publish bounded synchronized state declared by the manifest |
-| `actions` | Handle invocations from declared UI actions |
-| `events` | Subscribe to permitted daemon lifecycle events |
-| `threads` | Permission-gated thread reads and annotations |
-| `commands` | Register declared slash or command-palette commands |
+| Facet       | Purpose                                                     |
+| ----------- | ----------------------------------------------------------- |
+| `extension` | Identity, installed version, API version, lifecycle signal  |
+| `log`       | Structured, attributed diagnostics with redaction           |
+| `storage`   | Namespaced private storage and transactions                 |
+| `views`     | Publish bounded synchronized state declared by the manifest |
+| `actions`   | Handle invocations from declared UI actions                 |
+| `events`    | Planned: subscribe to permitted daemon lifecycle events     |
+| `threads`   | Planned: permission-gated thread reads and annotations      |
+| `commands`  | Planned: slash or command-palette commands                  |
 
 Later facets may add schedules, notifications, agent tools, turn control,
 workspace files, and mediated network access. Plausibility alone does not put a
@@ -193,9 +232,10 @@ Extensions have two intentionally separate forms of state.
 ### Private state
 
 Private state is daemon-owned, namespaced by extension id, and exposed only
-through `context.storage`. It supports JSON values with size limits, atomic
-transactions or compare-and-swap, schema versions and ordered migrations,
-retention while disabled, and separate confirmation before data deletion.
+through `context.storage`. v0.1 supports JSON get/set/delete, a 512 KiB limit
+per extension, atomic whole-action commits, and retention while disabled.
+Compare-and-swap, schema-versioned migrations, and user-facing data deletion
+are later gates.
 
 Secrets do not use ordinary storage. A later secrets capability must use
 platform credential storage and opaque handles where practical.
@@ -206,7 +246,7 @@ View state is non-secret data intended for clients:
 
 ```ts
 await context.views.publish({
-  view: "thread-tags",
+  viewId: "thread-tags",
   scope: { kind: "thread", id: threadId },
   value: { tags: [{ id: "urgent", label: "Urgent", color: "red" }] },
 });
@@ -217,9 +257,12 @@ bounded projections in snapshots/detail responses, and emits sequenced updates
 through the existing event stream. Relay encryption and replay work without a
 second extension transport.
 
-Views have per-view and per-entity limits. Large data is fetched on demand,
-not placed in every snapshot. This split lets clients render tags or notepad
-summaries while the host restarts without broadcasting private data.
+v0.1 limits action input to 64 KiB, each published view to 16 KiB, one action
+to 256 publications, retained view state to 4 MiB per extension, and a host
+response to 2 MiB. Large-data on-demand fetching is planned; until it exists,
+extensions must publish summaries rather than payloads near these ceilings.
+This split lets clients render tags or notepad summaries while the host
+restarts without broadcasting private data.
 
 ## 8. Declarative UI
 
@@ -234,8 +277,8 @@ The first API provides named contribution points:
 - conversation cards;
 - standalone panels.
 
-Only the first three plus declarative modal/form UI are required for Thread
-Tags.
+Thread Colours uses the first three; its fixed palette is rendered directly in
+the context menu and does not open a modal.
 
 Contributions bind manifest declarations to view state and actions. Clients
 render a versioned JSON vocabulary: stack, row, text, icon, divider, button,
@@ -264,22 +307,24 @@ flowchart LR
 
 The daemon owns this lifecycle:
 
-1. Discover bundled and user-installed manifests.
-2. Validate paths, compatibility, and recorded grants.
-3. Start the host when an executable extension is enabled.
-4. Send the enabled catalog and capability grants.
-5. Wait for activation and contribution registration.
-6. Publish status and contributions to clients.
-7. Route actions and permitted events through the host.
-8. Dispose on disable, upgrade, shutdown, or host restart.
+1. Discover bundled manifests from the FalconDeck-owned catalog.
+2. Validate paths, compatibility, declarations, and the empty v0.1 permission set.
+3. Lazily start that extension's host on its first executable action.
+4. Activate the package and collect its action registrations.
+5. Route a declared action with a bounded target, input, and private-state copy.
+6. Validate and atomically persist the returned storage and view projections.
+7. Publish status and view changes through the unified event stream.
+8. Dispose the process on disable, shutdown, timeout, or protocol failure.
 
-The host is a supervisor. Each extension executes in its own isolate or worker
-with independent status, limits, and runtime permissions. The Deno isolation
-primitive may evolve without changing the daemon-host contract.
+The daemon is the supervisor. Each extension executes in its own Deno process
+with independent lifecycle, timeout, status, and runtime permissions. Calls
+within one extension are ordered so its storage read, action, and atomic commit
+cannot lose concurrent updates; different extensions can execute independently.
+The isolation primitive may evolve without changing the daemon-host contract.
 
-Host restart uses bounded exponential backoff. Repeated failure suspends
-execution for the session and surfaces repair UI; it does not erase state. A
-failed upgrade leaves the previous working package active.
+The next invocation lazily restarts a host after timeout, protocol failure, or
+unexpected exit. Backoff, session circuit breaking, and transactional package
+upgrades remain phase-gated work; failures never erase retained extension data.
 
 ## 10. Permissions and trust
 
@@ -350,33 +395,34 @@ Canonical starter prompt:
 > contribution on supported clients, and list requested permissions before
 > enabling it.
 
-## 13. First official extension: Thread Tags
+## 13. First official extension: Thread Colours
 
-Thread Tags is bundled and enabled by default. An empty tag set produces no UI
-clutter. It is both useful and the acceptance test for the architecture.
+Thread Colours is bundled and enabled by default. Its durable package id stays
+`falcondeck.thread-tags` so existing installations keep their data. A thread
+with no colour produces no UI clutter. It is both useful and the acceptance
+test for the architecture.
 
 Initial behaviour:
 
-- Create, rename, recolour, reorder, and delete tags.
-- Attach zero or more tags from a thread context menu.
-- Show compact coloured tag indicators in thread rows.
-- Filter the sidebar by one or more tags.
-- Preserve definitions and assignments across restart.
+- Assign one optional colour from a fixed Finder-style palette without typing.
+- Remove a colour from the same thread context-menu picker.
+- Show one compact coloured indicator in thread rows.
+- Filter the sidebar by one or more colours.
+- Preserve assignments across restart.
 - Keep desktop, remote web, and mobile consistent through daemon snapshots and
   sequenced updates.
 - Render tags read-only when a client cannot edit them.
 
-Definitions live in private storage. Per-thread assignments and the small tag
-index needed by filters are view state. Deleting a tag removes assignments
-transactionally. Rename and recolour do not rewrite assignments because they
-refer to stable tag ids.
+Assignments live in private storage. The fixed palette and per-thread colour
+assignments are view state. v0.1 named, multi-tag data migrates by retaining the
+first assigned tag's colour for each thread.
 
 Required contributions:
 
 - `threadMenuActions.manage-tags`
 - `threadDecorations.tag-chips`
 - `sidebarFilters.tags`
-- a declarative manage-tags form
+- the shared system-colour context-menu renderer
 
 Acceptance gate:
 
@@ -402,7 +448,7 @@ Deliver:
 - manifest v1 Rust/TypeScript types and generated JSON Schema;
 - `packages/extension-sdk` identity and lifecycle types;
 - `packages/extension-testing` skeleton;
-- Thread Tags scaffold and official catalog entry;
+- Thread Colours scaffold and official catalog entry;
 - compatibility and diagnostic-code conventions.
 
 Gate:
@@ -439,14 +485,16 @@ Deliver:
 - per-extension activation, isolation, disposal, timeout, and diagnostics;
 - SDK implementations for log, storage, views, actions, and lifecycle;
 - transactional development reload;
-- host packaging in desktop and standalone daemon distributions.
+- host packaging in desktop and standalone daemon distributions (desktop is
+  implemented; standalone packaging remains planned).
 
 Gate:
 
 - throwing or hanging fixtures cannot affect another extension or daemon RPCs;
 - restart preserves private and last-published view state;
 - failed upgrade retains the previous version;
-- releases need no separately installed Deno runtime.
+- desktop releases need no separately installed Deno runtime; standalone
+  distributions must meet the same gate before that route ships.
 
 ### Phase 3 — declarative UI and settings
 
@@ -466,7 +514,7 @@ Gate:
 - an older client preserves state and shows an inspectable fallback;
 - disabling disposes UI without a client reload.
 
-### Phase 4 — Thread Tags vertical slice
+### Phase 4 — Thread Colours vertical slice
 
 Deliver section 13 using only public SDK facets, enabled by default in the
 official catalog.
@@ -485,7 +533,7 @@ Deliver:
 - `create|validate|test|dev|pack` CLI commands;
 - stable JSON diagnostics and repairs;
 - generated public SDK reference;
-- a minimal example distinct from Thread Tags;
+- a minimal example distinct from Thread Colours;
 - an end-to-end fresh-scaffold test;
 - public starter prompt and contribution checklist.
 
@@ -505,7 +553,7 @@ example consumer.
 
 Do not begin marketplace, signing, arbitrary webviews, whole-region UI
 replacement, extension dependencies, or cross-extension calls until local
-packages and Thread Tags exercise compatibility in real use.
+packages and Thread Colours exercise compatibility in real use.
 
 ## 15. Required test layers
 

@@ -6,7 +6,7 @@ import type { DrawerContentComponentProps } from '@react-navigation/drawer'
 
 import { useUnistyles } from 'react-native-unistyles'
 
-import { buildProjectGroups } from '@falcondeck/client-core'
+import { buildProjectGroups, deriveThreadTags } from '@falcondeck/client-core'
 
 import { useRelayStore, useSessionStore } from '@/store'
 import { SidebarView } from '@/components/navigation'
@@ -27,6 +27,10 @@ export default function AppLayout() {
         snapshot?.preferences.workspace_order,
       ),
     [snapshot?.preferences.workspace_order, snapshot?.threads, snapshot?.workspaces],
+  )
+  const threadTags = useMemo(
+    () => deriveThreadTags(snapshot?.extensions),
+    [snapshot?.extensions],
   )
 
   const handleSelectThread = useCallback(
@@ -69,9 +73,10 @@ export default function AppLayout() {
         onNewThread={handleNewThread}
         onOpenSettings={handleOpenSettings}
         onClose={() => navigation.dispatch(DrawerActions.closeDrawer())}
+        threadTagsById={threadTags.byThreadId}
       />
     ),
-    [groups, handleSelectThread, handleNewThread, handleOpenSettings, selectedThreadId],
+    [groups, handleSelectThread, handleNewThread, handleOpenSettings, selectedThreadId, threadTags.byThreadId],
   )
 
   if (!sessionId) {

@@ -269,6 +269,7 @@ impl AppState {
                     title: "Untitled thread".to_string(),
                     provider: AgentProvider::CODEX,
                     native_session_id: None,
+                    handoff_from: None,
                     status: ThreadStatus::Idle,
                     updated_at: now,
                     last_message_preview: None,
@@ -1209,6 +1210,7 @@ impl ManagedThread {
             ai_title_in_flight: false,
             requires_resume: false,
             queued_requests: Vec::new(),
+            dispatching_request: None,
         }
     }
 

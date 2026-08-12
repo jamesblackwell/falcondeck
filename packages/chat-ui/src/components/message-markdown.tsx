@@ -47,6 +47,23 @@ type StreamingMarkdownBlocks = {
   tail: string;
 };
 
+function closesStreamingFence(
+  line: string,
+  fence: { marker: "`" | "~"; length: number },
+) {
+  let cursor = 0;
+  while (cursor < 3 && line[cursor] === " ") cursor += 1;
+
+  const markerStart = cursor;
+  while (line[cursor] === fence.marker) cursor += 1;
+  if (cursor - markerStart < fence.length) return false;
+
+  for (; cursor < line.length; cursor += 1) {
+    if (line[cursor] !== " " && line[cursor] !== "\t") return false;
+  }
+  return true;
+}
+
 /**
  * Splits streamed Markdown only at blank lines outside fenced code blocks.
  * The scan is intentionally cheaper than parsing a Markdown AST: completed
@@ -68,10 +85,7 @@ export function splitStreamingMarkdownBlocks(
     const line = text.slice(cursor, lineEnd).replace(/\r$/, "");
 
     if (fence) {
-      const closingFence = new RegExp(
-        `^ {0,3}\\${fence.marker}{${fence.length},}[\\t ]*$`,
-      );
-      if (closingFence.test(line)) fence = null;
+      if (closesStreamingFence(line, fence)) fence = null;
     } else {
       const openingFence = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
       if (openingFence) {

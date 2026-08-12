@@ -10,7 +10,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import { FlashList } from "@shopify/flash-list";
-import { ChevronLeft, SquarePen } from "lucide-react-native";
+import { ChevronLeft, MoreHorizontal, SquarePen } from "lucide-react-native";
 import { DrawerActions } from "@react-navigation/native";
 import { useNavigation, useRouter } from "expo-router";
 import {
@@ -80,7 +80,7 @@ import {
   ThinkingIndicator,
   OperationalNoticeBanner,
 } from "@/components/chat";
-import { ConnectionHeader } from "@/components/navigation";
+import { ConnectionHeader, ThreadOptionsSheet } from "@/components/navigation";
 import {
   pasteImageInputFromClipboard,
   pickImageInputFromCamera,
@@ -233,6 +233,7 @@ export default function HomeScreen() {
   const [isLoadingOlder, setIsLoadingOlder] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
   const [isGoalSheetOpen, setIsGoalSheetOpen] = useState(false);
+  const [isThreadOptionsOpen, setIsThreadOptionsOpen] = useState(false);
   const selectionSeedRef = useRef<string | null>(null);
   const composerInputRef = useRef<TextInput>(null);
   const markReadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -758,8 +759,7 @@ export default function HomeScreen() {
   const handleSetGoal = useCallback(
     async (objective: string, tokenBudget: number | null) => {
       if (!selectedWorkspaceId) throw new Error("Select a project first");
-      const threadId =
-        selectedThreadId ?? (await startThread()).thread.id;
+      const threadId = selectedThreadId ?? (await startThread()).thread.id;
       return setThreadGoal(selectedWorkspaceId, threadId, {
         objective,
         token_budget: tokenBudget,
@@ -792,6 +792,14 @@ export default function HomeScreen() {
   const handleOpenSettings = useCallback(() => {
     router.push("/(app)/settings");
   }, [router]);
+
+  const handleOpenThreadOptions = useCallback(() => {
+    setIsThreadOptionsOpen(true);
+  }, []);
+
+  const handleCloseThreadOptions = useCallback(() => {
+    setIsThreadOptionsOpen(false);
+  }, []);
 
   const handleNewThreadFromCurrent = useCallback(() => {
     if (!workspace) return;
@@ -1116,20 +1124,36 @@ export default function HomeScreen() {
         </Pressable>
         <View style={styles.headerRight}>
           {selectedThread ? (
-            <Pressable
-              onPress={handleNewThreadFromCurrent}
-              accessibilityRole="button"
-              accessibilityLabel="New thread with current settings"
-              style={({ pressed }) => [
-                styles.headerIconButton,
-                pressed && styles.headerIconButtonPressed,
-              ]}
-            >
-              <SquarePen
-                size={theme.iconSize.md}
-                color={theme.colors.fg.secondary}
-              />
-            </Pressable>
+            <>
+              <Pressable
+                onPress={handleNewThreadFromCurrent}
+                accessibilityRole="button"
+                accessibilityLabel="New thread with current settings"
+                style={({ pressed }) => [
+                  styles.headerIconButton,
+                  pressed && styles.headerIconButtonPressed,
+                ]}
+              >
+                <SquarePen
+                  size={theme.iconSize.md}
+                  color={theme.colors.fg.secondary}
+                />
+              </Pressable>
+              <Pressable
+                onPress={handleOpenThreadOptions}
+                accessibilityRole="button"
+                accessibilityLabel="Thread options"
+                style={({ pressed }) => [
+                  styles.headerIconButton,
+                  pressed && styles.headerIconButtonPressed,
+                ]}
+              >
+                <MoreHorizontal
+                  size={theme.iconSize.md}
+                  color={theme.colors.fg.secondary}
+                />
+              </Pressable>
+            </>
           ) : null}
           <ConnectionHeader
             connectionStatus={connectionStatus}
@@ -1163,7 +1187,10 @@ export default function HomeScreen() {
       <View style={styles.listContainer}>
         {isSyncing ? (
           <View style={styles.syncState}>
-            <ActivityDiamond size={theme.iconSize.md} color={theme.colors.accent.default} />
+            <ActivityDiamond
+              size={theme.iconSize.md}
+              color={theme.colors.accent.default}
+            />
             <Text variant="caption" color="muted">
               {connectionStatus === "encrypted"
                 ? "Syncing..."
@@ -1172,7 +1199,7 @@ export default function HomeScreen() {
                   : "Connecting..."}
             </Text>
           </View>
-        ) : !selectedThread ? (
+        ) : !selectedThread && blocks.length === 0 ? (
           <View style={styles.newThreadState}>
             <Text variant="heading" color="primary">
               Let's build
@@ -1183,7 +1210,10 @@ export default function HomeScreen() {
           </View>
         ) : blocks.length === 0 && isSelectedThreadLoading ? (
           <View style={styles.syncState}>
-            <ActivityDiamond size={theme.iconSize.md} color={theme.colors.accent.default} />
+            <ActivityDiamond
+              size={theme.iconSize.md}
+              color={theme.colors.accent.default}
+            />
             <Text variant="caption" color="muted">
               Loading thread...
             </Text>
@@ -1325,6 +1355,14 @@ export default function HomeScreen() {
           onClearGoal={handleClearGoal}
           onSetGoalStatus={handleSetGoalStatus}
           onClose={() => setIsGoalSheetOpen(false)}
+        />
+      ) : null}
+
+      {isThreadOptionsOpen && selectedThread ? (
+        <ThreadOptionsSheet
+          workspaceId={selectedThread.workspace_id}
+          thread={selectedThread}
+          onClose={handleCloseThreadOptions}
         />
       ) : null}
     </KeyboardAvoidingView>

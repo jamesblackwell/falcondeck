@@ -41,7 +41,7 @@ describe('workspaceSendBlockReason', () => {
     ).toBe(false)
   })
 
-  it('surfaces reconnecting project guidance', () => {
+  it('surfaces concise reconnecting project guidance', () => {
     expect(
       workspaceSendBlockReason(
         workspace({
@@ -50,7 +50,7 @@ describe('workspaceSendBlockReason', () => {
         }),
         'codex',
       ),
-    ).toContain('alpha is still reconnecting')
+    ).toBe('Reconnecting to alpha. You can keep drafting while it reconnects.')
   })
 
   it('blocks when the selected provider needs auth', () => {

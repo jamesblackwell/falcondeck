@@ -10,6 +10,7 @@ import {
 import {
   ChevronDown,
   MessageSquare,
+  Quote,
   ShieldQuestion,
 } from "lucide-react";
 
@@ -29,6 +30,7 @@ import {
 import { ActivityDiamond, EmptyState, cn } from "@falcondeck/ui";
 
 import { FileDiffProvider, type OpenFileDiff } from "../lib/file-diff-context";
+import { normalizeQuotedSelection } from "../lib/quoted-selection";
 import { ConversationExportButton } from "./conversation-export-button";
 import {
   LiveActivityLane,
@@ -163,6 +165,7 @@ export const Conversation = memo(function Conversation({
   onRetryResponse,
   exportTitle = null,
   pinnedPlanId = null,
+  onQuoteSelection,
 }: {
   threadKey?: string | null;
   items: ConversationItem[];
@@ -197,6 +200,8 @@ export const Conversation = memo(function Conversation({
       renders once. Export still includes it — it reads `items`, not the
       filtered list. */
   pinnedPlanId?: string | null;
+  /** Adds selected user/assistant message text to the host composer. */
+  onQuoteSelection?: (text: string) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -212,6 +217,11 @@ export const Conversation = memo(function Conversation({
     scrollTop: number;
   } | null>(null);
   const [showJump, setShowJump] = useState(false);
+  const [selectedExcerpt, setSelectedExcerpt] = useState<{
+    text: string;
+    left: number;
+    top: number;
+  } | null>(null);
   const [completionAnnouncement, setCompletionAnnouncement] = useState<{
     sequence: number;
     message: string;
@@ -428,9 +438,77 @@ export const Conversation = memo(function Conversation({
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const isNearBottom = distanceFromBottom <= AUTO_SCROLL_THRESHOLD;
     stickyToBottomRef.current = isNearBottom;
+    setSelectedExcerpt(null);
     setShowJump(distanceFromBottom > JUMP_THRESHOLD);
     persistScrollPosition();
   }, [persistScrollPosition]);
+
+  const captureSelectedExcerpt = useCallback(() => {
+    if (!onQuoteSelection) return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      setSelectedExcerpt(null);
+      return;
+    }
+
+    const range = selection.getRangeAt(0);
+    const elementForNode = (node: Node) =>
+      node instanceof Element ? node : node.parentElement;
+    const startContent = elementForNode(range.startContainer)?.closest(
+      "[data-message-selectable-content]",
+    );
+    const endContent = elementForNode(range.endContainer)?.closest(
+      "[data-message-selectable-content]",
+    );
+    if (!startContent || startContent !== endContent) {
+      setSelectedExcerpt(null);
+      return;
+    }
+
+    const text = normalizeQuotedSelection(selection.toString());
+    const viewport = scrollRef.current?.parentElement;
+    if (!text || !viewport) {
+      setSelectedExcerpt(null);
+      return;
+    }
+    const rangeRect = range.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const left = Math.min(
+      Math.max(rangeRect.left + rangeRect.width / 2 - viewportRect.left, 64),
+      Math.max(64, viewportRect.width - 64),
+    );
+    setSelectedExcerpt({
+      text,
+      left,
+      top: Math.max(8, rangeRect.top - viewportRect.top - 44),
+    });
+  }, [onQuoteSelection]);
+
+  useLayoutEffect(() => setSelectedExcerpt(null), [threadKey]);
+
+  useEffect(() => {
+    if (!selectedExcerpt) return;
+    const dismissIfSelectionChanged = () => {
+      const selection = window.getSelection();
+      if (
+        !selection ||
+        selection.isCollapsed ||
+        normalizeQuotedSelection(selection.toString()) !== selectedExcerpt.text
+      ) {
+        setSelectedExcerpt(null);
+      }
+    };
+    const dismissOnResize = () => setSelectedExcerpt(null);
+    document.addEventListener("selectionchange", dismissIfSelectionChanged);
+    window.addEventListener("resize", dismissOnResize);
+    return () => {
+      document.removeEventListener(
+        "selectionchange",
+        dismissIfSelectionChanged,
+      );
+      window.removeEventListener("resize", dismissOnResize);
+    };
+  }, [selectedExcerpt]);
 
   const loadOlder = useCallback(() => {
     if (!onLoadOlder || isLoadingOlder) return;
@@ -579,6 +657,7 @@ export const Conversation = memo(function Conversation({
             aria-busy={isBusy}
             className="h-full overflow-x-hidden overflow-y-auto overscroll-y-contain"
             onScroll={handleScroll}
+            onMouseUp={captureSelectedExcerpt}
           >
             <div
               ref={contentRef}
@@ -721,6 +800,24 @@ export const Conversation = memo(function Conversation({
               <LiveActivityLane groups={liveActivityGroups} />
             </div>
           </div>
+
+          {selectedExcerpt ? (
+            <button
+              type="button"
+              aria-label="Add selected text to chat"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => {
+                onQuoteSelection?.(selectedExcerpt.text);
+                window.getSelection()?.removeAllRanges();
+                setSelectedExcerpt(null);
+              }}
+              className="fd-focus absolute z-30 inline-flex h-9 -translate-x-1/2 items-center gap-2 rounded-full border border-border-default bg-surface-4 px-3 text-[length:var(--fd-text-sm)] font-medium text-fg-primary shadow-[var(--fd-shadow-lg)] transition-[transform,background-color] hover:scale-[1.03] hover:bg-surface-3"
+              style={{ left: selectedExcerpt.left, top: selectedExcerpt.top }}
+            >
+              <Quote aria-hidden="true" className="h-3.5 w-3.5" />
+              Add to chat
+            </button>
+          ) : null}
 
           <div
             data-response-completion-announcer

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
-import { Check, ChevronDown, Zap } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, ChevronLeft, Zap } from "lucide-react";
 
 import {
   formatModelLabel,
@@ -126,6 +126,8 @@ function capitalize(value: string) {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+const EMPTY_PROVIDER_OPTIONS: ProviderOption[] = [];
+
 /**
  * The single model chip on the composer: model, reasoning effort, and the fast
  * service tier live in one popover so the toggle row stays short. The trigger
@@ -143,6 +145,9 @@ export function ModelMenu({
   fastActive = false,
   onFastActiveChange,
   showFastRow = false,
+  handoffProviders = EMPTY_PROVIDER_OPTIONS,
+  onHandoffProviderSelect,
+  handoffDisabledReason = null,
   disabled = false,
   open: controlledOpen,
   onOpenChange,
@@ -161,6 +166,11 @@ export function ModelMenu({
   onFastActiveChange?: (active: boolean) => void;
   /** True when any model of the provider advertises a tier, so the row does not flicker per model. */
   showFastRow?: boolean;
+  /** Other providers offered behind the second-step handoff surface. */
+  handoffProviders?: ProviderOption[];
+  onHandoffProviderSelect?: (provider: AgentProvider) => void;
+  /** Keeps handoff discoverable while explaining why it cannot start yet. */
+  handoffDisabledReason?: string | null;
   disabled?: boolean;
 } & MenuOpenProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
@@ -168,6 +178,7 @@ export function ModelMenu({
   const contentRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
   const [modelQuery, setModelQuery] = useState("");
+  const [panel, setPanel] = useState<"model" | "handoff">("model");
   const modelSearchable = models.length >= SEARCHABLE_OPTION_THRESHOLD;
   const visibleModels = useMemo(
     () =>
@@ -192,7 +203,10 @@ export function ModelMenu({
   const handleOpenChange = (nextOpen: boolean) => {
     if (controlledOpen === undefined) setUncontrolledOpen(nextOpen);
     onOpenChange?.(nextOpen);
-    if (!nextOpen) setModelQuery("");
+    if (!nextOpen) {
+      setModelQuery("");
+      setPanel("model");
+    }
   };
 
   /**
@@ -203,16 +217,35 @@ export function ModelMenu({
    * highlight to navigate by.
    */
   const rows = useMemo(() => {
-    const list: { kind: "model" | "effort" | "fast"; id: string }[] =
-      visibleModels.map((model) => ({ kind: "model" as const, id: model.id }));
+    const list: {
+      kind: "model" | "effort" | "fast" | "handoff" | "provider";
+      id: string;
+    }[] = [];
+    if (panel === "handoff") {
+      return handoffProviders.map((provider) => ({
+        kind: "provider" as const,
+        id: `provider:${provider.provider}`,
+      }));
+    }
+    list.push(
+      ...visibleModels.map((model) => ({
+        kind: "model" as const,
+        id: model.id,
+      })),
+    );
     if (reasoningOptions.length > 0)
       list.push({ kind: "effort", id: "effort" });
     if (showFastRow && onFastActiveChange && fastTier !== null)
       list.push({ kind: "fast", id: "fast" });
+    if (handoffProviders.length > 0 && onHandoffProviderSelect)
+      list.push({ kind: "handoff", id: "handoff" });
     return list;
   }, [
     fastTier,
+    handoffProviders,
+    onHandoffProviderSelect,
     onFastActiveChange,
+    panel,
     reasoningOptions.length,
     showFastRow,
     visibleModels,
@@ -241,7 +274,7 @@ export function ModelMenu({
 
   useEffect(() => {
     setActiveIndex(0);
-  }, [modelQuery]);
+  }, [modelQuery, panel]);
 
   // Keep the highlighted row scrolled into view during long model lists.
   useEffect(() => {
@@ -293,11 +326,21 @@ export function ModelMenu({
           handleOpenChange(false);
         } else if (activeRow.kind === "fast") {
           onFastActiveChange?.(!isFastOn);
+        } else if (activeRow.kind === "handoff") {
+          if (!handoffDisabledReason) setPanel("handoff");
+        } else if (activeRow.kind === "provider") {
+          const provider = activeRow.id.slice("provider:".length);
+          onHandoffProviderSelect?.(provider);
+          handleOpenChange(false);
         }
         return;
       }
       if (event.key === "Escape") {
         event.preventDefault();
+        if (panel === "handoff") {
+          setPanel("model");
+          return;
+        }
         handleOpenChange(false);
       }
     }
@@ -343,156 +386,280 @@ export function ModelMenu({
           onCloseAutoFocus={onCloseAutoFocus}
           className="z-50 w-[32rem] max-w-[calc(100vw-2rem)] rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
         >
-          <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
-            Model
-          </p>
-          {modelSearchable ? (
-            <OptionFilterField
-              value={modelQuery}
-              onChange={setModelQuery}
-              label="Search models"
-              resultCount={visibleModels.length}
-              autoFocus
+          {panel === "handoff" ? (
+            <HandoffProviderPanel
+              providers={handoffProviders}
+              activeRowId={activeRow?.id ?? null}
+              disabledReason={handoffDisabledReason}
+              onBack={() => setPanel("model")}
+              onActivate={activateRow}
+              onSelect={(provider) => {
+                onHandoffProviderSelect?.(provider);
+                handleOpenChange(false);
+              }}
             />
-          ) : null}
-          <div
-            role="menu"
-            aria-activedescendant={
-              activeRow ? `${menuId}-${activeRow.id}` : undefined
-            }
-            className="max-h-56 overflow-y-auto"
-          >
-            {visibleModels.map((model) => {
-              const isSelected = model.id === selectedModel?.id;
-              const isActive = activeRow?.id === model.id;
-              return (
-                <button
-                  key={model.id}
-                  id={`${menuId}-${model.id}`}
-                  data-row-id={model.id}
-                  type="button"
-                  role="menuitemradio"
-                  aria-checked={isSelected}
-                  onMouseEnter={() => activateRow(model.id)}
-                  onClick={() => {
-                    onModelChange(model.id);
-                    handleOpenChange(false);
-                  }}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors",
-                    isActive && "bg-surface-2",
-                  )}
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    {formatModelLabel(model.label)}
-                  </span>
-                  {isSelected ? (
-                    <Check
-                      aria-hidden="true"
-                      className="h-3.5 w-3.5 shrink-0"
-                    />
-                  ) : null}
-                </button>
-              );
-            })}
-            {visibleModels.length === 0 ? (
-              <p className="px-2.5 py-3 text-center text-[length:var(--fd-text-sm)] text-fg-muted">
-                No models match “{modelQuery.trim()}”
-              </p>
-            ) : null}
-          </div>
-
-          {reasoningOptions.length > 0 ? (
+          ) : (
             <>
-              <p className="mt-1 border-t border-border-subtle px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
-                Reasoning effort
+              <p className="px-2.5 pb-1 pt-1.5 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
+                Model
               </p>
+              {modelSearchable ? (
+                <OptionFilterField
+                  value={modelQuery}
+                  onChange={setModelQuery}
+                  label="Search models"
+                  resultCount={visibleModels.length}
+                  autoFocus
+                />
+              ) : null}
               <div
-                id={`${menuId}-effort`}
-                data-row-id="effort"
-                role="radiogroup"
-                aria-label="Reasoning effort"
-                onMouseEnter={() => activateRow("effort")}
-                className={cn(
-                  "flex items-center gap-1 rounded-[var(--fd-radius-md)] p-1",
-                  activeRow?.kind === "effort" &&
-                    "ring-1 ring-inset ring-border-emphasis",
-                )}
+                role="menu"
+                aria-activedescendant={
+                  activeRow ? `${menuId}-${activeRow.id}` : undefined
+                }
+                className="max-h-56 overflow-y-auto"
               >
-                {reasoningOptions.map((option) => {
-                  const isSelected = option === selectedEffort;
+                {visibleModels.map((model) => {
+                  const isSelected = model.id === selectedModel?.id;
+                  const isActive = activeRow?.id === model.id;
                   return (
                     <button
-                      key={option}
+                      key={model.id}
+                      id={`${menuId}-${model.id}`}
+                      data-row-id={model.id}
                       type="button"
-                      role="radio"
+                      role="menuitemradio"
                       aria-checked={isSelected}
-                      onClick={() => onEffortChange(option)}
+                      onMouseEnter={() => activateRow(model.id)}
+                      onClick={() => {
+                        onModelChange(model.id);
+                        handleOpenChange(false);
+                      }}
                       className={cn(
-                        "fd-focus h-6 flex-1 rounded-[var(--fd-radius-md)] px-2 text-[length:var(--fd-text-xs)] transition-colors",
-                        isSelected
-                          ? "bg-surface-3 text-fg-primary"
-                          : "text-fg-muted hover:bg-surface-2 hover:text-fg-secondary",
+                        "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active",
+                        isActive && "bg-interactive-hover",
                       )}
                     >
-                      {capitalize(option)}
+                      <span className="min-w-0 flex-1 truncate">
+                        {formatModelLabel(model.label)}
+                      </span>
+                      {isSelected ? (
+                        <Check
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5 shrink-0"
+                        />
+                      ) : null}
                     </button>
                   );
                 })}
-              </div>
-            </>
-          ) : null}
-
-          {showFastRow && onFastActiveChange ? (
-            <div className="border-t border-border-subtle pt-1">
-              <button
-                id={`${menuId}-fast`}
-                data-row-id="fast"
-                type="button"
-                role="menuitemcheckbox"
-                aria-checked={isFastOn}
-                aria-label="Fast mode"
-                disabled={fastTier === null}
-                title={
-                  fastTier === null
-                    ? "This model has one speed"
-                    : fastTier.description || `Run on the ${fastTier.name} tier`
-                }
-                onMouseEnter={() => activateRow("fast")}
-                onClick={() => onFastActiveChange(!isFastOn)}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-                  activeRow?.kind === "fast" && "bg-surface-2",
-                )}
-              >
-                {/* The bolt fills in when the tier is on, so state survives without color. */}
-                <Zap
-                  aria-hidden="true"
-                  className={cn(
-                    "h-3.5 w-3.5 shrink-0",
-                    isFastOn ? "text-accent" : "text-fg-muted",
-                  )}
-                  fill={isFastOn ? "currentColor" : "none"}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate">
-                    {fastTier?.name ?? "Fast"} mode
-                  </span>
-                  {fastTier?.description ? (
-                    <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
-                      {fastTier.description}
-                    </span>
-                  ) : null}
-                </span>
-                {isFastOn ? (
-                  <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
+                {visibleModels.length === 0 ? (
+                  <p className="px-2.5 py-3 text-center text-[length:var(--fd-text-sm)] text-fg-muted">
+                    No models match “{modelQuery.trim()}”
+                  </p>
                 ) : null}
-              </button>
-            </div>
-          ) : null}
+              </div>
+
+              {reasoningOptions.length > 0 ? (
+                <>
+                  <p className="mt-1 border-t border-border-subtle px-2.5 pb-1 pt-2 text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
+                    Reasoning effort
+                  </p>
+                  <div
+                    id={`${menuId}-effort`}
+                    data-row-id="effort"
+                    role="radiogroup"
+                    aria-label="Reasoning effort"
+                    onMouseEnter={() => activateRow("effort")}
+                    className={cn(
+                      "flex items-center gap-1 rounded-[var(--fd-radius-md)] p-1 transition-colors",
+                      activeRow?.kind === "effort" && "bg-interactive-hover",
+                    )}
+                  >
+                    {reasoningOptions.map((option) => {
+                      const isSelected = option === selectedEffort;
+                      return (
+                        <button
+                          key={option}
+                          type="button"
+                          role="radio"
+                          aria-checked={isSelected}
+                          onClick={() => onEffortChange(option)}
+                          className={cn(
+                            "h-6 flex-1 rounded-[var(--fd-radius-md)] px-2 text-[length:var(--fd-text-xs)] transition-colors focus-visible:bg-interactive-active focus-visible:text-fg-primary focus-visible:outline-none",
+                            isSelected
+                              ? "bg-interactive-active text-fg-primary"
+                              : "text-fg-muted hover:bg-interactive-active hover:text-fg-secondary",
+                          )}
+                        >
+                          {capitalize(option)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : null}
+
+              {showFastRow && onFastActiveChange ? (
+                <div className="border-t border-border-subtle pt-1">
+                  <button
+                    id={`${menuId}-fast`}
+                    data-row-id="fast"
+                    type="button"
+                    role="menuitemcheckbox"
+                    aria-checked={isFastOn}
+                    aria-label="Fast mode"
+                    disabled={fastTier === null}
+                    title={
+                      fastTier === null
+                        ? "This model has one speed"
+                        : fastTier.description ||
+                          `Run on the ${fastTier.name} tier`
+                    }
+                    onMouseEnter={() => activateRow("fast")}
+                    onClick={() => onFastActiveChange(!isFastOn)}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent",
+                      activeRow?.kind === "fast" && "bg-interactive-hover",
+                    )}
+                  >
+                    {/* The bolt fills in when the tier is on, so state survives without color. */}
+                    <Zap
+                      aria-hidden="true"
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0",
+                        isFastOn ? "text-accent" : "text-fg-muted",
+                      )}
+                      fill={isFastOn ? "currentColor" : "none"}
+                    />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">
+                        {fastTier?.name ?? "Fast"} mode
+                      </span>
+                      {fastTier?.description ? (
+                        <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                          {fastTier.description}
+                        </span>
+                      ) : null}
+                    </span>
+                    {isFastOn ? (
+                      <Check
+                        aria-hidden="true"
+                        className="h-3.5 w-3.5 shrink-0"
+                      />
+                    ) : null}
+                  </button>
+                </div>
+              ) : null}
+              {handoffProviders.length > 0 && onHandoffProviderSelect ? (
+                <div className="mt-1 border-t border-border-subtle pt-1">
+                  <button
+                    id={`${menuId}-handoff`}
+                    data-row-id="handoff"
+                    type="button"
+                    role="menuitem"
+                    disabled={Boolean(handoffDisabledReason)}
+                    title={handoffDisabledReason ?? undefined}
+                    onMouseEnter={() => activateRow("handoff")}
+                    onClick={() => setPanel("handoff")}
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-2 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent",
+                      activeRow?.kind === "handoff" && "bg-interactive-hover",
+                    )}
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate">
+                        Continue in another harness…
+                      </span>
+                      <span className="block truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                        Creates a linked thread; this one stays unchanged
+                      </span>
+                    </span>
+                    <ArrowRight
+                      aria-hidden="true"
+                      className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+                    />
+                  </button>
+                </div>
+              ) : null}
+            </>
+          )}
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
+  );
+}
+
+function HandoffProviderPanel({
+  providers,
+  activeRowId,
+  disabledReason,
+  onBack,
+  onActivate,
+  onSelect,
+}: {
+  providers: ProviderOption[];
+  activeRowId: string | null;
+  disabledReason: string | null;
+  onBack: () => void;
+  onActivate: (rowId: string) => void;
+  onSelect: (provider: AgentProvider) => void;
+}) {
+  return (
+    <>
+      <div className="flex items-center gap-2 px-1.5 pb-1 pt-1">
+        <button
+          type="button"
+          aria-label="Back to model settings"
+          onClick={onBack}
+          className="fd-focus inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] text-fg-muted hover:bg-interactive-hover hover:text-fg-primary"
+        >
+          <ChevronLeft aria-hidden="true" className="h-4 w-4" />
+        </button>
+        <div className="min-w-0">
+          <p className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+            Continue in another harness
+          </p>
+          <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+            Creates a linked thread with an AI-generated handoff
+          </p>
+        </div>
+      </div>
+      <div
+        role="menu"
+        aria-label="Destination harness"
+        className="border-t border-border-subtle pt-1"
+      >
+        {providers.map((option) => {
+          const rowId = `provider:${option.provider}`;
+          return (
+            <button
+              key={option.provider}
+              data-row-id={rowId}
+              type="button"
+              role="menuitem"
+              disabled={Boolean(disabledReason)}
+              title={disabledReason ?? undefined}
+              onMouseEnter={() => onActivate(rowId)}
+              onClick={() => onSelect(option.provider)}
+              className={cn(
+                "flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 py-2 text-left text-[length:var(--fd-text-sm)] text-fg-primary transition-colors hover:bg-interactive-hover focus-visible:bg-interactive-hover focus-visible:outline-none active:bg-interactive-active disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent",
+                activeRowId === rowId && "bg-interactive-hover",
+              )}
+            >
+              <span className="min-w-0 flex-1 truncate">{option.label}</span>
+              <ArrowRight
+                aria-hidden="true"
+                className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+              />
+            </button>
+          );
+        })}
+      </div>
+      <p className="px-2.5 py-2 text-[length:var(--fd-text-xs)] text-fg-muted">
+        Your current thread stays unchanged and remains available in the
+        sidebar.
+      </p>
+    </>
   );
 }
 

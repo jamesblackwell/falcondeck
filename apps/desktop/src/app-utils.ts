@@ -49,7 +49,7 @@ export function workspaceSendBlockReason(
 
   switch (workspace.status) {
     case 'connecting':
-      return `${workspace.path.split('/').pop() ?? 'This project'} is still reconnecting. Wait a moment and try again.`
+      return `Reconnecting to ${workspace.path.split('/').pop() ?? 'this project'}. You can keep drafting while it reconnects.`
     case 'disconnected':
       return workspace.last_error ?? `${workspace.path.split('/').pop() ?? 'This project'} is disconnected. Reconnect it and try again.`
     case 'error':

@@ -130,7 +130,7 @@ pub(super) async fn persist_preferences(
 /// Persist callers run concurrently; a shared temp path would let one
 /// writer's rename publish another writer's half-written file. Each write
 /// gets its own temp file so the atomic rename is the only shared step.
-async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result<(), DaemonError> {
+pub(super) async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result<(), DaemonError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
@@ -154,6 +154,13 @@ async fn write_atomically(path: &PathBuf, payload: Vec<u8>) -> Result<(), Daemon
     if let Err(error) = fs::rename(&tmp_path, path).await {
         let _ = fs::remove_file(&tmp_path).await;
         return Err(error.into());
+    }
+    // fsyncing the file protects its bytes; fsyncing the containing directory
+    // protects the rename itself across a sudden power loss. Queue acceptance
+    // relies on both before it can truthfully claim the message is durable.
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent).await?.sync_all().await?;
     }
     #[cfg(unix)]
     fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;

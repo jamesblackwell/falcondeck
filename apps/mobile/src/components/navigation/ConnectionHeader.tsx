@@ -1,10 +1,8 @@
 import { memo } from 'react'
-import { Pressable } from 'react-native'
+import { Pressable, View } from 'react-native'
 import { StyleSheet } from 'react-native-unistyles'
 
 import type { MachinePresence } from '@falcondeck/client-core'
-
-import { Badge } from '@/components/ui'
 
 interface ConnectionHeaderProps {
   connectionStatus: string
@@ -22,20 +20,20 @@ function connectionLabel(status: string): string {
   return 'Not connected'
 }
 
-function connectionBadgeState(
+function connectionState(
   connectionStatus: string,
   isEncrypted: boolean,
   desktopOnline: boolean,
-): { variant: 'success' | 'warning' | 'danger'; label: string } {
+): { connected: boolean; label: string } {
   const relayReady = connectionStatus === 'encrypted' && isEncrypted
 
   if (relayReady) {
-    if (desktopOnline) return { variant: 'success', label: 'Connected' }
-    return { variant: 'warning', label: 'Desktop offline' }
+    if (desktopOnline) return { connected: true, label: 'Connected' }
+    return { connected: false, label: 'Desktop offline' }
   }
 
   return {
-    variant: connectionStatus === 'disconnected' ? 'danger' : 'warning',
+    connected: false,
     label: connectionLabel(connectionStatus),
   }
 }
@@ -47,27 +45,34 @@ export const ConnectionHeader = memo(function ConnectionHeader({
   onPress,
 }: ConnectionHeaderProps) {
   const desktopOnline = machinePresence?.daemon_connected ?? false
-  const badgeState = connectionBadgeState(connectionStatus, isEncrypted, desktopOnline)
+  const state = connectionState(connectionStatus, isEncrypted, desktopOnline)
 
   return (
     <Pressable
       style={styles.container}
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={`Connection: ${badgeState.label}`}
+      accessibilityLabel={`Connection: ${state.label}`}
       accessibilityHint="Opens settings"
       hitSlop={8}
     >
-      <Badge variant={badgeState.variant} dot>
-        {badgeState.label}
-      </Badge>
+      <View style={[styles.dot, state.connected ? styles.connected : styles.disconnected]} />
     </Pressable>
   )
 })
 
 const styles = StyleSheet.create((theme) => ({
   container: {
-    flexDirection: 'row',
-    gap: theme.spacing[2],
+    minWidth: theme.minTouchTarget,
+    minHeight: theme.minTouchTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: theme.radius.full,
+  },
+  connected: { backgroundColor: theme.colors.success.default },
+  disconnected: { backgroundColor: theme.colors.danger.default },
 }))

@@ -1702,6 +1702,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         title: "Thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -1811,6 +1812,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     title: "Untitled thread".to_string(),
                     provider: AgentProvider::CODEX,
                     native_session_id: None,
+                    handoff_from: None,
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
@@ -2365,6 +2367,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 updated_at: Some(thread_updated_at),
                 provider: Some(AgentProvider::CLAUDE),
                 native_session_id: Some("native-session-1".to_string()),
+                handoff_from: None,
                 title: Some("Recovered thread".to_string()),
                 manual_title: false,
                 ai_title_generated: false,
@@ -2374,6 +2377,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 last_agent_activity_seq: 7,
                 variant: None,
                 agent: ThreadAgentParams::default(),
+                queued_requests: Vec::new(),
             }],
         }],
         remote: None,
@@ -2554,6 +2558,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     updated_at: None,
                     provider: Some(AgentProvider::CODEX),
                     native_session_id: Some("native-a".to_string()),
+                    handoff_from: None,
                     title: Some("Thread A".to_string()),
                     manual_title: false,
                     ai_title_generated: false,
@@ -2563,6 +2568,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_agent_activity_seq: 0,
                     variant: None,
                     agent: ThreadAgentParams::default(),
+                    queued_requests: Vec::new(),
                 }],
             },
         );
@@ -2582,6 +2588,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     updated_at: None,
                     provider: Some(AgentProvider::CLAUDE),
                     native_session_id: Some("native-b".to_string()),
+                    handoff_from: None,
                     title: Some("Thread B".to_string()),
                     manual_title: false,
                     ai_title_generated: false,
@@ -2591,6 +2598,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     last_agent_activity_seq: 3,
                     variant: None,
                     agent: ThreadAgentParams::default(),
+                    queued_requests: Vec::new(),
                 }],
             },
         );
@@ -2603,6 +2611,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         title: "Thread A renamed".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: Some("native-a-2".to_string()),
+        handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -2711,6 +2720,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         title: "Running thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: Some("native-session-1".to_string()),
+        handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -3118,6 +3128,7 @@ async fn insert_claude_workspace_with_session(
                     title: "Claude thread".to_string(),
                     provider: AgentProvider::CLAUDE,
                     native_session_id: Some(native_session_id.to_string()),
+                    handoff_from: None,
                     status: ThreadStatus::Running,
                     updated_at: Utc::now(),
                     last_message_preview: None,
@@ -3738,6 +3749,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         title: "Active thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -3760,6 +3772,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         title: "Archived thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -3969,6 +3982,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         title: "Idle thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -4055,7 +4069,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
 }
 
 #[tokio::test]
-async fn sends_against_a_running_thread_queue_and_are_removable() {
+async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-q");
     std::fs::create_dir_all(&workspace_path).unwrap();
@@ -4072,6 +4086,7 @@ async fn sends_against_a_running_thread_queue_and_are_removable() {
         title: "Running thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -4146,15 +4161,61 @@ async fn sends_against_a_running_thread_queue_and_are_removable() {
     assert_eq!(summary.queued_turns.len(), 1);
     assert_eq!(summary.queued_turns[0].preview, "queued follow-up");
 
+    let mut second_request = request.clone();
+    second_request.inputs = vec![falcondeck_core::TurnInputItem::Text {
+        id: None,
+        text: "second follow-up".to_string(),
+    }];
+    app.send_turn(second_request).await.unwrap();
+    let snapshot = app.snapshot().await;
+    let first_id = snapshot.threads[0].queued_turns[0].id.clone();
+    let second_id = snapshot.threads[0].queued_turns[1].id.clone();
+    app.reorder_queued_turns(
+        &workspace_id,
+        "thread-q",
+        &[second_id.clone(), first_id.clone()],
+    )
+    .await
+    .unwrap();
+    let snapshot = app.snapshot().await;
+    assert_eq!(
+        snapshot.threads[0].queued_turns[0].preview,
+        "second follow-up"
+    );
+    let workspaces = app.inner.workspaces.lock().await;
+    let queued_text = match &workspaces
+        .get(&workspace_id)
+        .unwrap()
+        .threads
+        .get("thread-q")
+        .unwrap()
+        .queued_requests[0]
+        .request
+        .inputs[0]
+    {
+        falcondeck_core::TurnInputItem::Text { text, .. } => text,
+        _ => panic!("expected queued text"),
+    };
+    assert_eq!(queued_text, "second follow-up");
+    drop(workspaces);
+    assert!(
+        app.reorder_queued_turns(&workspace_id, "thread-q", std::slice::from_ref(&first_id))
+            .await
+            .is_err(),
+        "partial orders are rejected"
+    );
+
     // Queued turns are removable before dispatch.
-    let queued_id = summary.queued_turns[0].id.clone();
-    app.remove_queued_turn(&workspace_id, "thread-q", &queued_id)
+    app.remove_queued_turn(&workspace_id, "thread-q", &first_id)
+        .await
+        .unwrap();
+    app.remove_queued_turn(&workspace_id, "thread-q", &second_id)
         .await
         .unwrap();
     let snapshot = app.snapshot().await;
     assert!(snapshot.threads[0].queued_turns.is_empty());
     assert!(
-        app.remove_queued_turn(&workspace_id, "thread-q", &queued_id)
+        app.remove_queued_turn(&workspace_id, "thread-q", &first_id)
             .await
             .is_err(),
         "removing twice reports not found"
@@ -4182,6 +4243,7 @@ async fn busy_thread_app(
         title: "Running thread".to_string(),
         provider: provider.clone(),
         native_session_id: None,
+        handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -4237,6 +4299,26 @@ async fn busy_thread_app(
         },
     );
     (app, workspace_id)
+}
+
+#[tokio::test]
+async fn queued_turn_is_persisted_before_enqueue_returns() {
+    let temp_dir = tempdir().unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let (app, workspace_id) = busy_thread_app(
+        &temp_dir,
+        AgentProvider::CLAUDE,
+        falcondeck_core::AgentCapabilitySummary::claude(),
+    )
+    .await;
+
+    app.send_turn(steer_request(&workspace_id, false))
+        .await
+        .unwrap();
+
+    let persisted = super::load_persisted_app_state(&state_path).await.unwrap();
+    let queued = &persisted.workspaces[0].thread_states[0].queued_requests[0];
+    assert_eq!(queued.summary.text, "actually, use the other endpoint");
 }
 
 fn steer_request(workspace_id: &str, steer: bool) -> falcondeck_core::SendTurnRequest {
@@ -4584,6 +4666,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         title: "t".to_string(),
         provider: AgentProvider::CLAUDE,
         native_session_id: Some("sess-hook".to_string()),
+        handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,

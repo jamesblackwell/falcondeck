@@ -89,7 +89,7 @@ export const FileListView = memo(function FileListView({
         <div className="flex h-7 items-center gap-2">
           <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">Review</p>
           {branch ? (
-            <div className="flex min-w-0 items-center gap-1 text-[length:var(--fd-text-2xs)] text-fg-muted">
+            <div className="flex min-w-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
               <GitBranch aria-hidden="true" className="h-3 w-3 shrink-0" />
               <span className="truncate">{branch}</span>
             </div>
@@ -139,7 +139,7 @@ export const FileListView = memo(function FileListView({
                 setQuery('')
               }}
               aria-pressed={activeTab === tab}
-              className={`fd-focus -mb-px border-b px-2 py-1.5 text-[length:var(--fd-text-xs)] font-medium capitalize transition-colors ${
+              className={`fd-focus -mb-px border-b px-2 py-1.5 text-[length:var(--fd-text-sm)] font-medium capitalize transition-colors ${
                 activeTab === tab
                   ? 'border-accent text-fg-primary'
                   : 'border-transparent text-fg-muted hover:text-fg-secondary'
@@ -147,7 +147,7 @@ export const FileListView = memo(function FileListView({
             >
               {tab}
               {tab === 'changes' && entries.length > 0 ? (
-                <span className="ml-1 text-[length:var(--fd-text-2xs)] text-fg-faint">
+                <span className="ml-1 text-[length:var(--fd-text-xs)] text-fg-faint">
                   {entries.length}
                 </span>
               ) : null}
@@ -162,7 +162,7 @@ export const FileListView = memo(function FileListView({
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={activeTab === 'changes' ? 'Filter changed files' : 'Go to file'}
-            className="min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-xs)] text-fg-primary outline-none placeholder:text-fg-faint"
+            className="min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-faint"
           />
           {query ? (
             <button
@@ -203,11 +203,11 @@ export const FileListView = memo(function FileListView({
                   className="fd-focus-inset flex h-8 w-full items-center gap-2 px-3 text-left [contain-intrinsic-size:32px] [content-visibility:auto] hover:bg-surface-2"
                 >
                   <FileTypeIcon path={entry.path} />
-                  <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)]">
+                  <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)]">
                     <span className="text-fg-muted">{dirPart(entry.path)}</span>
                     <span className="font-medium text-fg-primary">{basePart(entry.path)}</span>
                   </span>
-                  <span className="flex items-center gap-1.5 text-[length:var(--fd-text-2xs)] tabular-nums">
+                  <span className="flex items-center gap-1.5 text-[length:var(--fd-text-xs)] tabular-nums">
                     {entry.insertions != null ? <span className="text-success">+{entry.insertions}</span> : null}
                     {entry.deletions != null ? <span className="text-danger">-{entry.deletions}</span> : null}
                     <span

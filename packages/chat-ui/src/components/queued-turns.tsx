@@ -1,6 +1,6 @@
 import * as Popover from '@radix-ui/react-popover'
-import { Clock, MoreHorizontal, Paperclip, Pencil, Trash2 } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { CornerDownRight, MoreHorizontal, Paperclip, Pencil, Trash2 } from 'lucide-react'
+import { useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 
 import type { QueuedTurnSummary } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
@@ -31,7 +31,7 @@ function QueuedMenuItem({
       title={title}
       onClick={onClick}
       className={cn(
-        'fd-focus-inset flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)]',
+        'fd-focus-fill flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)]',
         disabled
           ? 'cursor-not-allowed text-fg-muted opacity-60'
           : destructive
@@ -112,6 +112,12 @@ function QueuedTurnChip({
   onRemove,
   onSteer,
   onEdit,
+  attachmentPreviewUrl,
+  draggable,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: {
   queued: QueuedTurnSummary
   canSteer: boolean
@@ -119,6 +125,12 @@ function QueuedTurnChip({
   onRemove: () => void
   onSteer: () => void
   onEdit?: (text: string) => void
+  attachmentPreviewUrl?: string
+  draggable: boolean
+  onDragStart: (event: DragEvent<HTMLDivElement>) => void
+  onDragOver: (event: DragEvent<HTMLDivElement>) => void
+  onDrop: (event: DragEvent<HTMLDivElement>) => void
+  onDragEnd: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [isEditing, setIsEditing] = useState(false)
@@ -141,9 +153,26 @@ function QueuedTurnChip({
   }
 
   return (
-    <div className="flex items-center gap-2 self-end rounded-[var(--fd-radius-lg)] border border-dashed border-border-emphasis bg-surface-2 py-1.5 pl-3 pr-1.5">
-      <Clock aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-      <span className="max-w-md truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
+    <div
+      draggable={draggable}
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
+      data-queued-turn-id={queued.id}
+      className="group flex min-h-10 cursor-grab items-center gap-2 px-2 py-1.5 active:cursor-grabbing"
+    >
+      <CornerDownRight aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
+      {attachmentPreviewUrl ? (
+        <img
+          src={attachmentPreviewUrl}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          className="h-8 w-8 shrink-0 rounded-[var(--fd-radius-sm)] border border-border-default bg-surface-3 object-cover"
+        />
+      ) : null}
+      <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
         {label}
       </span>
       {queued.attachment_count ? (
@@ -152,16 +181,24 @@ function QueuedTurnChip({
           {queued.attachment_count}
         </span>
       ) : null}
-      <span className="text-[length:var(--fd-text-xs)] text-fg-muted">queued</span>
       <button
         type="button"
         disabled={!canSteer}
         aria-disabled={!canSteer || undefined}
         title={canSteer ? undefined : steerDisabledReason}
         onClick={onSteer}
-        className="fd-focus-inset rounded-[var(--fd-radius-sm)] px-1 py-0.5 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:text-fg-primary disabled:cursor-not-allowed disabled:text-fg-muted disabled:opacity-60"
+        className="fd-focus-inset flex shrink-0 items-center gap-1 rounded-[var(--fd-radius-sm)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary transition-colors hover:bg-interactive-hover hover:text-fg-primary disabled:cursor-not-allowed disabled:text-fg-muted disabled:opacity-60"
       >
-        Steer
+        <CornerDownRight aria-hidden="true" className="h-3.5 w-3.5" /> Steer
+      </button>
+      <button
+        type="button"
+        aria-label={`Remove queued message: ${label}`}
+        title="Remove queued message"
+        onClick={onRemove}
+        className="fd-focus-inset shrink-0 rounded-[var(--fd-radius-sm)] p-1.5 text-fg-muted transition-colors hover:bg-danger-muted hover:text-danger"
+      >
+        <Trash2 aria-hidden="true" className="h-4 w-4" />
       </button>
       <Popover.Root open={open} onOpenChange={setOpen}>
         <Popover.Trigger
@@ -225,6 +262,8 @@ export function QueuedTurns({
   onRemove,
   onSteer,
   onEdit,
+  onReorder,
+  getAttachmentPreviewUrl,
 }: {
   queuedTurns: QueuedTurnSummary[]
   canSteer?: boolean
@@ -232,13 +271,35 @@ export function QueuedTurns({
   onRemove: (queuedId: string) => void
   onSteer: (queuedId: string) => void
   onEdit?: (queuedId: string, text: string) => void
+  onReorder?: (queuedIds: string[]) => void
+  getAttachmentPreviewUrl?: (queuedId: string) => string | undefined
 }) {
+  const draggedIdRef = useRef<string | null>(null)
+  const [previewOrder, setPreviewOrder] = useState<string[] | null>(null)
+  const previewOrderRef = useRef<string[] | null>(null)
+  const queuedById = useMemo(
+    () => new Map(queuedTurns.map((queued) => [queued.id, queued])),
+    [queuedTurns],
+  )
+  const orderedTurns = useMemo(() => {
+    if (!previewOrder) return queuedTurns
+    const seen = new Set<string>()
+    return [...previewOrder, ...queuedTurns.map((queued) => queued.id)].flatMap((id) => {
+      if (seen.has(id)) return []
+      seen.add(id)
+      const queued = queuedById.get(id)
+      return queued ? [queued] : []
+    })
+  }, [previewOrder, queuedById, queuedTurns])
   if (queuedTurns.length === 0) return null
   return (
     // Same centered column as the conversation and the composer, so the chips
     // sit directly above the prompt input instead of hugging the window edge.
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-1.5 px-3 pb-2 md:px-6">
-      {queuedTurns.map((queued) => (
+    <div
+      aria-label="Queued messages"
+      className="mx-auto mb-2 flex w-[calc(100%-1.5rem)] max-w-3xl flex-col divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2 shadow-[var(--fd-shadow-sm)] md:w-[calc(100%-3rem)]"
+    >
+      {orderedTurns.map((queued) => (
         <QueuedTurnChip
           key={queued.id}
           queued={queued}
@@ -247,6 +308,45 @@ export function QueuedTurns({
           onRemove={() => onRemove(queued.id)}
           onSteer={() => onSteer(queued.id)}
           onEdit={onEdit ? (text) => onEdit(queued.id, text) : undefined}
+          attachmentPreviewUrl={
+            queued.attachment_count ? getAttachmentPreviewUrl?.(queued.id) : undefined
+          }
+          draggable={queuedTurns.length > 1 && Boolean(onReorder)}
+          onDragStart={(event) => {
+            draggedIdRef.current = queued.id
+            const initialOrder = orderedTurns.map((item) => item.id)
+            previewOrderRef.current = initialOrder
+            setPreviewOrder(initialOrder)
+            event.dataTransfer.effectAllowed = 'move'
+            event.dataTransfer.setData('text/plain', queued.id)
+          }}
+          onDragOver={(event) => {
+            const activeDraggedId = draggedIdRef.current
+            if (!activeDraggedId || activeDraggedId === queued.id) return
+            event.preventDefault()
+            event.dataTransfer.dropEffect = 'move'
+            const order = previewOrderRef.current ?? queuedTurns.map((item) => item.id)
+            const targetIndex = order.indexOf(queued.id)
+            const next = order.filter((id) => id !== activeDraggedId)
+            next.splice(targetIndex < 0 ? next.length : targetIndex, 0, activeDraggedId)
+            previewOrderRef.current = next
+            setPreviewOrder(next)
+          }}
+          onDragEnd={() => {
+            draggedIdRef.current = null
+            previewOrderRef.current = null
+            setPreviewOrder(null)
+          }}
+          onDrop={(event) => {
+            event.preventDefault()
+            const next = previewOrderRef.current
+            previewOrderRef.current = null
+            draggedIdRef.current = null
+            setPreviewOrder(null)
+            if (next && next.join('\0') !== queuedTurns.map((item) => item.id).join('\0')) {
+              onReorder?.(next)
+            }
+          }}
         />
       ))}
     </div>

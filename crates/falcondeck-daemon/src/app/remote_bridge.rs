@@ -61,6 +61,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "thread.queue.remove",
     "thread.queue.steer",
     "thread.queue.edit",
+    "thread.queue.reorder",
     "workspace.connect",
     "workspace.remove",
     "workspace.files",
@@ -72,6 +73,9 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "connectors.update",
     "providers.read",
     "providers.update",
+    "extensions.read",
+    "extensions.update",
+    "extensions.action.invoke",
 ];
 
 impl AppState {
@@ -680,6 +684,41 @@ impl AppState {
                     }
                     result
                 }
+                "extensions.read" => serde_json::to_value(self.extension_snapshot().await)
+                    .map_err(|error| format!("failed to serialize extensions: {error}")),
+                "extensions.update" => {
+                    let extension_id = required(&["extensionId", "extension_id"])?;
+                    let enabled = params
+                        .get("enabled")
+                        .and_then(Value::as_bool)
+                        .ok_or_else(|| "invalid remote rpc payload".to_string())?;
+                    serde_json::to_value(
+                        self.update_extension(&extension_id, enabled)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize extension: {error}"))
+                }
+                "extensions.action.invoke" => {
+                    let extension_id = required(&["extensionId", "extension_id"])?;
+                    let action_id = required(&["actionId", "action_id"])?;
+                    let target = params
+                        .get("target")
+                        .cloned()
+                        .map(serde_json::from_value)
+                        .transpose()
+                        .map_err(|_| "invalid extension action target".to_string())?;
+                    let request = falcondeck_core::InvokeExtensionActionRequest {
+                        target,
+                        input: params.get("input").cloned().unwrap_or(Value::Null),
+                    };
+                    serde_json::to_value(
+                        self.invoke_extension_action(&extension_id, &action_id, request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize extension action: {error}"))
+                }
                 "connectors.read" => {
                     let workspace_path = self
                         .connectors_rpc_workspace_path(
@@ -753,6 +792,11 @@ impl AppState {
                             &["permissionMode", "permission_mode"],
                         ),
                         isolation: parse_thread_isolation(&params),
+                        handoff_from: params
+                            .get("handoffFrom")
+                            .or_else(|| params.get("handoff_from"))
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok()),
                     };
                     self.start_thread(request)
                         .await
@@ -1100,6 +1144,25 @@ impl AppState {
                         })
                         .map_err(|error| error.to_string())
                 }
+                "thread.queue.reorder" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    let queued_ids = params
+                        .get("queued_ids")
+                        .or_else(|| params.get("queuedIds"))
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| "missing queued_ids".to_string())?
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| "queued_ids must be strings".to_string())?;
+                    self.reorder_queued_turns(&workspace_id, &thread_id, &queued_ids)
+                        .await
+                        .and_then(|response| {
+                            serde_json::to_value(response).map_err(DaemonError::from)
+                        })
+                        .map_err(|error| error.to_string())
+                }
                 _ => Err(format!("unsupported remote rpc method `{method}`")),
             }
         }
@@ -1171,6 +1234,11 @@ impl AppState {
                             &["permissionMode", "permission_mode"],
                         ),
                         isolation: parse_thread_isolation(&params),
+                        handoff_from: params
+                            .get("handoffFrom")
+                            .or_else(|| params.get("handoff_from"))
+                            .cloned()
+                            .and_then(|value| serde_json::from_value(value).ok()),
                     };
                     self.start_thread(request)
                         .await

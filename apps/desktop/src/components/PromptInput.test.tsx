@@ -71,6 +71,29 @@ describe("PromptInput", () => {
     ).toBeDisabled();
   });
 
+  it("shows removable quoted excerpts and allows sending without a comment", () => {
+    const onSubmit = vi.fn();
+    const onRemoveQuotedSelection = vi.fn();
+    render(
+      <PromptInput
+        {...promptInputProps}
+        onSubmit={onSubmit}
+        quotedSelections={[{ id: "quote-1", text: "A selected answer" }]}
+        onRemoveQuotedSelection={onRemoveQuotedSelection}
+      />,
+    );
+
+    expect(screen.getByText("1 selected excerpt")).toBeInTheDocument();
+    expect(screen.getByText("A selected answer")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+    expect(onSubmit).toHaveBeenCalledOnce();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove selected excerpt 1" }),
+    );
+    expect(onRemoveQuotedSelection).toHaveBeenCalledWith("quote-1");
+  });
+
   it("announces image preparation and blocks every send path until it settles", () => {
     const onSubmit = vi.fn();
     render(
@@ -781,6 +804,43 @@ describe("PromptInput", () => {
     ).toHaveAttribute("aria-checked", "true");
     const effort = screen.getByRole("radio", { name: "Medium" });
     expect(effort).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("keeps handoff destinations behind a second model-menu step", () => {
+    const onHandoffProviderSelect = vi.fn();
+    render(
+      <PromptInput
+        {...promptInputProps}
+        models={[
+          {
+            id: "gpt-5.4",
+            label: "gpt-5.4",
+            is_default: true,
+            default_reasoning_effort: "medium",
+            supported_reasoning_efforts: [],
+          },
+        ]}
+        selectedModelId="gpt-5.4"
+        handoffProviders={[
+          { provider: "claude", label: "Claude" },
+          { provider: "grok", label: "Grok" },
+        ]}
+        onHandoffProviderSelect={onHandoffProviderSelect}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Model" }));
+    expect(screen.queryByRole("menuitem", { name: "Claude" })).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("menuitem", { name: /Continue in another harness/ }),
+    );
+    expect(
+      screen.getByRole("menu", { name: "Destination harness" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("menuitem", { name: "Claude" }));
+    expect(onHandoffProviderSelect).toHaveBeenCalledWith("claude");
   });
 
   it("filters a long model menu by label or provider identifier", () => {

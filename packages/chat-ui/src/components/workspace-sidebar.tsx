@@ -1,9 +1,15 @@
 import * as React from 'react'
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, FolderPlus, SquarePen } from 'lucide-react'
+import { createPortal } from 'react-dom'
+import { ChevronDown, FolderClosed, FolderPlus, SquarePen } from 'lucide-react'
 
 import { compareThreads } from '@falcondeck/client-core'
-import type { ProjectGroup, ThreadSortMode, ThreadSummary } from '@falcondeck/client-core'
+import type {
+  ProjectGroup,
+  ThreadSortMode,
+  ThreadSummary,
+  ThreadTag,
+} from '@falcondeck/client-core'
 import {
   ActivityDiamond,
   Button,
@@ -15,6 +21,7 @@ import {
 } from '@falcondeck/ui'
 
 import { AttentionInbox } from './attention-inbox'
+import { ThreadColorFilterMenu } from './thread-color-filter-menu'
 import { ThreadSortMenu } from './thread-sort-menu'
 import {
   DeleteThreadDialog,
@@ -30,6 +37,8 @@ import { WorkspaceGroup, type WorkspaceHostBadge } from './workspace-group'
 
 const VISIBLE_THREAD_LIMIT = 5
 const SHOW_MORE_STEP = 10
+const THREAD_PAGER_BUTTON_CLASS =
+  'fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary'
 const RELATIVE_TIME_TICK_MS = 60_000
 const OPTIMISTIC_SELECTION_TTL_MS = 1_500
 const WORKSPACE_DRAG_THRESHOLD_PX = 4
@@ -51,14 +60,24 @@ export type WorkspaceSidebarProps = {
   onNewThread?: (workspaceId: string) => void
   onArchiveThread?: ThreadItemArchiveHandler
   /** Permanent, unlike archive: also removes a variant thread's checkout. */
-  onDeleteThread?: (workspaceId: string, threadId: string) => Promise<void> | void
-  onRenameThread?: (workspaceId: string, threadId: string, title: string) => Promise<void> | void
+  onDeleteThread?: (
+    workspaceId: string,
+    threadId: string,
+  ) => Promise<void> | void
+  onRenameThread?: (
+    workspaceId: string,
+    threadId: string,
+    title: string,
+  ) => Promise<void> | void
   onTogglePinThread?: (
     workspaceId: string,
     threadId: string,
     pinned: boolean,
   ) => Promise<void> | void
-  onMarkThreadRead?: (workspaceId: string, threadId: string) => Promise<void> | void
+  onMarkThreadRead?: (
+    workspaceId: string,
+    threadId: string,
+  ) => Promise<void> | void
   onAddProject?: () => void
   onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void
   /** How chats order within each project; also applies to the pinned list. */
@@ -75,6 +94,13 @@ export type WorkspaceSidebarProps = {
   className?: string
   headerClassName?: string
   contentClassName?: string
+  threadTagsById?: Record<string, ThreadTag[]>
+  threadTagOptions?: ThreadTag[]
+  onSetThreadColor?: (
+    workspaceId: string,
+    thread: ThreadSummary,
+    color: ThreadTag | null,
+  ) => Promise<void> | void
 }
 
 const ThreadList = memo(function ThreadList({
@@ -84,7 +110,9 @@ const ThreadList = memo(function ThreadList({
   onSelectThread,
   onArchiveThread,
   onOpenThreadContextMenu,
+  onRequestRenameThread,
   nowTick,
+  threadTagsById,
 }: {
   group: ProjectGroup
   sortMode: ThreadSortMode
@@ -92,12 +120,19 @@ const ThreadList = memo(function ThreadList({
   onSelectThread: (workspaceId: string, threadId: string) => void
   onArchiveThread?: ThreadItemArchiveHandler
   onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void
+  onRequestRenameThread?: (args: {
+    workspaceId: string
+    thread: ThreadSummary
+  }) => void
   nowTick: number
+  threadTagsById?: Record<string, ThreadTag[]>
 }) {
   const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT)
   const unpinnedThreads = useMemo(
     () =>
-      group.threads.filter((thread) => !thread.is_pinned).sort(compareThreads(sortMode)),
+      group.threads
+        .filter((thread) => !thread.is_pinned)
+        .sort(compareThreads(sortMode)),
     [group.threads, sortMode],
   )
 
@@ -110,15 +145,21 @@ const ThreadList = memo(function ThreadList({
   // selection moves.
   const trailingSelected =
     selectedThreadId != null && hiddenCount > 0
-      ? (unpinnedThreads.slice(visibleCount).find((thread) => thread.id === selectedThreadId) ??
-        null)
+      ? (unpinnedThreads
+          .slice(visibleCount)
+          .find((thread) => thread.id === selectedThreadId) ?? null)
       : null
-  const canCollapse = hiddenCount === 0 && unpinnedThreads.length > VISIBLE_THREAD_LIMIT
+  // "Show less" rides alongside "Show more" as soon as the list has grown past
+  // its resting length, so a partly-expanded project can be wound back without
+  // first paging all the way to the end.
+  const canCollapse = visibleCount > VISIBLE_THREAD_LIMIT
 
   return (
     <>
       {group.threads.length === 0 ? (
-        <p className="py-2 pl-2.5 text-[length:var(--fd-text-xs)] text-fg-muted">No threads yet</p>
+        <p className="py-2 pl-2.5 text-[length:var(--fd-text-xs)] text-fg-muted">
+          No threads yet
+        </p>
       ) : null}
       {visible.map((thread) => (
         <ThreadItem
@@ -129,7 +170,9 @@ const ThreadList = memo(function ThreadList({
           onSelect={onSelectThread}
           onArchive={onArchiveThread}
           onOpenContextMenu={onOpenThreadContextMenu}
+          onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
+          tags={threadTagsById?.[thread.id]}
         />
       ))}
       {trailingSelected ? (
@@ -141,27 +184,39 @@ const ThreadList = memo(function ThreadList({
           onSelect={onSelectThread}
           onArchive={onArchiveThread}
           onOpenContextMenu={onOpenThreadContextMenu}
+          onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
+          tags={threadTagsById?.[trailingSelected.id]}
         />
       ) : null}
       {hiddenCount > 0 || canCollapse ? (
-        <button
-          type="button"
-          onClick={() =>
-            setVisibleCount(canCollapse ? VISIBLE_THREAD_LIMIT : visibleCount + SHOW_MORE_STEP)
-          }
-          aria-expanded={canCollapse}
-          className="fd-focus flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary"
-        >
-          <ChevronDown
-            aria-hidden="true"
-            className={cn(
-              'h-3 w-3 transition-transform duration-[var(--fd-duration-normal)] ease-[var(--fd-ease-default)]',
-              canCollapse && 'rotate-180',
-            )}
-          />
-          {canCollapse ? 'Show less' : 'Show more'}
-        </button>
+        <div className="flex items-center gap-1">
+          {hiddenCount > 0 ? (
+            <button
+              type="button"
+              onClick={() => setVisibleCount(visibleCount + SHOW_MORE_STEP)}
+              className={THREAD_PAGER_BUTTON_CLASS}
+            >
+              <ChevronDown aria-hidden="true" className="h-3 w-3" />
+              Show more
+            </button>
+          ) : null}
+          {canCollapse ? (
+            <button
+              type="button"
+              onClick={() => setVisibleCount(VISIBLE_THREAD_LIMIT)}
+              className={cn(
+                THREAD_PAGER_BUTTON_CLASS,
+                // Pushed right only while it shares the row with "Show more";
+                // on its own it keeps the list's left edge.
+                hiddenCount > 0 && 'ml-auto',
+              )}
+            >
+              Show less
+              <ChevronDown aria-hidden="true" className="h-3 w-3 rotate-180" />
+            </button>
+          ) : null}
+        </div>
       ) : null}
     </>
   )
@@ -177,7 +232,7 @@ function WorkspaceDropIndicator() {
     <div
       aria-hidden="true"
       data-workspace-drop-indicator="true"
-      className="mx-1 h-0.5 rounded-full bg-[#3b82f6] shadow-[0_0_8px_#3b82f6]"
+      className="mx-1 h-0.5 rounded-full bg-info shadow-[var(--fd-shadow-sm)]"
     />
   )
 }
@@ -188,14 +243,21 @@ const PinnedThreadList = memo(function PinnedThreadList({
   onSelectThread,
   onArchiveThread,
   onOpenThreadContextMenu,
+  onRequestRenameThread,
   nowTick,
+  threadTagsById,
 }: {
   entries: PinnedThreadEntry[]
   selectedThreadId: string | null
   onSelectThread: (workspaceId: string, threadId: string) => void
   onArchiveThread?: ThreadItemArchiveHandler
   onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void
+  onRequestRenameThread?: (args: {
+    workspaceId: string
+    thread: ThreadSummary
+  }) => void
   nowTick: number
+  threadTagsById?: Record<string, ThreadTag[]>
 }) {
   if (entries.length === 0) return null
 
@@ -217,7 +279,9 @@ const PinnedThreadList = memo(function PinnedThreadList({
             onSelect={onSelectThread}
             onArchive={onArchiveThread}
             onOpenContextMenu={onOpenThreadContextMenu}
+            onRequestRename={onRequestRenameThread}
             nowTick={nowTick}
+            tags={threadTagsById?.[thread.id]}
           />
         ))}
       </div>
@@ -254,13 +318,22 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   className,
   headerClassName,
   contentClassName,
+  threadTagsById,
+  threadTagOptions = [],
+  onSetThreadColor,
 }: WorkspaceSidebarProps) {
   const [optimisticSelection, setOptimisticSelection] = useState<{
     workspaceId: string | null
     threadId: string | null
   } | null>(null)
-  const [nowTick, setNowTick] = useState(() => Math.floor(Date.now() / RELATIVE_TIME_TICK_MS))
-  const [threadContextMenu, setThreadContextMenu] = useState<ThreadContextMenuState | null>(null)
+  const [nowTick, setNowTick] = useState(() =>
+    Math.floor(Date.now() / RELATIVE_TIME_TICK_MS),
+  )
+  const [selectedTagIds, setSelectedTagIds] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [threadContextMenu, setThreadContextMenu] =
+    useState<ThreadContextMenuState | null>(null)
   const [renameTarget, setRenameTarget] = useState<{
     workspaceId: string
     thread: ThreadSummary
@@ -284,9 +357,17 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [isRemovingWorkspace, setIsRemovingWorkspace] = useState(false)
   const threadContextMenuRef = useRef<HTMLDivElement | null>(null)
   const workspaceContextMenuRef = useRef<HTMLDivElement | null>(null)
-  const [draggingWorkspaceId, setDraggingWorkspaceId] = useState<string | null>(null)
+  const [draggingWorkspaceId, setDraggingWorkspaceId] = useState<string | null>(
+    null,
+  )
   const [dropIndex, setDropIndex] = useState<number | null>(null)
-  const [optimisticWorkspaceOrder, setOptimisticWorkspaceOrder] = useState<string[] | null>(null)
+  const [workspaceDragPosition, setWorkspaceDragPosition] = useState<{
+    x: number
+    y: number
+  } | null>(null)
+  const [optimisticWorkspaceOrder, setOptimisticWorkspaceOrder] = useState<
+    string[] | null
+  >(null)
   const workspaceDragRef = useRef<{
     pointerId: number
     workspaceId: string
@@ -304,15 +385,53 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       ? optimisticSelection
       : null
 
-  const visualSelectedWorkspaceId = pendingSelection?.workspaceId ?? selectedWorkspaceId
+  const visualSelectedWorkspaceId =
+    pendingSelection?.workspaceId ?? selectedWorkspaceId
   const visualSelectedThreadId = pendingSelection?.threadId ?? selectedThreadId
 
+  const availableTagIds = useMemo(
+    () => new Set(threadTagOptions.map((tag) => tag.id)),
+    [threadTagOptions],
+  )
+  const activeTagIds = useMemo(
+    () =>
+      new Set(
+        [...selectedTagIds].filter((tagId) => availableTagIds.has(tagId)),
+      ),
+    [availableTagIds, selectedTagIds],
+  )
+  const handleToggleTagFilter = useCallback((tagId: string) => {
+    setSelectedTagIds((current) => {
+      const next = new Set(current)
+      if (next.has(tagId)) next.delete(tagId)
+      else next.add(tagId)
+      return next
+    })
+  }, [])
+  const handleClearTagFilters = useCallback(
+    () => setSelectedTagIds(new Set()),
+    [],
+  )
+  const displayGroups = useMemo(() => {
+    if (activeTagIds.size === 0) return groups
+    return groups.flatMap((group) => {
+      const threads = group.threads.filter((thread) =>
+        (threadTagsById?.[thread.id] ?? []).some((tag) =>
+          activeTagIds.has(tag.id),
+        ),
+      )
+      return threads.length > 0 ? [{ ...group, threads }] : []
+    })
+  }, [activeTagIds, groups, threadTagsById])
+
   const orderedGroups = useMemo(() => {
-    if (!optimisticWorkspaceOrder) return groups
-    const groupsById = new Map(groups.map((group) => [group.workspace.id, group]))
+    if (!optimisticWorkspaceOrder) return displayGroups
+    const groupsById = new Map(
+      displayGroups.map((group) => [group.workspace.id, group]),
+    )
     const orderedIds = [
       ...optimisticWorkspaceOrder,
-      ...groups.map((group) => group.workspace.id),
+      ...displayGroups.map((group) => group.workspace.id),
     ]
     const seen = new Set<string>()
     return orderedIds.flatMap((workspaceId) => {
@@ -321,7 +440,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       const group = groupsById.get(workspaceId)
       return group ? [group] : []
     })
-  }, [groups, optimisticWorkspaceOrder])
+  }, [displayGroups, optimisticWorkspaceOrder])
 
   const workspaceOrder = useMemo(
     () => orderedGroups.map((group) => group.workspace.id),
@@ -330,7 +449,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const updateWorkspaceDropIndex = useCallback(
     (clientY: number, workspaceId: string) => {
-      const remainingWorkspaceIds = workspaceOrder.filter((id) => id !== workspaceId)
+      const remainingWorkspaceIds = workspaceOrder.filter(
+        (id) => id !== workspaceId,
+      )
       let nextIndex = remainingWorkspaceIds.length
       for (let index = 0; index < remainingWorkspaceIds.length; index += 1) {
         const row = workspaceRowRefs.current.get(remainingWorkspaceIds[index])
@@ -351,10 +472,20 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const handleWorkspacePointerDown = useCallback(
     (workspaceId: string, event: React.PointerEvent<HTMLDivElement>) => {
-      if (!onWorkspaceOrderChange || event.button !== 0 || event.isPrimary === false) return
+      if (
+        !onWorkspaceOrderChange ||
+        event.button !== 0 ||
+        event.isPrimary === false
+      )
+        return
       const target = event.target as HTMLElement
-      if (target.closest('button, a, input, textarea, select, [data-no-workspace-drag]')) return
-      event.currentTarget.setPointerCapture(event.pointerId)
+      if (
+        target.closest('a, input, textarea, select, [data-no-workspace-drag]')
+      )
+        return
+      // Capture is deferred until the drag threshold is crossed: capturing on
+      // pointerdown retargets the follow-up click to this row, so the
+      // collapse trigger nested inside it would never see the click.
       workspaceDragRef.current = {
         pointerId: event.pointerId,
         workspaceId,
@@ -371,12 +502,17 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     (event: React.PointerEvent<HTMLDivElement>) => {
       const drag = workspaceDragRef.current
       if (!drag || drag.pointerId !== event.pointerId) return
-      const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY)
+      const distance = Math.hypot(
+        event.clientX - drag.startX,
+        event.clientY - drag.startY,
+      )
       if (!drag.active && distance < WORKSPACE_DRAG_THRESHOLD_PX) return
       if (!drag.active) {
         drag.active = true
+        event.currentTarget.setPointerCapture(event.pointerId)
         setDraggingWorkspaceId(drag.workspaceId)
       }
+      setWorkspaceDragPosition({ x: event.clientX, y: event.clientY })
       event.preventDefault()
       updateWorkspaceDropIndex(event.clientY, drag.workspaceId)
     },
@@ -387,22 +523,34 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     (event?: React.PointerEvent<HTMLDivElement>) => {
       const drag = workspaceDragRef.current
       if (!drag) return
-      if (event && event.pointerId === drag.pointerId && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      if (
+        event &&
+        event.pointerId === drag.pointerId &&
+        event.currentTarget.hasPointerCapture(event.pointerId)
+      ) {
         event.currentTarget.releasePointerCapture(event.pointerId)
       }
       workspaceDragRef.current = null
       setDraggingWorkspaceId(null)
       setDropIndex(null)
-      if (!drag.active || drag.dropIndex == null || !onWorkspaceOrderChange) return
+      setWorkspaceDragPosition(null)
+      if (!drag.active || drag.dropIndex == null || !onWorkspaceOrderChange)
+        return
 
       suppressNextWorkspaceClickRef.current = true
       window.setTimeout(() => {
         suppressNextWorkspaceClickRef.current = false
       }, 0)
 
-      const remainingWorkspaceIds = workspaceOrder.filter((id) => id !== drag.workspaceId)
+      const remainingWorkspaceIds = workspaceOrder.filter(
+        (id) => id !== drag.workspaceId,
+      )
       const nextOrder = [...remainingWorkspaceIds]
-      nextOrder.splice(Math.min(drag.dropIndex, nextOrder.length), 0, drag.workspaceId)
+      nextOrder.splice(
+        Math.min(drag.dropIndex, nextOrder.length),
+        0,
+        drag.workspaceId,
+      )
       if (nextOrder.join('\0') === workspaceOrder.join('\0')) return
 
       setOptimisticWorkspaceOrder(nextOrder)
@@ -413,19 +561,24 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     [onWorkspaceOrderChange, workspaceOrder],
   )
 
-  const handleWorkspaceClickCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
-    if (!suppressNextWorkspaceClickRef.current) return
-    suppressNextWorkspaceClickRef.current = false
-    event.preventDefault()
-    event.stopPropagation()
-  }, [])
+  const handleWorkspaceClickCapture = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      if (!suppressNextWorkspaceClickRef.current) return
+      suppressNextWorkspaceClickRef.current = false
+      event.preventDefault()
+      event.stopPropagation()
+    },
+    [],
+  )
 
   useEffect(() => {
     if (!optimisticWorkspaceOrder) return
     const currentOrder = groups.map((group) => group.workspace.id)
     if (
       currentOrder.length === optimisticWorkspaceOrder.length &&
-      currentOrder.every((workspaceId, index) => workspaceId === optimisticWorkspaceOrder[index])
+      currentOrder.every(
+        (workspaceId, index) => workspaceId === optimisticWorkspaceOrder[index],
+      )
     ) {
       setOptimisticWorkspaceOrder(null)
     }
@@ -437,7 +590,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         groups.map((group) => [
           group.workspace.id,
           {
-            initialThreadId: group.workspace.current_thread_id ?? group.threads[0]?.id ?? null,
+            initialThreadId:
+              group.workspace.current_thread_id ?? group.threads[0]?.id ?? null,
             threadIds: new Set(group.threads.map((thread) => thread.id)),
           },
         ]),
@@ -458,11 +612,16 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   useEffect(() => {
     setOptimisticSelection((current) => {
       if (!current) return null
-      if (current.workspaceId === selectedWorkspaceId && current.threadId === selectedThreadId) {
+      if (
+        current.workspaceId === selectedWorkspaceId &&
+        current.threadId === selectedThreadId
+      ) {
         return null
       }
 
-      const metadata = current.workspaceId ? groupMetadata.get(current.workspaceId) : null
+      const metadata = current.workspaceId
+        ? groupMetadata.get(current.workspaceId)
+        : null
       if (!metadata) {
         return null
       }
@@ -477,7 +636,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     if (!pendingSelection) return
 
     const timeout = window.setTimeout(() => {
-      setOptimisticSelection((current) => (current === pendingSelection ? null : current))
+      setOptimisticSelection((current) =>
+        current === pendingSelection ? null : current,
+      )
     }, OPTIMISTIC_SELECTION_TTL_MS)
 
     return () => {
@@ -525,12 +686,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     resetRenameDialog()
   }, [isRenamingThread, resetRenameDialog])
 
-  const openRenameDialog = useCallback((workspaceId: string, thread: ThreadSummary) => {
-    setThreadContextMenu(null)
-    setRenameTarget({ workspaceId, thread })
-    setRenameValue(thread.title)
-    setRenameError(null)
-  }, [])
+  const openRenameDialog = useCallback(
+    (workspaceId: string, thread: ThreadSummary) => {
+      setThreadContextMenu(null)
+      setRenameTarget({ workspaceId, thread })
+      setRenameValue(thread.title)
+      setRenameError(null)
+    },
+    [],
+  )
 
   const handleOpenThreadContextMenu = useCallback(
     (args: ThreadContextMenuState) => {
@@ -539,13 +703,21 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !onDeleteThread &&
         !onRenameThread &&
         !onTogglePinThread &&
-        !onMarkThreadRead
+        !onMarkThreadRead &&
+        !onSetThreadColor
       ) {
         return
       }
       setThreadContextMenu(args)
     },
-    [onArchiveThread, onDeleteThread, onMarkThreadRead, onRenameThread, onTogglePinThread],
+    [
+      onArchiveThread,
+      onDeleteThread,
+      onMarkThreadRead,
+      onRenameThread,
+      onSetThreadColor,
+      onTogglePinThread,
+    ],
   )
 
   const openDeleteDialog = useCallback(() => {
@@ -571,7 +743,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       await onDeleteThread(deleteTarget.workspaceId, deleteTarget.thread.id)
       setDeleteTarget(null)
     } catch (error) {
-      setDeleteError(error instanceof Error ? error.message : 'Failed to delete thread')
+      setDeleteError(
+        error instanceof Error ? error.message : 'Failed to delete thread',
+      )
     } finally {
       setIsDeletingThread(false)
     }
@@ -581,7 +755,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     if (!threadContextMenu || !onArchiveThread) return
     const { workspaceId, thread } = threadContextMenu
     setThreadContextMenu(null)
-    void Promise.resolve(onArchiveThread(workspaceId, thread.id)).catch(() => {})
+    void Promise.resolve(onArchiveThread(workspaceId, thread.id)).catch(
+      () => {},
+    )
   }, [onArchiveThread, threadContextMenu])
 
   const handleStartRenameFromContextMenu = useCallback(() => {
@@ -589,21 +765,51 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     openRenameDialog(threadContextMenu.workspaceId, threadContextMenu.thread)
   }, [onRenameThread, openRenameDialog, threadContextMenu])
 
+  const handleRequestRenameThreadFromRow = useCallback(
+    ({
+      workspaceId,
+      thread,
+    }: {
+      workspaceId: string
+      thread: ThreadSummary
+    }) => {
+      openRenameDialog(workspaceId, thread)
+    },
+    [openRenameDialog],
+  )
+  const handleRequestRenameThread = onRenameThread
+    ? handleRequestRenameThreadFromRow
+    : undefined
+
   const handleTogglePinFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onTogglePinThread) return
     const { workspaceId, thread } = threadContextMenu
     setThreadContextMenu(null)
-    void Promise.resolve(onTogglePinThread(workspaceId, thread.id, !thread.is_pinned)).catch(
-      () => {},
-    )
+    void Promise.resolve(
+      onTogglePinThread(workspaceId, thread.id, !thread.is_pinned),
+    ).catch(() => {})
   }, [onTogglePinThread, threadContextMenu])
 
   const handleMarkReadFromContextMenu = useCallback(() => {
     if (!threadContextMenu || !onMarkThreadRead) return
     const { workspaceId, thread } = threadContextMenu
     setThreadContextMenu(null)
-    void Promise.resolve(onMarkThreadRead(workspaceId, thread.id)).catch(() => {})
+    void Promise.resolve(onMarkThreadRead(workspaceId, thread.id)).catch(
+      () => {},
+    )
   }, [onMarkThreadRead, threadContextMenu])
+
+  const handleSetColorFromContextMenu = useCallback(
+    (color: ThreadTag | null) => {
+      if (!threadContextMenu || !onSetThreadColor) return
+      const { workspaceId, thread } = threadContextMenu
+      setThreadContextMenu(null)
+      void Promise.resolve(onSetThreadColor(workspaceId, thread, color)).catch(
+        () => {},
+      )
+    },
+    [onSetThreadColor, threadContextMenu],
+  )
 
   const handleOpenWorkspaceContextMenu = useCallback(
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
@@ -642,28 +848,33 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       await onRemoveWorkspace(removeTarget.workspaceId)
       setRemoveTarget(null)
     } catch (error) {
-      setRemoveError(error instanceof Error ? error.message : 'Failed to remove project')
+      setRemoveError(
+        error instanceof Error ? error.message : 'Failed to remove project',
+      )
     } finally {
       setIsRemovingWorkspace(false)
     }
   }, [onRemoveWorkspace, removeTarget])
 
   const workspacePathById = useMemo(
-    () => new Map(groups.map((group) => [group.workspace.id, group.workspace.path])),
+    () =>
+      new Map(
+        groups.map((group) => [group.workspace.id, group.workspace.path]),
+      ),
     [groups],
   )
   // Pinned chats come from every project, so they get a single global sort
   // rather than the per-project ordering below.
   const pinnedThreads = useMemo(() => {
     const compare = compareThreads(threadSort)
-    return groups
+    return displayGroups
       .flatMap((group) =>
         group.threads
           .filter((thread) => thread.is_pinned)
           .map((thread) => ({ workspaceId: group.workspace.id, thread })),
       )
       .sort((left, right) => compare(left.thread, right.thread))
-  }, [groups, threadSort])
+  }, [displayGroups, threadSort])
 
   const handleRenameSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -679,10 +890,16 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       setIsRenamingThread(true)
       setRenameError(null)
       try {
-        await onRenameThread(renameTarget.workspaceId, renameTarget.thread.id, nextTitle)
+        await onRenameThread(
+          renameTarget.workspaceId,
+          renameTarget.thread.id,
+          nextTitle,
+        )
         resetRenameDialog()
       } catch (error) {
-        setRenameError(error instanceof Error ? error.message : 'Failed to rename thread')
+        setRenameError(
+          error instanceof Error ? error.message : 'Failed to rename thread',
+        )
       } finally {
         setIsRenamingThread(false)
       }
@@ -724,7 +941,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     if (!workspaceContextMenu) return
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (workspaceContextMenuRef.current?.contains(event.target as Node)) return
+      if (workspaceContextMenuRef.current?.contains(event.target as Node))
+        return
       setWorkspaceContextMenu(null)
     }
 
@@ -808,7 +1026,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               New thread
             </button>
           ) : (
-            <span className="text-[length:var(--fd-text-sm)] text-fg-muted">{title}</span>
+            <span className="text-[length:var(--fd-text-sm)] text-fg-muted">
+              {title}
+            </span>
           )}
           {onAddProject ? (
             <Button
@@ -832,7 +1052,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         </div>
 
         {errors.filter(Boolean).map((error) => (
-          <p key={error} className="text-[length:var(--fd-text-xs)] text-warning">
+          <p
+            key={error}
+            className="text-[length:var(--fd-text-xs)] text-warning"
+          >
             {error}
           </p>
         ))}
@@ -845,10 +1068,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           onSelectThread={handleSelectThread}
           onArchiveThread={onArchiveThread}
           onOpenThreadContextMenu={handleOpenThreadContextMenu}
+          onRequestRenameThread={handleRequestRenameThread}
           nowTick={nowTick}
+          threadTagsById={threadTagsById}
         />
         <AttentionInbox
-          groups={groups}
+          groups={displayGroups}
           selectedThreadId={visualSelectedThreadId}
           onSelectThread={handleSelectThread}
         />
@@ -860,27 +1085,48 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             >
               Projects
             </h2>
-            {onThreadSortChange ? (
-              <ThreadSortMenu value={threadSort} onChange={onThreadSortChange} />
-            ) : null}
+            <div className="flex items-center gap-1">
+              {threadTagOptions.length > 0 ? (
+                <ThreadColorFilterMenu
+                  options={threadTagOptions}
+                  selectedIds={activeTagIds}
+                  onToggle={handleToggleTagFilter}
+                  onClear={handleClearTagFilters}
+                />
+              ) : null}
+              {onThreadSortChange ? (
+                <ThreadSortMenu
+                  value={threadSort}
+                  onChange={onThreadSortChange}
+                />
+              ) : null}
+            </div>
           </div>
           <div className="space-y-4">
             {(() => {
               let remainingIndex = 0
+              const remainingWorkspaceIds = orderedGroups
+                .map((group) => group.workspace.id)
+                .filter((workspaceId) => workspaceId !== draggingWorkspaceId)
+              const lastRemainingWorkspaceId = remainingWorkspaceIds.at(-1)
               return orderedGroups.map((group) => {
                 const workspaceId = group.workspace.id
                 const isDragged = draggingWorkspaceId === workspaceId
                 const showDropBefore =
-                  draggingWorkspaceId != null && !isDragged && dropIndex === remainingIndex
+                  draggingWorkspaceId != null &&
+                  !isDragged &&
+                  dropIndex === remainingIndex
                 if (!isDragged) remainingIndex += 1
                 const dragHandleProps = onWorkspaceOrderChange
                   ? {
                       ref: (node: HTMLDivElement | null) => {
-                        if (node) workspaceRowRefs.current.set(workspaceId, node)
+                        if (node)
+                          workspaceRowRefs.current.set(workspaceId, node)
                         else workspaceRowRefs.current.delete(workspaceId)
                       },
-                      onPointerDown: (event: React.PointerEvent<HTMLDivElement>) =>
-                        handleWorkspacePointerDown(workspaceId, event),
+                      onPointerDown: (
+                        event: React.PointerEvent<HTMLDivElement>,
+                      ) => handleWorkspacePointerDown(workspaceId, event),
                       onPointerMove: handleWorkspacePointerMove,
                       onPointerUp: finishWorkspaceDrag,
                       onPointerCancel: finishWorkspaceDrag,
@@ -905,10 +1151,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                       onSelect={() =>
                         handleSelectWorkspace(
                           workspaceId,
-                          groupMetadata.get(workspaceId)?.initialThreadId ?? null,
+                          groupMetadata.get(workspaceId)?.initialThreadId ??
+                            null,
                         )
                       }
-                      onNewThread={onNewThread ? () => handleNewThread(workspaceId) : undefined}
+                      onNewThread={
+                        onNewThread
+                          ? () => handleNewThread(workspaceId)
+                          : undefined
+                      }
                       onOpenContextMenu={
                         onRemoveWorkspace
                           ? (position) =>
@@ -928,12 +1179,14 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                         onSelectThread={handleSelectThread}
                         onArchiveThread={onArchiveThread}
                         onOpenThreadContextMenu={handleOpenThreadContextMenu}
+                        onRequestRenameThread={handleRequestRenameThread}
                         nowTick={nowTick}
+                        threadTagsById={threadTagsById}
                       />
                     </WorkspaceGroup>
                     {draggingWorkspaceId != null &&
-                    !isDragged &&
-                    dropIndex === remainingIndex ? (
+                    workspaceId === lastRemainingWorkspaceId &&
+                    dropIndex === remainingWorkspaceIds.length ? (
                       <WorkspaceDropIndicator />
                     ) : null}
                   </React.Fragment>
@@ -942,7 +1195,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             })()}
             {groups.length === 0 ? (
               <EmptyState
-                icon={onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined}
+                icon={
+                  onAddProject ? <FolderPlus className="h-5 w-5" /> : undefined
+                }
                 title={emptyState.title}
                 description={emptyState.description}
               />
@@ -950,24 +1205,35 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           </div>
         </section>
       </SidebarContent>
-      {footer ? <div className="border-t border-border-subtle p-3">{footer}</div> : null}
+      {footer ? (
+        <div className="border-t border-border-subtle p-3">{footer}</div>
+      ) : null}
       <ThreadContextMenu
         menuRef={threadContextMenuRef}
         target={threadContextMenu}
         workspacePath={
-          threadContextMenu ? (workspacePathById.get(threadContextMenu.workspaceId) ?? null) : null
+          threadContextMenu
+            ? (workspacePathById.get(threadContextMenu.workspaceId) ?? null)
+            : null
         }
         canRename={Boolean(onRenameThread)}
         canArchive={Boolean(onArchiveThread)}
         canDelete={Boolean(onDeleteThread)}
         canPin={Boolean(onTogglePinThread)}
         canMarkRead={Boolean(onMarkThreadRead)}
+        colorOptions={onSetThreadColor ? threadTagOptions : []}
+        selectedColor={
+          threadContextMenu
+            ? (threadTagsById?.[threadContextMenu.thread.id]?.[0] ?? null)
+            : null
+        }
         onClose={closeThreadContextMenu}
         onRename={handleStartRenameFromContextMenu}
         onArchive={handleArchiveFromContextMenu}
         onDelete={openDeleteDialog}
         onTogglePin={handleTogglePinFromContextMenu}
         onMarkRead={handleMarkReadFromContextMenu}
+        onSetColor={handleSetColorFromContextMenu}
       />
       <DeleteThreadDialog
         target={deleteTarget}
@@ -997,6 +1263,27 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         onClose={closeRemoveDialog}
         onConfirm={handleConfirmRemoveWorkspace}
       />
+      {draggingWorkspaceId && workspaceDragPosition
+        ? createPortal(
+            <div
+              aria-hidden="true"
+              className="pointer-events-none fixed z-[100] flex max-w-64 items-center gap-2 rounded-[var(--fd-radius-md)] border border-border-default bg-surface-2 px-2.5 py-1.5 text-[length:var(--fd-text-sm)] font-medium text-fg-primary shadow-[var(--fd-shadow-lg)]"
+              style={{
+                left: workspaceDragPosition.x + 12,
+                top: workspaceDragPosition.y + 12,
+              }}
+            >
+              <FolderClosed className="h-4 w-4 shrink-0 text-fg-muted" />
+              <span className="truncate">
+                {orderedGroups
+                  .find((group) => group.workspace.id === draggingWorkspaceId)
+                  ?.workspace.path.split('/')
+                  .pop() ?? 'Project'}
+              </span>
+            </div>,
+            document.body,
+          )
+        : null}
     </SidebarShell>
   )
 })

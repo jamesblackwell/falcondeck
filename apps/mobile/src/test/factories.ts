@@ -77,6 +77,7 @@ export function snapshot(overrides: Partial<DaemonSnapshot> = {}): DaemonSnapsho
     threads: [thread()],
     interactive_requests: [],
     preferences: preferences(),
+    extensions: { catalog: [], views: [] },
     ...overrides,
   }
 }

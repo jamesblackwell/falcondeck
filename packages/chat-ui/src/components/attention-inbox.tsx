@@ -111,7 +111,7 @@ export const AttentionInbox = memo(function AttentionInbox({
         type="button"
         aria-expanded={!collapsed}
         onClick={() => setCollapsed(!collapsed)}
-        className="fd-focus-inset flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-1.5 py-1.5 text-left"
+        className="fd-focus-fill flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-1.5 py-1.5 text-left focus-visible:bg-surface-3"
       >
         <Bell aria-hidden="true" className="h-3.5 w-3.5 text-warning" />
         <span className="flex-1 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-secondary">
@@ -134,10 +134,10 @@ export const AttentionInbox = memo(function AttentionInbox({
               type="button"
               onClick={() => onSelectThread(entry.workspaceId, entry.thread.id)}
               className={cn(
-                'fd-focus-inset flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-1.5 py-1.5 text-left',
+                'fd-focus-fill flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-1.5 py-1.5 text-left',
                 selectedThreadId === entry.thread.id
-                  ? 'bg-accent-dim'
-                  : 'hover:bg-surface-3 active:bg-surface-4',
+                  ? 'fd-row-selected'
+                  : 'hover:bg-surface-3 focus-visible:bg-surface-3 active:bg-surface-4',
               )}
             >
               <span

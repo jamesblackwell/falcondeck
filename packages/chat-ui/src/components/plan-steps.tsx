@@ -42,7 +42,7 @@ export function PlanStepList({
           <li
             key={stepKeys[index]}
             aria-label={`${step.step}, ${presentation.label}`}
-            className="flex items-start gap-2 py-0.5"
+            className="flex items-center gap-2 py-0.5"
           >
             <PlanStepIcon state={presentation.state} />
             <span

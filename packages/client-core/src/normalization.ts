@@ -11,6 +11,7 @@ import type {
   DaemonSnapshot,
   EventEnvelope,
   FalconDeckPreferences,
+  ExtensionSnapshot,
   ImageInput,
   InteractiveRequest,
   InteractiveRequestOutcome,
@@ -479,6 +480,13 @@ export function normalizeThreadSummary(
     title: thread.title ?? "Untitled thread",
     provider: normalizeProvider(thread.provider),
     native_session_id: thread.native_session_id ?? null,
+    handoff_from:
+      thread.handoff_from && typeof thread.handoff_from.thread_id === "string"
+        ? {
+            thread_id: thread.handoff_from.thread_id,
+            provider: normalizeProvider(thread.handoff_from.provider),
+          }
+        : null,
     status: thread.status ?? "idle",
     updated_at: thread.updated_at ?? new Date(0).toISOString(),
     last_message_preview: thread.last_message_preview ?? null,
@@ -824,11 +832,14 @@ export function normalizeConversationItem(value: unknown): ConversationItem {
                 !!attachment &&
                 // The daemon's ImageInput carries no `type` discriminant on
                 // the wire; only reject attachments claiming another type.
-                (attachment.type === "image" || attachment.type === undefined) &&
+                (attachment.type === "image" ||
+                  attachment.type === undefined) &&
                 typeof attachment.id === "string" &&
                 typeof attachment.url === "string",
             )
-            .map((attachment) => ({ ...attachment, type: "image" }) as ImageInput)
+            .map(
+              (attachment) => ({ ...attachment, type: "image" }) as ImageInput,
+            )
         : [],
     };
   }
@@ -1358,6 +1369,152 @@ export function normalizeDaemonSnapshot(
       ),
     ),
     preferences: normalizePreferences(snapshot.preferences),
+    extensions: normalizeExtensionSnapshot(snapshot.extensions),
+  };
+}
+
+export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { catalog: [], views: [] };
+  }
+  const snapshot = value as Record<string, unknown>;
+  const normalizeId = (candidate: unknown) =>
+    typeof candidate === "string" &&
+    candidate.length > 0 &&
+    candidate.length <= 512
+      ? candidate
+      : null;
+  const normalizeContributions = (candidate: unknown) => {
+    const contributions =
+      candidate && typeof candidate === "object" && !Array.isArray(candidate)
+        ? (candidate as Record<string, unknown>)
+        : {};
+    const actions = Array.isArray(contributions.threadMenuActions)
+      ? contributions.threadMenuActions.flatMap((candidate) => {
+          if (
+            !candidate ||
+            typeof candidate !== "object" ||
+            Array.isArray(candidate)
+          )
+            return [];
+          const action = candidate as Record<string, unknown>;
+          const id = normalizeId(action.id);
+          return id && typeof action.title === "string"
+            ? [{ id, title: action.title }]
+            : [];
+        })
+      : [];
+    const normalizeViews = (candidate: unknown) =>
+      Array.isArray(candidate)
+        ? candidate.flatMap((candidate) => {
+            if (
+              !candidate ||
+              typeof candidate !== "object" ||
+              Array.isArray(candidate)
+            )
+              return [];
+            const view = candidate as Record<string, unknown>;
+            const id = normalizeId(view.id);
+            const viewId = normalizeId(view.view);
+            return id && viewId
+              ? [
+                  {
+                    id,
+                    view: viewId,
+                    title:
+                      typeof view.title === "string" ? view.title : undefined,
+                  },
+                ]
+              : [];
+          })
+        : [];
+    return {
+      threadMenuActions: actions,
+      threadDecorations: normalizeViews(contributions.threadDecorations),
+      sidebarFilters: normalizeViews(contributions.sidebarFilters),
+    };
+  };
+  return {
+    catalog: Array.isArray(snapshot.catalog)
+      ? snapshot.catalog.flatMap((candidate) => {
+          if (
+            !candidate ||
+            typeof candidate !== "object" ||
+            Array.isArray(candidate)
+          )
+            return [];
+          const extension = candidate as Record<string, unknown>;
+          const id = normalizeId(extension.id);
+          if (
+            !id ||
+            typeof extension.name !== "string" ||
+            typeof extension.version !== "string"
+          ) {
+            return [];
+          }
+          const status =
+            extension.status === "active" || extension.status === "error"
+              ? extension.status
+              : "disabled";
+          return [
+            {
+              id,
+              name: extension.name,
+              version: extension.version,
+              source:
+                typeof extension.source === "string"
+                  ? extension.source
+                  : "unknown",
+              bundled: extension.bundled === true,
+              enabled: extension.enabled === true,
+              status,
+              last_error:
+                typeof extension.last_error === "string"
+                  ? extension.last_error
+                  : null,
+              contributes: normalizeContributions(extension.contributes),
+              permissions: Array.isArray(extension.permissions)
+                ? extension.permissions.filter(
+                    (permission): permission is string =>
+                      typeof permission === "string",
+                  )
+                : [],
+            },
+          ];
+        })
+      : [],
+    views: Array.isArray(snapshot.views)
+      ? snapshot.views.flatMap((candidate) => {
+          if (
+            !candidate ||
+            typeof candidate !== "object" ||
+            Array.isArray(candidate)
+          )
+            return [];
+          const view = candidate as Record<string, unknown>;
+          const extensionId = normalizeId(view.extension_id);
+          const viewId = normalizeId(view.view_id);
+          if (!extensionId || !viewId || typeof view.updated_at !== "string")
+            return [];
+          const rawScope = view.scope;
+          const scope =
+            rawScope && typeof rawScope === "object" && !Array.isArray(rawScope)
+              ? (rawScope as Record<string, unknown>)
+              : null;
+          const kind = normalizeId(scope?.kind);
+          const id = normalizeId(scope?.id);
+          if (rawScope != null && (!kind || !id)) return [];
+          return [
+            {
+              extension_id: extensionId,
+              view_id: viewId,
+              scope: kind && id ? { kind, id } : null,
+              value: view.value,
+              updated_at: view.updated_at,
+            },
+          ];
+        })
+      : [],
   };
 }
 
@@ -1469,6 +1626,30 @@ export function normalizeEventEnvelope(
         ...event,
         preferences: normalizePreferences(event.preferences),
       },
+    });
+  }
+
+  if (event?.type === "extension-catalog-updated") {
+    return markNormalized({
+      ...(envelope as EventEnvelope),
+      event: {
+        ...event,
+        catalog: normalizeExtensionSnapshot({
+          catalog: event.catalog,
+          views: [],
+        }).catalog,
+      },
+    });
+  }
+
+  if (event?.type === "extension-view-updated") {
+    const view = event.view
+      ? (normalizeExtensionSnapshot({ catalog: [], views: [event.view] })
+          .views[0] ?? null)
+      : null;
+    return markNormalized({
+      ...(envelope as EventEnvelope),
+      event: { ...event, view },
     });
   }
 

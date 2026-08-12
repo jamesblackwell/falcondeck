@@ -16,6 +16,16 @@ export type ThreadAttentionPresentation = {
   indicatorTone: 'neutral' | 'info' | 'warning' | 'danger' | 'accent'
 }
 
+export const SHUTDOWN_INTERRUPTED_TURN_ERROR =
+  'FalconDeck was closed while this turn was running'
+
+export function wasTurnInterruptedByShutdown(thread: ThreadSummary) {
+  return (
+    thread.status === 'error' &&
+    thread.last_error === SHUTDOWN_INTERRUPTED_TURN_ERROR
+  )
+}
+
 export function deriveThreadAttentionPresentation(
   thread: ThreadSummary,
   interactiveRequests: InteractiveRequest[] = [],

@@ -1,11 +1,19 @@
 import * as React from 'react'
 import { memo, useMemo } from 'react'
-import { Archive, Pin, Split } from 'lucide-react'
+import { Archive, CircleStop, Pin, Split } from 'lucide-react'
 
-import { deriveThreadAttentionPresentation, type ThreadSummary } from '@falcondeck/client-core'
+import {
+  deriveThreadAttentionPresentation,
+  wasTurnInterruptedByShutdown,
+  type ThreadSummary,
+  type ThreadTag,
+} from '@falcondeck/client-core'
 import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 
-export type ThreadItemArchiveHandler = (workspaceId: string, threadId: string) => Promise<void> | void
+export type ThreadItemArchiveHandler = (
+  workspaceId: string,
+  threadId: string,
+) => Promise<void> | void
 
 export type ThreadItemProps = {
   thread: ThreadSummary
@@ -19,7 +27,23 @@ export type ThreadItemProps = {
     x: number
     y: number
   }) => void
+  onRequestRename?: (args: {
+    workspaceId: string
+    thread: ThreadSummary
+  }) => void
   nowTick?: number
+  tags?: ThreadTag[]
+}
+
+const TAG_COLORS: Record<string, string> = {
+  gray: '#94a3b8',
+  red: '#ef4444',
+  orange: '#f97316',
+  yellow: '#eab308',
+  green: '#22c55e',
+  blue: '#3b82f6',
+  purple: '#a855f7',
+  pink: '#ec4899',
 }
 
 function timeAgo(dateStr: string) {
@@ -41,18 +65,24 @@ export const ThreadItem = memo(
     onSelect,
     onArchive,
     onOpenContextMenu,
+    onRequestRename,
     nowTick = 0,
+    tags = [],
   }: ThreadItemProps) {
     const attention = deriveThreadAttentionPresentation(thread)
-    const timeString = useMemo(() => timeAgo(thread.updated_at), [nowTick, thread.updated_at])
+    const wasInterrupted = wasTurnInterruptedByShutdown(thread)
+    const timeString = useMemo(
+      () => timeAgo(thread.updated_at),
+      [nowTick, thread.updated_at],
+    )
 
     return (
       <div
         className={cn(
           'group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2',
           isSelected
-            ? 'bg-accent-dim'
-            : 'hover:bg-surface-3 active:bg-surface-4',
+            ? 'fd-row-selected'
+            : 'hover:bg-interactive-hover active:bg-interactive-active',
         )}
         onContextMenu={(event: React.MouseEvent<HTMLDivElement>) => {
           if (!onOpenContextMenu) return
@@ -64,6 +94,11 @@ export const ThreadItem = memo(
             y: event.clientY,
           })
         }}
+        onDoubleClick={(event: React.MouseEvent<HTMLDivElement>) => {
+          if (!onRequestRename) return
+          event.preventDefault()
+          onRequestRename({ workspaceId, thread })
+        }}
       >
         <button
           type="button"
@@ -71,7 +106,13 @@ export const ThreadItem = memo(
           onClick={() => onSelect(workspaceId, thread.id)}
         >
           <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-            {attention.showSpinner ? (
+            {wasInterrupted ? (
+              <CircleStop
+                role="img"
+                aria-label="Stopped when FalconDeck closed"
+                className="h-3.5 w-3.5 text-danger"
+              />
+            ) : attention.showSpinner ? (
               <ActivityDiamond />
             ) : attention.level === 'error' ? (
               <span className="h-2.5 w-2.5 rounded-full bg-danger" />
@@ -81,9 +122,21 @@ export const ThreadItem = memo(
               <span className="h-2.5 w-2.5 rounded-full bg-info" />
             ) : null}
           </span>
-          <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] text-fg-primary">
+          <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
             {thread.title}
           </span>
+          {tags.length > 0 ? (
+            <span className="flex shrink-0 items-center gap-1" aria-label={tags.map(tag => tag.label).join(', ')}>
+              {tags.slice(0, 3).map(tag => (
+                <span
+                  key={tag.id}
+                  title={tag.label}
+                  className="h-2 w-2 rounded-full"
+                  style={{ backgroundColor: TAG_COLORS[tag.color] ?? TAG_COLORS.gray }}
+                />
+              ))}
+            </span>
+          ) : null}
           {thread.variant ? (
             // The same Split icon the composer uses for "Isolated copy", so
             // the sidebar marker reads as that choice rather than git detail.
@@ -97,10 +150,18 @@ export const ThreadItem = memo(
             </span>
           ) : null}
           {thread.is_pinned ? (
-            <Pin role="img" aria-label="Pinned" className="h-3 w-3 shrink-0 rotate-45 text-fg-muted" />
+            <Pin
+              role="img"
+              aria-label="Pinned"
+              className="h-3 w-3 shrink-0 rotate-45 text-fg-muted"
+            />
           ) : null}
         </button>
-        {attention.showBadge ? (
+        {wasInterrupted ? (
+          <Badge variant="danger" className="shrink-0">
+            Stopped
+          </Badge>
+        ) : attention.showBadge ? (
           <Badge variant="success" className="shrink-0">
             {attention.badgeLabel}
           </Badge>
@@ -114,7 +175,9 @@ export const ThreadItem = memo(
             type="button"
             onClick={(e) => {
               e.stopPropagation()
-              void Promise.resolve(onArchive(workspaceId, thread.id)).catch(() => {})
+              void Promise.resolve(onArchive(workspaceId, thread.id)).catch(
+                () => {},
+              )
             }}
             title="Archive thread"
             aria-label={`Archive thread ${thread.title}`}
@@ -136,8 +199,19 @@ export const ThreadItem = memo(
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&
     prev.onArchive === next.onArchive &&
-    prev.onOpenContextMenu === next.onOpenContextMenu,
+    prev.onOpenContextMenu === next.onOpenContextMenu &&
+    prev.onRequestRename === next.onRequestRename &&
+    tagsEqual(prev.tags, next.tags),
 )
+
+function tagsEqual(a: ThreadTag[] | undefined, b: ThreadTag[] | undefined) {
+  if (a === b) return true
+  if ((a?.length ?? 0) !== (b?.length ?? 0)) return false
+  return (a ?? []).every((tag, index) => {
+    const other = b?.[index]
+    return tag.id === other?.id && tag.label === other.label && tag.color === other.color
+  })
+}
 
 function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
   return (
@@ -145,13 +219,15 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.title === b.title &&
     a.updated_at === b.updated_at &&
     a.status === b.status &&
+    a.last_error === b.last_error &&
     a.is_pinned === b.is_pinned &&
     a.variant?.slug === b.variant?.slug &&
     a.attention.unread === b.attention.unread &&
     a.attention.badge_label === b.attention.badge_label &&
     a.attention.pending_approval_count === b.attention.pending_approval_count &&
     a.attention.pending_question_count === b.attention.pending_question_count &&
-    a.attention.last_agent_activity_seq === b.attention.last_agent_activity_seq &&
+    a.attention.last_agent_activity_seq ===
+      b.attention.last_agent_activity_seq &&
     a.attention.last_read_seq === b.attention.last_read_seq
   )
 }

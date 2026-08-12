@@ -49,6 +49,14 @@ export function usePanelVisibility() {
     setVisibility((current) => ({ ...current, rail: !current.rail }))
   }, [])
 
+  const hideSidebar = useCallback(() => {
+    setVisibility((current) => (current.sidebar ? { ...current, sidebar: false } : current))
+  }, [])
+
+  const hideRail = useCallback(() => {
+    setVisibility((current) => (current.rail ? { ...current, rail: false } : current))
+  }, [])
+
   const showRail = useCallback(() => {
     setVisibility((current) => (current.rail ? current : { ...current, rail: true }))
   }, [])
@@ -59,5 +67,7 @@ export function usePanelVisibility() {
     toggleSidebar,
     toggleRail,
     showRail,
+    hideSidebar,
+    hideRail,
   }
 }

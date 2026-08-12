@@ -22,12 +22,17 @@ import {
   currentTurnPlan,
   DEFAULT_REMOTE_RELAY_URL,
   decryptJson,
+  decryptJsonBatch,
   deriveThreadAttentionPresentation,
+  deriveThreadTags,
+  THREAD_TAGS_ACTION_ID,
+  THREAD_TAGS_EXTENSION_ID,
   editResendUnavailableReason,
   deriveIdentityKeyPair,
   encryptJson,
   filesToImageInputs,
   generateBoxKeyPair,
+  generateUserItemId,
   imageAttachmentSendBlockReason,
   identityPublicKeyToBase64,
   latestWorkspaceNotice,
@@ -101,7 +106,9 @@ import {
   type ThreadHandle,
   type ThreadSortMode,
   type ThreadSummary,
+  type ThreadTag,
   type UpdatePreferencesPayload,
+  optimisticallySetThreadColor,
   encryptedDaemonEventEnvelope,
 } from "@falcondeck/client-core";
 import {
@@ -116,7 +123,15 @@ import {
   WorkspaceSidebar,
   realtimeAudioPlayer,
 } from "@falcondeck/chat-ui";
-import { ActivityDiamond, Badge, Button, ToastProvider, useToast } from "@falcondeck/ui";
+import {
+  ActivityDiamond,
+  Badge,
+  Button,
+  PANEL_TRANSITION_MS,
+  ToastProvider,
+  useToast,
+  usePresence,
+} from "@falcondeck/ui";
 
 import { PanelLeft, Settings, X } from "lucide-react";
 
@@ -282,6 +297,15 @@ function RemoteApp() {
   const [snapshot, setSnapshot] = useState<DaemonSnapshot | null>(() =>
     canWarmStart ? (initialPersistedSnapshot?.snapshot ?? null) : null,
   );
+  const threadTags = useMemo(
+    () => deriveThreadTags(snapshot?.extensions),
+    [snapshot?.extensions],
+  );
+  const threadTagsEnabled =
+    snapshot?.extensions.catalog.some(
+      (extension) =>
+        extension.id === THREAD_TAGS_EXTENSION_ID && extension.enabled,
+    ) ?? false;
   const [threadItems, setThreadItems] = useState<
     Record<string, ConversationItem[]>
   >({});
@@ -410,6 +434,8 @@ function RemoteApp() {
   const [isStopping, setIsStopping] = useState(false);
   const [isClaimingPairing, setIsClaimingPairing] = useState(false);
   const [showProjects, setShowProjects] = useState(false);
+  // Keeps the projects drawer in the tree long enough to slide back out.
+  const projectsDrawer = usePresence(showProjects, PANEL_TRANSITION_MS);
   const [showPreferences, setShowPreferences] = useState(false);
   const [paletteRequestKey, setPaletteRequestKey] = useState(0);
   const [notificationPreference, setNotificationPreference] =
@@ -1694,28 +1720,40 @@ function RemoteApp() {
           continue;
         }
 
-        let decrypted: unknown;
-        try {
-          decrypted = await decryptJson(sc.dataKey, update.body.envelope);
-          if (flushGeneration !== relayFlushGenerationRef.current) return;
-        } catch (e) {
-          // Decryption failed: the cursor is not advanced for this update.
-          // If nothing later in the batch decrypts either, a later sync
-          // replays it; if a later update does decrypt, the cursor advances
-          // past this one — skipping a single undecryptable update is the
-          // accepted trade-off over stalling the stream.
-          setError(
-            e instanceof Error ? e.message : "Failed to decrypt relay update",
-          );
-          continue;
+        const encryptedRun = [update];
+        const envelopes = [update.body.envelope];
+        while (true) {
+          const nextUpdate = batch[index + 1];
+          if (!nextUpdate || nextUpdate.body.t !== "encrypted") break;
+          encryptedRun.push(nextUpdate);
+          envelopes.push(nextUpdate.body.envelope);
+          index += 1;
         }
+        const decryptedRun = await decryptJsonBatch<unknown>(
+          sc.dataKey,
+          envelopes,
+        );
+        if (flushGeneration !== relayFlushGenerationRef.current) return;
 
-        advanceCursor(update.seq);
-        const events = parseDaemonEvents(decrypted);
-        for (const event of events) {
-          realtimeAudioPlayer.handleEvent(event);
-          daemonEvents.push(event);
-        }
+        decryptedRun.forEach((result, runIndex) => {
+          const encryptedUpdate = encryptedRun[runIndex]!;
+          if (result.status === "rejected") {
+            // Leave this update behind the cursor unless a later update
+            // succeeds, matching the single-update failure behavior.
+            setError(
+              result.reason instanceof Error
+                ? result.reason.message
+                : "Failed to decrypt relay update",
+            );
+            return;
+          }
+          advanceCursor(encryptedUpdate.seq);
+          const events = parseDaemonEvents(result.value);
+          for (const event of events) {
+            realtimeAudioPlayer.handleEvent(event);
+            daemonEvents.push(event);
+          }
+        });
       }
 
       if (deferredBootstrapSeq !== null) {
@@ -2249,6 +2287,41 @@ function RemoteApp() {
     [toast],
   );
 
+  const handleSetThreadColor = useCallback(
+    async (
+      _workspaceId: string,
+      thread: ThreadSummary,
+      color: ThreadTag | null,
+    ) => {
+      try {
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                extensions: optimisticallySetThreadColor(
+                  current.extensions,
+                  thread.id,
+                  color?.color ?? null,
+                ),
+              }
+            : current,
+        );
+        await callRpc("extensions.action.invoke", {
+          extensionId: THREAD_TAGS_EXTENSION_ID,
+          actionId: THREAD_TAGS_ACTION_ID,
+          target: { kind: "thread", id: thread.id },
+          input: { operation: "set_thread_color", color: color?.color ?? null },
+        });
+      } catch (error) {
+        void callRpc<DaemonSnapshot>("snapshot.current", {})
+          .then(setSnapshot)
+          .catch(() => {});
+        reportError(error, "Failed to set thread colour");
+      }
+    },
+    [callRpc, reportError],
+  );
+
   const submitQueuedAction = useCallback(
     async <T = unknown,>(
       actionType: string,
@@ -2366,13 +2439,13 @@ function RemoteApp() {
       submittedDraft,
       selectedWorkspace.skills ?? [],
     );
+    const userItemId = generateUserItemId();
     const submittedKey = conversationKey;
     sendingConversationKeyRef.current = submittedKey;
     sendingBaselineAgentItemIdRef.current = lastAgentItemId(items);
-    setDraftForConversation(submittedKey, "");
-    setAttachmentsForConversation(submittedKey, () => []);
     setIsSubmitting(true);
     let activeThreadId = selectedThreadId;
+    let pendingComposerKey = submittedKey;
     try {
       if (!activeThreadId) {
         const handle = normalizeThreadHandle(
@@ -2394,6 +2467,16 @@ function RemoteApp() {
           selectedWorkspace.id,
           activeThreadId,
         );
+        // Copy first, then delete: interruption during the new-thread handoff
+        // may leave two recoverable drafts, but never zero.
+        setDraftForConversation(startedConversationKey, submittedDraft);
+        setAttachmentsForConversation(
+          startedConversationKey,
+          () => submittedAttachments,
+        );
+        setDraftForConversation(submittedKey, "");
+        setAttachmentsForConversation(submittedKey, () => []);
+        pendingComposerKey = startedConversationKey;
         const adopted = conversationKeyRef.current === submittedKey;
         if (adopted) {
           conversationKeyRef.current = startedConversationKey;
@@ -2443,6 +2526,7 @@ function RemoteApp() {
               : []),
             ...submittedAttachments,
           ],
+          user_item_id: userItemId,
           selected_skills: submittedSkills,
           provider: selectedThread?.provider ?? selectedProvider,
           model_id: selectedModel,
@@ -2457,6 +2541,11 @@ function RemoteApp() {
         },
         { awaitCompletion: false },
       );
+      // The relay has durably accepted the outbox entry. Until this point the
+      // original composer remains in localStorage, surviving tab or process
+      // loss without relying on an in-memory catch handler.
+      setDraftForConversation(pendingComposerKey, "");
+      setAttachmentsForConversation(pendingComposerKey, () => []);
       setError(null);
     } catch (e) {
       // Put the unsent input back where the user now is: the thread that was
@@ -2464,6 +2553,10 @@ function RemoteApp() {
       const restoreKey = activeThreadId
         ? draftKeyFor(selectedWorkspace.id, activeThreadId)
         : submittedKey;
+      if (restoreKey !== submittedKey) {
+        setDraftForConversation(submittedKey, "");
+        setAttachmentsForConversation(submittedKey, () => []);
+      }
       restoreFailedSubmission(restoreKey, submittedDraft, submittedAttachments);
       reportError(e, "Failed to send message");
       sendingConversationKeyRef.current = null;
@@ -3887,8 +3980,11 @@ function RemoteApp() {
         </Suspense>
       ) : null}
 
-      {showProjects ? (
-        <div className="fd-safe-area fixed inset-0 z-40 bg-[var(--fd-overlay-strong)] backdrop-blur-sm md:hidden">
+      {projectsDrawer.mounted ? (
+        <div
+          data-state={projectsDrawer.entered ? "open" : "closed"}
+          className="group fd-safe-area fixed inset-0 z-40 bg-[var(--fd-overlay-strong)] opacity-0 backdrop-blur-sm transition-opacity duration-[var(--fd-duration-panel)] ease-[var(--fd-ease-panel)] data-[state=open]:opacity-100 md:hidden"
+        >
           <button
             type="button"
             className="absolute inset-0 h-full w-full"
@@ -3900,7 +3996,7 @@ function RemoteApp() {
             role="dialog"
             aria-modal="true"
             aria-label="Projects"
-            className="absolute inset-y-0 left-0 flex w-full max-w-none animate-in slide-in-from-left-8 duration-200"
+            className="absolute inset-y-0 left-0 flex w-full max-w-none -translate-x-full transition-transform duration-[var(--fd-duration-panel)] ease-[var(--fd-ease-panel)] group-data-[state=open]:translate-x-0"
           >
             <div className="flex h-full w-full flex-col border-r border-border-default bg-surface-1 shadow-2xl">
               <div className="flex items-center justify-between border-b border-border-subtle px-4 py-3">
@@ -3940,6 +4036,11 @@ function RemoteApp() {
                 onWorkspaceOrderChange={handleWorkspaceOrderChange}
                 title="Projects"
                 errors={error ? [error] : []}
+                threadTagsById={threadTags.byThreadId}
+                threadTagOptions={threadTags.tags}
+                onSetThreadColor={
+                  threadTagsEnabled ? handleSetThreadColor : undefined
+                }
                 emptyState={{
                   title: "Waiting for projects",
                   description:
@@ -3985,6 +4086,11 @@ function RemoteApp() {
           onWorkspaceOrderChange={handleWorkspaceOrderChange}
           title="Projects"
           errors={error ? [error] : []}
+          threadTagsById={threadTags.byThreadId}
+          threadTagOptions={threadTags.tags}
+          onSetThreadColor={
+            threadTagsEnabled ? handleSetThreadColor : undefined
+          }
           emptyState={{
             title: "Waiting for projects",
             description:

@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import React from 'react'
 
 import { formatRelativeTime } from './sessionListItem.utils'
+import { SessionListItem } from './SessionListItem'
+import { cleanup, renderComponent } from '../../test/render'
+import { thread } from '../../test/factories'
 
 describe('SessionListItem timeAgo', () => {
   beforeEach(() => {
@@ -10,6 +14,7 @@ describe('SessionListItem timeAgo', () => {
 
   afterEach(() => {
     vi.useRealTimers()
+    cleanup()
   })
 
   it('returns "now" for timestamps less than 1 minute ago', () => {
@@ -45,6 +50,24 @@ describe('SessionListItem timeAgo', () => {
 })
 
 describe('SessionListItem props contract', () => {
+  it('opens thread options from a long press', () => {
+    const onOpenThreadOptions = vi.fn()
+    const item = thread({ id: 'thread-1', workspace_id: 'workspace-1' })
+    const renderer = renderComponent(React.createElement(SessionListItem, {
+      thread: item,
+      workspaceId: 'workspace-1',
+      isSelected: false,
+      onSelectThread: vi.fn(),
+      onOpenThreadOptions,
+    }))
+
+    renderer.root.findByProps({
+      accessibilityHint: 'Double tap and hold for thread options',
+    }).props.onLongPress()
+
+    expect(onOpenThreadOptions).toHaveBeenCalledWith('workspace-1', item)
+  })
+
   it('accepts a full thread summary so presentation stays aligned with shared clients', () => {
     const props = {
       thread: {

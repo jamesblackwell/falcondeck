@@ -26,7 +26,7 @@ import {
   type ConversationMemoryCitation,
 } from "@falcondeck/client-core";
 
-import { ActivityDiamond, Text } from "@/components/ui";
+import { Text } from "@/components/ui";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 import { useExternalUrl } from "./useExternalUrl";
 
@@ -411,22 +411,7 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
         <MemoryCitationBlock citation={item.memory_citation} />
       ) : null}
       <View style={styles.actions} accessible={false}>
-        {lifecycle === "streaming" ? (
-          <View
-            style={styles.status}
-            accessible
-            accessibilityLabel="Response streaming"
-            accessibilityLiveRegion="polite"
-          >
-            <ActivityDiamond
-              size={theme.iconSize.xs}
-              color={theme.colors.accent.default}
-            />
-            <Text variant="caption" size="xs" color="accent">
-              Streaming…
-            </Text>
-          </View>
-        ) : lifecycle === "interrupted" ? (
+        {lifecycle === "interrupted" ? (
           <View
             style={styles.status}
             accessible

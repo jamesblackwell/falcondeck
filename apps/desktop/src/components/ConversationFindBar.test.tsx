@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitForElementToBeRemoved } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
 import { ConversationFindBar } from './ConversationFindBar'
@@ -32,7 +32,7 @@ describe('ConversationFindBar', () => {
     expect(screen.queryByText('No match')).not.toBeInTheDocument()
   })
 
-  it('shows a miss and closes with Escape', () => {
+  it('shows a miss and closes with Escape', async () => {
     render(
       <>
         <div data-conversation-transcript>available conversation text</div>
@@ -45,6 +45,9 @@ describe('ConversationFindBar', () => {
     expect(screen.getByText('No match')).toBeInTheDocument()
 
     fireEvent.keyDown(input, { key: 'Escape' })
-    expect(screen.queryByRole('search', { name: 'Find in chat' })).not.toBeInTheDocument()
+    // The bar collapses out before unmounting.
+    await waitForElementToBeRemoved(() =>
+      screen.queryByRole('search', { name: 'Find in chat' }),
+    )
   })
 })

@@ -31,7 +31,9 @@ use falcondeck_core::{
 };
 
 use crate::acp_protocol::AcpSessionUpdateKind;
-use crate::agent_binary::{preferred_command_path, resolve_agent_binary};
+use crate::agent_binary::{
+    desktop_login_shell_environment, preferred_command_path_with_environment, resolve_agent_binary,
+};
 use crate::error::DaemonError;
 
 /// Largest raw image file embedded inline for an ACP prompt, mirroring the
@@ -1017,14 +1019,18 @@ fn is_reasoning_mode_block(modes: &Value) -> bool {
     looks_like_reasoning(&options)
 }
 
-fn apply_provider_environment(
+async fn apply_provider_environment(
     command: &mut Command,
     executable: &str,
     provider_env: &HashMap<String, String>,
 ) {
-    if let Some(path) = preferred_command_path(executable) {
+    let login_environment = desktop_login_shell_environment().await;
+    command.envs(login_environment);
+    if let Some(path) = preferred_command_path_with_environment(executable, login_environment) {
         command.env("PATH", path);
     }
+    // Explicit provider configuration remains authoritative over both the
+    // daemon and login-shell environments.
     command.envs(provider_env);
 }
 
@@ -1037,7 +1043,7 @@ impl AcpRuntime {
     ) -> Result<Arc<Self>, DaemonError> {
         let executable = resolve_agent_binary(&config.command[0], &config.command[0]).executable;
         let mut command = Command::new(&executable);
-        apply_provider_environment(&mut command, &executable, &config.env);
+        apply_provider_environment(&mut command, &executable, &config.env).await;
         command
             .args(&config.command[1..])
             .current_dir(workspace_path)
@@ -1155,9 +1161,7 @@ impl AcpRuntime {
                 ),
             )
             .await;
-            let supported = outcome
-                .as_ref()
-                .is_ok_and(acp_interject_probe_supported);
+            let supported = outcome.as_ref().is_ok_and(acp_interject_probe_supported);
             runtime
                 .supports_steering
                 .store(supported, Ordering::Release);
@@ -2423,23 +2427,23 @@ mod tests {
             .map(|value| value.to_string_lossy().into_owned())
     }
 
-    #[test]
-    fn provider_environment_adds_executable_directory_to_path() {
+    #[tokio::test]
+    async fn provider_environment_adds_executable_directory_to_path() {
         let mut command = Command::new("/opt/homebrew/bin/pi-acp");
 
-        apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &HashMap::new());
+        apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &HashMap::new()).await;
 
         let path = command_path(&command).expect("PATH should be set");
         let first = std::env::split_paths(&path).next();
         assert_eq!(first.as_deref(), Some(Path::new("/opt/homebrew/bin")));
     }
 
-    #[test]
-    fn provider_environment_preserves_explicit_path_override() {
+    #[tokio::test]
+    async fn provider_environment_preserves_explicit_path_override() {
         let mut command = Command::new("/opt/homebrew/bin/pi-acp");
         let provider_env = HashMap::from([("PATH".to_string(), "/custom/bin".to_string())]);
 
-        apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &provider_env);
+        apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &provider_env).await;
 
         assert_eq!(command_path(&command).as_deref(), Some("/custom/bin"));
     }

@@ -1,9 +1,16 @@
 use std::{
+    collections::HashMap,
     env,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
+    time::Duration,
 };
+
+use tokio::{process::Command as TokioCommand, sync::OnceCell, time::timeout};
+
+const LOGIN_SHELL_ENV_MARKER: &[u8] = b"__FALCONDECK_LOGIN_SHELL_ENV__\0";
+const LOGIN_SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct AgentBinaryResolution {
@@ -138,6 +145,89 @@ pub fn preferred_command_path(executable: &str) -> Option<OsString> {
         Path::new(executable),
         env::var_os("HOME"),
         env::var_os("PATH"),
+    )
+}
+
+/// Environment added by the user's interactive login shell when FalconDeck is
+/// running as a packaged macOS app. Terminal-launched daemons already inherit
+/// this environment and avoid the extra shell startup.
+pub(crate) async fn desktop_login_shell_environment() -> &'static HashMap<OsString, OsString> {
+    static ENVIRONMENT: OnceCell<HashMap<OsString, OsString>> = OnceCell::const_new();
+
+    ENVIRONMENT
+        .get_or_init(|| async {
+            if !cfg!(target_os = "macos") || env::var_os("__CFBundleIdentifier").is_none() {
+                return HashMap::new();
+            }
+            capture_login_shell_environment().await.unwrap_or_default()
+        })
+        .await
+}
+
+async fn capture_login_shell_environment() -> Option<HashMap<OsString, OsString>> {
+    let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let mut command = TokioCommand::new(shell);
+    command
+        .args([
+            "-l",
+            "-i",
+            "-c",
+            "printf '__FALCONDECK_LOGIN_SHELL_ENV__\\0'; /usr/bin/env -0",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let output = command_output_with_timeout(&mut command, LOGIN_SHELL_ENV_TIMEOUT).await?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_login_shell_environment(&output.stdout)
+}
+
+async fn command_output_with_timeout(
+    command: &mut TokioCommand,
+    limit: Duration,
+) -> Option<Output> {
+    timeout(limit, command.output()).await.ok()?.ok()
+}
+
+fn parse_login_shell_environment(output: &[u8]) -> Option<HashMap<OsString, OsString>> {
+    let marker = output
+        .windows(LOGIN_SHELL_ENV_MARKER.len())
+        .position(|window| window == LOGIN_SHELL_ENV_MARKER)?;
+    let entries = &output[marker + LOGIN_SHELL_ENV_MARKER.len()..];
+    Some(
+        entries
+            .split(|byte| *byte == 0)
+            .filter_map(|entry| {
+                let separator = entry.iter().position(|byte| *byte == b'=')?;
+                let (key, value) = entry.split_at(separator);
+                if key.is_empty() {
+                    return None;
+                }
+                Some((
+                    OsString::from(String::from_utf8_lossy(key).into_owned()),
+                    OsString::from(String::from_utf8_lossy(&value[1..]).into_owned()),
+                ))
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn preferred_command_path_with_environment(
+    executable: &str,
+    environment: &HashMap<OsString, OsString>,
+) -> Option<OsString> {
+    build_preferred_command_path(
+        Path::new(executable),
+        environment
+            .get(OsStr::new("HOME"))
+            .cloned()
+            .or_else(|| env::var_os("HOME")),
+        environment
+            .get(OsStr::new("PATH"))
+            .cloned()
+            .or_else(|| env::var_os("PATH")),
     )
 }
 
@@ -285,7 +375,10 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use super::{ResolutionDiagnostics, build_preferred_command_path, missing_binary_message};
+    use super::{
+        ResolutionDiagnostics, build_preferred_command_path, command_output_with_timeout,
+        missing_binary_message, parse_login_shell_environment,
+    };
 
     #[test]
     fn missing_binary_message_includes_checked_sources() {
@@ -329,5 +422,43 @@ mod tests {
         assert!(entries.contains(&PathBuf::from("/Users/example/.opencode/bin")));
         assert!(entries.contains(&PathBuf::from("/usr/local/bin")));
         assert!(entries.contains(&PathBuf::from("/usr/bin")));
+    }
+
+    #[test]
+    fn login_shell_environment_ignores_startup_output_before_marker() {
+        let output = b"shell banner\n__FALCONDECK_LOGIN_SHELL_ENV__\0OPENROUTER_API_KEY=test\0";
+
+        let environment = parse_login_shell_environment(output).expect("environment should parse");
+
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("OPENROUTER_API_KEY")),
+            Some(&OsString::from("test"))
+        );
+    }
+
+    #[test]
+    fn login_shell_environment_preserves_equals_in_values() {
+        let output = b"__FALCONDECK_LOGIN_SHELL_ENV__\0TOKEN=first=second\0";
+
+        let environment = parse_login_shell_environment(output).expect("environment should parse");
+
+        assert_eq!(
+            environment.get(std::ffi::OsStr::new("TOKEN")),
+            Some(&OsString::from("first=second"))
+        );
+    }
+
+    #[tokio::test]
+    async fn login_shell_environment_command_is_bounded() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command
+            .args(["-c", "sleep 10"])
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped());
+
+        let output =
+            command_output_with_timeout(&mut command, std::time::Duration::from_millis(25)).await;
+
+        assert!(output.is_none());
     }
 }
