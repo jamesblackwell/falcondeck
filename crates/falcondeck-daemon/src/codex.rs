@@ -48,7 +48,9 @@ use crate::{
 mod session_file;
 mod thread_list;
 
-use session_file::hydrate_thread_items_from_session_file;
+use session_file::{
+    hydrate_thread_items_from_session_file, supplement_thread_items_with_session_tool_calls,
+};
 use thread_list::{parse_collaboration_modes, parse_models, parse_threads};
 
 pub struct CodexBootstrap {
@@ -350,11 +352,21 @@ impl CodexSession {
                 let (summary, items) = match session.read_thread(&summary.id).await {
                     Ok(value) => {
                         let mut items = hydrate_thread_items(&value);
-                        if items.is_empty()
-                            && let Some(path) =
-                                extract_thread_session_path(&value).or(session_path.clone())
+                        if let Some(path) =
+                            extract_thread_session_path(&value).or(session_path.clone())
                         {
-                            items = hydrate_thread_items_from_session_file(&path, &workspace_path);
+                            if items.is_empty() {
+                                items = hydrate_thread_items_from_session_file(
+                                    &path,
+                                    &workspace_path,
+                                );
+                            } else {
+                                supplement_thread_items_with_session_tool_calls(
+                                    &mut items,
+                                    &path,
+                                    &workspace_path,
+                                );
+                            }
                         }
                         (hydrate_thread_summary(summary, &value, &items), items)
                     }
@@ -1788,6 +1800,68 @@ mod tests {
                 && status == "completed"
                 && output == "Script completed\nM src/main.rs"
                 && completed_at.to_rfc3339() == "2026-08-11T10:43:31.939+00:00"
+        ));
+    }
+
+    #[test]
+    fn session_file_supplements_partial_thread_read_with_missing_tool_calls() {
+        let mut file = NamedTempFile::new().unwrap();
+        for entry in [
+            json!({
+                "timestamp": "2026-08-11T10:43:29.000Z",
+                "type": "session_meta",
+                "payload": { "cwd": "/Users/james/project-a" }
+            }),
+            json!({
+                "timestamp": "2026-08-11T10:43:31.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "tool-from-session",
+                    "call_id": "call-1",
+                    "name": "exec",
+                    "status": "completed"
+                }
+            }),
+            json!({
+                "timestamp": "2026-08-11T10:43:32.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call-1",
+                    "output": "done"
+                }
+            }),
+        ] {
+            writeln!(file, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+        let mut items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "status": "completed",
+                    "items": [{
+                        "id": "reasoning-from-read",
+                        "type": "reasoning",
+                        "createdAt": "2026-08-11T10:43:30.000Z"
+                    }]
+                }]
+            }
+        }));
+
+        supplement_thread_items_with_session_tool_calls(
+            &mut items,
+            file.path().to_str().unwrap(),
+            "/Users/james/project-a",
+        );
+
+        assert!(matches!(
+            items.as_slice(),
+            [
+                ConversationItem::Reasoning { id: reasoning_id, .. },
+                ConversationItem::ToolCall { id: tool_id, output: Some(output), .. }
+            ] if reasoning_id == "reasoning-from-read"
+                && tool_id == "tool-from-session"
+                && output == "done"
         ));
     }
 

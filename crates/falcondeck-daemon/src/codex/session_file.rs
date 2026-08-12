@@ -62,6 +62,26 @@ pub(super) fn hydrate_thread_items_from_session_file(
     conversation_items
 }
 
+pub(super) fn supplement_thread_items_with_session_tool_calls(
+    items: &mut Vec<ConversationItem>,
+    session_path: &str,
+    workspace_path: &str,
+) {
+    let session_items = hydrate_thread_items_from_session_file(session_path, workspace_path);
+    for session_item in session_items {
+        let ConversationItem::ToolCall { id, .. } = &session_item else {
+            continue;
+        };
+        let already_present = items.iter().any(
+            |item| matches!(item, ConversationItem::ToolCall { id: existing_id, .. } if existing_id == id),
+        );
+        if !already_present {
+            items.push(session_item);
+        }
+    }
+    items.sort_by_key(conversation_item_created_at);
+}
+
 #[derive(Clone)]
 enum SessionHydratedItemKind {
     UserMessage,
