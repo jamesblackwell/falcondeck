@@ -23,11 +23,11 @@ export function resolveThreadModelId(
 ) {
   const activeProvider = thread?.provider ?? provider ?? defaultProvider(workspace)
   const models = workspaceModels(workspace, activeProvider)
-  if (preferredModelId && models.some((model) => model.id === preferredModelId)) {
-    return preferredModelId
-  }
   if (thread?.agent.model_id && models.some((model) => model.id === thread.agent.model_id)) {
     return thread.agent.model_id
+  }
+  if (preferredModelId && models.some((model) => model.id === preferredModelId)) {
+    return preferredModelId
   }
   return (
     defaultModelId(workspace, activeProvider)
@@ -74,11 +74,11 @@ export function resolveReasoningEffort(
   provider?: AgentProvider | null,
 ) {
   const options = reasoningOptions(thread, workspace, preferredModelId, provider)
-  if (preferredEffort && options.includes(preferredEffort)) {
-    return preferredEffort
-  }
   if (thread?.agent.reasoning_effort && options.includes(thread.agent.reasoning_effort)) {
     return thread.agent.reasoning_effort
+  }
+  if (preferredEffort && options.includes(preferredEffort)) {
+    return preferredEffort
   }
   return defaultReasoningEffort(thread, workspace, preferredModelId, provider)
 }

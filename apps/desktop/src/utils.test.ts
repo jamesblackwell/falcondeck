@@ -249,6 +249,48 @@ describe('desktop selection utils', () => {
     expect(defaultReasoningEffort(selectedThread, selectedWorkspace)).toBe('high')
   })
 
+  it('keeps an existing thread model ahead of the workspace remembered model', () => {
+    const selectedWorkspace = workspace({
+      models: [
+        {
+          id: 'gpt-sol-5.6',
+          label: 'GPT Sol 5.6',
+          is_default: true,
+          default_reasoning_effort: 'medium',
+          supported_reasoning_efforts: [{ reasoning_effort: 'medium', description: 'Medium' }],
+        },
+        {
+          id: 'gpt-luna-5.6',
+          label: 'GPT Luna 5.6',
+          is_default: false,
+          default_reasoning_effort: 'high',
+          supported_reasoning_efforts: [{ reasoning_effort: 'high', description: 'High' }],
+        },
+      ],
+    })
+    const selectedThread = thread({
+      agent: {
+        model_id: 'gpt-sol-5.6',
+        reasoning_effort: 'medium',
+        collaboration_mode_id: null,
+        approval_policy: null,
+        service_tier: null,
+      },
+    })
+
+    expect(
+      resolveThreadModelId(selectedThread, selectedWorkspace, 'gpt-luna-5.6'),
+    ).toBe('gpt-sol-5.6')
+    expect(
+      resolveReasoningEffort(
+        selectedThread,
+        selectedWorkspace,
+        'gpt-luna-5.6',
+        'high',
+      ),
+    ).toBe('medium')
+  })
+
   it('falls back to the provider default when a preferred model is stale', () => {
     const selectedWorkspace = workspace({
       models: [
@@ -265,7 +307,7 @@ describe('desktop selection utils', () => {
     expect(resolveThreadModelId(null, selectedWorkspace, 'gpt-5.1-codex-max')).toBe('gpt-5.4')
   })
 
-  it('prefers a valid remembered effort over thread and model defaults', () => {
+  it('prefers an existing thread effort over a valid remembered effort', () => {
     const selectedWorkspace = workspace({
       models: [
         {
@@ -293,7 +335,7 @@ describe('desktop selection utils', () => {
 
     expect(
       resolveReasoningEffort(selectedThread, selectedWorkspace, 'gpt-5.4', 'high'),
-    ).toBe('high')
+    ).toBe('medium')
   })
 
 })
