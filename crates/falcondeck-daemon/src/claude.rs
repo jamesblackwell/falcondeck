@@ -1337,6 +1337,7 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
             .unwrap_or_else(|| "Claude thread".to_string()),
         provider: AgentProvider::CLAUDE,
         native_session_id: Some(session_id),
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: updated_at.or(file_updated_at).unwrap_or(now),

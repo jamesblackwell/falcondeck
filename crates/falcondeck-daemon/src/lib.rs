@@ -15,6 +15,7 @@ mod codex;
 mod connectors;
 mod error;
 mod git;
+pub(crate) mod opencode;
 mod skills;
 mod ssh_config;
 mod variant;

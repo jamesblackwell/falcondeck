@@ -214,3 +214,43 @@ reasoning, tool calls and diffs, permission requests, images, interruption,
 MCP servers, model/config discovery, and persisted session reload. OpenCode
 continues to own its agents, permissions, project rules, tools, formatters,
 linters, and provider authentication.
+
+### Native transport rollout and ACP fallback
+
+FalconDeck keeps the generic ACP adapter for OpenCode and every other ACP
+harness. The native OpenCode server is a separate transport that unlocks
+native session hydration and mid-turn `delivery: "steer"`; ACP remains a
+permanent fallback.
+
+An OpenCode entry can declare a transport:
+
+```json
+{
+  "providers": {
+    "opencode": {
+      "label": "OpenCode",
+      "command": ["opencode", "acp"],
+      "transport": "acp"
+    }
+  }
+}
+```
+
+`auto` tries the native server for each new thread and falls back to ACP if
+startup, session creation, or the read/permission/question compatibility probe
+fails. `native` requires that probe to succeed. `acp` always uses the generic
+adapter. A thread is pinned to the transport that created it: FalconDeck never
+switches an active turn, and never blindly resends an input after an ambiguous
+native admission.
+
+Native turns currently project authoritative text, reasoning, tool, permission,
+and question records from OpenCode's session APIs. Text and tool records may
+arrive at FalconDeck in larger completed blocks than they do over ACP. Use the
+Agents settings panel's **Use ACP** action if that tradeoff or a particular
+OpenCode release proves unreliable; the change applies to new threads and does
+not mutate existing sessions.
+
+The native server is started on `127.0.0.1` with a unique generated password,
+rather than exposing an unauthenticated listener. If native mode proves
+unstable in practice, select `acp`; that route remains supported and covered by
+the ACP conformance suite.

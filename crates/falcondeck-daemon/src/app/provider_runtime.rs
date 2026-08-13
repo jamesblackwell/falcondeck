@@ -24,6 +24,7 @@ use super::{
     AppState,
     acp_threads::{start_acp_turn, steer_acp_turn},
     agent_helpers::{ResolvedSelectedSkill, claude_prompt_from_inputs, codex_inputs},
+    opencode_threads::{requested_native_transport, start_opencode_turn, steer_opencode_turn},
     workspace_ops::{sandbox_policy_payload, send_turn},
 };
 use crate::{
@@ -45,6 +46,7 @@ pub(super) struct StartedThread {
     pub(super) thread_id: String,
     pub(super) title: String,
     pub(super) native_session_id: Option<String>,
+    pub(super) provider_transport: Option<String>,
 }
 
 /// Everything a backend needs to open a new thread.
@@ -152,20 +154,102 @@ impl ProviderRuntime {
                     title: extract_thread_title(&result)
                         .unwrap_or_else(|| "New thread".to_string()),
                     native_session_id: extract_thread_id(&result),
+                    provider_transport: None,
                 })
             }
             Self::Claude => Ok(StartedThread {
                 thread_id: format!("claude-thread-{}", Uuid::new_v4().simple()),
                 title: "New Claude thread".to_string(),
                 native_session_id: None,
+                provider_transport: None,
             }),
             // ACP providers open their conversation session on the first turn;
             // metadata discovery uses a separate short-lived session.
-            Self::Acp(provider) => Ok(StartedThread {
-                thread_id: format!("{}-thread-{}", provider.as_str(), Uuid::new_v4().simple()),
-                title: "New thread".to_string(),
-                native_session_id: None,
-            }),
+            Self::Acp(provider) => {
+                if provider.as_str().eq_ignore_ascii_case("opencode")
+                    && let Some(config) = app.opencode_config()
+                    && requested_native_transport(&config)
+                {
+                    match app.opencode_runtime_for(spec.workspace_id).await {
+                        Ok(runtime) => {
+                            match runtime.create_session(spec.cwd, spec.model_id).await {
+                                Ok(session_id) => {
+                                    let compatible = async {
+                                        runtime.messages(&session_id).await?;
+                                        runtime.pending_permissions(&session_id).await?;
+                                        runtime.pending_questions(&session_id).await?;
+                                        Ok::<_, DaemonError>(())
+                                    }
+                                    .await;
+                                    match compatible {
+                                        Ok(()) => {
+                                            app.set_opencode_native_available(
+                                                spec.workspace_id,
+                                                true,
+                                            )
+                                            .await;
+                                            return Ok(StartedThread {
+                                                thread_id: format!(
+                                                    "opencode-thread-{}",
+                                                    Uuid::new_v4().simple()
+                                                ),
+                                                title: "New thread".to_string(),
+                                                native_session_id: Some(session_id),
+                                                provider_transport: Some("native".to_string()),
+                                            });
+                                        }
+                                        Err(error) => {
+                                            runtime.delete_session(&session_id).await;
+                                            if matches!(
+                                                config.transport,
+                                                crate::acp::ProviderTransport::Native
+                                            ) {
+                                                return Err(error);
+                                            }
+                                            tracing::warn!(
+                                                %error,
+                                                "native OpenCode compatibility probe failed; using ACP"
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(error)
+                                    if matches!(
+                                        config.transport,
+                                        crate::acp::ProviderTransport::Native
+                                    ) =>
+                                {
+                                    return Err(error);
+                                }
+                                Err(error) => tracing::warn!(
+                                    %error,
+                                    "native OpenCode session creation failed; using ACP"
+                                ),
+                            }
+                        }
+                        Err(error)
+                            if matches!(
+                                config.transport,
+                                crate::acp::ProviderTransport::Native
+                            ) =>
+                        {
+                            return Err(error);
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "native OpenCode startup failed; using ACP"
+                        ),
+                    }
+                    app.set_opencode_native_available(spec.workspace_id, false)
+                        .await;
+                }
+                Ok(StartedThread {
+                    thread_id: format!("{}-thread-{}", provider.as_str(), Uuid::new_v4().simple()),
+                    title: "New thread".to_string(),
+                    native_session_id: None,
+                    provider_transport: Some("acp".to_string()),
+                })
+            }
         }
     }
 
@@ -264,6 +348,16 @@ impl ProviderRuntime {
                 Ok(())
             }
             Self::Acp(provider) => {
+                if spec.thread.provider_transport.as_deref() == Some("native") {
+                    return start_opencode_turn(
+                        app,
+                        spec.workspace_id,
+                        spec.thread_id,
+                        spec.inputs,
+                        spec.selected_skills,
+                    )
+                    .await;
+                }
                 start_acp_turn(
                     app,
                     spec.workspace_id,
@@ -322,6 +416,16 @@ impl ProviderRuntime {
                     .await
             }
             Self::Acp(provider) => {
+                if spec.thread.provider_transport.as_deref() == Some("native") {
+                    return steer_opencode_turn(
+                        app,
+                        spec.workspace_id,
+                        spec.thread_id,
+                        spec.inputs,
+                        spec.selected_skills,
+                    )
+                    .await;
+                }
                 steer_acp_turn(
                     app,
                     spec.workspace_id,
@@ -374,6 +478,23 @@ impl ProviderRuntime {
                 runtime.interrupt_turn(thread_id).await
             }
             Self::Acp(provider) => {
+                let native_session = {
+                    let workspaces = app.inner.workspaces.lock().await;
+                    workspaces
+                        .get(workspace_id)
+                        .and_then(|workspace| workspace.threads.get(thread_id))
+                        .filter(|thread| {
+                            thread.summary.provider_transport.as_deref() == Some("native")
+                        })
+                        .and_then(|thread| thread.summary.native_session_id.clone())
+                };
+                if let Some(session_id) = native_session {
+                    return app
+                        .opencode_runtime_for(workspace_id)
+                        .await?
+                        .interrupt(&session_id)
+                        .await;
+                }
                 let runtime = app.acp_runtime_for(workspace_id, provider).await?;
                 // A thread that never opened a session has nothing to cancel.
                 if let Some(session_id) = {

@@ -80,6 +80,7 @@ import {
   verifyPairingPublicKeyBundle,
   verifySessionKeyMaterial,
   workspaceAgentCapabilities,
+  threadAgentCapabilities,
   workspaceCollaborationModes,
   workspaceModels,
   workspaceProviderLabel,
@@ -3274,8 +3275,13 @@ function RemoteApp() {
     [selectedWorkspace],
   );
   const activeCapabilities = useMemo(
-    () => workspaceAgentCapabilities(selectedWorkspace, activeProvider),
-    [activeProvider, selectedWorkspace],
+    () =>
+      threadAgentCapabilities(
+        selectedWorkspace,
+        activeProvider,
+        selectedThread,
+      ),
+    [activeProvider, selectedThread, selectedWorkspace],
   );
   const editResendReason = selectedThread
     ? editResendUnavailableReason({

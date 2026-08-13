@@ -71,6 +71,22 @@ export function workspaceAgentCapabilities(
   );
 }
 
+/** Capabilities that depend on the transport pinned to an existing thread. */
+export function threadAgentCapabilities(
+  workspace: WorkspaceSummary | null | undefined,
+  provider: AgentProvider,
+  thread: ThreadSummary | null | undefined,
+): AgentCapabilitySummary {
+  const capabilities = workspaceAgentCapabilities(workspace, provider);
+  if (provider !== "opencode" || thread?.provider !== "opencode") {
+    return capabilities;
+  }
+  return {
+    ...capabilities,
+    supports_steering: thread.provider_transport === "native",
+  };
+}
+
 /**
  * Prevents a composer from silently degrading images for a provider that
  * explicitly does not accept image content. The attachments remain available

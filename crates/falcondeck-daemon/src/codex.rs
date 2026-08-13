@@ -2586,6 +2586,7 @@ mod tests {
                 title: "Restored".to_string(),
                 provider: AgentProvider::CODEX,
                 native_session_id: None,
+                provider_transport: None,
                 handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
@@ -2661,6 +2662,7 @@ mod tests {
                 title: "Restored".to_string(),
                 provider: AgentProvider::CODEX,
                 native_session_id: None,
+                provider_transport: None,
                 handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T09:00:00Z")
@@ -2706,6 +2708,7 @@ mod tests {
                 title: "Restored".to_string(),
                 provider: AgentProvider::CODEX,
                 native_session_id: None,
+                provider_transport: None,
                 handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),

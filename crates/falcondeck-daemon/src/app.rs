@@ -51,6 +51,7 @@ mod extension_host;
 mod extensions;
 pub(crate) mod host_provisioning;
 mod notifications;
+mod opencode_threads;
 mod provider_runtime;
 mod remote_bridge;
 mod remote_lifecycle;
@@ -151,6 +152,7 @@ struct ManagedWorkspace {
     summary: WorkspaceSummary,
     codex_session: Option<Arc<CodexSession>>,
     claude_runtime: Option<Arc<ClaudeRuntime>>,
+    opencode_runtime: Option<Arc<crate::opencode::OpenCodeRuntime>>,
     /// Live ACP agent processes keyed by provider id; normally started by
     /// background metadata hydration, with first-turn startup as a fallback.
     acp_runtimes: HashMap<AgentProvider, Arc<crate::acp::AcpRuntime>>,
@@ -248,6 +250,12 @@ impl AppState {
                 // before the first connect refreshes the agent entry.
                 capabilities.supports_images =
                     crate::acp::acp_supports_images(&config.id, capabilities.supports_images);
+                if config.id.eq_ignore_ascii_case("opencode")
+                    && crate::app::opencode_threads::requested_native_transport(config)
+                {
+                    capabilities.supports_images = true;
+                    capabilities.supports_steering = true;
+                }
                 WorkspaceAgentSummary {
                     provider: AgentProvider::new(config.id.clone()),
                     label: config.label.clone(),
@@ -354,6 +362,8 @@ struct PersistedThreadState {
     provider: Option<AgentProvider>,
     #[serde(default)]
     native_session_id: Option<String>,
+    #[serde(default)]
+    provider_transport: Option<String>,
     #[serde(default)]
     handoff_from: Option<falcondeck_core::ThreadHandoffSource>,
     #[serde(default)]
@@ -703,6 +713,7 @@ impl AppState {
                     .unwrap_or_else(|| "Restored thread".to_string()),
                 provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
                 native_session_id: state.native_session_id.clone(),
+                provider_transport: state.provider_transport.clone(),
                 handoff_from: state.handoff_from.clone(),
                 status,
                 updated_at: state
@@ -804,6 +815,7 @@ impl AppState {
                 summary: summary.clone(),
                 codex_session: None,
                 claude_runtime: None,
+                opencode_runtime: None,
                 acp_runtimes: HashMap::new(),
                 threads,
             },
@@ -888,6 +900,7 @@ impl AppState {
                         workspace.summary.path.clone(),
                         workspace.codex_session.clone(),
                         workspace.claude_runtime.clone(),
+                        workspace.opencode_runtime.clone(),
                         workspace
                             .threads
                             .values()
@@ -906,12 +919,17 @@ impl AppState {
                 .collect::<Vec<_>>()
         };
 
-        for (workspace_id, _path, codex_session, claude_runtime, threads) in snapshots {
+        for (workspace_id, _path, codex_session, claude_runtime, opencode_runtime, threads) in
+            snapshots
+        {
             if let Some(runtime) = claude_runtime {
                 let _ = runtime.shutdown().await;
             }
             if let Some(session) = codex_session {
                 let _ = session.shutdown().await;
+            }
+            if let Some(runtime) = opencode_runtime {
+                runtime.shutdown().await;
             }
             for (thread_id, was_running) in threads {
                 if !was_running {
@@ -1597,6 +1615,7 @@ impl AppState {
                     updated_at: Some(thread.summary.updated_at),
                     provider: Some(thread.summary.provider.clone()),
                     native_session_id: thread.summary.native_session_id.clone(),
+                    provider_transport: thread.summary.provider_transport.clone(),
                     handoff_from: thread.summary.handoff_from.clone(),
                     title: Some(thread.summary.title.clone()),
                     manual_title: thread.manual_title,

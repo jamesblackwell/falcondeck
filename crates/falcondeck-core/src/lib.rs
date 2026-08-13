@@ -2401,6 +2401,9 @@ pub struct ThreadSummary {
     /// Provider-native session identifier, if one exists.
     #[serde(default)]
     pub native_session_id: Option<String>,
+    /// Runtime pinned when the thread was created (`native` or `acp`).
+    #[serde(default)]
+    pub provider_transport: Option<String>,
     /// Source thread when this thread was created by a cross-provider handoff.
     #[serde(default)]
     pub handoff_from: Option<ThreadHandoffSource>,

@@ -1,0 +1,790 @@
+//! App integration for OpenCode's native HTTP session API.
+
+use std::sync::Arc;
+
+use chrono::Utc;
+use falcondeck_core::{
+    ApprovalDecision, ContentLifecycle, ConversationItem, InteractiveQuestion,
+    InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind, ServiceLevel,
+    ThreadStatus, TurnInputItem, UnifiedEvent,
+};
+use serde_json::Value;
+use uuid::Uuid;
+
+use crate::{
+    acp::{AcpProviderConfig, ProviderTransport},
+    error::DaemonError,
+    opencode::{Delivery, OpenCodeRuntime},
+};
+
+use super::{
+    AppState, PendingServerRequest,
+    agent_helpers::ResolvedSelectedSkill,
+    conversation_helpers::{ToolSettlement, tool_display_metadata},
+};
+
+impl AppState {
+    pub(super) fn opencode_config(&self) -> Option<AcpProviderConfig> {
+        self.fresh_acp_provider_configs()
+            .into_iter()
+            .find(|config| config.id.eq_ignore_ascii_case("opencode"))
+    }
+
+    pub(super) async fn opencode_runtime_for(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Arc<OpenCodeRuntime>, DaemonError> {
+        let existing = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .and_then(|workspace| workspace.opencode_runtime.clone());
+        if let Some(runtime) = existing {
+            if runtime.health().await.is_ok() {
+                return Ok(runtime);
+            }
+            let removed = self
+                .inner
+                .workspaces
+                .lock()
+                .await
+                .get_mut(workspace_id)
+                .and_then(|workspace| workspace.opencode_runtime.take());
+            if let Some(runtime) = removed {
+                runtime.shutdown().await;
+            }
+        }
+
+        let provider = falcondeck_core::AgentProvider::new("opencode".to_string());
+        let gate = {
+            let mut gates = self.inner.acp_runtime_gates.lock().await;
+            Arc::clone(
+                gates
+                    .entry((workspace_id.to_string(), provider))
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+            )
+        };
+        let _gate = gate.lock().await;
+        if let Some(runtime) = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .and_then(|workspace| workspace.opencode_runtime.clone())
+        {
+            if runtime.health().await.is_ok() {
+                return Ok(runtime);
+            }
+            let removed = self
+                .inner
+                .workspaces
+                .lock()
+                .await
+                .get_mut(workspace_id)
+                .and_then(|workspace| workspace.opencode_runtime.take());
+            if let Some(runtime) = removed {
+                runtime.shutdown().await;
+            }
+        }
+
+        let config = self.opencode_config().ok_or_else(|| {
+            DaemonError::BadRequest("OpenCode is not configured in providers.json".to_string())
+        })?;
+        let workspace_path = self
+            .inner
+            .workspaces
+            .lock()
+            .await
+            .get(workspace_id)
+            .map(|workspace| workspace.summary.path.clone())
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let runtime = OpenCodeRuntime::spawn(&config.command, &workspace_path, &config.env).await?;
+        let mut workspaces = self.inner.workspaces.lock().await;
+        if let Some(workspace) = workspaces.get_mut(workspace_id) {
+            workspace.opencode_runtime = Some(Arc::clone(&runtime));
+        } else {
+            drop(workspaces);
+            runtime.shutdown().await;
+            return Err(DaemonError::NotFound("workspace not found".to_string()));
+        }
+        Ok(runtime)
+    }
+
+    pub(super) async fn set_opencode_native_available(&self, workspace_id: &str, available: bool) {
+        let mut workspaces = self.inner.workspaces.lock().await;
+        let Some(agent) = workspaces.get_mut(workspace_id).and_then(|workspace| {
+            workspace
+                .summary
+                .agents
+                .iter_mut()
+                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case("opencode"))
+        }) else {
+            return;
+        };
+        agent.capabilities.supports_steering = available;
+        agent.capabilities.supports_images = available || agent.capabilities.supports_images;
+        agent.account.label = if available {
+            "OpenCode native connected".to_string()
+        } else {
+            "OpenCode using ACP fallback".to_string()
+        };
+    }
+
+    pub(super) async fn respond_opencode_permission(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        request_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<(), DaemonError> {
+        let session_id = self
+            .thread_summary(workspace_id, thread_id)
+            .await?
+            .native_session_id
+            .ok_or_else(|| {
+                DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
+            })?;
+        let reply = match decision {
+            ApprovalDecision::Allow => "once",
+            ApprovalDecision::AlwaysAllow => "always",
+            ApprovalDecision::Deny => "reject",
+        };
+        self.opencode_runtime_for(workspace_id)
+            .await?
+            .reply_permission(&session_id, request_id, reply)
+            .await
+    }
+
+    pub(super) async fn respond_opencode_question(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        request_id: &str,
+        answers: Vec<Vec<String>>,
+    ) -> Result<(), DaemonError> {
+        let session_id = self
+            .thread_summary(workspace_id, thread_id)
+            .await?
+            .native_session_id
+            .ok_or_else(|| {
+                DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
+            })?;
+        self.opencode_runtime_for(workspace_id)
+            .await?
+            .reply_question(&session_id, request_id, answers)
+            .await
+    }
+
+    pub(super) fn schedule_opencode_thread_hydration(&self, workspace_id: &str, thread_id: &str) {
+        let app = self.clone();
+        let workspace_id = workspace_id.to_string();
+        let thread_id = thread_id.to_string();
+        tokio::spawn(async move {
+            let result = async {
+                let session_id = app
+                    .thread_summary(&workspace_id, &thread_id)
+                    .await?
+                    .native_session_id
+                    .ok_or_else(|| {
+                        DaemonError::BadRequest(
+                            "native OpenCode thread has no session id".to_string(),
+                        )
+                    })?;
+                let messages = app
+                    .opencode_runtime_for(&workspace_id)
+                    .await?
+                    .messages(&session_id)
+                    .await?;
+                project_messages(&app, &workspace_id, &thread_id, &messages).await
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::info!(%error, %thread_id, "native OpenCode hydration failed");
+            }
+        });
+    }
+}
+
+pub(super) async fn start_opencode_turn(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> Result<(), DaemonError> {
+    let (session_id, prompt, files) = {
+        let workspaces = app.inner.workspaces.lock().await;
+        let thread = workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let session_id = thread.summary.native_session_id.clone().ok_or_else(|| {
+            DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
+        })?;
+        let (prompt, files) = opencode_prompt_from_inputs(inputs, selected_skills);
+        (session_id, prompt, files)
+    };
+    let runtime = app.opencode_runtime_for(workspace_id).await?;
+    let message_id = format!("msg_{}", Uuid::new_v4().simple());
+    // A successful response is durable admission. No ACP retry is permitted
+    // beyond this point because that could execute the same request twice.
+    runtime
+        .prompt(&session_id, &message_id, &prompt, &files, Delivery::Queue)
+        .await?;
+
+    let app = app.clone();
+    let workspace_id = workspace_id.to_string();
+    let thread_id = thread_id.to_string();
+    tokio::spawn(async move {
+        let outcome = async {
+            let wait = runtime.wait_until_idle(&session_id);
+            tokio::pin!(wait);
+            let mut permissions = tokio::time::interval(std::time::Duration::from_millis(400));
+            loop {
+                tokio::select! {
+                    result = &mut wait => {
+                        result?;
+                        break;
+                    }
+                    _ = permissions.tick() => {
+                        let pending = runtime.pending_permissions(&session_id).await?;
+                        surface_permissions(&app, &workspace_id, &thread_id, &pending).await?;
+                        let pending = runtime.pending_questions(&session_id).await?;
+                        surface_questions(&app, &workspace_id, &thread_id, &pending).await?;
+                    }
+                }
+            }
+            let messages = runtime.messages(&session_id).await?;
+            let current_messages = messages
+                .iter()
+                .position(|message| message.get("id").and_then(Value::as_str) == Some(&message_id))
+                .map(|index| &messages[index.saturating_add(1)..])
+                .ok_or_else(|| {
+                    DaemonError::Rpc(
+                        "OpenCode admitted the prompt but did not project its user message"
+                            .to_string(),
+                    )
+                })?;
+            project_messages(&app, &workspace_id, &thread_id, current_messages).await
+        }
+        .await;
+        let (status, error, settlement) = match outcome {
+            Ok(()) => (ThreadStatus::Idle, None, ToolSettlement::Completed),
+            Err(error) => (
+                ThreadStatus::Error,
+                Some(error.to_string()),
+                ToolSettlement::Failed,
+            ),
+        };
+        let settled_at = Utc::now();
+        app.settle_turn_items(&workspace_id, &thread_id, settled_at, settlement)
+            .await;
+        if let Ok(thread) = app
+            .upsert_thread(&workspace_id, &thread_id, |thread| {
+                thread.status = status;
+                thread.last_error = error;
+                thread.updated_at = settled_at;
+            })
+            .await
+        {
+            app.emit(
+                Some(workspace_id.clone()),
+                Some(thread_id.clone()),
+                UnifiedEvent::ThreadUpdated { thread },
+            );
+        }
+        app.dispatch_next_queued_turn(&workspace_id, &thread_id);
+        app.maybe_schedule_ai_thread_title(workspace_id, thread_id)
+            .await;
+    });
+    Ok(())
+}
+
+async fn surface_permissions(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    permissions: &[Value],
+) -> Result<(), DaemonError> {
+    for permission in permissions {
+        let Some(request_id) = permission.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let key = (workspace_id.to_string(), request_id.to_string());
+        if app
+            .inner
+            .interactive_requests
+            .lock()
+            .await
+            .contains_key(&key)
+        {
+            continue;
+        }
+        let action = permission
+            .get("action")
+            .and_then(Value::as_str)
+            .unwrap_or("OpenCode action");
+        let resources = permission
+            .get("resources")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let request = InteractiveRequest {
+            request_id: request_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            thread_id: Some(thread_id.to_string()),
+            method: "opencode/permission".to_string(),
+            kind: InteractiveRequestKind::Approval,
+            approval_decisions: Some(vec![
+                ApprovalDecision::Allow,
+                ApprovalDecision::AlwaysAllow,
+                ApprovalDecision::Deny,
+            ]),
+            title: action.to_string(),
+            detail: (!resources.is_empty()).then_some(resources),
+            command: None,
+            path: None,
+            turn_id: None,
+            item_id: None,
+            questions: Vec::new(),
+            created_at: Utc::now(),
+        };
+        app.inner.interactive_requests.lock().await.insert(
+            key,
+            PendingServerRequest {
+                raw_id: Value::Null,
+                request: request.clone(),
+                params: Value::Null,
+            },
+        );
+        let thread = app
+            .upsert_thread(workspace_id, thread_id, |thread| {
+                thread.status = ThreadStatus::WaitingForInput;
+                thread.updated_at = Utc::now();
+            })
+            .await?;
+        app.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::ThreadUpdated { thread },
+        );
+        app.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::InteractiveRequest {
+                request: request.clone(),
+            },
+        );
+        app.push_conversation_item(
+            workspace_id,
+            thread_id,
+            ConversationItem::InteractiveRequest {
+                id: request_id.to_string(),
+                request: Box::new(request),
+                created_at: Utc::now(),
+                resolved: false,
+                resolution: None,
+            },
+            false,
+        )
+        .await?;
+        app.notify_remote_attention("approval", workspace_id, Some(thread_id.to_string()))
+            .await;
+    }
+    Ok(())
+}
+
+async fn surface_questions(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    pending_questions: &[Value],
+) -> Result<(), DaemonError> {
+    for pending in pending_questions {
+        let Some(request_id) = pending.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let key = (workspace_id.to_string(), request_id.to_string());
+        if app
+            .inner
+            .interactive_requests
+            .lock()
+            .await
+            .contains_key(&key)
+        {
+            continue;
+        }
+        let questions = pending
+            .get("questions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(index, question)| InteractiveQuestion {
+                id: index.to_string(),
+                header: question
+                    .get("header")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Question")
+                    .to_string(),
+                question: question
+                    .get("question")
+                    .and_then(Value::as_str)
+                    .unwrap_or("OpenCode needs more information")
+                    .to_string(),
+                is_other: question
+                    .get("custom")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+                is_secret: false,
+                options: question
+                    .get("options")
+                    .and_then(Value::as_array)
+                    .map(|options| {
+                        options
+                            .iter()
+                            .filter_map(|option| {
+                                Some(InteractiveQuestionOption {
+                                    label: option.get("label")?.as_str()?.to_string(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .to_string(),
+                                })
+                            })
+                            .collect()
+                    }),
+            })
+            .collect::<Vec<_>>();
+        let request = InteractiveRequest {
+            request_id: request_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            thread_id: Some(thread_id.to_string()),
+            method: "opencode/question".to_string(),
+            kind: InteractiveRequestKind::Question,
+            approval_decisions: None,
+            title: "OpenCode question".to_string(),
+            detail: None,
+            command: None,
+            path: None,
+            turn_id: None,
+            item_id: None,
+            questions,
+            created_at: Utc::now(),
+        };
+        app.inner.interactive_requests.lock().await.insert(
+            key,
+            PendingServerRequest {
+                raw_id: Value::Null,
+                request: request.clone(),
+                params: Value::Null,
+            },
+        );
+        let thread = app
+            .upsert_thread(workspace_id, thread_id, |thread| {
+                thread.status = ThreadStatus::WaitingForInput;
+                thread.updated_at = Utc::now();
+            })
+            .await?;
+        app.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::ThreadUpdated { thread },
+        );
+        app.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::InteractiveRequest {
+                request: request.clone(),
+            },
+        );
+        app.push_conversation_item(
+            workspace_id,
+            thread_id,
+            ConversationItem::InteractiveRequest {
+                id: request_id.to_string(),
+                request: Box::new(request),
+                created_at: Utc::now(),
+                resolved: false,
+                resolution: None,
+            },
+            false,
+        )
+        .await?;
+        app.notify_remote_attention("question", workspace_id, Some(thread_id.to_string()))
+            .await;
+    }
+    Ok(())
+}
+
+pub(super) async fn steer_opencode_turn(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> Result<(), DaemonError> {
+    let thread = app.thread_summary(workspace_id, thread_id).await?;
+    let session_id = thread.native_session_id.ok_or_else(|| {
+        DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
+    })?;
+    let (prompt, files) = opencode_prompt_from_inputs(inputs, selected_skills);
+    app.opencode_runtime_for(workspace_id)
+        .await?
+        .prompt(
+            &session_id,
+            &format!("msg_{}", Uuid::new_v4().simple()),
+            &prompt,
+            &files,
+            Delivery::Steer,
+        )
+        .await?;
+    Ok(())
+}
+
+fn opencode_prompt_from_inputs(
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> (String, Vec<Value>) {
+    let mut text = inputs
+        .iter()
+        .filter_map(|input| match input {
+            TurnInputItem::Text { text, .. } => Some(text.as_str()),
+            TurnInputItem::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    // OpenCode owns its own skill expansion. Preserve authored aliases and
+    // only synthesize them when the selection arrived without prompt text.
+    if text.trim().is_empty() && !selected_skills.is_empty() {
+        text = selected_skills
+            .iter()
+            .map(|skill| format!("${}", skill.alias))
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let files = inputs
+        .iter()
+        .filter_map(|input| match input {
+            TurnInputItem::Image(image) => {
+                let uri = image
+                    .local_path
+                    .as_deref()
+                    .and_then(|path| reqwest::Url::from_file_path(path).ok())
+                    .map(|url| url.to_string())
+                    .unwrap_or_else(|| image.url.clone());
+                let mut file = serde_json::json!({ "uri": uri });
+                if let Some(name) = image.name.as_deref() {
+                    file["name"] = Value::String(name.to_string());
+                }
+                if let Some(mime_type) = image.mime_type.as_deref() {
+                    file["description"] = Value::String(format!("Image attachment ({mime_type})"));
+                }
+                Some(file)
+            }
+            TurnInputItem::Text { .. } => None,
+        })
+        .collect();
+    (text, files)
+}
+
+async fn project_messages(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    messages: &[Value],
+) -> Result<(), DaemonError> {
+    let mut provider_error = None;
+    for message in messages {
+        let message_id = message
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("assistant");
+        if message.get("type").and_then(Value::as_str) == Some("user") {
+            let text = message.get("text").and_then(Value::as_str).unwrap_or("");
+            if !text.is_empty() {
+                app.push_conversation_item(
+                    workspace_id,
+                    thread_id,
+                    ConversationItem::UserMessage {
+                        id: format!("opencode-{message_id}"),
+                        text: text.to_string(),
+                        attachments: Vec::new(),
+                        turn_id: None,
+                        previous_turn_id: None,
+                        created_at: Utc::now(),
+                    },
+                    true,
+                )
+                .await?;
+            }
+            continue;
+        }
+        if message.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        for content in message
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let content_id = content
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(message_id);
+            match content.get("type").and_then(Value::as_str) {
+                Some("text") => {
+                    let text = content.get("text").and_then(Value::as_str).unwrap_or("");
+                    if !text.is_empty() {
+                        app.push_conversation_item(
+                            workspace_id,
+                            thread_id,
+                            ConversationItem::AssistantMessage {
+                                id: format!("opencode-{content_id}"),
+                                text: text.to_string(),
+                                phase: None,
+                                memory_citation: None,
+                                citations: Vec::new(),
+                                lifecycle: ContentLifecycle::Complete,
+                                created_at: Utc::now(),
+                            },
+                            true,
+                        )
+                        .await?;
+                    }
+                }
+                Some("reasoning") => {
+                    let text = content.get("text").and_then(Value::as_str).unwrap_or("");
+                    if !text.is_empty() {
+                        app.push_conversation_item(
+                            workspace_id,
+                            thread_id,
+                            ConversationItem::Reasoning {
+                                id: format!("opencode-{content_id}"),
+                                summary: None,
+                                content: text.to_string(),
+                                lifecycle: ContentLifecycle::Complete,
+                                duration_ms: None,
+                                created_at: Utc::now(),
+                            },
+                            true,
+                        )
+                        .await?;
+                    }
+                }
+                Some("tool") => {
+                    let name = content
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Tool");
+                    let state = content.get("state").unwrap_or(&Value::Null);
+                    let raw_status = state
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("completed");
+                    let status = match raw_status {
+                        "error" | "failed" => "failed",
+                        "pending" | "running" => "in_progress",
+                        _ => "completed",
+                    };
+                    let output = state
+                        .get("output")
+                        .or_else(|| state.get("error"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let display =
+                        tool_display_metadata(name, "other", status, None, output.as_deref());
+                    app.push_conversation_item(
+                        workspace_id,
+                        thread_id,
+                        ConversationItem::ToolCall {
+                            id: format!("opencode-{content_id}"),
+                            title: name.to_string(),
+                            tool_kind: "other".to_string(),
+                            status: status.to_string(),
+                            output,
+                            exit_code: None,
+                            display: Box::new(display),
+                            detail: None,
+                            created_at: Utc::now(),
+                            completed_at: (status != "in_progress").then(Utc::now),
+                        },
+                        true,
+                    )
+                    .await?;
+                }
+                _ => {}
+            }
+        }
+        if let Some(error) = message.get("error") {
+            let message_text = error
+                .pointer("/data/message")
+                .or_else(|| error.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| error.to_string());
+            app.push_conversation_item(
+                workspace_id,
+                thread_id,
+                ConversationItem::Service {
+                    id: format!("opencode-error-{message_id}"),
+                    level: ServiceLevel::Error,
+                    message: message_text.clone(),
+                    created_at: Utc::now(),
+                },
+                true,
+            )
+            .await?;
+            provider_error = Some(message_text);
+        }
+    }
+    if let Some(error) = provider_error {
+        Err(DaemonError::Rpc(error))
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn requested_native_transport(config: &AcpProviderConfig) -> bool {
+    matches!(
+        config.transport,
+        ProviderTransport::Auto | ProviderTransport::Native
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use falcondeck_core::ImageInput;
+
+    use super::*;
+
+    #[test]
+    fn native_prompt_preserves_text_and_forwards_image_uris() {
+        let inputs = vec![
+            TurnInputItem::Text {
+                id: None,
+                text: "look at this".to_string(),
+            },
+            TurnInputItem::Image(ImageInput {
+                id: "image-1".to_string(),
+                name: Some("screen shot.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                url: "https://example.test/screen.png".to_string(),
+                local_path: None,
+            }),
+        ];
+
+        let (text, files) = opencode_prompt_from_inputs(&inputs, &[]);
+        assert_eq!(text, "look at this");
+        assert_eq!(files[0]["uri"], "https://example.test/screen.png");
+        assert_eq!(files[0]["name"], "screen shot.png");
+    }
+}

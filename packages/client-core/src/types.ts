@@ -418,6 +418,8 @@ export type ThreadSummary = {
   title: string;
   provider: AgentProvider;
   native_session_id?: string | null;
+  /** Runtime pinned when the thread was created (currently `native` or `acp`). */
+  provider_transport?: string | null;
   /** Source thread when this thread is a cross-provider continuation. */
   handoff_from?: ThreadHandoffSource | null;
   status: ThreadStatus;

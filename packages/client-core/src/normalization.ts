@@ -481,6 +481,7 @@ export function normalizeThreadSummary(
     title: thread.title ?? "Untitled thread",
     provider: normalizeProvider(thread.provider),
     native_session_id: thread.native_session_id ?? null,
+    provider_transport: thread.provider_transport ?? null,
     handoff_from:
       thread.handoff_from && typeof thread.handoff_from.thread_id === "string"
         ? {

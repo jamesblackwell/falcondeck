@@ -54,6 +54,7 @@ import {
   withComposerProvider,
   withComposerSelection,
   workspaceAgentCapabilities,
+  threadAgentCapabilities,
   workspaceCollaborationModes,
   workspaceModels,
   workspaceProviderLabel,
@@ -3756,8 +3757,13 @@ function AppInner() {
         ? "Handoffs from isolated threads are not supported yet"
         : null;
   const activeCapabilities = useMemo(
-    () => workspaceAgentCapabilities(selectedWorkspace, activeProvider),
-    [activeProvider, selectedWorkspace],
+    () =>
+      threadAgentCapabilities(
+        selectedWorkspace,
+        activeProvider,
+        selectedThread,
+      ),
+    [activeProvider, selectedThread, selectedWorkspace],
   );
   const editResendReason = selectedThread
     ? editResendUnavailableReason({

@@ -16,6 +16,8 @@ import { Bot, Plus, Trash2, X } from 'lucide-react'
 type ProviderEntry = {
   label?: string
   command?: string[]
+  env?: Record<string, string>
+  transport?: 'auto' | 'native' | 'acp'
 }
 
 type ProvidersOverview = {
@@ -49,8 +51,9 @@ const RECOMMENDED_AGENTS = [
   {
     id: 'opencode',
     label: 'OpenCode',
-    detail: 'Full OpenCode harness experience through its built-in ACP server',
+    detail: 'Native steering with automatic fallback to its built-in ACP server',
     command: ['opencode', 'acp'],
+    transport: 'auto' as const,
     installCommand: 'curl -fsSL https://opencode.ai/install | bash',
   },
   {
@@ -58,6 +61,7 @@ const RECOMMENDED_AGENTS = [
     label: 'Pi',
     detail: 'Minimal, extensible coding harness through the maintained pi-acp adapter',
     command: ['pi-acp'],
+    transport: undefined,
     installCommand:
       'npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp',
   },
@@ -165,7 +169,7 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
         <CardHeader>
           <CardTitle>Recommended</CardTitle>
           <CardDescription>
-            Maintained ACP adapters that work with FalconDeck&apos;s shared conversation experience.
+            Maintained agent adapters that work with FalconDeck&apos;s shared conversation experience.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -182,7 +186,9 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
                     <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                       {agent.label}
                     </span>
-                    <Badge variant="default">ACP</Badge>
+                    <Badge variant="default">
+                      {agent.id === 'opencode' ? 'Native + ACP' : 'ACP'}
+                    </Badge>
                   </div>
                   <p className="text-[length:var(--fd-text-xs)] text-fg-muted">{agent.detail}</p>
                   {!isConfigured ? (
@@ -198,13 +204,20 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
                   onClick={() => {
                     void write((providers) => ({
                       ...providers,
-                      [agent.id]: { label: agent.label, command: agent.command },
+                      [agent.id]: {
+                        label: agent.label,
+                        command: agent.command,
+                        ...(agent.transport ? { transport: agent.transport } : {}),
+                      },
                     })).then((ok) => {
                       if (ok) {
                         onToast({
                           variant: 'success',
                           title: `${agent.label} configured`,
-                          description: `FalconDeck will run ${agent.command.join(' ')} on this host.`,
+                          description:
+                            agent.id === 'opencode'
+                              ? 'FalconDeck will try OpenCode native and fall back to ACP on this host.'
+                              : `FalconDeck will run ${agent.command.join(' ')} on this host.`,
                         })
                       }
                     })
@@ -302,6 +315,38 @@ export function AgentsPanel({ baseUrl, onToast }: AgentsPanelProps) {
                       : provider.command.join(' ')}
                   </p>
                 </div>
+                {provider.id === 'opencode' ? (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      const current = overview.providers[provider.id]
+                      const useAcp = current?.transport !== 'acp'
+                      void write((providers) => ({
+                        ...providers,
+                        [provider.id]: {
+                          ...providers[provider.id],
+                          transport: useAcp ? 'acp' : 'auto',
+                        },
+                      })).then((ok) => {
+                        if (ok) {
+                          onToast({
+                            variant: 'success',
+                            title: useAcp
+                              ? 'OpenCode switched to ACP'
+                              : 'OpenCode native enabled',
+                            description:
+                              'The change applies to new threads; existing threads stay on their original transport.',
+                          })
+                        }
+                      })
+                    }}
+                  >
+                    {overview.providers[provider.id]?.transport === 'acp'
+                      ? 'Try native'
+                      : 'Use ACP'}
+                  </Button>
+                ) : null}
                 <Button
                   size="icon"
                   variant="ghost"

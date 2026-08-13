@@ -98,12 +98,14 @@ describe('AgentsPanel recommended agents', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
     const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
     expect(JSON.parse(request.body as string)).toEqual({
-      providers: { opencode: { label: 'OpenCode', command: ['opencode', 'acp'] } },
+      providers: {
+        opencode: { label: 'OpenCode', command: ['opencode', 'acp'], transport: 'auto' },
+      },
     })
     expect(onToast).toHaveBeenCalledWith({
       variant: 'success',
       title: 'OpenCode configured',
-      description: 'FalconDeck will run opencode acp on this host.',
+      description: 'FalconDeck will try OpenCode native and fall back to ACP on this host.',
     })
   })
 
@@ -143,5 +145,59 @@ describe('AgentsPanel recommended agents', () => {
     expect(
       await screen.findByText('curl -fsSL https://opencode.ai/install | bash'),
     ).toBeVisible()
+  })
+
+  it('switches OpenCode to ACP without discarding its command or environment', async () => {
+    const configured = {
+      providers: {
+        opencode: {
+          label: 'OpenCode custom',
+          command: ['/opt/bin/opencode', 'acp'],
+          env: { OPENCODE_CONFIG: '/tmp/opencode.json' },
+          transport: 'auto',
+        },
+      },
+      resolved: [
+        {
+          id: 'opencode',
+          label: 'OpenCode custom',
+          command: ['/opt/bin/opencode', 'acp'],
+          binary_found: true,
+          reserved: false,
+        },
+      ],
+    }
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(configured), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(configured), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<AgentsPanel baseUrl="http://127.0.0.1:4317" onToast={vi.fn()} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Use ACP' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    const [, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(request.body as string)).toEqual({
+      providers: {
+        opencode: {
+          label: 'OpenCode custom',
+          command: ['/opt/bin/opencode', 'acp'],
+          env: { OPENCODE_CONFIG: '/tmp/opencode.json' },
+          transport: 'acp',
+        },
+      },
+    })
   })
 })

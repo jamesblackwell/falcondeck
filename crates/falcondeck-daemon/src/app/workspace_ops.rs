@@ -294,6 +294,7 @@ pub(super) async fn connect_workspace_internal(
             summary: summary.clone(),
             codex_session,
             claude_runtime: Some(claude_runtime),
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: threads
                 .into_iter()
@@ -530,6 +531,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                     .unwrap_or_else(|| "Restored thread".to_string()),
                 provider: state.provider.clone().unwrap_or(AgentProvider::CODEX),
                 native_session_id: state.native_session_id.clone(),
+                provider_transport: state.provider_transport.clone(),
                 handoff_from: state.handoff_from.clone(),
                 status: restored_status,
                 updated_at: state
@@ -703,6 +705,7 @@ pub(super) async fn start_thread(
         thread_id,
         title,
         native_session_id,
+        provider_transport,
     } = match started {
         Ok(started) => started,
         Err(error) => {
@@ -727,6 +730,7 @@ pub(super) async fn start_thread(
         title,
         provider: provider.clone(),
         native_session_id,
+        provider_transport,
         handoff_from: request.handoff_from,
         status: ThreadStatus::Idle,
         updated_at: now,
@@ -2055,6 +2059,7 @@ pub(super) async fn send_turn(
                     title: "Untitled thread".to_string(),
                     provider: provider.clone(),
                     native_session_id: None,
+                    provider_transport: None,
                     handoff_from: None,
                     status: ThreadStatus::Idle,
                     updated_at: now,
@@ -2554,6 +2559,9 @@ pub(super) async fn remove_workspace(
     if let Some(runtime) = removed.claude_runtime {
         let _ = runtime.shutdown().await;
     }
+    if let Some(runtime) = removed.opencode_runtime {
+        runtime.shutdown().await;
+    }
     for (_, runtime) in removed.acp_runtimes {
         runtime.shutdown().await;
     }
@@ -2736,6 +2744,84 @@ pub(super) async fn respond_to_interactive_request(
                 snapshot: app.snapshot().await,
             },
         );
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("response sent".to_string()),
+        });
+    }
+    if pending.request.method == "opencode/permission" {
+        let InteractiveResponsePayload::Approval { decision } = response else {
+            return Err(DaemonError::BadRequest(
+                "OpenCode permission requests require an approval response".to_string(),
+            ));
+        };
+        let thread_id = pending.request.thread_id.ok_or_else(|| {
+            DaemonError::BadRequest("OpenCode permission request has no thread".to_string())
+        })?;
+        app.respond_opencode_permission(&workspace_id, &thread_id, &request_id, decision)
+            .await?;
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&request_key);
+        let still_waiting =
+            thread_has_pending_interactive_request(app, &workspace_id, &thread_id).await;
+        app.with_thread_mut(&workspace_id, &thread_id, |thread| {
+            if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
+                thread.status = ThreadStatus::Running;
+            }
+        })
+        .await?;
+        app.resolve_interactive_request_item(
+            &workspace_id,
+            &thread_id,
+            &request_id,
+            Some(resolution),
+        )
+        .await?;
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("response sent".to_string()),
+        });
+    }
+    if pending.request.method == "opencode/question" {
+        let InteractiveResponsePayload::Question { answers } = response else {
+            return Err(DaemonError::BadRequest(
+                "OpenCode questions require question answers".to_string(),
+            ));
+        };
+        let thread_id = pending.request.thread_id.clone().ok_or_else(|| {
+            DaemonError::BadRequest("OpenCode question has no thread".to_string())
+        })?;
+        let ordered_answers = pending
+            .request
+            .questions
+            .iter()
+            .map(|question| answers.get(&question.id).cloned().unwrap_or_default())
+            .collect();
+        app.respond_opencode_question(&workspace_id, &thread_id, &request_id, ordered_answers)
+            .await?;
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&request_key);
+        let still_waiting =
+            thread_has_pending_interactive_request(app, &workspace_id, &thread_id).await;
+        app.with_thread_mut(&workspace_id, &thread_id, |thread| {
+            if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
+                thread.status = ThreadStatus::Running;
+            }
+        })
+        .await?;
+        app.resolve_interactive_request_item(
+            &workspace_id,
+            &thread_id,
+            &request_id,
+            Some(resolution),
+        )
+        .await?;
         return Ok(CommandResponse {
             ok: true,
             message: Some("response sent".to_string()),
@@ -3241,13 +3327,20 @@ pub(super) async fn thread_detail(
     // A restored ACP thread carries only its summary; the transcript lives in
     // the agent's session store. Kick off a background session/load replay so
     // opening the thread fills it in instead of showing an empty conversation.
+    let needs_native_hydration = thread.items.is_empty()
+        && thread.summary.native_session_id.is_some()
+        && thread.summary.provider_transport.as_deref() == Some("native")
+        && !matches!(thread.summary.status, ThreadStatus::Running);
     let needs_acp_hydration = thread.items.is_empty()
         && thread.summary.native_session_id.is_some()
         && thread.summary.provider != AgentProvider::CODEX
         && thread.summary.provider != AgentProvider::CLAUDE
+        && thread.summary.provider_transport.as_deref() != Some("native")
         && !matches!(thread.summary.status, ThreadStatus::Running);
     drop(workspaces);
-    if needs_acp_hydration {
+    if needs_native_hydration {
+        app.schedule_opencode_thread_hydration(&request.workspace_id, &request.thread_id);
+    } else if needs_acp_hydration {
         app.schedule_acp_thread_hydration(&request.workspace_id, &request.thread_id);
     }
     let items = with_renderable_attachment_previews_for_items(detail.items).await;
@@ -3575,6 +3668,7 @@ mod tests {
                 title: format!("Hydrated {session_id}"),
                 provider: AgentProvider::CLAUDE,
                 native_session_id: Some(session_id.to_string()),
+                provider_transport: None,
                 handoff_from: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
@@ -3602,6 +3696,7 @@ mod tests {
             updated_at: Some(Utc::now()),
             provider: Some(AgentProvider::CLAUDE),
             native_session_id: session_id.map(ToOwned::to_owned),
+            provider_transport: None,
             handoff_from: None,
             title: Some(format!("Persisted {thread_id}")),
             manual_title: false,
@@ -3747,6 +3842,7 @@ mod tests {
             title: "Thread".to_string(),
             provider: AgentProvider::CLAUDE,
             native_session_id: None,
+            provider_transport: None,
             handoff_from: None,
             status: ThreadStatus::Running,
             updated_at: now,
@@ -3785,6 +3881,7 @@ mod tests {
                 summary: workspace,
                 codex_session: None,
                 claude_runtime: None,
+                opencode_runtime: None,
                 acp_runtimes: HashMap::new(),
                 threads: [(thread_id.to_string(), ManagedThread::new(thread))]
                     .into_iter()
@@ -4390,6 +4487,7 @@ mod tests {
                 },
                 codex_session: None,
                 claude_runtime: None,
+                opencode_runtime: None,
                 acp_runtimes: HashMap::new(),
                 threads: HashMap::new(),
             },

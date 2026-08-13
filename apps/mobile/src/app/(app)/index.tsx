@@ -32,6 +32,7 @@ import {
   STANDARD_SERVICE_TIER,
   validateImageAttachmentBudget,
   workspaceAgentCapabilities,
+  threadAgentCapabilities,
   workspaceModels,
   workspaceProviderLabel,
   workspaceProviderOptions,
@@ -275,8 +276,8 @@ export default function HomeScreen() {
   // Which mode pickers the composer shows, and whether a queued message can be
   // steered — both are per-provider, so they change with the active agent.
   const capabilities = useMemo(
-    () => workspaceAgentCapabilities(workspace, activeProvider),
-    [activeProvider, workspace],
+    () => threadAgentCapabilities(workspace, activeProvider, selectedThread),
+    [activeProvider, selectedThread, workspace],
   );
   const attachmentSendBlockReason = imageAttachmentSendBlockReason(
     capabilities,

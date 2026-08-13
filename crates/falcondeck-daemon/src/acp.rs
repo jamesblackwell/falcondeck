@@ -183,6 +183,19 @@ pub struct AcpProviderConfig {
     /// the daemon environment for keys not listed here.
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Transport selection for OpenCode; other ACP providers ignore it.
+    #[serde(default)]
+    pub transport: ProviderTransport,
+}
+
+/// OpenCode transport requested in `providers.json`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTransport {
+    #[default]
+    Auto,
+    Native,
+    Acp,
 }
 
 #[derive(Debug, Default, Deserialize)]

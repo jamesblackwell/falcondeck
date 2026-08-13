@@ -1771,6 +1771,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         title: "Thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -1872,6 +1873,7 @@ async fn update_thread_title_marks_thread_as_manual() {
             },
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
                 thread_id.clone(),
@@ -1881,6 +1883,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     title: "Untitled thread".to_string(),
                     provider: AgentProvider::CODEX,
                     native_session_id: None,
+                    provider_transport: None,
                     handoff_from: None,
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
@@ -2439,6 +2442,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 updated_at: Some(thread_updated_at),
                 provider: Some(AgentProvider::CLAUDE),
                 native_session_id: Some("native-session-1".to_string()),
+                provider_transport: None,
                 handoff_from: None,
                 title: Some("Recovered thread".to_string()),
                 manual_title: false,
@@ -2630,6 +2634,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     updated_at: None,
                     provider: Some(AgentProvider::CODEX),
                     native_session_id: Some("native-a".to_string()),
+                    provider_transport: None,
                     handoff_from: None,
                     title: Some("Thread A".to_string()),
                     manual_title: false,
@@ -2660,6 +2665,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     updated_at: None,
                     provider: Some(AgentProvider::CLAUDE),
                     native_session_id: Some("native-b".to_string()),
+                    provider_transport: None,
                     handoff_from: None,
                     title: Some("Thread B".to_string()),
                     manual_title: false,
@@ -2683,6 +2689,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         title: "Thread A renamed".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: Some("native-a-2".to_string()),
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -2725,6 +2732,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
             summary: live_workspace,
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
                 "thread-a".to_string(),
@@ -2792,6 +2800,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         title: "Running thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: Some("native-session-1".to_string()),
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
@@ -2830,6 +2839,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-1".to_string(), super::ManagedThread::new(thread))]
                 .into_iter()
@@ -3191,6 +3201,7 @@ async fn insert_claude_workspace_with_session(
             },
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
                 thread_id.to_string(),
@@ -3200,6 +3211,7 @@ async fn insert_claude_workspace_with_session(
                     title: "Claude thread".to_string(),
                     provider: AgentProvider::CLAUDE,
                     native_session_id: Some(native_session_id.to_string()),
+                    provider_transport: None,
                     handoff_from: None,
                     status: ThreadStatus::Running,
                     updated_at: Utc::now(),
@@ -3821,6 +3833,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         title: "Active thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -3844,6 +3857,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         title: "Archived thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -3882,6 +3896,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
             },
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [
                 (
@@ -4054,6 +4069,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         title: "Idle thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
@@ -4092,6 +4108,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-e".to_string(), super::ManagedThread::new(thread))]
                 .into_iter()
@@ -4158,6 +4175,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         title: "Running thread".to_string(),
         provider: AgentProvider::CODEX,
         native_session_id: None,
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
@@ -4196,6 +4214,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-q".to_string(), super::ManagedThread::new(thread))]
                 .into_iter()
@@ -4315,6 +4334,7 @@ async fn busy_thread_app(
         title: "Running thread".to_string(),
         provider: provider.clone(),
         native_session_id: None,
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
@@ -4361,6 +4381,7 @@ async fn busy_thread_app(
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [(
                 "thread-steer".to_string(),
@@ -4738,6 +4759,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         title: "t".to_string(),
         provider: AgentProvider::CLAUDE,
         native_session_id: Some("sess-hook".to_string()),
+        provider_transport: None,
         handoff_from: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
@@ -4777,6 +4799,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
             summary: workspace,
             codex_session: None,
             claude_runtime: None,
+            opencode_runtime: None,
             acp_runtimes: HashMap::new(),
             threads: [("thread-hook".to_string(), super::ManagedThread::new(thread))]
                 .into_iter()
