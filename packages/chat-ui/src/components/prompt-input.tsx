@@ -135,6 +135,12 @@ export type PromptInputProps = {
   focusRequestKey?: number;
   /** Opens one of the option menus in response to an app-level shortcut. */
   menuRequest?: ComposerMenuRequest | null;
+  /**
+   * Rendered shortcut per option menu ("⌃⇧M"), surfaced in each chip's
+   * tooltip. Hosts own the bindings, so the labels arrive from above rather
+   * than being hardcoded here.
+   */
+  menuShortcuts?: Partial<Record<ComposerMenu, string>>;
   disabled?: boolean;
   sendDisabled?: boolean;
   /** Visible explanation when content exists but the host cannot send it. */
@@ -181,6 +187,8 @@ const DEFAULT_PROVIDER_OPTIONS: ProviderOption[] = [
 ];
 const EMPTY_HANDOFF_PROVIDER_OPTIONS: ProviderOption[] = [];
 const EMPTY_QUOTED_SELECTIONS: readonly QuotedSelection[] = [];
+/** Stable default so an unset menuShortcuts never rebuilds optionMenuProps. */
+const NO_MENU_SHORTCUTS: Partial<Record<ComposerMenu, string>> = {};
 
 /** Keeps a disabled picker mounted when the host passes no handler for it. */
 const noopModeChange = () => {};
@@ -225,6 +233,7 @@ export const PromptInput = memo(function PromptInput({
   autoFocusKey = null,
   focusRequestKey = 0,
   menuRequest = null,
+  menuShortcuts = NO_MENU_SHORTCUTS,
   disabled = false,
   sendDisabled = false,
   sendDisabledReason,
@@ -397,6 +406,7 @@ export const PromptInput = memo(function PromptInput({
 
   const optionMenuProps = useCallback(
     (menu: ComposerMenu) => ({
+      shortcutHint: menuShortcuts[menu],
       open: openOptionMenu === menu,
       onOpenChange: (nextOpen: boolean) => {
         setOpenOptionMenu((current) =>
@@ -414,7 +424,7 @@ export const PromptInput = memo(function PromptInput({
         textareaRef.current?.focus();
       },
     }),
-    [openOptionMenu],
+    [menuShortcuts, openOptionMenu],
   );
 
   const activeSkill =
