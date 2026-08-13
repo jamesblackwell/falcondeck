@@ -207,9 +207,32 @@ function upsertThread(
     return threads.filter((thread) => thread.id !== nextThread.id);
   }
 
+  // The daemon builds some thread updates on background tasks, so a summary
+  // captured before a turn ended can be broadcast after the turn's own
+  // terminal update. Applying it would roll the thread back to Running and
+  // leave a spinner that never stops, because an idle thread emits nothing
+  // more to correct it. Timestamps only move forward here, and updates that
+  // deliberately preserve recency (pin, mark-read) carry the same value, so
+  // only a strictly older summary is a stale one.
+  const current = threads[existing];
+  if (isStaleThreadSummary(current, nextThread)) {
+    return threads;
+  }
+
   return threads.map((thread) =>
     thread.id === nextThread.id ? nextThread : thread,
   );
+}
+
+function isStaleThreadSummary(
+  current: DaemonSnapshot["threads"][number] | undefined,
+  next: DaemonSnapshot["threads"][number],
+) {
+  if (!current) return false;
+  const currentAt = Date.parse(current.updated_at);
+  const nextAt = Date.parse(next.updated_at);
+  if (Number.isNaN(currentAt) || Number.isNaN(nextAt)) return false;
+  return nextAt < currentAt;
 }
 
 /**

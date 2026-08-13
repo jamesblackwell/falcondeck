@@ -663,13 +663,14 @@ impl AppState {
                                     "No output from Claude for {minutes}m. Stop the turn if this looks stuck."
                                 ),
                             };
-                            let _ = self.emit_conversation_diagnostic(
-                                workspace_id.clone(),
-                                thread_id.clone(),
+                            self.push_conversation_diagnostic(
+                                &workspace_id,
+                                &thread_id,
                                 ServiceLevel::Warning,
                                 message,
                                 Some("claude-watchdog".to_string()),
-                            );
+                            )
+                            .await;
                         }
                         continue;
                     }
@@ -935,13 +936,17 @@ impl AppState {
                                     .await;
                             }
                         } else if let Some(message) = extract_claude_service_message(&value) {
-                            let _ = self.emit_conversation_diagnostic(
-                                workspace_id.clone(),
-                                thread_id.clone(),
+                            // Awaited, not spawned: a service message on the
+                            // last line of a turn would otherwise race the
+                            // turn's own terminal thread update.
+                            self.push_conversation_diagnostic(
+                                &workspace_id,
+                                &thread_id,
                                 ServiceLevel::Info,
                                 message,
                                 Some("claude".to_string()),
-                            );
+                            )
+                            .await;
                         }
                         if let Some(error) = extract_claude_error(&value) {
                             turn_error = Some(error);
@@ -1027,13 +1032,17 @@ impl AppState {
                 Some("Claude turn completed without emitting any assistant output".to_string());
         }
         if was_interrupted {
-            let _ = self.emit_conversation_diagnostic(
-                workspace_id.clone(),
-                thread_id.clone(),
+            // Awaited so its thread update cannot land after the Idle one
+            // emitted below; a stop that leaves the thread spinning forever is
+            // exactly what the user sees when this races.
+            self.push_conversation_diagnostic(
+                &workspace_id,
+                &thread_id,
                 ServiceLevel::Info,
                 "Turn interrupted".to_string(),
                 Some("claude-interrupt".to_string()),
-            );
+            )
+            .await;
         }
         let final_error = turn_error.clone();
         let settled_at = Utc::now();

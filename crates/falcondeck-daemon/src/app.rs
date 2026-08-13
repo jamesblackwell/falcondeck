@@ -1725,6 +1725,45 @@ impl AppState {
         });
     }
 
+    /// Adds a durable diagnostic to one conversation, awaiting the transcript
+    /// push instead of spawning it. Callers that follow a diagnostic with a
+    /// terminal status change must use this: the spawned variant re-reads the
+    /// thread summary after its own await point, so its `ThreadUpdated` can
+    /// carry a stale `Running` status and land *after* the caller's `Idle`
+    /// one — stranding the thread as a permanent spinner in every client.
+    pub async fn push_conversation_diagnostic(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        level: ServiceLevel,
+        message: String,
+        raw_method: Option<String>,
+    ) {
+        let _ = self
+            .push_conversation_item(
+                workspace_id,
+                thread_id,
+                ConversationItem::Service {
+                    id: format!("service-{}", Uuid::new_v4().simple()),
+                    level: level.clone(),
+                    message: message.clone(),
+                    created_at: Utc::now(),
+                },
+                false,
+            )
+            .await;
+        self.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::Service {
+                level,
+                message,
+                raw_method,
+                notice: None,
+            },
+        );
+    }
+
     /// Adds a durable diagnostic to one conversation. This path must not be
     /// used for workspace or application health.
     pub fn emit_conversation_diagnostic(
