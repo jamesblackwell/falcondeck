@@ -20,6 +20,7 @@ import { KeyboardShortcutsPanel } from './settings/KeyboardShortcutsPanel'
 import { RemoteAccessPanel } from './settings/RemoteAccessPanel'
 import { ServersPanel, type ServersPanelProps } from './settings/ServersPanel'
 import { SettingsSidebar } from './settings/SettingsSidebar'
+import { SpeechSettingsPanel } from './settings/SpeechSettingsPanel'
 import type { SettingsSectionId } from './settings/settings-utils'
 
 export type SettingsViewProps = {
@@ -108,6 +109,8 @@ export function SettingsView(props: SettingsViewProps) {
               onSetEnabled={props.onSetExtensionEnabled}
               onSetPermission={props.onSetExtensionPermission}
             />
+          ) : activeSection === 'speech' ? (
+            <SpeechSettingsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === 'general' ? (
             <GeneralSettingsPanel
               workspace={props.workspace}

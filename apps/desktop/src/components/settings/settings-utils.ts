@@ -4,7 +4,7 @@ import type {
   ToolDetailsMode,
   TrustedDevice,
 } from '@falcondeck/client-core'
-import { Blocks, Bot, Keyboard, Palette, Plug, Server, Settings, Wifi } from 'lucide-react'
+import { Blocks, Bot, Keyboard, Mic, Palette, Plug, Server, Settings, Wifi } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
 
@@ -15,6 +15,7 @@ export type SettingsSectionId =
   | 'servers'
   | 'agents'
   | 'connectors'
+  | 'speech'
   | 'extensions'
   | 'remote'
 
@@ -67,6 +68,12 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: 'Extensions',
     description: 'Add capabilities to FalconDeck',
     icon: Blocks,
+  },
+  {
+    id: 'speech',
+    label: 'Speech',
+    description: 'Transcription and OpenRouter',
+    icon: Mic,
   },
   {
     id: 'remote',

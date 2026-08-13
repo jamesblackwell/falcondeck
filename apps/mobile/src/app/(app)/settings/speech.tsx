@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { ScrollView, View } from 'react-native'
-import { StyleSheet } from 'react-native-unistyles'
+import { ScrollView } from 'react-native'
 
 import {
   ChoiceRow,
@@ -9,14 +8,12 @@ import {
   settingsPageStyles,
 } from '@/components/settings'
 import {
-  Button,
-  Input,
   OptionSheet,
-  Text,
   type OptionSheetItem,
 } from '@/components/ui'
 import {
   fetchOpenRouterSpeechModels,
+  getDesktopSpeechStatus,
   type SpeechModel,
 } from '@/features/speech/openRouterTranscription'
 import {
@@ -24,24 +21,22 @@ import {
   updateSpeechSettings,
   type SpeechProvider,
 } from '@/features/speech/speechSettings'
-import {
-  clearOpenRouterApiKey,
-  loadOpenRouterApiKey,
-  persistOpenRouterApiKey,
-} from '@/storage/secure'
 
 export default function SpeechSettingsScreen() {
   const [settings, setSettings] = useState(getSpeechSettings)
-  const [apiKey, setApiKey] = useState('')
-  const [hasSavedKey, setHasSavedKey] = useState(false)
-  const [isSaving, setIsSaving] = useState(false)
-  const [notice, setNotice] = useState<string | null>(null)
+  const [desktopStatus, setDesktopStatus] = useState<
+    'checking' | 'configured' | 'missing' | 'offline'
+  >('checking')
   const [models, setModels] = useState<SpeechModel[]>([])
   const [modelsError, setModelsError] = useState<string | null>(null)
   const [showModels, setShowModels] = useState(false)
 
   useEffect(() => {
-    void loadOpenRouterApiKey().then((key) => setHasSavedKey(Boolean(key)))
+    void getDesktopSpeechStatus()
+      .then((status) =>
+        setDesktopStatus(status.configured ? 'configured' : 'missing'),
+      )
+      .catch(() => setDesktopStatus('offline'))
     void fetchOpenRouterSpeechModels()
       .then(setModels)
       .catch(() =>
@@ -64,31 +59,6 @@ export default function SpeechSettingsScreen() {
 
   const selectProvider = (provider: SpeechProvider) => {
     setSettings(updateSpeechSettings({ provider }))
-    setNotice(null)
-  }
-
-  const saveKey = async () => {
-    const cleaned = apiKey.trim()
-    if (!cleaned) return
-    setIsSaving(true)
-    try {
-      await persistOpenRouterApiKey(cleaned)
-      setApiKey('')
-      setHasSavedKey(true)
-      setSettings(updateSpeechSettings({ provider: 'openrouter' }))
-      setNotice('OpenRouter API key saved securely on this device.')
-    } catch {
-      setNotice('Could not save the API key.')
-    } finally {
-      setIsSaving(false)
-    }
-  }
-
-  const removeKey = async () => {
-    await clearOpenRouterApiKey()
-    setApiKey('')
-    setHasSavedKey(false)
-    setNotice('OpenRouter API key removed.')
   }
 
   return (
@@ -110,7 +80,7 @@ export default function SpeechSettingsScreen() {
         />
         <ChoiceRow
           label="OpenRouter"
-          description="Record locally, then transcribe with your selected model."
+          description="Encrypt audio to your paired desktop for transcription."
           selected={settings.provider === 'openrouter'}
           onPress={() => selectProvider('openrouter')}
         />
@@ -118,38 +88,21 @@ export default function SpeechSettingsScreen() {
 
       <SettingsSection
         title="OpenRouter"
-        footer="The key is stored in the phone's secure keychain. Audio is retained locally if a transcription request fails."
+        footer="Add or remove the API key in FalconDeck desktop settings. The key never reaches this phone or FalconDeck's relay. Failed recordings remain local for retry."
       >
-        <View style={styles.keyEditor}>
-          <Input
-            value={apiKey}
-            onChangeText={setApiKey}
-            placeholder={
-              hasSavedKey ? 'API key saved — enter a replacement' : 'sk-or-v1-…'
-            }
-            secureTextEntry
-            autoCapitalize="none"
-            autoCorrect={false}
-            accessibilityLabel="OpenRouter API key"
-          />
-          <View style={styles.keyActions}>
-            <Button
-              label="Save key"
-              size="sm"
-              onPress={() => void saveKey()}
-              disabled={!apiKey.trim()}
-              loading={isSaving}
-            />
-            {hasSavedKey ? (
-              <Button
-                label="Remove"
-                size="sm"
-                variant="ghost"
-                onPress={() => void removeKey()}
-              />
-            ) : null}
-          </View>
-        </View>
+        <SettingsRow
+          label="Desktop credential"
+          detail={
+            desktopStatus === 'configured'
+              ? 'Stored in the desktop OS credential store'
+              : desktopStatus === 'missing'
+                ? 'Not configured — open FalconDeck settings on your desktop'
+                : desktopStatus === 'offline'
+                  ? 'Paired desktop is currently unavailable'
+                  : 'Checking paired desktop…'
+          }
+          value={desktopStatus === 'configured' ? 'Ready' : undefined}
+        />
         <SettingsRow
           label="Model"
           detail={
@@ -162,16 +115,6 @@ export default function SpeechSettingsScreen() {
           onPress={() => setShowModels(true)}
         />
       </SettingsSection>
-
-      {notice ? (
-        <Text
-          variant="caption"
-          color={notice.includes('Could not') ? 'danger' : 'secondary'}
-          accessibilityLiveRegion="polite"
-        >
-          {notice}
-        </Text>
-      ) : null}
 
       {showModels ? (
         <OptionSheet
@@ -188,17 +131,3 @@ export default function SpeechSettingsScreen() {
     </ScrollView>
   )
 }
-
-const styles = StyleSheet.create((theme) => ({
-  keyEditor: {
-    padding: theme.spacing[4],
-    gap: theme.spacing[3],
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border.subtle,
-  },
-  keyActions: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: theme.spacing[2],
-  },
-}))

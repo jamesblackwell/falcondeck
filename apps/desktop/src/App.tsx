@@ -128,6 +128,7 @@ import {
   resolveThreadModelId,
 } from "./utils";
 import { DesktopConversationPane } from "./components/DesktopConversationPane";
+import { DesktopVoiceInput } from "./components/DesktopVoiceInput";
 import { DesktopSidebar } from "./components/Sidebar";
 import { DesktopShell } from "./components/DesktopShell";
 import type { DiffPanelSelection } from "./components/DiffPanel";
@@ -276,6 +277,7 @@ function AppInner() {
     useState(false);
   const [isStartingRemote, setIsStartingRemote] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isVoiceInputOpen, setIsVoiceInputOpen] = useState(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
@@ -4321,6 +4323,9 @@ function AppInner() {
                   ? null
                   : (selectedWorkspaceId ?? "new"),
                 onSubmit: handleSubmitCallback,
+                onVoiceInput: baseUrl
+                  ? () => setIsVoiceInputOpen(true)
+                  : undefined,
                 onAlternateSubmit: handleAlternateSubmitCallback,
                 resolveComposerShortcut,
                 focusRequestKey: composerFocusRequestKey,
@@ -4453,6 +4458,21 @@ function AppInner() {
         onRailCollapsedByDrag={hideRail}
       />
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
+      {isVoiceInputOpen && baseUrl ? (
+        <DesktopVoiceInput
+          baseUrl={baseUrl}
+          onTranscript={setDraft}
+          onClose={() => setIsVoiceInputOpen(false)}
+          onOpenSettings={() => {
+            setIsVoiceInputOpen(false);
+            setSettingsSection("speech");
+            setSettingsRequestKey((current) => current + 1);
+            setIsSettingsOpen(true);
+            setIsScheduledOpen(false);
+            setIsActivityOpen(false);
+          }}
+        />
+      ) : null}
     </>
   );
 }

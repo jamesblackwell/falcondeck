@@ -2,6 +2,7 @@ import * as Popover from "@radix-ui/react-popover";
 import {
   ChevronLeft,
   ImagePlus,
+  Mic,
   Plug,
   Plus,
   Quote,
@@ -80,6 +81,8 @@ export type PromptInputProps = {
   ) => "submit" | "alternate-submit" | "newline" | null;
   /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
   onStop?: () => void;
+  /** Opens a host-provided speech recorder when the composer is empty. */
+  onVoiceInput?: () => void;
   onPickImages?: (files: FileList | readonly File[] | null) => void;
   onRemoveAttachment?: (attachmentId: string) => void;
   attachments: ImageInput[];
@@ -200,6 +203,7 @@ export const PromptInput = memo(function PromptInput({
   onAlternateSubmit,
   resolveComposerShortcut,
   onStop,
+  onVoiceInput,
   onPickImages,
   onRemoveAttachment,
   attachments,
@@ -749,7 +753,8 @@ export const PromptInput = memo(function PromptInput({
           <div className="border-b border-border-subtle px-4 py-3">
             <div className="mb-2 flex items-center gap-2 text-[length:var(--fd-text-xs)] font-medium text-fg-muted">
               <Quote aria-hidden="true" className="h-3.5 w-3.5" />
-              {quotedSelections.length} selected {quotedSelections.length === 1 ? "excerpt" : "excerpts"}
+              {quotedSelections.length} selected{" "}
+              {quotedSelections.length === 1 ? "excerpt" : "excerpts"}
             </div>
             <div className="flex max-h-48 flex-col gap-2 overflow-y-auto">
               {quotedSelections.map((selection, index) => (
@@ -1156,6 +1161,17 @@ export const PromptInput = memo(function PromptInput({
                 className="h-9 w-9 rounded-full p-0"
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
+              </Button>
+            ) : onVoiceInput && !hasContent ? (
+              <Button
+                type="button"
+                onClick={onVoiceInput}
+                disabled={disabled}
+                aria-label="Record voice input"
+                title="Record voice input"
+                className="h-9 w-9 rounded-full p-0"
+              >
+                <Mic className="h-4 w-4" />
               </Button>
             ) : (
               <Button

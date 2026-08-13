@@ -18,6 +18,7 @@ import type {
   MarkThreadReadPayload,
   RemoteStatusResponse,
   SnapshotRequest,
+  SpeechCredentialStatus,
   SelectedSkillReference,
   FalconDeckPreferences,
   ThreadDetail,
@@ -132,6 +133,27 @@ export function createDaemonApiClient(baseUrl: string) {
             body: JSON.stringify(payload),
           }),
         ),
+      );
+    },
+    async speechCredentialStatus() {
+      return parseJson<SpeechCredentialStatus>(
+        await fetch(`${baseUrl}/api/speech/openrouter-key`),
+      );
+    },
+    async saveSpeechCredential(apiKey: string) {
+      return parseJson<SpeechCredentialStatus>(
+        await fetch(`${baseUrl}/api/speech/openrouter-key`, {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ api_key: apiKey }),
+        }),
+      );
+    },
+    async deleteSpeechCredential() {
+      return parseJson<SpeechCredentialStatus>(
+        await fetch(`${baseUrl}/api/speech/openrouter-key`, {
+          method: "DELETE",
+        }),
       );
     },
     async extensions() {

@@ -25,8 +25,10 @@ import {
   updateSpeechSettings,
   type SpeechProvider,
 } from '@/features/speech/speechSettings'
-import { transcribeWithOpenRouter } from '@/features/speech/openRouterTranscription'
-import { loadOpenRouterApiKey } from '@/storage/secure'
+import {
+  getDesktopSpeechStatus,
+  transcribeWithDesktopOpenRouter,
+} from '@/features/speech/openRouterTranscription'
 
 type VoiceState =
   'choosing' | 'starting' | 'recording' | 'transcribing' | 'failed'
@@ -124,19 +126,9 @@ export function VoiceInputSheet({
     async (uri: string) => {
       setState('transcribing')
       setError(null)
-      const apiKey = await loadOpenRouterApiKey()
-      if (cancelledRef.current) return
-      if (!apiKey) {
-        setError(
-          'Add an OpenRouter API key in Speech settings, then retry this recording.',
-        )
-        setState('failed')
-        return
-      }
       try {
-        const result = await transcribeWithOpenRouter({
+        const result = await transcribeWithDesktopOpenRouter({
           uri,
-          apiKey,
           model: settingsRef.current.model,
           language: settingsRef.current.language,
         })
@@ -238,19 +230,25 @@ export function VoiceInputSheet({
       setProvider(nextProvider)
       settingsRef.current = updateSpeechSettings({ provider: nextProvider })
       if (nextProvider === 'openrouter') {
-        const apiKey = await loadOpenRouterApiKey()
-        if (cancelledRef.current) return
-        if (!apiKey) {
-          onClose()
-          router.push('/(app)/settings/speech' as Href)
-          return
+        try {
+          const status = await getDesktopSpeechStatus()
+          if (cancelledRef.current) return
+          if (!status.configured) {
+            setError('Add your OpenRouter API key in FalconDeck desktop settings first.')
+            setState('failed')
+            return
+          }
+          await startCloud()
+        } catch (cause) {
+          if (cancelledRef.current) return
+          setError(cause instanceof Error ? cause.message : 'Could not reach the paired desktop.')
+          setState('failed')
         }
-        await startCloud()
       } else {
         await startOnDevice()
       }
     },
-    [onClose, router, startCloud, startOnDevice],
+    [startCloud, startOnDevice],
   )
 
   useEffect(() => {
@@ -362,7 +360,7 @@ export function VoiceInputSheet({
             ? 'Choose how FalconDeck should turn speech into text.'
             : provider === 'on-device'
               ? 'Speech stays on this device.'
-              : 'Audio is sent to OpenRouter after you stop recording.'}
+              : 'Audio is encrypted to your desktop, which sends it to OpenRouter.'}
         </Text>
       </View>
 
@@ -387,7 +385,7 @@ export function VoiceInputSheet({
           >
             <Text variant="label">OpenRouter</Text>
             <Text variant="caption" color="muted">
-              Use a state-of-the-art transcription model with your own API key.
+              Use the API key held securely by your paired desktop.
             </Text>
           </Pressable>
         </View>

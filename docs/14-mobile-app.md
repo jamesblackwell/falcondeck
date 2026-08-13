@@ -35,6 +35,22 @@ Mobile App
       └── useInterruptTurn (stop button RPC)
 ```
 
+### Speech transcription security
+
+Mobile supports on-device transcription and OpenRouter transcription through the paired daemon.
+The OpenRouter API key is entered in desktop Speech settings and stored only in the computer's OS
+credential store. It is never copied to mobile, FalconDeck configuration, or the relay.
+
+For cloud transcription, mobile retains the recording locally and sends it in an end-to-end
+encrypted, non-durable RPC request. The relay forwards only ciphertext in memory. The daemon
+decrypts the audio, reads the credential for the OpenRouter request, and returns the transcript
+over the same encrypted RPC channel. Mobile deletes the recording only after transcription
+succeeds, allowing safe retries after connection or provider failures.
+
+The macOS composer mirrors the empty-draft microphone action. It records in the webview, persists
+pending audio in IndexedDB before transcription, and calls the daemon locally without exposing the
+credential to the recorder. Failed recordings remain available to retry or discard.
+
 ## Monorepo Integration
 
 The mobile app lives in an npm workspaces monorepo. **Critical details:**

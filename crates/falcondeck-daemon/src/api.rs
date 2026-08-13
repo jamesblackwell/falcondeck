@@ -2,7 +2,7 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{
-        Path, Query, Request, State,
+        DefaultBodyLimit, Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderValue, StatusCode, header},
@@ -182,6 +182,17 @@ pub fn router(state: AppState) -> Router {
             get(read_connectors).put(update_connectors),
         )
         .route("/api/providers", get(read_providers).put(update_providers))
+        .route(
+            "/api/speech/openrouter-key",
+            get(speech_openrouter_status)
+                .put(save_speech_openrouter_key)
+                .delete(delete_speech_openrouter_key),
+        )
+        .route("/api/speech/models", get(speech_models))
+        .route(
+            "/api/speech/transcribe",
+            post(speech_transcribe).layer(DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
         .route("/api/extensions", get(extensions))
         .route(
             "/api/extensions/{extension_id}",
@@ -245,6 +256,38 @@ async fn update_preferences(
     Json(request): Json<UpdatePreferencesRequest>,
 ) -> Result<Json<falcondeck_core::FalconDeckPreferences>, DaemonError> {
     Ok(Json(state.update_preferences(request).await?))
+}
+
+async fn speech_openrouter_status(
+    State(state): State<AppState>,
+) -> Result<Json<crate::app::SpeechCredentialStatus>, DaemonError> {
+    Ok(Json(state.speech_credential_status().await?))
+}
+
+async fn save_speech_openrouter_key(
+    State(state): State<AppState>,
+    Json(request): Json<crate::app::SaveSpeechCredentialRequest>,
+) -> Result<Json<crate::app::SpeechCredentialStatus>, DaemonError> {
+    Ok(Json(state.save_speech_credential(request.api_key).await?))
+}
+
+async fn delete_speech_openrouter_key(
+    State(state): State<AppState>,
+) -> Result<Json<crate::app::SpeechCredentialStatus>, DaemonError> {
+    Ok(Json(state.delete_speech_credential().await?))
+}
+
+async fn speech_models(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::app::SpeechModel>>, DaemonError> {
+    Ok(Json(state.speech_models().await?))
+}
+
+async fn speech_transcribe(
+    State(state): State<AppState>,
+    Json(request): Json<crate::app::SpeechTranscriptionRequest>,
+) -> Result<Json<crate::app::SpeechTranscriptionResponse>, DaemonError> {
+    Ok(Json(state.transcribe_speech(request).await?))
 }
 
 async fn extensions(State(state): State<AppState>) -> Json<falcondeck_core::ExtensionSnapshot> {

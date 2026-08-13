@@ -1490,3 +1490,8 @@ export type RelayClientMessage =
       workspace_id?: string | null;
       thread_id?: string | null;
     };
+
+export type SpeechCredentialStatus = {
+  configured: boolean;
+  storage: "os_credential_store";
+};

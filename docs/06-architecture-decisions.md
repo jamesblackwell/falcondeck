@@ -185,6 +185,18 @@ Status: Decided. These decisions are based on competitive research and source co
 - No daemon-side artificial timeout needed; agents already have their own
 - Priority channel: permission requests bypass normal message ordering so they surface immediately on mobile
 
+## Decision 15: User-owned cloud transcription credentials
+
+**Decision**: Cloud speech credentials remain on the paired daemon host.
+
+- API keys are stored in the host OS credential store, never FalconDeck configuration or relay storage.
+- Mobile audio travels to the daemon through the existing E2E-encrypted, non-durable RPC channel.
+- The daemon, not the mobile app or relay, authenticates to the transcription provider.
+- Direct-from-phone API-key storage is unsupported; upgrades delete the retired mobile credential.
+
+This keeps FalconDeck servers outside the credential trust boundary while preserving a private
+on-device transcription option.
+
 ## Open Questions
 
 See [08-open-questions.md](08-open-questions.md) for the current list of open questions and their status.

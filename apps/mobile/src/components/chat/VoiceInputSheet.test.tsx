@@ -1,5 +1,5 @@
 import { act } from 'react-test-renderer'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   requestRecordingPermissionsAsync,
   setAudioModeAsync,
@@ -11,18 +11,21 @@ import {
   resetSpeechSettings,
 } from '@/features/speech/speechSettings'
 import {
-  clearOpenRouterApiKey,
-  persistOpenRouterApiKey,
-} from '@/storage/secure'
+  useRelayStore,
+} from '@/store/relay-store'
 
 import { VoiceInputSheet } from './VoiceInputSheet'
 
 describe('VoiceInputSheet', () => {
+  const originalCallRpc = useRelayStore.getState()._callRpc
+
   beforeEach(async () => {
     vi.clearAllMocks()
     resetSpeechSettings()
     clearPendingVoiceRecording()
-    await clearOpenRouterApiKey()
+    useRelayStore.getState()._callRpc = vi
+      .fn()
+      .mockResolvedValue({ configured: true, storage: 'os_credential_store' }) as typeof originalCallRpc
   })
 
   it('does not start cloud recording after the sheet is dismissed during permission startup', async () => {
@@ -33,7 +36,6 @@ describe('VoiceInputSheet', () => {
     vi.mocked(requestRecordingPermissionsAsync).mockReturnValueOnce(
       permission as ReturnType<typeof requestRecordingPermissionsAsync>,
     )
-    await persistOpenRouterApiKey('test-key')
     const onClose = vi.fn()
     const r = renderComponent(
       <VoiceInputSheet onTranscript={vi.fn()} onClose={onClose} />,
@@ -62,5 +64,9 @@ describe('VoiceInputSheet', () => {
 
     expect(setAudioModeAsync).not.toHaveBeenCalled()
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  afterEach(() => {
+    useRelayStore.getState()._callRpc = originalCallRpc
   })
 })

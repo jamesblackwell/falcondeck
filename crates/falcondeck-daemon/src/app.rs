@@ -55,6 +55,7 @@ mod opencode_threads;
 mod provider_runtime;
 mod remote_bridge;
 mod remote_lifecycle;
+mod speech;
 mod storage;
 mod threads;
 mod workspace_ops;
@@ -64,6 +65,7 @@ use conversation_helpers::*;
 use provider_runtime::*;
 use remote_bridge::*;
 use remote_lifecycle::*;
+pub(crate) use speech::*;
 use storage::*;
 use threads::{interactive_request_counts, refresh_thread_attention};
 

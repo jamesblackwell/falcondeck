@@ -71,6 +71,33 @@ describe("PromptInput", () => {
     ).toBeDisabled();
   });
 
+  it("uses voice input as the empty composer action and restores Send after typing", () => {
+    const onVoiceInput = vi.fn();
+    const { rerender } = render(
+      <PromptInput {...promptInputProps} onVoiceInput={onVoiceInput} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Record voice input" }));
+    expect(onVoiceInput).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("button", { name: "Send message" }),
+    ).not.toBeInTheDocument();
+
+    rerender(
+      <PromptInput
+        {...promptInputProps}
+        value="Hello"
+        onVoiceInput={onVoiceInput}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Send message" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Record voice input" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows removable quoted excerpts and allows sending without a comment", () => {
     const onSubmit = vi.fn();
     const onRemoveQuotedSelection = vi.fn();

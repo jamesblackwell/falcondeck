@@ -2,70 +2,56 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   fetchOpenRouterSpeechModels,
-  transcribeWithOpenRouter,
+  getDesktopSpeechStatus,
+  transcribeWithDesktopOpenRouter,
 } from './openRouterTranscription'
-
-function mockResponse(status: number, body: unknown): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: vi.fn(async () => body),
-  } as unknown as Response
-}
+import { useRelayStore } from '@/store/relay-store'
 
 describe('OpenRouter transcription', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  const originalCallRpc = useRelayStore.getState()._callRpc
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    useRelayStore.getState()._callRpc = originalCallRpc
+  })
 
   it('discovers and sorts transcription models', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () =>
-        mockResponse(200, {
-          data: [
-            { id: 'z/model', name: 'Zulu' },
-            { id: 'a/model', name: 'Alpha' },
-            { id: 3, name: 'Invalid' },
-          ],
-        }),
-      ),
-    )
+    const rpc = vi.fn().mockResolvedValue([
+      { id: 'a/model', name: 'Alpha' },
+      { id: 'z/model', name: 'Zulu' },
+    ])
+    useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
 
     await expect(fetchOpenRouterSpeechModels()).resolves.toEqual([
       { id: 'a/model', name: 'Alpha' },
       { id: 'z/model', name: 'Zulu' },
     ])
+    expect(rpc).toHaveBeenCalledWith('speech.models', {})
   })
 
-  it('falls back to another STT model after a transient provider failure', async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValueOnce(
-        mockResponse(503, { error: { message: 'unavailable' } }),
-      )
-      .mockResolvedValueOnce(mockResponse(200, { text: '  Ship it  ' }))
-    vi.stubGlobal('fetch', fetch)
+  it('sends audio to the daemon over encrypted RPC', async () => {
+    const rpc = vi.fn().mockResolvedValue({ text: 'Ship it', model: 'custom/model' })
+    useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
 
     await expect(
-      transcribeWithOpenRouter({
+      transcribeWithDesktopOpenRouter({
         uri: 'file:///voice.m4a',
-        apiKey: 'secret',
         model: 'custom/model',
       }),
-    ).resolves.toEqual({ text: 'Ship it', model: 'openai/gpt-transcribe' })
-    expect(fetch).toHaveBeenCalledTimes(2)
+    ).resolves.toEqual({ text: 'Ship it', model: 'custom/model' })
+    expect(rpc).toHaveBeenCalledWith(
+      'speech.transcribe',
+      expect.objectContaining({ format: 'm4a', model: 'custom/model' }),
+      { timeoutMs: 80_000 },
+    )
   })
 
-  it('does not retry a rejected API key', async () => {
-    const fetch = vi.fn(async () => mockResponse(401, {}))
-    vi.stubGlobal('fetch', fetch)
-
-    await expect(
-      transcribeWithOpenRouter({
-        uri: 'file:///voice.wav',
-        apiKey: 'bad-key',
-        model: 'openai/gpt-transcribe',
-      }),
-    ).rejects.toThrow('API key was rejected')
-    expect(fetch).toHaveBeenCalledTimes(1)
+  it('reads credential presence without receiving the key', async () => {
+    const rpc = vi.fn().mockResolvedValue({ configured: true, storage: 'os_credential_store' })
+    useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
+    await expect(getDesktopSpeechStatus()).resolves.toEqual({
+      configured: true,
+      storage: 'os_credential_store',
+    })
   })
 })

@@ -43,6 +43,9 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "snapshot.current",
     "preferences.read",
     "preferences.update",
+    "speech.status",
+    "speech.models",
+    "speech.transcribe",
     "interactive.respond",
     "approval.respond",
     "thread.start",
@@ -653,6 +656,31 @@ impl AppState {
                 }
                 "preferences.read" => serde_json::to_value(self.preferences().await)
                     .map_err(|error| format!("failed to serialize preferences: {error}")),
+                "speech.status" => serde_json::to_value(
+                    self.speech_credential_status()
+                        .await
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| format!("failed to serialize speech status: {error}")),
+                "speech.models" => serde_json::to_value(
+                    self.speech_models()
+                        .await
+                        .map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| format!("failed to serialize speech models: {error}")),
+                "speech.transcribe" => {
+                    let request =
+                        serde_json::from_value::<super::SpeechTranscriptionRequest>(params.clone())
+                            .map_err(|error| {
+                                format!("invalid speech transcription payload: {error}")
+                            })?;
+                    serde_json::to_value(
+                        self.transcribe_speech(request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize transcription: {error}"))
+                }
                 "providers.read" => {
                     let state_dir = self
                         .state_dir()
