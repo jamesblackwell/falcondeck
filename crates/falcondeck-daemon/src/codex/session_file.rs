@@ -174,19 +174,7 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                     id: extract_string(payload, &["id"]).unwrap_or_else(|| {
                         format!("response-reasoning-{}", created_at.timestamp_millis())
                     }),
-                    summary: payload
-                        .get("summary")
-                        .and_then(Value::as_array)
-                        .map(|parts| {
-                            parts
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(str::trim)
-                                .filter(|part| !part.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                        })
-                        .filter(|summary| !summary.is_empty()),
+                    summary: thread_item_text(payload.get("summary")),
                     content: payload
                         .get("content")
                         .and_then(|content| thread_item_text(Some(content)))

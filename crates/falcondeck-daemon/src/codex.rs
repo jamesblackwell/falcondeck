@@ -1210,8 +1210,12 @@ fn thread_item_text(value: Option<&Value>) -> Option<String> {
     let joined = value
         .as_array()?
         .iter()
-        .filter_map(Value::as_str)
-        .map(str::trim)
+        .filter_map(|part| {
+            part.as_str()
+                .map(str::to_string)
+                .or_else(|| extract_string(part, &["text"]))
+        })
+        .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
@@ -1750,6 +1754,50 @@ mod tests {
                 && status == "completed"
                 && output == "Script completed\nM src/main.rs"
                 && completed_at.to_rfc3339() == "2026-08-11T10:43:31.939+00:00"
+        ));
+    }
+
+    #[test]
+    fn session_file_hydration_reads_structured_reasoning_parts() {
+        let mut file = NamedTempFile::new().unwrap();
+        for entry in [
+            json!({
+                "timestamp": "2026-08-11T10:43:29.220Z",
+                "type": "session_meta",
+                "payload": { "cwd": "/Users/james/project-a" }
+            }),
+            json!({
+                "timestamp": "2026-08-11T10:43:30.000Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "reasoning",
+                    "id": "reasoning-1",
+                    "summary": [
+                        { "type": "summary_text", "text": "Checking the scheduler" },
+                        { "type": "summary_text", "text": "Verifying restore behavior" }
+                    ],
+                    "content": [
+                        { "type": "reasoning_text", "text": "The retained provider detail." }
+                    ]
+                }
+            }),
+        ] {
+            writeln!(file, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+        }
+
+        let items = hydrate_thread_items_from_session_file(
+            file.path().to_str().unwrap(),
+            "/Users/james/project-a",
+        );
+
+        assert!(matches!(
+            items.as_slice(),
+            [ConversationItem::Reasoning {
+                summary: Some(summary),
+                content,
+                ..
+            }] if summary == "Checking the scheduler\nVerifying restore behavior"
+                && content == "The retained provider detail."
         ));
     }
 

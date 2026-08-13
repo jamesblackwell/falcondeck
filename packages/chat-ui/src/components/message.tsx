@@ -2035,50 +2035,32 @@ function ReasoningMessage({
     !activelyStreaming && item.duration_ms != null
       ? formatDurationMs(item.duration_ms)
       : null;
-
-  return (
-    <div className="min-w-0 border-l-2 border-border-subtle pl-3">
-      <button
-        type="button"
-        onClick={() => setOverride(!open)}
-        aria-expanded={open}
-        aria-live={
-          lifecycle === "error"
-            ? "assertive"
-            : lifecycle === "interrupted"
-              ? "polite"
-              : undefined
-        }
-        aria-atomic={
-          lifecycle === "error" || lifecycle === "interrupted"
-            ? "true"
-            : undefined
-        }
-        aria-label={durationLabel ? `${label}, ${durationLabel}` : label}
-        className="fd-focus flex max-w-full items-center gap-1.5 rounded-[var(--fd-radius-sm)] py-0.5 text-left text-[length:var(--fd-text-sm)] text-fg-muted transition-colors hover:text-fg-secondary"
-      >
-        {activelyStreaming ? (
-          <ActivityDiamond />
-        ) : lifecycle === "interrupted" ? (
-          <PauseCircle
-            aria-hidden="true"
-            className="h-3.5 w-3.5 shrink-0 text-warning"
-          />
-        ) : lifecycle === "error" ? (
-          <CircleX
-            aria-hidden="true"
-            className="h-3.5 w-3.5 shrink-0 text-danger"
-          />
-        ) : null}
-        <span className="min-w-0 truncate font-medium">{label}</span>
-        {durationLabel ? (
-          <span
-            aria-hidden="true"
-            className="shrink-0 text-[length:var(--fd-text-xs)] text-fg-faint"
-          >
-            · {durationLabel}
-          </span>
-        ) : null}
+  const hasBody = item.content.trim().length > 0;
+  const headerContent = (
+    <>
+      {activelyStreaming ? (
+        <ActivityDiamond />
+      ) : lifecycle === "interrupted" ? (
+        <PauseCircle
+          aria-hidden="true"
+          className="h-3.5 w-3.5 shrink-0 text-warning"
+        />
+      ) : lifecycle === "error" ? (
+        <CircleX
+          aria-hidden="true"
+          className="h-3.5 w-3.5 shrink-0 text-danger"
+        />
+      ) : null}
+      <span className="min-w-0 truncate font-medium">{label}</span>
+      {durationLabel ? (
+        <span
+          aria-hidden={hasBody || undefined}
+          className="shrink-0 text-[length:var(--fd-text-xs)] text-fg-faint"
+        >
+          · {durationLabel}
+        </span>
+      ) : null}
+      {hasBody ? (
         <ChevronRight
           aria-hidden="true"
           className={cn(
@@ -2086,8 +2068,46 @@ function ReasoningMessage({
             open && "rotate-90",
           )}
         />
-      </button>
-      {open || showPreview ? (
+      ) : null}
+    </>
+  );
+  const headerClassName =
+    "flex max-w-full items-center gap-1.5 rounded-[var(--fd-radius-sm)] py-0.5 text-left text-[length:var(--fd-text-sm)] text-fg-muted";
+  const ariaLive =
+    lifecycle === "error"
+      ? "assertive"
+      : lifecycle === "interrupted"
+        ? "polite"
+        : undefined;
+  const ariaLabel = durationLabel ? `${label}, ${durationLabel}` : label;
+
+  return (
+    <div className="min-w-0 border-l-2 border-border-subtle pl-3">
+      {hasBody ? (
+        <button
+          type="button"
+          onClick={() => setOverride(!open)}
+          aria-expanded={open}
+          aria-live={ariaLive}
+          aria-atomic={ariaLive ? "true" : undefined}
+          aria-label={ariaLabel}
+          className={cn(
+            "fd-focus transition-colors hover:text-fg-secondary",
+            headerClassName,
+          )}
+        >
+          {headerContent}
+        </button>
+      ) : (
+        <div
+          aria-live={ariaLive}
+          aria-atomic={ariaLive ? "true" : undefined}
+          className={headerClassName}
+        >
+          {headerContent}
+        </div>
+      )}
+      {hasBody && (open || showPreview) ? (
         <div
           className={cn("relative mt-1", showPreview && "overflow-hidden")}
           style={

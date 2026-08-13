@@ -124,6 +124,20 @@ describe('reasoning reveal', () => {
     expect(screen.getByText(THOUGHT)).toBeInTheDocument()
   })
 
+  it('does not offer an empty thought as an expandable control', () => {
+    render(
+      <Conversation
+        items={[reasoning({ summary: null, content: '', duration_ms: 1400 })]}
+      />,
+    )
+
+    expect(
+      screen.queryByRole('button', { name: /Thought/ }),
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('Thought')).toBeInTheDocument()
+    expect(screen.getByText(/1.4 s/)).toBeInTheDocument()
+  })
+
   it('opens the body immediately in always-expanded mode', () => {
     render(<Conversation items={[reasoning()]} preferences={preferences('always_expanded')} />)
 
