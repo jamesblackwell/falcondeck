@@ -138,13 +138,9 @@ impl OpenCodeRuntime {
         &self,
         cwd: &str,
         model: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<String, DaemonError> {
-        let mut body = json!({ "location": { "directory": cwd } });
-        // OpenCode model ids are provider-qualified.  Do not guess a provider
-        // for a bare id: omitting it preserves the user's OpenCode default.
-        if let Some((provider_id, id)) = model.and_then(|value| value.split_once('/')) {
-            body["model"] = json!({ "providerID": provider_id, "id": id });
-        }
+        let body = session_create_body(cwd, model, agent);
         let value = self
             .request(reqwest::Method::POST, "/api/session", Some(body))
             .await?;
@@ -155,6 +151,46 @@ impl OpenCodeRuntime {
             .ok_or_else(|| {
                 DaemonError::Rpc("OpenCode session creation returned no session id".to_string())
             })
+    }
+
+    /// Native model catalog. This response is intentionally kept inside the
+    /// daemon: provider records may contain credentials that must never be
+    /// projected into a FalconDeck snapshot.
+    pub async fn provider_catalog(&self) -> Result<Value, DaemonError> {
+        self.request(reqwest::Method::GET, "/config/providers", None)
+            .await
+    }
+
+    pub async fn agents(&self) -> Result<Vec<Value>, DaemonError> {
+        let value = self
+            .request(reqwest::Method::GET, "/api/agent", None)
+            .await?;
+        response_data_array(value, "agents")
+    }
+
+    pub async fn set_model(&self, session_id: &str, model: &str) -> Result<(), DaemonError> {
+        let Some(model) = model_ref(model) else {
+            // The synthetic `default` catalog entry deliberately preserves
+            // OpenCode's own configured model.
+            return Ok(());
+        };
+        self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{session_id}/model"),
+            Some(json!({ "model": model })),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    pub async fn set_agent(&self, session_id: &str, agent: &str) -> Result<(), DaemonError> {
+        self.request(
+            reqwest::Method::POST,
+            &format!("/api/session/{session_id}/agent"),
+            Some(json!({ "agent": agent })),
+        )
+        .await
+        .map(|_| ())
     }
 
     pub async fn delete_session(&self, session_id: &str) {
@@ -361,6 +397,25 @@ fn response_data_array(value: Value, endpoint: &str) -> Result<Vec<Value>, Daemo
         })
 }
 
+fn model_ref(model: &str) -> Option<Value> {
+    let (provider_id, id) = model.split_once('/')?;
+    (!provider_id.is_empty() && !id.is_empty())
+        .then(|| json!({ "providerID": provider_id, "id": id }))
+}
+
+fn session_create_body(cwd: &str, model: Option<&str>, agent: Option<&str>) -> Value {
+    let mut body = json!({ "location": { "directory": cwd } });
+    // OpenCode model ids are provider-qualified. Do not guess a provider for
+    // the synthetic default entry: omitting it preserves the user's config.
+    if let Some(model) = model.and_then(model_ref) {
+        body["model"] = model;
+    }
+    if let Some(agent) = agent.filter(|agent| !agent.is_empty()) {
+        body["agent"] = json!(agent);
+    }
+    body
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +440,21 @@ mod tests {
     fn compatibility_arrays_reject_changed_response_shapes() {
         let error = response_data_array(json!({ "messages": [] }), "messages").unwrap_err();
         assert!(error.to_string().contains("did not contain a data array"));
+    }
+
+    #[test]
+    fn session_creation_preserves_native_defaults_unless_overridden() {
+        assert_eq!(
+            session_create_body("/work", Some("default"), None),
+            json!({ "location": { "directory": "/work" } })
+        );
+        assert_eq!(
+            session_create_body("/work", Some("openrouter/x-ai/grok-4.6"), Some("plan")),
+            json!({
+                "location": { "directory": "/work" },
+                "model": { "providerID": "openrouter", "id": "x-ai/grok-4.6" },
+                "agent": "plan"
+            })
+        );
     }
 }

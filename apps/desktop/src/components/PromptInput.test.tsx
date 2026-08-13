@@ -724,7 +724,7 @@ describe("PromptInput", () => {
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("greys the capability pickers instead of dropping them, so the row keeps its shape", () => {
+  it("hides unsupported capability pickers and shows them once advertised", () => {
     const capabilities = {
       supports_review: false,
       supports_goals: false,
@@ -744,14 +744,12 @@ describe("PromptInput", () => {
       />,
     );
 
-    // Present but inert: an agent without these modes must not make the
-    // composer reflow when the user switches to it.
     expect(
-      screen.getByRole("combobox", { name: "Permission mode" }),
-    ).toBeDisabled();
+      screen.queryByRole("combobox", { name: "Permission mode" }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("combobox", { name: "Sandbox mode" }),
-    ).toBeDisabled();
+      screen.queryByRole("combobox", { name: "Sandbox mode" }),
+    ).not.toBeInTheDocument();
 
     rerender(
       <PromptInput

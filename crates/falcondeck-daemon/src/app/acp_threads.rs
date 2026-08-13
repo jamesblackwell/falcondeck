@@ -49,6 +49,26 @@ impl AppState {
         let workspace_id = workspace_id.to_string();
         tokio::spawn(async move {
             for config in app.fresh_acp_provider_configs() {
+                if config.id.eq_ignore_ascii_case("opencode")
+                    && super::opencode_threads::requested_native_transport(&config)
+                {
+                    match app.refresh_opencode_native_metadata(&workspace_id).await {
+                        Ok(()) => continue,
+                        Err(error) => {
+                            tracing::info!(
+                                provider = %config.id,
+                                %error,
+                                "native OpenCode metadata hydration failed"
+                            );
+                            app.set_opencode_native_available(&workspace_id, false).await;
+                            if matches!(config.transport, crate::acp::ProviderTransport::Native) {
+                                continue;
+                            }
+                            // Auto mode keeps its ACP rollback path when the
+                            // native server is unavailable or incompatible.
+                        }
+                    }
+                }
                 let provider = AgentProvider::new(config.id.clone());
                 if let Err(error) = app.acp_runtime_for(&workspace_id, &provider).await {
                     tracing::info!(
@@ -968,6 +988,19 @@ pub(super) async fn set_acp_thread_permission_mode(
     let ProviderRuntime::Acp(provider) = ProviderRuntime::for_provider(&provider) else {
         return Ok(());
     };
+
+    let is_native_opencode = {
+        let workspaces = app.inner.workspaces.lock().await;
+        workspaces
+            .get(workspace_id)
+            .and_then(|workspace| workspace.threads.get(thread_id))
+            .is_some_and(|thread| thread.summary.provider_transport.as_deref() == Some("native"))
+    };
+    if is_native_opencode {
+        // Native OpenCode permission behavior is enforced by the polling
+        // loop from the stored thread mode; there is no ACP session to update.
+        return Ok(());
+    }
 
     let session_id = {
         let workspaces = app.inner.workspaces.lock().await;

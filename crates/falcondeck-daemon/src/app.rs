@@ -248,6 +248,7 @@ impl AppState {
             .iter()
             .map(|config| {
                 let mut capabilities = AgentCapabilitySummary::acp_minimal();
+                let mut models = Vec::new();
                 // Mirror post-handshake Grok override so paste is available
                 // before the first connect refreshes the agent entry.
                 capabilities.supports_images =
@@ -255,8 +256,8 @@ impl AppState {
                 if config.id.eq_ignore_ascii_case("opencode")
                     && crate::app::opencode_threads::requested_native_transport(config)
                 {
-                    capabilities.supports_images = true;
-                    capabilities.supports_steering = true;
+                    capabilities = crate::app::opencode_threads::native_capabilities();
+                    models.push(crate::app::opencode_threads::native_default_model());
                 }
                 WorkspaceAgentSummary {
                     provider: AgentProvider::new(config.id.clone()),
@@ -265,7 +266,7 @@ impl AppState {
                         status: falcondeck_core::AccountStatus::Unknown,
                         label: format!("{} not started", config.label),
                     },
-                    models: Vec::new(),
+                    models,
                     collaboration_modes: Vec::new(),
                     skills: Vec::new(),
                     capabilities,

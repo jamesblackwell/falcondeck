@@ -250,6 +250,15 @@ Agents settings panel's **Use ACP** action if that tradeoff or a particular
 OpenCode release proves unreliable; the change applies to new threads and does
 not mutate existing sessions.
 
+When a workspace attaches, the native path loads OpenCode's provider model
+catalog and its visible primary agents. The composer therefore exposes native
+model selection plus OpenCode modes such as **Build** and **Plan**. The
+permission picker offers **Ask to approve** and **Always approve**. The latter
+answers each request for that thread with OpenCode's one-time approval; it does
+not persist a global OpenCode permission rule. OpenCode has no matching
+per-session filesystem sandbox setting, so FalconDeck hides the sandbox picker
+for native threads instead of displaying a disabled or misleading control.
+
 The native server is started on `127.0.0.1` with a unique generated password,
 rather than exposing an unauthenticated listener. If native mode proves
 unstable in practice, select `acp`; that route remains supported and covered by

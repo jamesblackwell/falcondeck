@@ -55,6 +55,7 @@ pub(super) struct StartThreadSpec<'a> {
     pub(super) model_id: Option<&'a str>,
     pub(super) sandbox_mode: Option<&'a str>,
     pub(super) approval_policy: &'a str,
+    pub(super) collaboration_mode_id: Option<&'a str>,
     /// Directory the thread will run in — its isolated checkout when the
     /// request asked for one, otherwise the workspace folder. Resolved by the
     /// caller because the variant is created before the backend thread exists.
@@ -172,7 +173,10 @@ impl ProviderRuntime {
                 {
                     match app.opencode_runtime_for(spec.workspace_id).await {
                         Ok(runtime) => {
-                            match runtime.create_session(spec.cwd, spec.model_id).await {
+                            match runtime
+                                .create_session(spec.cwd, spec.model_id, spec.collaboration_mode_id)
+                                .await
+                            {
                                 Ok(session_id) => {
                                     let compatible = async {
                                         runtime.messages(&session_id).await?;

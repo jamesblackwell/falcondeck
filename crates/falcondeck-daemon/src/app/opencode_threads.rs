@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use falcondeck_core::{
-    ApprovalDecision, ContentLifecycle, ConversationItem, InteractiveQuestion,
-    InteractiveQuestionOption, InteractiveRequest, InteractiveRequestKind, ServiceLevel,
-    ThreadStatus, TurnInputItem, UnifiedEvent,
+    AccountStatus, AgentCapabilitySummary, ApprovalDecision, CollaborationModeSummary,
+    ContentLifecycle, ConversationItem, InteractiveQuestion, InteractiveQuestionOption,
+    InteractiveRequest, InteractiveRequestKind, ModelSummary, ServiceLevel, ThreadStatus,
+    TurnInputItem, UnifiedEvent,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -126,11 +127,53 @@ impl AppState {
         };
         agent.capabilities.supports_steering = available;
         agent.capabilities.supports_images = available || agent.capabilities.supports_images;
+        if available {
+            agent.capabilities.permission_modes = native_permission_modes();
+        }
         agent.account.label = if available {
             "OpenCode native connected".to_string()
         } else {
             "OpenCode using ACP fallback".to_string()
         };
+    }
+
+    /// Starts the native server early enough to populate a fresh composer's
+    /// model and agent controls. Only normalized catalog fields leave this
+    /// module; the raw provider response can contain credentials.
+    pub(super) async fn refresh_opencode_native_metadata(
+        &self,
+        workspace_id: &str,
+    ) -> Result<(), DaemonError> {
+        let runtime = self.opencode_runtime_for(workspace_id).await?;
+        let (catalog, agents) = tokio::try_join!(runtime.provider_catalog(), runtime.agents())?;
+        let models = parse_native_models(&catalog)?;
+        let collaboration_modes = parse_native_agents(&agents);
+        let workspace = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let agent = workspace
+                .summary
+                .agents
+                .iter_mut()
+                .find(|agent| agent.provider.as_str().eq_ignore_ascii_case("opencode"))
+                .ok_or_else(|| {
+                    DaemonError::NotFound("OpenCode workspace agent not found".to_string())
+                })?;
+            agent.account.status = AccountStatus::Ready;
+            agent.account.label = "OpenCode native connected".to_string();
+            agent.capabilities = native_capabilities();
+            agent.models = models;
+            agent.collaboration_modes = collaboration_modes;
+            workspace.summary.clone()
+        };
+        self.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::WorkspaceUpdated { workspace },
+        );
+        Ok(())
     }
 
     pub(super) async fn respond_opencode_permission(
@@ -215,7 +258,7 @@ pub(super) async fn start_opencode_turn(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
 ) -> Result<(), DaemonError> {
-    let (session_id, prompt, files) = {
+    let (session_id, model_id, agent_id, prompt, files) = {
         let workspaces = app.inner.workspaces.lock().await;
         let thread = workspaces
             .get(workspace_id)
@@ -225,9 +268,23 @@ pub(super) async fn start_opencode_turn(
             DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
         })?;
         let (prompt, files) = opencode_prompt_from_inputs(inputs, selected_skills);
-        (session_id, prompt, files)
+        (
+            session_id,
+            thread.summary.agent.model_id.clone(),
+            thread.summary.agent.collaboration_mode_id.clone(),
+            prompt,
+            files,
+        )
     };
     let runtime = app.opencode_runtime_for(workspace_id).await?;
+    if let Some(agent_id) = agent_id.as_deref() {
+        runtime.set_agent(&session_id, agent_id).await?;
+    }
+    if let Some(model_id) = model_id.as_deref() {
+        // An agent can carry its own model. Apply the thread's explicit model
+        // last so changing Build/Plan does not silently replace that choice.
+        runtime.set_model(&session_id, model_id).await?;
+    }
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     // A successful response is durable admission. No ACP retry is permitted
     // beyond this point because that could execute the same request twice.
@@ -251,7 +308,23 @@ pub(super) async fn start_opencode_turn(
                     }
                     _ = permissions.tick() => {
                         let pending = runtime.pending_permissions(&session_id).await?;
-                        surface_permissions(&app, &workspace_id, &thread_id, &pending).await?;
+                        let permission_mode = app
+                            .thread_summary(&workspace_id, &thread_id)
+                            .await?
+                            .agent
+                            .permission_mode;
+                        if uses_blanket_approval(permission_mode.as_deref()) {
+                            approve_permissions_once(
+                                &app,
+                                &runtime,
+                                &workspace_id,
+                                &session_id,
+                                &pending,
+                            )
+                            .await?;
+                        } else {
+                            surface_permissions(&app, &workspace_id, &thread_id, &pending).await?;
+                        }
                         let pending = runtime.pending_questions(&session_id).await?;
                         surface_questions(&app, &workspace_id, &thread_id, &pending).await?;
                     }
@@ -300,6 +373,162 @@ pub(super) async fn start_opencode_turn(
         app.maybe_schedule_ai_thread_title(workspace_id, thread_id)
             .await;
     });
+    Ok(())
+}
+
+pub(super) fn native_permission_modes() -> Vec<String> {
+    vec!["default".to_string(), "always-approve".to_string()]
+}
+
+pub(super) fn native_capabilities() -> AgentCapabilitySummary {
+    AgentCapabilitySummary {
+        supports_images: true,
+        supports_interrupt: true,
+        supports_steering: true,
+        permission_modes: native_permission_modes(),
+        // OpenCode permissions are agent rules, not a FalconDeck-style
+        // per-session filesystem sandbox. An empty list hides that picker.
+        sandbox_modes: Vec::new(),
+        ..AgentCapabilitySummary::default()
+    }
+}
+
+pub(super) fn native_default_model() -> ModelSummary {
+    ModelSummary {
+        id: "default".to_string(),
+        label: "OpenCode default".to_string(),
+        is_default: true,
+        default_reasoning_effort: None,
+        supported_reasoning_efforts: Vec::new(),
+        service_tiers: Vec::new(),
+        default_service_tier: None,
+    }
+}
+
+fn parse_native_models(catalog: &Value) -> Result<Vec<ModelSummary>, DaemonError> {
+    let providers = catalog
+        .get("providers")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            DaemonError::Rpc(
+                "OpenCode native provider catalog did not contain a providers array".to_string(),
+            )
+        })?;
+    let mut models = vec![native_default_model()];
+    for provider in providers {
+        let Some(provider_id) = provider.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let provider_label = provider
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(provider_id);
+        let Some(provider_models) = provider.get("models").and_then(Value::as_object) else {
+            continue;
+        };
+        for model in provider_models.values() {
+            let Some(model_id) = model.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let model_label = model
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(model_id);
+            models.push(ModelSummary {
+                id: format!("{provider_id}/{model_id}"),
+                label: format!("{model_label} · {provider_label}"),
+                is_default: false,
+                // OpenCode variants are prompt-time options rather than the
+                // session model setting currently used by FalconDeck.
+                default_reasoning_effort: None,
+                supported_reasoning_efforts: Vec::new(),
+                service_tiers: Vec::new(),
+                default_service_tier: None,
+            });
+        }
+    }
+    models[1..].sort_by(|left, right| {
+        left.label
+            .to_lowercase()
+            .cmp(&right.label.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(models)
+}
+
+fn parse_native_agents(agents: &[Value]) -> Vec<CollaborationModeSummary> {
+    let mut modes = agents
+        .iter()
+        .filter(|agent| {
+            !agent
+                .get("hidden")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter(|agent| !matches!(agent.get("mode").and_then(Value::as_str), Some("subagent")))
+        .filter_map(|agent| {
+            let id = agent.get("id").and_then(Value::as_str)?;
+            let label = humanize_id(id);
+            let model_id = agent.get("model").and_then(|model| {
+                Some(format!(
+                    "{}/{}",
+                    model.get("providerID")?.as_str()?,
+                    model.get("modelID")?.as_str()?
+                ))
+            });
+            Some(CollaborationModeSummary {
+                id: id.to_string(),
+                label,
+                mode: Some(id.to_string()),
+                model_id,
+                reasoning_effort: None,
+                is_native: true,
+            })
+        })
+        .collect::<Vec<_>>();
+    modes.sort_by_key(|mode| (mode.id != "build", mode.label.to_lowercase()));
+    modes
+}
+
+fn humanize_id(id: &str) -> String {
+    let value = id.replace(['-', '_'], " ");
+    let mut chars = value.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+        .unwrap_or_default()
+}
+
+fn uses_blanket_approval(mode: Option<&str>) -> bool {
+    mode.is_some_and(|mode| {
+        mode.replace(['-', '_', ' '], "")
+            .eq_ignore_ascii_case("alwaysapprove")
+    })
+}
+
+async fn approve_permissions_once(
+    app: &AppState,
+    runtime: &OpenCodeRuntime,
+    workspace_id: &str,
+    session_id: &str,
+    permissions: &[Value],
+) -> Result<(), DaemonError> {
+    for request_id in permissions
+        .iter()
+        .filter_map(|permission| permission.get("id").and_then(Value::as_str))
+    {
+        let key = (workspace_id.to_string(), request_id.to_string());
+        if app.inner.interactive_requests.lock().await.contains_key(&key) {
+            // A mode change must not silently dismiss an approval already
+            // shown to the user; apply blanket approval to later requests.
+            continue;
+        }
+        // `always` persists OpenCode rules beyond this thread. FalconDeck's
+        // permission choice is thread-scoped, so approve each request once.
+        runtime
+            .reply_permission(session_id, request_id, "once")
+            .await?;
+    }
     Ok(())
 }
 
@@ -786,5 +1015,59 @@ mod tests {
         assert_eq!(text, "look at this");
         assert_eq!(files[0]["uri"], "https://example.test/screen.png");
         assert_eq!(files[0]["name"], "screen shot.png");
+    }
+
+    #[test]
+    fn native_catalog_keeps_an_explicit_default_and_qualifies_models() {
+        let models = parse_native_models(&serde_json::json!({
+            "providers": [{
+                "id": "openrouter",
+                "name": "OpenRouter",
+                "models": {
+                    "grok": { "id": "x-ai/grok-4.6", "name": "Grok 4.6" },
+                    "claude": { "id": "anthropic/claude-sonnet", "name": "Claude Sonnet" }
+                }
+            }],
+            "default": { "openrouter": "x-ai/grok-4.6" }
+        }))
+        .expect("catalog parses");
+
+        assert_eq!(models[0].id, "default");
+        assert!(models[0].is_default);
+        assert!(models.iter().any(|model| {
+            model.id == "openrouter/x-ai/grok-4.6" && model.label == "Grok 4.6 · OpenRouter"
+        }));
+        assert!(
+            models
+                .iter()
+                .skip(1)
+                .all(|model| model.supported_reasoning_efforts.is_empty())
+        );
+    }
+
+    #[test]
+    fn native_agents_only_expose_visible_primary_modes() {
+        let modes = parse_native_agents(&[
+            serde_json::json!({ "id": "plan", "mode": "primary", "hidden": false }),
+            serde_json::json!({ "id": "explore", "mode": "subagent", "hidden": false }),
+            serde_json::json!({ "id": "secret", "mode": "primary", "hidden": true }),
+            serde_json::json!({ "id": "build", "mode": "primary", "hidden": false }),
+        ]);
+
+        assert_eq!(
+            modes
+                .iter()
+                .map(|mode| mode.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["build", "plan"]
+        );
+        assert!(modes.iter().all(|mode| mode.is_native));
+    }
+
+    #[test]
+    fn only_the_native_blanket_mode_auto_approves() {
+        assert!(uses_blanket_approval(Some("always-approve")));
+        assert!(!uses_blanket_approval(Some("default")));
+        assert!(!uses_blanket_approval(None));
     }
 }

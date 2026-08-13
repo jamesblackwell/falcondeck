@@ -580,6 +580,8 @@ fn default_permission_mode(provider: &AgentProvider) -> Option<&'static str> {
         Some("bypassPermissions")
     } else if provider.as_str().eq_ignore_ascii_case("grok") {
         Some("always-approve")
+    } else if provider.as_str().eq_ignore_ascii_case("opencode") {
+        Some("always-approve")
     } else {
         None
     }
@@ -675,7 +677,7 @@ pub(super) async fn start_thread(
     {
         approval_policy = permission_mode.to_string();
     }
-    let model_id = request.model_id.clone().or(default_model_id);
+    let mut model_id = request.model_id.clone().or(default_model_id);
 
     // The checkout has to exist before the backend opens its thread, because
     // the cwd is fixed at that point for every provider.
@@ -697,6 +699,7 @@ pub(super) async fn start_thread(
                 model_id: model_id.as_deref(),
                 sandbox_mode: sandbox_mode.as_deref(),
                 approval_policy: &approval_policy,
+                collaboration_mode_id: request.collaboration_mode_id.as_deref(),
                 cwd,
             },
         )
@@ -717,6 +720,11 @@ pub(super) async fn start_thread(
             return Err(error);
         }
     };
+    if provider_transport.as_deref() == Some("acp") && model_id.as_deref() == Some("default") {
+        // `default` is the native catalog's synthetic "use OpenCode config"
+        // entry, not an ACP model id. Preserve ACP's own default on rollback.
+        model_id = None;
+    }
     let now = Utc::now();
     let is_handoff = request.handoff_from.is_some();
 
@@ -3511,6 +3519,10 @@ mod tests {
         );
         assert_eq!(
             default_permission_mode(&AgentProvider::new("grok")),
+            Some("always-approve")
+        );
+        assert_eq!(
+            default_permission_mode(&AgentProvider::new("opencode")),
             Some("always-approve")
         );
     }

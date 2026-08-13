@@ -1085,20 +1085,24 @@ export const PromptInput = memo(function PromptInput({
                   disabled={disabled || !onCollaborationModeChange}
                 />
               ) : null}
-              <PermissionModeSelector
-                value={selectedPermissionMode}
-                modes={capabilities.permission_modes}
-                onValueChange={onPermissionModeChange ?? noopModeChange}
-                disabled={disabled || !onPermissionModeChange}
-                {...optionMenuProps("permissions")}
-              />
-              <SandboxSelector
-                value={selectedSandboxMode}
-                modes={capabilities.sandbox_modes}
-                onValueChange={onSandboxModeChange ?? noopModeChange}
-                disabled={disabled || !onSandboxModeChange}
-                {...optionMenuProps("sandbox")}
-              />
+              {capabilities.permission_modes.length > 0 ? (
+                <PermissionModeSelector
+                  value={selectedPermissionMode}
+                  modes={capabilities.permission_modes}
+                  onValueChange={onPermissionModeChange ?? noopModeChange}
+                  disabled={disabled || !onPermissionModeChange}
+                  {...optionMenuProps("permissions")}
+                />
+              ) : null}
+              {capabilities.sandbox_modes.length > 0 ? (
+                <SandboxSelector
+                  value={selectedSandboxMode}
+                  modes={capabilities.sandbox_modes}
+                  onValueChange={onSandboxModeChange ?? noopModeChange}
+                  disabled={disabled || !onSandboxModeChange}
+                  {...optionMenuProps("sandbox")}
+                />
+              ) : null}
               <ModelMenu
                 models={models}
                 selectedModel={selectedModel}
