@@ -88,6 +88,9 @@ export type WorkspaceSidebarProps = {
     threadId: string,
   ) => Promise<void> | void;
   onAddProject?: () => void;
+  /** Rendered shortcuts ("⌘N") appended to the header tooltips, when the host binds them. */
+  newThreadShortcut?: string;
+  addProjectShortcut?: string;
   onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void;
   /** How chats order within each project; also applies to the pinned list. */
   threadSort?: ThreadSortMode;
@@ -425,6 +428,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onTogglePinThread,
   onMarkThreadRead,
   onAddProject,
+  newThreadShortcut,
+  addProjectShortcut,
   onRemoveWorkspace,
   threadSort = "last_updated",
   onThreadSortChange,
@@ -1211,6 +1216,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
             <button
               type="button"
               onClick={() => handleNewThread(visualSelectedWorkspaceId)}
+              title={
+                newThreadShortcut
+                  ? `New thread (${newThreadShortcut})`
+                  : "New thread"
+              }
               className="fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
             >
               <SquarePen aria-hidden="true" className="h-3.5 w-3.5" />
@@ -1229,7 +1239,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               className="h-7 w-7"
               onClick={onAddProject}
               disabled={isAddingProject}
-              title="Add project"
+              title={
+                addProjectShortcut
+                  ? `Add project (${addProjectShortcut})`
+                  : "Add project"
+              }
               aria-label="Add project"
               aria-busy={isAddingProject}
             >
