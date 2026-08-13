@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { View } from 'react-native'
 import Animated, { FadeIn, FadeOut, LinearTransition } from 'react-native-reanimated'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
@@ -20,10 +20,35 @@ interface SyncBannerProps {
  */
 export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) {
   const { theme } = useUnistyles()
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!status.isBusy || status.syncStartedAt === null) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [status.isBusy, status.syncStartedAt])
 
   if (!status.isBusy) return null
 
-  const isStalled = status.stage === 'offline'
+  const elapsedSeconds =
+    status.syncStartedAt === null
+      ? 0
+      : Math.max(0, Math.floor((now - status.syncStartedAt) / 1_000))
+  const retrySeconds =
+    status.nextRetryAt === null ? null : Math.max(0, Math.ceil((status.nextRetryAt - now) / 1_000))
+  const hasWaitedLongEnoughForDetails = elapsedSeconds >= 30
+  const timingDetail = hasWaitedLongEnoughForDetails
+    ? [
+        `Waiting ${elapsedSeconds}s`,
+        `attempt ${Math.max(status.syncAttempt, 1)}`,
+        retrySeconds === null ? null : `retry in ${retrySeconds}s`,
+      ]
+        .filter((part): part is string => part !== null)
+        .join(' · ')
+    : null
+  const isStalled = status.stage === 'offline' || status.stage === 'repairing' || !!status.lastError
+  const showsOfflineIcon = status.stage === 'offline'
   const tint = isStalled ? theme.colors.warning.default : theme.colors.info.default
 
   return (
@@ -36,7 +61,7 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
       accessibilityLiveRegion="polite"
       accessibilityLabel={`${status.label} ${status.detail}`}
     >
-      {isStalled ? (
+      {showsOfflineIcon ? (
         <CloudOff accessible={false} size={theme.iconSize.xs} color={tint} />
       ) : (
         <Spinner size={theme.iconSize.xs} color={tint} />
@@ -48,6 +73,16 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
         {status.detail ? (
           <Text variant="caption" size="xs" color="muted">
             {status.detail}
+          </Text>
+        ) : null}
+        {timingDetail ? (
+          <Text variant="caption" size="xs" color="muted">
+            {timingDetail}
+          </Text>
+        ) : null}
+        {status.lastError ? (
+          <Text variant="caption" size="xs" color="warning">
+            Last error: {status.lastError}
           </Text>
         ) : null}
       </View>

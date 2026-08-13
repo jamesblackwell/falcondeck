@@ -1,13 +1,18 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, EncryptedEnvelope, MachinePresence,
     PairingChallengeRequest, PairingChallengeResponse, PairingPublicKeyBundle, PairingStatus,
     PairingStatusResponse, QueuedRemoteAction, QueuedRemoteActionStatus, RelayClientMessage,
-    RelayHealthResponse, RelayPeerRole, RelayServerMessage, RelayUpdate, RelayUpdateBody,
-    RelayUpdatesResponse, StartPairingRequest, StartPairingResponse, SubmitQueuedActionRequest,
-    SyncCursor, TrustedDevice, TrustedDeviceStatus, TrustedDevicesResponse,
+    RelayHealthResponse, RelayPeerRole, RelayRpcFailureCode, RelayServerMessage, RelayUpdate,
+    RelayUpdateBody, RelayUpdatesResponse, StartPairingRequest, StartPairingResponse,
+    SubmitQueuedActionRequest, SyncCursor, TrustedDevice, TrustedDeviceStatus,
+    TrustedDevicesResponse,
     crypto::{
         generate_pairing_challenge, verify_pairing_claim_challenge,
         verify_pairing_public_key_bundle,
@@ -31,6 +36,9 @@ const WS_SYNC_CHUNK_MAX_BYTES: usize = 512 << 10;
 /// new challenge request replaces any outstanding one for the pairing.
 const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
 const PENDING_RPC_TTL_SECONDS: i64 = 30;
+/// An authoritative snapshot is the minimum RPC capability remote clients
+/// need before a connected daemon can be considered ready to sync.
+const REQUIRED_SYNC_RPC_METHOD: &str = "snapshot.current";
 /// Default Expo Push API endpoint; override (or disable with an empty value)
 /// via `FALCONDECK_RELAY_EXPO_PUSH_URL`.
 const EXPO_PUSH_URL: &str = "https://exp.host/--/api/v2/push/send";
@@ -292,17 +300,39 @@ pub(crate) struct TrustedDeviceRecord {
 #[derive(Default)]
 struct LiveSession {
     peers: HashMap<String, PeerHandle>,
-    rpc_methods: HashMap<String, String>,
+    /// Every live daemon peer that registered each method. Connections can
+    /// overlap during reconnect; retaining all owners prevents the departing
+    /// peer from erasing a still-live peer's registration.
+    rpc_methods: HashMap<String, HashSet<String>>,
     pending_rpc: HashMap<String, PendingRpc>,
 }
 
 struct PendingRpc {
+    method: String,
     requester_peer_id: String,
     responder_peer_id: String,
     expires_at: DateTime<Utc>,
 }
 
 impl LiveSession {
+    fn daemon_connected(&self) -> bool {
+        self.peers
+            .values()
+            .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
+    }
+
+    fn daemon_rpc_ready(&self) -> bool {
+        self.rpc_methods
+            .get(REQUIRED_SYNC_RPC_METHOD)
+            .is_some_and(|owners| {
+                owners.iter().any(|peer_id| {
+                    self.peers
+                        .get(peer_id)
+                        .is_some_and(|peer| matches!(peer.role, RelayPeerRole::Daemon))
+                })
+            })
+    }
+
     /// Remove expired pending RPC entries, returning the requester peers
     /// (if still connected) that should receive a failure result. The
     /// returned request ids have their peer namespace stripped, ready to
@@ -310,7 +340,7 @@ impl LiveSession {
     fn take_expired_rpcs(
         &mut self,
         now: DateTime<Utc>,
-    ) -> Vec<(String, String, mpsc::Sender<RelayServerMessage>)> {
+    ) -> Vec<(String, String, String, mpsc::Sender<RelayServerMessage>)> {
         let expired_request_ids = self
             .pending_rpc
             .iter()
@@ -324,6 +354,7 @@ impl LiveSession {
             {
                 notify.push((
                     strip_rpc_request_id_namespace(&pending.requester_peer_id, &request_id),
+                    pending.method,
                     pending.requester_peer_id.clone(),
                     requester.tx.clone(),
                 ));
@@ -1026,13 +1057,7 @@ impl AppState {
                 requires_bootstrap: after_seq == 0,
                 history_truncated,
             },
-            presence: session.machine_presence(store.live_sessions.get(session_id).is_some_and(
-                |live| {
-                    live.peers
-                        .values()
-                        .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
-                },
-            )),
+            presence: session.machine_presence(store.live_sessions.get(session_id)),
         })
     }
 
@@ -1223,8 +1248,10 @@ impl AppState {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
                 removed_peer = live.peers.remove(peer_id).is_some();
-                live.rpc_methods
-                    .retain(|_, owner_peer_id| owner_peer_id != peer_id);
+                live.rpc_methods.retain(|_, owner_peer_ids| {
+                    owner_peer_ids.remove(peer_id);
+                    !owner_peer_ids.is_empty()
+                });
 
                 let stale_request_ids = live
                     .pending_rpc
@@ -1256,6 +1283,13 @@ impl AppState {
                     if let Some(pending) = live.pending_rpc.remove(&request_id)
                         && let Some(requester) = live.peers.get(&pending.requester_peer_id)
                     {
+                        warn!(
+                            session_id,
+                            request_id,
+                            method = %pending.method,
+                            responder_peer_id = peer_id,
+                            "relay rpc responder disconnected before replying"
+                        );
                         deferred.push((
                             pending.requester_peer_id.clone(),
                             requester.tx.clone(),
@@ -1267,6 +1301,7 @@ impl AppState {
                                 ok: false,
                                 result: None,
                                 error: None,
+                                failure: Some(RelayRpcFailureCode::ResponderDisconnected),
                             },
                         ));
                     }
@@ -1572,10 +1607,16 @@ impl AppState {
 
     async fn register_rpc_method(&self, session_id: &str, peer_id: &str, method: String) {
         let mut ack = None;
+        let mut readiness_changed = false;
         {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
-                live.rpc_methods.insert(method.clone(), peer_id.to_string());
+                let was_ready = live.daemon_rpc_ready();
+                live.rpc_methods
+                    .entry(method.clone())
+                    .or_default()
+                    .insert(peer_id.to_string());
+                readiness_changed = was_ready != live.daemon_rpc_ready();
                 ack = live.peers.get(peer_id).map(|peer| peer.tx.clone());
             }
         }
@@ -1588,20 +1629,31 @@ impl AppState {
                 RelayServerMessage::RpcRegistered { method },
             );
         }
+        if readiness_changed {
+            self.broadcast_presence(session_id).await;
+        }
     }
 
     async fn unregister_rpc_method(&self, session_id: &str, peer_id: &str, method: String) {
         let mut ack = None;
+        let mut readiness_changed = false;
         {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
+                let was_ready = live.daemon_rpc_ready();
                 if live
                     .rpc_methods
                     .get(&method)
-                    .is_some_and(|owner| owner == peer_id)
+                    .is_some_and(|owners| owners.contains(peer_id))
                 {
-                    live.rpc_methods.remove(&method);
+                    if let Some(owners) = live.rpc_methods.get_mut(&method) {
+                        owners.remove(peer_id);
+                        if owners.is_empty() {
+                            live.rpc_methods.remove(&method);
+                        }
+                    }
                 }
+                readiness_changed = was_ready != live.daemon_rpc_ready();
                 ack = live.peers.get(peer_id).map(|peer| peer.tx.clone());
             }
         }
@@ -1613,6 +1665,9 @@ impl AppState {
                 &tx,
                 RelayServerMessage::RpcUnregistered { method },
             );
+        }
+        if readiness_changed {
+            self.broadcast_presence(session_id).await;
         }
     }
 
@@ -1640,6 +1695,13 @@ impl AppState {
                 expired = live.take_expired_rpcs(Utc::now());
                 let requester = live.peers.get(peer_id).map(|peer| peer.tx.clone());
                 if live.pending_rpc.contains_key(&namespaced_request_id) {
+                    warn!(
+                        session_id,
+                        peer_id,
+                        request_id,
+                        method,
+                        "rejecting duplicate in-flight relay rpc request"
+                    );
                     response = requester.map(|tx| {
                         (
                             peer_id.to_string(),
@@ -1649,14 +1711,23 @@ impl AppState {
                                 ok: false,
                                 result: None,
                                 error: None,
+                                failure: Some(RelayRpcFailureCode::RequestConflict),
                             },
                         )
                     });
-                } else if let Some(owner_peer_id) = live.rpc_methods.get(&method).cloned() {
+                } else if let Some(owner_peer_id) =
+                    live.rpc_methods.get(&method).and_then(|owners| {
+                        owners
+                            .iter()
+                            .find(|owner_peer_id| live.peers.contains_key(*owner_peer_id))
+                            .cloned()
+                    })
+                {
                     if let Some(owner) = live.peers.get(&owner_peer_id) {
                         live.pending_rpc.insert(
                             namespaced_request_id.clone(),
                             PendingRpc {
+                                method: method.clone(),
                                 requester_peer_id: peer_id.to_string(),
                                 responder_peer_id: owner_peer_id.clone(),
                                 expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
@@ -1674,11 +1745,20 @@ impl AppState {
                                     ok: false,
                                     result: None,
                                     error: None,
+                                    failure: Some(RelayRpcFailureCode::ResponderDisconnected),
                                 },
                             )
                         });
                     }
                 } else {
+                    warn!(
+                        session_id,
+                        peer_id,
+                        request_id,
+                        method,
+                        daemon_connected = live.daemon_connected(),
+                        "relay rpc method is unavailable"
+                    );
                     response = requester.map(|tx| {
                         (
                             peer_id.to_string(),
@@ -1688,6 +1768,7 @@ impl AppState {
                                 ok: false,
                                 result: None,
                                 error: None,
+                                failure: Some(RelayRpcFailureCode::MethodUnavailable),
                             },
                         )
                     });
@@ -1730,9 +1811,15 @@ impl AppState {
     fn notify_expired_rpcs(
         &self,
         session_id: &str,
-        expired: Vec<(String, String, mpsc::Sender<RelayServerMessage>)>,
+        expired: Vec<(String, String, String, mpsc::Sender<RelayServerMessage>)>,
     ) {
-        for (request_id, requester_peer_id, tx) in expired {
+        for (request_id, method, requester_peer_id, tx) in expired {
+            warn!(
+                session_id,
+                request_id,
+                method,
+                "relay rpc request timed out before the daemon replied"
+            );
             self.queue_message(
                 session_id,
                 &requester_peer_id,
@@ -1742,6 +1829,7 @@ impl AppState {
                     ok: false,
                     result: None,
                     error: None,
+                    failure: Some(RelayRpcFailureCode::TimedOut),
                 },
             );
         }
@@ -1806,6 +1894,7 @@ impl AppState {
                     ok,
                     result,
                     error,
+                    failure: None,
                 },
             );
         }
@@ -1966,11 +2055,7 @@ impl AppState {
         Ok(TrustedDevicesResponse {
             session_id: session_id.to_string(),
             devices,
-            presence: session.machine_presence(live.is_some_and(|live| {
-                live.peers
-                    .values()
-                    .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
-            })),
+            presence: session.machine_presence(live),
         })
     }
 
@@ -2490,11 +2575,7 @@ impl AppState {
             let Some(session) = store.data.sessions.get(session_id) else {
                 return;
             };
-            session.machine_presence(store.live_sessions.get(session_id).is_some_and(|live| {
-                live.peers
-                    .values()
-                    .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
-            }))
+            session.machine_presence(store.live_sessions.get(session_id))
         };
         self.broadcast(
             session_id,
@@ -2611,13 +2692,7 @@ impl AppState {
                 requires_bootstrap: after_seq == 0,
                 history_truncated,
             },
-            presence: session.machine_presence(store.live_sessions.get(session_id).is_some_and(
-                |live| {
-                    live.peers
-                        .values()
-                        .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
-                },
-            )),
+            presence: session.machine_presence(store.live_sessions.get(session_id)),
         })
     }
 
@@ -3027,10 +3102,11 @@ impl SessionRecord {
         devices
     }
 
-    fn machine_presence(&self, daemon_connected: bool) -> MachinePresence {
+    fn machine_presence(&self, live: Option<&LiveSession>) -> MachinePresence {
         MachinePresence {
             session_id: self.session_id.clone(),
-            daemon_connected,
+            daemon_connected: live.is_some_and(LiveSession::daemon_connected),
+            daemon_rpc_ready: live.is_some_and(LiveSession::daemon_rpc_ready),
             last_seen_at: self.daemon_last_seen_at,
         }
     }
@@ -3377,8 +3453,8 @@ mod tests {
     };
 
     use super::{
-        chunk_replay_updates, namespaced_rpc_request_id, push_dedupe_key,
-        strip_rpc_request_id_namespace, sync_messages,
+        LiveSession, PeerHandle, REQUIRED_SYNC_RPC_METHOD, chunk_replay_updates,
+        namespaced_rpc_request_id, push_dedupe_key, strip_rpc_request_id_namespace, sync_messages,
     };
 
     fn test_update(seq: u64) -> RelayUpdate {
@@ -3423,6 +3499,7 @@ mod tests {
             presence: MachinePresence {
                 session_id: "session-1".to_string(),
                 daemon_connected: false,
+                daemon_rpc_ready: false,
                 last_seen_at: None,
             },
         };
@@ -3485,5 +3562,28 @@ mod tests {
             strip_rpc_request_id_namespace("peer-abc", &namespaced),
             "scoped:id:1"
         );
+    }
+
+    #[test]
+    fn daemon_presence_is_not_sync_ready_until_snapshot_rpc_is_owned() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut live = LiveSession::default();
+        live.peers.insert(
+            "daemon-1".to_string(),
+            PeerHandle {
+                role: falcondeck_core::RelayPeerRole::Daemon,
+                device_id: None,
+                tx,
+            },
+        );
+
+        assert!(live.daemon_connected());
+        assert!(!live.daemon_rpc_ready());
+
+        live.rpc_methods.insert(
+            REQUIRED_SYNC_RPC_METHOD.to_string(),
+            std::collections::HashSet::from(["daemon-1".to_string()]),
+        );
+        assert!(live.daemon_rpc_ready());
     }
 }

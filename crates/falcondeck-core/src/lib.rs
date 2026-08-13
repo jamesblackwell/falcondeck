@@ -3233,6 +3233,11 @@ pub struct MachinePresence {
     pub session_id: String,
     /// Whether the daemon websocket is currently connected.
     pub daemon_connected: bool,
+    /// Whether the daemon has registered the RPC required to build an
+    /// authoritative client snapshot. A live websocket without this method
+    /// can carry presence while every client sync request still fails.
+    #[serde(default)]
+    pub daemon_rpc_ready: bool,
     /// Timestamp when the daemon was last seen by the relay.
     pub last_seen_at: Option<DateTime<Utc>>,
 }
@@ -3424,6 +3429,21 @@ pub enum RelayPeerRole {
     Client,
 }
 
+/// Relay-owned reason for an RPC failure that could not carry an encrypted
+/// daemon error payload.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayRpcFailureCode {
+    /// No connected daemon currently owns the requested method.
+    MethodUnavailable,
+    /// The same client request identifier is already in flight.
+    RequestConflict,
+    /// The daemon peer disappeared before resolving the request.
+    ResponderDisconnected,
+    /// The relay's pending-request deadline elapsed.
+    TimedOut,
+}
+
 /// Messages sent by daemon and clients to the relay websocket.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -3570,6 +3590,9 @@ pub enum RelayServerMessage {
         result: Option<EncryptedEnvelope>,
         /// Encrypted error payload.
         error: Option<EncryptedEnvelope>,
+        /// Plain relay-routing failure; absent for daemon-owned results.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure: Option<RelayRpcFailureCode>,
     },
     /// Newly requested remote action for the daemon.
     ActionRequested {

@@ -27,6 +27,8 @@ import {
   base64ToBytes,
   verifyPairingPublicKeyBundle,
   verifySessionKeyMaterial,
+  RELAY_RPC_TIMEOUT_MS,
+  relayRpcFailureMessage,
   REMOTE_SESSION_STORAGE_VERSION,
   type ClaimPairingRequest,
   type ClaimPairingResponse,
@@ -93,6 +95,18 @@ export interface RelayState {
   isSyncing: boolean
   /** A snapshot has landed at least once since launch (or unpair). */
   hasSyncedOnce: boolean
+  /** Timing and retry detail for the current authoritative snapshot sync. */
+  syncDiagnostics: SyncDiagnostics
+}
+
+export interface SyncDiagnostics {
+  startedAt: number | null
+  attempt: number
+  lastAttemptAt: number | null
+  nextRetryAt: number | null
+  lastError: string | null
+  lastErrorAt: number | null
+  lastSuccessAt: number | null
 }
 
 interface RelayActions {
@@ -106,6 +120,9 @@ interface RelayActions {
   _setMachinePresence: (presence: MachinePresence | null) => void
   _setError: (error: string | null) => void
   _setSyncing: (isSyncing: boolean, synced?: boolean) => void
+  _startSyncAttempt: () => void
+  _setSyncRetry: (error: string | null, nextRetryAt: number | null) => void
+  _finishSync: () => void
   _getSocket: () => WebSocket | null
   _setSocket: (socket: WebSocket | null) => void
   _getSessionCrypto: () => SessionCryptoState | null
@@ -194,6 +211,18 @@ function encryptedRpcErrorMessage(payload: unknown) {
   return 'Remote action failed'
 }
 
+function emptySyncDiagnostics(lastSuccessAt: number | null = null): SyncDiagnostics {
+  return {
+    startedAt: null,
+    attempt: 0,
+    lastAttemptAt: null,
+    nextRetryAt: null,
+    lastError: null,
+    lastErrorAt: null,
+    lastSuccessAt,
+  }
+}
+
 // ── Store ──────────────────────────────────────────────────────────
 
 export const useRelayStore = create<RelayStore>((set, get) => ({
@@ -208,6 +237,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   isEncrypted: false,
   isSyncing: false,
   hasSyncedOnce: false,
+  syncDiagnostics: emptySyncDiagnostics(),
 
   setRelayUrl: (url) => set({ relayUrl: url }),
   setPairingCode: (code) => set({ pairingCode: code.toUpperCase() }),
@@ -337,6 +367,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         isEncrypted: false,
         machinePresence: null,
         error: null,
+        isSyncing: false,
+        hasSyncedOnce: false,
+        syncDiagnostics: emptySyncDiagnostics(),
       })
     } catch (e) {
       set({
@@ -347,6 +380,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         error: e instanceof Error ? e.message : 'Failed to claim pairing',
         isConnected: false,
         isEncrypted: false,
+        isSyncing: false,
+        hasSyncedOnce: false,
+        syncDiagnostics: emptySyncDiagnostics(),
       })
     }
   },
@@ -430,6 +466,9 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
         error: null,
         isConnected: false,
         isEncrypted: false,
+        isSyncing: false,
+        hasSyncedOnce: false,
+        syncDiagnostics: emptySyncDiagnostics(),
       })
 
       return true
@@ -490,6 +529,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       isEncrypted: false,
       isSyncing: false,
       hasSyncedOnce: false,
+      syncDiagnostics: emptySyncDiagnostics(),
     })
 
     socket?.close()
@@ -513,6 +553,41 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   // backoff is still running and nothing has loaded.
   _setSyncing: (isSyncing, synced = false) =>
     set({ isSyncing, ...(synced ? { hasSyncedOnce: true } : null) }),
+  _startSyncAttempt: () =>
+    set((state) => {
+      const now = Date.now()
+      return {
+        isSyncing: true,
+        syncDiagnostics: {
+          ...state.syncDiagnostics,
+          startedAt: state.syncDiagnostics.startedAt ?? now,
+          attempt: state.syncDiagnostics.attempt + 1,
+          lastAttemptAt: now,
+          nextRetryAt: null,
+        },
+      }
+    }),
+  _setSyncRetry: (error, nextRetryAt) =>
+    set((state) => ({
+      syncDiagnostics: {
+        ...state.syncDiagnostics,
+        nextRetryAt,
+        ...(error
+          ? {
+              lastError: error,
+              lastErrorAt: Date.now(),
+            }
+          : null),
+      },
+    })),
+  _finishSync: () => {
+    const now = Date.now()
+    set({
+      isSyncing: false,
+      hasSyncedOnce: true,
+      syncDiagnostics: emptySyncDiagnostics(now),
+    })
+  },
   _getSocket: () => _socket,
   _setSocket: (socket) => { _socket = socket },
   _getSessionCrypto: () => _sessionCrypto,
@@ -585,7 +660,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       const timeout = setTimeout(() => {
         _pendingRpc.delete(requestId)
         reject(new Error(`Timed out waiting for ${method}`))
-      }, options?.timeoutMs ?? 20_000)
+      }, options?.timeoutMs ?? RELAY_RPC_TIMEOUT_MS)
 
       _pendingRpc.set(requestId, {
         method,
@@ -625,7 +700,7 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
       }
 
       if (!payload.error) {
-        pending.reject(new Error('Remote action failed'))
+        pending.reject(new Error(relayRpcFailureMessage(payload.failure, pending.method)))
         return true
       }
 

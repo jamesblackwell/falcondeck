@@ -94,6 +94,15 @@ describe('useRelayConnection session rotation', () => {
       isEncrypted: false,
       isSyncing: false,
       hasSyncedOnce: false,
+      syncDiagnostics: {
+        startedAt: null,
+        attempt: 0,
+        lastAttemptAt: null,
+        nextRetryAt: null,
+        lastError: null,
+        lastErrorAt: null,
+        lastSuccessAt: null,
+      },
     })
   })
 

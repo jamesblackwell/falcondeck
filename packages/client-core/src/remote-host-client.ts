@@ -37,6 +37,7 @@ import {
   relayReconnectDelayMs,
   type PersistedRemoteSession,
 } from './remote-session'
+import { RELAY_RPC_TIMEOUT_MS, relayRpcFailureMessage } from './remote-rpc'
 import type {
   ClaimPairingRequest,
   ClaimPairingResponse,
@@ -46,6 +47,7 @@ import type {
   PairingChallengeRequest,
   PairingChallengeResponse,
   RelayClientMessage,
+  RelayRpcFailureCode,
   RelayServerMessage,
   RelayUpdate,
   RelayWebSocketTicketResponse,
@@ -56,7 +58,6 @@ const RELAY_PING_INTERVAL_MS = 15_000
 const RELAY_BACKOFF_RESET_MS = 10_000
 const MAX_PENDING_ENCRYPTED_UPDATES = 1_000
 const BOOTSTRAP_REQUEST_RETRY_MS = 30_000
-const RPC_TIMEOUT_MS = 20_000
 
 export type RemoteHostStatus =
   | 'idle'
@@ -207,6 +208,7 @@ export class RemoteHostClient {
       resolve: (value: unknown) => void
       reject: (error: Error) => void
       timeout: ReturnType<typeof setTimeout>
+      method: string
     }
   >()
 
@@ -272,11 +274,12 @@ export class RemoteHostClient {
       const timeout = setTimeout(() => {
         this.pendingRpc.delete(requestId)
         reject(new Error(`Timed out waiting for ${method}`))
-      }, RPC_TIMEOUT_MS)
+      }, RELAY_RPC_TIMEOUT_MS)
       this.pendingRpc.set(requestId, {
         resolve: (value) => resolve(value as T),
         reject,
         timeout,
+        method,
       })
       this.send({ type: 'rpc-call', request_id: requestId, method, params: encrypted })
     })
@@ -542,7 +545,13 @@ export class RemoteHostClient {
         }
         break
       case 'rpc-result':
-        void this.resolveRpc(payload.request_id, payload.ok, payload.result ?? null, payload.error ?? null)
+        void this.resolveRpc(
+          payload.request_id,
+          payload.ok,
+          payload.result ?? null,
+          payload.error ?? null,
+          payload.failure,
+        )
         break
       case 'error':
         this.callbacks.onError?.(payload.message)
@@ -577,6 +586,7 @@ export class RemoteHostClient {
     ok: boolean,
     result: EncryptedEnvelope | null,
     errorEnvelope: EncryptedEnvelope | null,
+    failure: RelayRpcFailureCode | null | undefined,
   ) {
     const pending = this.pendingRpc.get(requestId)
     if (!pending) return
@@ -590,7 +600,7 @@ export class RemoteHostClient {
         return
       }
       if (!errorEnvelope) {
-        pending.reject(new Error('Remote action failed'))
+        pending.reject(new Error(relayRpcFailureMessage(failure, pending.method)))
         return
       }
       const decrypted = await decryptJson<unknown>(crypto.dataKey, errorEnvelope)

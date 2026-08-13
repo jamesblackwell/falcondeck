@@ -32,6 +32,17 @@ function resetStore() {
     error: null,
     isConnected: false,
     isEncrypted: false,
+    isSyncing: false,
+    hasSyncedOnce: false,
+    syncDiagnostics: {
+      startedAt: null,
+      attempt: 0,
+      lastAttemptAt: null,
+      nextRetryAt: null,
+      lastError: null,
+      lastErrorAt: null,
+      lastSuccessAt: null,
+    },
   })
   useSessionStore.getState().reset()
   resetSecureStore()
@@ -62,6 +73,28 @@ describe('relay-store', () => {
     it('uppercases the pairing code', () => {
       useRelayStore.getState().setPairingCode('abcd-1234')
       expect(useRelayStore.getState().pairingCode).toBe('ABCD-1234')
+    })
+  })
+
+  describe('sync diagnostics', () => {
+    it('tracks attempts and exact retry errors, then clears them on success', () => {
+      const store = useRelayStore.getState()
+      store._startSyncAttempt()
+      store._setSyncRetry('snapshot.current is not registered', Date.now() + 5_000)
+      store._startSyncAttempt()
+
+      expect(useRelayStore.getState().syncDiagnostics.attempt).toBe(2)
+      expect(useRelayStore.getState().syncDiagnostics.lastError).toBe(
+        'snapshot.current is not registered',
+      )
+
+      store._finishSync()
+      const finished = useRelayStore.getState()
+      expect(finished.isSyncing).toBe(false)
+      expect(finished.hasSyncedOnce).toBe(true)
+      expect(finished.syncDiagnostics.startedAt).toBeNull()
+      expect(finished.syncDiagnostics.lastError).toBeNull()
+      expect(finished.syncDiagnostics.lastSuccessAt).not.toBeNull()
     })
   })
 

@@ -1093,6 +1093,7 @@ pub(super) fn build_remote_status_response(remote: &RemoteBridgeState) -> Remote
             .map(|session_id| falcondeck_core::MachinePresence {
                 session_id: session_id.clone(),
                 daemon_connected: matches!(&status, RemoteConnectionStatus::Connected),
+                daemon_rpc_ready: matches!(&status, RemoteConnectionStatus::Connected),
                 last_seen_at: matches!(&status, RemoteConnectionStatus::Connected).then(Utc::now),
             })
     });

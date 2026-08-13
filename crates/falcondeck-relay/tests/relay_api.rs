@@ -507,6 +507,7 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
             ok: true,
             result: Some(test_envelope("ok")),
             error: None,
+            failure: None,
         }
     );
 
@@ -589,8 +590,109 @@ async fn websocket_fanout_and_rpc_forwarding_work() {
             ok: false,
             result: None,
             error: None,
+            failure: Some(falcondeck_core::RelayRpcFailureCode::MethodUnavailable),
         }
     );
+}
+
+#[tokio::test]
+async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+
+    let first_daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let second_daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let client_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &claim.client_token,
+    )
+    .await;
+    let (mut first_daemon_ws, _) = connect_async(first_daemon_url).await.unwrap();
+    let (mut second_daemon_ws, _) = connect_async(second_daemon_url).await.unwrap();
+    let (mut client_ws, _) = connect_async(client_url).await.unwrap();
+    assert!(matches!(
+        recv_server_message(&mut first_daemon_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    assert!(matches!(
+        recv_server_message(&mut second_daemon_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+    assert!(matches!(
+        recv_server_message(&mut client_ws).await,
+        RelayServerMessage::Ready { .. }
+    ));
+
+    for daemon in [&mut first_daemon_ws, &mut second_daemon_ws] {
+        send_client_message(
+            daemon,
+            &RelayClientMessage::RpcRegister {
+                method: "thread.detail".to_string(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            recv_server_message(daemon).await,
+            RelayServerMessage::RpcRegistered { .. }
+        ));
+    }
+
+    let seq_before_disconnect = server
+        .state
+        .session_updates(&claim.session_id, &claim.client_token, 0)
+        .await
+        .unwrap()
+        .next_seq;
+    second_daemon_ws.close(None).await.unwrap();
+    timeout(TokioDuration::from_secs(5), async {
+        loop {
+            let next_seq = server
+                .state
+                .session_updates(&claim.session_id, &claim.client_token, 0)
+                .await
+                .unwrap()
+                .next_seq;
+            if next_seq > seq_before_disconnect {
+                break;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("relay should process the departing daemon peer");
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "surviving-owner".to_string(),
+            method: "thread.detail".to_string(),
+            params: test_envelope("detail"),
+        },
+    )
+    .await;
+    let request = recv_server_message(&mut first_daemon_ws).await;
+    assert!(matches!(
+        request,
+        RelayServerMessage::RpcRequest { method, .. } if method == "thread.detail"
+    ));
 }
 
 #[tokio::test]
@@ -2282,6 +2384,7 @@ async fn duplicate_request_ids_from_different_devices_do_not_collide() {
             ok: true,
             result: Some(test_envelope("first-result")),
             error: None,
+            failure: None,
         }
     );
     let second_result = recv_server_message(&mut second_ws).await;
@@ -2292,6 +2395,7 @@ async fn duplicate_request_ids_from_different_devices_do_not_collide() {
             ok: true,
             result: Some(test_envelope("second-result")),
             error: None,
+            failure: None,
         }
     );
 }

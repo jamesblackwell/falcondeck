@@ -52,7 +52,6 @@ export function shouldReconnectOnAppForeground(
 ) {
   return nextAppState === 'active' && socketReadyState !== WebSocket.OPEN
 }
-
 /**
  * Matches only the relay's own structured error strings (exact, anchored) for
  * conditions that permanently invalidate the saved session. Substring or
@@ -207,7 +206,7 @@ export function useRelayConnection() {
     const requestGeneration = snapshotRequestGeneration.current + 1
     snapshotRequestGeneration.current = requestGeneration
     snapshotRequestInFlight.current = true
-    relay._setSyncing(true)
+    relay._startSyncAttempt()
     pendingSnapshotEvents.current = []
     pendingSnapshotEventSeqs.current.clear()
     snapshotRaceOverflowed.current = false
@@ -277,16 +276,19 @@ export function useRelayConnection() {
         snapshotRetryTimer.current = null
       }
       relay._setError(null)
-      relay._setSyncing(false, true)
+      relay._finishSync()
     } catch (e) {
       if (requestGeneration !== snapshotRequestGeneration.current) return
-      relay._setError(e instanceof Error ? e.message : 'Failed to load snapshot')
+      const message = e instanceof Error ? e.message : 'Failed to load snapshot'
+      relay._setError(message)
+      let nextRetryAt: number | null = null
       // Retry while this launch still owes a fresh snapshot — including when a
       // stale offline cache is on screen, otherwise one failed fetch strands
       // the banner with nothing scheduled to clear it.
       if (needsAuthoritativeSnapshot() && !snapshotRetryTimer.current) {
         const delay = Math.min(1000 * 2 ** snapshotRetryAttempt.current, 5_000)
         snapshotRetryAttempt.current += 1
+        nextRetryAt = Date.now() + delay
         snapshotRetryTimer.current = setTimeout(() => {
           snapshotRetryTimer.current = null
           // Deliberate self-reference for the retry: the callback has no deps
@@ -295,6 +297,7 @@ export function useRelayConnection() {
           void requestSnapshot()
         }, delay)
       }
+      relay._setSyncRetry(message, nextRetryAt)
     } finally {
       if (requestGeneration === snapshotRequestGeneration.current) {
         snapshotRequestInFlight.current = false
@@ -305,6 +308,7 @@ export function useRelayConnection() {
         pendingSnapshotEventSeqs.current.clear()
         snapshotRaceOverflowed.current = false
         if (shouldRefetch && !snapshotRefetchTimer.current) {
+          relay._setSyncRetry(null, Date.now() + SNAPSHOT_REFETCH_DELAY_MS)
           snapshotRefetchTimer.current = setTimeout(() => {
             snapshotRefetchTimer.current = null
             void requestSnapshot()
@@ -319,7 +323,10 @@ export function useRelayConnection() {
     if (await relay._handleRpcResult(payload)) {
       return
     }
-    if (!payload.ok) relay._setError('Remote action failed')
+    if (!payload.ok) {
+      const reason = payload.failure?.replace(/_/g, ' ') ?? 'no relay detail'
+      relay._setError(`Late remote response failed (${reason})`)
+    }
   }, [])
 
   const flushRelayUpdates = useCallback(async () => {

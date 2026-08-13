@@ -7,7 +7,8 @@
  * is waiting for instead of looking broken.
  */
 
-export type SessionSyncStage = 'pairing' | 'connecting' | 'securing' | 'syncing' | 'offline' | 'ready'
+export type SessionSyncStage =
+  'pairing' | 'connecting' | 'securing' | 'syncing' | 'repairing' | 'offline' | 'ready'
 
 export interface SessionSyncStatus {
   stage: SessionSyncStage
@@ -17,6 +18,10 @@ export interface SessionSyncStatus {
   detail: string
   /** False once the session is usable — the banner hides. */
   isBusy: boolean
+  syncStartedAt: number | null
+  syncAttempt: number
+  nextRetryAt: number | null
+  lastError: string | null
 }
 
 export interface SessionSyncInput {
@@ -28,73 +33,92 @@ export interface SessionSyncInput {
   hasSnapshot: boolean
   /** The paired desktop is reachable through the relay. */
   daemonConnected: boolean
+  /** The connected daemon has registered snapshot.current. Undefined means
+   * an older relay that only reports transport presence. */
+  daemonRpcReady?: boolean
   /** First sync since launch has landed. */
   hasSyncedOnce: boolean
+  syncStartedAt?: number | null
+  syncAttempt?: number
+  nextRetryAt?: number | null
+  lastError?: string | null
 }
 
 export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncStatus {
   const { connectionStatus, isEncrypted, isSyncing, hasSnapshot, daemonConnected, hasSyncedOnce } =
     input
+  const diagnostics = {
+    syncStartedAt: input.syncStartedAt ?? null,
+    syncAttempt: input.syncAttempt ?? 0,
+    nextRetryAt: input.nextRetryAt ?? null,
+    lastError: input.lastError ?? null,
+  }
+  const busy = (
+    stage: Exclude<SessionSyncStage, 'ready'>,
+    label: string,
+    detail: string,
+  ): SessionSyncStatus => ({
+    stage,
+    label,
+    detail,
+    isBusy: true,
+    ...diagnostics,
+  })
 
   if (connectionStatus === 'claiming') {
-    return {
-      stage: 'pairing',
-      label: 'Pairing this device…',
-      detail: 'Finishing the handshake with your Mac.',
-      isBusy: true,
-    }
+    return busy('pairing', 'Pairing this device…', 'Finishing the handshake with your Mac.')
   }
 
   if (!isEncrypted) {
     // 'connected' means the socket is up but the session data key has not
     // arrived yet, which is its own (usually brief) wait.
     if (connectionStatus === 'connected') {
-      return {
-        stage: 'securing',
-        label: 'Securing session…',
-        detail: 'Exchanging encryption keys with your Mac.',
-        isBusy: true,
-      }
+      return busy('securing', 'Securing session…', 'Exchanging encryption keys with your Mac.')
     }
     if (connectionStatus === 'connecting' || connectionStatus === 'disconnected') {
-      return {
-        stage: 'connecting',
-        label: 'Reconnecting…',
-        detail: hasSnapshot
+      return busy(
+        'connecting',
+        'Reconnecting…',
+        hasSnapshot
           ? 'Showing your last synced projects until the connection is back.'
           : 'Waiting for the relay connection.',
-        isBusy: true,
-      }
+      )
     }
-    return {
-      stage: 'offline',
-      label: 'Not connected',
-      detail: 'Pair this device from Settings to start a thread.',
-      isBusy: true,
-    }
+    return busy('offline', 'Not connected', 'Pair this device from Settings to start a thread.')
   }
 
   if (isSyncing || !hasSyncedOnce) {
-    return {
-      stage: 'syncing',
-      label: 'Syncing your projects…',
-      detail: hasSnapshot
+    if (daemonConnected && input.daemonRpcReady === false) {
+      return busy(
+        'repairing',
+        'Repairing sync…',
+        'Your Mac is online, but its sync service is re-registering. Retrying automatically.',
+      )
+    }
+    return busy(
+      'syncing',
+      'Syncing your projects…',
+      hasSnapshot
         ? 'Threads may be a few seconds out of date until this finishes.'
         : 'Loading projects and threads from your Mac.',
-      isBusy: true,
-    }
+    )
   }
 
   if (!daemonConnected) {
-    return {
-      stage: 'offline',
-      label: 'Desktop offline',
-      detail: 'FalconDeck is not running on your Mac, so new threads cannot start.',
-      isBusy: true,
-    }
+    return busy(
+      'offline',
+      'Desktop offline',
+      'FalconDeck is not running on your Mac, so new threads cannot start.',
+    )
   }
 
-  return { stage: 'ready', label: 'Connected', detail: '', isBusy: false }
+  return {
+    stage: 'ready',
+    label: 'Connected',
+    detail: '',
+    isBusy: false,
+    ...diagnostics,
+  }
 }
 
 /**
@@ -111,6 +135,8 @@ export function sessionSendBlockReason(status: SessionSyncStatus): string | null
       return 'Securing session…'
     case 'syncing':
       return 'Syncing with your Mac…'
+    case 'repairing':
+      return 'Repairing sync with your Mac…'
     case 'offline':
       return 'Not connected to your Mac'
     case 'ready':

@@ -41,9 +41,19 @@ In a staging relay, exercise each client with:
 6. duplicate replay frames after reconnect.
 7. a snapshot response resolving while an encrypted update is still decrypting,
    followed by a replacement snapshot that checkpoints the held update cursor.
+8. two overlapping daemon sockets that both register `snapshot.current`, then
+   close the most recently connected socket. Presence must remain online, the
+   surviving owner must continue serving snapshots, and removing every owner
+   must return the structured `method_unavailable` failure. Also clear the
+   relay's in-memory RPC registration while leaving the daemon socket alive;
+   heartbeat re-registration must restore `daemon_rpc_ready` within 15 seconds
+   without a reconnect.
 
 The expected result is either exactly-once visible state or harmless
 idempotent reapplication; no cursor may advance beyond an unapplied update.
+The mobile sync banner must name a missing snapshot registration immediately
+and, after 30 seconds, show elapsed time, attempt count, next retry, and the
+last exact failure instead of a generic “Remote action failed” message.
 
 ## Performance measurements
 

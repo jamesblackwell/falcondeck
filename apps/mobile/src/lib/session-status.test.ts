@@ -8,6 +8,7 @@ const ready = {
   isSyncing: false,
   hasSnapshot: true,
   daemonConnected: true,
+  daemonRpcReady: true,
   hasSyncedOnce: true,
 }
 
@@ -52,6 +53,17 @@ describe('resolveSessionSyncStatus', () => {
 
   it('reports syncing again on a later refetch', () => {
     expect(resolveSessionSyncStatus({ ...ready, isSyncing: true }).stage).toBe('syncing')
+  })
+
+  it('distinguishes a live Mac whose snapshot RPC registration is missing', () => {
+    const status = resolveSessionSyncStatus({
+      ...ready,
+      hasSyncedOnce: false,
+      daemonRpcReady: false,
+    })
+    expect(status.stage).toBe('repairing')
+    expect(status.detail).toContain('sync service is re-registering')
+    expect(sessionSendBlockReason(status)).toBe('Repairing sync with your Mac…')
   })
 
   it('surfaces an offline desktop once the session itself is healthy', () => {

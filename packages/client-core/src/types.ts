@@ -1156,8 +1156,17 @@ export type TrustedDevice = {
 export type MachinePresence = {
   session_id: string;
   daemon_connected: boolean;
+  /** True once the connected daemon owns snapshot.current. Optional for
+   * compatibility with older relays. */
+  daemon_rpc_ready?: boolean;
   last_seen_at: string | null;
 };
+
+export type RelayRpcFailureCode =
+  | "method_unavailable"
+  | "request_conflict"
+  | "responder_disconnected"
+  | "timed_out";
 
 export type SyncCursor = {
   session_id: string;
@@ -1326,6 +1335,7 @@ export type RelayServerMessage =
       ok: boolean;
       result?: EncryptedEnvelope | null;
       error?: EncryptedEnvelope | null;
+      failure?: RelayRpcFailureCode | null;
     }
   | { type: "error"; message: string };
 

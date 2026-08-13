@@ -109,15 +109,7 @@ impl AppState {
         let fence_seq = self.inner.sequence.load(Ordering::Relaxed);
         let snapshot = self.snapshot().await;
 
-        for method in REMOTE_RPC_METHODS {
-            send_relay_message(
-                &mut writer,
-                &RelayClientMessage::RpcRegister {
-                    method: (*method).to_string(),
-                },
-            )
-            .await?;
-        }
+        register_remote_rpc_methods(&mut writer).await?;
         if let Some(client_bundle) = client_bundle.as_ref() {
             self.publish_session_bootstrap(&mut writer, &pairing, client_bundle)
                 .await?;
@@ -228,6 +220,11 @@ impl AppState {
                         ));
                     }
                     send_relay_message(&mut writer, &RelayClientMessage::Ping).await?;
+                    // The relay's method registry is intentionally ephemeral.
+                    // Reassert it with every heartbeat so a partial relay
+                    // state loss self-heals without requiring either side to
+                    // reconnect (the websocket can remain healthy throughout).
+                    register_remote_rpc_methods(&mut writer).await?;
                 }
                 command = command_rx.recv() => {
                     if let Some(command) = command {
@@ -1725,6 +1722,19 @@ fn remote_event_message(
     event: &EventEnvelope,
 ) -> Result<RelayClientMessage, String> {
     remote_events_message(data_key, std::slice::from_ref(event))
+}
+
+async fn register_remote_rpc_methods(writer: &mut RelayWriter) -> Result<(), String> {
+    for method in REMOTE_RPC_METHODS {
+        send_relay_message(
+            writer,
+            &RelayClientMessage::RpcRegister {
+                method: (*method).to_string(),
+            },
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 async fn send_relay_message(

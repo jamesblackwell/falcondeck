@@ -13,8 +13,13 @@ export function useSessionSyncStatus(): SessionSyncStatus {
   const isEncrypted = useRelayStore((s) => s.isEncrypted)
   const isSyncing = useRelayStore((s) => s.isSyncing)
   const hasSyncedOnce = useRelayStore((s) => s.hasSyncedOnce)
-  const daemonConnected = useRelayStore((s) => s.machinePresence?.daemon_connected ?? false)
+  const machinePresence = useRelayStore((s) => s.machinePresence)
+  const syncDiagnostics = useRelayStore((s) => s.syncDiagnostics)
   const hasSnapshot = useSessionStore((s) => s.snapshot !== null)
+  const daemonConnected = machinePresence?.daemon_connected ?? false
+  // Older relays omit readiness. Preserve their transport-only behaviour
+  // until the relay upgrade reaches the device.
+  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? daemonConnected
 
   // Memoised so the banner's memo() actually holds: the resolver returns a
   // fresh object every call and this hook runs on every parent render.
@@ -26,8 +31,22 @@ export function useSessionSyncStatus(): SessionSyncStatus {
         isSyncing,
         hasSnapshot,
         daemonConnected,
+        daemonRpcReady,
         hasSyncedOnce,
+        syncStartedAt: syncDiagnostics.startedAt,
+        syncAttempt: syncDiagnostics.attempt,
+        nextRetryAt: syncDiagnostics.nextRetryAt,
+        lastError: syncDiagnostics.lastError,
       }),
-    [connectionStatus, daemonConnected, hasSnapshot, hasSyncedOnce, isEncrypted, isSyncing],
+    [
+      connectionStatus,
+      daemonConnected,
+      daemonRpcReady,
+      hasSnapshot,
+      hasSyncedOnce,
+      isEncrypted,
+      isSyncing,
+      syncDiagnostics,
+    ],
   )
 }

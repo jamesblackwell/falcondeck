@@ -18,6 +18,8 @@ import { __resetAllStores as resetMMKV } from 'react-native-mmkv'
 import { getJson, setJson } from '@/storage/mmkv'
 import { loadClientToken, persistClientSecretKey, persistClientToken } from '@/storage/secure'
 
+const originalSendMessage = useRelayStore.getState()._sendMessage
+
 function resetStore() {
   useRelayStore.setState({
     relayUrl: 'https://connect.falcondeck.com',
@@ -29,6 +31,7 @@ function resetStore() {
     error: null,
     isConnected: false,
     isEncrypted: false,
+    _sendMessage: originalSendMessage,
   })
   resetSecureStore()
   resetMMKV()
@@ -61,6 +64,32 @@ describe('relay-store crypto operations', () => {
 
       const decrypted = await store._decryptJson<{ message: string; count: number }>(envelope)
       expect(decrypted).toEqual({ message: 'secret', count: 42 })
+    })
+
+    it('surfaces the relay routing reason when an RPC has no encrypted error', async () => {
+      const dataKey = crypto.getRandomValues(new Uint8Array(32))
+      useRelayStore.getState()._setSessionCrypto({ dataKey, material: null })
+      const sent: Array<{ request_id: string }> = []
+      useRelayStore.setState({
+        _sendMessage: (message) => {
+          if (message.type === 'rpc-call') sent.push(message)
+        },
+      })
+
+      const request = useRelayStore.getState()._callRpc('snapshot.current', {})
+      await vi.waitFor(() => expect(sent).toHaveLength(1))
+      const rejection = expect(request).rejects.toThrow(
+        'Your Mac is connected, but snapshot.current is not registered',
+      )
+      await useRelayStore.getState()._handleRpcResult({
+        type: 'rpc-result',
+        request_id: sent[0].request_id,
+        ok: false,
+        result: null,
+        error: null,
+        failure: 'method_unavailable',
+      })
+      await rejection
     })
 
     it('decrypt throws when session crypto is not established', async () => {

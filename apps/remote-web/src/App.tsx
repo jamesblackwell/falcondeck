@@ -51,6 +51,8 @@ import {
   providerForThread,
   publicKeyToBase64,
   relayBacklogWouldOverflow,
+  relayRpcFailureMessage,
+  RELAY_RPC_TIMEOUT_MS,
   REMOTE_EVENT_BATCH_FEATURE,
   reconcileSnapshotSelection,
   resolvePersistedMode,
@@ -101,6 +103,7 @@ import {
   type PersistedRemoteSession,
   type QueuedRemoteAction,
   type RelayServerMessage,
+  type RelayRpcFailureCode,
   type RelayWebSocketTicketResponse,
   type RelayUpdate,
   type SessionCryptoState,
@@ -514,6 +517,7 @@ function RemoteApp() {
         resolve: (value: unknown) => void;
         reject: (error: Error) => void;
         timeout: number;
+        method: string;
       }
     >(),
   );
@@ -1375,6 +1379,7 @@ function RemoteApp() {
                   payload.ok,
                   payload.result ?? null,
                   payload.error ?? null,
+                  payload.failure,
                 );
                 return;
               }
@@ -1461,6 +1466,7 @@ function RemoteApp() {
     ok: boolean,
     result: EncryptedEnvelope | null,
     errorEnvelope: EncryptedEnvelope | null,
+    failure: RelayRpcFailureCode | null | undefined,
   ) {
     const pending = pendingRpc.current.get(requestId);
     if (!pending) return;
@@ -1474,7 +1480,9 @@ function RemoteApp() {
         return;
       }
       if (!errorEnvelope) {
-        pending.reject(new Error("Remote action failed"));
+        pending.reject(
+          new Error(relayRpcFailureMessage(failure, pending.method)),
+        );
         return;
       }
       const dec = await decryptJson<unknown>(sc.dataKey, errorEnvelope);
@@ -1925,11 +1933,12 @@ function RemoteApp() {
         const timeout = window.setTimeout(() => {
           pendingRpc.current.delete(requestId);
           reject(new Error(`Timed out waiting for ${method}`));
-        }, 20_000);
+        }, RELAY_RPC_TIMEOUT_MS);
         pendingRpc.current.set(requestId, {
           resolve: (value) => resolve(value as T),
           reject,
           timeout,
+          method,
         });
         sendRelayMessage(socket, {
           type: "rpc-call",
