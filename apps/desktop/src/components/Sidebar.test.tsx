@@ -110,6 +110,23 @@ function renderSidebar(
 }
 
 describe('DesktopSidebar', () => {
+  it('selects a thread when clicking anywhere in its highlighted row', () => {
+    const onSelectThread = vi.fn()
+    renderSidebar(
+      {
+        selectedThreadId: null,
+        onSelectThread,
+      },
+      {
+        updated_at: new Date().toISOString(),
+      },
+    )
+
+    fireEvent.click(screen.getByText('now'))
+
+    expect(onSelectThread).toHaveBeenCalledWith('workspace-1', 'thread-1')
+  })
+
   it('clearly marks a turn that stopped when FalconDeck closed', () => {
     renderSidebar(
       {},

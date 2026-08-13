@@ -84,6 +84,7 @@ export const ThreadItem = memo(
             ? 'fd-row-selected'
             : 'hover:bg-interactive-hover active:bg-interactive-active',
         )}
+        onClick={() => onSelect(workspaceId, thread.id)}
         onContextMenu={(event: React.MouseEvent<HTMLDivElement>) => {
           if (!onOpenContextMenu) return
           event.preventDefault()
@@ -103,7 +104,13 @@ export const ThreadItem = memo(
         <button
           type="button"
           className="fd-focus-inset flex min-w-0 flex-1 items-center gap-1.5 rounded-[var(--fd-radius-sm)] text-left"
-          onClick={() => onSelect(workspaceId, thread.id)}
+          onClick={(event) => {
+            // Selection also lives on the full row so the timestamp and
+            // trailing space match the hover/selected hit area. Keep the
+            // title button from selecting twice as the click bubbles up.
+            event.stopPropagation()
+            onSelect(workspaceId, thread.id)
+          }}
         >
           <span className="flex h-4 w-4 shrink-0 items-center justify-center">
             {wasInterrupted ? (
