@@ -154,12 +154,18 @@ export function connectionBadgeState(
   status: string,
   desktopOnline: boolean,
   hasSessionKey = true,
+  daemonRpcReady = desktopOnline,
+  daemonPresenceKnown = true,
 ) {
   if (status.startsWith('connected')) {
     // Attached to the relay is not the same as able to read anything: without
     // the session key the composer is disabled and the transcript is empty,
     // so a plain "Connected" would be a lie.
     if (!hasSessionKey) return { variant: 'warning' as const, label: 'Securing' }
+    if (!daemonPresenceKnown) return { variant: 'warning' as const, label: 'Checking desktop' }
+    if (desktopOnline && !daemonRpcReady) {
+      return { variant: 'warning' as const, label: 'Sync repairing' }
+    }
     if (desktopOnline) return { variant: 'success' as const, label: 'Connected' }
     return { variant: 'warning' as const, label: 'Desktop retrying' }
   }

@@ -7,8 +7,18 @@ import { SettingsRow, SettingsSection, settingsPageStyles } from '@/components/s
 import { Button, Text } from '@/components/ui'
 import { useRelayStore } from '@/store'
 
-function connectionSummary(status: string, encrypted: boolean, desktopOnline: boolean) {
-  if (status === 'encrypted' && encrypted) return desktopOnline ? 'Connected' : 'Daemon offline'
+function connectionSummary(
+  status: string,
+  encrypted: boolean,
+  desktopOnline: boolean,
+  daemonRpcReady: boolean,
+  daemonPresenceKnown: boolean,
+) {
+  if (status === 'encrypted' && encrypted) {
+    if (!daemonPresenceKnown) return 'Checking desktop…'
+    if (!desktopOnline) return 'Daemon offline'
+    return daemonRpcReady ? 'Connected' : 'Sync service repairing'
+  }
   if (status === 'connected') return 'Securing session…'
   if (status === 'connecting') return 'Connecting…'
   if (status === 'disconnected') return 'Waiting to reconnect'
@@ -26,6 +36,8 @@ export default function ConnectionsSettingsScreen() {
   const presence = useRelayStore((state) => state.machinePresence)
   const [isDisconnecting, setIsDisconnecting] = useState(false)
   const desktopOnline = presence?.daemon_connected ?? false
+  const daemonPresenceKnown = presence !== null
+  const daemonRpcReady = presence?.daemon_rpc_ready ?? desktopOnline
 
   const disconnectAndPair = async () => {
     if (isDisconnecting) return
@@ -56,9 +68,30 @@ export default function ConnectionsSettingsScreen() {
       contentInsetAdjustmentBehavior="automatic"
     >
       <SettingsSection title="Active connection" footer="FalconDeck connects through the relay with end-to-end encryption; the relay cannot read daemon traffic.">
-        <SettingsRow label="Status" value={connectionSummary(status, encrypted, desktopOnline)} />
+        <SettingsRow
+          label="Status"
+          value={connectionSummary(
+            status,
+            encrypted,
+            desktopOnline,
+            daemonRpcReady,
+            daemonPresenceKnown,
+          )}
+        />
         <SettingsRow label="Relay" value={relayUrl} />
         <SettingsRow label="Encryption" value={encrypted ? 'End-to-end encrypted' : 'Not established'} />
+        <SettingsRow
+          label="Snapshot sync"
+          value={
+            !daemonPresenceKnown
+              ? 'Waiting for presence'
+              : !desktopOnline
+                ? 'Desktop offline'
+                : daemonRpcReady
+                  ? 'Ready'
+                  : 'Re-registering'
+          }
+        />
         <SettingsRow label="Session" value={sessionId ?? '—'} />
         <SettingsRow label="Device" value={deviceId ?? '—'} />
       </SettingsSection>

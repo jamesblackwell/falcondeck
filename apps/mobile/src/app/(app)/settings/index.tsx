@@ -9,8 +9,18 @@ import { SettingsRow, SettingsSection, settingsPageStyles } from '@/components/s
 import { useRelayStore, useSessionStore } from '@/store'
 import { useAppearanceStore } from '@/theme/appearance'
 
-function connectionLabel(status: string, encrypted: boolean, desktopOnline: boolean) {
-  if (status === 'encrypted' && encrypted) return desktopOnline ? 'Connected' : 'Offline'
+function connectionLabel(
+  status: string,
+  encrypted: boolean,
+  desktopOnline: boolean,
+  daemonRpcReady: boolean,
+  daemonPresenceKnown: boolean,
+) {
+  if (status === 'encrypted' && encrypted) {
+    if (!daemonPresenceKnown) return 'Checking…'
+    if (!desktopOnline) return 'Offline'
+    return daemonRpcReady ? 'Connected' : 'Repairing'
+  }
   if (status === 'connected') return 'Securing…'
   if (status === 'connecting') return 'Connecting…'
   if (status === 'disconnected') return 'Reconnecting…'
@@ -27,6 +37,8 @@ export default function SettingsScreen() {
   const themeMode = useAppearanceStore((state) => state.themeMode)
   const normalized = normalizePreferences(preferences)
   const desktopOnline = machinePresence?.daemon_connected ?? false
+  const daemonPresenceKnown = machinePresence !== null
+  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? desktopOnline
   const appearanceValue = themeMode === 'system'
     ? 'System'
     : themeMode === 'light' ? 'Light' : 'Dark'
@@ -42,7 +54,13 @@ export default function SettingsScreen() {
         <SettingsRow
           label="Connections"
           detail="Pairing, relay status, and encryption"
-          value={connectionLabel(connectionStatus, isEncrypted, desktopOnline)}
+          value={connectionLabel(
+            connectionStatus,
+            isEncrypted,
+            desktopOnline,
+            daemonRpcReady,
+            daemonPresenceKnown,
+          )}
           icon={<MonitorCog size={theme.iconSize.sm} color={theme.colors.info.default} />}
           onPress={() => router.push('/(app)/settings/connections')}
         />

@@ -88,6 +88,12 @@ describe('relay-store', () => {
         'snapshot.current is not registered',
       )
 
+      store._setSyncRetry(null, null)
+      expect(useRelayStore.getState().syncDiagnostics.nextRetryAt).toBeNull()
+      expect(useRelayStore.getState().syncDiagnostics.lastError).toBe(
+        'snapshot.current is not registered',
+      )
+
       store._finishSync()
       const finished = useRelayStore.getState()
       expect(finished.isSyncing).toBe(false)

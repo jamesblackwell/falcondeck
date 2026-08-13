@@ -11,7 +11,7 @@ interface ConnectionHeaderProps {
   onPress?: () => void
 }
 
-function connectionLabel(status: string): string {
+export function connectionLabel(status: string): string {
   if (status === 'encrypted') return 'Connected'
   if (status === 'connected') return 'Securing session...'
   if (status === 'connecting') return 'Connecting...'
@@ -20,20 +20,26 @@ function connectionLabel(status: string): string {
   return 'Not connected'
 }
 
-function connectionState(
+export type ConnectionTone = 'connected' | 'repairing' | 'disconnected'
+
+export function connectionState(
   connectionStatus: string,
   isEncrypted: boolean,
   desktopOnline: boolean,
-): { connected: boolean; label: string } {
+  daemonRpcReady = desktopOnline,
+  daemonPresenceKnown = true,
+): { tone: ConnectionTone; label: string } {
   const relayReady = connectionStatus === 'encrypted' && isEncrypted
 
   if (relayReady) {
-    if (desktopOnline) return { connected: true, label: 'Connected' }
-    return { connected: false, label: 'Desktop offline' }
+    if (!daemonPresenceKnown) return { tone: 'repairing', label: 'Checking desktop' }
+    if (!desktopOnline) return { tone: 'disconnected', label: 'Desktop offline' }
+    if (!daemonRpcReady) return { tone: 'repairing', label: 'Sync repairing' }
+    return { tone: 'connected', label: 'Connected' }
   }
 
   return {
-    connected: false,
+    tone: 'disconnected',
     label: connectionLabel(connectionStatus),
   }
 }
@@ -45,7 +51,14 @@ export const ConnectionHeader = memo(function ConnectionHeader({
   onPress,
 }: ConnectionHeaderProps) {
   const desktopOnline = machinePresence?.daemon_connected ?? false
-  const state = connectionState(connectionStatus, isEncrypted, desktopOnline)
+  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? desktopOnline
+  const state = connectionState(
+    connectionStatus,
+    isEncrypted,
+    desktopOnline,
+    daemonRpcReady,
+    machinePresence !== null,
+  )
 
   return (
     <Pressable
@@ -56,7 +69,7 @@ export const ConnectionHeader = memo(function ConnectionHeader({
       accessibilityHint="Opens settings"
       hitSlop={8}
     >
-      <View style={[styles.dot, state.connected ? styles.connected : styles.disconnected]} />
+      <View style={[styles.dot, styles[state.tone]]} />
     </Pressable>
   )
 })
@@ -74,5 +87,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
   },
   connected: { backgroundColor: theme.colors.success.default },
+  repairing: { backgroundColor: theme.colors.warning.default },
   disconnected: { backgroundColor: theme.colors.danger.default },
 }))

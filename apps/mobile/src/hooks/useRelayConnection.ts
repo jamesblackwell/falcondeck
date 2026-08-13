@@ -591,6 +591,7 @@ export function useRelayConnection() {
       clearTimeout(snapshotRefetchTimer.current)
       snapshotRefetchTimer.current = null
     }
+    relay._setSyncRetry(null, null)
     if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
       globalThis.cancelAnimationFrame(relayFlushFrame.current)
       relayFlushFrame.current = null
@@ -668,6 +669,7 @@ export function useRelayConnection() {
         clearTimeout(snapshotRefetchTimer.current)
         snapshotRefetchTimer.current = null
       }
+      relay._setSyncRetry(null, null)
       if (relayFlushFrame.current !== null && globalThis.cancelAnimationFrame) {
         globalThis.cancelAnimationFrame(relayFlushFrame.current)
         relayFlushFrame.current = null
@@ -942,6 +944,7 @@ export function useRelayConnection() {
         clearTimeout(snapshotRefetchTimer.current)
         snapshotRefetchTimer.current = null
       }
+      relay._setSyncRetry(null, null)
       if (reconnectTimer.current) {
         clearTimeout(reconnectTimer.current)
         reconnectTimer.current = null

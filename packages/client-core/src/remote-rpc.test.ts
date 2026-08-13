@@ -13,6 +13,12 @@ describe('relayRpcFailureMessage', () => {
     )
   })
 
+  it('does not promise automatic retries for one-shot remote actions', () => {
+    expect(relayRpcFailureMessage('method_unavailable', 'thread.detail')).toBe(
+      'Your Mac is connected, but thread.detail is not registered. Try again in a moment.',
+    )
+  })
+
   it('does not collapse missing relay detail into a generic action error', () => {
     expect(relayRpcFailureMessage(undefined, 'thread.detail')).toBe(
       'Remote thread.detail failed without details.',

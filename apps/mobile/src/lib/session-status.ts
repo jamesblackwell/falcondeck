@@ -33,6 +33,9 @@ export interface SessionSyncInput {
   hasSnapshot: boolean
   /** The paired desktop is reachable through the relay. */
   daemonConnected: boolean
+  /** Presence has arrived from the relay. False avoids briefly reporting an
+   * offline Mac between the socket-ready and presence frames. */
+  daemonPresenceKnown?: boolean
   /** The connected daemon has registered snapshot.current. Undefined means
    * an older relay that only reports transport presence. */
   daemonRpcReady?: boolean
@@ -87,20 +90,11 @@ export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncSt
     return busy('offline', 'Not connected', 'Pair this device from Settings to start a thread.')
   }
 
-  if (isSyncing || !hasSyncedOnce) {
-    if (daemonConnected && input.daemonRpcReady === false) {
-      return busy(
-        'repairing',
-        'Repairing sync…',
-        'Your Mac is online, but its sync service is re-registering. Retrying automatically.',
-      )
-    }
+  if (input.daemonPresenceKnown === false) {
     return busy(
       'syncing',
-      'Syncing your projects…',
-      hasSnapshot
-        ? 'Threads may be a few seconds out of date until this finishes.'
-        : 'Loading projects and threads from your Mac.',
+      'Checking desktop…',
+      'Waiting for your Mac\'s status from the relay.',
     )
   }
 
@@ -109,6 +103,24 @@ export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncSt
       'offline',
       'Desktop offline',
       'FalconDeck is not running on your Mac, so new threads cannot start.',
+    )
+  }
+
+  if (input.daemonRpcReady === false) {
+    return busy(
+      'repairing',
+      'Repairing sync…',
+      'Your Mac is online, but its sync service is re-registering. Retrying automatically.',
+    )
+  }
+
+  if (isSyncing || !hasSyncedOnce) {
+    return busy(
+      'syncing',
+      'Syncing your projects…',
+      hasSnapshot
+        ? 'Threads may be a few seconds out of date until this finishes.'
+        : 'Loading projects and threads from your Mac.',
     )
   }
 

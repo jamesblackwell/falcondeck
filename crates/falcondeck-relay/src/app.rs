@@ -1,8 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use falcondeck_core::{
@@ -300,10 +296,10 @@ pub(crate) struct TrustedDeviceRecord {
 #[derive(Default)]
 struct LiveSession {
     peers: HashMap<String, PeerHandle>,
-    /// Every live daemon peer that registered each method. Connections can
-    /// overlap during reconnect; retaining all owners prevents the departing
-    /// peer from erasing a still-live peer's registration.
-    rpc_methods: HashMap<String, HashSet<String>>,
+    /// Live daemon peers in registration order for each method. Connections
+    /// can overlap during reconnect; the most recently registered owner serves
+    /// new calls while older owners remain as deterministic fallbacks.
+    rpc_methods: HashMap<String, Vec<String>>,
     pending_rpc: HashMap<String, PendingRpc>,
 }
 
@@ -321,16 +317,21 @@ impl LiveSession {
             .any(|peer| matches!(peer.role, RelayPeerRole::Daemon))
     }
 
-    fn daemon_rpc_ready(&self) -> bool {
+    fn rpc_owner(&self, method: &str) -> Option<(&str, &PeerHandle)> {
         self.rpc_methods
-            .get(REQUIRED_SYNC_RPC_METHOD)
-            .is_some_and(|owners| {
-                owners.iter().any(|peer_id| {
-                    self.peers
-                        .get(peer_id)
-                        .is_some_and(|peer| matches!(peer.role, RelayPeerRole::Daemon))
-                })
+            .get(method)?
+            .iter()
+            .rev()
+            .find_map(|peer_id| {
+                self.peers
+                    .get(peer_id)
+                    .filter(|peer| matches!(peer.role, RelayPeerRole::Daemon))
+                    .map(|peer| (peer_id.as_str(), peer))
             })
+    }
+
+    fn daemon_rpc_ready(&self) -> bool {
+        self.rpc_owner(REQUIRED_SYNC_RPC_METHOD).is_some()
     }
 
     /// Remove expired pending RPC entries, returning the requester peers
@@ -1249,7 +1250,7 @@ impl AppState {
             if let Some(live) = store.live_sessions.get_mut(session_id) {
                 removed_peer = live.peers.remove(peer_id).is_some();
                 live.rpc_methods.retain(|_, owner_peer_ids| {
-                    owner_peer_ids.remove(peer_id);
+                    owner_peer_ids.retain(|owner_peer_id| owner_peer_id != peer_id);
                     !owner_peer_ids.is_empty()
                 });
 
@@ -1612,10 +1613,10 @@ impl AppState {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
                 let was_ready = live.daemon_rpc_ready();
-                live.rpc_methods
-                    .entry(method.clone())
-                    .or_default()
-                    .insert(peer_id.to_string());
+                let owners = live.rpc_methods.entry(method.clone()).or_default();
+                if !owners.iter().any(|owner_peer_id| owner_peer_id == peer_id) {
+                    owners.push(peer_id.to_string());
+                }
                 readiness_changed = was_ready != live.daemon_rpc_ready();
                 ack = live.peers.get(peer_id).map(|peer| peer.tx.clone());
             }
@@ -1641,16 +1642,13 @@ impl AppState {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
                 let was_ready = live.daemon_rpc_ready();
-                if live
-                    .rpc_methods
-                    .get(&method)
-                    .is_some_and(|owners| owners.contains(peer_id))
+                if live.rpc_methods.get(&method).is_some_and(|owners| {
+                    owners.iter().any(|owner_peer_id| owner_peer_id == peer_id)
+                }) && let Some(owners) = live.rpc_methods.get_mut(&method)
                 {
-                    if let Some(owners) = live.rpc_methods.get_mut(&method) {
-                        owners.remove(peer_id);
-                        if owners.is_empty() {
-                            live.rpc_methods.remove(&method);
-                        }
+                    owners.retain(|owner_peer_id| owner_peer_id != peer_id);
+                    if owners.is_empty() {
+                        live.rpc_methods.remove(&method);
                     }
                 }
                 readiness_changed = was_ready != live.daemon_rpc_ready();
@@ -1715,41 +1713,20 @@ impl AppState {
                             },
                         )
                     });
-                } else if let Some(owner_peer_id) =
-                    live.rpc_methods.get(&method).and_then(|owners| {
-                        owners
-                            .iter()
-                            .find(|owner_peer_id| live.peers.contains_key(*owner_peer_id))
-                            .cloned()
-                    })
+                } else if let Some((owner_peer_id, owner_tx)) = live
+                    .rpc_owner(&method)
+                    .map(|(peer_id, peer)| (peer_id.to_owned(), peer.tx.clone()))
                 {
-                    if let Some(owner) = live.peers.get(&owner_peer_id) {
-                        live.pending_rpc.insert(
-                            namespaced_request_id.clone(),
-                            PendingRpc {
-                                method: method.clone(),
-                                requester_peer_id: peer_id.to_string(),
-                                responder_peer_id: owner_peer_id.clone(),
-                                expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
-                            },
-                        );
-                        target = Some((owner_peer_id, owner.tx.clone()));
-                    } else {
-                        live.rpc_methods.remove(&method);
-                        response = requester.map(|tx| {
-                            (
-                                peer_id.to_string(),
-                                tx,
-                                RelayServerMessage::RpcResult {
-                                    request_id: request_id.clone(),
-                                    ok: false,
-                                    result: None,
-                                    error: None,
-                                    failure: Some(RelayRpcFailureCode::ResponderDisconnected),
-                                },
-                            )
-                        });
-                    }
+                    live.pending_rpc.insert(
+                        namespaced_request_id.clone(),
+                        PendingRpc {
+                            method: method.clone(),
+                            requester_peer_id: peer_id.to_string(),
+                            responder_peer_id: owner_peer_id.clone(),
+                            expires_at: Utc::now() + Duration::seconds(PENDING_RPC_TTL_SECONDS),
+                        },
+                    );
+                    target = Some((owner_peer_id, owner_tx));
                 } else {
                     warn!(
                         session_id,
@@ -1788,6 +1765,19 @@ impl AppState {
                     params,
                 },
             );
+            // The websocket idle sweep is only a fallback and can run almost
+            // ten seconds after the nominal deadline. Schedule a per-request
+            // sweep so the relay's structured timeout reaches clients before
+            // their 35-second delivery deadline.
+            let state = self.clone();
+            let session_id = session_id.to_string();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    PENDING_RPC_TTL_SECONDS as u64,
+                ))
+                .await;
+                state.sweep_expired_rpcs(&session_id).await;
+            });
         } else if let Some((requester_peer_id, tx, message)) = response {
             self.queue_message(session_id, &requester_peer_id, &tx, message);
         }
@@ -1816,9 +1806,7 @@ impl AppState {
         for (request_id, method, requester_peer_id, tx) in expired {
             warn!(
                 session_id,
-                request_id,
-                method,
-                "relay rpc request timed out before the daemon replied"
+                request_id, method, "relay rpc request timed out before the daemon replied"
             );
             self.queue_message(
                 session_id,
@@ -3582,8 +3570,34 @@ mod tests {
 
         live.rpc_methods.insert(
             REQUIRED_SYNC_RPC_METHOD.to_string(),
-            std::collections::HashSet::from(["daemon-1".to_string()]),
+            vec!["daemon-1".to_string()],
         );
         assert!(live.daemon_rpc_ready());
+    }
+
+    #[test]
+    fn rpc_routing_prefers_the_newest_live_daemon_owner() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut live = LiveSession::default();
+        for peer_id in ["daemon-1", "daemon-2"] {
+            live.peers.insert(
+                peer_id.to_string(),
+                PeerHandle {
+                    role: falcondeck_core::RelayPeerRole::Daemon,
+                    device_id: None,
+                    tx: tx.clone(),
+                },
+            );
+        }
+        live.rpc_methods.insert(
+            REQUIRED_SYNC_RPC_METHOD.to_string(),
+            vec!["daemon-1".to_string(), "daemon-2".to_string()],
+        );
+
+        let owner = live
+            .rpc_owner(REQUIRED_SYNC_RPC_METHOD)
+            .map(|(peer_id, _)| peer_id);
+
+        assert_eq!(owner, Some("daemon-2"));
     }
 }

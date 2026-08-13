@@ -62,5 +62,10 @@ describe('SyncBanner', () => {
     expect(text).toContain('Waiting 31s · attempt 4 · retry in 3s')
     expect(text).toContain('Last error: Your Mac is connected')
     expect(text).toContain('snapshot.current is not registered')
+    const banner = r.root.find(
+      (node) => node.props?.accessibilityRole === 'progressbar',
+    )
+    expect(banner.props.accessibilityLabel).toContain('Waiting 31s · attempt 4')
+    expect(banner.props.accessibilityLabel).toContain('Last error: Your Mac is connected')
   })
 })

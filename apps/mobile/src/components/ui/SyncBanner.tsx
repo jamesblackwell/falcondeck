@@ -50,6 +50,14 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
   const isStalled = status.stage === 'offline' || status.stage === 'repairing' || !!status.lastError
   const showsOfflineIcon = status.stage === 'offline'
   const tint = isStalled ? theme.colors.warning.default : theme.colors.info.default
+  const accessibilityLabel = [
+    status.label,
+    status.detail,
+    timingDetail,
+    status.lastError ? `Last error: ${status.lastError}` : null,
+  ]
+    .filter((part): part is string => !!part)
+    .join(' ')
 
   return (
     <Animated.View
@@ -59,7 +67,7 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
       style={[styles.container, isStalled ? styles.stalled : styles.busy]}
       accessibilityRole="progressbar"
       accessibilityLiveRegion="polite"
-      accessibilityLabel={`${status.label} ${status.detail}`}
+      accessibilityLabel={accessibilityLabel}
     >
       {showsOfflineIcon ? (
         <CloudOff accessible={false} size={theme.iconSize.xs} color={tint} />

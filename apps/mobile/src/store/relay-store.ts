@@ -119,7 +119,7 @@ interface RelayActions {
   _setConnectionStatus: (status: ConnectionStatus) => void
   _setMachinePresence: (presence: MachinePresence | null) => void
   _setError: (error: string | null) => void
-  _setSyncing: (isSyncing: boolean, synced?: boolean) => void
+  _setSyncing: (isSyncing: boolean) => void
   _startSyncAttempt: () => void
   _setSyncRetry: (error: string | null, nextRetryAt: number | null) => void
   _finishSync: () => void
@@ -548,11 +548,10 @@ export const useRelayStore = create<RelayStore>((set, get) => ({
   },
   _setMachinePresence: (presence) => set({ machinePresence: presence }),
   _setError: (error) => set({ error }),
-  // `synced` is only true when a snapshot actually landed: a failed fetch must
-  // not flip hasSyncedOnce, or the banner would disappear while the retry
-  // backoff is still running and nothing has loaded.
-  _setSyncing: (isSyncing, synced = false) =>
-    set({ isSyncing, ...(synced ? { hasSyncedOnce: true } : null) }),
+  // `_finishSync` is the only path that marks a snapshot as landed. Toggling
+  // the in-flight flag after a failure must not hide the retry banner while
+  // nothing authoritative has loaded.
+  _setSyncing: (isSyncing) => set({ isSyncing }),
   _startSyncAttempt: () =>
     set((state) => {
       const now = Date.now()

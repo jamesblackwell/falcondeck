@@ -14,7 +14,7 @@ const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.ho
     deviceId: null as string | null,
     clientToken: null as string | null,
     connectionStatus: 'not_connected',
-    machinePresence: null,
+    machinePresence: null as import('@falcondeck/client-core').MachinePresence | null,
     error: null as string | null,
     isConnected: false,
     isEncrypted: false,
@@ -257,7 +257,29 @@ describe('mobile app screens', () => {
     const renderer = renderComponent(<ConnectionsSettingsScreen />)
     expect(textOf(renderer)).toContain('https://relay.test')
     expect(textOf(renderer)).toContain('End-to-end encrypted')
+    expect(textOf(renderer)).toContain('Snapshot sync')
     expect(textOf(renderer)).toContain('Replace Connection')
+  })
+
+  it('surfaces a connected daemon whose snapshot service is repairing', () => {
+    useRelayStore.setState({
+      connectionStatus: 'encrypted',
+      isEncrypted: true,
+      machinePresence: {
+        session_id: 'session-1',
+        daemon_connected: true,
+        daemon_rpc_ready: false,
+        last_seen_at: null,
+      },
+    })
+
+    const index = renderComponent(<SettingsScreen />)
+    expect(textOf(index)).toContain('Repairing')
+    cleanup()
+
+    const details = renderComponent(<ConnectionsSettingsScreen />)
+    expect(textOf(details)).toContain('Sync service repairing')
+    expect(textOf(details)).toContain('Re-registering')
   })
 
   it('uses the native stack header for settings', () => {

@@ -413,6 +413,24 @@ describe('connectionBadgeState', () => {
     )
   })
 
+  it('does not report healthy while snapshot RPC is re-registering', () => {
+    expect(
+      connectionBadgeState('connected as client (encrypted)', true, true, false),
+    ).toEqual({
+      variant: 'warning',
+      label: 'Sync repairing',
+    })
+  })
+
+  it('does not report the desktop offline before presence arrives', () => {
+    expect(
+      connectionBadgeState('connected as client (encrypted)', false, true, false, false),
+    ).toEqual({
+      variant: 'warning',
+      label: 'Checking desktop',
+    })
+  })
+
   it('reports a dropped socket as an error', () => {
     expect(connectionBadgeState('disconnected', false, true)).toEqual({
       variant: 'danger',

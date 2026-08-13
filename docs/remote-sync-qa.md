@@ -42,12 +42,17 @@ In a staging relay, exercise each client with:
 7. a snapshot response resolving while an encrypted update is still decrypting,
    followed by a replacement snapshot that checkpoints the held update cursor.
 8. two overlapping daemon sockets that both register `snapshot.current`, then
-   close the most recently connected socket. Presence must remain online, the
-   surviving owner must continue serving snapshots, and removing every owner
-   must return the structured `method_unavailable` failure. Also clear the
-   relay's in-memory RPC registration while leaving the daemon socket alive;
-   heartbeat re-registration must restore `daemon_rpc_ready` within 15 seconds
-   without a reconnect.
+   confirm the most recently registered live daemon serves the request, then
+   close it. Presence must remain online, the older live owner must continue
+   serving snapshots, and removing every owner must return the structured
+   `method_unavailable` failure. Also clear the relay's in-memory RPC
+   registration while leaving the daemon socket alive; heartbeat
+   re-registration must restore `daemon_rpc_ready` within 15 seconds without a
+   reconnect.
+9. a registered daemon that deliberately never answers `snapshot.current`.
+   The relay must return structured `timed_out` at its 30-second deadline,
+   before the client's 35-second delivery timeout, rather than leaving the UI
+   with only a generic local timeout.
 
 The expected result is either exactly-once visible state or harmless
 idempotent reapplication; no cursor may advance beyond an unapplied update.

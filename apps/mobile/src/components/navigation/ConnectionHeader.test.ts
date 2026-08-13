@@ -1,35 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import type { MachinePresence } from '@falcondeck/client-core'
 
-// Extract and test the connection label and dot state logic
-// from ConnectionHeader. These are pure functions we can test directly.
-
-function connectionLabel(status: string): string {
-  if (status === 'encrypted') return 'Connected'
-  if (status === 'connected') return 'Securing session...'
-  if (status === 'connecting') return 'Connecting...'
-  if (status === 'disconnected') return 'Disconnected'
-  if (status === 'claiming') return 'Pairing...'
-  return 'Not connected'
-}
-
-function connectionState(
-  connectionStatus: string,
-  isEncrypted: boolean,
-  isDesktopOnline: boolean,
-): { connected: boolean; label: string } {
-  const relayReady = connectionStatus === 'encrypted' && isEncrypted
-
-  if (relayReady) {
-    if (isDesktopOnline) return { connected: true, label: 'Connected' }
-    return { connected: false, label: 'Desktop offline' }
-  }
-
-  return {
-    connected: false,
-    label: connectionLabel(connectionStatus),
-  }
-}
+import { connectionLabel, connectionState } from './ConnectionHeader'
 
 function desktopOnline(machinePresence: MachinePresence | null): boolean {
   return machinePresence?.daemon_connected ?? false
@@ -66,39 +38,53 @@ describe('ConnectionHeader logic', () => {
   describe('connectionState', () => {
     it('returns connected success when relay is ready and desktop is online', () => {
       expect(connectionState('encrypted', true, true)).toEqual({
-        connected: true,
+        tone: 'connected',
         label: 'Connected',
       })
     })
 
     it('returns desktop offline warning when relay is ready but desktop is offline', () => {
       expect(connectionState('encrypted', true, false)).toEqual({
-        connected: false,
+        tone: 'disconnected',
         label: 'Desktop offline',
+      })
+    })
+
+    it('returns a warning while the daemon RPC registry is repairing', () => {
+      expect(connectionState('encrypted', true, true, false)).toEqual({
+        tone: 'repairing',
+        label: 'Sync repairing',
+      })
+    })
+
+    it('waits for presence rather than claiming the desktop is offline', () => {
+      expect(connectionState('encrypted', true, false, false, false)).toEqual({
+        tone: 'repairing',
+        label: 'Checking desktop',
       })
     })
 
     it('returns danger when disconnected and not encrypted', () => {
       expect(connectionState('disconnected', false, false)).toEqual({
-        connected: false,
+        tone: 'disconnected',
         label: 'Disconnected',
       })
     })
 
     it('returns warning for connecting and claiming states', () => {
       expect(connectionState('connecting', false, false)).toEqual({
-        connected: false,
+        tone: 'disconnected',
         label: 'Connecting...',
       })
       expect(connectionState('claiming', false, false)).toEqual({
-        connected: false,
+        tone: 'disconnected',
         label: 'Pairing...',
       })
     })
 
     it('keeps disconnected state when the transport is no longer encrypted', () => {
       expect(connectionState('disconnected', false, true)).toEqual({
-        connected: false,
+        tone: 'disconnected',
         label: 'Disconnected',
       })
     })

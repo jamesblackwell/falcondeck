@@ -11,7 +11,9 @@ export function relayRpcFailureMessage(
 ) {
   switch (failure) {
     case 'method_unavailable':
-      return `Your Mac is connected, but ${method} is not registered. FalconDeck will retry automatically.`
+      return method === 'snapshot.current'
+        ? 'Your Mac is connected, but snapshot.current is not registered. FalconDeck will retry automatically.'
+        : `Your Mac is connected, but ${method} is not registered. Try again in a moment.`
     case 'request_conflict':
       return `The relay rejected a duplicate ${method} request.`
     case 'responder_disconnected':

@@ -645,7 +645,7 @@ async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
         send_client_message(
             daemon,
             &RelayClientMessage::RpcRegister {
-                method: "thread.detail".to_string(),
+                method: "snapshot.current".to_string(),
             },
         )
         .await;
@@ -653,6 +653,48 @@ async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
             recv_server_message(daemon).await,
             RelayServerMessage::RpcRegistered { .. }
         ));
+    }
+
+    send_client_message(
+        &mut client_ws,
+        &RelayClientMessage::RpcCall {
+            request_id: "newest-owner".to_string(),
+            method: "snapshot.current".to_string(),
+            params: test_envelope("snapshot"),
+        },
+    )
+    .await;
+    let newest_request = recv_server_message(&mut second_daemon_ws).await;
+    let newest_request_id = match newest_request {
+        RelayServerMessage::RpcRequest {
+            request_id, method, ..
+        } => {
+            assert_eq!(method, "snapshot.current");
+            request_id
+        }
+        other => panic!("expected newest daemon to receive rpc request, got {other:?}"),
+    };
+    send_client_message(
+        &mut second_daemon_ws,
+        &RelayClientMessage::RpcResult {
+            request_id: newest_request_id,
+            ok: true,
+            result: Some(test_envelope("snapshot-result")),
+            error: None,
+        },
+    )
+    .await;
+    loop {
+        if matches!(
+            recv_server_message(&mut client_ws).await,
+            RelayServerMessage::RpcResult {
+                request_id,
+                ok: true,
+                ..
+            } if request_id == "newest-owner"
+        ) {
+            break;
+        }
     }
 
     let seq_before_disconnect = server
@@ -683,7 +725,7 @@ async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
         &mut client_ws,
         &RelayClientMessage::RpcCall {
             request_id: "surviving-owner".to_string(),
-            method: "thread.detail".to_string(),
+            method: "snapshot.current".to_string(),
             params: test_envelope("detail"),
         },
     )
@@ -691,7 +733,7 @@ async fn overlapping_daemon_rpc_owners_survive_one_peer_disconnect() {
     let request = recv_server_message(&mut first_daemon_ws).await;
     assert!(matches!(
         request,
-        RelayServerMessage::RpcRequest { method, .. } if method == "thread.detail"
+        RelayServerMessage::RpcRequest { method, .. } if method == "snapshot.current"
     ));
 }
 
@@ -1530,9 +1572,7 @@ async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
     .await;
 
     let RelayServerMessage::RpcRequest {
-        request_id,
-        method,
-        ..
+        request_id, method, ..
     } = recv_server_message(&mut daemon_ws).await
     else {
         panic!("expected snapshot RPC after truncated sync");

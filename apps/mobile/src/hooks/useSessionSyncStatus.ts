@@ -17,6 +17,7 @@ export function useSessionSyncStatus(): SessionSyncStatus {
   const syncDiagnostics = useRelayStore((s) => s.syncDiagnostics)
   const hasSnapshot = useSessionStore((s) => s.snapshot !== null)
   const daemonConnected = machinePresence?.daemon_connected ?? false
+  const daemonPresenceKnown = machinePresence !== null
   // Older relays omit readiness. Preserve their transport-only behaviour
   // until the relay upgrade reaches the device.
   const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? daemonConnected
@@ -31,6 +32,7 @@ export function useSessionSyncStatus(): SessionSyncStatus {
         isSyncing,
         hasSnapshot,
         daemonConnected,
+        daemonPresenceKnown,
         daemonRpcReady,
         hasSyncedOnce,
         syncStartedAt: syncDiagnostics.startedAt,
@@ -41,6 +43,7 @@ export function useSessionSyncStatus(): SessionSyncStatus {
     [
       connectionStatus,
       daemonConnected,
+      daemonPresenceKnown,
       daemonRpcReady,
       hasSnapshot,
       hasSyncedOnce,

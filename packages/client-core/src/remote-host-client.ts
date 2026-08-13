@@ -270,6 +270,13 @@ export class RemoteHostClient {
     if (!crypto) throw new Error('Encrypted relay session is not ready')
     const requestId = `host-${this.rpcCounter++}`
     const encrypted = await encryptJson(crypto.dataKey, params)
+    if (
+      this.socket !== socket ||
+      socket.readyState !== WebSocket.OPEN ||
+      this.sessionCrypto !== crypto
+    ) {
+      throw new Error('Remote connection closed before the request could be sent')
+    }
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRpc.delete(requestId)
@@ -281,7 +288,18 @@ export class RemoteHostClient {
         timeout,
         method,
       })
-      this.send({ type: 'rpc-call', request_id: requestId, method, params: encrypted })
+      try {
+        socket.send(JSON.stringify({
+          type: 'rpc-call',
+          request_id: requestId,
+          method,
+          params: encrypted,
+        } satisfies RelayClientMessage))
+      } catch (error) {
+        clearTimeout(timeout)
+        this.pendingRpc.delete(requestId)
+        reject(error instanceof Error ? error : new Error('Failed to send remote request'))
+      }
     })
   }
 

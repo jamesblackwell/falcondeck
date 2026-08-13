@@ -574,6 +574,8 @@ function RemoteApp() {
   const hasSessionKey = !!sessionCryptoRef.current;
   const isEncrypted = relayConnected && hasSessionKey;
   const desktopOnline = machinePresence?.daemon_connected ?? false;
+  const daemonPresenceKnown = machinePresence !== null;
+  const daemonRpcReady = machinePresence?.daemon_rpc_ready ?? desktopOnline;
   const selectedThreadItems = useMemo(
     () =>
       selectedThreadId
@@ -606,7 +608,22 @@ function RemoteApp() {
         ["Relay", relayHostLabel(relayUrl.trim() || DEFAULT_RELAY_URL)],
         ["Pairing code", pairingCode.trim() ? "present in browser" : "not set"],
         ["Session", isConnected ? "claimed" : "not claimed"],
-        ["Desktop", desktopOnline ? "online" : "offline or retrying"],
+        [
+          "Desktop",
+          !daemonPresenceKnown
+            ? "waiting for presence"
+            : desktopOnline
+              ? "online"
+              : "offline or retrying",
+        ],
+        [
+          "Snapshot RPC",
+          !daemonPresenceKnown
+            ? "waiting for presence"
+            : daemonRpcReady
+              ? "ready"
+              : "not registered",
+        ],
         ["Encryption", hasSessionKey ? "ready" : "waiting"],
         ["Connection", connectionStatus],
         ["Session ID", maskIdentifier(sessionId)],
@@ -615,6 +632,8 @@ function RemoteApp() {
       ] as const,
     [
       connectionStatus,
+      daemonPresenceKnown,
+      daemonRpcReady,
       desktopOnline,
       deviceId,
       hasSessionKey,
@@ -1956,6 +1975,13 @@ function RemoteApp() {
       if (!sc) throw new Error("Encrypted relay session is not ready");
       const requestId = `remote-${requestCounter.current++}`;
       const encrypted = await encryptJson(sc.dataKey, rpcParams);
+      if (
+        socketRef.current !== socket ||
+        socket.readyState !== WebSocket.OPEN ||
+        sessionCryptoRef.current !== sc
+      ) {
+        throw new Error("Remote connection closed before the request could be sent");
+      }
       return new Promise<T>((resolve, reject) => {
         const timeout = window.setTimeout(() => {
           pendingRpc.current.delete(requestId);
@@ -1967,12 +1993,22 @@ function RemoteApp() {
           timeout,
           method,
         });
-        sendRelayMessage(socket, {
-          type: "rpc-call",
-          request_id: requestId,
-          method,
-          params: encrypted,
-        });
+        try {
+          sendRelayMessage(socket, {
+            type: "rpc-call",
+            request_id: requestId,
+            method,
+            params: encrypted,
+          });
+        } catch (sendError) {
+          window.clearTimeout(timeout);
+          pendingRpc.current.delete(requestId);
+          reject(
+            sendError instanceof Error
+              ? sendError
+              : new Error("Failed to send remote request"),
+          );
+        }
       });
     },
     [],
@@ -3968,6 +4004,8 @@ function RemoteApp() {
     connectionStatus,
     desktopOnline,
     hasSessionKey,
+    daemonRpcReady,
+    daemonPresenceKnown,
   );
 
   return (

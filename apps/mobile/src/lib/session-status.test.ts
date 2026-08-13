@@ -8,6 +8,7 @@ const ready = {
   isSyncing: false,
   hasSnapshot: true,
   daemonConnected: true,
+  daemonPresenceKnown: true,
   daemonRpcReady: true,
   hasSyncedOnce: true,
 }
@@ -64,6 +65,32 @@ describe('resolveSessionSyncStatus', () => {
     expect(status.stage).toBe('repairing')
     expect(status.detail).toContain('sync service is re-registering')
     expect(sessionSendBlockReason(status)).toBe('Repairing sync with your Mac…')
+  })
+
+  it('keeps reporting a missing snapshot RPC after a previous successful sync', () => {
+    const status = resolveSessionSyncStatus({ ...ready, daemonRpcReady: false })
+    expect(status.stage).toBe('repairing')
+    expect(sessionSendBlockReason(status)).toBe('Repairing sync with your Mac…')
+  })
+
+  it('reports an offline desktop instead of a generic first-sync wait', () => {
+    const status = resolveSessionSyncStatus({
+      ...ready,
+      daemonConnected: false,
+      hasSyncedOnce: false,
+      isSyncing: true,
+    })
+    expect(status.stage).toBe('offline')
+  })
+
+  it('waits for the first presence frame instead of flashing an offline error', () => {
+    const status = resolveSessionSyncStatus({
+      ...ready,
+      daemonConnected: false,
+      daemonPresenceKnown: false,
+    })
+    expect(status.stage).toBe('syncing')
+    expect(status.label).toBe('Checking desktop…')
   })
 
   it('surfaces an offline desktop once the session itself is healthy', () => {
