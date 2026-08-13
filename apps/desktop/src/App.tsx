@@ -110,6 +110,7 @@ import {
 import {
   readPersistedComposerState,
   readStoredDrafts,
+  transferComposerDraft,
   writePersistedComposerState,
   writeStoredDrafts,
 } from "./composer-persistence";
@@ -145,6 +146,8 @@ import {
   commandForEvent,
   getShortcutSettings,
   isEditableTarget,
+  shortcutHint,
+  shortcutHintTokens,
   useShortcutSettings,
 } from "./shortcuts";
 import { sendDesktopAttentionNotification } from "./desktop-notifications";
@@ -232,6 +235,29 @@ function AppInner() {
     hideRail,
   } = usePanelVisibility();
   const shortcutSettings = useShortcutSettings();
+  // Bindings are customizable, so every hint surface (tooltips, palette rows)
+  // renders from the live keymap rather than a hardcoded string.
+  const paletteShortcutHints = useMemo(
+    () => ({
+      activity: shortcutHintTokens("openActivity", shortcutSettings),
+      settings: shortcutHintTokens("openSettings", shortcutSettings),
+      keyboardShortcuts: shortcutHintTokens(
+        "openKeyboardShortcuts",
+        shortcutSettings,
+      ),
+    }),
+    [shortcutSettings],
+  );
+  const composerMenuShortcuts = useMemo(
+    () => ({
+      provider: shortcutHint("openHarnessMenu", shortcutSettings) ?? undefined,
+      permissions:
+        shortcutHint("openPermissionMenu", shortcutSettings) ?? undefined,
+      sandbox: shortcutHint("openSandboxMenu", shortcutSettings) ?? undefined,
+      model: shortcutHint("openModelMenu", shortcutSettings) ?? undefined,
+    }),
+    [shortcutSettings],
+  );
   const [drafts, setDrafts] = useState<ComposerDrafts>(() =>
     readStoredDrafts(),
   );
@@ -293,6 +319,7 @@ function AppInner() {
     mode: "toggle" as "open" | "toggle" | "close",
   });
   const [composerFocusRequestKey, setComposerFocusRequestKey] = useState(0);
+  const [projectMenuRequestKey, setProjectMenuRequestKey] = useState(0);
   const [composerMenuRequest, setComposerMenuRequest] =
     useState<ComposerMenuRequest>({ key: 0, menu: "model" });
   const [findRequestKey, setFindRequestKey] = useState(0);
@@ -2712,6 +2739,24 @@ function AppInner() {
     [setSelectedWorkspaceId, setSelectedThreadId, setThreadDetail],
   );
 
+  const handleNewThreadProjectChange = useCallback(
+    (workspaceId: string) => {
+      const sourceKey = draftKeyFor(selectedWorkspaceId, null);
+      const targetKey = draftKeyFor(workspaceId, null);
+      if (sourceKey !== targetKey) {
+        setDrafts((current) => {
+          const next = transferComposerDraft(current, sourceKey, targetKey);
+          if (next === current) return current;
+          draftsRef.current = next;
+          writeRecoverableDrafts(next);
+          return next;
+        });
+      }
+      handleNewThread(workspaceId);
+    },
+    [handleNewThread, selectedWorkspaceId, writeRecoverableDrafts],
+  );
+
   const handleCheckoutBranch = useCallback(
     async (branch: string, create: boolean) => {
       try {
@@ -3034,6 +3079,15 @@ function AppInner() {
 
   const handleOpenSettings = useCallback(() => {
     setSettingsSection("general");
+    setSettingsRequestKey((current) => current + 1);
+    setIsSettingsOpen(true);
+    setIsScheduledOpen(false);
+    setIsActivityOpen(false);
+    setActiveExtensionPanelKey(null);
+  }, []);
+
+  const handleOpenKeyboardShortcuts = useCallback(() => {
+    setSettingsSection("keyboard");
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
     setIsScheduledOpen(false);
@@ -3929,10 +3983,7 @@ function AppInner() {
           handleOpenActivity();
           break;
         case "openKeyboardShortcuts":
-          setSettingsSection("keyboard");
-          setSettingsRequestKey((current) => current + 1);
-          setIsSettingsOpen(true);
-          setIsActivityOpen(false);
+          handleOpenKeyboardShortcuts();
           break;
         case "openProject":
           void handleAddProject();
@@ -3989,6 +4040,13 @@ function AppInner() {
           setIsActivityOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
           break;
+        case "openProjectMenu":
+          if (!selectedThreadId) {
+            setIsSettingsOpen(false);
+            setIsActivityOpen(false);
+            setProjectMenuRequestKey((current) => current + 1);
+          }
+          break;
         case "openHarnessMenu":
         case "openPermissionMenu":
         case "openSandboxMenu":
@@ -4021,6 +4079,7 @@ function AppInner() {
     handleAddProject,
     handleNewThread,
     handleOpenActivity,
+    handleOpenKeyboardShortcuts,
     handleStopCallback,
     isSettingsOpen,
     navigateSelectionHistory,
@@ -4112,6 +4171,8 @@ function AppInner() {
             onNewThread={handleNewThread}
             onOpenSettings={handleOpenSettings}
             onOpenActivity={handleOpenActivity}
+            onOpenKeyboardShortcuts={handleOpenKeyboardShortcuts}
+            shortcutHints={paletteShortcutHints}
             openRequestKey={paletteRequest.key}
             initialQuery={paletteRequest.query}
             initialScope={paletteRequest.scope}
@@ -4330,6 +4391,7 @@ function AppInner() {
                 resolveComposerShortcut,
                 focusRequestKey: composerFocusRequestKey,
                 menuRequest: composerMenuRequest,
+                menuShortcuts: composerMenuShortcuts,
                 onStop: handleStopCallback,
                 onPickImages: handlePickImages,
                 onRemoveAttachment: handleRemoveAttachment,
@@ -4371,7 +4433,12 @@ function AppInner() {
                   <ComposerContextBar
                     workspaces={workspaces}
                     selectedWorkspace={selectedWorkspace}
-                    onSelectWorkspace={handleNewThread}
+                    onSelectWorkspace={handleNewThreadProjectChange}
+                    projectMenuRequestKey={projectMenuRequestKey}
+                    projectShortcutLabel={
+                      shortcutHint("openProjectMenu", shortcutSettings) ??
+                      undefined
+                    }
                     selectedIsolation={selectedIsolation}
                     onIsolationChange={setSelectedIsolation}
                     branches={branches}
