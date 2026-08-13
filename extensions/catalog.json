@@ -3,6 +3,10 @@
     {
       "path": "official/thread-tags",
       "defaultEnabled": true
+    },
+    {
+      "path": "official/mini-zen",
+      "defaultEnabled": false
     }
   ]
 }

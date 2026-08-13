@@ -24,6 +24,7 @@ import {
   decryptJson,
   decryptJsonBatch,
   deriveThreadAttentionPresentation,
+  deriveExtensionPanels,
   deriveExtensionSidebarFilters,
   deriveThreadTags,
   THREAD_TAGS_ACTION_ID,
@@ -93,6 +94,7 @@ import {
   type DaemonSnapshot,
   type EncryptedEnvelope,
   type EventEnvelope,
+  type ExtensionUiActionBinding,
   type ImageInput,
   type InteractiveResponsePayload,
   type MachinePresence,
@@ -126,6 +128,8 @@ import {
   QueuedTurns,
   SessionHeader,
   OperationalNotice,
+  ExtensionPanel,
+  ExtensionPanelNavigation,
   WorkspaceSidebar,
   realtimeAudioPlayer,
 } from "@falcondeck/chat-ui";
@@ -311,6 +315,10 @@ function RemoteApp() {
     () => deriveExtensionSidebarFilters(snapshot?.extensions),
     [snapshot?.extensions],
   );
+  const extensionPanels = useMemo(
+    () => deriveExtensionPanels(snapshot?.extensions),
+    [snapshot?.extensions],
+  );
   const threadTagsEnabled =
     snapshot?.extensions.catalog.some(
       (extension) =>
@@ -328,6 +336,20 @@ function RemoteApp() {
     null,
   );
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
+    string | null
+  >(null);
+  const activeExtensionPanel = useMemo(
+    () =>
+      extensionPanels.find((panel) => panel.key === activeExtensionPanelKey) ??
+      null,
+    [activeExtensionPanelKey, extensionPanels],
+  );
+  useEffect(() => {
+    if (activeExtensionPanelKey && !activeExtensionPanel) {
+      setActiveExtensionPanelKey(null);
+    }
+  }, [activeExtensionPanel, activeExtensionPanelKey]);
   const [windowFocused, setWindowFocused] = useState(
     () => document.visibilityState !== "hidden",
   );
@@ -2348,6 +2370,23 @@ function RemoteApp() {
     [callRpc, reportError],
   );
 
+  const handleExtensionPanelAction = useCallback(
+    async (extensionId: string, action: ExtensionUiActionBinding) => {
+      await callRpc("extensions.action.invoke", {
+        extensionId,
+        actionId: action.actionId,
+        target: action.target,
+        input: action.input ?? null,
+      });
+      setSnapshot(
+        normalizeDaemonSnapshot(
+          await callRpc<DaemonSnapshot>("snapshot.current", {}),
+        ),
+      );
+    },
+    [callRpc],
+  );
+
   const submitQueuedAction = useCallback(
     async <T = unknown,>(
       actionType: string,
@@ -3220,6 +3259,7 @@ function RemoteApp() {
   const handleSelectWorkspace = useCallback(
     (workspaceId: string, threadId: string | null) => {
       setThreadDetail(null);
+      setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
       setShowProjects(false);
@@ -3229,6 +3269,7 @@ function RemoteApp() {
   const handleSelectThread = useCallback(
     (workspaceId: string, threadId: string) => {
       setThreadDetail(null);
+      setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
       setShowProjects(false);
@@ -3237,8 +3278,13 @@ function RemoteApp() {
   );
   const handleNewThread = useCallback((workspaceId: string) => {
     setThreadDetail(null);
+    setActiveExtensionPanelKey(null);
     setSelectedWorkspaceId(workspaceId);
     setSelectedThreadId(null);
+    setShowProjects(false);
+  }, []);
+  const handleSelectExtensionPanel = useCallback((panelKey: string) => {
+    setActiveExtensionPanelKey(panelKey);
     setShowProjects(false);
   }, []);
   const handleNewThreadFromCurrent = useCallback(() => {
@@ -3889,6 +3935,15 @@ function RemoteApp() {
     };
   }, [showProjects]);
 
+  const extensionPanelNavigation =
+    extensionPanels.length > 0 ? (
+      <ExtensionPanelNavigation
+        panels={extensionPanels}
+        activePanelKey={activeExtensionPanelKey}
+        onSelect={handleSelectExtensionPanel}
+      />
+    ) : undefined;
+
   // ── Pairing screen (not connected) ─────────────────────────────────
 
   if (!isConnected) {
@@ -4060,6 +4115,7 @@ function RemoteApp() {
                 threadSort={threadSort}
                 onThreadSortChange={handleThreadSortChange}
                 onWorkspaceOrderChange={handleWorkspaceOrderChange}
+                topNavigation={extensionPanelNavigation}
                 title="Projects"
                 errors={error ? [error] : []}
                 threadTagsById={threadTags.byThreadId}
@@ -4112,6 +4168,7 @@ function RemoteApp() {
           threadSort={threadSort}
           onThreadSortChange={handleThreadSortChange}
           onWorkspaceOrderChange={handleWorkspaceOrderChange}
+          topNavigation={extensionPanelNavigation}
           title="Projects"
           errors={error ? [error] : []}
           threadTagsById={threadTags.byThreadId}
@@ -4131,150 +4188,164 @@ function RemoteApp() {
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {operationalConditions.length > 0 ? (
-            <OperationalNotice
-              conditions={operationalConditions}
-              onDismiss={dismissOperationalCondition}
+          {activeExtensionPanel ? (
+            <ExtensionPanel
+              panel={activeExtensionPanel}
+              onAction={handleExtensionPanelAction}
+              onClose={() => setActiveExtensionPanelKey(null)}
             />
-          ) : null}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <Conversation
-              threadKey={
-                selectedThreadId
-                  ? `${selectedWorkspaceId ?? "workspace"}:${selectedThreadId}`
-                  : selectedWorkspaceId
-              }
-              items={items}
-              exportTitle={selectedThread?.title}
-              preferences={snapshot?.preferences ?? null}
-              emptyState={conversationEmptyState}
-              isSending={isSubmitting}
-              isThinking={selectedThread?.status === "running"}
-              isWaitingForInput={selectedThread?.status === "waiting_for_input"}
-              isLoading={isThreadDetailPending}
-              hasOlder={Boolean(
-                threadDetail?.workspace.id === selectedWorkspaceId &&
-                threadDetail.thread.id === selectedThreadId &&
-                threadDetail.has_older,
-              )}
-              isLoadingOlder={
-                loadingOlderThreadKey ===
-                `${selectedWorkspaceId}:${selectedThreadId}`
-              }
-              onLoadOlder={handleLoadOlder}
-              onEditResend={
-                selectedThread &&
-                activeCapabilities.supports_forking &&
-                !selectedThread.variant &&
-                selectedThread.status !== "running" &&
-                selectedThread.status !== "waiting_for_input"
-                  ? handleEditResend
-                  : undefined
-              }
-              editResendUnavailableReason={editResendReason}
-              onRetryResponse={
-                selectedThread &&
-                activeCapabilities.supports_forking &&
-                !selectedThread.variant &&
-                selectedThread.status !== "running" &&
-                selectedThread.status !== "waiting_for_input"
-                  ? handleRetryResponse
-                  : undefined
-              }
-              pinnedPlanId={pinnedPlan?.itemId ?? null}
-            />
-          </div>
+          ) : (
+            <>
+              {operationalConditions.length > 0 ? (
+                <OperationalNotice
+                  conditions={operationalConditions}
+                  onDismiss={dismissOperationalCondition}
+                />
+              ) : null}
+              <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+                <Conversation
+                  threadKey={
+                    selectedThreadId
+                      ? `${selectedWorkspaceId ?? "workspace"}:${selectedThreadId}`
+                      : selectedWorkspaceId
+                  }
+                  items={items}
+                  exportTitle={selectedThread?.title}
+                  preferences={snapshot?.preferences ?? null}
+                  emptyState={conversationEmptyState}
+                  isSending={isSubmitting}
+                  isThinking={selectedThread?.status === "running"}
+                  isWaitingForInput={
+                    selectedThread?.status === "waiting_for_input"
+                  }
+                  isLoading={isThreadDetailPending}
+                  hasOlder={Boolean(
+                    threadDetail?.workspace.id === selectedWorkspaceId &&
+                    threadDetail.thread.id === selectedThreadId &&
+                    threadDetail.has_older,
+                  )}
+                  isLoadingOlder={
+                    loadingOlderThreadKey ===
+                    `${selectedWorkspaceId}:${selectedThreadId}`
+                  }
+                  onLoadOlder={handleLoadOlder}
+                  onEditResend={
+                    selectedThread &&
+                    activeCapabilities.supports_forking &&
+                    !selectedThread.variant &&
+                    selectedThread.status !== "running" &&
+                    selectedThread.status !== "waiting_for_input"
+                      ? handleEditResend
+                      : undefined
+                  }
+                  editResendUnavailableReason={editResendReason}
+                  onRetryResponse={
+                    selectedThread &&
+                    activeCapabilities.supports_forking &&
+                    !selectedThread.variant &&
+                    selectedThread.status !== "running" &&
+                    selectedThread.status !== "waiting_for_input"
+                      ? handleRetryResponse
+                      : undefined
+                  }
+                  pinnedPlanId={pinnedPlan?.itemId ?? null}
+                />
+              </div>
 
-          <div className="shrink-0 border-t border-border-subtle bg-surface-0/95 backdrop-blur md:bg-transparent md:backdrop-blur-0">
-            {pinnedPlan ? (
-              <PlanBar plan={pinnedPlan.plan} threadKey={conversationKey} />
-            ) : null}
-            <InteractiveRequestBar
-              requests={interactiveRequests}
-              onRespond={(request, response) =>
-                handleInteractiveResponse(
-                  request.workspace_id,
-                  request.request_id,
-                  response,
-                )
-              }
-            />
-            {selectedThread ? (
-              <QueuedTurns
-                queuedTurns={selectedThread.queued_turns}
-                canSteer={activeCapabilities.supports_steering}
-                onRemove={(queuedId) => void handleRemoveQueuedTurn(queuedId)}
-                onSteer={(queuedId) => void handleSteerQueuedTurn(queuedId)}
-                onEdit={(queuedId, text) =>
-                  void handleEditQueuedTurn(queuedId, text)
-                }
-              />
-            ) : null}
-            <PromptInput
-              key={`${conversationKey}:${activeProvider}:${activeCapabilities.supports_images ? "images" : "no-images"}`}
-              value={draft}
-              onValueChange={setDraft}
-              onSubmit={() => void handleSubmit()}
-              onStop={() => void handleStop()}
-              onPickImages={handlePickImages}
-              onRemoveAttachment={handleRemoveAttachment}
-              attachments={attachments}
-              preparingAttachmentCount={preparingAttachmentCount}
-              skills={selectedWorkspace?.skills ?? []}
-              selectedProvider={activeProvider}
-              onProviderChange={handleProviderChange}
-              providers={providerOptions}
-              capabilities={activeCapabilities}
-              providerLocked={Boolean(selectedThread)}
-              showProviderSelector={!selectedThread}
-              models={models}
-              selectedModelId={selectedModel}
-              onModelChange={handleModelChange}
-              reasoningOptions={currentReasoningOptions}
-              selectedEffort={selectedEffort}
-              onEffortChange={handleEffortChange}
-              selectedServiceTier={selectedServiceTier}
-              onServiceTierChange={handleServiceTierChange}
-              collaborationModes={workspaceCollaborationModes(
-                selectedWorkspace,
-                activeProvider,
-              )}
-              selectedCollaborationMode={selectedCollaborationMode}
-              onCollaborationModeChange={handleCollaborationModeChange}
-              selectedPermissionMode={selectedPermissionMode}
-              onPermissionModeChange={handlePermissionModeChange}
-              selectedSandboxMode={selectedSandboxMode}
-              onSandboxModeChange={handleSandboxModeChange}
-              disabled={
-                !selectedWorkspace ||
-                !sessionId ||
-                !clientToken ||
-                !hasSessionKey
-              }
-              sendDisabled={
-                isSubmitting ||
-                preparingAttachmentCount > 0 ||
-                Boolean(attachmentSendBlockReason)
-              }
-              sendDisabledReason={attachmentSendBlockReason ?? undefined}
-              isRunning={
-                selectedThread?.status === "running" ||
-                selectedThread?.status === "waiting_for_input"
-              }
-              isStopping={isStopping}
-              goal={
-                selectedWorkspace && activeCapabilities.supports_goals
-                  ? {
-                      goal: selectedThread?.goal ?? null,
-                      provider: activeProvider,
-                      onSetGoal: handleSetGoal,
-                      onClearGoal: handleClearGoal,
-                      onSetGoalStatus: handleSetGoalStatus,
+              <div className="shrink-0 border-t border-border-subtle bg-surface-0/95 backdrop-blur md:bg-transparent md:backdrop-blur-0">
+                {pinnedPlan ? (
+                  <PlanBar plan={pinnedPlan.plan} threadKey={conversationKey} />
+                ) : null}
+                <InteractiveRequestBar
+                  requests={interactiveRequests}
+                  onRespond={(request, response) =>
+                    handleInteractiveResponse(
+                      request.workspace_id,
+                      request.request_id,
+                      response,
+                    )
+                  }
+                />
+                {selectedThread ? (
+                  <QueuedTurns
+                    queuedTurns={selectedThread.queued_turns}
+                    canSteer={activeCapabilities.supports_steering}
+                    onRemove={(queuedId) =>
+                      void handleRemoveQueuedTurn(queuedId)
                     }
-                  : undefined
-              }
-            />
-          </div>
+                    onSteer={(queuedId) => void handleSteerQueuedTurn(queuedId)}
+                    onEdit={(queuedId, text) =>
+                      void handleEditQueuedTurn(queuedId, text)
+                    }
+                  />
+                ) : null}
+                <PromptInput
+                  key={`${conversationKey}:${activeProvider}:${activeCapabilities.supports_images ? "images" : "no-images"}`}
+                  value={draft}
+                  onValueChange={setDraft}
+                  onSubmit={() => void handleSubmit()}
+                  onStop={() => void handleStop()}
+                  onPickImages={handlePickImages}
+                  onRemoveAttachment={handleRemoveAttachment}
+                  attachments={attachments}
+                  preparingAttachmentCount={preparingAttachmentCount}
+                  skills={selectedWorkspace?.skills ?? []}
+                  selectedProvider={activeProvider}
+                  onProviderChange={handleProviderChange}
+                  providers={providerOptions}
+                  capabilities={activeCapabilities}
+                  providerLocked={Boolean(selectedThread)}
+                  showProviderSelector={!selectedThread}
+                  models={models}
+                  selectedModelId={selectedModel}
+                  onModelChange={handleModelChange}
+                  reasoningOptions={currentReasoningOptions}
+                  selectedEffort={selectedEffort}
+                  onEffortChange={handleEffortChange}
+                  selectedServiceTier={selectedServiceTier}
+                  onServiceTierChange={handleServiceTierChange}
+                  collaborationModes={workspaceCollaborationModes(
+                    selectedWorkspace,
+                    activeProvider,
+                  )}
+                  selectedCollaborationMode={selectedCollaborationMode}
+                  onCollaborationModeChange={handleCollaborationModeChange}
+                  selectedPermissionMode={selectedPermissionMode}
+                  onPermissionModeChange={handlePermissionModeChange}
+                  selectedSandboxMode={selectedSandboxMode}
+                  onSandboxModeChange={handleSandboxModeChange}
+                  disabled={
+                    !selectedWorkspace ||
+                    !sessionId ||
+                    !clientToken ||
+                    !hasSessionKey
+                  }
+                  sendDisabled={
+                    isSubmitting ||
+                    preparingAttachmentCount > 0 ||
+                    Boolean(attachmentSendBlockReason)
+                  }
+                  sendDisabledReason={attachmentSendBlockReason ?? undefined}
+                  isRunning={
+                    selectedThread?.status === "running" ||
+                    selectedThread?.status === "waiting_for_input"
+                  }
+                  isStopping={isStopping}
+                  goal={
+                    selectedWorkspace && activeCapabilities.supports_goals
+                      ? {
+                          goal: selectedThread?.goal ?? null,
+                          provider: activeProvider,
+                          onSetGoal: handleSetGoal,
+                          onClearGoal: handleClearGoal,
+                          onSetGoalStatus: handleSetGoalStatus,
+                        }
+                      : undefined
+                  }
+                />
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

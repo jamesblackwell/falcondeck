@@ -935,6 +935,8 @@ export type ExtensionContributions = {
   threadMenuActions: ExtensionActionContribution[];
   threadDecorations: ExtensionViewContribution[];
   sidebarFilters: ExtensionViewContribution[];
+  /** Named full-main-area surfaces. Optional while normalizing older snapshots. */
+  panels?: ExtensionViewContribution[];
   /** Contribution kinds introduced by a newer daemon. */
   unsupported?: UnsupportedExtensionContribution[];
 };

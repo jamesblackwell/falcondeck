@@ -170,6 +170,17 @@ impl ExtensionRegistry {
                     self.root.join("official/thread-tags/server.ts"),
                     include_str!("../../../../extensions/official/thread-tags/server.ts"),
                 ),
+                (
+                    self.root
+                        .join("official/mini-zen/falcondeck.extension.json"),
+                    include_str!(
+                        "../../../../extensions/official/mini-zen/falcondeck.extension.json"
+                    ),
+                ),
+                (
+                    self.root.join("official/mini-zen/server.ts"),
+                    include_str!("../../../../extensions/official/mini-zen/server.ts"),
+                ),
             ]);
         }
         for (path, contents) in assets {
@@ -446,6 +457,7 @@ impl ExtensionRegistry {
                     .thread_decorations
                     .iter()
                     .chain(summary.contributes.sidebar_filters.iter())
+                    .chain(summary.contributes.panels.iter())
                     .map(|contribution| contribution.view.as_str())
                     .collect::<std::collections::HashSet<_>>()
             })
@@ -696,7 +708,8 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
     }
     let contribution_count = manifest.contributes.thread_menu_actions.len()
         + manifest.contributes.thread_decorations.len()
-        + manifest.contributes.sidebar_filters.len();
+        + manifest.contributes.sidebar_filters.len()
+        + manifest.contributes.panels.len();
     if contribution_count > MAX_MANIFEST_CONTRIBUTIONS {
         return Err(DaemonError::BadRequest(format!(
             "extension manifest exceeds {MAX_MANIFEST_CONTRIBUTIONS} contributions"
@@ -706,6 +719,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
     validate_unique_actions(&manifest.contributes.thread_menu_actions, &mut ids)?;
     validate_unique_views(&manifest.contributes.thread_decorations, &mut ids)?;
     validate_unique_views(&manifest.contributes.sidebar_filters, &mut ids)?;
+    validate_unique_views(&manifest.contributes.panels, &mut ids)?;
     if manifest
         .contributes
         .sidebar_filters
@@ -714,6 +728,16 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
     {
         return Err(DaemonError::BadRequest(
             "extension sidebar filters require a title".to_string(),
+        ));
+    }
+    if manifest
+        .contributes
+        .panels
+        .iter()
+        .any(|panel| panel.title.is_none())
+    {
+        return Err(DaemonError::BadRequest(
+            "extension panels require a title".to_string(),
         ));
     }
     let declared_actions = manifest
@@ -727,6 +751,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
         .thread_decorations
         .iter()
         .chain(manifest.contributes.sidebar_filters.iter())
+        .chain(manifest.contributes.panels.iter())
         .map(|contribution| contribution.view.as_str())
         .collect::<HashSet<_>>();
     for contribution in manifest
@@ -734,6 +759,7 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
         .thread_decorations
         .iter()
         .chain(manifest.contributes.sidebar_filters.iter())
+        .chain(manifest.contributes.panels.iter())
     {
         if let Some(document) = contribution.ui.as_ref() {
             validate_ui_document(document, &declared_actions, &declared_views)?;
@@ -765,6 +791,7 @@ fn validate_manifest_contribution_shape(manifest: &Value) -> Result<(), DaemonEr
             "threadMenuActions" => &["id", "title"][..],
             "threadDecorations" => &["id", "view", "ui"][..],
             "sidebarFilters" => &["id", "title", "view", "ui"][..],
+            "panels" => &["id", "title", "view", "ui"][..],
             _ => {
                 return Err(DaemonError::BadRequest(format!(
                     "unknown extension contribution point: {surface}"
@@ -1123,6 +1150,29 @@ mod tests {
     }
 
     #[test]
+    fn manifest_accepts_a_titled_declarative_panel() {
+        let mut manifest = manifest();
+        manifest.contributes.panels = vec![ExtensionViewContribution {
+            id: "attention".to_string(),
+            title: Some("Mini Zen".to_string()),
+            view: "attention-panel".to_string(),
+            ui: Some(ExtensionUiDocument {
+                version: 1,
+                root: ExtensionUiNode::State {
+                    state: falcondeck_core::ExtensionUiStateKind::Empty,
+                    title: "Nothing needs attention".to_string(),
+                    description: None,
+                },
+            }),
+        }];
+
+        assert!(validate_manifest(&manifest).is_ok());
+
+        manifest.contributes.panels[0].title = None;
+        assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
     fn manifest_rejects_ui_filter_bound_to_undeclared_view() {
         let mut manifest = manifest_with_sidebar_filter();
         let Some(ExtensionUiNode::Select { binding, .. }) = manifest
@@ -1246,6 +1296,15 @@ mod tests {
             .expect("Thread Tags should be bundled");
         assert!(thread_tags.enabled);
         assert_eq!(thread_tags.status, ExtensionStatus::Active);
+
+        let mini_zen = snapshot
+            .catalog
+            .iter()
+            .find(|extension| extension.id == "falcondeck.mini-zen")
+            .expect("Mini Zen should be bundled");
+        assert!(!mini_zen.enabled);
+        assert_eq!(mini_zen.status, ExtensionStatus::Disabled);
+        assert_eq!(mini_zen.contributes.panels.len(), 1);
 
         let host_path = state_dir.path().join("extension-host/main.ts");
         tokio::fs::write(&host_path, "// stale bundled host")

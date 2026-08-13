@@ -34,6 +34,7 @@ describe("extension snapshot normalization", () => {
         threadMenuActions: [],
         threadDecorations: [],
         sidebarFilters: [],
+        panels: [],
         unsupported: [],
       },
       permissions: [],
@@ -71,7 +72,7 @@ describe("extension snapshot normalization", () => {
           name: "Example",
           version: "1.0.0",
           contributes: {
-            panels: [{ id: "future", title: "Future panel", view: "future" }],
+            statusBarItems: [{ id: "future", title: "Future item" }],
           },
         },
       ],
@@ -80,10 +81,41 @@ describe("extension snapshot normalization", () => {
 
     expect(normalized.catalog[0]?.contributes.unsupported).toEqual([
       {
-        kind: "panels",
-        entries: [{ id: "future", title: "Future panel", view: "future" }],
+        kind: "statusBarItems",
+        entries: [{ id: "future", title: "Future item" }],
       },
     ]);
+  });
+
+  it("normalizes panels as a known declarative contribution", () => {
+    const normalized = normalizeExtensionSnapshot({
+      catalog: [
+        {
+          id: "example.panel",
+          name: "Example",
+          version: "1.0.0",
+          contributes: {
+            panels: [
+              {
+                id: "main",
+                title: "Example panel",
+                view: "main-panel",
+                ui: {
+                  version: 1,
+                  root: { type: "text", text: "Hello" },
+                },
+              },
+            ],
+          },
+        },
+      ],
+      views: [],
+    });
+
+    expect(normalized.catalog[0]?.contributes.panels).toEqual([
+      expect.objectContaining({ id: "main", view: "main-panel" }),
+    ]);
+    expect(normalized.catalog[0]?.contributes.unsupported).toEqual([]);
   });
 });
 

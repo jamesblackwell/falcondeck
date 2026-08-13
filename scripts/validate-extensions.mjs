@@ -21,6 +21,7 @@ const contributionShapes = {
   threadMenuActions: { title: true, view: false, ui: false },
   threadDecorations: { title: false, view: true, ui: true },
   sidebarFilters: { title: true, view: true, ui: true },
+  panels: { title: true, view: true, ui: true },
 };
 const identifierPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 const uiTones = new Set([
@@ -72,22 +73,35 @@ function reportUi(pointer, message) {
   return false;
 }
 
-function validateUiNode(node, pointer, depth, counter, declaredActions, declaredViews) {
+function validateUiNode(
+  node,
+  pointer,
+  depth,
+  counter,
+  declaredActions,
+  declaredViews,
+) {
   counter.nodes += 1;
   if (depth > 32 || counter.nodes > 256) {
     return reportUi(pointer, "declarative UI exceeds 32 levels or 256 nodes");
   }
   if (!isObject(node) || typeof node.type !== "string") {
-    return reportUi(pointer, "declarative UI node must be an object with a type");
+    return reportUi(
+      pointer,
+      "declarative UI node must be an object with a type",
+    );
   }
   if (node.type === "stack" || node.type === "row") {
-    const allowed = node.type === "row"
-      ? ["type", "gap", "wrap", "children"]
-      : ["type", "gap", "children"];
+    const allowed =
+      node.type === "row"
+        ? ["type", "gap", "wrap", "children"]
+        : ["type", "gap", "children"];
     if (
       !hasOnlyKeys(node, allowed) ||
       (node.gap !== undefined && !uiGaps.has(node.gap)) ||
-      (node.type === "row" && node.wrap !== undefined && typeof node.wrap !== "boolean") ||
+      (node.type === "row" &&
+        node.wrap !== undefined &&
+        typeof node.wrap !== "boolean") ||
       !Array.isArray(node.children) ||
       node.children.length > 256
     ) {
@@ -106,21 +120,25 @@ function validateUiNode(node, pointer, depth, counter, declaredActions, declared
   }
   if (node.type === "text") {
     return (
-      hasOnlyKeys(node, ["type", "text", "style", "tone"]) &&
-      validUiText(node.text) &&
-      (node.style === undefined || uiTextStyles.has(node.style)) &&
-      (node.tone === undefined || uiTones.has(node.tone))
-    ) || reportUi(pointer, "invalid text node");
+      (hasOnlyKeys(node, ["type", "text", "style", "tone"]) &&
+        validUiText(node.text) &&
+        (node.style === undefined || uiTextStyles.has(node.style)) &&
+        (node.tone === undefined || uiTones.has(node.tone))) ||
+      reportUi(pointer, "invalid text node")
+    );
   }
   if (node.type === "badge") {
     return (
-      hasOnlyKeys(node, ["type", "text", "tone"]) &&
-      validUiText(node.text) &&
-      (node.tone === undefined || uiTones.has(node.tone))
-    ) || reportUi(pointer, "invalid badge node");
+      (hasOnlyKeys(node, ["type", "text", "tone"]) &&
+        validUiText(node.text) &&
+        (node.tone === undefined || uiTones.has(node.tone))) ||
+      reportUi(pointer, "invalid badge node")
+    );
   }
   if (node.type === "divider") {
-    return hasOnlyKeys(node, ["type"]) || reportUi(pointer, "invalid divider node");
+    return (
+      hasOnlyKeys(node, ["type"]) || reportUi(pointer, "invalid divider node")
+    );
   }
   if (node.type === "button") {
     const action = node.action;
@@ -136,25 +154,36 @@ function validateUiNode(node, pointer, depth, counter, declaredActions, declared
     ) {
       return reportUi(pointer, "invalid button or undeclared action binding");
     }
-    if (action.target !== undefined && (
-      !isObject(action.target) ||
-      !hasOnlyKeys(action.target, ["kind", "id"]) ||
-      typeof action.target.kind !== "string" ||
-      action.target.kind.length === 0 ||
-      [...action.target.kind].length > 64 ||
-      typeof action.target.id !== "string" ||
-      action.target.id.length === 0 ||
-      [...action.target.id].length > 512
-    )) {
+    if (
+      action.target !== undefined &&
+      (!isObject(action.target) ||
+        !hasOnlyKeys(action.target, ["kind", "id"]) ||
+        typeof action.target.kind !== "string" ||
+        action.target.kind.length === 0 ||
+        [...action.target.kind].length > 64 ||
+        typeof action.target.id !== "string" ||
+        action.target.id.length === 0 ||
+        [...action.target.id].length > 512)
+    ) {
       return reportUi(`${pointer}/action/target`, "invalid action target");
     }
-    if (action.input !== undefined && Buffer.byteLength(JSON.stringify(action.input)) > 64 * 1024) {
-      return reportUi(`${pointer}/action/input`, "action input exceeds 65536 bytes");
+    if (
+      action.input !== undefined &&
+      Buffer.byteLength(JSON.stringify(action.input)) > 64 * 1024
+    ) {
+      return reportUi(
+        `${pointer}/action/input`,
+        "action input exceeds 65536 bytes",
+      );
     }
     return true;
   }
   if (node.type === "list") {
-    if (!hasOnlyKeys(node, ["type", "items"]) || !Array.isArray(node.items) || node.items.length > 256) {
+    if (
+      !hasOnlyKeys(node, ["type", "items"]) ||
+      !Array.isArray(node.items) ||
+      node.items.length > 256
+    ) {
       return reportUi(pointer, "invalid list node");
     }
     return node.items.every((item, index) =>
@@ -171,7 +200,8 @@ function validateUiNode(node, pointer, depth, counter, declaredActions, declared
   if (node.type === "select") {
     const binding = node.binding;
     const values = new Set();
-    const validOptions = Array.isArray(node.options) &&
+    const validOptions =
+      Array.isArray(node.options) &&
       node.options.length <= 256 &&
       node.options.every((option) => {
         if (
@@ -183,11 +213,13 @@ function validateUiNode(node, pointer, depth, counter, declaredActions, declared
           values.has(option.value) ||
           !validUiText(option.label, false) ||
           (option.tone !== undefined && !uiTones.has(option.tone))
-        ) return false;
+        )
+          return false;
         values.add(option.value);
         return true;
       });
-    const validBinding = isObject(binding) &&
+    const validBinding =
+      isObject(binding) &&
       hasOnlyKeys(binding, ["view", "path", "operator"]) &&
       identifierPattern.test(binding.view ?? "") &&
       declaredViews.has(binding.view) &&
@@ -195,33 +227,49 @@ function validateUiNode(node, pointer, depth, counter, declaredActions, declared
       Array.isArray(binding.path) &&
       binding.path.length > 0 &&
       binding.path.length <= 16 &&
-      binding.path.every((segment) =>
-        typeof segment === "string" &&
-        segment.length > 0 &&
-        [...segment].length <= 128 &&
-        !unsafePathSegments.has(segment),
+      binding.path.every(
+        (segment) =>
+          typeof segment === "string" &&
+          segment.length > 0 &&
+          [...segment].length <= 128 &&
+          !unsafePathSegments.has(segment),
       );
     return (
-      hasOnlyKeys(node, ["type", "id", "label", "multiple", "options", "binding"]) &&
-      identifierPattern.test(node.id ?? "") &&
-      validUiText(node.label, false) &&
-      (node.multiple === undefined || typeof node.multiple === "boolean") &&
-      validOptions &&
-      validBinding
-    ) || reportUi(pointer, "invalid select or thread-filter binding");
+      (hasOnlyKeys(node, [
+        "type",
+        "id",
+        "label",
+        "multiple",
+        "options",
+        "binding",
+      ]) &&
+        identifierPattern.test(node.id ?? "") &&
+        validUiText(node.label, false) &&
+        (node.multiple === undefined || typeof node.multiple === "boolean") &&
+        validOptions &&
+        validBinding) ||
+      reportUi(pointer, "invalid select or thread-filter binding")
+    );
   }
   if (node.type === "state") {
     return (
-      hasOnlyKeys(node, ["type", "state", "title", "description"]) &&
-      uiStateKinds.has(node.state) &&
-      validUiText(node.title, false) &&
-      (node.description === undefined || validUiText(node.description))
-    ) || reportUi(pointer, "invalid state node");
+      (hasOnlyKeys(node, ["type", "state", "title", "description"]) &&
+        uiStateKinds.has(node.state) &&
+        validUiText(node.title, false) &&
+        (node.description === undefined || validUiText(node.description))) ||
+      reportUi(pointer, "invalid state node")
+    );
   }
   return reportUi(pointer, `unsupported declarative UI node: ${node.type}`);
 }
 
-function validateUiDocument(document, pointer, declaredActions, declaredViews, requireSelectRoot) {
+function validateUiDocument(
+  document,
+  pointer,
+  declaredActions,
+  declaredViews,
+  requireSelectRoot,
+) {
   if (
     !isObject(document) ||
     !hasOnlyKeys(document, ["version", "root"]) ||
@@ -230,7 +278,10 @@ function validateUiDocument(document, pointer, declaredActions, declaredViews, r
     return reportUi(pointer, "declarative UI must use version 1");
   }
   if (requireSelectRoot && document.root?.type !== "select") {
-    return reportUi(`${pointer}/root`, "sidebar filter UI must use a select root");
+    return reportUi(
+      `${pointer}/root`,
+      "sidebar filter UI must use a select root",
+    );
   }
   return validateUiNode(
     document.root,

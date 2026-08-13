@@ -49,6 +49,11 @@
           "type": "array",
           "maxItems": 256,
           "items": { "$ref": "#/$defs/titledViewContribution" }
+        },
+        "panels": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/titledViewContribution" }
         }
       },
       "additionalProperties": false

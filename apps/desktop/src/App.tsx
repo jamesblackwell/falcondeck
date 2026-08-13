@@ -20,6 +20,7 @@ import {
   countAwaitingResponseThreads,
   countActivityEntries,
   conversationItemsForSelection,
+  deriveExtensionPanels,
   deriveThreadAttentionPresentation,
   deriveExtensionSidebarFilters,
   deriveThreadTags,
@@ -62,6 +63,8 @@ import {
   type AttachmentPreparationCounts,
   type ComposerDrafts,
   type ConversationItem,
+  type ExtensionPanelDefinition,
+  type ExtensionUiActionBinding,
   type ImageInput,
   type PersistedComposerSelection,
   type PersistedComposerState,
@@ -79,6 +82,7 @@ import {
 } from "@falcondeck/client-core";
 import {
   ComposerContextBar,
+  ExtensionPanel,
   NewThreadState,
   composePromptWithQuotedSelections,
   normalizeQuotedSelection,
@@ -148,6 +152,10 @@ import { resolveMainView } from "./main-view-registry";
 // memoized PromptInput on every render.
 const NO_ATTACHMENTS: ImageInput[] = [];
 const NO_QUOTED_SELECTIONS: QuotedSelection[] = [];
+
+type DesktopExtensionPanel = ExtensionPanelDefinition & {
+  ownerHostId: string | null;
+};
 
 function lastAgentItemId(items: ConversationItem[]) {
   for (let index = items.length - 1; index >= 0; index -= 1) {
@@ -267,7 +275,11 @@ function AppInner() {
     useState(false);
   const [isStartingRemote, setIsStartingRemote] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
+  const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
+    string | null
+  >(null);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
@@ -603,6 +615,45 @@ function AppInner() {
     () => deriveExtensionSidebarFilters(viewSnapshot?.extensions),
     [viewSnapshot?.extensions],
   );
+  const extensionPanels = useMemo<DesktopExtensionPanel[]>(() => {
+    const localPanels = deriveExtensionPanels(snapshot?.extensions).map(
+      (panel) => ({
+        ...panel,
+        key: `extension:local:${panel.key}`,
+        ownerHostId: null,
+      }),
+    );
+    const remotePanels = remoteHosts.hosts.flatMap((host) =>
+      deriveExtensionPanels(host.snapshot?.extensions).map((panel) => ({
+        ...panel,
+        key: `extension:${host.id}:${panel.key}`,
+        title: `${panel.title} · ${host.name}`,
+        ownerHostId: host.id,
+      })),
+    );
+    return [...localPanels, ...remotePanels];
+  }, [remoteHosts.hosts, snapshot?.extensions]);
+  useEffect(() => {
+    if (
+      activeExtensionPanelKey &&
+      !extensionPanels.some((panel) => panel.key === activeExtensionPanelKey)
+    ) {
+      setActiveExtensionPanelKey(null);
+    }
+  }, [activeExtensionPanelKey, extensionPanels]);
+  useEffect(() => {
+    if (
+      activeExtensionPanelKey &&
+      (isActivityOpen || isScheduledOpen || isSettingsOpen)
+    ) {
+      setActiveExtensionPanelKey(null);
+    }
+  }, [
+    activeExtensionPanelKey,
+    isActivityOpen,
+    isScheduledOpen,
+    isSettingsOpen,
+  ]);
   const threadTagsEnabled =
     viewSnapshot?.extensions.catalog.some(
       (extension) =>
@@ -643,6 +694,29 @@ function AppInner() {
       return host ? host.api() : api;
     },
     [api, remoteHosts],
+  );
+  const invokeExtensionPanelAction = useCallback(
+    async (
+      panel: DesktopExtensionPanel,
+      extensionId: string,
+      action: ExtensionUiActionBinding,
+    ) => {
+      const host = panel.ownerHostId
+        ? remoteHosts.hosts.find(
+            (candidate) => candidate.id === panel.ownerHostId,
+          )
+        : null;
+      const actionApi = host
+        ? (remoteHosts.manager.connection(host.id)?.api() ?? null)
+        : api;
+      if (!actionApi) throw new Error("The FalconDeck daemon is not connected");
+      await actionApi.invokeExtensionAction(extensionId, action.actionId, {
+        target: action.target,
+        input: action.input ?? null,
+      });
+      if (!host && api) setSnapshot(await api.snapshot());
+    },
+    [api, remoteHosts.hosts, remoteHosts.manager, setSnapshot],
   );
   const selectedWorkspace = useMemo(
     () =>
@@ -2573,7 +2647,9 @@ function AppInner() {
   const handleSelectWorkspace = useCallback(
     (workspaceId: string, threadId: string | null) => {
       setIsSettingsOpen(false);
+      setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
     },
@@ -2583,7 +2659,9 @@ function AppInner() {
   const handleSelectThread = useCallback(
     (workspaceId: string, threadId: string) => {
       setIsSettingsOpen(false);
+      setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
     },
@@ -2593,7 +2671,9 @@ function AppInner() {
   const handleNewThread = useCallback(
     (workspaceId: string) => {
       setIsSettingsOpen(false);
+      setIsScheduledOpen(false);
       setIsActivityOpen(false);
+      setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(null);
       // Clear the detail at the same time as the selection. The connection
@@ -2929,12 +3009,30 @@ function AppInner() {
     setSettingsSection("general");
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
+    setIsScheduledOpen(false);
     setIsActivityOpen(false);
+    setActiveExtensionPanelKey(null);
+  }, []);
+
+  const handleOpenScheduled = useCallback(() => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(true);
+    setIsActivityOpen(false);
+    setActiveExtensionPanelKey(null);
   }, []);
 
   const handleOpenActivity = useCallback(() => {
     setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
     setIsActivityOpen(true);
+    setActiveExtensionPanelKey(null);
+  }, []);
+
+  const handleOpenExtensionPanel = useCallback((panelKey: string) => {
+    setIsSettingsOpen(false);
+    setIsScheduledOpen(false);
+    setIsActivityOpen(false);
+    setActiveExtensionPanelKey(panelKey);
   }, []);
 
   const handleCheckForUpdates = useCallback(() => {
@@ -3966,9 +4064,11 @@ function AppInner() {
   );
   const activeMainViewId = isActivityOpen
     ? "core.activity"
-    : isSettingsOpen
-      ? "core.settings"
-      : null;
+    : isScheduledOpen
+      ? "core.scheduled"
+      : isSettingsOpen
+        ? "core.settings"
+        : activeExtensionPanelKey;
 
   return (
     <>
@@ -4023,6 +4123,9 @@ function AppInner() {
               threadTagsEnabled ? handleSetThreadColor : undefined
             }
             canSetThreadColor={canSetThreadColor}
+            extensionPanels={extensionPanels}
+            activeExtensionPanelKey={activeExtensionPanelKey}
+            onOpenExtensionPanel={handleOpenExtensionPanel}
           />
         }
         main={
@@ -4085,6 +4188,19 @@ function AppInner() {
                     onClose={() => setIsSettingsOpen(false)}
                   />
                 </Suspense>
+              ),
+              ...Object.fromEntries(
+                extensionPanels.map((panel) => [
+                  panel.key,
+                  <ExtensionPanel
+                    key={panel.key}
+                    panel={panel}
+                    onClose={() => setActiveExtensionPanelKey(null)}
+                    onAction={(extensionId, action) =>
+                      invokeExtensionPanelAction(panel, extensionId, action)
+                    }
+                  />,
+                ]),
               ),
             },
             activeMainViewId,

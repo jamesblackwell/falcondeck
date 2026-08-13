@@ -768,6 +768,9 @@ pub struct ExtensionContributions {
     /// Filters made available above the thread list.
     #[serde(default)]
     pub sidebar_filters: Vec<ExtensionViewContribution>,
+    /// Named full-main-area surfaces rendered by clients.
+    #[serde(default)]
+    pub panels: Vec<ExtensionViewContribution>,
 }
 
 /// Declared action contribution.
@@ -811,7 +814,7 @@ pub enum ExtensionUiNode {
     /// Vertical layout.
     Stack {
         /// Spacing between children.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<ExtensionUiGap>,
         /// Child components.
         children: Vec<ExtensionUiNode>,
@@ -819,7 +822,7 @@ pub enum ExtensionUiNode {
     /// Horizontal layout.
     Row {
         /// Spacing between children.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         gap: Option<ExtensionUiGap>,
         /// Whether children may wrap onto another line.
         #[serde(default)]
@@ -832,10 +835,10 @@ pub enum ExtensionUiNode {
         /// Text content.
         text: String,
         /// Semantic text treatment.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<ExtensionUiTextStyle>,
         /// Semantic colour treatment.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tone: Option<ExtensionUiTone>,
     },
     /// Compact label.
@@ -843,7 +846,7 @@ pub enum ExtensionUiNode {
         /// Badge content.
         text: String,
         /// Semantic colour treatment.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         tone: Option<ExtensionUiTone>,
     },
     /// Visual and semantic separation between adjacent content.
@@ -855,10 +858,10 @@ pub enum ExtensionUiNode {
         /// Action invocation data.
         action: ExtensionUiActionBinding,
         /// Semantic button treatment.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         variant: Option<ExtensionUiButtonVariant>,
         /// Whether the control is unavailable.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "is_false")]
         disabled: bool,
     },
     /// Semantic list of declarative child components.
@@ -887,9 +890,13 @@ pub enum ExtensionUiNode {
         /// Short state title.
         title: String,
         /// Optional supporting copy.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Spacing tokens available to declarative extension layouts.
@@ -980,7 +987,7 @@ pub struct ExtensionUiActionBinding {
     #[serde(default)]
     pub input: Value,
     /// Optional literal entity target.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<ExtensionViewScope>,
 }
 
@@ -993,7 +1000,7 @@ pub struct ExtensionUiSelectOption {
     /// Visible option label.
     pub label: String,
     /// Optional semantic swatch or tone.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tone: Option<ExtensionUiTone>,
 }
 

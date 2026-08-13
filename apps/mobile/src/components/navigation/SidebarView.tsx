@@ -1,42 +1,69 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { Pressable, View } from 'react-native'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { StyleSheet, useUnistyles } from 'react-native-unistyles'
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { Pressable, View } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import Animated, {
   Easing,
   useAnimatedStyle,
   useSharedValue,
   withTiming,
-} from 'react-native-reanimated'
-import { FlashList } from '@shopify/flash-list'
-import { ChevronDown, ChevronRight, Settings, SquarePen, X } from 'lucide-react-native'
-import * as Haptics from 'expo-haptics'
+} from "react-native-reanimated";
+import { FlashList } from "@shopify/flash-list";
+import {
+  ChevronDown,
+  ChevronRight,
+  Settings,
+  SquarePen,
+  X,
+} from "lucide-react-native";
+import * as Haptics from "expo-haptics";
 
-import type { ProjectGroup, ThreadSummary, ThreadTag } from '@falcondeck/client-core'
+import type {
+  ProjectGroup,
+  ThreadSummary,
+  ThreadTag,
+} from "@falcondeck/client-core";
 
-import { Text, Button, EmptyState, SyncBanner } from '@/components/ui'
-import { SessionListItem } from '@/components/chat'
-import { useCollapsible } from '@/components/chat/useCollapsible'
-import { useSessionSyncStatus } from '@/hooks/useSessionSyncStatus'
-import { buildSidebarRows, SHOW_MORE_STEP, type SidebarRow } from './sidebarRows'
-import { ThreadOptionsSheet } from './ThreadOptionsSheet'
+import { Text, Button, EmptyState, SyncBanner } from "@/components/ui";
+import { SessionListItem } from "@/components/chat";
+import { useCollapsible } from "@/components/chat/useCollapsible";
+import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
+import {
+  buildSidebarRows,
+  SHOW_MORE_STEP,
+  type SidebarRow,
+} from "./sidebarRows";
+import { ThreadOptionsSheet } from "./ThreadOptionsSheet";
 
 interface SidebarViewProps {
-  groups: ProjectGroup[]
-  selectedThreadId: string | null
-  onSelectThread: (workspaceId: string, threadId: string) => void
-  onNewThread: (workspaceId: string) => void
-  onOpenSettings?: () => void
+  groups: ProjectGroup[];
+  selectedThreadId: string | null;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onNewThread: (workspaceId: string) => void;
+  onOpenSettings?: () => void;
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
-  onClose?: () => void
-  threadTagsById?: Record<string, ThreadTag[]>
+  onClose?: () => void;
+  threadTagsById?: Record<string, ThreadTag[]>;
   /** Visible fallback for declarative sidebar filters not rendered on mobile v1. */
-  extensionFilterCount?: number
+  extensionFilterCount?: number;
+  /** Visible fallback for full-main-area extension panels not rendered on mobile v1. */
+  extensionPanelCount?: number;
 }
 
 // Rotating one chevron rather than swapping two icons, so the open/close
 // toggle reads as a single continuous motion.
-const CHEVRON_TIMING = { duration: 150, easing: Easing.out(Easing.cubic) } as const
+const CHEVRON_TIMING = {
+  duration: 150,
+  easing: Easing.out(Easing.cubic),
+} as const;
 
 const WorkspaceChevron = memo(function WorkspaceChevron({
   workspaceId,
@@ -44,36 +71,36 @@ const WorkspaceChevron = memo(function WorkspaceChevron({
   size,
   color,
 }: {
-  workspaceId: string
-  isOpen: boolean
-  size: number
-  color: string
+  workspaceId: string;
+  isOpen: boolean;
+  size: number;
+  color: string;
 }) {
-  const progress = useSharedValue(isOpen ? 1 : 0)
-  const renderedWorkspaceId = useRef(workspaceId)
+  const progress = useSharedValue(isOpen ? 1 : 0);
+  const renderedWorkspaceId = useRef(workspaceId);
 
   useEffect(() => {
-    const target = isOpen ? 1 : 0
+    const target = isOpen ? 1 : 0;
     // FlashList recycles rows, so this view can land on a different workspace
     // mid-scroll: snap there instead of spinning through a toggle nobody made.
     if (renderedWorkspaceId.current !== workspaceId) {
-      renderedWorkspaceId.current = workspaceId
-      progress.value = target
-      return
+      renderedWorkspaceId.current = workspaceId;
+      progress.value = target;
+      return;
     }
-    progress.value = withTiming(target, CHEVRON_TIMING)
-  }, [isOpen, progress, workspaceId])
+    progress.value = withTiming(target, CHEVRON_TIMING);
+  }, [isOpen, progress, workspaceId]);
 
   const chevronStyle = useAnimatedStyle(() => ({
     transform: [{ rotate: `${progress.value * 90}deg` }],
-  }))
+  }));
 
   return (
     <Animated.View style={chevronStyle}>
       <ChevronRight size={size} color={color} />
     </Animated.View>
-  )
-})
+  );
+});
 
 // Collapsed projects keep their thread rows in the list data so the same cells
 // can animate shut — height runs to zero while everything below slides up,
@@ -84,23 +111,23 @@ const CollapsibleRow = memo(function CollapsibleRow({
   isCollapsed,
   children,
 }: {
-  rowKey: string
-  isCollapsed: boolean
-  children: ReactNode
+  rowKey: string;
+  isCollapsed: boolean;
+  children: ReactNode;
 }) {
-  const { bodyStyle, onContentLayout } = useCollapsible(!isCollapsed, rowKey)
+  const { bodyStyle, onContentLayout } = useCollapsible(!isCollapsed, rowKey);
 
   return (
     <Animated.View
       style={bodyStyle}
-      pointerEvents={isCollapsed ? 'none' : 'auto'}
+      pointerEvents={isCollapsed ? "none" : "auto"}
       accessibilityElementsHidden={isCollapsed}
-      importantForAccessibility={isCollapsed ? 'no-hide-descendants' : 'auto'}
+      importantForAccessibility={isCollapsed ? "no-hide-descendants" : "auto"}
     >
       <View onLayout={onContentLayout}>{children}</View>
     </Animated.View>
-  )
-})
+  );
+});
 
 export const SidebarView = memo(function SidebarView({
   groups,
@@ -111,26 +138,35 @@ export const SidebarView = memo(function SidebarView({
   onClose,
   threadTagsById,
   extensionFilterCount = 0,
+  extensionPanelCount = 0,
 }: SidebarViewProps) {
-  const { theme } = useUnistyles()
-  const insets = useSafeAreaInsets()
+  const { theme } = useUnistyles();
+  const insets = useSafeAreaInsets();
   // The sidebar is where "New thread" lives, so it is where the boot-time wait
   // has to be visible: without this the button looks broken for ~10s.
-  const syncStatus = useSessionSyncStatus()
+  const syncStatus = useSessionSyncStatus();
 
-  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(() => new Set())
-  const [visibleThreadCounts, setVisibleThreadCounts] = useState<Map<string, number>>(
-    () => new Map(),
-  )
+  const [collapsedWorkspaces, setCollapsedWorkspaces] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [visibleThreadCounts, setVisibleThreadCounts] = useState<
+    Map<string, number>
+  >(() => new Map());
   const [optionsTarget, setOptionsTarget] = useState<{
-    workspaceId: string
-    thread: ThreadSummary
-  } | null>(null)
+    workspaceId: string;
+    thread: ThreadSummary;
+  } | null>(null);
 
   const rows = useMemo(
-    () => buildSidebarRows(groups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId),
+    () =>
+      buildSidebarRows(
+        groups,
+        collapsedWorkspaces,
+        visibleThreadCounts,
+        selectedThreadId,
+      ),
     [groups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId],
-  )
+  );
 
   // The drawer runs to the bottom of the screen, so the last thread would sit
   // under the home indicator without this.
@@ -140,55 +176,63 @@ export const SidebarView = memo(function SidebarView({
       paddingBottom: theme.spacing[3] + insets.bottom,
     }),
     [insets.bottom, theme.spacing],
-  )
+  );
 
   const toggleWorkspaceCollapse = useCallback((workspaceId: string) => {
     setCollapsedWorkspaces((prev) => {
-      const next = new Set(prev)
+      const next = new Set(prev);
       if (next.has(workspaceId)) {
-        next.delete(workspaceId)
+        next.delete(workspaceId);
       } else {
-        next.add(workspaceId)
+        next.add(workspaceId);
       }
-      return next
-    })
-  }, [])
+      return next;
+    });
+  }, []);
 
   const handleOverflowPress = useCallback(
     (workspaceId: string, visibleCount: number, isExpanded: boolean) => {
       setVisibleThreadCounts((prev) => {
-        const next = new Map(prev)
+        const next = new Map(prev);
         if (isExpanded) {
-          next.delete(workspaceId)
+          next.delete(workspaceId);
         } else {
-          next.set(workspaceId, visibleCount + SHOW_MORE_STEP)
+          next.set(workspaceId, visibleCount + SHOW_MORE_STEP);
         }
-        return next
-      })
+        return next;
+      });
     },
     [],
-  )
+  );
 
-  const openThreadOptions = useCallback((workspaceId: string, thread: ThreadSummary) => {
-    void Haptics.selectionAsync()
-    setOptionsTarget({ workspaceId, thread })
-  }, [])
+  const openThreadOptions = useCallback(
+    (workspaceId: string, thread: ThreadSummary) => {
+      void Haptics.selectionAsync();
+      setOptionsTarget({ workspaceId, thread });
+    },
+    [],
+  );
 
   const closeThreadOptions = useCallback(() => {
-    setOptionsTarget(null)
-  }, [])
+    setOptionsTarget(null);
+  }, []);
 
   const renderRow = useCallback(
     ({ item }: { item: SidebarRow }) => {
-      if (item.type === 'section') {
+      if (item.type === "section") {
         return (
-          <Text variant="caption" color="muted" weight="medium" style={styles.sectionHeading}>
+          <Text
+            variant="caption"
+            color="muted"
+            weight="medium"
+            style={styles.sectionHeading}
+          >
             {item.title.toUpperCase()}
           </Text>
-        )
+        );
       }
 
-      if (item.type === 'workspace') {
+      if (item.type === "workspace") {
         // Two sibling controls, not a button inside a button: nesting them made
         // VoiceOver read the row as one element and swallowed "new thread".
         return (
@@ -198,7 +242,9 @@ export const SidebarView = memo(function SidebarView({
               onPress={() => toggleWorkspaceCollapse(item.workspaceId)}
               accessibilityRole="button"
               accessibilityLabel={item.workspaceName}
-              accessibilityHint={item.isOpen ? 'Collapses this project' : 'Expands this project'}
+              accessibilityHint={
+                item.isOpen ? "Collapses this project" : "Expands this project"
+              }
               accessibilityState={{ expanded: item.isOpen }}
             >
               <WorkspaceChevron
@@ -223,19 +269,26 @@ export const SidebarView = memo(function SidebarView({
               accessibilityLabel={`New thread in ${item.workspaceName}`}
               onPress={() => onNewThread(item.workspaceId)}
             >
-              <SquarePen size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+              <SquarePen
+                size={theme.iconSize.xs}
+                color={theme.colors.fg.muted}
+              />
             </Button>
           </View>
-        )
+        );
       }
 
-      if (item.type === 'overflow') {
+      if (item.type === "overflow") {
         return (
           <CollapsibleRow rowKey={item.key} isCollapsed={item.isCollapsed}>
             <Pressable
               style={styles.overflowRow}
               onPress={() =>
-                handleOverflowPress(item.workspaceId, item.visibleCount, item.isExpanded)
+                handleOverflowPress(
+                  item.workspaceId,
+                  item.visibleCount,
+                  item.isExpanded,
+                )
               }
               accessibilityRole="button"
               accessibilityState={{ expanded: item.isExpanded }}
@@ -246,11 +299,11 @@ export const SidebarView = memo(function SidebarView({
                 style={item.isExpanded ? styles.chevronFlipped : undefined}
               />
               <Text variant="caption" color="muted">
-                {item.isExpanded ? 'Show less' : 'Show more'}
+                {item.isExpanded ? "Show less" : "Show more"}
               </Text>
             </Pressable>
           </CollapsibleRow>
-        )
+        );
       }
 
       return (
@@ -264,7 +317,7 @@ export const SidebarView = memo(function SidebarView({
             tags={threadTagsById?.[item.thread.id]}
           />
         </CollapsibleRow>
-      )
+      );
     },
     [
       onNewThread,
@@ -277,7 +330,7 @@ export const SidebarView = memo(function SidebarView({
       handleOverflowPress,
       threadTagsById,
     ],
-  )
+  );
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -287,7 +340,10 @@ export const SidebarView = memo(function SidebarView({
             Threads
           </Text>
           <Pressable
-            style={({ pressed }) => [styles.closeButton, pressed ? styles.closeButtonPressed : undefined]}
+            style={({ pressed }) => [
+              styles.closeButton,
+              pressed ? styles.closeButtonPressed : undefined,
+            ]}
             onPress={onClose}
             accessibilityRole="button"
             accessibilityLabel="Close sidebar"
@@ -304,8 +360,18 @@ export const SidebarView = memo(function SidebarView({
         <View style={styles.extensionFallback} accessibilityRole="text">
           <Text variant="caption" color="muted">
             {extensionFilterCount === 1
-              ? 'An extension filter is available on desktop and web.'
+              ? "An extension filter is available on desktop and web."
               : `${extensionFilterCount} extension filters are available on desktop and web.`}
+          </Text>
+        </View>
+      ) : null}
+
+      {extensionPanelCount > 0 ? (
+        <View style={styles.extensionFallback} accessibilityRole="text">
+          <Text variant="caption" color="muted">
+            {extensionPanelCount === 1
+              ? "This extension provides a panel not yet supported here. Open it on desktop or web."
+              : `${extensionPanelCount} extensions provide panels not yet supported here. Open them on desktop or web.`}
           </Text>
         </View>
       ) : null}
@@ -314,10 +380,16 @@ export const SidebarView = memo(function SidebarView({
         {rows.length === 0 ? (
           // 'offline' is a dead end rather than a wait, so it keeps the
           // regular empty state; the banner above already explains it.
-          syncStatus.isBusy && syncStatus.stage !== 'offline' ? (
-            <EmptyState title="Loading your projects…" description={syncStatus.detail} />
+          syncStatus.isBusy && syncStatus.stage !== "offline" ? (
+            <EmptyState
+              title="Loading your projects…"
+              description={syncStatus.detail}
+            />
           ) : (
-            <EmptyState title="No projects" description="Connect from your desktop to get started" />
+            <EmptyState
+              title="No projects"
+              description="Connect from your desktop to get started"
+            />
           )
         ) : (
           <FlashList
@@ -332,16 +404,29 @@ export const SidebarView = memo(function SidebarView({
       </View>
 
       {onOpenSettings ? (
-        <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, theme.spacing[3]) }]}>
+        <View
+          style={[
+            styles.footer,
+            { paddingBottom: Math.max(insets.bottom, theme.spacing[3]) },
+          ]}
+        >
           <Pressable
-            style={({ pressed }) => [styles.settingsRow, pressed ? styles.settingsRowPressed : undefined]}
+            style={({ pressed }) => [
+              styles.settingsRow,
+              pressed ? styles.settingsRowPressed : undefined,
+            ]}
             onPress={onOpenSettings}
             accessibilityRole="button"
             accessibilityLabel="Settings"
             accessibilityHint="Opens mobile settings"
           >
-            <Settings size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
-            <Text variant="label" color="secondary" weight="medium">Settings</Text>
+            <Settings
+              size={theme.iconSize.sm}
+              color={theme.colors.fg.secondary}
+            />
+            <Text variant="label" color="secondary" weight="medium">
+              Settings
+            </Text>
           </Pressable>
         </View>
       ) : null}
@@ -354,8 +439,8 @@ export const SidebarView = memo(function SidebarView({
         />
       ) : null}
     </View>
-  )
-})
+  );
+});
 
 const styles = StyleSheet.create((theme) => ({
   container: {
@@ -373,13 +458,13 @@ const styles = StyleSheet.create((theme) => ({
     borderWidth: 1,
     borderColor: theme.colors.border.subtle,
     borderRadius: theme.radius.lg,
-    borderCurve: 'continuous',
+    borderCurve: "continuous",
     backgroundColor: theme.colors.surface[2],
   },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     minHeight: theme.minTouchTarget,
     paddingLeft: theme.spacing[4],
     paddingRight: theme.spacing[2],
@@ -388,8 +473,8 @@ const styles = StyleSheet.create((theme) => ({
   closeButton: {
     width: theme.minTouchTarget,
     height: theme.minTouchTarget,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     borderRadius: theme.radius.full,
   },
   closeButtonPressed: { backgroundColor: theme.colors.surface[2] },
@@ -402,17 +487,17 @@ const styles = StyleSheet.create((theme) => ({
   },
   settingsRow: {
     minHeight: theme.minTouchTarget,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: theme.spacing[3],
     paddingHorizontal: theme.spacing[3],
     borderRadius: theme.radius.lg,
   },
   settingsRowPressed: { backgroundColor: theme.colors.surface[2] },
   workspaceHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: theme.spacing[3],
     marginTop: theme.spacing[2],
   },
@@ -424,8 +509,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   workspaceLeft: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: theme.spacing[2],
     // The row is the whole tap target for collapsing, so it carries the
     // minimum height rather than the header wrapper around it.
@@ -435,14 +520,14 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
   },
   overflowRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: "row",
+    alignItems: "center",
     gap: theme.spacing[1.5],
     minHeight: theme.minTouchTarget,
     paddingHorizontal: theme.spacing[4],
     marginLeft: theme.spacing[3],
   },
   chevronFlipped: {
-    transform: [{ rotate: '180deg' }],
+    transform: [{ rotate: "180deg" }],
   },
-}))
+}));

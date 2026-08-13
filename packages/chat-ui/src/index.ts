@@ -35,3 +35,4 @@ export * from "./components/workspace-group";
 export * from "./components/attention-inbox";
 export * from "./components/extension-ui-renderer";
 export * from "./components/extension-sidebar-filters";
+export * from "./components/extension-panel";

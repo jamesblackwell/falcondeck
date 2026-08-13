@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  deriveExtensionPanels,
   deriveExtensionSidebarFilters,
   filterProjectGroupsByExtensions,
   normalizeExtensionUiDocument,
@@ -212,6 +213,58 @@ describe("deriveExtensionSidebarFilters", () => {
     });
 
     expect(deriveExtensionSidebarFilters(snapshot)).toEqual([]);
+  });
+});
+
+describe("deriveExtensionPanels", () => {
+  it("resolves an enabled manifest panel and prefers published UI", () => {
+    const snapshot = extensionSnapshot();
+    const manifestDocument: ExtensionUiDocument = {
+      version: 1,
+      root: { type: "text", text: "Manifest panel" },
+    };
+    const publishedDocument: ExtensionUiDocument = {
+      version: 1,
+      root: { type: "text", text: "Published panel" },
+    };
+    snapshot.catalog[0]!.contributes.panels = [
+      {
+        id: "attention",
+        title: "Mini Zen",
+        view: "attention-panel",
+        ui: manifestDocument,
+      },
+    ];
+    snapshot.views.push({
+      extension_id: "example.colors",
+      view_id: "attention-panel",
+      value: publishedDocument,
+      updated_at: "2026-08-13T00:00:01Z",
+    });
+
+    expect(deriveExtensionPanels(snapshot)).toEqual([
+      expect.objectContaining({
+        key: "example.colors:attention",
+        title: "Mini Zen",
+        document: publishedDocument,
+        unsupportedReason: null,
+      }),
+    ]);
+  });
+
+  it("keeps declared panels visible when content is unavailable", () => {
+    const snapshot = extensionSnapshot();
+    snapshot.catalog[0]!.contributes.panels = [
+      { id: "attention", title: "Mini Zen", view: "attention-panel" },
+    ];
+
+    expect(deriveExtensionPanels(snapshot)[0]).toMatchObject({
+      document: null,
+      unsupportedReason: "Panel content has not been published",
+    });
+
+    snapshot.catalog[0]!.enabled = false;
+    expect(deriveExtensionPanels(snapshot)).toEqual([]);
   });
 });
 

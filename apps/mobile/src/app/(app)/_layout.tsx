@@ -1,28 +1,29 @@
-import { useCallback, useMemo } from 'react'
-import { Drawer } from 'expo-router/drawer'
-import { Redirect, useRouter } from 'expo-router'
-import { DrawerActions } from '@react-navigation/native'
-import type { DrawerContentComponentProps } from '@react-navigation/drawer'
+import { useCallback, useMemo } from "react";
+import { Drawer } from "expo-router/drawer";
+import { Redirect, useRouter } from "expo-router";
+import { DrawerActions } from "@react-navigation/native";
+import type { DrawerContentComponentProps } from "@react-navigation/drawer";
 
-import { useUnistyles } from 'react-native-unistyles'
+import { useUnistyles } from "react-native-unistyles";
 
 import {
   buildProjectGroups,
+  deriveExtensionPanels,
   deriveExtensionSidebarFilters,
   deriveThreadTags,
-} from '@falcondeck/client-core'
+} from "@falcondeck/client-core";
 
-import { useRelayStore, useSessionStore } from '@/store'
-import { SidebarView } from '@/components/navigation'
-import { triggerThreadSelectionHaptic } from '@/lib/haptics'
+import { useRelayStore, useSessionStore } from "@/store";
+import { SidebarView } from "@/components/navigation";
+import { triggerThreadSelectionHaptic } from "@/lib/haptics";
 
 export default function AppLayout() {
-  const router = useRouter()
-  const { theme } = useUnistyles()
-  const sessionId = useRelayStore((s) => s.sessionId)
-  const snapshot = useSessionStore((s) => s.snapshot)
-  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId)
-  const selectedThreadId = useSessionStore((s) => s.selectedThreadId)
+  const router = useRouter();
+  const { theme } = useUnistyles();
+  const sessionId = useRelayStore((s) => s.sessionId);
+  const snapshot = useSessionStore((s) => s.snapshot);
+  const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
+  const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
   const groups = useMemo(
     () =>
       buildProjectGroups(
@@ -30,27 +31,35 @@ export default function AppLayout() {
         snapshot?.threads ?? [],
         snapshot?.preferences.workspace_order,
       ),
-    [snapshot?.preferences.workspace_order, snapshot?.threads, snapshot?.workspaces],
-  )
+    [
+      snapshot?.preferences.workspace_order,
+      snapshot?.threads,
+      snapshot?.workspaces,
+    ],
+  );
   const threadTags = useMemo(
     () => deriveThreadTags(snapshot?.extensions),
     [snapshot?.extensions],
-  )
+  );
   const extensionFilterCount = useMemo(
     () => deriveExtensionSidebarFilters(snapshot?.extensions).length,
     [snapshot?.extensions],
-  )
+  );
+  const extensionPanelCount = useMemo(
+    () => deriveExtensionPanels(snapshot?.extensions).length,
+    [snapshot?.extensions],
+  );
 
   const handleSelectThread = useCallback(
     (wId: string, tId: string) => {
       if (selectedWorkspaceId !== wId || selectedThreadId !== tId) {
-        triggerThreadSelectionHaptic()
+        triggerThreadSelectionHaptic();
       }
-      useSessionStore.getState().selectThread(wId, tId)
-      router.navigate('/(app)')
+      useSessionStore.getState().selectThread(wId, tId);
+      router.navigate("/(app)");
     },
     [router, selectedThreadId, selectedWorkspaceId],
-  )
+  );
 
   const handleNewThread = useCallback(
     (wId: string) => {
@@ -58,17 +67,17 @@ export default function AppLayout() {
       // the workspace's remembered provider/model/effort/modes, so nothing is
       // inherited from the previously viewed thread.
       if (selectedWorkspaceId !== wId || selectedThreadId !== null) {
-        triggerThreadSelectionHaptic()
+        triggerThreadSelectionHaptic();
       }
-      useSessionStore.getState().selectNewThread(wId)
-      router.navigate('/(app)')
+      useSessionStore.getState().selectNewThread(wId);
+      router.navigate("/(app)");
     },
     [router, selectedThreadId, selectedWorkspaceId],
-  )
+  );
 
   const handleOpenSettings = useCallback(() => {
-    router.navigate('/(app)/settings')
-  }, [router])
+    router.navigate("/(app)/settings");
+  }, [router]);
 
   // The drawer covers the whole screen, so there is no scrim left to tap:
   // closing it has to come from a control inside the sidebar.
@@ -83,10 +92,12 @@ export default function AppLayout() {
         onClose={() => navigation.dispatch(DrawerActions.closeDrawer())}
         threadTagsById={threadTags.byThreadId}
         extensionFilterCount={extensionFilterCount}
+        extensionPanelCount={extensionPanelCount}
       />
     ),
     [
       extensionFilterCount,
+      extensionPanelCount,
       groups,
       handleSelectThread,
       handleNewThread,
@@ -94,10 +105,10 @@ export default function AppLayout() {
       selectedThreadId,
       threadTags.byThreadId,
     ],
-  )
+  );
 
   if (!sessionId) {
-    return <Redirect href="/(auth)/pair" />
+    return <Redirect href="/(auth)/pair" />;
   }
 
   return (
@@ -111,10 +122,10 @@ export default function AppLayout() {
         // Full-width sidebar: thread titles are long and the 300pt panel
         // truncated most of them. 'front' keeps the conversation in place
         // underneath instead of shoving it entirely off-screen.
-        drawerType: 'front',
+        drawerType: "front",
         drawerStyle: {
           backgroundColor: theme.colors.surface[1],
-          width: '100%',
+          width: "100%",
         },
         sceneStyle: {
           backgroundColor: theme.colors.surface[0],
@@ -122,5 +133,5 @@ export default function AppLayout() {
       }}
       drawerContent={renderDrawerContent}
     />
-  )
+  );
 }

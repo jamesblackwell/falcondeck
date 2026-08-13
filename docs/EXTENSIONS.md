@@ -1,9 +1,9 @@
 # FalconDeck Extensions
 
 Status: canonical architecture and implementation plan. The v0 foundation and
-Thread Colours vertical slice and the scoped declarative UI v1 foundation are
-implemented; later capabilities are explicitly tracked below. Last reconciled
-with the code on 2026-08-13.
+Thread Colours vertical slice, the scoped declarative UI v1 foundation, and
+standalone panels are implemented; later capabilities are explicitly tracked
+below. Last reconciled with the code on 2026-08-13.
 
 This document is the source of truth for code that extends FalconDeck itself.
 If implementation conflicts with it, update this document and record the
@@ -26,6 +26,10 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 - a bounded declarative UI v1 schema, public SDK types/builder, defensive client
   normalizer, shared web renderer, generic sidebar-filter host, and visible
   unsupported-contribution fallback;
+- named `panels` contributions rendered through the desktop main-view registry
+  and remote web, with an explicit mobile fallback;
+- the bundled, disabled-by-default Mini Zen proof extension, currently showing
+  its static panel while events and summary-only thread reads remain gated;
 - `packages/extension-testing`, with deterministic public-SDK activation,
   storage, actions, view publications, failure injection, declaration checks,
   daemon-equivalent limits, and atomic rollback;
@@ -158,7 +162,8 @@ extension cannot declare itself trusted or default-enabled in its manifest.
 Initial policy:
 
 - `falcondeck.thread-tags`: bundled and enabled by default.
-- `falcondeck.notepad`: bundled but disabled by default once implemented.
+- `falcondeck.mini-zen`: bundled but disabled by default while its Phase 6
+  event/read facets are completed.
 
 ## 5. Manifest contract
 
@@ -302,15 +307,19 @@ target. Select bindings carry a declared thread-scoped view id, a bounded safe
 object path, and the `includes_any` comparison; clients keep the selection
 itself local and never evaluate extension expressions.
 
-The generic web host currently consumes `sidebarFilters`. Static manifest UI
-lets a lazy extension render on first paint; a synchronized global projection
-with the contribution's view id may replace that document later. Thread
-Colours now uses this path, while its thread menu action and row decoration
-remain on their existing shared compatibility adapter. Header/composer actions,
+The generic web hosts currently consume `sidebarFilters` and `panels`. A panel
+is a titled, named full-main-area surface and uses the same bounded global UI
+document rules as other view contributions. Static manifest UI lets a lazy
+extension render on first paint; a synchronized global projection with the
+contribution's view id may replace that document later. Desktop registers core
+Activity and Settings takeovers plus extension panels by stable view id;
+remote web renders the same panel/navigation primitives. Thread Colours uses
+the generic filter path, while its thread menu action and row decoration remain
+on their existing shared compatibility adapter. Header/composer actions,
 forms, modal hosts, colour picker, Markdown, icons, and the full mobile
-vocabulary remain planned rather than silently treated as implemented.
-Mobile shows an attributed notice when one or more enabled sidebar filters are
-available on desktop/web; it does not silently discard the contribution.
+vocabulary remain planned rather than silently treated as implemented. Mobile
+shows attributed notices for enabled filters and panels, including the exact
+panel-not-supported-here fallback; it does not silently discard either surface.
 
 The renderer supplies accessibility and keyboard semantics, theme tokens,
 localization-ready strings, and validation without extension-authored CSS.
@@ -554,7 +563,9 @@ Gate:
 Progress (2026-08-13): the panel-prerequisite subset is implemented: UI v1
 wire/schema/SDK contracts, bounded validation, defensive normalization, the
 shared web renderer, generic unsupported fallback, fake-host package, and the
-generic `sidebarFilters` host proven by Thread Colours. Mobile vocabulary,
+generic `sidebarFilters` host proven by Thread Colours. The additive `panels`
+contribution, desktop main-view registry, desktop/remote hosts, mobile fallback,
+and static Mini Zen proof are also implemented. Mobile vocabulary,
 thread action/decoration generic hosts, forms/modals, and local-path install
 remain open, so Phase 3 as originally scoped is not marked complete.
 
@@ -597,10 +608,18 @@ example consumer.
 
 The active Phase 6 sequence is: finish the panel-scoped Phase 3 renderer
 prerequisite; add standalone panels and the desktop main-view registry; add
-permission grants plus summary-only `threads:read`; add bounded event delivery;
-then prove the whole public surface with an official mini-Zen attention panel.
-Permission enforcement comes before thread-bearing events so no temporary
+bounded id-only event delivery; add permission grants plus summary-only
+`threads:read`; then complete the official Mini Zen attention panel. Events do
+not carry thread fields before permission enforcement, so no temporary
 unguarded read path ships.
+
+Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen
+uses only the public SDK; manifests and bounded view state remain daemon-owned;
+the contribution is named and declarative; desktop and remote render it while
+mobile explains the unsupported surface; older clients preserve/list the
+unknown contribution; disabling removes it from normalized client definitions;
+and static UI remains available through host crashes because no client code is
+executed.
 
 Do not begin marketplace, signing, arbitrary webviews, whole-region UI
 replacement, extension dependencies, or cross-extension calls until local

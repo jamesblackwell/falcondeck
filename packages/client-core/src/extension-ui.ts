@@ -91,6 +91,16 @@ export type ExtensionSidebarFilterDefinition = {
   unsupportedReason: string | null;
 };
 
+export type ExtensionPanelDefinition = {
+  key: string;
+  extensionId: string;
+  extensionName: string;
+  contributionId: string;
+  title: string;
+  document: ExtensionUiDocument | null;
+  unsupportedReason: string | null;
+};
+
 export type ActiveExtensionThreadFilter = {
   key: string;
   extensionId: string;
@@ -469,6 +479,51 @@ export function deriveExtensionSidebarFilters(
           unsupportedReason: normalized.ok ? null : normalized.reason,
         },
       ];
+    });
+  });
+}
+
+/** Resolves enabled panel declarations against synchronized global UI state. */
+export function deriveExtensionPanels(
+  snapshot: ExtensionSnapshot | null | undefined,
+): ExtensionPanelDefinition[] {
+  if (!snapshot) return [];
+  return snapshot.catalog.flatMap((extension) => {
+    if (!extension.enabled) return [];
+    return (extension.contributes.panels ?? []).map((contribution) => {
+      const published = snapshot.views.find(
+        (view) =>
+          view.extension_id === extension.id &&
+          view.view_id === contribution.view &&
+          view.scope == null,
+      );
+      const publishedRecord = asRecord(published?.value);
+      const hasPublishedUi =
+        publishedRecord !== null &&
+        "version" in publishedRecord &&
+        "root" in publishedRecord;
+      const hasDeclarativeUi =
+        contribution.ui != null ||
+        contribution.uiUnsupportedReason != null ||
+        hasPublishedUi;
+      const normalized = hasDeclarativeUi
+        ? documentForContribution(snapshot, extension.id, contribution)
+        : null;
+
+      return {
+        key: `${extension.id}:${contribution.id}`,
+        extensionId: extension.id,
+        extensionName: extension.name,
+        contributionId: contribution.id,
+        title: contribution.title ?? extension.name,
+        document: normalized?.ok ? normalized.document : null,
+        unsupportedReason:
+          normalized == null
+            ? "Panel content has not been published"
+            : normalized.ok
+              ? null
+              : normalized.reason,
+      };
     });
   });
 }

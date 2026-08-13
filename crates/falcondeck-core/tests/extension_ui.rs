@@ -1,5 +1,6 @@
 use falcondeck_core::{
-    ExtensionUiDocument, ExtensionUiFilterOperator, ExtensionUiNode, ExtensionUiTone,
+    ExtensionContributions, ExtensionUiDocument, ExtensionUiFilterOperator, ExtensionUiNode,
+    ExtensionUiTone,
 };
 use serde_json::json;
 
@@ -47,4 +48,51 @@ fn declarative_ui_nodes_reject_unknown_fields() {
     .expect_err("extension UI cannot smuggle executable fields");
 
     assert!(error.to_string().contains("unknown field"));
+}
+
+#[test]
+fn panel_contributions_use_the_public_camel_case_wire_shape() {
+    let contributions: ExtensionContributions = serde_json::from_value(json!({
+        "panels": [{
+            "id": "attention",
+            "title": "Mini Zen",
+            "view": "attention-panel",
+            "ui": {
+                "version": 1,
+                "root": { "type": "text", "text": "One thing at a time" }
+            }
+        }]
+    }))
+    .expect("panel contribution should deserialize");
+
+    assert_eq!(contributions.panels.len(), 1);
+    assert_eq!(contributions.panels[0].view, "attention-panel");
+    assert!(contributions.sidebar_filters.is_empty());
+}
+
+#[test]
+fn declarative_ui_omits_absent_optional_fields_on_the_wire() {
+    let value = json!({
+        "version": 1,
+        "root": {
+            "type": "stack",
+            "children": [
+                { "type": "text", "text": "Ready" },
+                {
+                    "type": "button",
+                    "label": "Run",
+                    "action": { "actionId": "run", "input": null }
+                },
+                { "type": "state", "state": "empty", "title": "Nothing here" }
+            ]
+        }
+    });
+
+    let document: ExtensionUiDocument =
+        serde_json::from_value(value.clone()).expect("minimal UI should deserialize");
+
+    assert_eq!(
+        serde_json::to_value(document).expect("minimal UI should serialize"),
+        value
+    );
 }

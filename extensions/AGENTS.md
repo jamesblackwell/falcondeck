@@ -8,6 +8,8 @@ Read `../docs/EXTENSIONS.md` before changing or creating an extension.
 - Put declarative contribution UI in the manifest's `ui` field and use only
   the versioned public vocabulary documented in `docs/EXTENSIONS.md`;
   `defineExtensionUi` is available when constructing the same documents in TS.
+- Declare a titled `panels` entry for a full-main-area surface. Desktop and web
+  render the bounded document; mobile deliberately shows a visible fallback.
 - Keep private data in `context.storage`; publish only bounded, non-secret view
   projections needed by clients.
 - Request no permissions unless the capability genuinely needs them.

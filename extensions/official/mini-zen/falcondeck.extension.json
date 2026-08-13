@@ -1,0 +1,46 @@
+{
+  "$schema": "../../../schemas/extension-manifest.schema.json",
+  "id": "falcondeck.mini-zen",
+  "name": "Mini Zen",
+  "version": "0.1.0",
+  "engines": {
+    "falcondeck": "^0.1"
+  },
+  "entrypoint": "server.ts",
+  "contributes": {
+    "panels": [
+      {
+        "id": "attention",
+        "title": "Mini Zen",
+        "view": "attention-panel",
+        "ui": {
+          "version": 1,
+          "root": {
+            "type": "stack",
+            "gap": "large",
+            "children": [
+              {
+                "type": "text",
+                "text": "Mini Zen",
+                "style": "heading"
+              },
+              {
+                "type": "text",
+                "text": "One attention item at a time, without losing the rest of your work.",
+                "tone": "muted"
+              },
+              { "type": "divider" },
+              {
+                "type": "state",
+                "state": "empty",
+                "title": "Attention feed unavailable",
+                "description": "Mini Zen will stay empty until attention access is available and enabled."
+              }
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "permissions": []
+}

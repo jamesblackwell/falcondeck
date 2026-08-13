@@ -1453,6 +1453,7 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
       "threadMenuActions",
       "threadDecorations",
       "sidebarFilters",
+      "panels",
     ]);
     const unsupported = Object.entries(contributions).flatMap(
       ([kind, entries]) =>
@@ -1464,6 +1465,7 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
       threadMenuActions: actions,
       threadDecorations: normalizeViews(contributions.threadDecorations),
       sidebarFilters: normalizeViews(contributions.sidebarFilters),
+      panels: normalizeViews(contributions.panels),
       unsupported,
     };
   };
