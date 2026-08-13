@@ -293,62 +293,64 @@ export function QueuedTurns({
   }, [previewOrder, queuedById, queuedTurns])
   if (queuedTurns.length === 0) return null
   return (
-    // Same centered column as the conversation and the composer, so the chips
-    // sit directly above the prompt input instead of hugging the window edge.
-    <div
-      aria-label="Queued messages"
-      className="mx-auto mb-2 flex w-[calc(100%-1.5rem)] max-w-3xl flex-col divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2 shadow-[var(--fd-shadow-sm)] md:w-[calc(100%-3rem)]"
-    >
-      {orderedTurns.map((queued) => (
-        <QueuedTurnChip
-          key={queued.id}
-          queued={queued}
-          canSteer={canSteer}
-          steerDisabledReason={steerDisabledReason}
-          onRemove={() => onRemove(queued.id)}
-          onSteer={() => onSteer(queued.id)}
-          onEdit={onEdit ? (text) => onEdit(queued.id, text) : undefined}
-          attachmentPreviewUrl={
-            queued.attachment_count ? getAttachmentPreviewUrl?.(queued.id) : undefined
-          }
-          draggable={queuedTurns.length > 1 && Boolean(onReorder)}
-          onDragStart={(event) => {
-            draggedIdRef.current = queued.id
-            const initialOrder = orderedTurns.map((item) => item.id)
-            previewOrderRef.current = initialOrder
-            setPreviewOrder(initialOrder)
-            event.dataTransfer.effectAllowed = 'move'
-            event.dataTransfer.setData('text/plain', queued.id)
-          }}
-          onDragOver={(event) => {
-            const activeDraggedId = draggedIdRef.current
-            if (!activeDraggedId || activeDraggedId === queued.id) return
-            event.preventDefault()
-            event.dataTransfer.dropEffect = 'move'
-            const order = previewOrderRef.current ?? queuedTurns.map((item) => item.id)
-            const targetIndex = order.indexOf(queued.id)
-            const next = order.filter((id) => id !== activeDraggedId)
-            next.splice(targetIndex < 0 ? next.length : targetIndex, 0, activeDraggedId)
-            previewOrderRef.current = next
-            setPreviewOrder(next)
-          }}
-          onDragEnd={() => {
-            draggedIdRef.current = null
-            previewOrderRef.current = null
-            setPreviewOrder(null)
-          }}
-          onDrop={(event) => {
-            event.preventDefault()
-            const next = previewOrderRef.current
-            previewOrderRef.current = null
-            draggedIdRef.current = null
-            setPreviewOrder(null)
-            if (next && next.join('\0') !== queuedTurns.map((item) => item.id).join('\0')) {
-              onReorder?.(next)
+    // Mirror the composer wrapper and its padding so this card's edges align
+    // with the prompt card, at every responsive breakpoint.
+    <div className="mx-auto mb-2 w-full max-w-3xl px-3 md:px-6">
+      <div
+        aria-label="Queued messages"
+        className="flex flex-col divide-y divide-border-subtle overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-2 shadow-[var(--fd-shadow-sm)]"
+      >
+        {orderedTurns.map((queued) => (
+          <QueuedTurnChip
+            key={queued.id}
+            queued={queued}
+            canSteer={canSteer}
+            steerDisabledReason={steerDisabledReason}
+            onRemove={() => onRemove(queued.id)}
+            onSteer={() => onSteer(queued.id)}
+            onEdit={onEdit ? (text) => onEdit(queued.id, text) : undefined}
+            attachmentPreviewUrl={
+              queued.attachment_count ? getAttachmentPreviewUrl?.(queued.id) : undefined
             }
-          }}
-        />
-      ))}
+            draggable={queuedTurns.length > 1 && Boolean(onReorder)}
+            onDragStart={(event) => {
+              draggedIdRef.current = queued.id
+              const initialOrder = orderedTurns.map((item) => item.id)
+              previewOrderRef.current = initialOrder
+              setPreviewOrder(initialOrder)
+              event.dataTransfer.effectAllowed = 'move'
+              event.dataTransfer.setData('text/plain', queued.id)
+            }}
+            onDragOver={(event) => {
+              const activeDraggedId = draggedIdRef.current
+              if (!activeDraggedId || activeDraggedId === queued.id) return
+              event.preventDefault()
+              event.dataTransfer.dropEffect = 'move'
+              const order = previewOrderRef.current ?? queuedTurns.map((item) => item.id)
+              const targetIndex = order.indexOf(queued.id)
+              const next = order.filter((id) => id !== activeDraggedId)
+              next.splice(targetIndex < 0 ? next.length : targetIndex, 0, activeDraggedId)
+              previewOrderRef.current = next
+              setPreviewOrder(next)
+            }}
+            onDragEnd={() => {
+              draggedIdRef.current = null
+              previewOrderRef.current = null
+              setPreviewOrder(null)
+            }}
+            onDrop={(event) => {
+              event.preventDefault()
+              const next = previewOrderRef.current
+              previewOrderRef.current = null
+              draggedIdRef.current = null
+              setPreviewOrder(null)
+              if (next && next.join('\0') !== queuedTurns.map((item) => item.id).join('\0')) {
+                onReorder?.(next)
+              }
+            }}
+          />
+        ))}
+      </div>
     </div>
   )
 }
