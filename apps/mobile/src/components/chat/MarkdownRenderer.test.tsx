@@ -256,10 +256,10 @@ describe("MarkdownRenderer", () => {
 
     expect(headingStyles).toHaveLength(6);
     expect(headingStyles.map((style) => style.fontSize)).toEqual([
-      32, 26, 22, 19, 16, 14,
+      26, 22, 19, 17, 16, 14,
     ]);
     expect(headingStyles.map((style) => style.lineHeight)).toEqual([
-      40, 32.5, 27.5, 23.75, 20, 17.5,
+      32.5, 27.5, 23.75, 21.25, 20, 17.5,
     ]);
   });
 

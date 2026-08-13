@@ -779,20 +779,20 @@ const styles = StyleSheet.create((theme) => ({
     lineHeight: theme.fontSize.base * theme.lineHeight.normal,
   },
   heading1: {
-    fontSize: theme.fontSize["3xl"],
-    lineHeight: theme.fontSize["3xl"] * theme.lineHeight.tight,
-  },
-  heading2: {
     fontSize: theme.fontSize["2xl"],
     lineHeight: theme.fontSize["2xl"] * theme.lineHeight.tight,
   },
-  heading3: {
+  heading2: {
     fontSize: theme.fontSize.xl,
     lineHeight: theme.fontSize.xl * theme.lineHeight.tight,
   },
-  heading4: {
+  heading3: {
     fontSize: theme.fontSize.lg,
     lineHeight: theme.fontSize.lg * theme.lineHeight.tight,
+  },
+  heading4: {
+    fontSize: theme.fontSize.md,
+    lineHeight: theme.fontSize.md * theme.lineHeight.tight,
   },
   heading5: {
     color: theme.colors.fg.secondary,
