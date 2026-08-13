@@ -190,6 +190,7 @@ describe('ChatInput component', () => {
   it('renders empty', () => {
     const r = renderComponent(<ChatInput value="" {...chatInputDefaults} />)
     expect(r.toJSON()).toBeTruthy()
+    expect(r.root.findByProps({ accessibilityLabel: 'Record voice message' })).toBeDefined()
   })
 
   it('renders with text', () => {
@@ -197,6 +198,18 @@ describe('ChatInput component', () => {
       <ChatInput value="Hello" {...chatInputDefaults} />,
     )
     expect(r.toJSON()).toBeTruthy()
+    expect(r.root.findByProps({ accessibilityLabel: 'Send message' })).toBeDefined()
+  })
+
+  it('opens speech setup from an empty composer', () => {
+    const r = renderComponent(<ChatInput value="" {...chatInputDefaults} />)
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: 'Record voice message' }).props.onPress()
+    })
+
+    expect(textOf(r)).toContain('Choose how FalconDeck should turn speech into text.')
+    expect(textOf(r)).toContain('On-device')
+    expect(textOf(r)).toContain('OpenRouter')
   })
 
   it('renders disabled', () => {

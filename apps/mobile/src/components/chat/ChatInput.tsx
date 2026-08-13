@@ -9,7 +9,7 @@ import {
 } from 'react'
 import { View, TextInput, Pressable } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
-import { Plus, Send, Square, Target } from 'lucide-react-native'
+import { Mic, Plus, Send, Square, Target } from 'lucide-react-native'
 import * as Haptics from 'expo-haptics'
 
 import {
@@ -30,6 +30,7 @@ import { OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
 
 import { AttachmentPreviewList } from './AttachmentPreviewList'
 import { InputToolbar } from './InputToolbar'
+import { VoiceInputSheet } from './VoiceInputSheet'
 import {
   SANDBOX_DEFAULT_VALUE,
   permissionChipLabel,
@@ -138,12 +139,14 @@ export const ChatInput = memo(function ChatInput({
     end: number
   } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
+  const [voiceInputOpen, setVoiceInputOpen] = useState(false)
   const [openSheet, setOpenSheet] = useState<
     'more' | 'provider' | 'permission' | 'sandbox' | null
   >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
   const hasContent = value.trim().length > 0 || attachments.length > 0
   const showStop = Boolean(onStop) && isRunning && !hasContent
+  const showMic = !showStop && !hasContent
 
   const filteredSkills = useMemo(() => {
     const query = slashQuery?.query.trim().toLowerCase() ?? ''
@@ -249,6 +252,17 @@ export const ChatInput = memo(function ChatInput({
       onChangeText(nextValue)
     },
     [onChangeText, value.length],
+  )
+
+  const handleVoiceTranscript = useCallback(
+    (transcript: string) => {
+      const nextCaret = transcript.length
+      selectionRangeRef.current = { start: nextCaret, end: nextCaret }
+      setCaretIndex(nextCaret)
+      setPendingSelection({ start: nextCaret, end: nextCaret })
+      onChangeText(transcript)
+    },
+    [onChangeText],
   )
 
   const handleInsertSkill = useCallback(
@@ -555,22 +569,38 @@ export const ChatInput = memo(function ChatInput({
                 ? canStop
                   ? styles.sendActive
                   : styles.sendInactive
-                : canSend
+                : showMic
+                  ? disabled
+                    ? styles.sendInactive
+                    : styles.sendActive
+                  : canSend
                   ? styles.sendActive
                   : styles.sendInactive,
             ]}
-            onPress={showStop ? handleStop : handleSubmit}
-            disabled={showStop ? !canStop : !canSend}
+            onPress={
+              showStop
+                ? handleStop
+                : showMic
+                  ? () => setVoiceInputOpen(true)
+                  : handleSubmit
+            }
+            disabled={showStop ? !canStop : showMic ? Boolean(disabled) : !canSend}
             accessibilityRole="button"
             accessibilityLabel={
               showStop
                 ? isStopping
                   ? 'Stopping'
                   : 'Stop generating'
-                : 'Send message'
+                : showMic
+                  ? 'Record voice message'
+                  : 'Send message'
             }
-            accessibilityHint={sendDisabled ? sendDisabledReason : undefined}
-            accessibilityState={{ disabled: showStop ? !canStop : !canSend }}
+            accessibilityHint={
+              showMic ? 'Opens speech-to-text recording' : sendDisabled ? sendDisabledReason : undefined
+            }
+            accessibilityState={{
+              disabled: showStop ? !canStop : showMic ? Boolean(disabled) : !canSend,
+            }}
             hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
           >
             {showStop ? (
@@ -580,6 +610,11 @@ export const ChatInput = memo(function ChatInput({
                   canStop ? theme.colors.surface[0] : theme.colors.fg.faint
                 }
                 fill={canStop ? theme.colors.surface[0] : theme.colors.fg.faint}
+              />
+            ) : showMic ? (
+              <Mic
+                size={theme.iconSize.md}
+                color={disabled ? theme.colors.fg.faint : theme.colors.surface[0]}
               />
             ) : (
               <Send
@@ -642,6 +677,12 @@ export const ChatInput = memo(function ChatInput({
             setOpenSheet(null)
           }}
           onClose={() => setOpenSheet(null)}
+        />
+      ) : null}
+      {voiceInputOpen ? (
+        <VoiceInputSheet
+          onTranscript={handleVoiceTranscript}
+          onClose={() => setVoiceInputOpen(false)}
         />
       ) : null}
     </View>

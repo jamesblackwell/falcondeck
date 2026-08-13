@@ -46,6 +46,19 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     'expo-font',
     'expo-notifications',
     [
+      'expo-audio',
+      {
+        microphonePermission: 'Allow FalconDeck to record speech for transcription.',
+      },
+    ],
+    [
+      'expo-speech-recognition',
+      {
+        microphonePermission: 'Allow FalconDeck to record speech for transcription.',
+        speechRecognitionPermission: 'Allow FalconDeck to transcribe speech on this device.',
+      },
+    ],
+    [
       'expo-image-picker',
       {
         photosPermission: 'Allow FalconDeck to choose photos to attach to a prompt.',

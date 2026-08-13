@@ -1,6 +1,6 @@
 import { ScrollView } from 'react-native'
-import { useRouter } from 'expo-router'
-import { Bell, Info, MessageSquareText, MonitorCog, Palette } from 'lucide-react-native'
+import { useRouter, type Href } from 'expo-router'
+import { Bell, Info, MessageSquareText, Mic, MonitorCog, Palette } from 'lucide-react-native'
 import { useUnistyles } from 'react-native-unistyles'
 
 import { normalizePreferences } from '@falcondeck/client-core'
@@ -86,6 +86,12 @@ export default function SettingsScreen() {
           value={notificationValue}
           icon={<Bell size={theme.iconSize.sm} color={theme.colors.danger.default} />}
           onPress={() => router.push('/(app)/settings/notifications')}
+        />
+        <SettingsRow
+          label="Speech"
+          detail="On-device or OpenRouter transcription"
+          icon={<Mic size={theme.iconSize.sm} color={theme.colors.info.default} />}
+          onPress={() => router.push('/(app)/settings/speech' as Href)}
         />
       </SettingsSection>
 

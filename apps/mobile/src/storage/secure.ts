@@ -3,6 +3,7 @@ import * as SecureStore from 'expo-secure-store'
 const KEY_CLIENT_SECRET = 'fd.clientSecretKey'
 const KEY_DATA_KEY = 'fd.dataKey'
 const KEY_CLIENT_TOKEN = 'fd.clientToken'
+const KEY_OPENROUTER_API_KEY = 'fd.openRouterApiKey'
 
 const STORE_OPTIONS: SecureStore.SecureStoreOptions = {
   keychainAccessible: SecureStore.AFTER_FIRST_UNLOCK,
@@ -57,6 +58,23 @@ export async function loadClientToken(): Promise<string | null> {
     console.warn('[SecureStore] loadClientToken failed', e)
     return null
   }
+}
+
+export async function persistOpenRouterApiKey(apiKey: string): Promise<void> {
+  await SecureStore.setItemAsync(KEY_OPENROUTER_API_KEY, apiKey, STORE_OPTIONS)
+}
+
+export async function loadOpenRouterApiKey(): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(KEY_OPENROUTER_API_KEY, STORE_OPTIONS)
+  } catch (e) {
+    console.warn('[SecureStore] loadOpenRouterApiKey failed', e)
+    return null
+  }
+}
+
+export async function clearOpenRouterApiKey(): Promise<void> {
+  await SecureStore.deleteItemAsync(KEY_OPENROUTER_API_KEY, STORE_OPTIONS)
 }
 
 export async function clearDataKey(): Promise<void> {

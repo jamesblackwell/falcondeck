@@ -45,6 +45,7 @@ export default function SettingsLayout() {
       <Stack.Screen name="appearance" options={{ title: 'Appearance' }} />
       <Stack.Screen name="conversation" options={{ title: 'Conversation' }} />
       <Stack.Screen name="notifications" options={{ title: 'Notifications' }} />
+      <Stack.Screen name="speech" options={{ title: 'Speech' }} />
       <Stack.Screen name="about" options={{ title: 'About FalconDeck' }} />
     </Stack>
   )
