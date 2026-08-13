@@ -38,7 +38,28 @@ describe("extension snapshot normalization", () => {
         unsupported: [],
       },
       permissions: [],
+      granted_permissions: [],
     });
+  });
+
+  it("normalizes permission grants separately from manifest requests", () => {
+    const normalized = normalizeExtensionSnapshot({
+      catalog: [
+        {
+          id: "example.reader",
+          name: "Reader",
+          version: "1.0.0",
+          permissions: ["threads:read"],
+          granted_permissions: ["threads:read", 42],
+        },
+      ],
+      views: [],
+    });
+
+    expect(normalized.catalog[0]?.permissions).toEqual(["threads:read"]);
+    expect(normalized.catalog[0]?.granted_permissions).toEqual([
+      "threads:read",
+    ]);
   });
 
   it("drops malformed scopes and contributions at the client boundary", () => {

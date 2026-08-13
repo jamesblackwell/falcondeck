@@ -1,4 +1,8 @@
-import { defineExtension, defineExtensionUi } from "@falcondeck/extension-sdk";
+import {
+  defineExtension,
+  defineExtensionUi,
+  type ExtensionThreadSummary,
+} from "@falcondeck/extension-sdk";
 
 type PendingAttention = {
   workspaceId: string;
@@ -8,8 +12,19 @@ type PendingAttention = {
 
 const MAX_PENDING_ATTENTION = 256;
 
-function attentionPanel(pending: readonly PendingAttention[]) {
+function attentionPanel(
+  pending: readonly PendingAttention[],
+  threads: readonly ExtensionThreadSummary[],
+) {
   const count = pending.length;
+  const current = pending[0];
+  const currentThread = current?.threadId
+    ? threads.find(
+        (thread) =>
+          thread.id === current.threadId &&
+          thread.workspaceId === current.workspaceId,
+      )
+    : undefined;
   return defineExtensionUi({
     version: 1,
     root: {
@@ -54,9 +69,18 @@ function attentionPanel(pending: readonly PendingAttention[]) {
               },
               {
                 type: "text" as const,
-                text: "Thread titles remain hidden until summary access is granted.",
-                tone: "muted" as const,
+                text: currentThread?.title ?? "A thread needs attention",
+                style: "heading" as const,
               },
+              ...(count > 1
+                ? [
+                    {
+                      type: "text" as const,
+                      text: `${count - 1} more waiting`,
+                      tone: "muted" as const,
+                    },
+                  ]
+                : []),
             ]),
       ],
     },
@@ -68,10 +92,17 @@ export default defineExtension({
     context.log.info("Mini Zen activated");
 
     const publish = async (pending: readonly PendingAttention[]) => {
+      let threads: ExtensionThreadSummary[] = [];
+      try {
+        threads = await context.threads.list();
+      } catch {
+        // Permission denial is expected until the user grants threads:read.
+        // The identifier-only attention count remains useful and safe.
+      }
       await context.storage.set("pendingAttention", pending);
       await context.views.publish({
         viewId: "attention-panel",
-        value: attentionPanel(pending),
+        value: attentionPanel(pending, threads),
       });
     };
 
@@ -109,6 +140,22 @@ export default defineExtension({
             item.requestId !== event.requestId,
         ),
       );
+    });
+
+    context.events.on("thread.updated", async (event) => {
+      const current = await context.storage.get<PendingAttention[]>(
+        "pendingAttention",
+        [],
+      );
+      if (
+        current.some(
+          (item) =>
+            item.workspaceId === event.workspaceId &&
+            item.threadId === event.threadId,
+        )
+      ) {
+        await publish(current);
+      }
     });
   },
 });

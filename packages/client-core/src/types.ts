@@ -952,6 +952,19 @@ export type ExtensionSummary = {
   last_error?: string | null;
   contributes: ExtensionContributions;
   permissions: string[];
+  /** User-approved subset of manifest-requested permissions. */
+  granted_permissions?: string[];
+};
+
+/** Summary-only extension projection; message previews and transcripts are absent. */
+export type ExtensionThreadSummary = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  status: ThreadStatus;
+  updatedAt: string;
+  pendingApprovalCount: number;
+  pendingQuestionCount: number;
 };
 
 export type ExtensionViewScope = {

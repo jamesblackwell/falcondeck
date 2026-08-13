@@ -740,6 +740,30 @@ pub struct ExtensionSummary {
     /// Capabilities requested by the manifest.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// User-approved capabilities currently available to this extension.
+    #[serde(default)]
+    pub granted_permissions: Vec<String>,
+}
+
+/// Reduced thread projection exposed by the `threads:read` extension facet.
+/// Transcript content and message previews are intentionally absent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtensionThreadSummary {
+    /// Stable thread identifier.
+    pub id: String,
+    /// Stable owning workspace identifier.
+    pub workspace_id: String,
+    /// User-visible thread title.
+    pub title: String,
+    /// Current thread lifecycle state.
+    pub status: ThreadStatus,
+    /// Last summary update time.
+    pub updated_at: DateTime<Utc>,
+    /// Count of unresolved approval requests.
+    pub pending_approval_count: u32,
+    /// Count of unresolved question requests.
+    pub pending_question_count: u32,
 }
 
 /// Extension lifecycle visible in Settings and diagnostics.
@@ -1066,6 +1090,15 @@ pub struct ExtensionViewScope {
 pub struct UpdateExtensionRequest {
     /// Desired activation state.
     pub enabled: bool,
+}
+
+/// Request to grant or revoke one manifest-declared extension permission.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateExtensionPermissionRequest {
+    /// Stable permission identifier such as `threads:read`.
+    pub permission: String,
+    /// Whether the permission should be present in the daemon-owned grant set.
+    pub granted: bool,
 }
 
 /// Generic invocation of a manifest-declared extension action.

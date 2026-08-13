@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::LazyLock,
 };
@@ -34,6 +34,8 @@ const MAX_UI_OPTIONS: usize = 256;
 const MAX_UI_TEXT_CHARS: usize = 4_096;
 const MAX_UI_PATH_SEGMENTS: usize = 16;
 const MAX_UI_PATH_SEGMENT_CHARS: usize = 128;
+const MAX_MANIFEST_PERMISSIONS: usize = 16;
+pub(super) const THREADS_READ_PERMISSION: &str = "threads:read";
 
 static EXTENSION_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$").expect("extension id regex is valid")
@@ -93,6 +95,8 @@ pub(super) struct ExtensionPackage {
 struct PersistedExtensionState {
     #[serde(default)]
     enabled: HashMap<String, bool>,
+    #[serde(default)]
+    grants: HashMap<String, BTreeSet<String>>,
     #[serde(default)]
     storage: HashMap<String, BTreeMap<String, Value>>,
     #[serde(default)]
@@ -268,6 +272,18 @@ impl ExtensionRegistry {
                 .copied()
                 .unwrap_or(entry.default_enabled);
             self.persisted.enabled.insert(manifest.id.clone(), enabled);
+            let declared_permissions = manifest
+                .permissions
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let granted_permissions = self
+                .persisted
+                .grants
+                .entry(manifest.id.clone())
+                .or_default();
+            granted_permissions.retain(|permission| declared_permissions.contains(permission));
+            let granted_permissions = granted_permissions.iter().cloned().collect::<Vec<_>>();
             let status = if enabled {
                 ExtensionStatus::Active
             } else {
@@ -284,6 +300,7 @@ impl ExtensionRegistry {
                 last_error: None,
                 contributes: manifest.contributes,
                 permissions: manifest.permissions,
+                granted_permissions,
             };
             packages.insert(
                 manifest.id.clone(),
@@ -368,6 +385,25 @@ impl ExtensionRegistry {
             .is_some_and(|summary| summary.enabled)
     }
 
+    pub(super) fn has_grant(&self, extension_id: &str, permission: &str) -> bool {
+        self.summaries.get(extension_id).is_some_and(|summary| {
+            summary.enabled
+                && summary
+                    .granted_permissions
+                    .iter()
+                    .any(|granted| granted == permission)
+        })
+    }
+
+    pub(super) fn permission_granted(&self, extension_id: &str, permission: &str) -> bool {
+        self.summaries.get(extension_id).is_some_and(|summary| {
+            summary
+                .granted_permissions
+                .iter()
+                .any(|granted| granted == permission)
+        })
+    }
+
     pub(super) fn storage(&self, extension_id: &str) -> BTreeMap<String, Value> {
         self.persisted
             .storage
@@ -432,6 +468,67 @@ impl ExtensionRegistry {
         summary.last_error = None;
         let updated = summary.clone();
         Ok(updated)
+    }
+
+    pub(super) async fn update_permission(
+        &mut self,
+        extension_id: &str,
+        permission: &str,
+        granted: bool,
+    ) -> Result<ExtensionSummary, DaemonError> {
+        let summary = self
+            .summaries
+            .get(extension_id)
+            .ok_or_else(|| DaemonError::NotFound("extension not found".to_string()))?;
+        if !summary
+            .permissions
+            .iter()
+            .any(|declared| declared == permission)
+        {
+            return Err(DaemonError::BadRequest(
+                "extension permission is not declared by the manifest".to_string(),
+            ));
+        }
+        let currently_granted = summary
+            .granted_permissions
+            .iter()
+            .any(|current| current == permission);
+        if currently_granted == granted {
+            return Ok(summary.clone());
+        }
+
+        let mut persisted = self.persisted.clone();
+        let grants = persisted
+            .grants
+            .entry(extension_id.to_string())
+            .or_default();
+        if granted {
+            grants.insert(permission.to_string());
+        } else {
+            grants.remove(permission);
+            // View data can have been derived from the revoked capability.
+            // The daemon cannot safely distinguish those projections, so it
+            // retracts all synchronized views while retaining private state.
+            persisted
+                .views
+                .retain(|_, view| view.extension_id != extension_id);
+        }
+        self.persist_state(&persisted).await?;
+        self.persisted = persisted;
+
+        let summary = self
+            .summaries
+            .get_mut(extension_id)
+            .expect("extension existence was checked before persistence");
+        summary.granted_permissions = self
+            .persisted
+            .grants
+            .get(extension_id)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        Ok(summary.clone())
     }
 
     pub(super) async fn mark_error(
@@ -719,9 +816,15 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
             "unsupported FalconDeck extension engine range".to_string(),
         ));
     }
-    if !manifest.permissions.is_empty() {
+    if manifest.permissions.len() > MAX_MANIFEST_PERMISSIONS
+        || manifest
+            .permissions
+            .iter()
+            .any(|permission| permission != THREADS_READ_PERMISSION)
+        || manifest.permissions.iter().collect::<HashSet<_>>().len() != manifest.permissions.len()
+    {
         return Err(DaemonError::BadRequest(
-            "extension permissions are not supported by this FalconDeck version".to_string(),
+            "extension permissions are unsupported, duplicated, or exceed their limit".to_string(),
         ));
     }
     let contribution_count = manifest.contributes.thread_menu_actions.len()
@@ -1145,6 +1248,16 @@ mod tests {
         let mut permissioned = manifest();
         permissioned.permissions.push("filesystem".to_string());
         assert!(validate_manifest(&permissioned).is_err());
+
+        let mut supported = manifest();
+        supported
+            .permissions
+            .push(THREADS_READ_PERMISSION.to_string());
+        assert!(validate_manifest(&supported).is_ok());
+        supported
+            .permissions
+            .push(THREADS_READ_PERMISSION.to_string());
+        assert!(validate_manifest(&supported).is_err());
     }
 
     #[test]
@@ -1323,6 +1436,8 @@ mod tests {
         assert!(!mini_zen.enabled);
         assert_eq!(mini_zen.status, ExtensionStatus::Disabled);
         assert_eq!(mini_zen.contributes.panels.len(), 1);
+        assert_eq!(mini_zen.permissions, [THREADS_READ_PERMISSION]);
+        assert!(mini_zen.granted_permissions.is_empty());
 
         let host_path = state_dir.path().join("extension-host/main.ts");
         tokio::fs::write(&host_path, "// stale bundled host")
@@ -1338,6 +1453,73 @@ mod tests {
                 .await
                 .expect("refreshed host should read"),
             include_str!("../../../../apps/extension-host/main.ts")
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_grants_are_declared_denied_by_default_and_persisted() {
+        let state_dir = tempfile::tempdir().expect("temporary state directory");
+        let state_path = state_dir.path().join("state.json");
+        let mut registry = ExtensionRegistry::new(&state_path);
+        registry.restore().await.expect("registry should restore");
+
+        assert!(!registry.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+        let granted = registry
+            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, true)
+            .await
+            .expect("declared permission should grant");
+        assert_eq!(granted.granted_permissions, [THREADS_READ_PERMISSION]);
+        assert!(!registry.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+        registry
+            .update_enabled("falcondeck.mini-zen", true)
+            .await
+            .expect("Mini Zen should enable");
+        assert!(registry.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+        assert!(
+            registry
+                .update_permission("falcondeck.thread-tags", THREADS_READ_PERMISSION, true,)
+                .await
+                .is_err()
+        );
+
+        let mut restored = ExtensionRegistry::new(&state_path);
+        restored.restore().await.expect("grant should restore");
+        let mini_zen = restored
+            .snapshot()
+            .catalog
+            .into_iter()
+            .find(|extension| extension.id == "falcondeck.mini-zen")
+            .expect("Mini Zen should restore");
+        assert_eq!(mini_zen.granted_permissions, [THREADS_READ_PERMISSION]);
+
+        restored.persisted.views.insert(
+            "permission-derived".to_string(),
+            ExtensionView {
+                extension_id: "falcondeck.mini-zen".to_string(),
+                view_id: "attention-panel".to_string(),
+                scope: None,
+                value: serde_json::json!({ "title": "private thread title" }),
+                updated_at: Utc::now(),
+            },
+        );
+
+        restored
+            .update_permission("falcondeck.mini-zen", THREADS_READ_PERMISSION, false)
+            .await
+            .expect("grant should revoke");
+        let mut revoked = ExtensionRegistry::new(&state_path);
+        revoked.restore().await.expect("revocation should restore");
+        assert!(!revoked.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
+        assert!(revoked.persisted.views.is_empty());
+        assert!(
+            revoked
+                .snapshot()
+                .catalog
+                .into_iter()
+                .find(|extension| extension.id == "falcondeck.mini-zen")
+                .expect("Mini Zen should restore after revocation")
+                .granted_permissions
+                .is_empty()
         );
     }
 

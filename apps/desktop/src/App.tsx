@@ -395,6 +395,30 @@ function AppInner() {
     },
     [api, setSnapshot],
   );
+  const handleSetExtensionPermission = useCallback(
+    async (extensionId: string, permission: string, granted: boolean) => {
+      if (!api) throw new Error("The FalconDeck daemon is not connected");
+      const updated = await api.updateExtensionPermission(
+        extensionId,
+        permission,
+        granted,
+      );
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              extensions: {
+                ...current.extensions,
+                catalog: current.extensions.catalog.map((extension) =>
+                  extension.id === updated.id ? updated : extension,
+                ),
+              },
+            }
+          : current,
+      );
+    },
+    [api, setSnapshot],
+  );
   const [windowFocused, setWindowFocused] = useState(
     () => document.visibilityState !== "hidden",
   );
@@ -4185,6 +4209,7 @@ function AppInner() {
                       snapshot?.extensions ?? { catalog: [], views: [] }
                     }
                     onSetExtensionEnabled={handleSetExtensionEnabled}
+                    onSetExtensionPermission={handleSetExtensionPermission}
                     onClose={() => setIsSettingsOpen(false)}
                   />
                 </Suspense>

@@ -24,6 +24,7 @@ const contributionShapes = {
   panels: { title: true, view: true, ui: true },
 };
 const identifierPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const supportedPermissions = new Set(["threads:read"]);
 const uiTones = new Set([
   "default",
   "muted",
@@ -483,12 +484,31 @@ if (manifest) {
   }
   if (!Array.isArray(manifest.permissions)) {
     report("FDX1008", "permissions must be an array", "/permissions");
-  } else if (manifest.permissions.length > 0) {
-    report(
-      "FDX1018",
-      "permissions are not supported by this FalconDeck version",
-      "/permissions",
-    );
+  } else {
+    if (manifest.permissions.length > 16) {
+      report("FDX1008", "permissions exceed the 16-item limit", "/permissions");
+    }
+    const seenPermissions = new Set();
+    for (let index = 0; index < manifest.permissions.length; index += 1) {
+      const permission = manifest.permissions[index];
+      if (
+        typeof permission !== "string" ||
+        !supportedPermissions.has(permission)
+      ) {
+        report(
+          "FDX1018",
+          `unsupported permission: ${String(permission)}`,
+          `/permissions/${index}`,
+        );
+      } else if (seenPermissions.has(permission)) {
+        report(
+          "FDX1008",
+          `duplicate permission: ${permission}`,
+          `/permissions/${index}`,
+        );
+      }
+      seenPermissions.add(permission);
+    }
   }
 }
 

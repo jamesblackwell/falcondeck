@@ -60,8 +60,8 @@
     },
     "permissions": {
       "type": "array",
-      "maxItems": 0,
-      "items": { "type": "string", "minLength": 1 },
+      "maxItems": 16,
+      "items": { "enum": ["threads:read"] },
       "uniqueItems": true
     }
   },

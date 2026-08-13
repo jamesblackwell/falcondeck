@@ -4,12 +4,15 @@ import type {
   ExtensionDefinition,
   ExtensionEvent,
   ExtensionEventType,
+  ExtensionThreadSummary,
   PublishedExtensionView,
 } from "@falcondeck/extension-sdk";
 
 const MAX_ACTION_INPUT_BYTES = 64 * 1024;
 const MAX_EVENT_BYTES = 4 * 1024;
 const MAX_EVENT_HANDLERS_PER_TYPE = 32;
+const MAX_THREAD_SUMMARIES = 1_000;
+const MAX_THREAD_SUMMARY_BYTES = 2 * 1024 * 1024;
 const SUPPORTED_EVENT_TYPES = new Set<ExtensionEventType>([
   "thread.updated",
   "turn.ended",
@@ -35,6 +38,8 @@ export type ExtensionTestHostOptions = {
   storage?: JsonRecord;
   declaredActions?: readonly string[];
   declaredViews?: readonly string[];
+  grantedPermissions?: readonly string[];
+  threadSummaries?: readonly ExtensionThreadSummary[];
 };
 
 export type ExtensionTestInvocation = {
@@ -81,6 +86,41 @@ function validateScope(scope: ExtensionActionInvocation["target"]): void {
   }
 }
 
+function reduceThreadSummary(
+  summary: ExtensionThreadSummary,
+): ExtensionThreadSummary {
+  return cloneJson({
+    id: summary.id,
+    workspaceId: summary.workspaceId,
+    title: Array.from(summary.title).slice(0, 256).join(""),
+    status: summary.status,
+    updatedAt: summary.updatedAt,
+    pendingApprovalCount: summary.pendingApprovalCount,
+    pendingQuestionCount: summary.pendingQuestionCount,
+  });
+}
+
+function boundThreadSummaries(
+  summaries: readonly ExtensionThreadSummary[],
+): ExtensionThreadSummary[] {
+  const reduced = summaries
+    .map(reduceThreadSummary)
+    .sort(
+      (left, right) =>
+        right.updatedAt.localeCompare(left.updatedAt) ||
+        left.id.localeCompare(right.id),
+    );
+  const bounded: ExtensionThreadSummary[] = [];
+  let bytes = 2;
+  for (const summary of reduced.slice(0, MAX_THREAD_SUMMARIES)) {
+    const itemBytes = encodedBytes(summary) + 1;
+    if (bytes + itemBytes > MAX_THREAD_SUMMARY_BYTES) break;
+    bytes += itemBytes;
+    bounded.push(summary);
+  }
+  return bounded;
+}
+
 /** In-memory public-SDK host for extension unit and contract tests. */
 export class ExtensionTestHost {
   readonly extensionId: string;
@@ -100,6 +140,8 @@ export class ExtensionTestHost {
     fields?: JsonRecord;
   }> = [];
   private readonly retainedViews = new Map<string, PublishedExtensionView>();
+  private readonly grantedPermissions = new Set<string>();
+  private threadSummaries: ExtensionThreadSummary[];
   private publishedViews: PublishedExtensionView[] = [];
   private activated = false;
   private nextFailure: Error | null = null;
@@ -117,6 +159,10 @@ export class ExtensionTestHost {
     this.declaredViews = options.declaredViews
       ? new Set(options.declaredViews)
       : null;
+    for (const permission of options.grantedPermissions ?? []) {
+      this.grantedPermissions.add(permission);
+    }
+    this.threadSummaries = boundThreadSummaries(options.threadSummaries ?? []);
     for (const [key, value] of Object.entries(options.storage ?? {})) {
       this.storage.set(key, cloneJson(value));
     }
@@ -179,6 +225,14 @@ export class ExtensionTestHost {
           };
         },
       },
+      threads: {
+        list: async () => {
+          if (!this.grantedPermissions.has("threads:read")) {
+            throw new Error("threads:read permission is not granted");
+          }
+          return cloneJson(this.threadSummaries);
+        },
+      },
       log: {
         info: (message, fields) => {
           this.diagnostics.push({
@@ -213,6 +267,21 @@ export class ExtensionTestHost {
   failNextEvent(error: Error | string): void {
     this.nextEventFailure =
       typeof error === "string" ? new Error(error) : error;
+  }
+
+  setPermissionGranted(permission: string, granted: boolean): void {
+    if (granted) this.grantedPermissions.add(permission);
+    else {
+      const wasGranted = this.grantedPermissions.has(permission);
+      this.grantedPermissions.delete(permission);
+      // The daemon retracts synchronized projections on revocation because it
+      // cannot distinguish data derived from the revoked capability.
+      if (wasGranted) this.retainedViews.clear();
+    }
+  }
+
+  setThreadSummaries(summaries: readonly ExtensionThreadSummary[]): void {
+    this.threadSummaries = boundThreadSummaries(summaries);
   }
 
   private eventHandlerSnapshot(): Map<ExtensionEventType, Set<EventHandler>> {

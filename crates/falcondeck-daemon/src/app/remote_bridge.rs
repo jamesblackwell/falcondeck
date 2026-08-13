@@ -75,6 +75,7 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "providers.update",
     "extensions.read",
     "extensions.update",
+    "extensions.permission.update",
     "extensions.action.invoke",
 ];
 
@@ -683,6 +684,20 @@ impl AppState {
                         .ok_or_else(|| "invalid remote rpc payload".to_string())?;
                     serde_json::to_value(
                         self.update_extension(&extension_id, enabled)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize extension: {error}"))
+                }
+                "extensions.permission.update" => {
+                    let extension_id = required(&["extensionId", "extension_id"])?;
+                    let permission = required(&["permission"])?;
+                    let granted = params
+                        .get("granted")
+                        .and_then(Value::as_bool)
+                        .ok_or_else(|| "invalid remote rpc payload".to_string())?;
+                    serde_json::to_value(
+                        self.update_extension_permission(&extension_id, &permission, granted)
                             .await
                             .map_err(|error| error.to_string())?,
                     )

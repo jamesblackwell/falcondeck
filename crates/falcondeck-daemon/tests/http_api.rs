@@ -123,6 +123,91 @@ async fn health_and_snapshot_routes_work_with_cors() {
 }
 
 #[tokio::test]
+async fn extension_permission_grants_are_explicit_and_persisted() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+
+    let before = client
+        .get(format!("{}/api/extensions", daemon.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .json::<falcondeck_core::ExtensionSnapshot>()
+        .await
+        .unwrap();
+    let mini_zen = before
+        .catalog
+        .iter()
+        .find(|extension| extension.id == "falcondeck.mini-zen")
+        .unwrap();
+    assert_eq!(mini_zen.permissions, ["threads:read"]);
+    assert!(mini_zen.granted_permissions.is_empty());
+
+    let granted = client
+        .patch(format!(
+            "{}/api/extensions/falcondeck.mini-zen/permissions",
+            daemon.base_url()
+        ))
+        .json(&serde_json::json!({
+            "permission": "threads:read",
+            "granted": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(granted.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        granted
+            .json::<falcondeck_core::ExtensionSummary>()
+            .await
+            .unwrap()
+            .granted_permissions,
+        ["threads:read"]
+    );
+
+    let undeclared = client
+        .patch(format!(
+            "{}/api/extensions/falcondeck.thread-tags/permissions",
+            daemon.base_url()
+        ))
+        .json(&serde_json::json!({
+            "permission": "threads:read",
+            "granted": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(undeclared.status(), reqwest::StatusCode::BAD_REQUEST);
+    daemon.shutdown().await.unwrap();
+
+    let restored = spawn_embedded(test_config_with_state_path(state_path))
+        .await
+        .unwrap();
+    let snapshot = client
+        .get(format!("{}/api/extensions", restored.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .json::<falcondeck_core::ExtensionSnapshot>()
+        .await
+        .unwrap();
+    assert_eq!(
+        snapshot
+            .catalog
+            .iter()
+            .find(|extension| extension.id == "falcondeck.mini-zen")
+            .unwrap()
+            .granted_permissions,
+        ["threads:read"]
+    );
+    restored.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn rejects_requests_with_non_loopback_host_headers() {
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();

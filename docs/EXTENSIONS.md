@@ -1,9 +1,10 @@
 # FalconDeck Extensions
 
 Status: canonical architecture and implementation plan. The v0 foundation and
-Thread Colours vertical slice, the scoped declarative UI v1 foundation, and
-standalone panels are implemented; later capabilities are explicitly tracked
-below. Last reconciled with the code on 2026-08-13.
+Thread Colours vertical slice, the scoped declarative UI v1 foundation,
+standalone panels, bounded lifecycle events, and permission-gated summary
+reads are implemented; later capabilities are explicitly tracked below. Last
+reconciled with the code on 2026-08-13.
 
 This document is the source of truth for code that extends FalconDeck itself.
 If implementation conflicts with it, update this document and record the
@@ -30,8 +31,10 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   and remote web, with an explicit mobile fallback;
 - bounded, identifier-only lifecycle events delivered to disposable public-SDK
   subscriptions through independently supervised per-extension queues;
-- the bundled, disabled-by-default Mini Zen proof extension, currently tracking
-  pending attention signals while summary-only thread reads remain gated;
+- daemon-owned, denied-by-default `threads:read` grants, summary-only thread
+  reduction, local HTTP and relay RPC mutation, and desktop grant controls;
+- the bundled, disabled-by-default Mini Zen proof extension, using public event,
+  thread-summary, storage, and panel APIs with a useful pre-grant fallback;
 - `packages/extension-testing`, with deterministic public-SDK activation,
   storage, actions, view publications, failure injection, declaration checks,
   daemon-equivalent limits, and atomic rollback;
@@ -39,8 +42,8 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   projection tests.
 
 The following planned parts are not yet public API: user/local-path install,
-permission grants beyond the baseline sandbox,
-the remaining declarative form primitives and mobile renderer,
+permissions beyond summary-only `threads:read`, the remaining declarative form
+primitives and mobile renderer,
 migrations/transactions beyond atomic
 action commits, the full `create|test|dev|pack` CLI, archive signing/update, and
 a bundled Deno executable for standalone daemon releases. Do not document those as
@@ -164,8 +167,9 @@ extension cannot declare itself trusted or default-enabled in its manifest.
 Initial policy:
 
 - `falcondeck.thread-tags`: bundled and enabled by default.
-- `falcondeck.mini-zen`: bundled but disabled by default while its Phase 6
-  summary-read facet and user grant are completed.
+- `falcondeck.mini-zen`: bundled but disabled by default so enabling the
+  opinionated panel remains an explicit choice; its requested `threads:read`
+  permission is still denied until separately granted.
 
 ## 5. Manifest contract
 
@@ -192,9 +196,9 @@ Every package contains `falcondeck.extension.json`, validated before code loads:
 
 Required properties are a globally unique reverse-domain-style id, name,
 semantic version, supported extension API range, backend entrypoint, declared
-contributions, and a permissions array. The v0.1 validator requires that array
-to be empty because capability grants are not implemented yet; an extension
-that requests an unenforced permission is rejected rather than run unsafely.
+contributions, and a permissions array. The v0.1 validator accepts at most 16
+unique permissions and currently recognizes only `threads:read`; unknown or
+duplicate permissions are rejected rather than run without enforcement.
 
 Paths are package-relative, cannot traverse (including through symlinks), and
 must resolve beneath the installed root. Unknown manifest and contribution
@@ -220,8 +224,9 @@ export default defineExtension({
 ```
 
 The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
-`storage`, `views`, `actions`, and identifier-only `events`. The remaining rows
-are planned capabilities:
+`storage`, `views`, `actions`, identifier-only `events`, and the
+permission-gated `threads` summary reader. The remaining rows are planned
+capabilities:
 
 | Facet       | Purpose                                                     |
 | ----------- | ----------------------------------------------------------- |
@@ -231,7 +236,7 @@ are planned capabilities:
 | `views`     | Publish bounded synchronized state declared by the manifest |
 | `actions`   | Handle invocations from declared UI actions                 |
 | `events`    | Subscribe to bounded identifier-only lifecycle events       |
-| `threads`   | Planned: permission-gated thread reads and annotations      |
+| `threads`   | List summary-only threads with a `threads:read` grant       |
 | `commands`  | Planned: slash or command-palette commands                  |
 
 Later facets may add schedules, notifications, agent tools, turn control,
@@ -247,8 +252,17 @@ as actions.
 The initial event union contains `thread.updated`, `turn.ended`,
 `attention.opened`, and `attention.resolved`. Payloads contain only stable
 workspace, thread, turn, and request identifiers. Status, title, preview,
-prompt, transcript, and resolution fields are deliberately absent until a
-declared read permission is granted and enforced.
+prompt, transcript, and resolution fields are deliberately absent. An
+extension that needs thread metadata requests it separately through the
+declared, granted, and enforced summary-read facet.
+
+`context.threads.list()` fails closed unless the manifest declares
+`threads:read` and the user has granted it. The returned projection is capped
+at 1,000 most-recently-updated entries and 2 MiB, and contains only thread id,
+workspace id, a title truncated to 256 characters, status, updated timestamp,
+and pending approval/question counts. Message previews, prompts, transcripts,
+turn content, agent configuration, and filesystem paths never cross this v1
+boundary.
 
 `defineExtensionUi(...)` type-checks UI v1 documents while preserving literal
 component, control, view, and action identifiers. The same checked document
@@ -360,7 +374,7 @@ flowchart LR
 The daemon owns this lifecycle:
 
 1. Discover bundled manifests from the FalconDeck-owned catalog.
-2. Validate paths, compatibility, declarations, and the empty v0.1 permission set.
+2. Validate paths, compatibility, declarations, and the bounded v0.1 permission set.
 3. Validate static declarative UI and render it without starting extension code.
 4. Lazily start that extension's host on its first executable action or queued event.
 5. Activate the package and collect its action registrations and event subscriptions.
@@ -392,9 +406,18 @@ views, declared actions with a FalconDeck-supplied target, declared UI, and the
 identifier-only lifecycle signals listed in section 6. Any event enrichment is
 a read and remains unavailable until its permission is declared and granted.
 
-Broader access is explicit and granular. Planned families are:
+The first explicit capability is `threads:read`. Grants are stored by the
+daemon independently from enablement, denied by default even for bundled
+extensions, restricted to permissions declared by the installed manifest, and
+rechecked for every action or event callback. Revocation is serialized with an
+extension's in-flight callback boundary. Its v1 projection is the bounded
+summary shape in section 6; it does not expose message content. Revocation also
+retracts that extension's synchronized view projections so previously derived
+fields do not remain in future snapshots; namespaced private state is retained.
 
-- `threads:read` and `threads:annotate`;
+Broader planned families are:
+
+- `threads:annotate` and richer separately named thread reads;
 - `turns:start`, `turns:steer`, and `turns:interrupt`;
 - `workspaces:read` and `workspace-files:read|write`;
 - `network:<origin>`;
@@ -402,9 +425,10 @@ Broader access is explicit and granular. Planned families are:
 - `agent-tools:register`;
 - lifecycle event subscriptions by event family.
 
-The daemon checks every operation, not only activation, and reduces event
-payloads to granted fields. Permission increases suspend an upgrade until the
-user approves them.
+The daemon checks every operation, not only activation. Lifecycle events remain
+identifier-only even with a grant; extensions explicitly request the reduced
+summary list through the gated SDK facet. Suspending upgrades that request new
+permissions remains a later upgrade-system gate.
 
 Bundled means distributed by FalconDeck, not unrestricted. Default-enabled
 official extensions stay within baseline capabilities unless the product has
@@ -417,8 +441,9 @@ directory, and a packed local archive with a digest. Git and registry installs,
 signatures, provenance, automatic updates, and a marketplace follow after the
 local contract stabilizes.
 
-Settings shows source, version, status, permissions, enable/disable control,
-diagnostics, and data-removal control. Disabling retains data. Uninstalling code
+Settings shows source, version, status, requested permissions, current grants,
+grant/revoke controls, enable/disable control, and diagnostics. Disabling
+retains data and grants. Data-removal controls remain planned; uninstalling code
 and deleting data are separate operations.
 
 Enablement is daemon-scoped initially so all paired clients see one coherent
@@ -446,9 +471,9 @@ pointing here. It adds no unrelated placeholder dependencies.
 The SDK exports types and builders. The manifest schema powers completion. The
 implemented test package provides activation, private storage, declared action
 invocation, lifecycle-event dispatch, disposable subscriptions, bounded view
-publications, diagnostics, failure injection, and atomic rollback. Permission
-grants, time control, and later SDK facets join it in the same slice that
-introduces each capability.
+publications, permission grants/revocation, reduced thread-summary reads,
+diagnostics, failure injection, and atomic rollback. Time control and later SDK
+facets join it in the same slice that introduces each capability.
 
 Canonical starter prompt:
 
@@ -632,6 +657,13 @@ bounded id-only event delivery; add permission grants plus summary-only
 not carry thread fields before permission enforcement, so no temporary
 unguarded read path ships.
 
+Progress (2026-08-13): this sequence is implemented end to end. Mini Zen is the
+official proof: it subscribes to attention lifecycle events, persists a bounded
+private queue, optionally resolves ids to granted summary titles, and publishes
+its panel through declarative UI v1. Before the grant it still renders an
+identifier-only attention count and generic thread label. It uses no private
+imports and remains bundled, disabled by default.
+
 Panel drift checklist (2026-08-13): panels are an extension feature; Mini Zen
 uses only the public SDK; manifests and bounded view state remain daemon-owned;
 the contribution is named and declarative; desktop and remote render it while
@@ -649,6 +681,17 @@ older and mobile clients require no event-aware fallback; host crashes and
 timeouts affect one extension and a later event lazily restarts it; the fake
 host mirrors payload, handler, effect, and failure limits; Mini Zen consumes
 attention open/resolved events without private imports.
+
+Permission/read drift checklist (2026-08-13): `threads:read` is a FalconDeck
+extension capability exposed only through the public SDK; the daemon persists
+and validates explicit grants, rechecks them at each callback, and reduces data
+to a 1,000-entry/256-title-character summary projection with no message content;
+the fake host mirrors denial, grants, revocation, reduction, and limits; local
+and remote grant mutation return the synchronized catalog shape; desktop
+Settings exposes the requested-versus-granted state while older clients treat
+the additive grant field as optional; disabling stops callbacks and summary
+access without deleting the grant; host failure cannot widen access or erase
+state; Mini Zen proves both granted and denied paths using only public APIs.
 
 Do not begin marketplace, signing, arbitrary webviews, whole-region UI
 replacement, extension dependencies, or cross-extension calls until local

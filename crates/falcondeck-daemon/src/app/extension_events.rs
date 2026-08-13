@@ -161,14 +161,24 @@ async fn run_extension_event_worker(
         }
         let host = app.inner.extension_hosts.lock().await.host(&package.id);
         let mut host = host.lock().await;
-        let storage = {
+        let (storage, can_read_threads) = {
             let registry = app.inner.extensions.lock().await;
             if !registry.is_enabled(&package.id) {
                 continue;
             }
-            registry.storage(&package.id)
+            (
+                registry.storage(&package.id),
+                registry.has_grant(&package.id, super::extensions::THREADS_READ_PERMISSION),
+            )
         };
-        let result = host.dispatch_event(&package, &event, &storage).await;
+        let thread_summaries = if can_read_threads {
+            Some(app.extension_thread_summaries().await)
+        } else {
+            None
+        };
+        let result = host
+            .dispatch_event(&package, &event, &storage, thread_summaries.as_deref())
+            .await;
         let result = match result {
             Ok(result) => result,
             Err(error) => {

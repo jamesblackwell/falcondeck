@@ -233,4 +233,71 @@ describe("ExtensionTestHost", () => {
       "unsupported extension event type",
     );
   });
+
+  it("denies thread reads by default and reduces granted summaries", async () => {
+    const observed: unknown[] = [];
+    const extension = defineExtension({
+      activate(context) {
+        context.events.on("thread.updated", async () => {
+          observed.push(await context.threads.list());
+        });
+      },
+    });
+    const summary = {
+      id: "thread-1",
+      workspaceId: "workspace-1",
+      title: "Needs review",
+      status: "waiting_for_input" as const,
+      updatedAt: "2026-08-13T08:00:00Z",
+      pendingApprovalCount: 1,
+      pendingQuestionCount: 0,
+      transcript: "must not cross the boundary",
+      lastMessagePreview: "also private",
+    };
+    const host = createExtensionTestHost(extension, {
+      threadSummaries: [summary],
+    });
+    const event = {
+      type: "thread.updated" as const,
+      workspaceId: "workspace-1",
+      threadId: "thread-1",
+    };
+
+    await expect(host.dispatchEvent(event)).rejects.toThrow(
+      "threads:read permission is not granted",
+    );
+    host.setPermissionGranted("threads:read", true);
+    await host.dispatchEvent(event);
+
+    expect(observed).toEqual([
+      [
+        {
+          id: "thread-1",
+          workspaceId: "workspace-1",
+          title: "Needs review",
+          status: "waiting_for_input",
+          updatedAt: "2026-08-13T08:00:00Z",
+          pendingApprovalCount: 1,
+          pendingQuestionCount: 0,
+        },
+      ],
+    ]);
+
+    host.setThreadSummaries(
+      Array.from({ length: 1_005 }, (_, index) => ({
+        id: `thread-${index}`,
+        workspaceId: "workspace-1",
+        title: "x".repeat(300),
+        status: "idle" as const,
+        updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
+        pendingApprovalCount: 0,
+        pendingQuestionCount: 0,
+      })),
+    );
+    await host.dispatchEvent(event);
+    const bounded = observed[1] as Array<{ id: string; title: string }>;
+    expect(bounded).toHaveLength(1_000);
+    expect(bounded[0]?.id).toBe("thread-1004");
+    expect(Array.from(bounded[0]?.title ?? "")).toHaveLength(256);
+  });
 });

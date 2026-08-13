@@ -11,6 +11,15 @@ type ExtensionEvent = {
   turnId?: string;
   requestId?: string;
 };
+type ExtensionThreadSummary = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  status: "idle" | "running" | "waiting_for_input" | "error";
+  updatedAt: string;
+  pendingApprovalCount: number;
+  pendingQuestionCount: number;
+};
 type ActionInvocation = {
   target?: ViewScope;
   input: unknown;
@@ -35,6 +44,7 @@ type ExtensionContext = {
       handler: (event: ExtensionEvent) => void | Promise<void>,
     ): { dispose(): void };
   };
+  threads: { list(): Promise<ExtensionThreadSummary[]> };
   log: {
     info(message: string, fields?: JsonObject): void;
     error(message: string, fields?: JsonObject): void;
@@ -52,6 +62,7 @@ type Runtime = {
   nextEventHandlerId: number;
   storage: Map<string, unknown>;
   publishedViews: PublishedView[];
+  threadSummaries: ExtensionThreadSummary[] | null;
   context: ExtensionContext;
 };
 type RuntimeRequest = {
@@ -59,6 +70,7 @@ type RuntimeRequest = {
   extensionId: string;
   entrypoint: string;
   storage: Record<string, unknown>;
+  threadSummaries?: ExtensionThreadSummary[];
 };
 type ActionRequest = RuntimeRequest & {
   method: "action.invoke";
@@ -115,6 +127,7 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
   if (existing) {
     existing.storage = new Map(Object.entries(request.storage));
     existing.publishedViews = [];
+    existing.threadSummaries = request.threadSummaries ?? null;
     return existing;
   }
 
@@ -124,6 +137,7 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
   runtime.nextEventHandlerId = 1;
   runtime.storage = new Map(Object.entries(request.storage));
   runtime.publishedViews = [];
+  runtime.threadSummaries = request.threadSummaries ?? null;
   runtime.context = {
     extension: { id: request.extensionId },
     actions: {
@@ -178,6 +192,18 @@ async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
             if (handlers.size === 0) runtime.eventHandlers.delete(type);
           },
         };
+      },
+    },
+    threads: {
+      list() {
+        if (runtime.threadSummaries === null) {
+          return Promise.reject(
+            new Error("threads:read permission is not granted"),
+          );
+        }
+        return Promise.resolve(
+          runtime.threadSummaries.map((summary) => ({ ...summary })),
+        );
       },
     },
     log: {

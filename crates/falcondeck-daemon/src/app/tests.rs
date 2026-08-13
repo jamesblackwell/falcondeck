@@ -3,11 +3,11 @@ use std::path::PathBuf;
 
 use chrono::{Duration, Utc};
 use falcondeck_core::{
-    AgentProvider, ContentLifecycle, ConversationItem, ImageInput, InteractiveRequest,
-    InteractiveRequestKind, InteractiveRequestOutcome, SnapshotRequest, ThreadAgentParams,
-    ThreadAttention, ThreadStatus, ThreadSummary, ToolActivityKind, ToolArtifactKind,
-    ToolCallDetail, ToolHistoryMode, ToolLifecycle, TurnInputItem, UpdateThreadRequest,
-    WorkspaceStatus, WorkspaceSummary,
+    AgentProvider, ContentLifecycle, ConversationItem, ExtensionThreadSummary, ImageInput,
+    InteractiveRequest, InteractiveRequestKind, InteractiveRequestOutcome, SnapshotRequest,
+    ThreadAgentParams, ThreadAttention, ThreadStatus, ThreadSummary, ToolActivityKind,
+    ToolArtifactKind, ToolCallDetail, ToolHistoryMode, ToolLifecycle, TurnInputItem,
+    UpdateThreadRequest, WorkspaceStatus, WorkspaceSummary,
     crypto::{LocalBoxKeyPair, build_pairing_public_key_bundle, generate_data_key},
 };
 use serde_json::{Value, json};
@@ -16,8 +16,9 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration as TokioDuration, sleep};
 
 use super::{
-    AppState, PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
-    claude_prompt_from_inputs, codex_inputs,
+    AppState, MAX_EXTENSION_THREAD_SUMMARIES, MAX_EXTENSION_THREAD_SUMMARY_BYTES,
+    PersistedAppState, PersistedRemoteSecrets, PersistedRemoteState,
+    bound_extension_thread_summaries, claude_prompt_from_inputs, codex_inputs,
     conversation_helpers::{
         ToolSettlement, codex_artifact_conversation_item, is_known_tool_item,
         tool_display_metadata, unsupported_conversation_item,
@@ -29,6 +30,35 @@ use super::{
     },
     should_surface_tool_item, workspace_status_after_account_update,
 };
+
+#[test]
+fn extension_thread_summaries_enforce_count_title_and_byte_limits() {
+    let summary = |index: usize, id: String| ExtensionThreadSummary {
+        id,
+        workspace_id: "workspace-1".to_string(),
+        title: "t".repeat(300),
+        status: ThreadStatus::Idle,
+        updated_at: Utc::now() + Duration::seconds(index as i64),
+        pending_approval_count: 0,
+        pending_question_count: 0,
+    };
+    let bounded = bound_extension_thread_summaries(
+        (0..MAX_EXTENSION_THREAD_SUMMARIES + 5)
+            .map(|index| summary(index, format!("thread-{index}")))
+            .collect(),
+    );
+    assert_eq!(bounded.len(), MAX_EXTENSION_THREAD_SUMMARIES);
+    assert!(bounded.iter().all(|item| item.title.chars().count() == 256));
+    assert_eq!(bounded[0].id, "thread-1004");
+
+    let byte_bounded = bound_extension_thread_summaries(
+        (0..MAX_EXTENSION_THREAD_SUMMARIES)
+            .map(|index| summary(index, format!("thread-{index}-{}", "x".repeat(3_000))))
+            .collect(),
+    );
+    assert!(byte_bounded.len() < MAX_EXTENSION_THREAD_SUMMARIES);
+    assert!(serde_json::to_vec(&byte_bounded).unwrap().len() <= MAX_EXTENSION_THREAD_SUMMARY_BYTES);
+}
 
 #[test]
 fn maps_codex_thread_status_and_waiting_flags() {

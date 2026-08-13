@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use falcondeck_core::ExtensionViewScope;
+use falcondeck_core::{ExtensionThreadSummary, ExtensionViewScope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::{
@@ -85,6 +85,8 @@ struct HostActionRequest<'a> {
     target: Option<&'a ExtensionViewScope>,
     input: &'a Value,
     storage: &'a BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_summaries: Option<&'a [ExtensionThreadSummary]>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -135,6 +137,8 @@ struct HostEventRequest<'a> {
     entrypoint: String,
     event: &'a ExtensionEvent,
     storage: &'a BTreeMap<String, Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_summaries: Option<&'a [ExtensionThreadSummary]>,
 }
 
 #[derive(Deserialize)]
@@ -179,6 +183,7 @@ impl ExtensionHost {
         target: Option<&ExtensionViewScope>,
         input: &Value,
         storage: &BTreeMap<String, Value>,
+        thread_summaries: Option<&[ExtensionThreadSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         let package_root = package
             .entrypoint
@@ -206,6 +211,7 @@ impl ExtensionHost {
             target,
             input,
             storage,
+            thread_summaries,
         };
         let response = self
             .send_request(&request, request_id, HOST_ACTION_TIMEOUT, "action")
@@ -222,6 +228,7 @@ impl ExtensionHost {
         package: &ExtensionPackage,
         event: &ExtensionEvent,
         storage: &BTreeMap<String, Value>,
+        thread_summaries: Option<&[ExtensionThreadSummary]>,
     ) -> Result<ExtensionHostActionResult, DaemonError> {
         if serde_json::to_vec(event)?.len() > MAX_EXTENSION_EVENT_BYTES {
             return Err(DaemonError::BadRequest(format!(
@@ -252,6 +259,7 @@ impl ExtensionHost {
             entrypoint: package.entrypoint.to_string_lossy().into_owned(),
             event,
             storage,
+            thread_summaries,
         };
         let response = self
             .send_request(&request, request_id, HOST_EVENT_TIMEOUT, "event")
@@ -451,7 +459,7 @@ fn extension_host_script(state_dir: &std::path::Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use falcondeck_core::InvokeExtensionActionRequest;
+    use falcondeck_core::{InvokeExtensionActionRequest, ThreadStatus};
 
     #[test]
     fn host_pool_reuses_one_host_per_extension_and_isolates_others() {
@@ -500,6 +508,7 @@ mod tests {
                 None,
                 &serde_json::json!({ "operation": "read" }),
                 &legacy_storage,
+                None,
             )
             .await
             .expect("legacy tags should migrate");
@@ -522,6 +531,7 @@ mod tests {
                     "color": "red"
                 }),
                 &migrated.storage,
+                None,
             )
             .await
             .expect("thread tags action should run");
@@ -570,8 +580,13 @@ import { defineExtension } from '@falcondeck/extension-sdk'
 export default defineExtension({
   activate(context) {
     context.events.on('thread.updated', async ({ threadId }) => {
+      const threads = await context.threads.list()
+      const thread = threads.find((candidate) => candidate.id === threadId)
       await context.storage.set('threadId', threadId)
-      await context.views.publish({ viewId: 'latest', value: { threadId } })
+      await context.views.publish({
+        viewId: 'latest',
+        value: { threadId, title: thread?.title ?? null },
+      })
     })
   },
 })
@@ -588,8 +603,29 @@ export default defineExtension({
             thread_id: "thread-1".to_string(),
         };
         let mut host = ExtensionHost::new(&state_path, "deno".to_string());
+        let summaries = [ExtensionThreadSummary {
+            id: "thread-1".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            title: "Needs review".to_string(),
+            status: ThreadStatus::WaitingForInput,
+            updated_at: chrono::Utc::now(),
+            pending_approval_count: 1,
+            pending_question_count: 0,
+        }];
+        let denied = match host
+            .dispatch_event(&package, &event, &BTreeMap::new(), None)
+            .await
+        {
+            Ok(_) => panic!("thread reads must be denied without a grant projection"),
+            Err(error) => error,
+        };
+        assert!(
+            denied
+                .to_string()
+                .contains("threads:read permission is not granted")
+        );
         let result = host
-            .dispatch_event(&package, &event, &BTreeMap::new())
+            .dispatch_event(&package, &event, &BTreeMap::new(), Some(&summaries))
             .await
             .expect("event should run");
         host.stop().await;
@@ -604,7 +640,7 @@ export default defineExtension({
         assert_eq!(published.scope, None);
         assert_eq!(
             published.value,
-            serde_json::json!({ "threadId": "thread-1" })
+            serde_json::json!({ "threadId": "thread-1", "title": "Needs review" })
         );
     }
 
@@ -676,7 +712,7 @@ export default defineExtension({
         };
         let mut host = ExtensionHost::new(&state_path, "deno".to_string());
         let result = host
-            .invoke(&package, "run", None, &Value::Null, &BTreeMap::new())
+            .invoke(&package, "run", None, &Value::Null, &BTreeMap::new(), None)
             .await
             .expect("console diagnostics must stay off protocol stdout");
         host.stop().await;

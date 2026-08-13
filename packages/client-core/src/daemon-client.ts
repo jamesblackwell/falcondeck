@@ -141,11 +141,30 @@ export function createDaemonApiClient(baseUrl: string) {
     },
     async updateExtension(extensionId: string, enabled: boolean) {
       return parseJson<ExtensionSummary>(
-        await fetch(`${baseUrl}/api/extensions/${encodeURIComponent(extensionId)}`, {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ enabled }),
-        }),
+        await fetch(
+          `${baseUrl}/api/extensions/${encodeURIComponent(extensionId)}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ enabled }),
+          },
+        ),
+      );
+    },
+    async updateExtensionPermission(
+      extensionId: string,
+      permission: string,
+      granted: boolean,
+    ) {
+      return parseJson<ExtensionSummary>(
+        await fetch(
+          `${baseUrl}/api/extensions/${encodeURIComponent(extensionId)}/permissions`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ permission, granted }),
+          },
+        ),
       );
     },
     async invokeExtensionAction(

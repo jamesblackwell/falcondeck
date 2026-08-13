@@ -1514,6 +1514,12 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
                       typeof permission === "string",
                   )
                 : [],
+              granted_permissions: Array.isArray(extension.granted_permissions)
+                ? extension.granted_permissions.filter(
+                    (permission): permission is string =>
+                      typeof permission === "string",
+                  )
+                : [],
             },
           ];
         })

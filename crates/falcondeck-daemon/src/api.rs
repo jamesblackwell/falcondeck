@@ -188,6 +188,10 @@ pub fn router(state: AppState) -> Router {
             axum::routing::patch(update_extension),
         )
         .route(
+            "/api/extensions/{extension_id}/permissions",
+            axum::routing::patch(update_extension_permission),
+        )
+        .route(
             "/api/extensions/{extension_id}/actions/{action_id}",
             post(invoke_extension_action),
         )
@@ -255,6 +259,18 @@ async fn update_extension(
     Ok(Json(
         state
             .update_extension(&extension_id, request.enabled)
+            .await?,
+    ))
+}
+
+async fn update_extension_permission(
+    State(state): State<AppState>,
+    Path(extension_id): Path<String>,
+    Json(request): Json<falcondeck_core::UpdateExtensionPermissionRequest>,
+) -> Result<Json<falcondeck_core::ExtensionSummary>, DaemonError> {
+    Ok(Json(
+        state
+            .update_extension_permission(&extension_id, &request.permission, request.granted)
             .await?,
     ))
 }

@@ -15,13 +15,17 @@ Read `../docs/EXTENSIONS.md` before changing or creating an extension.
 - Use `context.events.on(...)` only for identifier-only lifecycle signals;
   dispose temporary subscriptions and query permission-gated facets for any
   user-visible thread data instead of assuming events contain it.
+- Declare `threads:read` before calling `context.threads.list()`. The call is
+  denied until the user grants it and returns only bounded summaries, never
+  prompts, messages, previews, or transcripts.
 - Request no permissions unless the capability genuinely needs them.
 - Run `npm run extension:validate -- <package> --json`, `deno check
 --import-map=extensions/import-map.json` on the entrypoint, and the relevant
   daemon/client tests before handoff.
 - Exercise backend behavior through `@falcondeck/extension-testing`; pass the
-  manifest's declared action and view ids to the fake host so undeclared work,
-  size limits, failures, and atomic rollback are tested.
+  manifest's declared action/view ids and permission grants to the fake host so
+  undeclared work, denied reads, size limits, failures, and atomic rollback are
+  tested.
 - Official extensions must prove public API behavior. Do not add a private
   daemon method or core thread field for their data.
 

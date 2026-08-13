@@ -14,12 +14,12 @@ use falcondeck_core::{
     DaemonSnapshot, EventEnvelope, ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary,
     FalconDeckPreferences, ForkThreadRequest, HealthResponse, InteractiveRequest,
     InteractiveRequestKind, InteractiveResponsePayload, InvokeExtensionActionRequest,
-    OperationalCondition, PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice,
-    SkillSummary, SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget,
-    ThreadAgentParams, ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle,
-    ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage, UnifiedEvent,
-    UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
-    WorkspaceSummary, crypto::LocalBoxKeyPair,
+    OperationalCondition, PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest,
+    ServiceLevel, ServiceNotice, SkillSummary, SnapshotRequest, StartReviewRequest,
+    StartThreadRequest, TextDeltaTarget, ThreadAgentParams, ThreadAttention, ThreadDetail,
+    ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage,
+    UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary,
+    WorkspaceStatus, WorkspaceSummary, crypto::LocalBoxKeyPair,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -68,6 +68,9 @@ use threads::{interactive_request_counts, refresh_thread_attention};
 
 const WORKSPACE_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_INTERRUPTED_TURN_ERROR: &str = "FalconDeck was closed while this turn was running";
+const MAX_EXTENSION_THREAD_SUMMARIES: usize = 1_000;
+const MAX_EXTENSION_THREAD_TITLE_CHARS: usize = 256;
+const MAX_EXTENSION_THREAD_SUMMARY_BYTES: usize = 2 * 1024 * 1024;
 
 /// How long `schedule_persist` waits before writing, so a burst of streamed
 /// updates costs one state snapshot instead of one per chunk.
@@ -187,6 +190,39 @@ struct QueuedTurnRequest {
     id: String,
     request: SendTurnRequest,
     summary: falcondeck_core::QueuedTurnSummary,
+}
+
+fn bound_extension_thread_summaries(
+    mut summaries: Vec<falcondeck_core::ExtensionThreadSummary>,
+) -> Vec<falcondeck_core::ExtensionThreadSummary> {
+    for summary in &mut summaries {
+        summary.title = summary
+            .title
+            .chars()
+            .take(MAX_EXTENSION_THREAD_TITLE_CHARS)
+            .collect();
+    }
+    summaries.sort_by(|left, right| {
+        right
+            .updated_at
+            .cmp(&left.updated_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut encoded_bytes = 2usize;
+    summaries
+        .into_iter()
+        .take(MAX_EXTENSION_THREAD_SUMMARIES)
+        .take_while(|summary| {
+            let item_bytes = serde_json::to_vec(summary)
+                .map(|encoded| encoded.len().saturating_add(1))
+                .unwrap_or(MAX_EXTENSION_THREAD_SUMMARY_BYTES);
+            if encoded_bytes.saturating_add(item_bytes) > MAX_EXTENSION_THREAD_SUMMARY_BYTES {
+                return false;
+            }
+            encoded_bytes = encoded_bytes.saturating_add(item_bytes);
+            true
+        })
+        .collect()
 }
 
 impl AppState {
@@ -1012,6 +1048,24 @@ impl AppState {
         self.inner.extensions.lock().await.snapshot()
     }
 
+    async fn extension_thread_summaries(&self) -> Vec<falcondeck_core::ExtensionThreadSummary> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let summaries = workspaces
+            .values()
+            .flat_map(|workspace| workspace.threads.values())
+            .map(|thread| falcondeck_core::ExtensionThreadSummary {
+                id: thread.summary.id.clone(),
+                workspace_id: thread.summary.workspace_id.clone(),
+                title: thread.summary.title.clone(),
+                status: thread.summary.status.clone(),
+                updated_at: thread.summary.updated_at,
+                pending_approval_count: thread.summary.attention.pending_approval_count,
+                pending_question_count: thread.summary.attention.pending_question_count,
+            })
+            .collect::<Vec<_>>();
+        bound_extension_thread_summaries(summaries)
+    }
+
     /// Enables or disables one installed extension without deleting its data.
     pub async fn update_extension(
         &self,
@@ -1079,6 +1133,63 @@ impl AppState {
         Ok(updated)
     }
 
+    /// Grants or revokes one manifest-declared permission under the same
+    /// per-extension gate used by callbacks, so revocation cannot race an
+    /// in-flight read or commit.
+    pub async fn update_extension_permission(
+        &self,
+        extension_id: &str,
+        permission: &str,
+        granted: bool,
+    ) -> Result<ExtensionSummary, DaemonError> {
+        if !self
+            .inner
+            .extensions
+            .lock()
+            .await
+            .contains_extension(extension_id)
+        {
+            return Err(DaemonError::NotFound("extension not found".to_string()));
+        }
+        let host = self.inner.extension_hosts.lock().await.host(extension_id);
+        let _host = host.lock().await;
+        let (updated, revoked_views) = {
+            let mut extensions = self.inner.extensions.lock().await;
+            let revoked_views =
+                if !granted && extensions.permission_granted(extension_id, permission) {
+                    extensions.retained_views(extension_id)
+                } else {
+                    Vec::new()
+                };
+            let updated = extensions
+                .update_permission(extension_id, permission, granted)
+                .await?;
+            (updated, revoked_views)
+        };
+        let catalog = self.inner.extensions.lock().await.snapshot().catalog;
+        self.emit(
+            None,
+            None,
+            UnifiedEvent::ExtensionCatalogUpdated { catalog },
+        );
+        for view in revoked_views {
+            self.emit(
+                None,
+                view.scope
+                    .as_ref()
+                    .filter(|scope| scope.kind == "thread")
+                    .map(|scope| scope.id.clone()),
+                UnifiedEvent::ExtensionViewUpdated {
+                    extension_id: view.extension_id,
+                    view_id: view.view_id,
+                    scope: view.scope,
+                    view: None,
+                },
+            );
+        }
+        Ok(updated)
+    }
+
     /// Invokes a manifest-declared action through the isolated extension host.
     pub async fn invoke_extension_action(
         &self,
@@ -1102,12 +1213,18 @@ impl AppState {
         // updates from one stale snapshot and overwrite each other.
         let host = self.inner.extension_hosts.lock().await.host(extension_id);
         let mut host = host.lock().await;
-        let (package, storage) = {
+        let (package, storage, can_read_threads) = {
             let registry = self.inner.extensions.lock().await;
             (
                 registry.package(extension_id, action_id)?,
                 registry.storage(extension_id),
+                registry.has_grant(extension_id, extensions::THREADS_READ_PERMISSION),
             )
+        };
+        let thread_summaries = if can_read_threads {
+            Some(self.extension_thread_summaries().await)
+        } else {
+            None
         };
         let host_result = host
             .invoke(
@@ -1116,6 +1233,7 @@ impl AppState {
                 request.target.as_ref(),
                 &request.input,
                 &storage,
+                thread_summaries.as_deref(),
             )
             .await;
         let host_result = match host_result {

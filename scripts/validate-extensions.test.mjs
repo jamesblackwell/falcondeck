@@ -104,3 +104,41 @@ test("panels require a durable title and view id", () => {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("threads:read is accepted and unknown permissions fail stably", () => {
+  const directory = mkdtempSync(
+    resolve(tmpdir(), "falcondeck-extension-validator-"),
+  );
+  try {
+    writeFileSync(resolve(directory, "server.ts"), "export default {}\n");
+    const manifest = {
+      id: "example.permissions",
+      name: "Example",
+      version: "1.0.0",
+      engines: { falcondeck: "^0.1" },
+      entrypoint: "server.ts",
+      contributes: {},
+      permissions: ["threads:read"],
+    };
+    writeFileSync(
+      resolve(directory, "falcondeck.extension.json"),
+      JSON.stringify(manifest),
+    );
+    assert.deepEqual(validate(directory), {
+      status: 0,
+      output: { ok: true, diagnostics: [] },
+    });
+
+    manifest.permissions = ["threads:transcript"];
+    writeFileSync(
+      resolve(directory, "falcondeck.extension.json"),
+      JSON.stringify(manifest),
+    );
+    const denied = validate(directory);
+    assert.equal(denied.status, 1);
+    assert.equal(denied.output.diagnostics[0]?.code, "FDX1018");
+    assert.equal(denied.output.diagnostics[0]?.pointer, "/permissions/0");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

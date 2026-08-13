@@ -133,6 +133,20 @@ export type ExtensionDisposable = {
   dispose(): void;
 };
 
+export type ExtensionThreadStatus =
+  "idle" | "running" | "waiting_for_input" | "error";
+
+/** Summary-only `threads:read` projection. No transcript or message preview is exposed. */
+export type ExtensionThreadSummary = {
+  id: string;
+  workspaceId: string;
+  title: string;
+  status: ExtensionThreadStatus;
+  updatedAt: string;
+  pendingApprovalCount: number;
+  pendingQuestionCount: number;
+};
+
 export type ExtensionContext = {
   extension: { id: string };
   actions: {
@@ -156,6 +170,10 @@ export type ExtensionContext = {
         event: Extract<ExtensionEvent, { type: TType }>,
       ) => void | Promise<void>,
     ): ExtensionDisposable;
+  };
+  threads: {
+    /** Lists daemon-reduced summaries when `threads:read` is granted. */
+    list(): Promise<ExtensionThreadSummary[]>;
   };
   log: {
     info(message: string, fields?: Record<string, unknown>): void;

@@ -54,6 +54,11 @@ export type SettingsViewProps = {
   onClose: () => void
   extensions: ExtensionSnapshot
   onSetExtensionEnabled: (extensionId: string, enabled: boolean) => Promise<void>
+  onSetExtensionPermission: (
+    extensionId: string,
+    permission: string,
+    granted: boolean,
+  ) => Promise<void>
 }
 
 export function SettingsView(props: SettingsViewProps) {
@@ -101,6 +106,7 @@ export function SettingsView(props: SettingsViewProps) {
             <ExtensionsPanel
               extensions={props.extensions}
               onSetEnabled={props.onSetExtensionEnabled}
+              onSetPermission={props.onSetExtensionPermission}
             />
           ) : activeSection === 'general' ? (
             <GeneralSettingsPanel
