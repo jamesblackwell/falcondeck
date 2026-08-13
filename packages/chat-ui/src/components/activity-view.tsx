@@ -256,11 +256,17 @@ const ActivityRow = memo(
       <article
         className={cn(
           "rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4 shadow-[var(--fd-shadow-sm)]",
+          entry.section !== "blocked" && "h-36 overflow-hidden",
           offline && "opacity-60",
         )}
         data-activity-thread={entry.thread.id}
       >
-        <div className="flex items-start gap-3">
+        <div
+          className={cn(
+            "flex items-start gap-3",
+            entry.section !== "blocked" && "h-full",
+          )}
+        >
           <button
             type="button"
             onClick={() => onOpenThread(entry.workspaceId, entry.thread.id)}
@@ -283,9 +289,9 @@ const ActivityRow = memo(
             {reason ? (
               <span
                 className={cn(
-                  "mt-2 block whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary",
+                  "mt-2 line-clamp-3 break-words whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary",
                   entry.section === "running" &&
-                    "line-clamp-3 break-words font-mono text-[length:var(--fd-text-xs)] leading-relaxed",
+                    "font-mono text-[length:var(--fd-text-xs)] leading-relaxed",
                 )}
               >
                 {reason}
@@ -474,7 +480,7 @@ export const ActivityView = memo(function ActivityView({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
-        <div className="mx-auto w-full max-w-[1120px] space-y-6">
+        <div className="mx-auto w-full max-w-[1440px] space-y-6">
           <section
             aria-label="Activity summary"
             className="flex flex-col gap-4 rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 px-4 py-3 shadow-[var(--fd-shadow-sm)] md:flex-row md:items-center"
@@ -568,7 +574,10 @@ export const ActivityView = memo(function ActivityView({
                   </div>
                   <div
                     data-activity-grid={section}
-                    className="grid items-start gap-3 xl:grid-cols-2"
+                    className={cn(
+                      "grid items-start gap-3 lg:grid-cols-2",
+                      section !== "blocked" && "2xl:grid-cols-3",
+                    )}
                   >
                     {sectionEntries.map((entry) => (
                       <ActivityRow

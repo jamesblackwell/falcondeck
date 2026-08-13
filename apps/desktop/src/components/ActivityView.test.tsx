@@ -159,13 +159,22 @@ describe("ActivityView", () => {
     expect(screen.getByText("Process exited 1")).toBeInTheDocument();
     expect(screen.getByText("Implementation complete")).toBeInTheDocument();
     expect(screen.getByText("Running tests")).toHaveClass("line-clamp-3");
+    expect(
+      document.querySelector('[data-activity-thread="running"]'),
+    ).toHaveClass("h-36", "overflow-hidden");
+    expect(
+      document.querySelector('[data-activity-thread="blocked"]'),
+    ).not.toHaveClass("h-36");
     expect(screen.getByLabelText("Activity summary")).toHaveTextContent(
       "3 need attention",
     );
     expect(screen.getByText("Needs response")).toBeInTheDocument();
     expect(
       document.querySelector('[data-activity-grid="running"]'),
-    ).toHaveClass("xl:grid-cols-2");
+    ).toHaveClass("lg:grid-cols-2", "2xl:grid-cols-3");
+    expect(
+      document.querySelector('[data-activity-grid="blocked"]'),
+    ).not.toHaveClass("2xl:grid-cols-3");
   });
 
   it("answers an approval inline with the exact response payload", async () => {
