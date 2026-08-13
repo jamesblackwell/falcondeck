@@ -1,7 +1,7 @@
 import { Pressable } from 'react-native'
 import { Stack, useRouter } from 'expo-router'
 import { X } from 'lucide-react-native'
-import { useUnistyles } from 'react-native-unistyles'
+import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 export default function SettingsLayout() {
   const { theme } = useUnistyles()
@@ -14,7 +14,8 @@ export default function SettingsLayout() {
       onPress={() => router.navigate('/(app)')}
       accessibilityRole="button"
       accessibilityLabel="Close settings"
-      hitSlop={12}
+      hitSlop={6}
+      style={({ pressed }) => [styles.closeButton, pressed && styles.closeButtonPressed]}
     >
       <X size={theme.iconSize.lg} color={theme.colors.fg.primary} />
     </Pressable>
@@ -48,3 +49,16 @@ export default function SettingsLayout() {
     </Stack>
   )
 }
+
+const styles = StyleSheet.create((theme) => ({
+  closeButton: {
+    width: theme.minTouchTarget,
+    height: theme.minTouchTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: theme.radius.full,
+  },
+  closeButtonPressed: {
+    backgroundColor: theme.colors.surface[2],
+  },
+}))
