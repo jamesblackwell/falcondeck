@@ -59,6 +59,11 @@ function precedes(left: string, right: string) {
   return within(projects).getByText(left).compareDocumentPosition(within(projects).getByText(right))
 }
 
+function precedesIn(regionName: string, left: string, right: string) {
+  const region = screen.getByRole('region', { name: regionName })
+  return within(region).getByText(left).compareDocumentPosition(within(region).getByText(right))
+}
+
 describe('Priority chat queue', () => {
   it('keeps the initial order stable while snapshot timestamps churn', () => {
     const alpha = thread('Alpha', { status: 'running', updated_at: '2026-08-13T11:00:00Z' })
@@ -68,6 +73,44 @@ describe('Priority chat queue', () => {
 
     rerender(sidebar([{ workspace, threads: [{ ...beta, updated_at: '2026-08-13T12:00:00Z' }, alpha] }], null))
     expect(precedes('Alpha', 'Beta')).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  it('preserves source order when several chats arrive in one snapshot', () => {
+    const existing = thread('Existing', { status: 'running' })
+    const { rerender } = render(sidebar([{ workspace, threads: [existing] }], null))
+    const firstArrival = thread('First arrival', { status: 'running' })
+    const secondArrival = thread('Second arrival', { status: 'running' })
+
+    rerender(sidebar([{
+      workspace,
+      threads: [firstArrival, secondArrival, existing],
+    }], null))
+
+    expect(precedes('First arrival', 'Second arrival')).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(precedes('Second arrival', 'Existing')).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  it('keeps pinned Priority rows stable while timestamps churn', () => {
+    const alpha = thread('Pinned Alpha', {
+      is_pinned: true,
+      status: 'running',
+      updated_at: '2026-08-13T11:00:00Z',
+    })
+    const beta = thread('Pinned Beta', {
+      is_pinned: true,
+      status: 'running',
+      updated_at: '2026-08-13T10:00:00Z',
+    })
+    const { rerender } = render(sidebar([{ workspace, threads: [alpha, beta] }], null))
+    expect(precedesIn('Pinned', 'Pinned Alpha', 'Pinned Beta'))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+
+    rerender(sidebar([{
+      workspace,
+      threads: [{ ...beta, updated_at: '2026-08-13T12:00:00Z' }, alpha],
+    }], null))
+    expect(precedesIn('Pinned', 'Pinned Alpha', 'Pinned Beta'))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 
   it('promotes immediately and defers selected-thread demotion until navigation', () => {

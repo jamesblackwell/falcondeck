@@ -51,16 +51,7 @@ function compareEntries(left: ActivityEntry, right: ActivityEntry) {
   if (sectionRank !== 0) return sectionRank
 
   if (left.section === 'blocked' && right.section === 'blocked') {
-    const leftRequest = left.requests[0]
-    const rightRequest = right.requests[0]
-    const kindRank =
-      (leftRequest ? requestKindRank(leftRequest) : 2) -
-      (rightRequest ? requestKindRank(rightRequest) : 2)
-    return (
-      kindRank ||
-      compareIsoAscending(leftRequest?.created_at ?? '', rightRequest?.created_at ?? '') ||
-      left.thread.id.localeCompare(right.thread.id)
-    )
+    return left.sortKey.localeCompare(right.sortKey)
   }
 
   if (
@@ -73,7 +64,25 @@ function compareEntries(left: ActivityEntry, right: ActivityEntry) {
     )
   }
 
-  return left.thread.title.localeCompare(right.thread.title) || left.thread.id.localeCompare(right.thread.id)
+  return left.sortKey.localeCompare(right.sortKey)
+}
+
+function activitySectionForThread(
+  thread: ThreadSummary,
+  hasInteractiveRequest: boolean,
+): ActivitySection | null {
+  if (
+    hasInteractiveRequest ||
+    thread.attention.pending_approval_count + thread.attention.pending_question_count > 0
+  ) {
+    return 'blocked'
+  }
+
+  const attention = deriveThreadAttentionPresentation(thread)
+  if (attention.level === 'error' && attention.unread) return 'failed'
+  if (thread.status === 'idle' && attention.unread) return 'ready'
+  if (attention.level === 'running') return 'running'
+  return null
 }
 
 /**
@@ -100,15 +109,7 @@ export function collectActivityEntries(
       if (thread.is_archived) continue
 
       const requests = requestsByThread.get(`${group.workspace.id}:${thread.id}`) ?? []
-      const attention = deriveThreadAttentionPresentation(thread)
-      const hasPendingCount =
-        thread.attention.pending_approval_count + thread.attention.pending_question_count > 0
-
-      let section: ActivitySection | null = null
-      if (hasPendingCount || requests.length > 0) section = 'blocked'
-      else if (attention.level === 'error' && attention.unread) section = 'failed'
-      else if (thread.status === 'idle' && attention.unread) section = 'ready'
-      else if (attention.level === 'running') section = 'running'
+      const section = activitySectionForThread(thread, requests.length > 0)
       if (!section) continue
 
       const sortKey =
@@ -137,8 +138,22 @@ export function countActivityEntries(
   interactiveRequests: InteractiveRequest[],
 ): ActivityCounts {
   const counts: ActivityCounts = { blocked: 0, failed: 0, ready: 0 }
-  for (const entry of collectActivityEntries(groups, interactiveRequests)) {
-    if (entry.section !== 'running') counts[entry.section] += 1
+  const requestThreadKeys = new Set<string>()
+  for (const request of interactiveRequests) {
+    if (request.thread_id) {
+      requestThreadKeys.add(`${request.workspace_id}:${request.thread_id}`)
+    }
+  }
+
+  for (const group of groups) {
+    for (const thread of group.threads) {
+      if (thread.is_archived) continue
+      const section = activitySectionForThread(
+        thread,
+        requestThreadKeys.has(`${group.workspace.id}:${thread.id}`),
+      )
+      if (section && section !== 'running') counts[section] += 1
+    }
   }
   return counts
 }

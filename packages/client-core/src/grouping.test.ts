@@ -134,4 +134,14 @@ describe('compareThreads', () => {
     alpha.updated_at = '2026-08-12T11:00:00Z'
     expect([zulu, alpha].sort(compare).map(({ id }) => id)).toEqual(['alpha', 'zulu'])
   })
+
+  it('keeps alphabetical ties stable when activity timestamps change', () => {
+    const first = summary({ id: 'a', title: 'Same', updated_at: '2026-08-12T09:00:00Z' })
+    const second = summary({ id: 'b', title: 'Same', updated_at: '2026-08-12T10:00:00Z' })
+    const compare = compareThreads('alphabetical')
+
+    expect([second, first].sort(compare).map(({ id }) => id)).toEqual(['a', 'b'])
+    first.updated_at = '2026-08-12T11:00:00Z'
+    expect([second, first].sort(compare).map(({ id }) => id)).toEqual(['a', 'b'])
+  })
 })

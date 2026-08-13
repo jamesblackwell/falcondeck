@@ -15,6 +15,12 @@ import { InteractiveRequestCard } from "./interactive-request-card";
 
 const RELATIVE_TIME_TICK_MS = 60_000;
 const RESOLVED_HOLD_MS = 1_500;
+const SECTION_ORDER: readonly ActivitySection[] = [
+  "blocked",
+  "failed",
+  "ready",
+  "running",
+];
 
 export type ActivityViewProps = {
   groups: ProjectGroup[];
@@ -72,11 +78,10 @@ function entryKey(entry: ActivityEntry) {
   return `${entry.workspaceId}:${entry.thread.id}`;
 }
 
-function timeAgo(dateStr: string, nowTick: number) {
-  void nowTick;
+function timeAgo(dateStr: string, nowMs: number) {
   const seconds = Math.max(
     0,
-    Math.floor((Date.now() - new Date(dateStr).getTime()) / 1000),
+    Math.floor((nowMs - new Date(dateStr).getTime()) / 1000),
   );
   if (seconds < 60) return "now";
   const minutes = Math.floor(seconds / 60);
@@ -86,7 +91,77 @@ function timeAgo(dateStr: string, nowTick: number) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-/** Keep existing Failed/Ready rows under the pointer while snapshots churn. */
+function mergeResolvedEntries(
+  entries: ActivityEntry[],
+  resolvedEntries: Record<string, ResolvedEntry>,
+) {
+  const freshBlockedKeys = new Set(
+    entries
+      .filter((entry) => entry.section === "blocked")
+      .map(entryKey),
+  );
+  const merged = entries.filter((entry) => {
+    const resolved = resolvedEntries[entryKey(entry)];
+    return !resolved || entry.section === "blocked";
+  });
+
+  for (const [key, resolved] of Object.entries(resolvedEntries)) {
+    if (!freshBlockedKeys.has(key)) merged.push(resolved.entry);
+  }
+  return merged;
+}
+
+function resolvedRequestForEntry(
+  entry: ActivityEntry,
+  resolvedEntry: ResolvedEntry | undefined,
+) {
+  if (!resolvedEntry) return undefined;
+  const currentRequest = entry.requests[0];
+  return !currentRequest ||
+    currentRequest.request_id === resolvedEntry.request.request_id
+    ? resolvedEntry.request
+    : undefined;
+}
+
+function reconcileStableKeys(
+  previousKeys: string[],
+  entries: ActivityEntry[],
+) {
+  const desiredKeys = entries.map(entryKey);
+  const currentKeys = new Set(desiredKeys);
+  const order = previousKeys.filter((key) => currentKeys.has(key));
+  const placed = new Set(order);
+
+  for (let desiredIndex = 0; desiredIndex < desiredKeys.length; desiredIndex += 1) {
+    const key = desiredKeys[desiredIndex];
+    if (!key || placed.has(key)) continue;
+
+    let insertionIndex = -1;
+    for (let index = desiredIndex - 1; index >= 0; index -= 1) {
+      const precedingKey = desiredKeys[index];
+      if (precedingKey && placed.has(precedingKey)) {
+        insertionIndex = order.indexOf(precedingKey) + 1;
+        break;
+      }
+    }
+    if (insertionIndex === -1) {
+      for (let index = desiredIndex + 1; index < desiredKeys.length; index += 1) {
+        const followingKey = desiredKeys[index];
+        if (followingKey && placed.has(followingKey)) {
+          insertionIndex = order.indexOf(followingKey);
+          break;
+        }
+      }
+    }
+
+    if (insertionIndex === -1) order.push(key);
+    else order.splice(insertionIndex, 0, key);
+    placed.add(key);
+  }
+  return order;
+}
+
+/** Keep actionable rows under the pointer while snapshots churn. */
 function useStableOrder(entries: ActivityEntry[]) {
   const orderRef = useRef(new Map<string, string[]>());
   const bySection = new Map<ActivitySection, ActivityEntry[]>();
@@ -96,17 +171,12 @@ function useStableOrder(entries: ActivityEntry[]) {
     bySection.set(entry.section, sectionEntries);
   }
 
-  for (const section of ["failed", "ready"] as const) {
+  for (const section of ["blocked", "failed", "ready"] as const) {
     const sectionEntries = bySection.get(section) ?? [];
-    const currentKeys = new Set(sectionEntries.map(entryKey));
-    const previous = (orderRef.current.get(section) ?? []).filter((key) =>
-      currentKeys.has(key),
+    const order = reconcileStableKeys(
+      orderRef.current.get(section) ?? [],
+      sectionEntries,
     );
-    const previousSet = new Set(previous);
-    const arrivals = sectionEntries
-      .map(entryKey)
-      .filter((key) => !previousSet.has(key));
-    const order = [...arrivals, ...previous];
     orderRef.current.set(section, order);
     const rank = new Map(order.map((key, index) => [key, index]));
     sectionEntries.sort(
@@ -137,7 +207,7 @@ function requestsEqual(
 type ActivityRowProps = {
   entry: ActivityEntry;
   host?: { name: string; connected: boolean };
-  nowTick: number;
+  nowMs: number;
   resolvedRequest?: InteractiveRequest;
   onOpenThread: ActivityViewProps["onOpenThread"];
   onMarkThreadRead: ActivityViewProps["onMarkThreadRead"];
@@ -152,7 +222,7 @@ const ActivityRow = memo(
   function ActivityRow({
     entry,
     host,
-    nowTick,
+    nowMs,
     resolvedRequest,
     onOpenThread,
     onMarkThreadRead,
@@ -189,10 +259,15 @@ const ActivityRow = memo(
               <span className="truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
                 {entry.thread.title}
               </span>
-              {host ? <Badge variant="default">{host.name}</Badge> : null}
+              {host ? (
+                <Badge variant={offline ? "danger" : "default"}>
+                  {host.name}
+                  {offline ? " · Offline" : ""}
+                </Badge>
+              ) : null}
             </span>
             <span className="mt-1 block text-[length:var(--fd-text-xs)] text-fg-muted">
-              {entry.projectLabel} · {timeAgo(entry.thread.updated_at, nowTick)}
+              {entry.projectLabel} · {timeAgo(entry.thread.updated_at, nowMs)}
             </span>
             {reason ? (
               <span className="mt-2 block whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary">
@@ -207,9 +282,11 @@ const ActivityRow = memo(
                 size="sm"
                 variant="ghost"
                 disabled={offline}
-                onClick={() =>
-                  void onMarkThreadRead(entry.workspaceId, entry.thread.id)
-                }
+                onClick={() => {
+                  void Promise.resolve(
+                    onMarkThreadRead(entry.workspaceId, entry.thread.id),
+                  ).catch(() => {});
+                }}
               >
                 Mark read
               </Button>
@@ -220,17 +297,22 @@ const ActivityRow = memo(
         {entry.section === "blocked" ? (
           <div className="mt-4" title={offline ? "Host offline" : undefined}>
             {request ? (
-              <InteractiveRequestCard
-                key={request.request_id}
-                request={request}
-                pendingCount={entry.requests.length}
-                resolved={resolvedRequest?.request_id === request.request_id}
-                onRespond={
-                  offline || resolvedRequest
-                    ? undefined
-                    : (response) => onRespond(entry, request, response)
-                }
-              />
+              <fieldset
+                disabled={offline}
+                className="m-0 min-w-0 border-0 p-0"
+              >
+                <InteractiveRequestCard
+                  key={request.request_id}
+                  request={request}
+                  pendingCount={entry.requests.length}
+                  resolved={resolvedRequest?.request_id === request.request_id}
+                  onRespond={
+                    resolvedRequest
+                      ? undefined
+                      : (response) => onRespond(entry, request, response)
+                  }
+                />
+              </fieldset>
             ) : (
               <div className="rounded-[var(--fd-radius-lg)] border border-warning/20 bg-warning-muted px-4 py-3 text-[length:var(--fd-text-sm)] text-warning">
                 Loading request…
@@ -255,7 +337,7 @@ const ActivityRow = memo(
     requestsEqual(previous.entry.requests, next.entry.requests) &&
     previous.host?.name === next.host?.name &&
     previous.host?.connected === next.host?.connected &&
-    previous.nowTick === next.nowTick &&
+    previous.nowMs === next.nowMs &&
     previous.resolvedRequest?.request_id === next.resolvedRequest?.request_id &&
     previous.onOpenThread === next.onOpenThread &&
     previous.onMarkThreadRead === next.onMarkThreadRead &&
@@ -272,12 +354,11 @@ export const ActivityView = memo(function ActivityView({
   onClose,
   onNewThread,
 }: ActivityViewProps) {
-  const [nowTick, setNowTick] = useState(() =>
-    Math.floor(Date.now() / RELATIVE_TIME_TICK_MS),
-  );
+  const [nowMs, setNowMs] = useState(Date.now);
   const [resolvedEntries, setResolvedEntries] = useState<
     Record<string, ResolvedEntry>
   >({});
+  const resolvedTimeoutsRef = useRef(new Map<string, number>());
   const entries = useMemo(
     () => collectActivityEntries(groups, interactiveRequests),
     [groups, interactiveRequests],
@@ -285,11 +366,20 @@ export const ActivityView = memo(function ActivityView({
 
   useEffect(() => {
     const timer = window.setInterval(
-      () => setNowTick(Math.floor(Date.now() / RELATIVE_TIME_TICK_MS)),
+      () => setNowMs(Date.now()),
       RELATIVE_TIME_TICK_MS,
     );
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(
+    () => () => {
+      for (const timeout of resolvedTimeoutsRef.current.values()) {
+        window.clearTimeout(timeout);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -313,7 +403,9 @@ export const ActivityView = memo(function ActivityView({
         ...current,
         [key]: { entry, request },
       }));
-      window.setTimeout(() => {
+      const previousTimeout = resolvedTimeoutsRef.current.get(key);
+      if (previousTimeout !== undefined) window.clearTimeout(previousTimeout);
+      const timeout = window.setTimeout(() => {
         setResolvedEntries((current) => {
           if (current[key]?.request.request_id !== request.request_id)
             return current;
@@ -321,17 +413,17 @@ export const ActivityView = memo(function ActivityView({
           delete next[key];
           return next;
         });
+        resolvedTimeoutsRef.current.delete(key);
       }, RESOLVED_HOLD_MS);
+      resolvedTimeoutsRef.current.set(key, timeout);
     },
     [onInteractiveResponse],
   );
 
-  const visibleEntries = [...entries];
-  const visibleKeys = new Set(visibleEntries.map(entryKey));
-  for (const resolved of Object.values(resolvedEntries)) {
-    if (!visibleKeys.has(entryKey(resolved.entry)))
-      visibleEntries.push(resolved.entry);
-  }
+  const visibleEntries = useMemo(
+    () => mergeResolvedEntries(entries, resolvedEntries),
+    [entries, resolvedEntries],
+  );
   const sections = useStableOrder(visibleEntries);
   const runningCount = sections.get("running")?.length ?? 0;
   const attentionCount = visibleEntries.length - runningCount;
@@ -378,7 +470,7 @@ export const ActivityView = memo(function ActivityView({
             />
           ) : null}
 
-          {(["blocked", "failed", "ready", "running"] as const).map(
+          {SECTION_ORDER.map(
             (section) => {
               const sectionEntries = sections.get(section) ?? [];
               if (sectionEntries.length === 0) return null;
@@ -410,10 +502,11 @@ export const ActivityView = memo(function ActivityView({
                         key={entryKey(entry)}
                         entry={entry}
                         host={workspaceHosts[entry.workspaceId]}
-                        nowTick={nowTick}
-                        resolvedRequest={
-                          resolvedEntries[entryKey(entry)]?.request
-                        }
+                        nowMs={nowMs}
+                        resolvedRequest={resolvedRequestForEntry(
+                          entry,
+                          resolvedEntries[entryKey(entry)],
+                        )}
                         onOpenThread={onOpenThread}
                         onMarkThreadRead={onMarkThreadRead}
                         onRespond={handleRespond}

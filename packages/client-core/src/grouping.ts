@@ -60,9 +60,9 @@ export function compareThreads(mode: ThreadSortMode) {
         const rightTitle = right.title.trim()
         // Untitled threads go last instead of clumping at the top on ''.
         if (!leftTitle || !rightTitle) {
-          return Number(!leftTitle) - Number(!rightTitle) || compareByRecency(left, right)
+          return Number(!leftTitle) - Number(!rightTitle) || left.id.localeCompare(right.id)
         }
-        return leftTitle.localeCompare(rightTitle) || compareByRecency(left, right)
+        return leftTitle.localeCompare(rightTitle) || left.id.localeCompare(right.id)
       }
       case 'last_updated':
         return compareByRecency(left, right)

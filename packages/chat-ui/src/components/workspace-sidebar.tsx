@@ -42,6 +42,7 @@ const THREAD_PAGER_BUTTON_CLASS =
 const RELATIVE_TIME_TICK_MS = 60_000
 const OPTIMISTIC_SELECTION_TTL_MS = 1_500
 const WORKSPACE_DRAG_THRESHOLD_PX = 4
+const PRIORITY_THREAD_COMPARATOR = compareThreads('priority')
 
 type SidebarEmptyState = {
   title: string
@@ -110,15 +111,20 @@ type PriorityQueueState = {
   order: number
 }
 
+const summaryKey = (thread: ThreadSummary) => thread.id
+const summaryThread = (thread: ThreadSummary) => thread
+
 /**
  * Keeps Priority useful as a work queue instead of a live activity sort.
  * Promotions apply immediately; demotions wait for the next navigation so a
  * selected row cannot jump when opening it marks it read.
  */
-function useStablePriorityOrder(
-  threads: ThreadSummary[],
+function useStablePriorityOrder<Item>(
+  items: Item[],
   selectedThreadId: string | null,
   active: boolean,
+  keyFor: (item: Item) => string,
+  threadFor: (item: Item) => ThreadSummary,
 ) {
   const queueRef = useRef(new Map<string, PriorityQueueState>())
   const previousSelectionRef = useRef(selectedThreadId)
@@ -128,7 +134,7 @@ function useStablePriorityOrder(
   return useMemo(() => {
     if (!active) {
       wasActiveRef.current = false
-      return threads
+      return items
     }
 
     const enteringPriority = !wasActiveRef.current
@@ -136,44 +142,57 @@ function useStablePriorityOrder(
     wasActiveRef.current = true
     previousSelectionRef.current = selectedThreadId
 
-    const liveIds = new Set(threads.map((thread) => thread.id))
+    const liveIds = new Set(items.map(keyFor))
     for (const id of queueRef.current.keys()) {
       if (!liveIds.has(id)) queueRef.current.delete(id)
     }
 
     if (enteringPriority) {
       queueRef.current.clear()
-      const seeded = [...threads].sort(compareThreads('priority'))
-      seeded.forEach((thread, order) => queueRef.current.set(thread.id, {
-        bucket: threadPriorityRank(thread),
+      const seeded = [...items].sort((left, right) =>
+        PRIORITY_THREAD_COMPARATOR(threadFor(left), threadFor(right)),
+      )
+      seeded.forEach((item, order) => queueRef.current.set(keyFor(item), {
+        bucket: threadPriorityRank(threadFor(item)),
         order,
       }))
       nextFrontOrderRef.current = -1
     } else {
-      for (const thread of threads) {
-        const desiredBucket = threadPriorityRank(thread)
-        const current = queueRef.current.get(thread.id)
-        if (!current) {
-          queueRef.current.set(thread.id, {
-            bucket: desiredBucket,
-            order: nextFrontOrderRef.current--,
-          })
-        } else if (desiredBucket < current.bucket || navigated) {
+      const arrivals = items
+        .filter((item) => !queueRef.current.has(keyFor(item)))
+        .sort((left, right) =>
+          PRIORITY_THREAD_COMPARATOR(threadFor(left), threadFor(right)),
+        )
+      let arrivalOrder = nextFrontOrderRef.current - arrivals.length + 1
+      for (const item of arrivals) {
+        queueRef.current.set(keyFor(item), {
+          bucket: threadPriorityRank(threadFor(item)),
+          order: arrivalOrder++,
+        })
+      }
+      nextFrontOrderRef.current -= arrivals.length
+
+      for (const item of items) {
+        const desiredBucket = threadPriorityRank(threadFor(item))
+        const current = queueRef.current.get(keyFor(item))
+        if (current && (desiredBucket < current.bucket || navigated)) {
           current.bucket = desiredBucket
         }
       }
     }
 
-    return [...threads].sort((left, right) => {
-      const leftState = queueRef.current.get(left.id)
-      const rightState = queueRef.current.get(right.id)
+    return [...items].sort((left, right) => {
+      const leftKey = keyFor(left)
+      const rightKey = keyFor(right)
+      const leftState = queueRef.current.get(leftKey)
+      const rightState = queueRef.current.get(rightKey)
       return (
         (leftState?.bucket ?? 4) - (rightState?.bucket ?? 4) ||
         (leftState?.order ?? 0) - (rightState?.order ?? 0) ||
-        left.id.localeCompare(right.id)
+        leftKey.localeCompare(rightKey)
       )
     })
-  }, [active, selectedThreadId, threads])
+  }, [active, items, keyFor, selectedThreadId, threadFor])
 }
 
 const ThreadList = memo(function ThreadList({
@@ -209,6 +228,8 @@ const ThreadList = memo(function ThreadList({
     unpinned,
     selectedThreadId,
     sortMode === 'priority',
+    summaryKey,
+    summaryThread,
   )
   const unpinnedThreads = useMemo(
     () => sortMode === 'priority'
@@ -307,6 +328,10 @@ type PinnedThreadEntry = {
   workspaceId: string
   thread: ThreadSummary
 }
+
+const pinnedEntryKey = (entry: PinnedThreadEntry) =>
+  `${entry.workspaceId}:${entry.thread.id}`
+const pinnedEntryThread = (entry: PinnedThreadEntry) => entry.thread
 
 function WorkspaceDropIndicator() {
   return (
@@ -947,16 +972,29 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   )
   // Pinned chats come from every project, so they get a single global sort
   // rather than the per-project ordering below.
-  const pinnedThreads = useMemo(() => {
-    const compare = compareThreads(threadSort)
-    return displayGroups
-      .flatMap((group) =>
+  const pinnedCandidates = useMemo(
+    () =>
+      displayGroups.flatMap((group) =>
         group.threads
           .filter((thread) => thread.is_pinned)
           .map((thread) => ({ workspaceId: group.workspace.id, thread })),
-      )
-      .sort((left, right) => compare(left.thread, right.thread))
-  }, [displayGroups, threadSort])
+      ),
+    [displayGroups],
+  )
+  const stablePinnedThreads = useStablePriorityOrder(
+    pinnedCandidates,
+    visualSelectedThreadId,
+    threadSort === 'priority',
+    pinnedEntryKey,
+    pinnedEntryThread,
+  )
+  const pinnedThreads = useMemo(() => {
+    if (threadSort === 'priority') return stablePinnedThreads
+    const compare = compareThreads(threadSort)
+    return [...pinnedCandidates].sort((left, right) =>
+      compare(left.thread, right.thread),
+    )
+  }, [pinnedCandidates, stablePinnedThreads, threadSort])
 
   const handleRenameSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
