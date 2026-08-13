@@ -333,8 +333,16 @@ export const PromptInput = memo(function PromptInput({
   const syncTextareaHeight = useCallback(
     (element: HTMLTextAreaElement | null) => {
       if (!element) return;
+      const previousScrollTop = element.scrollTop;
       element.style.height = "auto";
       element.style.height = `${Math.min(element.scrollHeight, PROMPT_INPUT_MAX_HEIGHT)}px`;
+      // Collapsing to `auto` resets scroll position, and once the textarea is
+      // pinned at max height the browser won't chase the caret on its own —
+      // without this, a Shift+Enter newline lands below the visible area.
+      const caretAtEnd =
+        element.selectionStart === element.selectionEnd &&
+        element.selectionEnd === element.value.length;
+      element.scrollTop = caretAtEnd ? element.scrollHeight : previousScrollTop;
     },
     [],
   );

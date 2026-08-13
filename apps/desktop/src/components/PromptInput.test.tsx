@@ -397,6 +397,34 @@ describe("PromptInput", () => {
     expect(textarea.style.height).toBe("52px");
   });
 
+  it("keeps the caret visible once the textarea is pinned at max height", () => {
+    Object.defineProperty(HTMLTextAreaElement.prototype, "scrollHeight", {
+      configurable: true,
+      get() {
+        return 320;
+      },
+    });
+
+    const value = "line 1\nline 2\nline 3\nline 4\nline 5\nline 6";
+    const { rerender } = render(
+      <PromptInput {...promptInputProps} value={value} />,
+    );
+
+    const textarea = screen.getByPlaceholderText(
+      "Ask anything",
+    ) as HTMLTextAreaElement;
+    expect(textarea.style.height).toBe("200px");
+
+    // Caret at the end (the Shift+Enter case): follow the new line. The
+    // mid-text case (scroll position preserved) is not representable here —
+    // assigning a controlled value in jsdom moves the caret to the end,
+    // unlike real typing where React leaves the DOM value untouched.
+    textarea.setSelectionRange(value.length, value.length);
+    textarea.scrollTop = 0;
+    rerender(<PromptInput {...promptInputProps} value={`${value}\n`} />);
+    expect(textarea.scrollTop).toBe(320);
+  });
+
   it("hosts the goal surface inside the plus menu", async () => {
     const onSetGoal = vi.fn();
     render(
