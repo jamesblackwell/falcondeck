@@ -1,10 +1,15 @@
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
+import { act } from "react-test-renderer";
 import { renderComponent, cleanup, textOf } from "../../test/render";
 import { ConnectionHeader } from "./ConnectionHeader";
 import { SidebarView } from "./SidebarView";
 import { workspace, thread } from "../../test/factories";
-import type { ProjectGroup } from "@falcondeck/client-core";
+import type {
+  ExtensionSidebarFilterDefinition,
+  ExtensionSnapshot,
+  ProjectGroup,
+} from "@falcondeck/client-core";
 
 afterEach(cleanup);
 
@@ -142,14 +147,99 @@ describe("SidebarView component", () => {
       renderComponent(<SidebarView {...base} groups={groups} />).toJSON(),
     ).toBeTruthy();
   });
-  it("shows a visible fallback for extension filters not supported on mobile", () => {
+  it("filters threads with a declarative colour filter", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1" }),
+        threads: [
+          thread({
+            id: "red-thread",
+            workspace_id: "w1",
+            title: "Red thread",
+            is_pinned: true,
+          }),
+          thread({ id: "blue-thread", workspace_id: "w1", title: "Blue thread" }),
+        ],
+      },
+    ];
+    const extensionSnapshot: ExtensionSnapshot = {
+      catalog: [],
+      views: [
+        {
+          extension_id: "falcondeck.thread-tags",
+          view_id: "thread-tags",
+          scope: { kind: "thread", id: "red-thread" },
+          value: { tagIds: ["red"] },
+          updated_at: "2026-08-13T00:00:00Z",
+        },
+        {
+          extension_id: "falcondeck.thread-tags",
+          view_id: "thread-tags",
+          scope: { kind: "thread", id: "blue-thread" },
+          value: { tagIds: ["blue"] },
+          updated_at: "2026-08-13T00:00:00Z",
+        },
+      ],
+    };
+    const extensionSidebarFilters: ExtensionSidebarFilterDefinition[] = [
+      {
+        key: "falcondeck.thread-tags:colors",
+        extensionId: "falcondeck.thread-tags",
+        extensionName: "Thread Colours",
+        contributionId: "colors",
+        title: "Colours",
+        unsupportedReason: null,
+        document: {
+          version: 1,
+          root: {
+            type: "select",
+            id: "colors",
+            label: "Filter by colour",
+            multiple: true,
+            options: [
+              { value: "red", label: "Red", tone: "red" },
+              { value: "blue", label: "Blue", tone: "blue" },
+            ],
+            binding: {
+              view: "thread-tags",
+              path: ["tagIds"],
+              operator: "includes_any",
+            },
+          },
+        },
+      },
+    ];
     const r = renderComponent(
-      <SidebarView {...base} extensionFilterCount={1} />,
+      <SidebarView
+        {...base}
+        groups={groups}
+        extensionSnapshot={extensionSnapshot}
+        extensionSidebarFilters={extensionSidebarFilters}
+      />,
     );
 
-    expect(textOf(r)).toContain(
-      "An extension filter is available on desktop and web.",
-    );
+    expect(textOf(r)).not.toContain("available on desktop and web");
+    expect(
+      r.root.findAllByProps({ accessibilityLabel: "Filter threads" }),
+    ).toHaveLength(1);
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: "Filter threads" }).props.onPress();
+    });
+    act(() => {
+      r.root.findByProps({ accessibilityLabel: "Red" }).props.onPress();
+    });
+    act(() => {
+      r.root
+        .findAll(
+          (node) =>
+            node.props.accessibilityLabel === "Close thread filters" &&
+            typeof node.props.onPress === "function",
+        )[0]!
+        .props.onPress();
+    });
+
+    expect(textOf(r)).toContain("Red thread");
+    expect(textOf(r)).not.toContain("Blue thread");
   });
   it("shows a visible fallback for extension panels not supported on mobile", () => {
     const r = renderComponent(

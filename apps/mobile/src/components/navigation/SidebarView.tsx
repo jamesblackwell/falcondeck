@@ -20,6 +20,7 @@ import { FlashList } from "@shopify/flash-list";
 import {
   ChevronDown,
   ChevronRight,
+  ListFilter,
   Settings,
   SquarePen,
   X,
@@ -27,10 +28,14 @@ import {
 import * as Haptics from "expo-haptics";
 
 import type {
+  ActiveExtensionThreadFilter,
+  ExtensionSidebarFilterDefinition,
+  ExtensionSnapshot,
   ProjectGroup,
   ThreadSummary,
   ThreadTag,
 } from "@falcondeck/client-core";
+import { filterProjectGroupsByExtensions } from "@falcondeck/client-core";
 
 import { Text, Button, EmptyState, SyncBanner } from "@/components/ui";
 import { SessionListItem } from "@/components/chat";
@@ -42,6 +47,7 @@ import {
   type SidebarRow,
 } from "./sidebarRows";
 import { ThreadOptionsSheet } from "./ThreadOptionsSheet";
+import { ExtensionFilterSheet } from "./ExtensionFilterSheet";
 
 interface SidebarViewProps {
   groups: ProjectGroup[];
@@ -52,8 +58,8 @@ interface SidebarViewProps {
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
   onClose?: () => void;
   threadTagsById?: Record<string, ThreadTag[]>;
-  /** Visible fallback for declarative sidebar filters not rendered on mobile v1. */
-  extensionFilterCount?: number;
+  extensionSnapshot?: ExtensionSnapshot | null;
+  extensionSidebarFilters?: readonly ExtensionSidebarFilterDefinition[];
   /** Visible fallback for full-main-area extension panels not rendered on mobile v1. */
   extensionPanelCount?: number;
 }
@@ -137,7 +143,8 @@ export const SidebarView = memo(function SidebarView({
   onOpenSettings,
   onClose,
   threadTagsById,
-  extensionFilterCount = 0,
+  extensionSnapshot,
+  extensionSidebarFilters = [],
   extensionPanelCount = 0,
 }: SidebarViewProps) {
   const { theme } = useUnistyles();
@@ -156,17 +163,80 @@ export const SidebarView = memo(function SidebarView({
     workspaceId: string;
     thread: ThreadSummary;
   } | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [extensionFilterSelections, setExtensionFilterSelections] = useState<
+    Map<string, ReadonlySet<string>>
+  >(() => new Map());
+
+  const supportedExtensionFilters = useMemo(
+    () =>
+      extensionSidebarFilters.filter(
+        (definition) => definition.document?.root.type === "select",
+      ),
+    [extensionSidebarFilters],
+  );
+  const activeExtensionFilters = useMemo(
+    () =>
+      supportedExtensionFilters.flatMap(
+        (definition): ActiveExtensionThreadFilter[] => {
+          const root = definition.document?.root;
+          if (!root || root.type !== "select") return [];
+          return [
+            {
+              key: definition.key,
+              extensionId: definition.extensionId,
+              binding: root.binding,
+              selectedValues:
+                extensionFilterSelections.get(definition.key) ?? new Set(),
+            },
+          ];
+        },
+      ),
+    [extensionFilterSelections, supportedExtensionFilters],
+  );
+  const displayGroups = useMemo(
+    () =>
+      filterProjectGroupsByExtensions(
+        groups,
+        extensionSnapshot,
+        activeExtensionFilters,
+      ),
+    [activeExtensionFilters, extensionSnapshot, groups],
+  );
+  const activeExtensionFilterCount = useMemo(
+    () =>
+      activeExtensionFilters.reduce(
+        (count, filter) => count + filter.selectedValues.size,
+        0,
+      ),
+    [activeExtensionFilters],
+  );
 
   const rows = useMemo(
     () =>
       buildSidebarRows(
-        groups,
+        displayGroups,
         collapsedWorkspaces,
         visibleThreadCounts,
         selectedThreadId,
       ),
-    [groups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId],
+    [displayGroups, collapsedWorkspaces, visibleThreadCounts, selectedThreadId],
   );
+
+  const handleExtensionFilterChange = useCallback(
+    (key: string, values: ReadonlySet<string>) => {
+      setExtensionFilterSelections((current) => {
+        const next = new Map(current);
+        next.set(key, values);
+        return next;
+      });
+    },
+    [],
+  );
+
+  const clearExtensionFilters = useCallback(() => {
+    setExtensionFilterSelections(new Map());
+  }, []);
 
   // The drawer runs to the bottom of the screen, so the last thread would sit
   // under the home indicator without this.
@@ -221,14 +291,45 @@ export const SidebarView = memo(function SidebarView({
     ({ item }: { item: SidebarRow }) => {
       if (item.type === "section") {
         return (
-          <Text
-            variant="caption"
-            color="muted"
-            weight="medium"
-            style={styles.sectionHeading}
-          >
-            {item.title.toUpperCase()}
-          </Text>
+          <View style={styles.sectionHeading}>
+            <Text variant="caption" color="muted" weight="medium">
+              {item.title.toUpperCase()}
+            </Text>
+            {item.title === "Projects" && supportedExtensionFilters.length > 0 ? (
+              <Pressable
+                style={({ pressed }) => [
+                  styles.filterButton,
+                  activeExtensionFilterCount > 0
+                    ? styles.filterButtonActive
+                    : undefined,
+                  pressed ? styles.filterButtonPressed : undefined,
+                ]}
+                onPress={() => setFiltersOpen(true)}
+                accessibilityRole="button"
+                accessibilityLabel="Filter threads"
+                accessibilityHint={
+                  activeExtensionFilterCount > 0
+                    ? `${activeExtensionFilterCount} selected`
+                    : "Filter threads by colour"
+                }
+                accessibilityState={{ selected: activeExtensionFilterCount > 0 }}
+              >
+                <ListFilter
+                  size={theme.iconSize.xs}
+                  color={
+                    activeExtensionFilterCount > 0
+                      ? theme.colors.accent.default
+                      : theme.colors.fg.muted
+                  }
+                />
+                {activeExtensionFilterCount > 0 ? (
+                  <Text variant="caption" size="2xs" color="accent" weight="semibold">
+                    {activeExtensionFilterCount}
+                  </Text>
+                ) : null}
+              </Pressable>
+            ) : null}
+          </View>
         );
       }
 
@@ -329,6 +430,9 @@ export const SidebarView = memo(function SidebarView({
       toggleWorkspaceCollapse,
       handleOverflowPress,
       threadTagsById,
+      activeExtensionFilterCount,
+      supportedExtensionFilters.length,
+      theme.colors.accent.default,
     ],
   );
 
@@ -356,16 +460,6 @@ export const SidebarView = memo(function SidebarView({
 
       <SyncBanner status={syncStatus} />
 
-      {extensionFilterCount > 0 ? (
-        <View style={styles.extensionFallback} accessibilityRole="text">
-          <Text variant="caption" color="muted">
-            {extensionFilterCount === 1
-              ? "An extension filter is available on desktop and web."
-              : `${extensionFilterCount} extension filters are available on desktop and web.`}
-          </Text>
-        </View>
-      ) : null}
-
       {extensionPanelCount > 0 ? (
         <View style={styles.extensionFallback} accessibilityRole="text">
           <Text variant="caption" color="muted">
@@ -385,6 +479,18 @@ export const SidebarView = memo(function SidebarView({
               title="Loading your projects…"
               description={syncStatus.detail}
             />
+          ) : activeExtensionFilterCount > 0 ? (
+            <View style={styles.filteredEmptyState}>
+              <EmptyState
+                title="No matching threads"
+                description="Try clearing one or more filters"
+              />
+              <Button
+                variant="ghost"
+                label="Change filters"
+                onPress={() => setFiltersOpen(true)}
+              />
+            </View>
           ) : (
             <EmptyState
               title="No projects"
@@ -438,6 +544,16 @@ export const SidebarView = memo(function SidebarView({
           onClose={closeThreadOptions}
         />
       ) : null}
+
+      {filtersOpen ? (
+        <ExtensionFilterSheet
+          definitions={supportedExtensionFilters}
+          selections={extensionFilterSelections}
+          onChange={handleExtensionFilterChange}
+          onClearAll={clearExtensionFilters}
+          onClose={() => setFiltersOpen(false)}
+        />
+      ) : null}
     </View>
   );
 });
@@ -449,6 +565,12 @@ const styles = StyleSheet.create((theme) => ({
   },
   list: {
     flex: 1,
+  },
+  filteredEmptyState: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: theme.spacing[2],
   },
   extensionFallback: {
     marginHorizontal: theme.spacing[3],
@@ -502,10 +624,28 @@ const styles = StyleSheet.create((theme) => ({
     marginTop: theme.spacing[2],
   },
   sectionHeading: {
+    minHeight: theme.minTouchTarget,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
     paddingHorizontal: theme.spacing[3],
     paddingTop: theme.spacing[3],
     paddingBottom: theme.spacing[1],
-    letterSpacing: 0.8,
+  },
+  filterButton: {
+    minWidth: theme.minTouchTarget,
+    minHeight: theme.minTouchTarget,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: theme.spacing[1],
+    borderRadius: theme.radius.full,
+  },
+  filterButtonActive: {
+    backgroundColor: theme.colors.accent.muted,
+  },
+  filterButtonPressed: {
+    backgroundColor: theme.colors.surface[3],
   },
   workspaceLeft: {
     flex: 1,

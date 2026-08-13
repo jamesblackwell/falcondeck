@@ -41,8 +41,8 @@ export default function AppLayout() {
     () => deriveThreadTags(snapshot?.extensions),
     [snapshot?.extensions],
   );
-  const extensionFilterCount = useMemo(
-    () => deriveExtensionSidebarFilters(snapshot?.extensions).length,
+  const extensionSidebarFilters = useMemo(
+    () => deriveExtensionSidebarFilters(snapshot?.extensions),
     [snapshot?.extensions],
   );
   const extensionPanelCount = useMemo(
@@ -91,12 +91,14 @@ export default function AppLayout() {
         onOpenSettings={handleOpenSettings}
         onClose={() => navigation.dispatch(DrawerActions.closeDrawer())}
         threadTagsById={threadTags.byThreadId}
-        extensionFilterCount={extensionFilterCount}
+        extensionSnapshot={snapshot?.extensions}
+        extensionSidebarFilters={extensionSidebarFilters}
         extensionPanelCount={extensionPanelCount}
       />
     ),
     [
-      extensionFilterCount,
+      extensionSidebarFilters,
+      snapshot?.extensions,
       extensionPanelCount,
       groups,
       handleSelectThread,
