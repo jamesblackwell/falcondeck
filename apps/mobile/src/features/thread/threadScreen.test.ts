@@ -45,6 +45,27 @@ describe('threadScreen helpers', () => {
     expect(shouldShowThinkingIndicator(presentation(blocks), true)).toBe(false)
   })
 
+  it('hides the fallback while the latest reasoning block already says thinking', () => {
+    const blocks = [
+      {
+        id: 'reasoning:reasoning-1',
+        kind: 'item',
+        default_open: false,
+        suppress_read_only_detail: false,
+        item: {
+          id: 'reasoning-1',
+          kind: 'reasoning',
+          summary: null,
+          content: 'Working through the problem',
+          lifecycle: 'streaming',
+          created_at: '2026-03-16T10:00:00Z',
+        },
+      },
+    ] as ConversationRenderBlock[]
+
+    expect(shouldShowThinkingIndicator(presentation(blocks), true)).toBe(false)
+  })
+
   it('hides thinking when the latest block is a tool summary', () => {
     const blocks = [
       {

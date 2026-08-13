@@ -1,4 +1,4 @@
-import type { ConversationPresentation } from '@falcondeck/client-core'
+import { contentLifecycle, type ConversationPresentation } from '@falcondeck/client-core'
 
 export function getWorkspaceTitle(path: string | null | undefined): string {
   const title = path?.split('/').pop()
@@ -20,6 +20,13 @@ export function shouldShowThinkingIndicator(
   if (lastBlock.kind === 'tool_summary') return false
   // A running work session already renders its own "Working…" line.
   if (lastBlock.kind === 'work_session') return !lastBlock.running
+
+  // A live reasoning block labels itself "Thinking…", so rendering the
+  // thread-level fallback beneath it would repeat the same status twice.
+  if (lastBlock.item.kind === 'reasoning') {
+    const lifecycle = contentLifecycle(lastBlock.item)
+    if (lifecycle === 'pending' || lifecycle === 'streaming') return false
+  }
 
   return !(
     lastBlock.item.kind === 'tool_call' &&
