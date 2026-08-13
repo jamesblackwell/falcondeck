@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, sync::Mutex, task::JoinHandle};
 use tokio_postgres::{Client as PostgresClient, NoTls};
@@ -10,7 +11,7 @@ use crate::error::RelayError;
 use falcondeck_core::RelayUpdate;
 
 use super::app::{
-    PairingRecord, PersistedState, QueuedActionRecord, SessionMeta, SessionRecord,
+    PairingRecord, PersistedState, QueuedActionRecord, RetentionConfig, SessionMeta, SessionRecord,
     TrustedDeviceRecord,
 };
 
@@ -272,6 +273,81 @@ impl PostgresBackend {
         Ok(Self {
             client: Mutex::new(client),
         })
+    }
+
+    /// Enforce replay retention before rows are decoded into memory. The
+    /// retained window is always a contiguous sequence suffix, so deleting a
+    /// prefix and advancing `oldest_lost_seq` preserves truncation recovery.
+    pub(crate) async fn prune_updates_before_load(
+        &self,
+        retention: &RetentionConfig,
+        now: DateTime<Utc>,
+    ) -> Result<u64, RelayError> {
+        let update_cutoff = now
+            .checked_sub_signed(retention.update_retention)
+            .unwrap_or(DateTime::<Utc>::MIN_UTC);
+        let max_updates = i64::try_from(retention.max_updates_per_session).unwrap_or(i64::MAX);
+        let max_bytes = i64::try_from(retention.max_update_bytes_per_session).unwrap_or(i64::MAX);
+        let client = self.client.lock().await;
+        let deleted = client
+            .execute(
+                r"
+                WITH ranked AS (
+                    SELECT
+                        session_id,
+                        seq,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY session_id ORDER BY seq DESC
+                        ) AS reverse_rank,
+                        SUM(pg_column_size(body)::bigint) OVER (
+                            PARTITION BY session_id
+                            ORDER BY seq DESC
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) AS newer_bytes,
+                        MAX(seq) FILTER (WHERE created_at < $1) OVER (
+                            PARTITION BY session_id
+                        ) AS age_cutoff_seq
+                    FROM relay_updates
+                ),
+                cutoffs AS (
+                    SELECT session_id, MAX(seq) AS highest_pruned_seq
+                    FROM ranked
+                    WHERE seq <= COALESCE(age_cutoff_seq, 0)
+                       OR reverse_rank > $2
+                       OR (newer_bytes > $3 AND reverse_rank > 1)
+                    GROUP BY session_id
+                ),
+                updated_sessions AS (
+                    UPDATE relay_sessions AS session
+                    SET oldest_lost_seq = GREATEST(
+                        session.oldest_lost_seq,
+                        cutoffs.highest_pruned_seq + 1
+                    )
+                    FROM cutoffs
+                    WHERE session.session_id = cutoffs.session_id
+                    RETURNING session.session_id
+                )
+                DELETE FROM relay_updates AS update
+                USING cutoffs
+                WHERE update.session_id = cutoffs.session_id
+                  AND update.seq <= cutoffs.highest_pruned_seq
+                  AND EXISTS (
+                      SELECT 1 FROM updated_sessions
+                      WHERE updated_sessions.session_id = update.session_id
+                  )
+                ",
+                &[&update_cutoff, &max_updates, &max_bytes],
+            )
+            .await
+            .map_err(|error| {
+                RelayError::StateLoad(format!(
+                    "failed to prune replay before loading Postgres state: {error}"
+                ))
+            })?;
+        if deleted > 0 {
+            warn!(deleted, "pruned retained replay before loading relay state");
+        }
+        Ok(deleted)
     }
 }
 

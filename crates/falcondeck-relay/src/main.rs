@@ -69,6 +69,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse::<usize>()
         .unwrap_or(10_000)
         .max(1),
+        max_update_bytes_per_session: env_or_default(
+            "FALCONDECK_RELAY_MAX_UPDATE_BYTES_PER_SESSION",
+            "67108864",
+        )
+        .parse::<usize>()
+        .unwrap_or(64 * 1024 * 1024)
+        .max(1),
         trusted_device_retention: duration_days_or(
             env_or_default("FALCONDECK_RELAY_TRUSTED_DEVICE_RETENTION_DAYS", "180")
                 .parse::<i64>()

@@ -130,6 +130,10 @@ fn chunk_replay_updates(updates: Vec<RelayUpdate>) -> Vec<Vec<RelayUpdate>> {
 pub struct RetentionConfig {
     pub update_retention: Duration,
     pub max_updates_per_session: usize,
+    /// Approximate in-memory payload bytes retained per session. Replay is a
+    /// reconnect aid, not the source of truth; clients recover a truncated
+    /// window from `snapshot.current`.
+    pub max_update_bytes_per_session: usize,
     pub trusted_device_retention: Duration,
     pub claimed_pairing_retention: Duration,
     pub completed_action_retention: Duration,
@@ -140,6 +144,7 @@ impl Default for RetentionConfig {
         Self {
             update_retention: Duration::days(7),
             max_updates_per_session: 10_000,
+            max_update_bytes_per_session: 64 * 1024 * 1024,
             trusted_device_retention: Duration::days(180),
             claimed_pairing_retention: Duration::days(1),
             completed_action_retention: Duration::days(3),
@@ -472,12 +477,28 @@ impl AppState {
         retention: RetentionConfig,
     ) -> Result<Self, RelayError> {
         let pg = crate::persistence::PostgresBackend::connect(&database_url).await?;
+        // Prune in Postgres before decoding replay rows. Loading every row and
+        // pruning afterward made a multi-gigabyte replay table require several
+        // gigabytes of RAM just to start, repeatedly OOM-killing the service.
+        pg.prune_updates_before_load(&retention, Utc::now()).await?;
         let mut data = crate::persistence::load_postgres_state(&pg).await?;
         for session in data.sessions.values_mut() {
             session.migrate_legacy_device_fields();
             session.ensure_next_seq();
         }
         let normalized = normalize_in_flight_actions(&mut data);
+        let normalized_action_sessions = normalized.then(|| {
+            data.sessions
+                .values()
+                .filter(|session| !session.actions.is_empty())
+                .map(|session| {
+                    (
+                        session.meta(),
+                        session.actions.values().cloned().collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
         let backend = Arc::new(pg);
         let state = Self::from_parts(
             version,
@@ -487,10 +508,21 @@ impl AppState {
             backend,
             false,
         );
-        let pruned = !state.prune_expired_state().await?.is_empty();
-        if normalized || pruned {
-            state.persist_current().await?;
+        // Only action rows can change during startup normalization. Persist
+        // them directly; rewriting every Postgres table here used to churn
+        // the large replay relation and briefly duplicate its storage.
+        if let Some(sessions) = normalized_action_sessions {
+            for (session, actions) in sessions {
+                state
+                    .inner
+                    .backend
+                    .persist_action(&session, &actions)
+                    .await?;
+            }
         }
+        // Use the same targeted deletes as the background pass. A full
+        // Postgres rewrite here bloated the replay table on every startup.
+        state.prune_retained_state().await?;
         state.spawn_prune_task();
         Ok(state)
     }
@@ -3232,7 +3264,6 @@ fn prune_state(
         session.ensure_next_seq();
 
         let update_cutoff = saturating_sub(now, retention.update_retention);
-        let mut highest_pruned_seq = None;
         // Cut a true sequence prefix rather than filtering by age alone: a
         // backwards clock step can leave a newer-seq row with an older
         // timestamp, and an age-only filter would then strand a Postgres
@@ -3243,17 +3274,39 @@ fn prune_state(
             .filter(|update| update.created_at < update_cutoff)
             .map(|update| update.seq)
             .max();
-        if let Some(cutoff_seq) = age_cutoff_seq {
-            session.updates.retain(|update| update.seq > cutoff_seq);
-            highest_pruned_seq = Some(cutoff_seq);
+        let age_drop_count = age_cutoff_seq
+            .map(|cutoff_seq| {
+                session
+                    .updates
+                    .partition_point(|update| update.seq <= cutoff_seq)
+            })
+            .unwrap_or(0);
+        let count_drop_count = session
+            .updates
+            .len()
+            .saturating_sub(retention.max_updates_per_session);
+        // Count limits do not protect memory when an encrypted snapshot is
+        // several megabytes. Walk newest-to-oldest and retain a contiguous
+        // suffix within the byte budget. Always keep the newest update so a
+        // single oversized checkpoint can still seed reconnect recovery.
+        let mut retained_bytes = 0usize;
+        let mut byte_keep_from = session.updates.len();
+        for (index, update) in session.updates.iter().enumerate().rev() {
+            let update_bytes = estimated_update_retained_bytes(update);
+            if index + 1 == session.updates.len()
+                || retained_bytes.saturating_add(update_bytes)
+                    <= retention.max_update_bytes_per_session
+            {
+                retained_bytes = retained_bytes.saturating_add(update_bytes);
+                byte_keep_from = index;
+            } else {
+                break;
+            }
         }
-        if session.updates.len() > retention.max_updates_per_session {
-            let drop_count = session.updates.len() - retention.max_updates_per_session;
-            let drained_highest = session.updates[drop_count - 1].seq;
+        let drop_count = age_drop_count.max(count_drop_count).max(byte_keep_from);
+        if drop_count > 0 {
+            let highest_pruned_seq = session.updates[drop_count - 1].seq;
             session.updates.drain(0..drop_count);
-            highest_pruned_seq = Some(highest_pruned_seq.unwrap_or(0).max(drained_highest));
-        }
-        if let Some(highest_pruned_seq) = highest_pruned_seq {
             // Only genuine retention pruning advances `oldest_lost_seq`;
             // superseded presence removals never count as lost history.
             session.oldest_lost_seq = session
@@ -3356,6 +3409,51 @@ fn prune_state(
     });
 
     report
+}
+
+/// Cheap, conservative retained-memory estimate. Encrypted ciphertext makes
+/// up almost all production replay volume; the fixed allowance covers the
+/// enum, strings, ids, timestamps, and collection allocation overhead without
+/// serializing every retained update again during the minute-level sweep.
+fn estimated_update_retained_bytes(update: &RelayUpdate) -> usize {
+    const ENTRY_OVERHEAD_BYTES: usize = 512;
+
+    let payload_bytes = match &update.body {
+        RelayUpdateBody::Encrypted { envelope } => envelope.ciphertext.len(),
+        RelayUpdateBody::SessionBootstrap { material } => {
+            material.pairing_id.len()
+                + material.session_id.len()
+                + material.daemon_public_key.len()
+                + material.daemon_identity_public_key.len()
+                + material.client_public_key.len()
+                + material.client_identity_public_key.len()
+                + material.client_wrapped_data_key.wrapped_key.len()
+                + material
+                    .daemon_wrapped_data_key
+                    .as_ref()
+                    .map_or(0, |key| key.wrapped_key.len())
+                + material.signature.len()
+        }
+        RelayUpdateBody::ActionStatus { action } => {
+            action.action_id.len()
+                + action.session_id.len()
+                + action.device_id.len()
+                + action.action_type.len()
+                + action.idempotency_key.len()
+                + action.error.as_ref().map_or(0, String::len)
+                + action
+                    .result
+                    .as_ref()
+                    .map_or(0, |result| result.ciphertext.len())
+        }
+        RelayUpdateBody::Presence { presence } => presence.session_id.len(),
+    };
+
+    update
+        .id
+        .len()
+        .saturating_add(payload_bytes)
+        .saturating_add(ENTRY_OVERHEAD_BYTES)
 }
 
 /// Compare two secrets without exiting on the first differing byte, so

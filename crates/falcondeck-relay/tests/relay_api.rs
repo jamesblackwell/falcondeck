@@ -1419,6 +1419,7 @@ async fn pruned_history_sets_truncation_cursor_without_reusing_sequences() {
     let server = spawn_server_with_retention(RetentionConfig {
         update_retention: Duration::days(7),
         max_updates_per_session: 1,
+        max_update_bytes_per_session: usize::MAX,
         trusted_device_retention: Duration::days(180),
         claimed_pairing_retention: Duration::days(1),
         completed_action_retention: Duration::days(3),
@@ -1476,6 +1477,7 @@ async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
     let server = spawn_server_with_retention(RetentionConfig {
         update_retention: Duration::days(7),
         max_updates_per_session: 1,
+        max_update_bytes_per_session: usize::MAX,
         trusted_device_retention: Duration::days(180),
         claimed_pairing_retention: Duration::days(1),
         completed_action_retention: Duration::days(3),
@@ -1579,6 +1581,62 @@ async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
     };
     assert!(request_id.ends_with(":snapshot-after-truncation"));
     assert_eq!(method, "snapshot.current");
+}
+
+#[tokio::test]
+async fn replay_retention_is_bounded_by_payload_bytes() {
+    let server = spawn_server_with_retention(RetentionConfig {
+        update_retention: Duration::days(7),
+        max_updates_per_session: 10_000,
+        // One encrypted update plus its conservative allocation allowance fits;
+        // two do not. The newest update is always retained even if it alone is
+        // larger than the configured budget.
+        max_update_bytes_per_session: 1_600,
+        trusted_device_retention: Duration::days(180),
+        claimed_pairing_retention: Duration::days(1),
+        completed_action_retention: Duration::days(3),
+    })
+    .await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    for marker in ["a", "b", "c"] {
+        send_client_message(
+            &mut daemon_ws,
+            &RelayClientMessage::Update {
+                body: RelayUpdateBody::Encrypted {
+                    envelope: test_envelope(&format!("{marker}{}", "x".repeat(700))),
+                },
+            },
+        )
+        .await;
+        let _ = recv_until_update(&mut daemon_ws).await;
+    }
+
+    trigger_prune(&server).await;
+    let history = get_json::<RelayUpdatesResponse>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/updates?after_seq=1",
+            server.http_base, claim.session_id
+        ),
+        Some(&claim.client_token),
+    )
+    .await;
+
+    assert!(history.cursor.history_truncated);
+    assert_eq!(history.updates.len(), 1);
+    assert_eq!(history.updates[0].seq, 4);
 }
 
 #[tokio::test]
@@ -1738,6 +1796,7 @@ async fn idle_trusted_sessions_are_pruned_after_retention_expires() {
         RetentionConfig {
             update_retention: Duration::milliseconds(5),
             max_updates_per_session: 10_000,
+            max_update_bytes_per_session: usize::MAX,
             trusted_device_retention: Duration::milliseconds(5),
             claimed_pairing_retention: Duration::milliseconds(5),
             completed_action_retention: Duration::milliseconds(5),
