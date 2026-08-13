@@ -28,8 +28,10 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   unsupported-contribution fallback;
 - named `panels` contributions rendered through the desktop main-view registry
   and remote web, with an explicit mobile fallback;
-- the bundled, disabled-by-default Mini Zen proof extension, currently showing
-  its static panel while events and summary-only thread reads remain gated;
+- bounded, identifier-only lifecycle events delivered to disposable public-SDK
+  subscriptions through independently supervised per-extension queues;
+- the bundled, disabled-by-default Mini Zen proof extension, currently tracking
+  pending attention signals while summary-only thread reads remain gated;
 - `packages/extension-testing`, with deterministic public-SDK activation,
   storage, actions, view publications, failure injection, declaration checks,
   daemon-equivalent limits, and atomic rollback;
@@ -163,7 +165,7 @@ Initial policy:
 
 - `falcondeck.thread-tags`: bundled and enabled by default.
 - `falcondeck.mini-zen`: bundled but disabled by default while its Phase 6
-  event/read facets are completed.
+  summary-read facet and user grant are completed.
 
 ## 5. Manifest contract
 
@@ -218,7 +220,8 @@ export default defineExtension({
 ```
 
 The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
-`storage`, `views`, and `actions`. The remaining rows are planned capabilities:
+`storage`, `views`, `actions`, and identifier-only `events`. The remaining rows
+are planned capabilities:
 
 | Facet       | Purpose                                                     |
 | ----------- | ----------------------------------------------------------- |
@@ -227,7 +230,7 @@ The implemented v0.1 `ExtensionContext` facets are `extension`, `log`,
 | `storage`   | Namespaced private storage and transactions                 |
 | `views`     | Publish bounded synchronized state declared by the manifest |
 | `actions`   | Handle invocations from declared UI actions                 |
-| `events`    | Planned: subscribe to permitted daemon lifecycle events     |
+| `events`    | Subscribe to bounded identifier-only lifecycle events       |
 | `threads`   | Planned: permission-gated thread reads and annotations      |
 | `commands`  | Planned: slash or command-palette commands                  |
 
@@ -236,8 +239,16 @@ workspace files, and mediated network access. Plausibility alone does not put a
 facet into v1.
 
 The v0.1 action registration is process-lifetime and returns `void`; disabling
-the extension terminates that isolated host. Subscription facets introduced in
-later slices return disposables and are released in reverse registration order.
+the extension terminates that isolated host. `events.on(type, handler)` returns
+an idempotent disposable. Event handlers are ordered within one extension and
+their storage/view effects commit atomically through the same daemon boundary
+as actions.
+
+The initial event union contains `thread.updated`, `turn.ended`,
+`attention.opened`, and `attention.resolved`. Payloads contain only stable
+workspace, thread, turn, and request identifiers. Status, title, preview,
+prompt, transcript, and resolution fields are deliberately absent until a
+declared read permission is granted and enforced.
 
 `defineExtensionUi(...)` type-checks UI v1 documents while preserving literal
 component, control, view, and action identifiers. The same checked document
@@ -351,17 +362,22 @@ The daemon owns this lifecycle:
 1. Discover bundled manifests from the FalconDeck-owned catalog.
 2. Validate paths, compatibility, declarations, and the empty v0.1 permission set.
 3. Validate static declarative UI and render it without starting extension code.
-4. Lazily start that extension's host on its first executable action.
-5. Activate the package and collect its action registrations.
-6. Route a declared action with a bounded target, input, and private-state copy.
+4. Lazily start that extension's host on its first executable action or queued event.
+5. Activate the package and collect its action registrations and event subscriptions.
+6. Route a declared action or identifier-only event with bounded input and a private-state copy.
 7. Validate and atomically persist the returned storage and view projections.
 8. Publish status and view changes through the unified event stream.
 9. Dispose the process on disable, shutdown, timeout, or protocol failure.
 
 The daemon is the supervisor. Each extension executes in its own Deno process
 with independent lifecycle, timeout, status, and runtime permissions. Calls
-within one extension are ordered so its storage read, action, and atomic commit
-cannot lose concurrent updates; different extensions can execute independently.
+within one extension are ordered so its storage read, callback, and atomic
+commit cannot lose concurrent updates; different extensions can execute
+independently. Each enabled extension has a 256-event queue. When full, the
+daemon drops the newest event and records a warning rather than allowing an
+unbounded backlog or blocking another extension. Event payloads are capped at
+4 KiB, subscriptions at 32 handlers per event type, and callbacks at five
+seconds.
 The isolation primitive may evolve without changing the daemon-host contract.
 
 The next invocation lazily restarts a host after timeout, protocol failure, or
@@ -372,7 +388,9 @@ upgrades remain phase-gated work; failures never erase retained extension data.
 
 Baseline capabilities need no prompt because they cannot reach user data beyond
 the invocation context: identity, diagnostics, own storage, declared bounded
-views, declared actions with a FalconDeck-supplied target, and declared UI.
+views, declared actions with a FalconDeck-supplied target, declared UI, and the
+identifier-only lifecycle signals listed in section 6. Any event enrichment is
+a read and remains unavailable until its permission is declared and granted.
 
 Broader access is explicit and granular. Planned families are:
 
@@ -427,9 +445,10 @@ pointing here. It adds no unrelated placeholder dependencies.
 
 The SDK exports types and builders. The manifest schema powers completion. The
 implemented test package provides activation, private storage, declared action
-invocation, bounded view publications, diagnostics, failure injection, and
-atomic rollback. Permission grants, time control, and later SDK facets join it
-in the same slice that introduces each capability.
+invocation, lifecycle-event dispatch, disposable subscriptions, bounded view
+publications, diagnostics, failure injection, and atomic rollback. Permission
+grants, time control, and later SDK facets join it in the same slice that
+introduces each capability.
 
 Canonical starter prompt:
 
@@ -565,7 +584,7 @@ wire/schema/SDK contracts, bounded validation, defensive normalization, the
 shared web renderer, generic unsupported fallback, fake-host package, and the
 generic `sidebarFilters` host proven by Thread Colours. The additive `panels`
 contribution, desktop main-view registry, desktop/remote hosts, mobile fallback,
-and static Mini Zen proof are also implemented. Mobile vocabulary,
+and event-driven Mini Zen proof are also implemented. Mobile vocabulary,
 thread action/decoration generic hosts, forms/modals, and local-path install
 remain open, so Phase 3 as originally scoped is not marked complete.
 
@@ -620,6 +639,16 @@ mobile explains the unsupported surface; older clients preserve/list the
 unknown contribution; disabling removes it from normalized client definitions;
 and static UI remains available through host crashes because no client code is
 executed.
+
+Event drift checklist (2026-08-13): lifecycle subscriptions are an extension
+feature implemented entirely through the public SDK; the daemon selects and
+reduces events, owns bounded per-extension queues, serializes callbacks with
+actions, validates atomic effects, and stops delivery on disable; payloads are
+identifier-only until read grants exist; no client executes extension code, so
+older and mobile clients require no event-aware fallback; host crashes and
+timeouts affect one extension and a later event lazily restarts it; the fake
+host mirrors payload, handler, effect, and failure limits; Mini Zen consumes
+attention open/resolved events without private imports.
 
 Do not begin marketplace, signing, arbitrary webviews, whole-region UI
 replacement, extension dependencies, or cross-extension calls until local

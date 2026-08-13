@@ -18,9 +18,11 @@ const result = await host.invokeAction('refresh')
 
 Pass the action and view ids from the fixture manifest so undeclared behavior
 fails before a package reaches the real daemon. Failed actions roll private
-storage and publications back atomically. `failNextAction` supports isolated
-host-failure tests, while `storageSnapshot` and `diagnosticSnapshot` return
-detached JSON values for assertions.
+storage and publications back atomically. `dispatchEvent` exercises public SDK
+subscriptions with the same identifier-only payload and effect boundary;
+`failNextAction` and `failNextEvent` support isolated host-failure tests, while
+`storageSnapshot` and `diagnosticSnapshot` return detached JSON values for
+assertions.
 
 `publishedViewSnapshot` exposes the latest successfully committed projection
 per view and scope. The fake boundary also enforces the daemon's per-view,

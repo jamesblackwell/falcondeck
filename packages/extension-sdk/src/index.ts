@@ -102,6 +102,37 @@ export type PublishedExtensionView<TValue = unknown> = {
   value: TValue;
 };
 
+export type ExtensionEvent =
+  | {
+      type: "thread.updated";
+      workspaceId: string;
+      threadId: string;
+    }
+  | {
+      type: "turn.ended";
+      workspaceId: string;
+      threadId: string;
+      turnId: string;
+    }
+  | {
+      type: "attention.opened";
+      workspaceId: string;
+      threadId?: string;
+      requestId: string;
+    }
+  | {
+      type: "attention.resolved";
+      workspaceId: string;
+      threadId?: string;
+      requestId: string;
+    };
+
+export type ExtensionEventType = ExtensionEvent["type"];
+
+export type ExtensionDisposable = {
+  dispose(): void;
+};
+
 export type ExtensionContext = {
   extension: { id: string };
   actions: {
@@ -118,6 +149,14 @@ export type ExtensionContext = {
     delete(key: string): Promise<void>;
   };
   views: { publish<T>(view: PublishedExtensionView<T>): Promise<void> };
+  events: {
+    on<TType extends ExtensionEventType>(
+      type: TType,
+      handler: (
+        event: Extract<ExtensionEvent, { type: TType }>,
+      ) => void | Promise<void>,
+    ): ExtensionDisposable;
+  };
   log: {
     info(message: string, fields?: Record<string, unknown>): void;
     error(message: string, fields?: Record<string, unknown>): void;

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { defineExtension } from "@falcondeck/extension-sdk";
+import {
+  defineExtension,
+  type ExtensionEventType,
+} from "@falcondeck/extension-sdk";
 
 import { createExtensionTestHost } from "./index";
 
@@ -133,5 +136,101 @@ describe("ExtensionTestHost", () => {
       "host response exceeds",
     );
     expect(host.storageSnapshot()).toEqual({});
+  });
+
+  it("delivers typed lifecycle events and commits their effects", async () => {
+    const extension = defineExtension({
+      activate(context) {
+        context.events.on("attention.opened", async (event) => {
+          await context.storage.set("requestId", event.requestId);
+          await context.views.publish({
+            viewId: "attention",
+            value: { threadId: event.threadId, requestId: event.requestId },
+          });
+        });
+      },
+    });
+    const host = createExtensionTestHost(extension, {
+      declaredViews: ["attention"],
+    });
+
+    await host.dispatchEvent({
+      type: "attention.opened",
+      workspaceId: "workspace-1",
+      threadId: "thread-1",
+      requestId: "request-1",
+    });
+
+    expect(host.storageSnapshot()).toEqual({ requestId: "request-1" });
+    expect(host.publishedViewSnapshot()).toEqual([
+      {
+        viewId: "attention",
+        value: { threadId: "thread-1", requestId: "request-1" },
+      },
+    ]);
+  });
+
+  it("rolls event effects back atomically after a handler failure", async () => {
+    let shouldFail = true;
+    const extension = defineExtension({
+      activate(context) {
+        context.events.on("thread.updated", async ({ threadId }) => {
+          await context.storage.set("threadId", threadId);
+          if (shouldFail) {
+            shouldFail = false;
+            throw new Error("event failed");
+          }
+        });
+      },
+    });
+    const host = createExtensionTestHost(extension);
+    const event = {
+      type: "thread.updated" as const,
+      workspaceId: "workspace-1",
+      threadId: "thread-1",
+    };
+
+    await expect(host.dispatchEvent(event)).rejects.toThrow("event failed");
+    expect(host.storageSnapshot()).toEqual({});
+    await expect(host.dispatchEvent(event)).resolves.toMatchObject({
+      storage: { threadId: "thread-1" },
+    });
+  });
+
+  it("stops delivering to a disposed event subscription", async () => {
+    const deliveries: string[] = [];
+    const extension = defineExtension({
+      activate(context) {
+        const disposed = context.events.on("thread.updated", ({ threadId }) => {
+          deliveries.push(`disposed:${threadId}`);
+        });
+        context.events.on("thread.updated", ({ threadId }) => {
+          deliveries.push(`active:${threadId}`);
+        });
+        disposed.dispose();
+        disposed.dispose();
+      },
+    });
+    const host = createExtensionTestHost(extension);
+
+    await host.dispatchEvent({
+      type: "thread.updated",
+      workspaceId: "workspace-1",
+      threadId: "thread-1",
+    });
+
+    expect(deliveries).toEqual(["active:thread-1"]);
+  });
+
+  it("rejects unsupported event subscription names at the host boundary", async () => {
+    const extension = defineExtension({
+      activate(context) {
+        context.events.on("future.event" as ExtensionEventType, () => {});
+      },
+    });
+
+    await expect(createExtensionTestHost(extension).activate()).rejects.toThrow(
+      "unsupported extension event type",
+    );
   });
 });

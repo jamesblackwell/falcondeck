@@ -12,6 +12,9 @@ Read `../docs/EXTENSIONS.md` before changing or creating an extension.
   render the bounded document; mobile deliberately shows a visible fallback.
 - Keep private data in `context.storage`; publish only bounded, non-secret view
   projections needed by clients.
+- Use `context.events.on(...)` only for identifier-only lifecycle signals;
+  dispose temporary subscriptions and query permission-gated facets for any
+  user-visible thread data instead of assuming events contain it.
 - Request no permissions unless the capability genuinely needs them.
 - Run `npm run extension:validate -- <package> --json`, `deno check
 --import-map=extensions/import-map.json` on the entrypoint, and the relevant

@@ -4,6 +4,13 @@ type JsonObject = Record<string, unknown>;
 
 type ViewScope = { kind: string; id: string };
 type PublishedView = { viewId: string; scope?: ViewScope; value: unknown };
+type ExtensionEvent = {
+  type: string;
+  workspaceId: string;
+  threadId?: string;
+  turnId?: string;
+  requestId?: string;
+};
 type ActionInvocation = {
   target?: ViewScope;
   input: unknown;
@@ -22,6 +29,12 @@ type ExtensionContext = {
     delete(key: string): Promise<void>;
   };
   views: { publish(view: PublishedView): Promise<void> };
+  events: {
+    on(
+      type: string,
+      handler: (event: ExtensionEvent) => void | Promise<void>,
+    ): { dispose(): void };
+  };
   log: {
     info(message: string, fields?: JsonObject): void;
     error(message: string, fields?: JsonObject): void;
@@ -32,22 +45,41 @@ type ExtensionDefinition = {
 };
 type Runtime = {
   actions: Map<string, (invocation: ActionInvocation) => unknown>;
+  eventHandlers: Map<
+    string,
+    Map<number, (event: ExtensionEvent) => void | Promise<void>>
+  >;
+  nextEventHandlerId: number;
   storage: Map<string, unknown>;
   publishedViews: PublishedView[];
   context: ExtensionContext;
 };
-type ActionRequest = {
+type RuntimeRequest = {
   requestId: number;
-  method: "action.invoke";
   extensionId: string;
   entrypoint: string;
+  storage: Record<string, unknown>;
+};
+type ActionRequest = RuntimeRequest & {
+  method: "action.invoke";
   actionId: string;
   target?: ViewScope;
   input: unknown;
-  storage: Record<string, unknown>;
 };
+type EventRequest = RuntimeRequest & {
+  method: "event.dispatch";
+  event: ExtensionEvent;
+};
+type HostRequest = ActionRequest | EventRequest;
 
 const runtimes = new Map<string, Runtime>();
+const MAX_EVENT_HANDLERS_PER_TYPE = 32;
+const SUPPORTED_EVENT_TYPES = new Set([
+  "thread.updated",
+  "turn.ended",
+  "attention.opened",
+  "attention.resolved",
+]);
 const protocolEncoder = new TextEncoder();
 const writeDiagnostic = console.error.bind(console);
 
@@ -78,7 +110,7 @@ async function writeProtocol(response: JsonObject): Promise<void> {
   );
 }
 
-async function runtimeFor(request: ActionRequest): Promise<Runtime> {
+async function runtimeFor(request: RuntimeRequest): Promise<Runtime> {
   const existing = runtimes.get(request.extensionId);
   if (existing) {
     existing.storage = new Map(Object.entries(request.storage));
@@ -88,6 +120,8 @@ async function runtimeFor(request: ActionRequest): Promise<Runtime> {
 
   const runtime = {} as Runtime;
   runtime.actions = new Map();
+  runtime.eventHandlers = new Map();
+  runtime.nextEventHandlerId = 1;
   runtime.storage = new Map(Object.entries(request.storage));
   runtime.publishedViews = [];
   runtime.context = {
@@ -103,7 +137,7 @@ async function runtimeFor(request: ActionRequest): Promise<Runtime> {
     storage: {
       get<T>(key: string, fallback: T): Promise<T> {
         return Promise.resolve(
-          runtime.storage.has(key) ? runtime.storage.get(key) as T : fallback,
+          runtime.storage.has(key) ? (runtime.storage.get(key) as T) : fallback,
         );
       },
       set(key, value) {
@@ -119,6 +153,31 @@ async function runtimeFor(request: ActionRequest): Promise<Runtime> {
       publish(view) {
         runtime.publishedViews.push(view);
         return Promise.resolve();
+      },
+    },
+    events: {
+      on(type, handler) {
+        if (!SUPPORTED_EVENT_TYPES.has(type)) {
+          throw new Error(`unsupported extension event type: ${type}`);
+        }
+        const handlerId = runtime.nextEventHandlerId++;
+        const handlers = runtime.eventHandlers.get(type) ?? new Map();
+        if (handlers.size >= MAX_EVENT_HANDLERS_PER_TYPE) {
+          throw new Error(
+            `extension registered more than ${MAX_EVENT_HANDLERS_PER_TYPE} handlers for ${type}`,
+          );
+        }
+        handlers.set(handlerId, handler);
+        runtime.eventHandlers.set(type, handlers);
+        let disposed = false;
+        return {
+          dispose() {
+            if (disposed) return;
+            disposed = true;
+            handlers.delete(handlerId);
+            if (handlers.size === 0) runtime.eventHandlers.delete(type);
+          },
+        };
       },
     },
     log: {
@@ -169,16 +228,36 @@ async function invoke(request: ActionRequest): Promise<JsonObject> {
   };
 }
 
+async function dispatchEvent(request: EventRequest): Promise<JsonObject> {
+  const runtime = await runtimeFor(request);
+  const handlers = [
+    ...(runtime.eventHandlers.get(request.event.type)?.values() ?? []),
+  ];
+  for (const handler of handlers) await handler(request.event);
+  return {
+    requestId: request.requestId,
+    ok: true,
+    result: null,
+    storage: Object.fromEntries(runtime.storage),
+    publishedViews: runtime.publishedViews,
+  };
+}
+
 async function handleLine(line: string): Promise<void> {
   if (!line.trim()) return;
   let requestId = 0;
   try {
-    const request = JSON.parse(line) as ActionRequest;
+    const request = JSON.parse(line) as HostRequest;
     requestId = request.requestId;
-    if (request.method !== "action.invoke") {
-      throw new Error(`unsupported host method: ${request.method}`);
+    if (request.method === "action.invoke") {
+      await writeProtocol(await invoke(request));
+    } else if (request.method === "event.dispatch") {
+      await writeProtocol(await dispatchEvent(request));
+    } else {
+      throw new Error(
+        `unsupported host method: ${(request as { method?: unknown }).method}`,
+      );
     }
-    await writeProtocol(await invoke(request));
   } catch (error) {
     await writeProtocol({
       requestId,

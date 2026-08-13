@@ -46,6 +46,7 @@ use crate::{
 mod acp_threads;
 pub(crate) mod agent_helpers;
 pub(crate) mod conversation_helpers;
+mod extension_events;
 mod extension_host;
 mod extensions;
 pub(crate) mod host_provisioning;
@@ -123,6 +124,8 @@ struct InnerState {
     extensions: Mutex<extensions::ExtensionRegistry>,
     /// Lazily started Deno sidecars, isolated and serialized per extension.
     extension_hosts: Mutex<extension_host::ExtensionHostPool>,
+    /// Bounded, independent lifecycle-event queue for each enabled extension.
+    extension_event_queues: extension_events::ExtensionEventQueues,
     remote: Mutex<RemoteBridgeState>,
     /// SSH provisioning jobs keyed by job id. Progress lives only in memory:
     /// a job is meaningless across a daemon restart, since the background task
@@ -455,6 +458,7 @@ impl AppState {
                 preferences: Mutex::new(FalconDeckPreferences::default()),
                 extensions: Mutex::new(extension_registry),
                 extension_hosts: Mutex::new(extension_hosts),
+                extension_event_queues: StdMutex::new(HashMap::new()),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,
@@ -490,6 +494,7 @@ impl AppState {
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {
         self.inner.extensions.lock().await.restore().await?;
+        self.sync_extension_event_workers().await;
         let preferences = load_preferences(&self.inner.preferences_path).await?;
         {
             let mut current = self.inner.preferences.lock().await;
@@ -886,6 +891,7 @@ impl AppState {
             }
         }
 
+        self.stop_extension_event_workers();
         let extension_hosts = self.inner.extension_hosts.lock().await.drain();
         for host in extension_hosts {
             host.lock().await.stop().await;
@@ -1039,6 +1045,7 @@ impl AppState {
         if !enabled {
             self.inner.extension_hosts.lock().await.remove(extension_id);
         }
+        self.sync_extension_event_workers().await;
         let (catalog, retained_views) = {
             let extensions = self.inner.extensions.lock().await;
             (
@@ -1738,6 +1745,11 @@ impl AppState {
     }
 
     fn emit(&self, workspace_id: Option<String>, thread_id: Option<String>, event: UnifiedEvent) {
+        let extension_event = extension_events::lifecycle_event(
+            workspace_id.as_deref(),
+            thread_id.as_deref(),
+            &event,
+        );
         let envelope = EventEnvelope {
             seq: self.inner.sequence.fetch_add(1, Ordering::Relaxed),
             emitted_at: Utc::now(),
@@ -1746,6 +1758,9 @@ impl AppState {
             event,
         };
         let _ = self.inner.broadcaster.send(envelope);
+        if let Some(event) = extension_event {
+            self.enqueue_extension_event(event);
+        }
     }
 
     pub async fn git_status(

@@ -19,6 +19,8 @@ use super::extensions::{ExtensionPackage, PublishedExtensionView};
 use crate::{agent_binary::resolve_agent_binary, error::DaemonError};
 
 const HOST_ACTION_TIMEOUT: Duration = Duration::from_secs(10);
+const HOST_EVENT_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const MAX_EXTENSION_EVENT_BYTES: usize = 4 * 1024;
 const MAX_HOST_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_SAFE_JAVASCRIPT_INTEGER: u64 = 9_007_199_254_740_991;
 
@@ -82,6 +84,56 @@ struct HostActionRequest<'a> {
     action_id: &'a str,
     target: Option<&'a ExtensionViewScope>,
     input: &'a Value,
+    storage: &'a BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "type")]
+pub(super) enum ExtensionEvent {
+    #[serde(rename = "thread.updated")]
+    ThreadUpdated {
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "threadId")]
+        thread_id: String,
+    },
+    #[serde(rename = "turn.ended")]
+    TurnEnded {
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "threadId")]
+        thread_id: String,
+        #[serde(rename = "turnId")]
+        turn_id: String,
+    },
+    #[serde(rename = "attention.opened")]
+    AttentionOpened {
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "threadId", skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+    #[serde(rename = "attention.resolved")]
+    AttentionResolved {
+        #[serde(rename = "workspaceId")]
+        workspace_id: String,
+        #[serde(rename = "threadId", skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+        #[serde(rename = "requestId")]
+        request_id: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HostEventRequest<'a> {
+    request_id: u64,
+    method: &'static str,
+    extension_id: &'a str,
+    entrypoint: String,
+    event: &'a ExtensionEvent,
     storage: &'a BTreeMap<String, Value>,
 }
 
@@ -155,12 +207,75 @@ impl ExtensionHost {
             input,
             storage,
         };
-        let line = serde_json::to_vec(&request)?;
+        let response = self
+            .send_request(&request, request_id, HOST_ACTION_TIMEOUT, "action")
+            .await?;
+        Ok(ExtensionHostActionResult {
+            result: response.result,
+            storage: response.storage,
+            published_views: response.published_views,
+        })
+    }
+
+    pub(super) async fn dispatch_event(
+        &mut self,
+        package: &ExtensionPackage,
+        event: &ExtensionEvent,
+        storage: &BTreeMap<String, Value>,
+    ) -> Result<ExtensionHostActionResult, DaemonError> {
+        if serde_json::to_vec(event)?.len() > MAX_EXTENSION_EVENT_BYTES {
+            return Err(DaemonError::BadRequest(format!(
+                "extension event exceeds {MAX_EXTENSION_EVENT_BYTES} bytes"
+            )));
+        }
+        let package_root = package
+            .entrypoint
+            .parent()
+            .ok_or_else(|| {
+                DaemonError::Process("extension entrypoint has no package root".to_string())
+            })?
+            .to_path_buf();
+        if self.allowed_package_roots.insert(package_root) && self.process.is_some() {
+            self.stop().await;
+        }
+        self.ensure_started().await?;
+        let request_id = self.next_request_id;
+        self.next_request_id = if request_id >= MAX_SAFE_JAVASCRIPT_INTEGER {
+            1
+        } else {
+            request_id + 1
+        };
+        let request = HostEventRequest {
+            request_id,
+            method: "event.dispatch",
+            extension_id: &package.id,
+            entrypoint: package.entrypoint.to_string_lossy().into_owned(),
+            event,
+            storage,
+        };
+        let response = self
+            .send_request(&request, request_id, HOST_EVENT_TIMEOUT, "event")
+            .await?;
+        Ok(ExtensionHostActionResult {
+            result: response.result,
+            storage: response.storage,
+            published_views: response.published_views,
+        })
+    }
+
+    async fn send_request(
+        &mut self,
+        request: &impl Serialize,
+        request_id: u64,
+        request_timeout: Duration,
+        operation: &str,
+    ) -> Result<HostActionResponse, DaemonError> {
+        let line = serde_json::to_vec(request)?;
         let process = self
             .process
             .as_mut()
             .ok_or_else(|| DaemonError::Process("extension host unavailable".to_string()))?;
-        let response = timeout(HOST_ACTION_TIMEOUT, async {
+        let response = timeout(request_timeout, async {
             process.stdin.write_all(&line).await?;
             process.stdin.write_all(b"\n").await?;
             process.stdin.flush().await?;
@@ -177,9 +292,9 @@ impl ExtensionHost {
             }
             Err(_) => {
                 self.stop().await;
-                return Err(DaemonError::Process(
-                    "extension action timed out".to_string(),
-                ));
+                return Err(DaemonError::Process(format!(
+                    "extension {operation} timed out"
+                )));
             }
         };
         if response.request_id != request_id {
@@ -192,22 +307,17 @@ impl ExtensionHost {
             return Err(DaemonError::Process(
                 response
                     .error
-                    .unwrap_or_else(|| "extension action failed".to_string()),
+                    .unwrap_or_else(|| format!("extension {operation} failed")),
             ));
         }
-        Ok(ExtensionHostActionResult {
-            result: response.result,
-            storage: response.storage,
-            published_views: response.published_views,
-        })
+        Ok(response)
     }
 
     async fn ensure_started(&mut self) -> Result<(), DaemonError> {
-        if let Some(process) = self.process.as_mut() {
-            match process.child.try_wait() {
-                Ok(None) => return Ok(()),
-                Ok(Some(_)) | Err(_) => {}
-            }
+        if let Some(process) = self.process.as_mut()
+            && let Ok(None) = process.child.try_wait()
+        {
+            return Ok(());
         }
         self.process = None;
         let script = extension_host_script(&self.state_dir);
@@ -433,6 +543,69 @@ mod tests {
                     .as_ref()
                     .is_some_and(|scope| scope.id == "thread-1")
         }));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_event_runs_through_public_host_contract() {
+        let deno = resolve_agent_binary("deno", "deno").executable;
+        if Command::new(deno).arg("--version").output().await.is_err() {
+            return;
+        }
+        let state_dir = tempfile::tempdir().expect("temporary host state");
+        let state_path = state_dir.path().join("state.json");
+        let mut registry = super::super::extensions::ExtensionRegistry::new(&state_path);
+        registry
+            .restore()
+            .await
+            .expect("runtime support assets should restore");
+        let package_dir = state_dir.path().join("event-extension");
+        tokio::fs::create_dir_all(&package_dir)
+            .await
+            .expect("fixture package should create");
+        let entrypoint = package_dir.join("server.ts");
+        tokio::fs::write(
+            &entrypoint,
+            r#"
+import { defineExtension } from '@falcondeck/extension-sdk'
+export default defineExtension({
+  activate(context) {
+    context.events.on('thread.updated', async ({ threadId }) => {
+      await context.storage.set('threadId', threadId)
+      await context.views.publish({ viewId: 'latest', value: { threadId } })
+    })
+  },
+})
+"#,
+        )
+        .await
+        .expect("fixture extension should write");
+        let package = ExtensionPackage {
+            id: "test.events".to_string(),
+            entrypoint,
+        };
+        let event = ExtensionEvent::ThreadUpdated {
+            workspace_id: "workspace-1".to_string(),
+            thread_id: "thread-1".to_string(),
+        };
+        let mut host = ExtensionHost::new(&state_path, "deno".to_string());
+        let result = host
+            .dispatch_event(&package, &event, &BTreeMap::new())
+            .await
+            .expect("event should run");
+        host.stop().await;
+
+        assert_eq!(
+            result.storage.get("threadId"),
+            Some(&serde_json::json!("thread-1"))
+        );
+        assert_eq!(result.published_views.len(), 1);
+        let published = &result.published_views[0];
+        assert_eq!(published.view_id, "latest");
+        assert_eq!(published.scope, None);
+        assert_eq!(
+            published.value,
+            serde_json::json!({ "threadId": "thread-1" })
+        );
     }
 
     #[tokio::test]

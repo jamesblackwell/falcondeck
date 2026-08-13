@@ -350,6 +350,24 @@ impl ExtensionRegistry {
         self.summaries.contains_key(extension_id)
     }
 
+    pub(super) fn enabled_packages(&self) -> Vec<ExtensionPackage> {
+        self.packages
+            .iter()
+            .filter(|(extension_id, _)| {
+                self.summaries
+                    .get(*extension_id)
+                    .is_some_and(|summary| summary.enabled)
+            })
+            .map(|(_, package)| package.clone())
+            .collect()
+    }
+
+    pub(super) fn is_enabled(&self, extension_id: &str) -> bool {
+        self.summaries
+            .get(extension_id)
+            .is_some_and(|summary| summary.enabled)
+    }
+
     pub(super) fn storage(&self, extension_id: &str) -> BTreeMap<String, Value> {
         self.persisted
             .storage

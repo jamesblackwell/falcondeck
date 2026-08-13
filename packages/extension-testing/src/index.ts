@@ -2,10 +2,20 @@ import type {
   ExtensionActionInvocation,
   ExtensionContext,
   ExtensionDefinition,
+  ExtensionEvent,
+  ExtensionEventType,
   PublishedExtensionView,
 } from "@falcondeck/extension-sdk";
 
 const MAX_ACTION_INPUT_BYTES = 64 * 1024;
+const MAX_EVENT_BYTES = 4 * 1024;
+const MAX_EVENT_HANDLERS_PER_TYPE = 32;
+const SUPPORTED_EVENT_TYPES = new Set<ExtensionEventType>([
+  "thread.updated",
+  "turn.ended",
+  "attention.opened",
+  "attention.resolved",
+]);
 const MAX_EXTENSION_STORAGE_BYTES = 512 * 1024;
 const MAX_VIEW_BYTES = 16 * 1024;
 const MAX_PUBLISHED_VIEWS_PER_ACTION = 256;
@@ -18,6 +28,7 @@ type JsonRecord = Record<string, unknown>;
 type ActionHandler = (
   invocation: ExtensionActionInvocation,
 ) => unknown | Promise<unknown>;
+type EventHandler = (event: ExtensionEvent) => unknown | Promise<unknown>;
 
 export type ExtensionTestHostOptions = {
   extensionId?: string;
@@ -36,6 +47,11 @@ export type ExtensionTestActionResult = {
   storage: JsonRecord;
   publishedViews: PublishedExtensionView[];
 };
+
+export type ExtensionTestEventResult = Omit<
+  ExtensionTestActionResult,
+  "result"
+>;
 
 function cloneJson<T>(value: T): T {
   const encoded = JSON.stringify(value);
@@ -73,6 +89,10 @@ export class ExtensionTestHost {
   private readonly declaredActions: ReadonlySet<string> | null;
   private readonly declaredViews: ReadonlySet<string> | null;
   private readonly actions = new Map<string, ActionHandler>();
+  private readonly eventHandlers = new Map<
+    ExtensionEventType,
+    Set<EventHandler>
+  >();
   private readonly storage = new Map<string, unknown>();
   private readonly diagnostics: Array<{
     level: "info" | "error";
@@ -83,6 +103,7 @@ export class ExtensionTestHost {
   private publishedViews: PublishedExtensionView[] = [];
   private activated = false;
   private nextFailure: Error | null = null;
+  private nextEventFailure: Error | null = null;
 
   constructor(
     definition: ExtensionDefinition,
@@ -136,6 +157,28 @@ export class ExtensionTestHost {
           this.publishedViews.push(cloneJson(view));
         },
       },
+      events: {
+        on: (type, handler) => {
+          if (!SUPPORTED_EVENT_TYPES.has(type)) {
+            throw new Error(`unsupported extension event type: ${type}`);
+          }
+          const handlers = this.eventHandlers.get(type) ?? new Set();
+          if (handlers.size >= MAX_EVENT_HANDLERS_PER_TYPE) {
+            throw new Error(
+              `extension registered more than ${MAX_EVENT_HANDLERS_PER_TYPE} handlers for ${type}`,
+            );
+          }
+          const registered = handler as EventHandler;
+          handlers.add(registered);
+          this.eventHandlers.set(type, handlers);
+          return {
+            dispose: () => {
+              handlers.delete(registered);
+              if (handlers.size === 0) this.eventHandlers.delete(type);
+            },
+          };
+        },
+      },
       log: {
         info: (message, fields) => {
           this.diagnostics.push({
@@ -166,6 +209,107 @@ export class ExtensionTestHost {
     this.nextFailure = typeof error === "string" ? new Error(error) : error;
   }
 
+  /** Makes the next event delivery fail before extension code runs. */
+  failNextEvent(error: Error | string): void {
+    this.nextEventFailure =
+      typeof error === "string" ? new Error(error) : error;
+  }
+
+  private eventHandlerSnapshot(): Map<ExtensionEventType, Set<EventHandler>> {
+    return new Map(
+      Array.from(this.eventHandlers, ([type, handlers]) => [
+        type,
+        new Set(handlers),
+      ]),
+    );
+  }
+
+  private restoreAfterFailure(
+    previousStorage: JsonRecord,
+    wasActivated: boolean,
+    previousActions: Map<string, ActionHandler>,
+    previousEventHandlers: Map<ExtensionEventType, Set<EventHandler>>,
+  ): void {
+    this.storage.clear();
+    for (const [key, value] of Object.entries(previousStorage)) {
+      this.storage.set(key, cloneJson(value));
+    }
+    if (!wasActivated) {
+      this.actions.clear();
+      for (const [id, handler] of previousActions) {
+        this.actions.set(id, handler);
+      }
+      this.eventHandlers.clear();
+      for (const [type, handlers] of previousEventHandlers) {
+        this.eventHandlers.set(type, new Set(handlers));
+      }
+      this.activated = false;
+    }
+    this.publishedViews = [];
+  }
+
+  private commitEffects(result: unknown): ExtensionTestActionResult {
+    const storage = this.storageSnapshot();
+    if (encodedBytes(storage) > MAX_EXTENSION_STORAGE_BYTES) {
+      throw new Error(
+        `extension storage exceeds ${MAX_EXTENSION_STORAGE_BYTES} bytes`,
+      );
+    }
+    if (this.publishedViews.length > MAX_PUBLISHED_VIEWS_PER_ACTION) {
+      throw new Error(
+        `extension call published more than ${MAX_PUBLISHED_VIEWS_PER_ACTION} views`,
+      );
+    }
+    for (const view of this.publishedViews) {
+      if (this.declaredViews && !this.declaredViews.has(view.viewId)) {
+        throw new Error(`extension published undeclared view: ${view.viewId}`);
+      }
+      validateScope(view.scope);
+      if (encodedBytes(view.value) > MAX_VIEW_BYTES) {
+        throw new Error(`extension view exceeds ${MAX_VIEW_BYTES} bytes`);
+      }
+    }
+    const nextRetainedViews = new Map(this.retainedViews);
+    for (const view of this.publishedViews) {
+      nextRetainedViews.set(viewKey(view), cloneJson(view));
+    }
+    const retainedViewBytes = Array.from(nextRetainedViews.values()).reduce(
+      (total, view) =>
+        total +
+        encodedBytes({
+          extension_id: this.extensionId,
+          view_id: view.viewId,
+          scope: view.scope ?? null,
+          value: view.value,
+          updated_at: "1970-01-01T00:00:00.000Z",
+        }),
+      0,
+    );
+    if (retainedViewBytes > MAX_EXTENSION_VIEW_STATE_BYTES) {
+      throw new Error(
+        `extension view state exceeds ${MAX_EXTENSION_VIEW_STATE_BYTES} bytes`,
+      );
+    }
+    const response = {
+      result: cloneJson(result ?? null),
+      storage,
+      publishedViews: cloneJson(this.publishedViews),
+    };
+    if (
+      encodedBytes({ jsonrpc: "2.0", id: 1, result: response }) >
+      MAX_HOST_RESPONSE_BYTES
+    ) {
+      throw new Error(
+        `extension host response exceeds ${MAX_HOST_RESPONSE_BYTES} bytes`,
+      );
+    }
+    this.retainedViews.clear();
+    for (const [key, view] of nextRetainedViews) {
+      this.retainedViews.set(key, view);
+    }
+    return response;
+  }
+
   async invokeAction(
     actionId: string,
     invocation: ExtensionTestInvocation = {},
@@ -189,86 +333,58 @@ export class ExtensionTestHost {
     const previousStorage = this.storageSnapshot();
     const wasActivated = this.activated;
     const previousActions = new Map(this.actions);
+    const previousEventHandlers = this.eventHandlerSnapshot();
     try {
       await this.activate();
       const handler = this.actions.get(actionId);
       if (!handler)
         throw new Error(`extension did not register action: ${actionId}`);
       const result = await handler({ target: invocation.target, input });
-      const storage = this.storageSnapshot();
-      if (encodedBytes(storage) > MAX_EXTENSION_STORAGE_BYTES) {
-        throw new Error(
-          `extension storage exceeds ${MAX_EXTENSION_STORAGE_BYTES} bytes`,
-        );
-      }
-      if (this.publishedViews.length > MAX_PUBLISHED_VIEWS_PER_ACTION) {
-        throw new Error(
-          `extension action published more than ${MAX_PUBLISHED_VIEWS_PER_ACTION} views`,
-        );
-      }
-      for (const view of this.publishedViews) {
-        if (this.declaredViews && !this.declaredViews.has(view.viewId)) {
-          throw new Error(
-            `extension published undeclared view: ${view.viewId}`,
-          );
-        }
-        validateScope(view.scope);
-        if (encodedBytes(view.value) > MAX_VIEW_BYTES) {
-          throw new Error(`extension view exceeds ${MAX_VIEW_BYTES} bytes`);
-        }
-      }
-      const nextRetainedViews = new Map(this.retainedViews);
-      for (const view of this.publishedViews) {
-        nextRetainedViews.set(viewKey(view), cloneJson(view));
-      }
-      const retainedViewBytes = Array.from(nextRetainedViews.values()).reduce(
-        (total, view) =>
-          total +
-          encodedBytes({
-            extension_id: this.extensionId,
-            view_id: view.viewId,
-            scope: view.scope ?? null,
-            value: view.value,
-            updated_at: "1970-01-01T00:00:00.000Z",
-          }),
-        0,
-      );
-      if (retainedViewBytes > MAX_EXTENSION_VIEW_STATE_BYTES) {
-        throw new Error(
-          `extension view state exceeds ${MAX_EXTENSION_VIEW_STATE_BYTES} bytes`,
-        );
-      }
-      const response = {
-        result: cloneJson(result ?? null),
-        storage,
-        publishedViews: cloneJson(this.publishedViews),
-      };
-      if (
-        encodedBytes({ jsonrpc: "2.0", id: 1, result: response }) >
-        MAX_HOST_RESPONSE_BYTES
-      ) {
-        throw new Error(
-          `extension host response exceeds ${MAX_HOST_RESPONSE_BYTES} bytes`,
-        );
-      }
-      this.retainedViews.clear();
-      for (const [key, view] of nextRetainedViews) {
-        this.retainedViews.set(key, view);
-      }
-      return response;
+      return this.commitEffects(result);
     } catch (error) {
-      this.storage.clear();
-      for (const [key, value] of Object.entries(previousStorage)) {
-        this.storage.set(key, cloneJson(value));
+      this.restoreAfterFailure(
+        previousStorage,
+        wasActivated,
+        previousActions,
+        previousEventHandlers,
+      );
+      throw error;
+    }
+  }
+
+  async dispatchEvent(
+    event: ExtensionEvent,
+  ): Promise<ExtensionTestEventResult> {
+    this.publishedViews = [];
+    if (this.nextEventFailure) {
+      const error = this.nextEventFailure;
+      this.nextEventFailure = null;
+      throw error;
+    }
+    const delivered = cloneJson(event);
+    if (encodedBytes(delivered) > MAX_EVENT_BYTES) {
+      throw new Error(`extension event exceeds ${MAX_EVENT_BYTES} bytes`);
+    }
+    const previousStorage = this.storageSnapshot();
+    const wasActivated = this.activated;
+    const previousActions = new Map(this.actions);
+    const previousEventHandlers = this.eventHandlerSnapshot();
+    try {
+      await this.activate();
+      for (const handler of Array.from(
+        this.eventHandlers.get(delivered.type) ?? [],
+      )) {
+        await handler(delivered);
       }
-      if (!wasActivated) {
-        this.actions.clear();
-        for (const [id, handler] of previousActions) {
-          this.actions.set(id, handler);
-        }
-        this.activated = false;
-      }
-      this.publishedViews = [];
+      const { storage, publishedViews } = this.commitEffects(null);
+      return { storage, publishedViews };
+    } catch (error) {
+      this.restoreAfterFailure(
+        previousStorage,
+        wasActivated,
+        previousActions,
+        previousEventHandlers,
+      );
       throw error;
     }
   }
