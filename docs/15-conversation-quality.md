@@ -317,6 +317,9 @@ changes. Empty failed or interrupted turns receive one stable, empty assistant
 receipt rather than disappearing. The receipt identity is derived from the
 provider turn (or authoritative user item when a provider has no turn id), so
 live settlement and later history hydration converge without duplication.
+Failed assistant content also carries the provider-reported error when one is
+available. Clients render that detail beneath the stable “Response failed”
+label; older events without a detail keep the generic label.
 Provider turn status restores the lifecycle of partial content during history
 hydration; reconnect must never rewrite an interrupted or failed answer as
 complete.
@@ -682,6 +685,23 @@ model as other tool activity, while their full evidence remains accessible.
 
 ## Operational output contract
 
+Errors are routed by semantic ownership, not by provider log severity. A tool
+failure updates that tool's transcript receipt; a turn failure settles the
+assistant receipt with its provider explanation; an approval, form, or other
+control failure stays beside that control. Short-lived failures caused by a
+user action may additionally use a toast. Raw provider stdout/stderr is daemon
+diagnostic logging and never becomes user-facing content by itself.
+
+Workspace degradation uses keyed active operational conditions. Re-emitting the
+same `(workspace, key)` replaces its severity and message while preserving its
+identity and first-seen time; successful recovery explicitly clears it. Clients
+show the highest-severity active condition in the top banner and expose all
+remaining conditions through a compact issue center. Dismissal applies to one
+condition version, so a materially updated condition becomes visible again.
+This zone is reserved for current provider availability, authentication,
+configuration, connection, and capability problems—not historical turn or tool
+failures. Fatal application startup failures remain a separate blocking screen.
+
 Operational provider output is part of the transcript when it affects the
 user's understanding of a turn. Restored and live Codex plans preserve their
 free-form text, with replay-safe UTF-16 `item/plan/delta` updates until an
@@ -724,9 +744,9 @@ Thread-targeted provider,
 guardian, model-verification, model-reroute, and safety-buffering notifications
 become retained service items; warnings and errors use alert semantics and
 cannot look like quiet informational text. Global deprecation/configuration
-warnings become capped, retained workspace notices when no thread target exists.
-They survive reconnect snapshots, remain outside conversation history, select
-the newest highest-severity notice per workspace, and can be dismissed locally.
+warnings become active workspace conditions when no thread target exists. They
+survive reconnect snapshots, remain outside conversation history, and can be
+dismissed locally.
 Structured diagnostic detail is collapsed by default and uses the same bounded,
 copyable technical-detail surface as an in-transcript service receipt.
 

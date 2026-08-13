@@ -1360,6 +1360,21 @@ export function normalizeDaemonSnapshot(
             typeof notice.created_at === "string",
         )
       : [],
+    operational_conditions: Array.isArray(snapshot.operational_conditions)
+      ? snapshot.operational_conditions.filter(
+          (condition) =>
+            condition &&
+            typeof condition.id === "string" &&
+            typeof condition.key === "string" &&
+            typeof condition.workspace_id === "string" &&
+            (condition.level === "info" ||
+              condition.level === "warning" ||
+              condition.level === "error") &&
+            typeof condition.message === "string" &&
+            typeof condition.created_at === "string" &&
+            typeof condition.updated_at === "string",
+        )
+      : [],
     thread_token_usage: Object.fromEntries(
       Object.entries(snapshot.thread_token_usage ?? {}).flatMap(
         ([threadId, usage]) => {

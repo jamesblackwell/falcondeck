@@ -689,6 +689,10 @@ pub struct DaemonSnapshot {
     /// Recent workspace-level operational notices that do not belong in a transcript.
     #[serde(default)]
     pub service_notices: Vec<ServiceNotice>,
+    /// Active, keyed workspace conditions. Unlike service notices, these describe
+    /// current degradation and disappear when the underlying problem recovers.
+    #[serde(default)]
+    pub operational_conditions: Vec<OperationalCondition>,
     /// Latest provider-reported token usage keyed by thread id. Kept separate
     /// from thread summaries so frequent usage updates do not churn sidebars.
     #[serde(default)]
@@ -857,6 +861,28 @@ pub struct ServiceNotice {
     pub raw_method: Option<String>,
     /// When FalconDeck received the notice.
     pub created_at: DateTime<Utc>,
+}
+
+/// Active workspace-level degradation that remains relevant until explicitly cleared.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationalCondition {
+    /// Stable identity retained across updates to the same condition.
+    pub id: String,
+    /// Stable semantic key within the workspace, such as `codex_connection`.
+    pub key: String,
+    /// Workspace affected by the condition.
+    pub workspace_id: String,
+    /// Current severity.
+    pub level: ServiceLevel,
+    /// Human-readable explanation and recovery guidance when known.
+    pub message: String,
+    /// Provider or daemon source associated with the condition.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// When this condition first became active.
+    pub created_at: DateTime<Utc>,
+    /// When its severity or message last changed.
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Provider-reported token counts for one scope.
@@ -2767,6 +2793,18 @@ pub enum UnifiedEvent {
         #[serde(default)]
         notice: Option<ServiceNotice>,
     },
+    /// An active workspace condition was created or changed.
+    OperationalConditionUpserted {
+        /// Complete replacement condition.
+        condition: OperationalCondition,
+    },
+    /// An active workspace condition recovered.
+    OperationalConditionCleared {
+        /// Stable semantic key of the recovered condition.
+        key: String,
+        /// Stable condition identity used to remove the legacy notice projection.
+        condition_id: String,
+    },
     /// Latest token/context usage for the target thread.
     ThreadTokenUsageUpdated {
         /// Provider-reported usage snapshot.
@@ -3668,6 +3706,7 @@ mod tests {
             threads: Vec::new(),
             interactive_requests: Vec::new(),
             service_notices: Vec::new(),
+            operational_conditions: Vec::new(),
             thread_token_usage: std::collections::BTreeMap::new(),
             preferences: FalconDeckPreferences::default(),
             extensions: ExtensionSnapshot::default(),

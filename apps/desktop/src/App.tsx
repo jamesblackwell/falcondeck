@@ -28,7 +28,8 @@ import {
   filesToImageInputs,
   generateUserItemId,
   imageAttachmentSendBlockReason,
-  latestWorkspaceNotice,
+  operationalConditionDismissalKey,
+  workspaceOperationalConditions,
   mergeThreadDetailPage,
   optimisticallySetThreadColor,
   removeConversationItem,
@@ -64,6 +65,7 @@ import {
   type PersistedComposerState,
   type InteractiveRequest,
   type InteractiveResponsePayload,
+  type OperationalCondition,
   type ThreadHandle,
   type ThreadIsolation,
   type ThinkingDisplay,
@@ -377,9 +379,9 @@ function AppInner() {
   const [windowFocused, setWindowFocused] = useState(
     () => document.visibilityState !== "hidden",
   );
-  const [dismissedNoticeIds, setDismissedNoticeIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [dismissedConditionVersions, setDismissedConditionVersions] = useState<
+    Set<string>
+  >(() => new Set());
   const [thinkingDisplay, setThinkingDisplay] = useState<ThinkingDisplay>(
     readStoredThinkingDisplay,
   );
@@ -3498,23 +3500,33 @@ function AppInner() {
       threadDetail.workspace.id !== selectedWorkspaceId ||
       threadDetail.thread.id !== selectedThreadId),
   );
-  const operationalNotice = useMemo(
+  const operationalConditions = useMemo(
     () =>
-      latestWorkspaceNotice(
+      workspaceOperationalConditions(
+        viewSnapshot?.operational_conditions,
         viewSnapshot?.service_notices,
         selectedWorkspaceId,
-        dismissedNoticeIds,
+        dismissedConditionVersions,
       ),
-    [dismissedNoticeIds, selectedWorkspaceId, viewSnapshot?.service_notices],
+    [
+      dismissedConditionVersions,
+      selectedWorkspaceId,
+      viewSnapshot?.operational_conditions,
+      viewSnapshot?.service_notices,
+    ],
   );
-  const dismissOperationalNotice = useCallback((noticeId: string) => {
-    setDismissedNoticeIds((current) => {
-      if (current.has(noticeId)) return current;
-      const next = new Set(current);
-      next.add(noticeId);
-      return next;
-    });
-  }, []);
+  const dismissOperationalCondition = useCallback(
+    (condition: OperationalCondition) => {
+      const dismissalKey = operationalConditionDismissalKey(condition);
+      setDismissedConditionVersions((current) => {
+        if (current.has(dismissalKey)) return current;
+        const next = new Set(current);
+        next.add(dismissalKey);
+        return next;
+      });
+    },
+    [],
+  );
 
   // The transport acknowledging turn.start is not the same as the agent
   // starting work (especially for Claude over SSH). Keep the optimistic label
@@ -4012,8 +4024,8 @@ function AppInner() {
               }
               onLoadOlderMessages={handleLoadOlder}
               interactiveRequests={interactiveRequests}
-              operationalNotice={operationalNotice}
-              onDismissOperationalNotice={dismissOperationalNotice}
+              operationalConditions={operationalConditions}
+              onDismissOperationalCondition={dismissOperationalCondition}
               findRequestKey={findRequestKey}
               onRemoveQueuedTurn={handleRemoveQueuedTurn}
               onSteerQueuedTurn={handleSteerQueuedTurn}

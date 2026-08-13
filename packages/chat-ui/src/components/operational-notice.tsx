@@ -3,20 +3,22 @@ import { AlertCircle, AlertTriangle, Info, X } from "lucide-react";
 
 import {
   serviceMessagePresentation,
-  type ServiceNotice,
+  type OperationalCondition,
 } from "@falcondeck/client-core";
 import { cn } from "@falcondeck/ui";
 
 import { CodeBlock } from "./code-block";
 
 export function OperationalNotice({
-  notice,
+  conditions,
   onDismiss,
 }: {
-  notice: ServiceNotice;
-  onDismiss: (noticeId: string) => void;
+  conditions: readonly OperationalCondition[];
+  onDismiss: (condition: OperationalCondition) => void;
 }) {
+  const notice = conditions[0];
   const [detailOpen, setDetailOpen] = useState(false);
+  if (!notice) return null;
   const presentation = serviceMessagePresentation(notice.level, notice.message);
   const Icon =
     notice.level === "error"
@@ -62,11 +64,44 @@ export function OperationalNotice({
             ) : null}
           </details>
         ) : null}
+        {conditions.length > 1 ? (
+          <details className="mt-2 border-t border-border-subtle pt-2">
+            <summary className="fd-focus cursor-pointer font-medium text-fg-secondary">
+              {conditions.length} active issues
+            </summary>
+            <ul className="mt-2 space-y-2">
+              {conditions.map((condition) => {
+                const conditionPresentation = serviceMessagePresentation(
+                  condition.level,
+                  condition.message,
+                );
+                return (
+                  <li
+                    key={condition.id}
+                    className="flex items-start gap-2 rounded-[var(--fd-radius-sm)] bg-surface-2 px-2 py-1.5"
+                  >
+                    <span className="min-w-0 flex-1 whitespace-pre-wrap">
+                      {conditionPresentation.message}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onDismiss(condition)}
+                      className="fd-focus shrink-0 text-fg-muted hover:text-fg-primary"
+                      aria-label={`Dismiss issue: ${conditionPresentation.message}`}
+                    >
+                      Dismiss
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </details>
+        ) : null}
       </div>
       <button
         type="button"
-        onClick={() => onDismiss(notice.id)}
-        aria-label="Dismiss notice"
+        onClick={() => onDismiss(notice)}
+        aria-label="Dismiss issue"
         className="-m-1 inline-flex size-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted hover:bg-surface-3 hover:text-fg-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
         <X aria-hidden="true" className="size-3.5" />

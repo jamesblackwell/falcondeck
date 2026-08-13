@@ -595,13 +595,7 @@ impl AppState {
                     if message.is_empty() {
                         continue;
                     }
-                    let _ = app.emit_service(
-                        Some(workspace_id.clone()),
-                        Some(thread_id.clone()),
-                        ServiceLevel::Info,
-                        message.to_string(),
-                        Some("claude-stderr".to_string()),
-                    );
+                    tracing::debug!(%workspace_id, %thread_id, "claude stderr: {message}");
                 }
             })
         });
@@ -668,9 +662,9 @@ impl AppState {
                                     "No output from Claude for {minutes}m. Stop the turn if this looks stuck."
                                 ),
                             };
-                            let _ = self.emit_service(
-                                Some(workspace_id.clone()),
-                                Some(thread_id.clone()),
+                            let _ = self.emit_conversation_diagnostic(
+                                workspace_id.clone(),
+                                thread_id.clone(),
                                 ServiceLevel::Warning,
                                 message,
                                 Some("claude-watchdog".to_string()),
@@ -940,9 +934,9 @@ impl AppState {
                                     .await;
                             }
                         } else if let Some(message) = extract_claude_service_message(&value) {
-                            let _ = self.emit_service(
-                                Some(workspace_id.clone()),
-                                Some(thread_id.clone()),
+                            let _ = self.emit_conversation_diagnostic(
+                                workspace_id.clone(),
+                                thread_id.clone(),
                                 ServiceLevel::Info,
                                 message,
                                 Some("claude".to_string()),
@@ -964,15 +958,12 @@ impl AppState {
                             }
                         }
                     }
-                    Err(_) => {
-                        let _ = self.emit_service(
-                            Some(workspace_id.clone()),
-                            Some(thread_id.clone()),
-                            ServiceLevel::Info,
-                            trimmed.to_string(),
-                            Some("claude".to_string()),
-                        );
-                    }
+                    Err(error) => tracing::debug!(
+                        %workspace_id,
+                        %thread_id,
+                        %error,
+                        "ignored unparseable Claude stream line"
+                    ),
                 }
             }
         }
@@ -1035,9 +1026,9 @@ impl AppState {
                 Some("Claude turn completed without emitting any assistant output".to_string());
         }
         if was_interrupted {
-            let _ = self.emit_service(
-                Some(workspace_id.clone()),
-                Some(thread_id.clone()),
+            let _ = self.emit_conversation_diagnostic(
+                workspace_id.clone(),
+                thread_id.clone(),
                 ServiceLevel::Info,
                 "Turn interrupted".to_string(),
                 Some("claude-interrupt".to_string()),

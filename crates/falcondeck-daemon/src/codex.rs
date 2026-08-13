@@ -84,10 +84,8 @@ pub struct HydratedThread {
 /// they are protected by the disconnect drain in `read_stdout` instead.
 const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Remove terminal control sequences from provider stderr before it crosses
-/// the daemon/client boundary. Codex uses ANSI styling even when stderr is
-/// piped, and displaying those bytes directly produces replacement glyphs in
-/// browser and native clients.
+/// Remove terminal control sequences before provider stderr enters daemon
+/// diagnostic logs. Codex uses ANSI styling even when stderr is piped.
 fn strip_terminal_control_sequences(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars();
@@ -138,26 +136,6 @@ fn strip_terminal_control_sequences(input: &str) -> String {
     }
 
     output
-}
-
-/// Map Codex's stderr log level to the daemon's service severity. Structured
-/// logs and human-readable tracing output both contain a standalone level
-/// token, so this remains tolerant of Codex's formatting changes.
-fn codex_stderr_level(line: &str) -> falcondeck_core::ServiceLevel {
-    let upper = line.to_ascii_uppercase();
-    let has_token = |expected: &str| {
-        upper
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .any(|token| token == expected)
-    };
-
-    if has_token("ERROR") {
-        falcondeck_core::ServiceLevel::Error
-    } else if has_token("WARN") || has_token("WARNING") {
-        falcondeck_core::ServiceLevel::Warning
-    } else {
-        falcondeck_core::ServiceLevel::Info
-    }
 }
 
 fn is_non_fatal_codex_cache_diagnostic(line: &str) -> bool {
@@ -261,7 +239,6 @@ impl CodexSession {
         }
 
         {
-            let state = state.clone();
             let workspace_id = workspace_id.clone();
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
@@ -273,13 +250,7 @@ impl CodexSession {
                     if is_non_fatal_codex_cache_diagnostic(&message) {
                         continue;
                     }
-                    let _ = state.emit_service(
-                        Some(workspace_id.clone()),
-                        None,
-                        codex_stderr_level(&message),
-                        message,
-                        Some("stderr".to_string()),
-                    );
+                    tracing::debug!(%workspace_id, "codex app-server stderr: {message}");
                 }
             });
         }
@@ -652,35 +623,34 @@ impl CodexSession {
                         }
                         Err(error) => {
                             warn!("failed to parse codex message: {error}");
-                            let _ = self.state.emit_service(
-                                Some(self.workspace_id.clone()),
-                                None,
-                                falcondeck_core::ServiceLevel::Warning,
-                                format!("Unparseable Codex message: {line}"),
-                                Some("parse-error".to_string()),
-                            );
                         }
                     }
                 }
                 Ok(None) => {
-                    let _ = self.state.emit_service(
-                        Some(self.workspace_id.clone()),
-                        None,
-                        falcondeck_core::ServiceLevel::Warning,
-                        "Codex app-server disconnected".to_string(),
-                        Some("disconnect".to_string()),
-                    );
+                    if !self.expected_exit.load(Ordering::Acquire) && !self.state.is_shutting_down()
+                    {
+                        let _ = self.state.upsert_operational_condition(
+                            self.workspace_id.clone(),
+                            "codex_connection",
+                            falcondeck_core::ServiceLevel::Warning,
+                            "Codex app-server disconnected".to_string(),
+                            Some("disconnect".to_string()),
+                        );
+                    }
                     break;
                 }
                 Err(error) => {
                     warn!("codex stdout read error: {error}");
-                    let _ = self.state.emit_service(
-                        Some(self.workspace_id.clone()),
-                        None,
-                        falcondeck_core::ServiceLevel::Error,
-                        format!("Codex stream error: {error}"),
-                        Some("stream-error".to_string()),
-                    );
+                    if !self.expected_exit.load(Ordering::Acquire) && !self.state.is_shutting_down()
+                    {
+                        let _ = self.state.upsert_operational_condition(
+                            self.workspace_id.clone(),
+                            "codex_connection",
+                            falcondeck_core::ServiceLevel::Error,
+                            format!("Codex stream error: {error}"),
+                            Some("stream-error".to_string()),
+                        );
+                    }
                     break;
                 }
             }
@@ -1460,24 +1430,6 @@ mod tests {
         assert_eq!(
             strip_terminal_control_sequences(raw),
             "2026-08-09T10:52:51.408419Z ERROR codex_models_manager::cache: failed to load models cache"
-        );
-    }
-
-    #[test]
-    fn maps_codex_stderr_log_levels_to_service_severity() {
-        assert_eq!(
-            codex_stderr_level(
-                r#"{"timestamp":"2026-08-09T10:52:51Z","level":"ERROR","target":"codex_models_manager::cache"}"#
-            ),
-            falcondeck_core::ServiceLevel::Error
-        );
-        assert_eq!(
-            codex_stderr_level("2026-08-09T10:52:51Z WARN codex_core::plugins: retrying"),
-            falcondeck_core::ServiceLevel::Warning
-        );
-        assert_eq!(
-            codex_stderr_level("codex app-server started"),
-            falcondeck_core::ServiceLevel::Info
         );
     }
 

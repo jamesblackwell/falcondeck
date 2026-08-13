@@ -813,6 +813,8 @@ export type DaemonSnapshot = {
   interactive_requests: InteractiveRequest[];
   /** Older daemons omit workspace notices; normalization always supplies an array. */
   service_notices?: ServiceNotice[];
+  /** Active keyed workspace degradation; newer daemons update and clear these in place. */
+  operational_conditions?: OperationalCondition[];
   /** High-frequency usage lives outside thread summaries to avoid sidebar churn. */
   thread_token_usage?: Record<string, ThreadTokenUsage>;
   preferences: FalconDeckPreferences;
@@ -889,6 +891,17 @@ export type ServiceNotice = {
   created_at: string;
 };
 
+export type OperationalCondition = {
+  id: string;
+  key: string;
+  workspace_id: string;
+  level: ServiceLevel;
+  message: string;
+  source: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 export type TokenUsageBreakdown = {
   total_tokens: number;
   input_tokens: number;
@@ -954,6 +967,15 @@ export type EventEnvelope = {
         message: string;
         raw_method?: string | null;
         notice?: ServiceNotice | null;
+      }
+    | {
+        type: "operational-condition-upserted";
+        condition: OperationalCondition;
+      }
+    | {
+        type: "operational-condition-cleared";
+        key: string;
+        condition_id: string;
       }
     | { type: "thread-token-usage-updated"; usage: ThreadTokenUsage }
     | { type: "realtime-audio-started"; session_id?: string | null }

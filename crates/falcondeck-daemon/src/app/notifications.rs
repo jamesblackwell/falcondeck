@@ -5,6 +5,34 @@ use falcondeck_core::{
     RealtimeAudioChunk, ThreadTokenUsage, TokenUsageBreakdown, ToolCallDetail, ToolLifecycle,
 };
 
+fn emit_scoped_diagnostic(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: Option<String>,
+    condition_key: &str,
+    level: ServiceLevel,
+    message: String,
+    source: Option<String>,
+) -> Result<(), DaemonError> {
+    if let Some(thread_id) = thread_id {
+        app.emit_conversation_diagnostic(
+            workspace_id.to_string(),
+            thread_id,
+            level,
+            message,
+            source,
+        )
+    } else {
+        app.upsert_operational_condition(
+            workspace_id.to_string(),
+            condition_key,
+            level,
+            message,
+            source,
+        )
+    }
+}
+
 pub(super) async fn ingest_notification(
     app: &AppState,
     workspace_id: &str,
@@ -257,9 +285,9 @@ pub(super) async fn ingest_notification(
                         interrupted: true,
                     },
                 );
-                app.emit_service(
-                    Some(workspace_id.to_string()),
-                    Some(thread_id),
+                app.emit_conversation_diagnostic(
+                    workspace_id.to_string(),
+                    thread_id,
                     ServiceLevel::Error,
                     message,
                     Some(method.to_string()),
@@ -1523,9 +1551,11 @@ pub(super) async fn ingest_notification(
             let thread_id = extract_thread_id(&params);
             let message =
                 extract_string(&params, &["message"]).unwrap_or_else(|| params.to_string());
-            app.emit_service(
-                Some(workspace_id.to_string()),
+            emit_scoped_diagnostic(
+                app,
+                workspace_id,
                 thread_id,
+                "provider_error",
                 ServiceLevel::Error,
                 message,
                 Some(method.to_string()),
@@ -1535,9 +1565,11 @@ pub(super) async fn ingest_notification(
             let thread_id = extract_thread_id(&params);
             let message = extract_string(&params, &["message"])
                 .unwrap_or_else(|| "Provider warning".to_string());
-            app.emit_service(
-                Some(workspace_id.to_string()),
+            emit_scoped_diagnostic(
+                app,
+                workspace_id,
                 thread_id,
+                "provider_warning",
                 ServiceLevel::Warning,
                 message,
                 Some(method.to_string()),
@@ -1547,9 +1579,9 @@ pub(super) async fn ingest_notification(
             let summary = extract_string(&params, &["summary"])
                 .unwrap_or_else(|| "Deprecated provider behavior".to_string());
             let details = extract_string(&params, &["details"]);
-            app.emit_service(
-                Some(workspace_id.to_string()),
-                None,
+            app.upsert_operational_condition(
+                workspace_id.to_string(),
+                "provider_deprecation",
                 ServiceLevel::Warning,
                 match details {
                     Some(details) if !details.is_empty() => format!("{summary}\n{details}"),
@@ -1573,9 +1605,9 @@ pub(super) async fn ingest_notification(
             .filter(|part| !part.is_empty())
             .collect::<Vec<_>>()
             .join("\n");
-            app.emit_service(
-                Some(workspace_id.to_string()),
-                None,
+            app.upsert_operational_condition(
+                workspace_id.to_string(),
+                "provider_configuration",
                 ServiceLevel::Warning,
                 message,
                 Some(method.to_string()),
@@ -1591,9 +1623,9 @@ pub(super) async fn ingest_notification(
                     .filter_map(Value::as_str)
                     .collect::<Vec<_>>();
                 if !verifications.is_empty() {
-                    app.emit_service(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
+                    app.emit_conversation_diagnostic(
+                        workspace_id.to_string(),
+                        thread_id,
                         ServiceLevel::Info,
                         format!("Model verification: {}", verifications.join(", ")),
                         Some(method.to_string()),
@@ -1629,9 +1661,9 @@ pub(super) async fn ingest_notification(
                 if let Some(faster) = faster {
                     message.push_str(&format!(". Faster model available: {faster}"));
                 }
-                app.emit_service(
-                    Some(workspace_id.to_string()),
-                    Some(thread_id),
+                app.emit_conversation_diagnostic(
+                    workspace_id.to_string(),
+                    thread_id,
                     if enabled {
                         ServiceLevel::Warning
                     } else {
@@ -1687,9 +1719,10 @@ pub(super) async fn ingest_notification(
         }
         "mcpServer/startupStatus/updated" => {
             let status = extract_string(&params, &["status"]);
+            let name =
+                extract_string(&params, &["name"]).unwrap_or_else(|| "MCP server".to_string());
+            let condition_key = format!("mcp_startup:{name}");
             if status.as_deref() == Some("failed") {
-                let name =
-                    extract_string(&params, &["name"]).unwrap_or_else(|| "MCP server".to_string());
                 let error = extract_string(&params, &["error"])
                     .unwrap_or_else(|| "Startup failed".to_string());
                 let reason = extract_string(&params, &["failureReason", "failure_reason"]);
@@ -1700,32 +1733,37 @@ pub(super) async fn ingest_notification(
                     ),
                     None => format!("{name} failed to start: {error}"),
                 };
-                app.emit_service(
-                    Some(workspace_id.to_string()),
-                    extract_thread_id(&params),
+                app.upsert_operational_condition(
+                    workspace_id.to_string(),
+                    condition_key,
                     ServiceLevel::Error,
                     message,
                     Some(method.to_string()),
                 )?;
+            } else {
+                app.clear_operational_condition(workspace_id, &condition_key);
             }
         }
         "mcpServer/oauthLogin/completed" => {
+            let name =
+                extract_string(&params, &["name"]).unwrap_or_else(|| "MCP server".to_string());
+            let condition_key = format!("mcp_auth:{name}");
             if !params
                 .get("success")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
             {
-                let name =
-                    extract_string(&params, &["name"]).unwrap_or_else(|| "MCP server".to_string());
                 let error = extract_string(&params, &["error"])
                     .unwrap_or_else(|| "Authentication failed".to_string());
-                app.emit_service(
-                    Some(workspace_id.to_string()),
-                    extract_thread_id(&params),
+                app.upsert_operational_condition(
+                    workspace_id.to_string(),
+                    condition_key,
                     ServiceLevel::Error,
                     format!("{name} sign-in failed: {error}"),
                     Some(method.to_string()),
                 )?;
+            } else {
+                app.clear_operational_condition(workspace_id, &condition_key);
             }
         }
         "account/updated" => {
@@ -1772,9 +1810,9 @@ pub(super) async fn ingest_notification(
                         Some(thread_id.clone()),
                         UnifiedEvent::ThreadUpdated { thread },
                     );
-                    app.emit_service(
-                        Some(workspace_id.to_string()),
-                        Some(thread_id),
+                    app.emit_conversation_diagnostic(
+                        workspace_id.to_string(),
+                        thread_id,
                         ServiceLevel::Warning,
                         format!("Model rerouted to {model_id}"),
                         Some(method.to_string()),
@@ -2863,9 +2901,11 @@ pub(super) async fn ingest_server_request(
         return Ok(());
     }
 
-    app.emit_service(
-        Some(workspace_id.to_string()),
+    emit_scoped_diagnostic(
+        app,
+        workspace_id,
         extract_thread_id(&params),
+        "unsupported_interactive_request",
         ServiceLevel::Warning,
         format!("FalconDeck has not implemented interactive handling for {method} yet."),
         Some(method.to_string()),

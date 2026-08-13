@@ -614,9 +614,9 @@ async fn warn_once_if_claude_approvals_unavailable(app: &AppState, workspace_id:
     {
         return;
     }
-    let _ = app.emit_service(
-        Some(workspace_id.to_string()),
-        None,
+    let _ = app.upsert_operational_condition(
+        workspace_id.to_string(),
+        "claude_approvals",
         falcondeck_core::ServiceLevel::Warning,
         "Claude approvals disabled: curl not found".to_string(),
         Some("claude-hooks".to_string()),

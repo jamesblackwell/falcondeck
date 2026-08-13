@@ -23,14 +23,18 @@ describe("operational conversation status", () => {
     });
     const rendered = renderComponent(
       <OperationalNoticeBanner
-        notice={{
-          id: "skill-warning",
-          workspace_id: "workspace-1",
-          level: "warning",
-          message: raw,
-          raw_method: "provider/warning",
-          created_at: "2026-08-09T10:00:00Z",
-        }}
+        conditions={[
+          {
+            id: "skill-warning",
+            key: "skill_icon",
+            workspace_id: "workspace-1",
+            level: "warning",
+            message: raw,
+            source: "provider/warning",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+        ]}
         onDismiss={() => {}}
       />,
     );
@@ -62,14 +66,18 @@ describe("operational conversation status", () => {
     const copy = vi.spyOn(Clipboard, "setStringAsync").mockResolvedValue(true);
     const rendered = renderComponent(
       <OperationalNoticeBanner
-        notice={{
-          id: "large-diagnostic",
-          workspace_id: "workspace-1",
-          level: "error",
-          message: raw,
-          raw_method: "provider/error",
-          created_at: "2026-08-09T10:00:00Z",
-        }}
+        conditions={[
+          {
+            id: "large-diagnostic",
+            key: "provider_configuration",
+            workspace_id: "workspace-1",
+            level: "error",
+            message: raw,
+            source: "provider/error",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+        ]}
         onDismiss={() => {}}
       />,
     );
@@ -94,24 +102,67 @@ describe("operational conversation status", () => {
     const onDismiss = vi.fn();
     const rendered = renderComponent(
       <OperationalNoticeBanner
-        notice={{
-          id: "notice-1",
-          workspace_id: "workspace-1",
-          level: "warning",
-          message: "Configuration will change",
-          raw_method: "deprecationNotice",
-          created_at: "2026-08-09T10:00:00Z",
-        }}
+        conditions={[
+          {
+            id: "notice-1",
+            key: "provider_configuration",
+            workspace_id: "workspace-1",
+            level: "warning",
+            message: "Configuration will change",
+            source: "deprecationNotice",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+        ]}
         onDismiss={onDismiss}
       />,
     );
     expect(textOf(rendered)).toContain("Configuration will change");
     const dismiss = rendered.root.findByProps({
-      accessibilityLabel: "Dismiss notice",
+      accessibilityLabel: "Dismiss issue",
     });
     expect(dismiss.props.accessibilityRole).toBe("button");
     expect(dismiss.props.hitSlop).toBeGreaterThan(0);
     act(() => dismiss.props.onPress());
-    expect(onDismiss).toHaveBeenCalledWith("notice-1");
+    expect(onDismiss).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "notice-1" }),
+    );
+  });
+
+  it("opens a compact message center when several conditions are active", () => {
+    const rendered = renderComponent(
+      <OperationalNoticeBanner
+        conditions={[
+          {
+            id: "condition-1",
+            key: "codex_connection",
+            workspace_id: "workspace-1",
+            level: "error",
+            message: "Codex disconnected",
+            source: "disconnect",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+          {
+            id: "condition-2",
+            key: "mcp_startup:test",
+            workspace_id: "workspace-1",
+            level: "warning",
+            message: "Test MCP unavailable",
+            source: "mcpServer/startupStatus/updated",
+            created_at: "2026-08-09T10:01:00Z",
+            updated_at: "2026-08-09T10:01:00Z",
+          },
+        ]}
+        onDismiss={() => {}}
+      />,
+    );
+
+    act(() =>
+      rendered.root
+        .findByProps({ accessibilityLabel: "2 active issues" })
+        .props.onPress(),
+    );
+    expect(textOf(rendered)).toContain("Test MCP unavailable");
   });
 });

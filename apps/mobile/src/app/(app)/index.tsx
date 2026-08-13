@@ -21,7 +21,8 @@ import {
   editResendUnavailableReason,
   encryptJson,
   imageAttachmentSendBlockReason,
-  latestWorkspaceNotice,
+  operationalConditionDismissalKey,
+  workspaceOperationalConditions,
   orderedInteractiveRequestQueue,
   providerForThread,
   reuseRetrySourcesByAssistantId,
@@ -38,6 +39,7 @@ import {
   type ConversationPresentation,
   type ConversationRenderBlock,
   type InteractiveResponsePayload,
+  type OperationalCondition,
   type QueuedTurnSummary,
 } from "@falcondeck/client-core";
 import { useShallow } from "zustand/react/shallow";
@@ -121,26 +123,36 @@ export default function HomeScreen() {
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
   const selectedWorkspaceId = useSessionStore((s) => s.selectedWorkspaceId);
   const snapshot = useSessionStore((s) => s.snapshot);
-  const [dismissedNoticeIds, setDismissedNoticeIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const operationalNotice = useMemo(
+  const [dismissedConditionVersions, setDismissedConditionVersions] = useState<
+    Set<string>
+  >(() => new Set());
+  const operationalConditions = useMemo(
     () =>
-      latestWorkspaceNotice(
+      workspaceOperationalConditions(
+        snapshot?.operational_conditions,
         snapshot?.service_notices,
         selectedWorkspaceId,
-        dismissedNoticeIds,
+        dismissedConditionVersions,
       ),
-    [dismissedNoticeIds, selectedWorkspaceId, snapshot?.service_notices],
+    [
+      dismissedConditionVersions,
+      selectedWorkspaceId,
+      snapshot?.operational_conditions,
+      snapshot?.service_notices,
+    ],
   );
-  const dismissOperationalNotice = useCallback((noticeId: string) => {
-    setDismissedNoticeIds((current) => {
-      if (current.has(noticeId)) return current;
-      const next = new Set(current);
-      next.add(noticeId);
-      return next;
-    });
-  }, []);
+  const dismissOperationalCondition = useCallback(
+    (condition: OperationalCondition) => {
+      const dismissalKey = operationalConditionDismissalKey(condition);
+      setDismissedConditionVersions((current) => {
+        if (current.has(dismissalKey)) return current;
+        const next = new Set(current);
+        next.add(dismissalKey);
+        return next;
+      });
+    },
+    [],
+  );
   const {
     connectionStatus,
     error,
@@ -1168,10 +1180,10 @@ export default function HomeScreen() {
 
       <ErrorBanner message={error} onDismiss={handleDismissError} />
 
-      {operationalNotice ? (
+      {operationalConditions.length > 0 ? (
         <OperationalNoticeBanner
-          notice={operationalNotice}
-          onDismiss={dismissOperationalNotice}
+          conditions={operationalConditions}
+          onDismiss={dismissOperationalCondition}
         />
       ) : null}
 

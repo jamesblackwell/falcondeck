@@ -14,7 +14,7 @@ use falcondeck_core::{
     DaemonSnapshot, EventEnvelope, ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary,
     FalconDeckPreferences, ForkThreadRequest, HealthResponse, InteractiveRequest,
     InteractiveRequestKind, InteractiveResponsePayload, InvokeExtensionActionRequest,
-    PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice,
+    OperationalCondition, PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice,
     SkillSummary, SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget,
     ThreadAgentParams, ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle,
     ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage, UnifiedEvent,
@@ -100,6 +100,8 @@ struct InnerState {
     interactive_requests: Mutex<HashMap<(String, String), PendingServerRequest>>,
     /// Capped session-level notices for workspace events without a transcript target.
     service_notices: StdMutex<Vec<ServiceNotice>>,
+    /// Current workspace degradation keyed by `(workspace_id, semantic_key)`.
+    operational_conditions: StdMutex<HashMap<(String, String), OperationalCondition>>,
     /// Latest high-frequency token usage keyed by thread id.
     thread_token_usage: StdMutex<HashMap<String, ThreadTokenUsage>>,
     /// Active realtime transcript parts keyed by (thread id, provider role).
@@ -443,6 +445,7 @@ impl AppState {
                 persistence: Mutex::new(()),
                 interactive_requests: Mutex::new(HashMap::new()),
                 service_notices: StdMutex::new(Vec::new()),
+                operational_conditions: StdMutex::new(HashMap::new()),
                 thread_token_usage: StdMutex::new(HashMap::new()),
                 realtime_transcripts: StdMutex::new(HashMap::new()),
                 claude_approvals: Mutex::new(HashMap::new()),
@@ -911,6 +914,15 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        let mut operational_conditions = self
+            .inner
+            .operational_conditions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        operational_conditions.sort_by_key(|condition| condition.updated_at);
         let thread_token_usage = self
             .inner
             .thread_token_usage
@@ -982,6 +994,7 @@ impl AppState {
             threads,
             interactive_requests: interactive_request_list,
             service_notices,
+            operational_conditions,
             thread_token_usage,
             preferences,
             extensions,
@@ -1565,69 +1578,163 @@ impl AppState {
         });
     }
 
-    pub fn emit_service(
+    /// Adds a durable diagnostic to one conversation. This path must not be
+    /// used for workspace or application health.
+    pub fn emit_conversation_diagnostic(
         &self,
-        workspace_id: Option<String>,
-        thread_id: Option<String>,
+        workspace_id: String,
+        thread_id: String,
         level: ServiceLevel,
         message: String,
         raw_method: Option<String>,
     ) -> Result<(), DaemonError> {
-        if let (Some(workspace_id), Some(thread_id)) = (workspace_id.clone(), thread_id.clone()) {
-            let app = self.clone();
-            let service_message = message.clone();
-            let service_level = level.clone();
-            tokio::spawn(async move {
-                let _ = app
-                    .push_conversation_item(
-                        &workspace_id,
-                        &thread_id,
-                        ConversationItem::Service {
-                            id: format!("service-{}", Uuid::new_v4().simple()),
-                            level: service_level,
-                            message: service_message,
-                            created_at: Utc::now(),
-                        },
-                        false,
-                    )
-                    .await;
-            });
-        }
-        let notice = match (workspace_id.as_ref(), thread_id.as_ref()) {
-            (Some(workspace_id), None) => {
-                let notice = ServiceNotice {
-                    id: format!("notice-{}", Uuid::new_v4().simple()),
-                    workspace_id: workspace_id.clone(),
-                    level: level.clone(),
-                    message: message.clone(),
-                    raw_method: raw_method.clone(),
-                    created_at: Utc::now(),
-                };
-                let mut notices = self
-                    .inner
-                    .service_notices
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                notices.push(notice.clone());
-                if notices.len() > 32 {
-                    let excess = notices.len() - 32;
-                    notices.drain(0..excess);
-                }
-                Some(notice)
-            }
-            _ => None,
-        };
+        let app = self.clone();
+        let event_workspace_id = workspace_id.clone();
+        let event_thread_id = thread_id.clone();
+        let service_message = message.clone();
+        let service_level = level.clone();
+        tokio::spawn(async move {
+            let _ = app
+                .push_conversation_item(
+                    &workspace_id,
+                    &thread_id,
+                    ConversationItem::Service {
+                        id: format!("service-{}", Uuid::new_v4().simple()),
+                        level: service_level,
+                        message: service_message,
+                        created_at: Utc::now(),
+                    },
+                    false,
+                )
+                .await;
+        });
         self.emit(
-            workspace_id,
-            thread_id,
+            Some(event_workspace_id),
+            Some(event_thread_id),
             UnifiedEvent::Service {
                 level,
                 message,
                 raw_method,
-                notice,
+                notice: None,
             },
         );
         Ok(())
+    }
+
+    /// Creates or replaces one active workspace condition. Reusing `key`
+    /// preserves identity, so repeated failures cannot turn into a banner log.
+    pub fn upsert_operational_condition(
+        &self,
+        workspace_id: String,
+        key: impl Into<String>,
+        level: ServiceLevel,
+        message: String,
+        source: Option<String>,
+    ) -> Result<(), DaemonError> {
+        let key = key.into();
+        let now = Utc::now();
+        let condition = {
+            let mut conditions = self
+                .inner
+                .operational_conditions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let map_key = (workspace_id.clone(), key.clone());
+            let existing = conditions.get(&map_key);
+            let created_at = existing.map_or(now, |condition| condition.created_at);
+            let updated_at = existing
+                .filter(|condition| {
+                    condition.level == level
+                        && condition.message == message
+                        && condition.source == source
+                })
+                .map_or(now, |condition| condition.updated_at);
+            let id = existing.map_or_else(
+                || format!("condition-{}", Uuid::new_v4().simple()),
+                |condition| condition.id.clone(),
+            );
+            let condition = OperationalCondition {
+                id,
+                key,
+                workspace_id: workspace_id.clone(),
+                level: level.clone(),
+                message: message.clone(),
+                source: source.clone(),
+                created_at,
+                updated_at,
+            };
+            conditions.insert(map_key, condition.clone());
+            condition
+        };
+
+        // Keep the legacy snapshot/event projection until older paired clients
+        // no longer depend on `service_notices`.
+        let legacy_notice = ServiceNotice {
+            id: condition.id.clone(),
+            workspace_id: workspace_id.clone(),
+            level: level.clone(),
+            message: message.clone(),
+            raw_method: source.clone(),
+            created_at: condition.created_at,
+        };
+        {
+            let mut notices = self
+                .inner
+                .service_notices
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            notices.retain(|notice| notice.id != legacy_notice.id);
+            notices.push(legacy_notice.clone());
+            if notices.len() > 32 {
+                let excess = notices.len() - 32;
+                notices.drain(0..excess);
+            }
+        }
+
+        self.emit(
+            Some(workspace_id.clone()),
+            None,
+            UnifiedEvent::OperationalConditionUpserted {
+                condition: condition.clone(),
+            },
+        );
+        self.emit(
+            Some(workspace_id),
+            None,
+            UnifiedEvent::Service {
+                level,
+                message,
+                raw_method: source,
+                notice: Some(legacy_notice),
+            },
+        );
+        Ok(())
+    }
+
+    /// Clears a recovered workspace condition. Unknown keys are a no-op.
+    pub fn clear_operational_condition(&self, workspace_id: &str, key: &str) {
+        let removed = self
+            .inner
+            .operational_conditions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&(workspace_id.to_string(), key.to_string()));
+        let Some(condition) = removed else {
+            return;
+        };
+        self.inner
+            .service_notices
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|notice| notice.id != condition.id);
+        self.emit(
+            Some(workspace_id.to_string()),
+            None,
+            UnifiedEvent::OperationalConditionCleared {
+                key: key.to_string(),
+                condition_id: condition.id,
+            },
+        );
     }
 
     fn emit(&self, workspace_id: Option<String>, thread_id: Option<String>, event: UnifiedEvent) {

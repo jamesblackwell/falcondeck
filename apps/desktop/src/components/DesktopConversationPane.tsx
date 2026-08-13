@@ -1,13 +1,16 @@
 import { useMemo, type ComponentProps, type ReactNode } from 'react'
 
-import { currentTurnPlan, wasTurnInterruptedByShutdown } from '@falcondeck/client-core'
+import {
+  currentTurnPlan,
+  wasTurnInterruptedByShutdown,
+} from '@falcondeck/client-core'
 import type {
   ConversationItem,
   FalconDeckPreferences,
   InteractiveRequest,
   InteractiveResponsePayload,
+  OperationalCondition,
   RemoteStatusResponse,
-  ServiceNotice,
   ThreadSummary,
   TrustedDevice,
   WorkspaceSummary,
@@ -49,8 +52,8 @@ type DesktopConversationPaneProps = {
   isLoadingOlderMessages?: boolean
   onLoadOlderMessages?: () => void
   interactiveRequests: InteractiveRequest[]
-  operationalNotice: ServiceNotice | null
-  onDismissOperationalNotice: (noticeId: string) => void
+  operationalConditions: readonly OperationalCondition[]
+  onDismissOperationalCondition: (condition: OperationalCondition) => void
   findRequestKey?: number
   onStartPairing: () => void
   onRevokeDevice?: (device: TrustedDevice) => void
@@ -70,9 +73,13 @@ type DesktopConversationPaneProps = {
   onOpenFile?: OpenFileDiff | null
   headerControls?: ReactNode
   onNewThread?: () => void
-  onEditResend?: (item: Extract<ConversationItem, { kind: 'user_message' }>) => void
+  onEditResend?: (
+    item: Extract<ConversationItem, { kind: 'user_message' }>,
+  ) => void
   editResendUnavailableReason?: string | null
-  onRetryResponse?: (item: Extract<ConversationItem, { kind: 'user_message' }>) => void
+  onRetryResponse?: (
+    item: Extract<ConversationItem, { kind: 'user_message' }>,
+  ) => void
   onContinueInterruptedTurn?: () => void
   onDismissInterruptedTurn?: () => void
   quotedSelections?: readonly QuotedSelection[]
@@ -102,8 +109,8 @@ export function DesktopConversationPane({
   isLoadingOlderMessages = false,
   onLoadOlderMessages,
   interactiveRequests,
-  operationalNotice,
-  onDismissOperationalNotice,
+  operationalConditions,
+  onDismissOperationalCondition,
   findRequestKey = 0,
   onStartPairing,
   onRevokeDevice,
@@ -131,14 +138,19 @@ export function DesktopConversationPane({
 }: DesktopConversationPaneProps) {
   // The live plan is pinned above the composer instead of scrolling away with
   // the rest of the turn; the transcript skips the same item.
-  const pinnedPlan = useMemo(() => currentTurnPlan(conversationItems), [conversationItems])
+  const pinnedPlan = useMemo(
+    () => currentTurnPlan(conversationItems),
+    [conversationItems],
+  )
   // Notices collapse rather than vanish, so the outgoing content has to
   // survive the frame where its source data goes away.
-  const lastOperationalNotice = useLastPresent(operationalNotice)
+  const lastOperationalConditions = useLastPresent(
+    operationalConditions.length > 0 ? operationalConditions : null,
+  )
   const showInterruptedNotice = Boolean(
     selectedThread &&
-      wasTurnInterruptedByShutdown(selectedThread) &&
-      onContinueInterruptedTurn,
+    wasTurnInterruptedByShutdown(selectedThread) &&
+    onContinueInterruptedTurn,
   )
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface-1">
@@ -160,11 +172,11 @@ export function DesktopConversationPane({
         />
         {headerControls}
       </SessionHeader>
-      <CollapseRegion open={Boolean(operationalNotice)}>
-        {lastOperationalNotice ? (
+      <CollapseRegion open={operationalConditions.length > 0}>
+        {lastOperationalConditions?.length ? (
           <OperationalNotice
-            notice={lastOperationalNotice}
-            onDismiss={onDismissOperationalNotice}
+            conditions={lastOperationalConditions}
+            onDismiss={onDismissOperationalCondition}
           />
         ) : null}
       </CollapseRegion>
@@ -203,8 +215,13 @@ export function DesktopConversationPane({
         pinnedPlanId={pinnedPlan?.itemId ?? null}
         onQuoteSelection={onQuoteSelection}
       />
-      {pinnedPlan ? <PlanBar plan={pinnedPlan.plan} threadKey={selectedThreadId} /> : null}
-      <InteractiveRequestBar requests={interactiveRequests} onRespond={onInteractiveResponse} />
+      {pinnedPlan ? (
+        <PlanBar plan={pinnedPlan.plan} threadKey={selectedThreadId} />
+      ) : null}
+      <InteractiveRequestBar
+        requests={interactiveRequests}
+        onRespond={onInteractiveResponse}
+      />
       {selectedThread && onRemoveQueuedTurn && onSteerQueuedTurn ? (
         <QueuedTurns
           queuedTurns={selectedThread.queued_turns}

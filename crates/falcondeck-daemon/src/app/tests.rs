@@ -53,25 +53,64 @@ fn maps_codex_thread_status_and_waiting_flags() {
 }
 
 #[tokio::test]
-async fn retains_workspace_service_notices_in_snapshots() {
+async fn retains_keyed_operational_conditions_in_snapshots() {
     let app = AppState::new("test".to_string(), HashMap::new());
-    app.emit_service(
-        Some("workspace-1".to_string()),
-        None,
+    app.upsert_operational_condition(
+        "workspace-1".to_string(),
+        "provider_deprecation",
         falcondeck_core::ServiceLevel::Warning,
         "Configuration will change".to_string(),
         Some("deprecationNotice".to_string()),
     )
-    .expect("emit notice");
+    .expect("upsert condition");
 
     let snapshot = app.snapshot().await;
     assert!(matches!(
-        snapshot.service_notices.as_slice(),
-        [notice]
-            if notice.workspace_id == "workspace-1"
-                && notice.message == "Configuration will change"
-                && notice.raw_method.as_deref() == Some("deprecationNotice")
+        snapshot.operational_conditions.as_slice(),
+        [condition]
+            if condition.workspace_id == "workspace-1"
+                && condition.key == "provider_deprecation"
+                && condition.message == "Configuration will change"
+                && condition.source.as_deref() == Some("deprecationNotice")
     ));
+}
+
+#[tokio::test]
+async fn replaces_repeated_operational_conditions_instead_of_appending() {
+    let app = AppState::new("test".to_string(), HashMap::new());
+    for message in ["First failure", "Second failure"] {
+        app.upsert_operational_condition(
+            "workspace-1".to_string(),
+            "codex_connection",
+            falcondeck_core::ServiceLevel::Error,
+            message.to_string(),
+            Some("stream-error".to_string()),
+        )
+        .expect("upsert condition");
+    }
+
+    let snapshot = app.snapshot().await;
+    assert!(matches!(
+        snapshot.operational_conditions.as_slice(),
+        [condition] if condition.message == "Second failure"
+    ));
+}
+
+#[tokio::test]
+async fn removes_operational_condition_after_recovery() {
+    let app = AppState::new("test".to_string(), HashMap::new());
+    app.upsert_operational_condition(
+        "workspace-1".to_string(),
+        "codex_connection",
+        falcondeck_core::ServiceLevel::Error,
+        "Disconnected".to_string(),
+        Some("disconnect".to_string()),
+    )
+    .expect("upsert condition");
+
+    app.clear_operational_condition("workspace-1", "codex_connection");
+
+    assert!(app.snapshot().await.operational_conditions.is_empty());
 }
 
 #[test]

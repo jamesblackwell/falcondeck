@@ -35,7 +35,8 @@ import {
   generateUserItemId,
   imageAttachmentSendBlockReason,
   identityPublicKeyToBase64,
-  latestWorkspaceNotice,
+  operationalConditionDismissalKey,
+  workspaceOperationalConditions,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
   mergeThreadDetailPage,
@@ -92,6 +93,7 @@ import {
   type ImageInput,
   type InteractiveResponsePayload,
   type MachinePresence,
+  type OperationalCondition,
   type PairingChallengeRequest,
   type PairingChallengeResponse,
   type PersistedComposerSelection,
@@ -321,9 +323,9 @@ function RemoteApp() {
   const [windowFocused, setWindowFocused] = useState(
     () => document.visibilityState !== "hidden",
   );
-  const [dismissedNoticeIds, setDismissedNoticeIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const [dismissedConditionVersions, setDismissedConditionVersions] = useState<
+    Set<string>
+  >(() => new Set());
   const [drafts, setDrafts] = useState<ComposerDrafts>(() =>
     readStoredDrafts(),
   );
@@ -1018,23 +1020,33 @@ function RemoteApp() {
       ),
     [selectedThreadId, selectedWorkspaceId, snapshot?.threads],
   );
-  const operationalNotice = useMemo(
+  const operationalConditions = useMemo(
     () =>
-      latestWorkspaceNotice(
+      workspaceOperationalConditions(
+        snapshot?.operational_conditions,
         snapshot?.service_notices,
         selectedWorkspaceId,
-        dismissedNoticeIds,
+        dismissedConditionVersions,
       ),
-    [dismissedNoticeIds, selectedWorkspaceId, snapshot?.service_notices],
+    [
+      dismissedConditionVersions,
+      selectedWorkspaceId,
+      snapshot?.operational_conditions,
+      snapshot?.service_notices,
+    ],
   );
-  const dismissOperationalNotice = useCallback((noticeId: string) => {
-    setDismissedNoticeIds((current) => {
-      if (current.has(noticeId)) return current;
-      const next = new Set(current);
-      next.add(noticeId);
-      return next;
-    });
-  }, []);
+  const dismissOperationalCondition = useCallback(
+    (condition: OperationalCondition) => {
+      const dismissalKey = operationalConditionDismissalKey(condition);
+      setDismissedConditionVersions((current) => {
+        if (current.has(dismissalKey)) return current;
+        const next = new Set(current);
+        next.add(dismissalKey);
+        return next;
+      });
+    },
+    [],
+  );
   const groups = useMemo(
     () =>
       buildProjectGroups(
@@ -4101,10 +4113,10 @@ function RemoteApp() {
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {operationalNotice ? (
+          {operationalConditions.length > 0 ? (
             <OperationalNotice
-              notice={operationalNotice}
-              onDismiss={dismissOperationalNotice}
+              conditions={operationalConditions}
+              onDismiss={dismissOperationalCondition}
             />
           ) : null}
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden">

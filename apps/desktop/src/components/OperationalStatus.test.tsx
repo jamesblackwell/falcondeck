@@ -16,14 +16,18 @@ describe("operational conversation status", () => {
     });
     render(
       <OperationalNotice
-        notice={{
-          id: "skill-warning",
-          workspace_id: "workspace-1",
-          level: "warning",
-          message: raw,
-          raw_method: "provider/warning",
-          created_at: "2026-08-09T10:00:00Z",
-        }}
+        conditions={[
+          {
+            id: "skill-warning",
+            key: "skill_icon",
+            workspace_id: "workspace-1",
+            level: "warning",
+            message: raw,
+            source: "provider/warning",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+        ]}
         onDismiss={() => {}}
       />,
     );
@@ -47,14 +51,18 @@ describe("operational conversation status", () => {
     });
     render(
       <OperationalNotice
-        notice={{
-          id: "large-diagnostic",
-          workspace_id: "workspace-1",
-          level: "error",
-          message: raw,
-          raw_method: "provider/error",
-          created_at: "2026-08-09T10:00:00Z",
-        }}
+        conditions={[
+          {
+            id: "large-diagnostic",
+            key: "provider_configuration",
+            workspace_id: "workspace-1",
+            level: "error",
+            message: raw,
+            source: "provider/error",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+        ]}
         onDismiss={() => {}}
       />,
     );
@@ -73,19 +81,58 @@ describe("operational conversation status", () => {
     const onDismiss = vi.fn();
     render(
       <OperationalNotice
-        notice={{
-          id: "notice-1",
-          workspace_id: "workspace-1",
-          level: "error",
-          message: "MCP startup failed",
-          raw_method: "mcpServer/startupFailed",
-          created_at: "2026-08-09T10:00:00Z",
-        }}
+        conditions={[
+          {
+            id: "notice-1",
+            key: "mcp_startup:test",
+            workspace_id: "workspace-1",
+            level: "error",
+            message: "MCP startup failed",
+            source: "mcpServer/startupFailed",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+        ]}
         onDismiss={onDismiss}
       />,
     );
     expect(screen.getByRole("alert")).toHaveTextContent("MCP startup failed");
-    fireEvent.click(screen.getByRole("button", { name: "Dismiss notice" }));
-    expect(onDismiss).toHaveBeenCalledWith("notice-1");
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss issue" }));
+    expect(onDismiss).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "notice-1" }),
+    );
+  });
+
+  it("opens a compact message center when several conditions are active", () => {
+    render(
+      <OperationalNotice
+        conditions={[
+          {
+            id: "condition-1",
+            key: "codex_connection",
+            workspace_id: "workspace-1",
+            level: "error",
+            message: "Codex disconnected",
+            source: "disconnect",
+            created_at: "2026-08-09T10:00:00Z",
+            updated_at: "2026-08-09T10:00:00Z",
+          },
+          {
+            id: "condition-2",
+            key: "mcp_startup:test",
+            workspace_id: "workspace-1",
+            level: "warning",
+            message: "Test MCP unavailable",
+            source: "mcpServer/startupStatus/updated",
+            created_at: "2026-08-09T10:01:00Z",
+            updated_at: "2026-08-09T10:01:00Z",
+          },
+        ]}
+        onDismiss={() => {}}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("2 active issues"));
+    expect(screen.getByText("Test MCP unavailable")).toBeVisible();
   });
 });

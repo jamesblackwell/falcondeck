@@ -139,7 +139,11 @@ pub(super) async fn connect_workspace_internal(
                 models,
                 collaboration_modes,
                 threads,
-            }) => (Some(session), account, models, collaboration_modes, threads),
+            }) => {
+                app.clear_operational_condition(&workspace_id, "codex_bootstrap");
+                app.clear_operational_condition(&workspace_id, "codex_connection");
+                (Some(session), account, models, collaboration_modes, threads)
+            }
             Err(error) => {
                 // Degrading to a Claude-only workspace is only useful when
                 // Claude is actually installed; with no working provider at
@@ -150,9 +154,9 @@ pub(super) async fn connect_workspace_internal(
                 }
                 let message = error.to_string();
                 tracing::warn!("codex bootstrap failed for {path_string}: {message}");
-                let _ = app.emit_service(
-                    Some(workspace_id.clone()),
-                    None,
+                let _ = app.upsert_operational_condition(
+                    workspace_id.clone(),
+                    "codex_bootstrap",
                     falcondeck_core::ServiceLevel::Warning,
                     message,
                     Some("codex-bootstrap".to_string()),
@@ -2573,6 +2577,16 @@ pub(super) async fn remove_workspace(
         .lock()
         .await
         .retain(|(request_workspace, _), _| request_workspace != workspace_id);
+    app.inner
+        .operational_conditions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|(condition_workspace, _), _| condition_workspace != workspace_id);
+    app.inner
+        .service_notices
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .retain(|notice| notice.workspace_id != workspace_id);
     let _ = app.persist_local_state().await;
     app.emit(
         None,
@@ -3019,13 +3033,8 @@ pub(super) async fn run_codex_reconnect(app: &AppState, workspace_id: &str) {
                 return;
             }
             CodexReconnectAttempt::Reconnected => {
-                let _ = app.emit_service(
-                    Some(workspace_id.to_string()),
-                    None,
-                    falcondeck_core::ServiceLevel::Info,
-                    "Codex reconnected".to_string(),
-                    Some("codex-reconnect".to_string()),
-                );
+                app.clear_operational_condition(workspace_id, "codex_connection");
+                app.clear_operational_condition(workspace_id, "codex_bootstrap");
                 app.emit(
                     Some(workspace_id.to_string()),
                     None,
@@ -3055,9 +3064,9 @@ pub(super) async fn run_codex_reconnect(app: &AppState, workspace_id: &str) {
             };
         }
     }
-    let _ = app.emit_service(
-        Some(workspace_id.to_string()),
-        None,
+    let _ = app.upsert_operational_condition(
+        workspace_id.to_string(),
+        "codex_connection",
         falcondeck_core::ServiceLevel::Error,
         failure,
         Some("codex-reconnect".to_string()),

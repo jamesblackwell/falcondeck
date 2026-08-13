@@ -5,24 +5,27 @@ import { AlertCircle, AlertTriangle, Info, X } from "lucide-react-native";
 
 import {
   serviceMessagePresentation,
-  type ServiceNotice,
+  type OperationalCondition,
 } from "@falcondeck/client-core";
 
 import { Text } from "@/components/ui";
 import { CodeBlock } from "./CodeBlock";
 
 interface OperationalNoticeBannerProps {
-  notice: ServiceNotice;
-  onDismiss: (noticeId: string) => void;
+  conditions: readonly OperationalCondition[];
+  onDismiss: (condition: OperationalCondition) => void;
 }
 
 export const OperationalNoticeBanner = memo(function OperationalNoticeBanner({
-  notice,
+  conditions,
   onDismiss,
 }: OperationalNoticeBannerProps) {
   const [detailOpen, setDetailOpen] = useState(false);
-  const presentation = serviceMessagePresentation(notice.level, notice.message);
+  const [issuesOpen, setIssuesOpen] = useState(false);
   const { theme } = useUnistyles();
+  const notice = conditions[0];
+  if (!notice) return null;
+  const presentation = serviceMessagePresentation(notice.level, notice.message);
   const Icon =
     notice.level === "error"
       ? AlertCircle
@@ -76,11 +79,63 @@ export const OperationalNoticeBanner = memo(function OperationalNoticeBanner({
             ) : null}
           </>
         ) : null}
+        {conditions.length > 1 ? (
+          <View style={styles.issueCenter}>
+            <Pressable
+              onPress={() => setIssuesOpen((open) => !open)}
+              accessibilityRole="button"
+              accessibilityLabel={`${conditions.length} active issues`}
+              accessibilityState={{ expanded: issuesOpen }}
+              style={styles.detailButton}
+            >
+              <Text
+                variant="caption"
+                size="xs"
+                weight="semibold"
+                color="secondary"
+              >
+                {conditions.length} active issues
+              </Text>
+            </Pressable>
+            {issuesOpen ? (
+              <View style={styles.issueList}>
+                {conditions.map((condition) => {
+                  const issue = serviceMessagePresentation(
+                    condition.level,
+                    condition.message,
+                  );
+                  return (
+                    <View key={condition.id} style={styles.issueRow}>
+                      <Text
+                        variant="caption"
+                        size="xs"
+                        color="secondary"
+                        style={styles.issueMessage}
+                      >
+                        {issue.message}
+                      </Text>
+                      <Pressable
+                        onPress={() => onDismiss(condition)}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Dismiss issue: ${issue.message}`}
+                        hitSlop={(theme.minTouchTarget - theme.iconSize.sm) / 2}
+                      >
+                        <Text variant="caption" size="xs" color="muted">
+                          Dismiss
+                        </Text>
+                      </Pressable>
+                    </View>
+                  );
+                })}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
       </View>
       <Pressable
-        onPress={() => onDismiss(notice.id)}
+        onPress={() => onDismiss(notice)}
         accessibilityRole="button"
-        accessibilityLabel="Dismiss notice"
+        accessibilityLabel="Dismiss issue"
         hitSlop={(theme.minTouchTarget - theme.iconSize.sm) / 2}
       >
         <X
@@ -124,5 +179,26 @@ const styles = StyleSheet.create((theme) => ({
   detailButton: {
     minHeight: theme.minTouchTarget,
     justifyContent: "center",
+  },
+  issueCenter: {
+    borderTopWidth: 1,
+    borderTopColor: theme.colors.border.subtle,
+    marginTop: theme.spacing[1],
+    paddingTop: theme.spacing[1],
+  },
+  issueList: {
+    gap: theme.spacing[2],
+  },
+  issueRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    gap: theme.spacing[2],
+    paddingHorizontal: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
+    borderRadius: theme.radius.sm,
+    backgroundColor: theme.colors.surface[2],
+  },
+  issueMessage: {
+    flex: 1,
   },
 }));

@@ -1837,29 +1837,33 @@ export default function ConversationQaScreen() {
       </View>
       {scenario === "mixed" && showNotice ? (
         <OperationalNoticeBanner
-          notice={{
-            id: "qa-notice",
-            workspace_id: "qa-workspace",
-            level: "warning",
-            message: JSON.stringify({
-              level: "WARN",
-              fields: {
-                message:
-                  "Provider configuration changed. New turns use the updated settings.",
-                provider: "codex",
-                scope: "workspace",
-                source: "configuration",
-                model: "gpt-5",
-                approval: "on-request",
-                sandbox: "workspace-write",
-                reconnect_required: false,
-                effective: "next-turn",
-              },
-              target: "codex_core::config",
-            }),
-            raw_method: "configWarning",
-            created_at: at(0),
-          }}
+          conditions={[
+            {
+              id: "qa-notice",
+              key: "provider_configuration",
+              workspace_id: "qa-workspace",
+              level: "warning",
+              message: JSON.stringify({
+                level: "WARN",
+                fields: {
+                  message:
+                    "Provider configuration changed. New turns use the updated settings.",
+                  provider: "codex",
+                  scope: "workspace",
+                  source: "configuration",
+                  model: "gpt-5",
+                  approval: "on-request",
+                  sandbox: "workspace-write",
+                  reconnect_required: false,
+                  effective: "next-turn",
+                },
+                target: "codex_core::config",
+              }),
+              source: "configWarning",
+              created_at: at(0),
+              updated_at: at(0),
+            },
+          ]}
           onDismiss={() => setShowNotice(false)}
         />
       ) : null}

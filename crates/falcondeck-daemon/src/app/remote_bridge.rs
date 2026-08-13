@@ -672,15 +672,7 @@ impl AppState {
                     let result = crate::acp::write_providers_file(&state_dir, &providers)
                         .map(|()| serde_json::json!({ "ok": true }));
                     if result.is_ok() {
-                        // Provider commands are exec'd directly by the daemon, so
-                        // remote edits leave a visible trace.
-                        let _ = self.emit_service(
-                            None,
-                            None,
-                            falcondeck_core::ServiceLevel::Info,
-                            "Agent providers updated by a paired device".to_string(),
-                            Some("remote".to_string()),
-                        );
+                        tracing::info!("agent providers updated by a paired device");
                     }
                     result
                 }
@@ -754,20 +746,12 @@ impl AppState {
                     )
                     .map(|()| serde_json::json!({ "ok": true }));
                     if result.is_ok() {
-                        // Connector commands run outside the approval/sandbox
-                        // machinery, so remote edits leave a visible trace.
-                        let _ = self.emit_service(
-                            None,
-                            None,
-                            falcondeck_core::ServiceLevel::Info,
-                            format!(
-                                "MCP connectors updated by a paired device ({} scope)",
-                                match scope {
-                                    crate::connectors::ConnectorScope::Global => "global",
-                                    crate::connectors::ConnectorScope::Workspace => "workspace",
-                                }
-                            ),
-                            Some("remote".to_string()),
+                        tracing::info!(
+                            scope = match scope {
+                                crate::connectors::ConnectorScope::Global => "global",
+                                crate::connectors::ConnectorScope::Workspace => "workspace",
+                            },
+                            "MCP connectors updated by a paired device"
                         );
                     }
                     result

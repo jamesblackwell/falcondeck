@@ -2,6 +2,7 @@ import type {
   DaemonSnapshot,
   EventEnvelope,
   ImageInput,
+  OperationalCondition,
   ServiceNotice,
   ThreadSummary,
 } from "./types";
@@ -119,6 +120,53 @@ export function latestWorkspaceNotice(
     if (notice.level === "info" && !latestInfo) latestInfo = notice;
   }
   return latestWarning ?? latestInfo;
+}
+
+/** Dismisses one version of a condition; a later update becomes visible again. */
+export function operationalConditionDismissalKey(
+  condition: Pick<OperationalCondition, "id" | "updated_at">,
+): string {
+  return `${condition.id}:${condition.updated_at}`;
+}
+
+/** Active conditions for one workspace, highest severity and newest first. */
+export function workspaceOperationalConditions(
+  conditions: readonly OperationalCondition[] | null | undefined,
+  legacyNotices: readonly ServiceNotice[] | null | undefined,
+  workspaceId: string | null | undefined,
+  dismissedVersions: ReadonlySet<string>,
+): OperationalCondition[] {
+  if (!workspaceId) return [];
+  const current = (conditions ?? []).filter(
+    (condition) => condition.workspace_id === workspaceId,
+  );
+  const candidates =
+    current.length > 0
+      ? current
+      : (legacyNotices ?? [])
+          .filter((notice) => notice.workspace_id === workspaceId)
+          .map((notice) => ({
+            id: notice.id,
+            key: `legacy:${notice.id}`,
+            workspace_id: notice.workspace_id,
+            level: notice.level,
+            message: notice.message,
+            source: notice.raw_method,
+            created_at: notice.created_at,
+            updated_at: notice.created_at,
+          }));
+  const severity = { error: 2, warning: 1, info: 0 } as const;
+  return candidates
+    .filter(
+      (condition) =>
+        !dismissedVersions.has(operationalConditionDismissalKey(condition)) &&
+        !dismissedVersions.has(condition.id),
+    )
+    .sort((left, right) => {
+      const severityDifference = severity[right.level] - severity[left.level];
+      if (severityDifference !== 0) return severityDifference;
+      return right.updated_at.localeCompare(left.updated_at);
+    });
 }
 
 function upsertWorkspace(
@@ -260,6 +308,32 @@ export function applySnapshotEvent(
         service_notices: [...notices, notice].slice(-32),
       };
     }
+    case "operational-condition-upserted": {
+      const conditions = snapshot.operational_conditions ?? [];
+      return {
+        ...snapshot,
+        operational_conditions: [
+          daemonEvent.condition,
+          ...conditions.filter(
+            (condition) =>
+              condition.workspace_id !== daemonEvent.condition.workspace_id ||
+              condition.key !== daemonEvent.condition.key,
+          ),
+        ],
+      };
+    }
+    case "operational-condition-cleared":
+      return {
+        ...snapshot,
+        operational_conditions: (snapshot.operational_conditions ?? []).filter(
+          (condition) =>
+            condition.workspace_id !== event.workspace_id ||
+            condition.key !== daemonEvent.key,
+        ),
+        service_notices: (snapshot.service_notices ?? []).filter(
+          (notice) => notice.id !== daemonEvent.condition_id,
+        ),
+      };
     case "thread-token-usage-updated": {
       if (!event.thread_id) return snapshot;
       const usage = snapshot.thread_token_usage ?? {};

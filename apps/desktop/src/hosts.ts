@@ -715,6 +715,12 @@ export function mergeSnapshots(
       ...(local?.service_notices ?? []),
       ...hostSnapshots.flatMap((snapshot) => snapshot.service_notices ?? []),
     ],
+    operational_conditions: [
+      ...(local?.operational_conditions ?? []),
+      ...hostSnapshots.flatMap(
+        (snapshot) => snapshot.operational_conditions ?? [],
+      ),
+    ],
     thread_token_usage: Object.assign(
       {},
       base?.thread_token_usage ?? {},
