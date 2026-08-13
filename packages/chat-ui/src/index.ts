@@ -1,4 +1,5 @@
 export * from "./components/interactive-request-card";
+export * from "./components/activity-view";
 export * from "./components/interactive-request-bar";
 export * from "./components/interrupted-turn-notice";
 export * from "./components/code-block";

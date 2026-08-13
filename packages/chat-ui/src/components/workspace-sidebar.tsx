@@ -3,7 +3,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronDown, FolderClosed, FolderPlus, SquarePen } from 'lucide-react'
 
-import { compareThreads } from '@falcondeck/client-core'
+import { compareThreads, threadPriorityRank } from '@falcondeck/client-core'
 import type {
   ProjectGroup,
   ThreadSortMode,
@@ -91,6 +91,8 @@ export type WorkspaceSidebarProps = {
   errors?: string[]
   emptyState?: SidebarEmptyState
   footer?: React.ReactNode
+  /** First-class navigation rendered before pinned threads and projects. */
+  topNavigation?: React.ReactNode
   className?: string
   headerClassName?: string
   contentClassName?: string
@@ -101,6 +103,77 @@ export type WorkspaceSidebarProps = {
     thread: ThreadSummary,
     color: ThreadTag | null,
   ) => Promise<void> | void
+}
+
+type PriorityQueueState = {
+  bucket: number
+  order: number
+}
+
+/**
+ * Keeps Priority useful as a work queue instead of a live activity sort.
+ * Promotions apply immediately; demotions wait for the next navigation so a
+ * selected row cannot jump when opening it marks it read.
+ */
+function useStablePriorityOrder(
+  threads: ThreadSummary[],
+  selectedThreadId: string | null,
+  active: boolean,
+) {
+  const queueRef = useRef(new Map<string, PriorityQueueState>())
+  const previousSelectionRef = useRef(selectedThreadId)
+  const wasActiveRef = useRef(false)
+  const nextFrontOrderRef = useRef(-1)
+
+  return useMemo(() => {
+    if (!active) {
+      wasActiveRef.current = false
+      return threads
+    }
+
+    const enteringPriority = !wasActiveRef.current
+    const navigated = previousSelectionRef.current !== selectedThreadId
+    wasActiveRef.current = true
+    previousSelectionRef.current = selectedThreadId
+
+    const liveIds = new Set(threads.map((thread) => thread.id))
+    for (const id of queueRef.current.keys()) {
+      if (!liveIds.has(id)) queueRef.current.delete(id)
+    }
+
+    if (enteringPriority) {
+      queueRef.current.clear()
+      const seeded = [...threads].sort(compareThreads('priority'))
+      seeded.forEach((thread, order) => queueRef.current.set(thread.id, {
+        bucket: threadPriorityRank(thread),
+        order,
+      }))
+      nextFrontOrderRef.current = -1
+    } else {
+      for (const thread of threads) {
+        const desiredBucket = threadPriorityRank(thread)
+        const current = queueRef.current.get(thread.id)
+        if (!current) {
+          queueRef.current.set(thread.id, {
+            bucket: desiredBucket,
+            order: nextFrontOrderRef.current--,
+          })
+        } else if (desiredBucket < current.bucket || navigated) {
+          current.bucket = desiredBucket
+        }
+      }
+    }
+
+    return [...threads].sort((left, right) => {
+      const leftState = queueRef.current.get(left.id)
+      const rightState = queueRef.current.get(right.id)
+      return (
+        (leftState?.bucket ?? 4) - (rightState?.bucket ?? 4) ||
+        (leftState?.order ?? 0) - (rightState?.order ?? 0) ||
+        left.id.localeCompare(right.id)
+      )
+    })
+  }, [active, selectedThreadId, threads])
 }
 
 const ThreadList = memo(function ThreadList({
@@ -128,12 +201,20 @@ const ThreadList = memo(function ThreadList({
   threadTagsById?: Record<string, ThreadTag[]>
 }) {
   const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT)
+  const unpinned = useMemo(
+    () => group.threads.filter((thread) => !thread.is_pinned),
+    [group.threads],
+  )
+  const stablePriorityThreads = useStablePriorityOrder(
+    unpinned,
+    selectedThreadId,
+    sortMode === 'priority',
+  )
   const unpinnedThreads = useMemo(
-    () =>
-      group.threads
-        .filter((thread) => !thread.is_pinned)
-        .sort(compareThreads(sortMode)),
-    [group.threads, sortMode],
+    () => sortMode === 'priority'
+      ? stablePriorityThreads
+      : [...unpinned].sort(compareThreads(sortMode)),
+    [sortMode, stablePriorityThreads, unpinned],
   )
 
   const visible = unpinnedThreads.slice(0, visibleCount)
@@ -315,6 +396,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     description: 'Add a project folder to get started.',
   },
   footer,
+  topNavigation,
   className,
   headerClassName,
   contentClassName,
@@ -1062,6 +1144,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       </SidebarHeader>
 
       <SidebarContent className={contentClassName}>
+        {topNavigation ? <nav className="mb-4">{topNavigation}</nav> : null}
         <PinnedThreadList
           entries={pinnedThreads}
           selectedThreadId={visualSelectedThreadId}

@@ -5,6 +5,7 @@ export type ShortcutContext = 'global' | 'composer'
 export type ShortcutCommandId =
   | 'commandPalette'
   | 'openSettings'
+  | 'openActivity'
   | 'openKeyboardShortcuts'
   | 'openProject'
   | 'newThread'
@@ -49,6 +50,7 @@ export type ShortcutSettings = {
 export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'commandPalette', label: 'Command menu', description: 'Search chats and available commands', category: 'App', context: 'global', defaults: ['Mod+K', 'Mod+Shift+P'] },
   { id: 'openSettings', label: 'Settings', description: 'Open FalconDeck settings', category: 'App', context: 'global', defaults: ['Mod+,'] },
+  { id: 'openActivity', label: 'Activity', description: 'Open the cross-project attention queue', category: 'App', context: 'global', defaults: ['Mod+U'] },
   { id: 'openKeyboardShortcuts', label: 'Keyboard shortcuts', description: 'Review and customize every binding', category: 'App', context: 'global', defaults: ['Mod+Shift+/'] },
   { id: 'openProject', label: 'Open project', description: 'Add a local project folder', category: 'App', context: 'global', defaults: ['Mod+O'] },
   { id: 'newThread', label: 'New chat', description: 'Start a chat in the current project', category: 'Conversation', context: 'global', defaults: ['Mod+N', 'Mod+Shift+O'] },

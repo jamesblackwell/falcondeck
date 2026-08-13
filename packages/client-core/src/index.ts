@@ -1,5 +1,6 @@
 export * from './types'
 export * from './grouping'
+export * from './activity'
 export * from './conversation'
 export * from './daemon-client'
 export * from './crypto'

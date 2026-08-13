@@ -36,6 +36,7 @@ describe('keyboard shortcuts', () => {
     expect(shortcutFromEvent(key('}', { metaKey: true, shiftKey: true }))).toBe('Mod+Shift+]')
     expect(commandForEvent('composer', key('Enter', { metaKey: true }))).toBe('invertFollowUp')
     expect(commandForEvent('global', key('k', { metaKey: true }))).toBe('commandPalette')
+    expect(commandForEvent('global', key('u', { metaKey: true }))).toBe('openActivity')
     expect(commandForEvent('global', key('?', { metaKey: true, shiftKey: true }))).toBe('openKeyboardShortcuts')
     expect(commandForEvent('global', key('Enter', { metaKey: true }))).toBeNull()
   })

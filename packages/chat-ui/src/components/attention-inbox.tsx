@@ -87,6 +87,8 @@ export const AttentionInbox = memo(function AttentionInbox({
   selectedThreadId,
   onSelectThread,
 }: AttentionInboxProps) {
+  // TODO(Activity view): consider removing this compact duplicate once the
+  // full Activity surface in docs/ACTIVITY-VIEW.md has proven itself.
   const [collapsed, setCollapsed] = useState(false)
   // The selected thread is excluded: the user is already looking at it, and
   // its unread/running churn would pop the inbox in and out on every message,

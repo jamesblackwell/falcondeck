@@ -47,7 +47,7 @@ describe('compareThreads', () => {
       ...overrides,
     }) as ThreadSummary
 
-  it('puts every unread chat ahead of newer read activity', () => {
+  it('uses the work-queue bucket order', () => {
     const unread = summary({
       id: 'unread',
       updated_at: '2026-08-12T08:00:00Z',
@@ -76,7 +76,7 @@ describe('compareThreads', () => {
     })
 
     expect([running, awaitingResponse, unread].sort(compareThreads('priority')).map(({ id }) => id))
-      .toEqual(['unread', 'awaiting-response', 'running'])
+      .toEqual(['awaiting-response', 'unread', 'running'])
   })
 
   it('keeps actionable status ordering within the unread bucket', () => {
@@ -114,7 +114,7 @@ describe('compareThreads', () => {
     ).toEqual(['unread-awaiting-response', 'ordinary-unread'])
   })
 
-  it('does not reorder equal-priority chats when streaming refreshes updated_at', () => {
+  it('uses recency to seed order within a priority bucket', () => {
     const alpha = summary({
       id: 'alpha',
       title: 'Alpha',
@@ -129,7 +129,7 @@ describe('compareThreads', () => {
     })
     const compare = compareThreads('priority')
 
-    expect([zulu, alpha].sort(compare).map(({ id }) => id)).toEqual(['alpha', 'zulu'])
+    expect([zulu, alpha].sort(compare).map(({ id }) => id)).toEqual(['zulu', 'alpha'])
 
     alpha.updated_at = '2026-08-12T11:00:00Z'
     expect([zulu, alpha].sort(compare).map(({ id }) => id)).toEqual(['alpha', 'zulu'])

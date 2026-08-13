@@ -18,6 +18,7 @@ import {
   composerProviderFor,
   composerSelectionFor,
   countAwaitingResponseThreads,
+  countActivityEntries,
   conversationItemsForSelection,
   deriveThreadAttentionPresentation,
   deriveThreadTags,
@@ -159,6 +160,11 @@ const SettingsView = lazy(() =>
     default: module.SettingsView,
   })),
 );
+const ActivityView = lazy(() =>
+  import("@falcondeck/chat-ui/activity-view").then((module) => ({
+    default: module.ActivityView,
+  })),
+);
 const DiffPanel = lazy(() =>
   import("./components/DiffPanel").then((module) => ({
     default: module.DiffPanel,
@@ -269,6 +275,7 @@ function AppInner() {
     useState(false);
   const [isStartingRemote, setIsStartingRemote] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
   const [settingsRequestKey, setSettingsRequestKey] = useState(0);
@@ -730,6 +737,10 @@ function AppInner() {
       viewSnapshot?.threads,
       viewSnapshot?.workspaces,
     ],
+  );
+  const activityCounts = useMemo(
+    () => countActivityEntries(groups, viewSnapshot?.interactive_requests ?? []),
+    [groups, viewSnapshot?.interactive_requests],
   );
   const conversationItems: ConversationItem[] = useMemo(() => {
     const selectedItems = conversationItemsForSelection(
@@ -2536,6 +2547,7 @@ function AppInner() {
   const handleSelectWorkspace = useCallback(
     (workspaceId: string, threadId: string | null) => {
       setIsSettingsOpen(false);
+      setIsActivityOpen(false);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
     },
@@ -2545,6 +2557,7 @@ function AppInner() {
   const handleSelectThread = useCallback(
     (workspaceId: string, threadId: string) => {
       setIsSettingsOpen(false);
+      setIsActivityOpen(false);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
     },
@@ -2554,6 +2567,7 @@ function AppInner() {
   const handleNewThread = useCallback(
     (workspaceId: string) => {
       setIsSettingsOpen(false);
+      setIsActivityOpen(false);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(null);
       // Clear the detail at the same time as the selection. The connection
@@ -2889,6 +2903,12 @@ function AppInner() {
     setSettingsSection("general");
     setSettingsRequestKey((current) => current + 1);
     setIsSettingsOpen(true);
+    setIsActivityOpen(false);
+  }, []);
+
+  const handleOpenActivity = useCallback(() => {
+    setIsSettingsOpen(false);
+    setIsActivityOpen(true);
   }, []);
 
   const handleCheckForUpdates = useCallback(() => {
@@ -3689,6 +3709,7 @@ function AppInner() {
       const next = threads[(index + offset + threads.length) % threads.length];
       if (!next) return;
       setIsSettingsOpen(false);
+      setIsActivityOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
       setSelectedThreadId(next.id);
     },
@@ -3703,6 +3724,7 @@ function AppInner() {
       navigatingHistoryRef.current = true;
       selectionHistoryIndexRef.current = nextIndex;
       setIsSettingsOpen(false);
+      setIsActivityOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
       setSelectedThreadId(entry.threadId);
     },
@@ -3745,11 +3767,16 @@ function AppInner() {
           setSettingsSection("general");
           setSettingsRequestKey((current) => current + 1);
           setIsSettingsOpen(true);
+          setIsActivityOpen(false);
+          break;
+        case "openActivity":
+          handleOpenActivity();
           break;
         case "openKeyboardShortcuts":
           setSettingsSection("keyboard");
           setSettingsRequestKey((current) => current + 1);
           setIsSettingsOpen(true);
+          setIsActivityOpen(false);
           break;
         case "openProject":
           void handleAddProject();
@@ -3803,6 +3830,7 @@ function AppInner() {
           break;
         case "focusComposer":
           setIsSettingsOpen(false);
+          setIsActivityOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
           break;
         case "openHarnessMenu":
@@ -3818,6 +3846,7 @@ function AppInner() {
                   ? ("sandbox" as const)
                   : ("model" as const);
           setIsSettingsOpen(false);
+          setIsActivityOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
           break;
         }
@@ -3835,6 +3864,7 @@ function AppInner() {
   }, [
     handleAddProject,
     handleNewThread,
+    handleOpenActivity,
     handleStopCallback,
     isSettingsOpen,
     navigateSelectionHistory,
@@ -3918,6 +3948,7 @@ function AppInner() {
             onSelectThread={handleSelectThread}
             onNewThread={handleNewThread}
             onOpenSettings={handleOpenSettings}
+            onOpenActivity={handleOpenActivity}
             openRequestKey={paletteRequest.key}
             initialQuery={paletteRequest.query}
             initialScope={paletteRequest.scope}
@@ -3948,6 +3979,10 @@ function AppInner() {
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
+            onOpenActivity={handleOpenActivity}
+            activityOpen={isActivityOpen}
+            activityCount={activityCounts.blocked + activityCounts.failed + activityCounts.ready}
+            activityHasFailure={activityCounts.failed > 0}
             errors={sidebarErrors}
             threadTagsById={threadTags.byThreadId}
             threadTagOptions={threadTags.tags}
@@ -3957,7 +3992,20 @@ function AppInner() {
           />
         }
         main={
-          isSettingsOpen ? (
+          isActivityOpen ? (
+            <Suspense fallback={loadingThreadState}>
+              <ActivityView
+                groups={groups}
+                interactiveRequests={viewSnapshot?.interactive_requests ?? []}
+                workspaceHosts={workspaceHostBadges}
+                onOpenThread={handleSelectThread}
+                onInteractiveResponse={handleInteractiveResponseCallback}
+                onMarkThreadRead={handleMarkThreadRead}
+                onClose={() => setIsActivityOpen(false)}
+                onNewThread={selectedWorkspaceId ? () => handleNewThread(selectedWorkspaceId) : undefined}
+              />
+            </Suspense>
+          ) : isSettingsOpen ? (
             <Suspense fallback={loadingThreadState}>
               <SettingsView
                 initialSection={settingsSection}
@@ -4160,6 +4208,7 @@ function AppInner() {
                   setSettingsSection("connectors");
                   setSettingsRequestKey((current) => current + 1);
                   setIsSettingsOpen(true);
+                  setIsActivityOpen(false);
                 },
                 // Goals live in the composer's plus menu, not the header.
                 goal:
@@ -4185,7 +4234,7 @@ function AppInner() {
           )
         }
         rail={
-          isSettingsOpen ? undefined : (
+          isSettingsOpen || isActivityOpen ? undefined : (
             <Suspense fallback={null}>
               <DiffPanel
                 api={apiFor(selectedWorkspaceId)}

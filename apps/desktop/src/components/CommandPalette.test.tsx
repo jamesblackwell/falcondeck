@@ -76,6 +76,22 @@ describe("CommandPalette controlled requests", () => {
     Element.prototype.scrollIntoView = vi.fn();
   });
 
+  it("opens Activity from the Actions section", () => {
+    const onOpenActivity = vi.fn();
+    render(
+      <CommandPalette
+        groups={[]}
+        onSelectThread={vi.fn()}
+        onOpenActivity={onOpenActivity}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("option", { name: /Open Activity/i }));
+    expect(onOpenActivity).toHaveBeenCalledOnce();
+  });
+
   it("toggles for the command shortcut and remains open for explicit search requests", () => {
     const props = { groups: [], onSelectThread: vi.fn() };
     const { rerender } = render(

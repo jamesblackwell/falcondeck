@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from '
 import { createPortal } from 'react-dom'
 import {
   Check,
+  Activity,
   FolderClosed,
   MessageSquare,
   Monitor,
@@ -151,6 +152,7 @@ export type CommandPaletteProps = {
   onSelectThread: (workspaceId: string, threadId: string) => void
   onNewThread?: (workspaceId: string) => void
   onOpenSettings?: () => void
+  onOpenActivity?: () => void
   /** Controlled open request for hosts with customizable shortcuts. */
   openRequestKey?: number
   initialQuery?: string
@@ -167,6 +169,7 @@ export const CommandPalette = memo(function CommandPalette({
   onSelectThread,
   onNewThread,
   onOpenSettings,
+  onOpenActivity,
   openRequestKey,
   initialQuery = '',
   initialScope = 'all',
@@ -306,6 +309,17 @@ export const CommandPalette = memo(function CommandPalette({
         })
       }
     }
+    if (onOpenActivity) {
+      result.push({
+        id: 'activity',
+        kind: 'action',
+        section: 'Actions',
+        label: 'Open Activity',
+        icon: <Activity className="h-3.5 w-3.5" />,
+        search: normalizeSearchFields({ primary: 'Open Activity', secondary: '', keywords: 'attention queue blocked failed unread running' }),
+        run: onOpenActivity,
+      })
+    }
     if (onOpenSettings) {
       result.push({
         id: 'settings',
@@ -354,7 +368,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.palette, appearance.theme, groups, onNewThread, onOpenSettings, onSelectThread, open])
+  }, [appearance.palette, appearance.theme, groups, onNewThread, onOpenActivity, onOpenSettings, onSelectThread, open])
 
   const filtered = useMemo(() => {
     const scopedItems = initialScope === 'threads'
