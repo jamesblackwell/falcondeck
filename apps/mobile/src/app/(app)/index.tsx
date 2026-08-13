@@ -1391,7 +1391,7 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: theme.spacing[4],
-    paddingVertical: theme.spacing[3],
+    paddingVertical: theme.spacing[1],
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border.subtle,
   },
