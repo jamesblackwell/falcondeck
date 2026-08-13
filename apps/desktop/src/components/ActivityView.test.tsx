@@ -158,7 +158,14 @@ describe("ActivityView", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Process exited 1")).toBeInTheDocument();
     expect(screen.getByText("Implementation complete")).toBeInTheDocument();
-    expect(screen.getByText("Running tests")).toBeInTheDocument();
+    expect(screen.getByText("Running tests")).toHaveClass("line-clamp-3");
+    expect(screen.getByLabelText("Activity summary")).toHaveTextContent(
+      "3 need attention",
+    );
+    expect(screen.getByText("Needs response")).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-activity-grid="running"]'),
+    ).toHaveClass("xl:grid-cols-2");
   });
 
   it("answers an approval inline with the exact response payload", async () => {
@@ -367,6 +374,7 @@ describe("ActivityView", () => {
     const onNewThread = vi.fn();
     render(<ActivityView {...props({ onNewThread })} />);
     expect(screen.getByText("All caught up")).toBeInTheDocument();
+    expect(screen.getByText("No active work")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "New thread" }));
     expect(onNewThread).toHaveBeenCalledOnce();
   });

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Check, CircleAlert, Play, X } from "lucide-react";
+import { Activity, Check, CircleAlert, Plus, Play, X } from "lucide-react";
 
 import {
   collectActivityEntries,
@@ -73,6 +73,17 @@ const SECTION_META: Record<
     tone: "text-success",
   },
 };
+
+const SUMMARY_STATS: readonly {
+  section: ActivitySection;
+  label: string;
+  tone: string;
+}[] = [
+  { section: "blocked", label: "Needs response", tone: "text-warning" },
+  { section: "failed", label: "Failed", tone: "text-danger" },
+  { section: "ready", label: "Ready", tone: "text-info" },
+  { section: "running", label: "Running", tone: "text-success" },
+];
 
 function entryKey(entry: ActivityEntry) {
   return `${entry.workspaceId}:${entry.thread.id}`;
@@ -270,7 +281,13 @@ const ActivityRow = memo(
               {entry.projectLabel} · {timeAgo(entry.thread.updated_at, nowMs)}
             </span>
             {reason ? (
-              <span className="mt-2 block whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary">
+              <span
+                className={cn(
+                  "mt-2 block whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary",
+                  entry.section === "running" &&
+                    "line-clamp-3 break-words font-mono text-[length:var(--fd-text-xs)] leading-relaxed",
+                )}
+              >
                 {reason}
               </span>
             ) : null}
@@ -427,6 +444,12 @@ export const ActivityView = memo(function ActivityView({
   const sections = useStableOrder(visibleEntries);
   const runningCount = sections.get("running")?.length ?? 0;
   const attentionCount = visibleEntries.length - runningCount;
+  const summaryCounts = new Map(
+    SECTION_ORDER.map((section) => [
+      section,
+      sections.get(section)?.length ?? 0,
+    ]),
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-1">
@@ -450,23 +473,70 @@ export const ActivityView = memo(function ActivityView({
         </Button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-8">
-        <div className="mx-auto w-full max-w-[720px] space-y-8">
-          {attentionCount === 0 ? (
+      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
+        <div className="mx-auto w-full max-w-[1120px] space-y-6">
+          <section
+            aria-label="Activity summary"
+            className="flex flex-col gap-4 rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 px-4 py-3 shadow-[var(--fd-shadow-sm)] md:flex-row md:items-center"
+          >
+            <div className="flex min-w-0 items-center gap-3 md:w-52 md:shrink-0">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 text-fg-muted">
+                <Activity aria-hidden="true" className="h-4 w-4" />
+              </span>
+              <div className="min-w-0">
+                <p className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                  {attentionCount === 0
+                    ? "All caught up"
+                    : `${attentionCount} need${attentionCount === 1 ? "s" : ""} attention`}
+                </p>
+                <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                  {runningCount > 0
+                    ? `${runningCount} running quietly`
+                    : "No active runs"}
+                </p>
+              </div>
+            </div>
+
+            <dl className="grid min-w-0 flex-1 grid-cols-2 gap-px overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-border-subtle sm:grid-cols-4">
+              {SUMMARY_STATS.map((stat) => (
+                <div
+                  key={stat.section}
+                  className="flex min-w-0 items-baseline justify-between gap-2 bg-surface-1 px-3 py-2 sm:block"
+                >
+                  <dt className="truncate text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em] text-fg-muted">
+                    {stat.label}
+                  </dt>
+                  <dd
+                    className={cn(
+                      "mt-0.5 text-[length:var(--fd-text-sm)] font-semibold tabular-nums",
+                      stat.tone,
+                    )}
+                  >
+                    {summaryCounts.get(stat.section) ?? 0}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+
+            {onNewThread ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="shrink-0"
+                onClick={onNewThread}
+              >
+                <Plus aria-hidden="true" className="h-4 w-4" />
+                New thread
+              </Button>
+            ) : null}
+          </section>
+
+          {visibleEntries.length === 0 ? (
             <EmptyState
-              icon={<Activity className="h-6 w-6" />}
-              title="All caught up"
-              description={
-                runningCount > 0
-                  ? `${runningCount} running quietly`
-                  : "Nothing needs your attention"
-              }
-              action={
-                onNewThread ? (
-                  <Button onClick={onNewThread}>New thread</Button>
-                ) : undefined
-              }
-              className="rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2"
+              title="No active work"
+              description="Tasks that need attention or are still running will appear here."
+              className="py-16"
             />
           ) : null}
 
@@ -496,7 +566,10 @@ export const ActivityView = memo(function ActivityView({
                     </div>
                     <Badge variant="default">{sectionEntries.length}</Badge>
                   </div>
-                  <div className="space-y-3">
+                  <div
+                    data-activity-grid={section}
+                    className="grid items-start gap-3 xl:grid-cols-2"
+                  >
                     {sectionEntries.map((entry) => (
                       <ActivityRow
                         key={entryKey(entry)}
