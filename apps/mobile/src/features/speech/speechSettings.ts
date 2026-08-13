@@ -16,6 +16,7 @@ export type SpeechSettings = {
 export type PendingVoiceRecording = {
   uri: string
   createdAt: number
+  provider: SpeechProvider
 }
 
 const DEFAULT_SETTINGS: SpeechSettings = {
@@ -57,15 +58,38 @@ export function resetSpeechSettings(): void {
 
 export function getPendingVoiceRecording(): PendingVoiceRecording | null {
   const pending = getJson<Partial<PendingVoiceRecording>>(PENDING_RECORDING_KEY)
-  return pending &&
-    typeof pending.uri === 'string' &&
-    typeof pending.createdAt === 'number'
-    ? { uri: pending.uri, createdAt: pending.createdAt }
-    : null
+  if (
+    !pending ||
+    typeof pending.uri !== 'string' ||
+    typeof pending.createdAt !== 'number'
+  ) {
+    return null
+  }
+  const provider =
+    pending.provider === 'on-device' || pending.provider === 'openrouter'
+      ? pending.provider
+      : (getSpeechSettings().provider ?? 'on-device')
+  const normalized = {
+    uri: pending.uri,
+    createdAt: pending.createdAt,
+    provider,
+  }
+  if (
+    pending.provider !== 'on-device' &&
+    pending.provider !== 'openrouter'
+  ) {
+    // Older builds did not record provenance. Pin the current explicit choice,
+    // defaulting to the privacy-preserving local path, so it cannot later drift.
+    setJson(PENDING_RECORDING_KEY, normalized)
+  }
+  return normalized
 }
 
-export function setPendingVoiceRecording(uri: string): PendingVoiceRecording {
-  const pending = { uri, createdAt: Date.now() }
+export function setPendingVoiceRecording(
+  uri: string,
+  provider: SpeechProvider,
+): PendingVoiceRecording {
+  const pending = { uri, createdAt: Date.now(), provider }
   setJson(PENDING_RECORDING_KEY, pending)
   return pending
 }

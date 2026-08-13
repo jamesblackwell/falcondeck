@@ -7,10 +7,7 @@ import {
   SettingsSection,
   settingsPageStyles,
 } from '@/components/settings'
-import {
-  OptionSheet,
-  type OptionSheetItem,
-} from '@/components/ui'
+import { OptionSheet, type OptionSheetItem } from '@/components/ui'
 import {
   fetchOpenRouterSpeechModels,
   getDesktopSpeechStatus,
@@ -32,6 +29,9 @@ export default function SpeechSettingsScreen() {
   const [showModels, setShowModels] = useState(false)
 
   useEffect(() => {
+    if (settings.provider !== 'openrouter') return
+    setDesktopStatus('checking')
+    setModelsError(null)
     void getDesktopSpeechStatus()
       .then((status) =>
         setDesktopStatus(status.configured ? 'configured' : 'missing'),
@@ -44,7 +44,7 @@ export default function SpeechSettingsScreen() {
           'Could not refresh the model list. Your saved model will still work.',
         ),
       )
-  }, [])
+  }, [settings.provider])
 
   const modelItems = useMemo<OptionSheetItem[]>(() => {
     const available = models.map((model) => ({
@@ -86,35 +86,37 @@ export default function SpeechSettingsScreen() {
         />
       </SettingsSection>
 
-      <SettingsSection
-        title="OpenRouter"
-        footer="Add or remove the API key in FalconDeck desktop settings. The key never reaches this phone or FalconDeck's relay. Failed recordings remain local for retry."
-      >
-        <SettingsRow
-          label="Desktop credential"
-          detail={
-            desktopStatus === 'configured'
-              ? 'Stored in the desktop OS credential store'
-              : desktopStatus === 'missing'
-                ? 'Not configured — open FalconDeck settings on your desktop'
-                : desktopStatus === 'offline'
-                  ? 'Paired desktop is currently unavailable'
-                  : 'Checking paired desktop…'
-          }
-          value={desktopStatus === 'configured' ? 'Ready' : undefined}
-        />
-        <SettingsRow
-          label="Model"
-          detail={
-            modelsError ??
-            (models.length
-              ? `${models.length} transcription models available`
-              : 'Loading available models…')
-          }
-          value={settings.model.split('/').pop()}
-          onPress={() => setShowModels(true)}
-        />
-      </SettingsSection>
+      {settings.provider === 'openrouter' ? (
+        <SettingsSection
+          title="OpenRouter"
+          footer="Add or remove the API key in FalconDeck desktop settings. The key never reaches this phone or FalconDeck's relay. Failed recordings remain local for retry."
+        >
+          <SettingsRow
+            label="Desktop credential"
+            detail={
+              desktopStatus === 'configured'
+                ? 'Stored in the desktop OS credential store'
+                : desktopStatus === 'missing'
+                  ? 'Not configured — open FalconDeck settings on your desktop'
+                  : desktopStatus === 'offline'
+                    ? 'Paired desktop is currently unavailable'
+                    : 'Checking paired desktop…'
+            }
+            value={desktopStatus === 'configured' ? 'Ready' : undefined}
+          />
+          <SettingsRow
+            label="Model"
+            detail={
+              modelsError ??
+              (models.length
+                ? `${models.length} transcription models available`
+                : 'Loading available models…')
+            }
+            value={settings.model.split('/').pop()}
+            onPress={() => setShowModels(true)}
+          />
+        </SettingsSection>
+      ) : null}
 
       {showModels ? (
         <OptionSheet

@@ -77,9 +77,12 @@ export function VoiceInputSheet({
   }))
   const settingsRef = useRef(initial.settings)
   const initialProvider = initial.settings.provider
+  const initialPendingProvider = initial.pending?.provider ?? null
   const [provider, setProvider] = useState<SpeechProvider | null>(
-    initialProvider,
+    initialPendingProvider ?? initialProvider,
   )
+  const [recordingProvider, setRecordingProvider] =
+    useState<SpeechProvider | null>(initialPendingProvider)
   const [state, setState] = useState<VoiceState>(
     initial.pending ? 'failed' : initialProvider ? 'starting' : 'choosing',
   )
@@ -178,7 +181,7 @@ export function VoiceInputSheet({
     }
   }, [recorder])
 
-  const startOnDevice = useCallback(async () => {
+  const startOnDevice = useCallback(async (audioUri?: string) => {
     setState('starting')
     setError(null)
     if (!ExpoSpeechRecognitionModule.isRecognitionAvailable()) {
@@ -193,15 +196,17 @@ export function VoiceInputSheet({
       setState('failed')
       return
     }
-    const permission =
-      await ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync()
-    if (cancelledRef.current) return
-    if (!permission.granted) {
-      setError(
-        'Microphone access is required to use on-device speech recognition.',
-      )
-      setState('failed')
-      return
+    if (!audioUri) {
+      const permission =
+        await ExpoSpeechRecognitionModule.requestMicrophonePermissionsAsync()
+      if (cancelledRef.current) return
+      if (!permission.granted) {
+        setError(
+          'Microphone access is required to use on-device speech recognition.',
+        )
+        setState('failed')
+        return
+      }
     }
     transcriptRef.current = ''
     finalizedTranscriptRef.current = ''
@@ -213,15 +218,23 @@ export function VoiceInputSheet({
       continuous: true,
       requiresOnDeviceRecognition: true,
       addsPunctuation: true,
-      recordingOptions: ExpoSpeechRecognitionModule.supportsRecording()
+      audioSource: audioUri
         ? {
-            persist: true,
-            outputDirectory: directory.uri,
-            outputFileName: `voice-${Date.now()}.wav`,
-            outputSampleRate: 16_000,
-            outputEncoding: 'pcmFormatInt16',
+            uri: audioUri,
+            audioChannels: 1,
+            sampleRate: 16_000,
           }
         : undefined,
+      recordingOptions:
+        !audioUri && ExpoSpeechRecognitionModule.supportsRecording()
+          ? {
+              persist: true,
+              outputDirectory: directory.uri,
+              outputFileName: `voice-${Date.now()}.wav`,
+              outputSampleRate: 16_000,
+              outputEncoding: 'pcmFormatInt16',
+            }
+          : undefined,
     })
   }, [])
 
@@ -234,14 +247,20 @@ export function VoiceInputSheet({
           const status = await getDesktopSpeechStatus()
           if (cancelledRef.current) return
           if (!status.configured) {
-            setError('Add your OpenRouter API key in FalconDeck desktop settings first.')
+            setError(
+              'Add your OpenRouter API key in FalconDeck desktop settings first.',
+            )
             setState('failed')
             return
           }
           await startCloud()
         } catch (cause) {
           if (cancelledRef.current) return
-          setError(cause instanceof Error ? cause.message : 'Could not reach the paired desktop.')
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : 'Could not reach the paired desktop.',
+          )
           setState('failed')
         }
       } else {
@@ -275,7 +294,8 @@ export function VoiceInputSheet({
   useSpeechRecognitionEvent('audioend', (event) => {
     if (!event.uri) return
     setRecordingUri(event.uri)
-    setPendingVoiceRecording(event.uri)
+    setRecordingProvider('on-device')
+    setPendingVoiceRecording(event.uri, 'on-device')
   })
   useSpeechRecognitionEvent('error', (event) => {
     if (cancelledRef.current || event.error === 'aborted') return
@@ -301,7 +321,8 @@ export function VoiceInputSheet({
         throw new Error('The recorder did not produce an audio file.')
       const uri = moveCloudRecording(recorder.uri)
       setRecordingUri(uri)
-      setPendingVoiceRecording(uri)
+      setRecordingProvider('openrouter')
+      setPendingVoiceRecording(uri, 'openrouter')
       await setAudioModeAsync({ allowsRecording: false })
       await transcribeCloud(uri)
     } catch (cause) {
@@ -323,7 +344,9 @@ export function VoiceInputSheet({
       void recorder.stop().then(() => {
         if (recorder.uri) {
           const uri = moveCloudRecording(recorder.uri)
-          setPendingVoiceRecording(uri)
+          setRecordingUri(uri)
+          setRecordingProvider('openrouter')
+          setPendingVoiceRecording(uri, 'openrouter')
         }
         return setAudioModeAsync({ allowsRecording: false })
       })
@@ -339,11 +362,53 @@ export function VoiceInputSheet({
 
   const retry = useCallback(async () => {
     if (recordingUri) {
-      await transcribeCloud(recordingUri)
+      if (recordingProvider === 'on-device') {
+        setProvider('on-device')
+        await startOnDevice(recordingUri)
+        return
+      }
+      try {
+        const status = await getDesktopSpeechStatus()
+        if (cancelledRef.current) return
+        if (!status.configured) {
+          setError(
+            'This saved recording needs OpenRouter. Add the API key on your desktop, or discard it and record on-device.',
+          )
+          setState('failed')
+          return
+        }
+        setProvider('openrouter')
+        await transcribeCloud(recordingUri)
+      } catch (cause) {
+        if (cancelledRef.current) return
+        setError(
+          cause instanceof Error
+            ? cause.message
+            : 'Could not reach the paired desktop.',
+        )
+        setState('failed')
+      }
       return
     }
     if (provider) await begin(provider)
-  }, [begin, provider, recordingUri, transcribeCloud])
+  }, [
+    begin,
+    provider,
+    recordingProvider,
+    recordingUri,
+    startOnDevice,
+    transcribeCloud,
+  ])
+
+  const discardAndRecordOnDevice = useCallback(() => {
+    removeRecording(recordingUri)
+    clearPendingVoiceRecording()
+    setRecordingUri(null)
+    setRecordingProvider(null)
+    settingsRef.current = updateSpeechSettings({ provider: 'on-device' })
+    setProvider('on-device')
+    void startOnDevice()
+  }, [recordingUri, startOnDevice])
 
   return (
     <NativeSheet
@@ -429,16 +494,31 @@ export function VoiceInputSheet({
           ) : null}
           {state === 'failed' ? (
             <View style={styles.actions}>
-              <Button
-                label={recordingUri ? 'Retry transcription' : 'Try again'}
-                icon={
-                  <RotateCcw
-                    size={theme.iconSize.sm}
-                    color={theme.colors.surface[0]}
-                  />
-                }
-                onPress={() => void retry()}
-              />
+              {recordingUri &&
+              recordingProvider === 'openrouter' &&
+              initialProvider === 'on-device' ? (
+                <Button
+                  label="Discard and record on-device"
+                  icon={
+                    <Mic
+                      size={theme.iconSize.sm}
+                      color={theme.colors.surface[0]}
+                    />
+                  }
+                  onPress={discardAndRecordOnDevice}
+                />
+              ) : (
+                <Button
+                  label={recordingUri ? 'Retry transcription' : 'Try again'}
+                  icon={
+                    <RotateCcw
+                      size={theme.iconSize.sm}
+                      color={theme.colors.surface[0]}
+                    />
+                  }
+                  onPress={() => void retry()}
+                />
+              )}
               {recordingUri ? (
                 <Button
                   variant="ghost"
