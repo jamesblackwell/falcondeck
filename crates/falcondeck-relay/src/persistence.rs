@@ -299,7 +299,10 @@ impl PostgresBackend {
                         ROW_NUMBER() OVER (
                             PARTITION BY session_id ORDER BY seq DESC
                         ) AS reverse_rank,
-                        SUM(pg_column_size(body)::bigint) OVER (
+                        -- pg_column_size returns integer, whose SUM is bigint.
+                        -- Casting each input to bigint would make SUM return
+                        -- numeric and reject the driver's i64 byte limit.
+                        SUM(pg_column_size(body)) OVER (
                             PARTITION BY session_id
                             ORDER BY seq DESC
                             ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
@@ -327,13 +330,13 @@ impl PostgresBackend {
                     WHERE session.session_id = cutoffs.session_id
                     RETURNING session.session_id
                 )
-                DELETE FROM relay_updates AS update
+                DELETE FROM relay_updates AS target
                 USING cutoffs
-                WHERE update.session_id = cutoffs.session_id
-                  AND update.seq <= cutoffs.highest_pruned_seq
+                WHERE target.session_id = cutoffs.session_id
+                  AND target.seq <= cutoffs.highest_pruned_seq
                   AND EXISTS (
                       SELECT 1 FROM updated_sessions
-                      WHERE updated_sessions.session_id = update.session_id
+                      WHERE updated_sessions.session_id = target.session_id
                   )
                 ",
                 &[&update_cutoff, &max_updates, &max_bytes],
@@ -1211,5 +1214,116 @@ pub(crate) fn queued_action_status_from_db(
         other => Err(RelayError::StateLoad(format!(
             "unknown queued action status `{other}`"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This test uses temporary tables on an explicitly supplied PostgreSQL
+    /// instance so it exercises PostgreSQL's real parser and window/CTE
+    /// semantics without touching durable schemas or rows.
+    #[tokio::test]
+    #[ignore = "set FALCONDECK_RELAY_TEST_DATABASE_URL to run the PostgreSQL integration test"]
+    async fn postgres_preload_prune_enforces_age_count_and_byte_bounds() {
+        let database_url = std::env::var("FALCONDECK_RELAY_TEST_DATABASE_URL")
+            .expect("FALCONDECK_RELAY_TEST_DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, NoTls)
+            .await
+            .expect("connect to test PostgreSQL");
+        let connection_task = tokio::spawn(async move {
+            connection.await.expect("test PostgreSQL connection");
+        });
+
+        client
+            .batch_execute(
+                r"
+                CREATE TEMP TABLE relay_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    oldest_lost_seq BIGINT NOT NULL DEFAULT 0
+                );
+                CREATE TEMP TABLE relay_updates (
+                    session_id TEXT NOT NULL,
+                    seq BIGINT NOT NULL,
+                    body JSONB NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    PRIMARY KEY (session_id, seq)
+                );
+
+                INSERT INTO relay_sessions (session_id)
+                VALUES ('count'), ('bytes'), ('age'), ('oversized');
+
+                INSERT INTO relay_updates (session_id, seq, body, created_at) VALUES
+                    ('count', 1, jsonb_build_object('payload', 'a'), NOW()),
+                    ('count', 2, jsonb_build_object('payload', 'b'), NOW()),
+                    ('count', 3, jsonb_build_object('payload', 'c'), NOW()),
+                    ('bytes', 1, jsonb_build_object('payload', repeat('a', 700)), NOW()),
+                    ('bytes', 2, jsonb_build_object('payload', repeat('b', 700)), NOW()),
+                    ('age', 1, jsonb_build_object('payload', 'old'), NOW() - INTERVAL '8 days'),
+                    ('age', 2, jsonb_build_object('payload', 'new'), NOW()),
+                    ('oversized', 1, jsonb_build_object('payload', repeat('z', 1200)), NOW());
+                ",
+            )
+            .await
+            .expect("create PostgreSQL pruning fixtures");
+
+        let backend = PostgresBackend {
+            client: Mutex::new(client),
+        };
+        let retention = RetentionConfig {
+            update_retention: chrono::Duration::days(7),
+            max_updates_per_session: 2,
+            max_update_bytes_per_session: 900,
+            trusted_device_retention: chrono::Duration::days(180),
+            claimed_pairing_retention: chrono::Duration::days(1),
+            completed_action_retention: chrono::Duration::days(3),
+        };
+
+        assert_eq!(
+            backend
+                .prune_updates_before_load(&retention, Utc::now())
+                .await
+                .expect("prune PostgreSQL replay"),
+            3
+        );
+
+        let client = backend.client.lock().await;
+        for (session_id, expected_seq, expected_oldest_lost_seq) in [
+            ("count", vec![2_i64, 3], 2_i64),
+            ("bytes", vec![2_i64], 2_i64),
+            ("age", vec![2_i64], 2_i64),
+            ("oversized", vec![1_i64], 0_i64),
+        ] {
+            let retained = client
+                .query(
+                    "SELECT seq FROM relay_updates WHERE session_id = $1 ORDER BY seq",
+                    &[&session_id],
+                )
+                .await
+                .expect("query retained replay")
+                .into_iter()
+                .map(|row| row.get::<_, i64>("seq"))
+                .collect::<Vec<_>>();
+            assert_eq!(retained, expected_seq, "session {session_id}");
+
+            let oldest_lost_seq = client
+                .query_one(
+                    "SELECT oldest_lost_seq FROM relay_sessions WHERE session_id = $1",
+                    &[&session_id],
+                )
+                .await
+                .expect("query truncation cursor")
+                .get::<_, i64>("oldest_lost_seq");
+            assert_eq!(
+                oldest_lost_seq, expected_oldest_lost_seq,
+                "session {session_id}"
+            );
+        }
+        drop(client);
+        drop(backend);
+        connection_task
+            .await
+            .expect("join PostgreSQL connection task");
     }
 }
