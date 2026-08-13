@@ -20,9 +20,29 @@ import {
 import {
   readPersistedComposerState,
   readStoredDrafts,
+  transferComposerDraft,
   writePersistedComposerState,
   writeStoredDrafts,
 } from './composer-persistence'
+
+describe('transferComposerDraft', () => {
+  it('moves the active draft to another project', () => {
+    const drafts = upsertComposerDraft({}, 'source', 'keep this text', 1)
+
+    expect(transferComposerDraft(drafts, 'source', 'target', 2)).toEqual({
+      target: { text: 'keep this text', updatedAt: 2 },
+    })
+  })
+
+  it('keeps an existing destination draft instead of overwriting it', () => {
+    let drafts = upsertComposerDraft({}, 'source', 'active draft', 1)
+    drafts = upsertComposerDraft(drafts, 'target', 'older target draft', 1)
+
+    expect(transferComposerDraft(drafts, 'source', 'target', 2)).toEqual({
+      target: { text: 'active draft\n\nolder target draft', updatedAt: 2 },
+    })
+  })
+})
 
 describe('draftKeyFor', () => {
   it('gives each conversation its own key, including the per-workspace new-thread composer', () => {

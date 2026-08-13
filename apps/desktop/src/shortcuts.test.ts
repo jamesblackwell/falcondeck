@@ -8,6 +8,9 @@ import {
   setShortcutBindings,
   shortcutConflict,
   shortcutFromEvent,
+  shortcutHint,
+  shortcutHintTokens,
+  shortcutTitle,
   shortcutTokens,
   shortcutValidation,
 } from './shortcuts'
@@ -51,12 +54,33 @@ describe('keyboard shortcuts', () => {
   })
 
   it('maps Ctrl+Shift chords to the composer option menus', () => {
+    expect(commandForEvent('global', key('L', { ctrlKey: true, shiftKey: true }))).toBe('openProjectMenu')
     expect(commandForEvent('global', key('A', { ctrlKey: true, shiftKey: true }))).toBe('openHarnessMenu')
     expect(commandForEvent('global', key('P', { ctrlKey: true, shiftKey: true }))).toBe('openPermissionMenu')
     expect(commandForEvent('global', key('S', { ctrlKey: true, shiftKey: true }))).toBe('openSandboxMenu')
     expect(commandForEvent('global', key('M', { ctrlKey: true, shiftKey: true }))).toBe('openModelMenu')
     // The Command-based palette chord must stay distinct from Ctrl+Shift+P.
     expect(commandForEvent('global', key('P', { metaKey: true, shiftKey: true }))).toBe('commandPalette')
+  })
+
+  it('opens the shortcut sheet from a bare "?" as well as the Mac Help chord', () => {
+    expect(commandForEvent('global', key('?', { shiftKey: true }))).toBe('openKeyboardShortcuts')
+    expect(commandForEvent('global', key('?', { metaKey: true, shiftKey: true }))).toBe('openKeyboardShortcuts')
+    // An unmodified "?" is only safe because it is punctuation; validation
+    // still refuses bare letters, which would swallow ordinary typing.
+    expect(shortcutValidation('Shift+/', 'global')).toBeNull()
+  })
+
+  it('renders hints for the primary binding of a command', () => {
+    expect(shortcutHint('openActivity')).toBe('⌘U')
+    expect(shortcutHintTokens('openActivity')).toEqual(['⌘', 'U'])
+    expect(shortcutTitle('Activity', 'openActivity')).toBe('Activity (⌘U)')
+
+    setShortcutBindings('openActivity', [])
+    expect(shortcutHint('openActivity')).toBeNull()
+    expect(shortcutHintTokens('openActivity')).toBeUndefined()
+    // An unbound command falls back to a plain label rather than "(  )".
+    expect(shortcutTitle('Activity', 'openActivity')).toBe('Activity')
   })
 
   it('persists explicit unbinding and supports reset', () => {

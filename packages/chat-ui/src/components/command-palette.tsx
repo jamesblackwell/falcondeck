@@ -5,6 +5,7 @@ import {
   Check,
   Activity,
   FolderClosed,
+  Keyboard,
   MessageSquare,
   Monitor,
   Moon,
@@ -42,7 +43,20 @@ type PaletteItem = {
   search: PaletteSearchFields
   active?: boolean
   unread?: boolean
+  /** Rendered shortcut tokens ("⌘", "U") shown right-aligned on the row. */
+  shortcut?: readonly string[]
   run: () => void
+}
+
+/**
+ * Shortcut hints for the actions the palette offers, so the palette doubles as
+ * the place people learn the bindings. Tokens are pre-rendered by the host,
+ * which owns the (customizable) keymap.
+ */
+export type PaletteShortcutHints = {
+  activity?: readonly string[]
+  settings?: readonly string[]
+  keyboardShortcuts?: readonly string[]
 }
 
 export type PaletteSearchFields = {
@@ -53,6 +67,8 @@ export type PaletteSearchFields = {
 
 const PRIORITY_THREAD_COMPARATOR = compareThreads('priority')
 const MAX_SEARCH_RESULTS = 30
+/** Stable default so an unset hints prop does not rebuild the item list. */
+const NO_SHORTCUT_HINTS: PaletteShortcutHints = {}
 
 function normalizeSearchText(value: string): string {
   return value
@@ -153,6 +169,8 @@ export type CommandPaletteProps = {
   onNewThread?: (workspaceId: string) => void
   onOpenSettings?: () => void
   onOpenActivity?: () => void
+  onOpenKeyboardShortcuts?: () => void
+  shortcutHints?: PaletteShortcutHints
   /** Controlled open request for hosts with customizable shortcuts. */
   openRequestKey?: number
   initialQuery?: string
@@ -170,6 +188,8 @@ export const CommandPalette = memo(function CommandPalette({
   onNewThread,
   onOpenSettings,
   onOpenActivity,
+  onOpenKeyboardShortcuts,
+  shortcutHints = NO_SHORTCUT_HINTS,
   openRequestKey,
   initialQuery = '',
   initialScope = 'all',
@@ -316,8 +336,21 @@ export const CommandPalette = memo(function CommandPalette({
         section: 'Actions',
         label: 'Open Activity',
         icon: <Activity className="h-3.5 w-3.5" />,
+        shortcut: shortcutHints.activity,
         search: normalizeSearchFields({ primary: 'Open Activity', secondary: '', keywords: 'attention queue blocked failed unread running' }),
         run: onOpenActivity,
+      })
+    }
+    if (onOpenKeyboardShortcuts) {
+      result.push({
+        id: 'keyboard-shortcuts',
+        kind: 'action',
+        section: 'Actions',
+        label: 'Keyboard shortcuts',
+        icon: <Keyboard className="h-3.5 w-3.5" />,
+        shortcut: shortcutHints.keyboardShortcuts,
+        search: normalizeSearchFields({ primary: 'Keyboard shortcuts', secondary: '', keywords: 'keybindings hotkeys bindings shortcuts keymap help cheatsheet' }),
+        run: onOpenKeyboardShortcuts,
       })
     }
     if (onOpenSettings) {
@@ -327,6 +360,7 @@ export const CommandPalette = memo(function CommandPalette({
         section: 'Actions',
         label: 'Open settings',
         icon: <Settings className="h-3.5 w-3.5" />,
+        shortcut: shortcutHints.settings,
         search: normalizeSearchFields({ primary: 'Open settings', secondary: '', keywords: 'settings preferences options' }),
         run: onOpenSettings,
       })
@@ -368,7 +402,7 @@ export const CommandPalette = memo(function CommandPalette({
     }
 
     return result
-  }, [appearance.palette, appearance.theme, groups, onNewThread, onOpenActivity, onOpenSettings, onSelectThread, open])
+  }, [appearance.palette, appearance.theme, groups, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenSettings, onSelectThread, open, shortcutHints])
 
   const filtered = useMemo(() => {
     const scopedItems = initialScope === 'threads'
@@ -547,6 +581,13 @@ export const CommandPalette = memo(function CommandPalette({
                       {item.sublabel}
                     </span>
                   ) : null}
+                  {item.shortcut?.length ? (
+                    <span className="flex shrink-0 items-center gap-0.5">
+                      {item.shortcut.map((token, tokenIndex) => (
+                        <Kbd key={`${token}-${tokenIndex}`}>{token}</Kbd>
+                      ))}
+                    </span>
+                  ) : null}
                   {item.active ? (
                     <Check aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-accent" />
                   ) : null}
@@ -564,6 +605,14 @@ export const CommandPalette = memo(function CommandPalette({
           <span className="flex items-center gap-1">
             <Kbd>↵</Kbd> open
           </span>
+          {shortcutHints.keyboardShortcuts?.length ? (
+            <span className="ml-auto flex items-center gap-1">
+              {shortcutHints.keyboardShortcuts.map((token, index) => (
+                <Kbd key={`${token}-${index}`}>{token}</Kbd>
+              ))}
+              all shortcuts
+            </span>
+          ) : null}
         </div>
       </div>
     </div>,

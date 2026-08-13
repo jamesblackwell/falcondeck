@@ -92,6 +92,33 @@ describe("CommandPalette controlled requests", () => {
     expect(onOpenActivity).toHaveBeenCalledOnce();
   });
 
+  it("teaches the bindings for the actions it offers", () => {
+    const onOpenKeyboardShortcuts = vi.fn();
+    render(
+      <CommandPalette
+        groups={[]}
+        onSelectThread={vi.fn()}
+        onOpenActivity={vi.fn()}
+        onOpenKeyboardShortcuts={onOpenKeyboardShortcuts}
+        shortcutHints={{
+          activity: ["⌘", "U"],
+          keyboardShortcuts: ["⇧", "/"],
+        }}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    expect(
+      within(screen.getByRole("option", { name: /Open Activity/i })).getByText("⌘"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("option", { name: /Keyboard shortcuts/i }),
+    );
+    expect(onOpenKeyboardShortcuts).toHaveBeenCalledOnce();
+  });
+
   it("toggles for the command shortcut and remains open for explicit search requests", () => {
     const props = { groups: [], onSelectThread: vi.fn() };
     const { rerender } = render(

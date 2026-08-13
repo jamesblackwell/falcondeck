@@ -9,6 +9,8 @@ import {
 import type { ExtensionPanelDefinition } from "@falcondeck/client-core";
 import { cn } from "@falcondeck/ui";
 
+import { shortcutHint, shortcutTitle, useShortcutSettings } from "../shortcuts";
+
 export type DesktopSidebarProps = WorkspaceSidebarProps & {
   onOpenSettings?: () => void;
   settingsOpen?: boolean;
@@ -39,9 +41,12 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   onOpenExtensionPanel,
   ...props
 }: DesktopSidebarProps) {
+  const shortcutSettings = useShortcutSettings();
   return (
     <WorkspaceSidebar
       {...props}
+      newThreadShortcut={shortcutHint("newThread", shortcutSettings) ?? undefined}
+      addProjectShortcut={shortcutHint("openProject", shortcutSettings) ?? undefined}
       headerClassName="min-h-12 justify-center gap-1 pb-1 pl-20 pr-3 pt-1"
       topNavigation={
         onOpenScheduled || onOpenActivity || extensionPanels.length > 0 ? (
@@ -58,6 +63,11 @@ export const DesktopSidebar = memo(function DesktopSidebar({
                 )}
                 aria-current={activityOpen ? "page" : undefined}
                 aria-label="Activity"
+                title={shortcutTitle(
+                  "Activity — attention queue across projects",
+                  "openActivity",
+                  shortcutSettings,
+                )}
               >
                 <Activity aria-hidden="true" className="h-4 w-4 shrink-0" />
                 <span className="min-w-0 flex-1">Activity</span>
@@ -115,12 +125,13 @@ export const DesktopSidebar = memo(function DesktopSidebar({
             type="button"
             onClick={onOpenSettings}
             className={cn(
-              'fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors',
+              "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
               settingsOpen
-                ? 'bg-surface-3 text-fg-primary'
-                : 'text-fg-secondary hover:bg-surface-3 hover:text-fg-primary',
+                ? "bg-surface-3 text-fg-primary"
+                : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
             )}
-            aria-current={settingsOpen ? 'page' : undefined}
+            aria-current={settingsOpen ? "page" : undefined}
+            title={shortcutTitle("Settings", "openSettings", shortcutSettings)}
           >
             <Settings aria-hidden="true" className="h-4 w-4 shrink-0" />
             <span>Settings</span>
@@ -128,5 +139,5 @@ export const DesktopSidebar = memo(function DesktopSidebar({
         ) : null
       }
     />
-  )
-})
+  );
+});

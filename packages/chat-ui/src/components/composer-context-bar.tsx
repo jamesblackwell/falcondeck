@@ -33,6 +33,10 @@ export type ComposerContextBarProps = {
   workspaces: WorkspaceSummary[]
   selectedWorkspace: WorkspaceSummary | null
   onSelectWorkspace: (workspaceId: string) => void
+  /** Increment to open the project picker from a host-level keyboard shortcut. */
+  projectMenuRequestKey?: number
+  /** Human-readable shortcut rendered in the project chip tooltip. */
+  projectShortcutLabel?: string
   selectedIsolation: ThreadIsolation
   onIsolationChange: (value: ThreadIsolation) => void
   /** Branch state of the project folder; null hides the chip (remote host, not a repo). */
@@ -80,6 +84,8 @@ export const ComposerContextBar = memo(function ComposerContextBar({
   workspaces,
   selectedWorkspace,
   onSelectWorkspace,
+  projectMenuRequestKey = 0,
+  projectShortcutLabel,
   selectedIsolation,
   onIsolationChange,
   branches = null,
@@ -110,6 +116,8 @@ export const ComposerContextBar = memo(function ComposerContextBar({
         workspaceHosts={workspaceHosts}
         remoteHosts={remoteHosts}
         onSelectWorkspace={onSelectWorkspace}
+        openRequestKey={projectMenuRequestKey}
+        shortcutLabel={projectShortcutLabel}
         onAddLocalProject={onAddLocalProject}
         onAddRemoteProject={onAddRemoteProject}
         isAddingProject={isAddingProject}
@@ -191,6 +199,8 @@ function ProjectMenu({
   workspaceHosts,
   remoteHosts,
   onSelectWorkspace,
+  openRequestKey,
+  shortcutLabel,
   onAddLocalProject,
   onAddRemoteProject,
   isAddingProject,
@@ -203,6 +213,8 @@ function ProjectMenu({
   workspaceHosts: Record<string, WorkspaceHostBadge>
   remoteHosts: ComposerRemoteHostOption[]
   onSelectWorkspace: (workspaceId: string) => void
+  openRequestKey: number
+  shortcutLabel?: string
   onAddLocalProject?: () => void | Promise<void>
   onAddRemoteProject?: (hostId: string, path: string) => void | Promise<void>
   isAddingProject: boolean
@@ -214,6 +226,10 @@ function ProjectMenu({
   const [remoteHostId, setRemoteHostId] = useState<string | null>(null)
   const [remotePath, setRemotePath] = useState('')
   const [remoteError, setRemoteError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (openRequestKey > 0 && !disabled) setOpen(true)
+  }, [disabled, openRequestKey])
 
   const connectedRemoteHosts = useMemo(
     () => remoteHosts.filter((host) => host.connected),
@@ -291,6 +307,7 @@ function ProjectMenu({
           aria-label="Project"
           aria-haspopup="menu"
           aria-expanded={open}
+          title={shortcutLabel ? `Change project (${shortcutLabel})` : 'Change project'}
           disabled={menuDisabled}
           className={CHIP_CLASS}
         >

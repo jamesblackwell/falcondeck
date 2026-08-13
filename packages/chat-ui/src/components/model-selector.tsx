@@ -37,7 +37,18 @@ export type MenuOpenProps = {
    * shortcut-opened menu). Call `event.preventDefault()` before refocusing.
    */
   onCloseAutoFocus?: (event: Event) => void;
+  /**
+   * Rendered shortcut for the host binding that opens this picker ("⌃⇧M").
+   * Shown in the trigger tooltip so the chip teaches its own shortcut.
+   */
+  shortcutHint?: string;
 };
+
+/** Trigger tooltip that names the control and, when bound, its shortcut. */
+function triggerTitle(label: string, shortcutHint: string | undefined, reason?: string | null) {
+  if (reason) return reason;
+  return shortcutHint ? `${label} (${shortcutHint})` : label;
+}
 
 export function ProviderSelector({
   value,
@@ -47,6 +58,7 @@ export function ProviderSelector({
   open,
   onOpenChange,
   onCloseAutoFocus,
+  shortcutHint,
 }: {
   value: AgentProvider;
   providers: ProviderOption[];
@@ -69,6 +81,7 @@ export function ProviderSelector({
         variant="quiet"
         disabled={disabled || providers.length === 0}
         aria-label="Agent"
+        title={triggerTitle("Choose agent", shortcutHint)}
       >
         <SelectValue placeholder="Agent" />
       </SelectTrigger>
@@ -152,6 +165,7 @@ export function ModelMenu({
   open: controlledOpen,
   onOpenChange,
   onCloseAutoFocus,
+  shortcutHint,
 }: {
   models: ModelSummary[];
   /** The model a send would use: the explicit pick or the provider default. */
@@ -358,6 +372,7 @@ export function ModelMenu({
           aria-label="Model"
           aria-haspopup="menu"
           aria-expanded={open}
+          title={triggerTitle("Choose model and reasoning", shortcutHint)}
           disabled={disabled || models.length === 0}
           className="fd-focus inline-flex h-7 max-w-full items-center gap-1 rounded-[var(--fd-radius-md)] px-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50 data-[state=open]:bg-surface-3 data-[state=open]:text-fg-secondary"
         >
@@ -704,6 +719,7 @@ export function PermissionModeSelector({
   open,
   onOpenChange,
   onCloseAutoFocus,
+  shortcutHint,
 }: {
   value: string | null;
   modes: string[];
@@ -732,7 +748,11 @@ export function PermissionModeSelector({
         variant="quiet"
         disabled={disabled || unavailable}
         aria-label="Permission mode"
-        title={unavailable ? "This agent has no permission modes" : undefined}
+        title={triggerTitle(
+          "Choose permission mode",
+          shortcutHint,
+          unavailable ? "This agent has no permission modes" : null,
+        )}
       >
         <SelectValue placeholder="Permissions" />
       </SelectTrigger>
@@ -759,6 +779,7 @@ export function SandboxSelector({
   open,
   onOpenChange,
   onCloseAutoFocus,
+  shortcutHint,
 }: {
   value: string | null;
   modes: string[];
@@ -779,7 +800,11 @@ export function SandboxSelector({
         variant="quiet"
         disabled={disabled || unavailable}
         aria-label="Sandbox mode"
-        title={unavailable ? "This agent has no sandbox modes" : undefined}
+        title={triggerTitle(
+          "Choose sandbox mode",
+          shortcutHint,
+          unavailable ? "This agent has no sandbox modes" : null,
+        )}
       >
         <SelectValue placeholder="Sandbox" />
       </SelectTrigger>

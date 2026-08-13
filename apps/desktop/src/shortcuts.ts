@@ -21,6 +21,7 @@ export type ShortcutCommandId =
   | 'decreaseTextSize'
   | 'resetTextSize'
   | 'focusComposer'
+  | 'openProjectMenu'
   | 'openHarnessMenu'
   | 'openPermissionMenu'
   | 'openSandboxMenu'
@@ -51,7 +52,10 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'commandPalette', label: 'Command menu', description: 'Search chats and available commands', category: 'App', context: 'global', defaults: ['Mod+K', 'Mod+Shift+P'] },
   { id: 'openSettings', label: 'Settings', description: 'Open FalconDeck settings', category: 'App', context: 'global', defaults: ['Mod+,'] },
   { id: 'openActivity', label: 'Activity', description: 'Open the cross-project attention queue', category: 'App', context: 'global', defaults: ['Mod+U'] },
-  { id: 'openKeyboardShortcuts', label: 'Keyboard shortcuts', description: 'Review and customize every binding', category: 'App', context: 'global', defaults: ['Mod+Shift+/'] },
+  // "?" is the cross-app convention for the shortcut sheet (GitHub, Slack, Linear).
+  // It is safe as a bare key because the global handler ignores editable targets,
+  // and ⌘? stays bound for the macOS Help-menu muscle memory.
+  { id: 'openKeyboardShortcuts', label: 'Keyboard shortcuts', description: 'Review and customize every binding', category: 'App', context: 'global', defaults: ['Shift+/', 'Mod+Shift+/'] },
   { id: 'openProject', label: 'Open project', description: 'Add a local project folder', category: 'App', context: 'global', defaults: ['Mod+O'] },
   { id: 'newThread', label: 'New chat', description: 'Start a chat in the current project', category: 'Conversation', context: 'global', defaults: ['Mod+N', 'Mod+Shift+O'] },
   { id: 'searchThreads', label: 'Search chats', description: 'Open the command menu focused on chats', category: 'Conversation', context: 'global', defaults: ['Mod+G'] },
@@ -66,6 +70,7 @@ export const SHORTCUT_DEFINITIONS: readonly ShortcutDefinition[] = [
   { id: 'decreaseTextSize', label: 'Decrease text size', description: 'Decrease the interface text scale', category: 'View', context: 'global', defaults: ['Mod+-'] },
   { id: 'resetTextSize', label: 'Reset text size', description: 'Restore the default interface text scale', category: 'View', context: 'global', defaults: ['Mod+0'] },
   { id: 'focusComposer', label: 'Focus prompt', description: 'Move focus to the prompt composer', category: 'Composer', context: 'global', defaults: ['Shift+Escape'] },
+  { id: 'openProjectMenu', label: 'Choose project', description: 'Change the project for a new chat', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+L'] },
   { id: 'openHarnessMenu', label: 'Choose agent', description: 'Open the agent picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+A'] },
   { id: 'openPermissionMenu', label: 'Choose permission mode', description: 'Open the permission mode picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+P'] },
   { id: 'openSandboxMenu', label: 'Choose sandbox mode', description: 'Open the sandbox picker on the composer', category: 'Composer', context: 'global', defaults: ['Ctrl+Shift+S'] },
@@ -274,6 +279,35 @@ export function shortcutValidation(shortcut: string, context: ShortcutContext): 
 export function shortcutTokens(shortcut: string): string[] {
   const symbols: Record<string, string> = { Mod: '⌘', Ctrl: '⌃', Alt: '⌥', Shift: '⇧', Enter: '↵', Escape: 'Esc', Backspace: '⌫', Delete: '⌦', Up: '↑', Down: '↓', Left: '←', Right: '→', Space: 'Space', Plus: '+' }
   return normalizeShortcut(shortcut).split('+').map((part) => symbols[part] ?? part)
+}
+
+/**
+ * Rendered form of a command's primary binding ("⌘U"), or null when the user
+ * has cleared every binding for it. The first binding wins because the
+ * shortcuts panel lists them in preference order.
+ */
+export function shortcutHint(commandId: ShortcutCommandId, settings = current): string | null {
+  const tokens = shortcutHintTokens(commandId, settings)
+  return tokens ? tokens.join('') : null
+}
+
+/** Same primary binding as `shortcutHint`, kept as tokens for `<Kbd>` rendering. */
+export function shortcutHintTokens(
+  commandId: ShortcutCommandId,
+  settings = current,
+): string[] | undefined {
+  const [binding] = bindingsFor(commandId, settings)
+  return binding ? shortcutTokens(binding) : undefined
+}
+
+/**
+ * Tooltip text for a control that a shortcut also drives. Discoverability
+ * lives on the control itself, so the hint is appended rather than replacing
+ * the accessible name — screen readers keep reading the plain label.
+ */
+export function shortcutTitle(label: string, commandId: ShortcutCommandId, settings = current): string {
+  const hint = shortcutHint(commandId, settings)
+  return hint ? `${label} (${hint})` : label
 }
 
 export function isEditableTarget(target: EventTarget | null) {

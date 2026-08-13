@@ -50,6 +50,18 @@ describe('ComposerContextBar', () => {
     expect(screen.getByRole('button', { name: 'Git branch' })).toHaveTextContent('main')
   })
 
+  it('opens the project picker when requested by the host shortcut', () => {
+    const { rerender } = render(
+      <ComposerContextBar {...baseProps} projectMenuRequestKey={0} />,
+    )
+
+    expect(screen.queryByRole('menuitemradio', { name: 'lucidpic' })).not.toBeInTheDocument()
+
+    rerender(<ComposerContextBar {...baseProps} projectMenuRequestKey={1} />)
+
+    expect(screen.getByRole('menuitemradio', { name: 'lucidpic' })).toBeInTheDocument()
+  })
+
   it('labels remote projects with the host name and a host location chip', () => {
     render(
       <ComposerContextBar
