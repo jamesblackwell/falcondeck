@@ -393,6 +393,10 @@ function AppInner() {
   const announcedUpdateVersionRef = useRef<string | null>(null);
   const announcedDownloadedVersionRef = useRef<string | null>(null);
   const draftsRef = useRef(drafts);
+  // Submitted text leaves the visible composer immediately, but remains
+  // overlaid onto durable draft storage until the daemon accepts the turn.
+  // This preserves crash recovery without making the controlled input linger.
+  const pendingDraftBackupsRef = useRef(new Map<string, string>());
   const attachmentsByConversationRef = useRef(attachmentsByConversation);
   const attachmentPreparationCountsRef = useRef(attachmentPreparationCounts);
   const sendingConversationKeyRef = useRef<string | null>(null);
@@ -443,17 +447,35 @@ function AppInner() {
     selectionHistoryIndexRef.current = history.length - 1;
   }, [selectedThreadId, selectedWorkspaceId]);
 
-  const setDraftForConversation = useCallback((key: string, value: string) => {
-    setDrafts((current) => {
-      const next = upsertComposerDraft(current, key, value);
-      draftsRef.current = next;
-      if (next !== current) writeStoredDrafts(next);
-      return next;
-    });
+  const writeRecoverableDrafts = useCallback((current: ComposerDrafts) => {
+    let recoverable = current;
+    for (const [key, submittedDraft] of pendingDraftBackupsRef.current) {
+      recoverable = upsertComposerDraft(
+        recoverable,
+        key,
+        mergeFailedComposerDraft(
+          submittedDraft,
+          recoverable[key]?.text ?? "",
+        ),
+      );
+    }
+    writeStoredDrafts(recoverable);
   }, []);
 
+  const setDraftForConversation = useCallback(
+    (key: string, value: string) => {
+      setDrafts((current) => {
+        const next = upsertComposerDraft(current, key, value);
+        draftsRef.current = next;
+        if (next !== current) writeRecoverableDrafts(next);
+        return next;
+      });
+    },
+    [writeRecoverableDrafts],
+  );
+
   useEffect(() => {
-    const flushDrafts = () => writeStoredDrafts(draftsRef.current);
+    const flushDrafts = () => writeRecoverableDrafts(draftsRef.current);
     const handleVisibility = () => {
       if (document.visibilityState === "hidden") flushDrafts();
     };
@@ -463,7 +485,7 @@ function AppInner() {
       window.removeEventListener("pagehide", flushDrafts);
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, []);
+  }, [writeRecoverableDrafts]);
 
   const setDraft = useCallback(
     (value: string) => setDraftForConversation(conversationKey, value),
@@ -547,14 +569,14 @@ function AppInner() {
         );
         const next = upsertComposerDraft(current, key, restored);
         draftsRef.current = next;
-        if (next !== current) writeStoredDrafts(next);
+        if (next !== current) writeRecoverableDrafts(next);
         return next;
       });
       setAttachmentsForConversation(key, (current) =>
         mergeFailedComposerAttachments(failedAttachments, current),
       );
     },
-    [setAttachmentsForConversation],
+    [setAttachmentsForConversation, writeRecoverableDrafts],
   );
 
   // Local daemon snapshot merged with enrolled remote-host snapshots: the
@@ -2184,11 +2206,26 @@ function AppInner() {
         item: optimisticItem,
       });
     }
+    // The transcript receives the optimistic user item immediately, so clear
+    // the matching composer in the same interaction. Keeping the controlled
+    // input populated until sendTurn resolves makes a successful send look
+    // duplicated and leaves the composer feeling stuck on slower links. The
+    // captured submission below remains available for catch to restore.
+    if (!override?.preserveComposer) {
+      pendingDraftBackupsRef.current.set(submittedKey, submittedUserDraft);
+      setDraftForConversation(submittedKey, "");
+      setAttachmentsForConversation(submittedKey, () => []);
+      setQuotedSelectionsByConversation((current) => {
+        if (!(submittedKey in current)) return current;
+        const next = { ...current };
+        delete next[submittedKey];
+        return next;
+      });
+    }
     sendingConversationKeyRef.current = submittedKey;
     sendingBaselineAgentItemIdRef.current = lastAgentItemId(conversationItems);
     setIsSending(true);
     let activeThreadId = selectedThreadId;
-    let pendingComposerKey = submittedKey;
     try {
       if (!activeThreadId) {
         if (selectedIsolation === "isolated") {
@@ -2214,28 +2251,38 @@ function AppInner() {
           activeThreadId,
         );
         if (!override?.preserveComposer) {
-          // Copy first, then delete: a crash between these writes can leave a
-          // duplicate draft, never a missing one.
-          setDraftForConversation(startedConversationKey, submittedUserDraft);
+          const pendingBackup = pendingDraftBackupsRef.current.get(submittedKey);
+          if (pendingBackup !== undefined) {
+            pendingDraftBackupsRef.current.delete(submittedKey);
+            pendingDraftBackupsRef.current.set(
+              startedConversationKey,
+              pendingBackup,
+            );
+          }
+          // Anything authored after pressing Send belongs to the newly-created
+          // thread. Move that newer input from the temporary new-thread key;
+          // the submitted text is already represented by the optimistic item.
+          setDraftForConversation(
+            startedConversationKey,
+            draftsRef.current[submittedKey]?.text ?? "",
+          );
           setAttachmentsForConversation(
             startedConversationKey,
-            () => submittedAttachments,
+            () => attachmentsByConversationRef.current[submittedKey] ?? [],
           );
-          if (submittedSelections.length > 0) {
-            setQuotedSelectionsByConversation((current) => ({
-              ...current,
-              [startedConversationKey]: submittedSelections,
-            }));
-          }
           setDraftForConversation(submittedKey, "");
           setAttachmentsForConversation(submittedKey, () => []);
           setQuotedSelectionsByConversation((current) => {
-            if (!(submittedKey in current)) return current;
+            const nextSelections = current[submittedKey] ?? [];
+            if (!(submittedKey in current) && nextSelections.length === 0)
+              return current;
             const next = { ...current };
+            if (nextSelections.length > 0) {
+              next[startedConversationKey] = nextSelections;
+            }
             delete next[submittedKey];
             return next;
           });
-          pendingComposerKey = startedConversationKey;
         }
         const adopted = conversationKeyRef.current === submittedKey;
         if (adopted) {
@@ -2336,18 +2383,11 @@ function AppInner() {
       if (optimisticItem && sendResponse?.message === "queued") {
         removeOptimisticItem(selectedWorkspace.id, activeThreadId, userItemId);
       }
-      // Keep authored input in durable draft storage until the daemon has
-      // accepted it. A process crash or lost response can therefore duplicate
-      // a retry, but it cannot erase the user's words.
       if (!override?.preserveComposer) {
-        setDraftForConversation(pendingComposerKey, "");
-        setAttachmentsForConversation(pendingComposerKey, () => []);
-        setQuotedSelectionsByConversation((current) => {
-          if (!(pendingComposerKey in current)) return current;
-          const next = { ...current };
-          delete next[pendingComposerKey];
-          return next;
-        });
+        pendingDraftBackupsRef.current.delete(
+          draftKeyFor(selectedWorkspace.id, activeThreadId),
+        );
+        writeRecoverableDrafts(draftsRef.current);
       }
       setPendingNewThreadItem((current) =>
         current?.conversationKey === submittedKey ? null : current,
@@ -2368,6 +2408,7 @@ function AppInner() {
         current?.conversationKey === submittedKey ? null : current,
       );
       if (!override?.preserveComposer) {
+        pendingDraftBackupsRef.current.delete(restoreKey);
         if (restoreKey !== submittedKey) {
           setDraftForConversation(submittedKey, "");
           setAttachmentsForConversation(submittedKey, () => []);
