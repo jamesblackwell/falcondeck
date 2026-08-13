@@ -28,6 +28,10 @@ const WS_TICKET_TTL_SECONDS: i64 = 30;
 /// still sent on its own; the websocket's 16 MiB cap remains the final guard.
 const WS_SYNC_CHUNK_MAX_UPDATES: usize = 128;
 const WS_SYNC_CHUNK_MAX_BYTES: usize = 512 << 10;
+/// Reconnect replay is only a fast-path. Beyond this window clients rebuild
+/// from `snapshot.current`, which avoids flooding their bounded decrypt queues
+/// with an arbitrarily large burst of stale incremental state.
+const WS_SYNC_REPLAY_MAX_UPDATES: usize = 1_024;
 /// How long a claim challenge stays valid; challenges are single-use and a
 /// new challenge request replaces any outstanding one for the pairing.
 const PAIRING_CHALLENGE_TTL_SECONDS: i64 = 300;
@@ -64,15 +68,13 @@ const PRUNE_INTERVAL_SECONDS: u64 = 60;
 const MAX_RPC_REQUEST_ID_LENGTH: usize = 128;
 
 fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
-    // Once retention has removed any part of the requested window, the
-    // remaining tail is not a trustworthy base for client state. Sending it
-    // is actively harmful: a long-lived session can fill the peer's bounded
-    // outbound queue (and the client's bounded decrypt queue) before the
-    // authoritative snapshot RPC gets a chance to run. Tell the client where
-    // the lost window ends and let it rebuild from the daemon snapshot; live
-    // updates emitted after this marker are still delivered normally and are
-    // raced against that snapshot by the clients.
-    if response.cursor.history_truncated {
+    // Once retention has removed any part of the requested window, or the
+    // intact window is too large for safe incremental catch-up, replay is not
+    // a trustworthy or bounded base for client state. Tell the client where
+    // the skipped window ends and let it rebuild from the daemon snapshot;
+    // live updates emitted after this marker are still delivered normally and
+    // are raced against that snapshot by the clients.
+    if response.cursor.history_truncated || response.updates.len() > WS_SYNC_REPLAY_MAX_UPDATES {
         return vec![RelayServerMessage::Sync {
             updates: Vec::new(),
             next_seq: response.next_seq,
@@ -3597,6 +3599,40 @@ mod tests {
             falcondeck_core::RelayServerMessage::Sync {
                 updates,
                 next_seq: 130,
+                history_truncated: true,
+                ..
+            } if updates.is_empty()
+        ));
+    }
+
+    #[test]
+    fn oversized_replay_uses_snapshot_recovery_instead_of_flooding_clients() {
+        let response = RelayUpdatesResponse {
+            session_id: "session-1".to_string(),
+            updates: (1..=1_025).map(test_update).collect(),
+            next_seq: 1_026,
+            cursor: SyncCursor {
+                session_id: "session-1".to_string(),
+                next_seq: 1_026,
+                last_acknowledged_seq: 0,
+                requires_bootstrap: true,
+                history_truncated: false,
+            },
+            presence: MachinePresence {
+                session_id: "session-1".to_string(),
+                daemon_connected: true,
+                daemon_rpc_ready: true,
+                last_seen_at: None,
+            },
+        };
+
+        let messages = sync_messages(response);
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            &messages[0],
+            falcondeck_core::RelayServerMessage::Sync {
+                updates,
+                next_seq: 1_026,
                 history_truncated: true,
                 ..
             } if updates.is_empty()

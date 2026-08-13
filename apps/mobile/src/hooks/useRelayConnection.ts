@@ -794,7 +794,7 @@ export function useRelayConnection() {
                   payload.updates.length,
                 )
               ) {
-                relay._setError('Remote event backlog exceeded the safe limit')
+                console.warn('Remote event backlog exceeded the safe limit; reconnecting for snapshot recovery')
                 socket.close()
                 return
               }
@@ -825,7 +825,7 @@ export function useRelayConnection() {
               break
             case 'update':
               if (relayBacklogWouldOverflow(pendingRelayUpdates.current.length, 1)) {
-                relay._setError('Remote event backlog exceeded the safe limit')
+                console.warn('Remote event backlog exceeded the safe limit; reconnecting for snapshot recovery')
                 socket.close()
                 return
               }

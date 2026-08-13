@@ -942,6 +942,47 @@ describe('isSubmitting state management', () => {
 describe('loadThreadDetail', () => {
   beforeEach(resetAll);
 
+  it('keeps a background thread refresh failure out of the global error banner', async () => {
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+
+    const setError = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    useRelayStore.setState({
+      _callRpc: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Timed out waiting for thread.detail'),
+        ) as RelayStoreState['_callRpc'],
+      _setError: setError as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      await act(async () => {
+        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1');
+      });
+
+      expect(setError).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(
+        'Failed to refresh thread detail',
+        expect.objectContaining({
+          message: 'Timed out waiting for thread.detail',
+        }),
+      );
+    } finally {
+      harness.unmount();
+      warn.mockRestore();
+    }
+  });
+
   it('requests the newest tail window for the selected thread', async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
@@ -1053,6 +1094,49 @@ describe('loadThreadDetail', () => {
       'msg-2',
       'msg-3',
     ]);
+  });
+
+  it('shows a friendly error when user-requested older history fails', async () => {
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+    useSessionStore.getState().setThreadDetail(
+      threadDetail({
+        items: [assistantMessage('msg-2', 'second')],
+        has_older: true,
+        oldest_item_id: 'msg-2',
+      }),
+    );
+
+    const setError = vi.fn();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    useRelayStore.setState({
+      _callRpc: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Timed out waiting for thread.detail'),
+        ) as RelayStoreState['_callRpc'],
+      _setError: setError as RelayStoreState['_setError'],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      await act(async () => {
+        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1', { older: true });
+      });
+
+      expect(setError).toHaveBeenCalledWith("Couldn't load older messages. Try again.");
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      harness.unmount();
+      warn.mockRestore();
+    }
   });
 
   it('ignores stale detail responses after the user switches threads', async () => {

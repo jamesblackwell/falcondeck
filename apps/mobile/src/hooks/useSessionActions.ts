@@ -311,7 +311,11 @@ export function useSessionActions() {
           return null;
         }
 
-        relay._setError(e instanceof Error ? e.message : 'Failed to load thread');
+        if (options?.older) {
+          relay._setError("Couldn't load older messages. Try again.");
+        } else {
+          console.warn('Failed to refresh thread detail', e);
+        }
         return null;
       }
     },
