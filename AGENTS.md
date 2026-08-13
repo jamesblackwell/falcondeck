@@ -50,6 +50,7 @@ FalconDeck is a monorepo for a local daemon-first agent control plane:
 
 ## Working Guidelines
 
+- Multiple agents often work directly on `main`. Keep commits terse and scoped, commit completed work promptly, and exclude unrelated changes.
 - Read `docs/` before changing protocol or architecture.
 - Read `docs/EXTENSIONS.md` before changing extension contracts, contribution
   points, permissions, storage, or host behaviour.

@@ -608,19 +608,33 @@ pub(crate) fn extract_claude_tool_event(value: &Value) -> Option<ClaudeToolEvent
         };
         // A failed tool is still delivered as an ordinary tool_result — only
         // the is_error flag (or an "Error:" toolUseResult string) says so.
+        let tool_use_result = value
+            .get("toolUseResult")
+            .or_else(|| value.get("tool_use_result"));
         let failed = tool_result
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false)
-            || value
-                .get("toolUseResult")
+            || tool_use_result
                 .and_then(Value::as_str)
                 .is_some_and(|result| result.trim_start().starts_with("Error:"));
+        let is_async_launch = tool_use_result.is_some_and(|result| {
+            result.get("isAsync").and_then(Value::as_bool) == Some(true)
+                || result.get("is_async").and_then(Value::as_bool) == Some(true)
+                || extract_string(result, &["status"]).as_deref() == Some("async_launched")
+        });
         return Some(ClaudeToolEvent {
             id,
             title: title.clone(),
             tool_kind: title,
-            status: if failed { "failed" } else { "completed" }.to_string(),
+            status: if failed {
+                "failed"
+            } else if is_async_launch {
+                "running"
+            } else {
+                "completed"
+            }
+            .to_string(),
             output,
             images: claude_tool_result_images(value, tool_result),
         });
@@ -1641,5 +1655,27 @@ mod subagent_stream_tests {
             format_subagent_activity(&steps[..1], 3),
             "Sub-agent activity:\n… 3 earlier steps hidden\n· Bash: cargo test"
         );
+    }
+
+    #[test]
+    fn async_agent_launch_keeps_the_tool_running() {
+        let event = extract_claude_tool_event(&json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_agent",
+                    "content": [{ "type": "text", "text": "Async agent launched" }]
+                }]
+            },
+            "tool_use_result": {
+                "is_async": true,
+                "status": "async_launched",
+                "agentId": "agent-1"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(event.status, "running");
     }
 }

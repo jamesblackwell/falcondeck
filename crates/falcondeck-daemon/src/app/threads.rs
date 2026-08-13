@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     process::Stdio,
     sync::{Arc, atomic::Ordering},
 };
@@ -567,6 +567,8 @@ impl AppState {
         let mut tool_identity = HashMap::<String, (String, String)>::new();
         // Sub-agent step log per spawning tool call: (kept steps, dropped count).
         let mut subagent_steps = HashMap::<String, (Vec<String>, usize)>::new();
+        let mut background_tasks = HashSet::<String>::new();
+        let mut background_task_tools = HashMap::<String, String>::new();
         let mut running_tool_titles = HashMap::<String, String>::new();
         let mut last_line_at = tokio::time::Instant::now();
         let mut stall_warned = false;
@@ -685,6 +687,47 @@ impl AppState {
                 }
                 match serde_json::from_str::<Value>(trimmed) {
                     Ok(value) => {
+                        if let Some(tasks) = claude_background_tasks(&value) {
+                            background_tasks = tasks;
+                        }
+                        if let Some((task_id, tool_use_id)) = claude_task_started(&value) {
+                            background_tasks.insert(task_id.clone());
+                            background_task_tools.insert(task_id, tool_use_id);
+                        }
+                        if let Some(task) = claude_task_finished(&value) {
+                            background_tasks.remove(&task.task_id);
+                            let tool_id = task
+                                .tool_use_id
+                                .or_else(|| background_task_tools.remove(&task.task_id));
+                            if let Some(tool_id) = tool_id {
+                                running_tool_titles.remove(&tool_id);
+                                let (title, tool_kind) =
+                                    tool_identity.get(&tool_id).cloned().unwrap_or_else(|| {
+                                        ("Sub-agent".to_string(), "Agent".to_string())
+                                    });
+                                let item = ConversationItem::ToolCall {
+                                    id: tool_id,
+                                    title: title.clone(),
+                                    tool_kind: tool_kind.clone(),
+                                    status: task.status.clone(),
+                                    output: task.summary.clone(),
+                                    exit_code: None,
+                                    display: Box::new(tool_display_metadata(
+                                        &title,
+                                        &tool_kind,
+                                        &task.status,
+                                        None,
+                                        task.summary.as_deref(),
+                                    )),
+                                    detail: None,
+                                    created_at: Utc::now(),
+                                    completed_at: Some(Utc::now()),
+                                };
+                                let _ = self
+                                    .push_conversation_item(&workspace_id, &thread_id, item, true)
+                                    .await;
+                            }
+                        }
                         // Sub-agent traffic is tagged with the id of the tool
                         // call that spawned it. It must stay out of the main
                         // transcript paths — its prose would merge into the
@@ -911,7 +954,14 @@ impl AppState {
                         if let Some(is_error) = claude_result_is_error(&value) {
                             saw_result = true;
                             result_reported_success = !is_error;
-                            break;
+                            // Claude emits an interim result when the parent
+                            // yields while async agents keep working. Closing
+                            // stdin at that point kills those agents. Their
+                            // terminal notification triggers another parent
+                            // response/result, which is the real boundary.
+                            if is_error || background_tasks.is_empty() {
+                                break;
+                            }
                         }
                     }
                     Err(_) => {
@@ -1332,6 +1382,70 @@ fn claude_result_is_error(value: &Value) -> Option<bool> {
     )
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ClaudeTaskFinished {
+    task_id: String,
+    tool_use_id: Option<String>,
+    status: String,
+    summary: Option<String>,
+}
+
+fn claude_background_tasks(value: &Value) -> Option<HashSet<String>> {
+    if value.get("type").and_then(Value::as_str) != Some("system")
+        || value.get("subtype").and_then(Value::as_str) != Some("background_tasks_changed")
+    {
+        return None;
+    }
+    Some(
+        value
+            .get("tasks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|task| task.get("task_id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+fn claude_task_started(value: &Value) -> Option<(String, String)> {
+    if value.get("type").and_then(Value::as_str) != Some("system")
+        || value.get("subtype").and_then(Value::as_str) != Some("task_started")
+    {
+        return None;
+    }
+    let task_id = value.get("task_id")?.as_str()?.to_string();
+    let tool_use_id = value.get("tool_use_id")?.as_str()?.to_string();
+    Some((task_id, tool_use_id))
+}
+
+fn claude_task_finished(value: &Value) -> Option<ClaudeTaskFinished> {
+    if value.get("type").and_then(Value::as_str) != Some("system")
+        || value.get("subtype").and_then(Value::as_str) != Some("task_notification")
+    {
+        return None;
+    }
+    let provider_status = value.get("status")?.as_str()?;
+    let status = match provider_status {
+        "completed" => "completed",
+        "failed" => "failed",
+        "killed" | "stopped" | "interrupted" => "interrupted",
+        _ => provider_status,
+    };
+    Some(ClaudeTaskFinished {
+        task_id: value.get("task_id")?.as_str()?.to_string(),
+        tool_use_id: value
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        status: status.to_string(),
+        summary: value
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 /// Session id the CLI reports in its `system:init` event — authoritative over
 /// whatever id the daemon passed on the command line.
 fn claude_init_session_id(value: &Value) -> Option<String> {
@@ -1397,5 +1511,46 @@ mod tests {
         ] {
             assert_eq!(claude_result_is_error(&value), None, "{value}");
         }
+    }
+
+    #[test]
+    fn background_task_changes_are_authoritative() {
+        let tasks = claude_background_tasks(&json!({
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [
+                { "task_id": "agent-1", "task_type": "local_agent" },
+                { "task_id": "agent-2", "task_type": "local_agent" }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            tasks,
+            HashSet::from(["agent-1".to_string(), "agent-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn task_notification_settles_the_spawning_tool() {
+        let task = claude_task_finished(&json!({
+            "type": "system",
+            "subtype": "task_notification",
+            "task_id": "agent-1",
+            "tool_use_id": "toolu_agent",
+            "status": "completed",
+            "summary": "Inspection finished"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            task,
+            ClaudeTaskFinished {
+                task_id: "agent-1".to_string(),
+                tool_use_id: Some("toolu_agent".to_string()),
+                status: "completed".to_string(),
+                summary: Some("Inspection finished".to_string()),
+            }
+        );
     }
 }
