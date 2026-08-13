@@ -142,6 +142,7 @@ import {
   useShortcutSettings,
 } from "./shortcuts";
 import { sendDesktopAttentionNotification } from "./desktop-notifications";
+import { resolveMainView } from "./main-view-registry";
 
 // Stable empty array so conversations without attachments don't bust the
 // memoized PromptInput on every render.
@@ -3963,6 +3964,11 @@ function AppInner() {
       ),
     [actionError, connectionError],
   );
+  const activeMainViewId = isActivityOpen
+    ? "core.activity"
+    : isSettingsOpen
+      ? "core.settings"
+      : null;
 
   return (
     <>
@@ -4020,55 +4026,69 @@ function AppInner() {
           />
         }
         main={
-          isActivityOpen ? (
-            <Suspense fallback={loadingThreadState}>
-              <ActivityView
-                groups={groups}
-                interactiveRequests={viewSnapshot?.interactive_requests ?? []}
-                workspaceHosts={workspaceHostBadges}
-                onOpenThread={handleSelectThread}
-                onInteractiveResponse={handleInteractiveResponseCallback}
-                onMarkThreadRead={handleMarkThreadRead}
-                onClose={() => setIsActivityOpen(false)}
-                onNewThread={selectedWorkspaceId ? () => handleNewThread(selectedWorkspaceId) : undefined}
-              />
-            </Suspense>
-          ) : isSettingsOpen ? (
-            <Suspense fallback={loadingThreadState}>
-              <SettingsView
-                initialSection={settingsSection}
-                sectionRequestKey={settingsRequestKey}
-                workspace={selectedWorkspace}
-                localWorkspaces={snapshot?.workspaces ?? []}
-                baseUrl={baseUrl}
-                hostManager={remoteHosts.manager}
-                hosts={remoteHosts.hosts}
-                onToast={toast}
-                preferences={effectivePreferences}
-                remoteStatus={remoteStatus}
-                pairingLink={pairingLink}
-                relayUrl={relayUrl}
-                isStartingRemote={isStartingRemote}
-                remoteControlsDisabled={remoteControlsDisabled}
-                remoteControlsUnavailableReason={
-                  remoteControlsUnavailableReason
-                }
-                revokingDeviceId={revokingDeviceId}
-                updater={updater.state}
-                updaterProgressPercent={updater.progressPercent}
-                onUpdatePreferences={handleUpdatePreferences}
-                onStartPairing={handleStartPairingCallback}
-                onRefreshRemoteStatus={handleRefreshRemoteStatus}
-                onRevokeDevice={handleRevokeDevice}
-                onCheckForUpdates={handleCheckForUpdates}
-                onDownloadUpdate={handleDownloadUpdate}
-                onRestartToInstallUpdate={handleRestartToInstallUpdate}
-                extensions={snapshot?.extensions ?? { catalog: [], views: [] }}
-                onSetExtensionEnabled={handleSetExtensionEnabled}
-                onClose={() => setIsSettingsOpen(false)}
-              />
-            </Suspense>
-          ) : (
+          resolveMainView(
+            {
+              "core.activity": (
+                <Suspense fallback={loadingThreadState}>
+                  <ActivityView
+                    groups={groups}
+                    interactiveRequests={
+                      viewSnapshot?.interactive_requests ?? []
+                    }
+                    workspaceHosts={workspaceHostBadges}
+                    onOpenThread={handleSelectThread}
+                    onInteractiveResponse={handleInteractiveResponseCallback}
+                    onMarkThreadRead={handleMarkThreadRead}
+                    onClose={() => setIsActivityOpen(false)}
+                    onNewThread={
+                      selectedWorkspaceId
+                        ? () => handleNewThread(selectedWorkspaceId)
+                        : undefined
+                    }
+                  />
+                </Suspense>
+              ),
+              "core.settings": (
+                <Suspense fallback={loadingThreadState}>
+                  <SettingsView
+                    initialSection={settingsSection}
+                    sectionRequestKey={settingsRequestKey}
+                    workspace={selectedWorkspace}
+                    localWorkspaces={snapshot?.workspaces ?? []}
+                    baseUrl={baseUrl}
+                    hostManager={remoteHosts.manager}
+                    hosts={remoteHosts.hosts}
+                    onToast={toast}
+                    preferences={effectivePreferences}
+                    remoteStatus={remoteStatus}
+                    pairingLink={pairingLink}
+                    relayUrl={relayUrl}
+                    isStartingRemote={isStartingRemote}
+                    remoteControlsDisabled={remoteControlsDisabled}
+                    remoteControlsUnavailableReason={
+                      remoteControlsUnavailableReason
+                    }
+                    revokingDeviceId={revokingDeviceId}
+                    updater={updater.state}
+                    updaterProgressPercent={updater.progressPercent}
+                    onUpdatePreferences={handleUpdatePreferences}
+                    onStartPairing={handleStartPairingCallback}
+                    onRefreshRemoteStatus={handleRefreshRemoteStatus}
+                    onRevokeDevice={handleRevokeDevice}
+                    onCheckForUpdates={handleCheckForUpdates}
+                    onDownloadUpdate={handleDownloadUpdate}
+                    onRestartToInstallUpdate={handleRestartToInstallUpdate}
+                    extensions={
+                      snapshot?.extensions ?? { catalog: [], views: [] }
+                    }
+                    onSetExtensionEnabled={handleSetExtensionEnabled}
+                    onClose={() => setIsSettingsOpen(false)}
+                  />
+                </Suspense>
+              ),
+            },
+            activeMainViewId,
+          ) ?? (
             <DesktopConversationPane
               selectedWorkspace={selectedWorkspace}
               selectedThread={selectedThread}
@@ -4262,7 +4282,7 @@ function AppInner() {
           )
         }
         rail={
-          isSettingsOpen || isActivityOpen ? undefined : (
+          activeMainViewId ? undefined : (
             <Suspense fallback={null}>
               <DiffPanel
                 api={apiFor(selectedWorkspaceId)}
