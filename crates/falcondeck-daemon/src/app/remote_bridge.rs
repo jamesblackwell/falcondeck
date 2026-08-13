@@ -862,6 +862,10 @@ impl AppState {
                             &["serviceTier", "service_tier"],
                         ),
                         pinned: params.get("pinned").and_then(Value::as_bool),
+                        acknowledge_interruption: params
+                            .get("acknowledgeInterruption")
+                            .or_else(|| params.get("acknowledge_interruption"))
+                            .and_then(Value::as_bool),
                         permission_mode: explicit_optional_string(
                             &params,
                             &["permissionMode", "permission_mode"],
@@ -1274,6 +1278,10 @@ impl AppState {
                             &["serviceTier", "service_tier"],
                         ),
                         pinned: params.get("pinned").and_then(Value::as_bool),
+                        acknowledge_interruption: params
+                            .get("acknowledgeInterruption")
+                            .or_else(|| params.get("acknowledge_interruption"))
+                            .and_then(Value::as_bool),
                         permission_mode: explicit_optional_string(
                             &params,
                             &["permissionMode", "permission_mode"],

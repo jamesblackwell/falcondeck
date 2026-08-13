@@ -1035,6 +1035,9 @@ pub struct UpdateThreadRequest {
     /// Optional pin state override for the thread.
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// Clear the retained app-shutdown interruption after the user has seen it.
+    #[serde(default)]
+    pub acknowledge_interruption: Option<bool>,
     /// Claude permission mode override; explicit `null` clears it.
     #[serde(default, deserialize_with = "deserialize_explicit_option")]
     pub permission_mode: Option<Option<String>>,

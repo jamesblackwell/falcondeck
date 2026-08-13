@@ -1,12 +1,14 @@
-import { CircleStop } from 'lucide-react'
+import { CircleStop, X } from 'lucide-react'
 
 import { Button } from '@falcondeck/ui'
 
 export function InterruptedTurnNotice({
   onContinue,
+  onDismiss,
   isContinuing = false,
 }: {
   onContinue: () => void
+  onDismiss?: () => void
   isContinuing?: boolean
 }) {
   return (
@@ -32,6 +34,16 @@ export function InterruptedTurnNotice({
       >
         {isContinuing ? 'Continuing…' : 'Continue'}
       </Button>
+      {onDismiss ? (
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Dismiss stopped-turn notice"
+          className="-m-1 inline-flex size-7 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted hover:bg-surface-3 hover:text-fg-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+        >
+          <X aria-hidden="true" className="size-3.5" />
+        </button>
+      ) : null}
     </div>
   )
 }

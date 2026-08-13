@@ -1030,6 +1030,8 @@ export type UpdateThreadPayload = {
   /** Tier id for future turns; `"default"` is the provider's standard tier. */
   service_tier?: string | null;
   pinned?: boolean;
+  /** Clear the retained app-shutdown interruption after user acknowledgement. */
+  acknowledge_interruption?: boolean;
   permission_mode?: string | null;
   approval_policy?: string | null;
   sandbox_mode?: string | null;

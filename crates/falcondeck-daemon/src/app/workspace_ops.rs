@@ -463,7 +463,23 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
     }
     let mut adopted_transcripts = HashMap::new();
     let mut threads_out = Vec::with_capacity(threads.len());
-    for thread in threads {
+    for mut thread in threads {
+        // Provider hydration knows the transcript, but it cannot know that
+        // FalconDeck disappeared during the last turn. Keep the daemon's
+        // persisted interruption authoritative when both records describe
+        // the same thread; otherwise the startup placeholder's warning would
+        // vanish as soon as hydration completed.
+        if persisted_thread_states
+            .get(&thread.summary.id)
+            .is_some_and(|state| {
+                matches!(state.status, Some(ThreadStatus::Running))
+                    || (matches!(state.status, Some(ThreadStatus::Error))
+                        && state.last_error.as_deref() == Some(SHUTDOWN_INTERRUPTED_TURN_ERROR))
+            })
+        {
+            thread.summary.status = ThreadStatus::Error;
+            thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+        }
         match session_owners.get(thread.summary.id.as_str()) {
             Some(owner) => {
                 adopted_transcripts.insert(owner.thread_id.clone(), thread);
@@ -493,7 +509,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
         };
         let restored_last_error = state.last_error.clone().or_else(|| {
             matches!(state.status, Some(ThreadStatus::Running))
-                .then(|| "FalconDeck was closed while this turn was running".to_string())
+                .then(|| SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
         });
         threads_out.push(crate::codex::HydratedThread {
             summary: ThreadSummary {
@@ -2265,6 +2281,13 @@ pub(super) async fn update_thread(
         if let Some(pinned) = request.pinned {
             thread.summary.is_pinned = pinned;
         }
+        if request.acknowledge_interruption == Some(true)
+            && matches!(thread.summary.status, ThreadStatus::Error)
+            && thread.summary.last_error.as_deref() == Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+        {
+            thread.summary.status = ThreadStatus::Idle;
+            thread.summary.last_error = None;
+        }
         if let Some(permission_mode) = request.permission_mode.clone() {
             thread.summary.agent.permission_mode =
                 permission_mode.filter(|mode| !mode.eq_ignore_ascii_case("default"));
@@ -2277,7 +2300,7 @@ pub(super) async fn update_thread(
         }
         // Pin toggles must not bump recency: updated_at drives the sidebar
         // sort, and unpinning a stale thread should return it to its place.
-        let is_pin_only_update = request.title.is_none()
+        let is_non_recency_update = request.title.is_none()
             && request.model_id.is_none()
             && request.reasoning_effort.is_none()
             && request.collaboration_mode_id.is_none()
@@ -2285,8 +2308,8 @@ pub(super) async fn update_thread(
             && request.permission_mode.is_none()
             && request.approval_policy.is_none()
             && request.sandbox_mode.is_none()
-            && request.pinned.is_some();
-        if !is_pin_only_update {
+            && (request.pinned.is_some() || request.acknowledge_interruption.is_some());
+        if !is_non_recency_update {
             thread.summary.updated_at = now;
             workspace.summary.current_thread_id = Some(request.thread_id.clone());
         }
@@ -3651,8 +3674,32 @@ mod tests {
         assert_eq!(thread.summary.status, ThreadStatus::Error);
         assert_eq!(
             thread.summary.last_error.as_deref(),
-            Some("FalconDeck was closed while this turn was running")
+            Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
         );
+    }
+
+    #[test]
+    fn direct_provider_hydration_keeps_shutdown_interruption_until_acknowledged() {
+        let mut state = persisted_thread("thread-1", Some("thread-1"));
+        state.status = Some(ThreadStatus::Error);
+        state.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+        let states = HashMap::from([("thread-1".to_string(), state)]);
+
+        let merged = merge_hydrated_threads_with_persisted_state(
+            vec![hydrated_thread("thread-1", "partial answer")],
+            &states,
+            "workspace-1",
+            None,
+            Utc::now(),
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].summary.status, ThreadStatus::Error);
+        assert_eq!(
+            merged[0].summary.last_error.as_deref(),
+            Some(SHUTDOWN_INTERRUPTED_TURN_ERROR)
+        );
+        assert_eq!(merged[0].items.len(), 1);
     }
 
     #[test]
@@ -3735,6 +3782,50 @@ mod tests {
                     .collect(),
             },
         );
+    }
+
+    #[tokio::test]
+    async fn acknowledging_shutdown_interruption_clears_it_without_bumping_recency() {
+        let temp_dir = tempdir().unwrap();
+        let app = AppState::new_with_state_path(
+            "test".to_string(),
+            HashMap::new(),
+            temp_dir.path().join("daemon-state.json"),
+        );
+        seed_workspace_with_thread(&app, "workspace-1", "thread-1").await;
+        let interrupted_at = Utc::now() - chrono::Duration::minutes(5);
+        app.with_thread_mut("workspace-1", "thread-1", |thread| {
+            thread.status = ThreadStatus::Error;
+            thread.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+            thread.updated_at = interrupted_at;
+        })
+        .await
+        .unwrap();
+
+        let handle = update_thread(
+            &app,
+            falcondeck_core::UpdateThreadRequest {
+                workspace_id: "workspace-1".to_string(),
+                thread_id: "thread-1".to_string(),
+                title: None,
+                provider: None,
+                model_id: None,
+                reasoning_effort: None,
+                collaboration_mode_id: None,
+                service_tier: None,
+                pinned: None,
+                acknowledge_interruption: Some(true),
+                permission_mode: None,
+                approval_policy: None,
+                sandbox_mode: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(handle.thread.status, ThreadStatus::Idle);
+        assert_eq!(handle.thread.last_error, None);
+        assert_eq!(handle.thread.updated_at, interrupted_at);
     }
 
     #[tokio::test]

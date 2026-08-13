@@ -2671,6 +2671,41 @@ function AppInner() {
     selectedIsolation,
   ]);
 
+  const handleDismissInterruptedTurn = useCallback(() => {
+    if (!selectedWorkspace || !selectedThreadId) return;
+    const client = apiFor(selectedWorkspace.id);
+    if (!client) return;
+    void client
+      .updateThread({
+        workspace_id: selectedWorkspace.id,
+        thread_id: selectedThreadId,
+        acknowledge_interruption: true,
+      })
+      .then((handle) => {
+        applyThreadHandle(handle);
+        setActionError(null);
+      })
+      .catch((error: unknown) => {
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Failed to dismiss stopped turn";
+        setActionError(message);
+        toast({
+          variant: "danger",
+          title: "Failed to dismiss stopped turn",
+          description: message,
+        });
+      });
+  }, [
+    apiFor,
+    applyThreadHandle,
+    selectedThreadId,
+    selectedWorkspace,
+    setActionError,
+    toast,
+  ]);
+
   const handleAlternateSubmitCallback = useCallback(() => {
     const settings = getShortcutSettings();
     const isBusy =
@@ -4017,6 +4052,7 @@ function AppInner() {
                   : undefined
               }
               onContinueInterruptedTurn={handleContinueInterruptedTurn}
+              onDismissInterruptedTurn={handleDismissInterruptedTurn}
               quotedSelections={quotedSelections}
               onQuoteSelection={addQuotedSelection}
               onRemoveQuotedSelection={removeQuotedSelection}

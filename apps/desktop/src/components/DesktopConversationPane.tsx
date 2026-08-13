@@ -74,6 +74,7 @@ type DesktopConversationPaneProps = {
   editResendUnavailableReason?: string | null
   onRetryResponse?: (item: Extract<ConversationItem, { kind: 'user_message' }>) => void
   onContinueInterruptedTurn?: () => void
+  onDismissInterruptedTurn?: () => void
   quotedSelections?: readonly QuotedSelection[]
   onQuoteSelection?: (text: string) => void
   onRemoveQuotedSelection?: (selectionId: string) => void
@@ -123,6 +124,7 @@ export function DesktopConversationPane({
   editResendUnavailableReason,
   onRetryResponse,
   onContinueInterruptedTurn,
+  onDismissInterruptedTurn,
   quotedSelections = NO_QUOTED_SELECTIONS,
   onQuoteSelection,
   onRemoveQuotedSelection,
@@ -170,6 +172,7 @@ export function DesktopConversationPane({
         {onContinueInterruptedTurn ? (
           <InterruptedTurnNotice
             onContinue={onContinueInterruptedTurn}
+            onDismiss={onDismissInterruptedTurn}
             isContinuing={isSending}
           />
         ) : null}

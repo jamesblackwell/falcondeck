@@ -66,6 +66,7 @@ use storage::*;
 use threads::{interactive_request_counts, refresh_thread_attention};
 
 const WORKSPACE_RESTORE_TIMEOUT: Duration = Duration::from_secs(30);
+const SHUTDOWN_INTERRUPTED_TURN_ERROR: &str = "FalconDeck was closed while this turn was running";
 
 /// How long `schedule_persist` waits before writing, so a burst of streamed
 /// updates costs one state snapshot instead of one per chunk.
@@ -647,7 +648,7 @@ impl AppState {
             };
             let thread_last_error = state.last_error.clone().or_else(|| {
                 matches!(state.status, Some(ThreadStatus::Running))
-                    .then(|| "FalconDeck was closed while this turn was running".to_string())
+                    .then(|| SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
             });
             let summary = ThreadSummary {
                 id: state.thread_id.clone(),
@@ -875,8 +876,7 @@ impl AppState {
                 let _ = self
                     .with_thread_mut(&workspace_id, &thread_id, |thread| {
                         thread.status = ThreadStatus::Error;
-                        thread.last_error =
-                            Some("FalconDeck was closed while this turn was running".to_string());
+                        thread.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
                         thread.updated_at = Utc::now();
                     })
                     .await;
