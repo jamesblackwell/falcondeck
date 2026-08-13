@@ -85,7 +85,8 @@
       "required": ["id", "view"],
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
-        "view": { "$ref": "#/$defs/identifier" }
+        "view": { "$ref": "#/$defs/identifier" },
+        "ui": { "$ref": "extension-ui-v1.schema.json" }
       },
       "additionalProperties": false
     },
@@ -95,7 +96,8 @@
       "properties": {
         "id": { "$ref": "#/$defs/identifier" },
         "title": { "type": "string", "minLength": 1, "maxLength": 80 },
-        "view": { "$ref": "#/$defs/identifier" }
+        "view": { "$ref": "#/$defs/identifier" },
+        "ui": { "$ref": "extension-ui-v1.schema.json" }
       },
       "additionalProperties": false
     }

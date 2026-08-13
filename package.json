@@ -13,6 +13,7 @@
     "desktop:version:sync": "node ./scripts/prepare-desktop-release.mjs",
     "extension-runtime:prepare": "node ./scripts/prepare-extension-runtime.mjs",
     "extension:validate": "node ./scripts/validate-extensions.mjs",
+    "extension:validate:test": "node --test ./scripts/validate-extensions.test.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },

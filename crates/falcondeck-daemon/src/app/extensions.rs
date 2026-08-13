@@ -7,7 +7,8 @@ use std::{
 use chrono::Utc;
 use falcondeck_core::{
     ExtensionActionContribution, ExtensionContributions, ExtensionSnapshot, ExtensionStatus,
-    ExtensionSummary, ExtensionView, ExtensionViewContribution, ExtensionViewScope,
+    ExtensionSummary, ExtensionUiDocument, ExtensionUiNode, ExtensionView,
+    ExtensionViewContribution, ExtensionViewScope,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,12 @@ const MAX_CATALOG_PACKAGES: usize = 128;
 const MAX_CATALOG_BYTES: u64 = 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 const MAX_MANIFEST_CONTRIBUTIONS: usize = 256;
+const MAX_UI_DEPTH: usize = 32;
+const MAX_UI_NODES: usize = 256;
+const MAX_UI_OPTIONS: usize = 256;
+const MAX_UI_TEXT_CHARS: usize = 4_096;
+const MAX_UI_PATH_SEGMENTS: usize = 16;
+const MAX_UI_PATH_SEGMENT_CHARS: usize = 128;
 
 static EXTENSION_ID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[a-z0-9]+(?:[.-][a-z0-9]+)+$").expect("extension id regex is valid")
@@ -709,6 +716,40 @@ fn validate_manifest(manifest: &ExtensionManifest) -> Result<(), DaemonError> {
             "extension sidebar filters require a title".to_string(),
         ));
     }
+    let declared_actions = manifest
+        .contributes
+        .thread_menu_actions
+        .iter()
+        .map(|action| action.id.as_str())
+        .collect::<HashSet<_>>();
+    let declared_views = manifest
+        .contributes
+        .thread_decorations
+        .iter()
+        .chain(manifest.contributes.sidebar_filters.iter())
+        .map(|contribution| contribution.view.as_str())
+        .collect::<HashSet<_>>();
+    for contribution in manifest
+        .contributes
+        .thread_decorations
+        .iter()
+        .chain(manifest.contributes.sidebar_filters.iter())
+    {
+        if let Some(document) = contribution.ui.as_ref() {
+            validate_ui_document(document, &declared_actions, &declared_views)?;
+        }
+    }
+    for filter in &manifest.contributes.sidebar_filters {
+        if filter
+            .ui
+            .as_ref()
+            .is_some_and(|document| !matches!(&document.root, ExtensionUiNode::Select { .. }))
+        {
+            return Err(DaemonError::BadRequest(
+                "extension sidebar filter UI must use a select root".to_string(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -722,8 +763,8 @@ fn validate_manifest_contribution_shape(manifest: &Value) -> Result<(), DaemonEr
     for (surface, values) in contributes {
         let allowed = match surface.as_str() {
             "threadMenuActions" => &["id", "title"][..],
-            "threadDecorations" => &["id", "view"][..],
-            "sidebarFilters" => &["id", "title", "view"][..],
+            "threadDecorations" => &["id", "view", "ui"][..],
+            "sidebarFilters" => &["id", "title", "view", "ui"][..],
             _ => {
                 return Err(DaemonError::BadRequest(format!(
                     "unknown extension contribution point: {surface}"
@@ -791,6 +832,152 @@ fn validate_unique_views<'a>(
     Ok(())
 }
 
+fn validate_ui_document(
+    document: &ExtensionUiDocument,
+    declared_actions: &HashSet<&str>,
+    declared_views: &HashSet<&str>,
+) -> Result<(), DaemonError> {
+    if document.version != 1 {
+        return Err(DaemonError::BadRequest(
+            "unsupported extension declarative UI version".to_string(),
+        ));
+    }
+    let mut node_count = 0;
+    validate_ui_node(
+        &document.root,
+        1,
+        &mut node_count,
+        declared_actions,
+        declared_views,
+    )
+}
+
+fn validate_ui_node(
+    node: &ExtensionUiNode,
+    depth: usize,
+    node_count: &mut usize,
+    declared_actions: &HashSet<&str>,
+    declared_views: &HashSet<&str>,
+) -> Result<(), DaemonError> {
+    *node_count = node_count.saturating_add(1);
+    if depth > MAX_UI_DEPTH || *node_count > MAX_UI_NODES {
+        return Err(DaemonError::BadRequest(
+            "extension declarative UI exceeds its depth or node limit".to_string(),
+        ));
+    }
+    match node {
+        ExtensionUiNode::Stack { children, .. } | ExtensionUiNode::Row { children, .. } => {
+            for child in children {
+                validate_ui_node(
+                    child,
+                    depth + 1,
+                    node_count,
+                    declared_actions,
+                    declared_views,
+                )?;
+            }
+        }
+        ExtensionUiNode::Text { text, .. } | ExtensionUiNode::Badge { text, .. } => {
+            validate_ui_text(text, false)?;
+        }
+        ExtensionUiNode::Divider {} => {}
+        ExtensionUiNode::Button {
+            label,
+            action,
+            disabled: _,
+            variant: _,
+        } => {
+            validate_ui_text(label, true)?;
+            if !declared_actions.contains(action.action_id.as_str()) {
+                return Err(DaemonError::BadRequest(format!(
+                    "extension UI references undeclared action: {}",
+                    action.action_id
+                )));
+            }
+            ExtensionRegistry::validate_action_input(&action.input)?;
+            ExtensionRegistry::validate_action_target(action.target.as_ref())?;
+        }
+        ExtensionUiNode::List { items } => {
+            for item in items {
+                validate_ui_node(
+                    item,
+                    depth + 1,
+                    node_count,
+                    declared_actions,
+                    declared_views,
+                )?;
+            }
+        }
+        ExtensionUiNode::Select {
+            id,
+            label,
+            options,
+            binding,
+            ..
+        } => {
+            if !CONTRIBUTION_ID_PATTERN.is_match(id) {
+                return Err(DaemonError::BadRequest(
+                    "extension UI select id must be kebab-case".to_string(),
+                ));
+            }
+            validate_ui_text(label, true)?;
+            if options.len() > MAX_UI_OPTIONS {
+                return Err(DaemonError::BadRequest(format!(
+                    "extension UI select exceeds {MAX_UI_OPTIONS} options"
+                )));
+            }
+            let mut option_values = HashSet::new();
+            for option in options {
+                validate_ui_text(&option.label, true)?;
+                if option.value.is_empty()
+                    || option.value.chars().count() > 256
+                    || !option_values.insert(option.value.as_str())
+                {
+                    return Err(DaemonError::BadRequest(
+                        "extension UI select values must be non-empty and unique".to_string(),
+                    ));
+                }
+            }
+            if !declared_views.contains(binding.view.as_str()) {
+                return Err(DaemonError::BadRequest(format!(
+                    "extension UI filter references undeclared view: {}",
+                    binding.view
+                )));
+            }
+            if binding.path.is_empty()
+                || binding.path.len() > MAX_UI_PATH_SEGMENTS
+                || binding.path.iter().any(|segment| {
+                    segment.is_empty()
+                        || segment.chars().count() > MAX_UI_PATH_SEGMENT_CHARS
+                        || matches!(segment.as_str(), "__proto__" | "constructor" | "prototype")
+                })
+            {
+                return Err(DaemonError::BadRequest(
+                    "extension UI filter path is invalid or exceeds its limit".to_string(),
+                ));
+            }
+        }
+        ExtensionUiNode::State {
+            title, description, ..
+        } => {
+            validate_ui_text(title, true)?;
+            if let Some(description) = description {
+                validate_ui_text(description, false)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_ui_text(value: &str, require_non_empty: bool) -> Result<(), DaemonError> {
+    if value.chars().count() > MAX_UI_TEXT_CHARS || (require_non_empty && value.trim().is_empty()) {
+        return Err(DaemonError::BadRequest(format!(
+            "extension UI text is empty or exceeds {MAX_UI_TEXT_CHARS} characters"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_scope(scope: &ExtensionViewScope) -> Result<(), DaemonError> {
     let kind_len = scope.kind.chars().count();
     let id_len = scope.id.chars().count();
@@ -809,6 +996,10 @@ fn validate_scope(scope: &ExtensionViewScope) -> Result<(), DaemonError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use falcondeck_core::{
+        ExtensionUiFilterBinding, ExtensionUiFilterOperator, ExtensionUiSelectOption,
+        ExtensionUiTone,
+    };
 
     fn manifest() -> ExtensionManifest {
         ExtensionManifest {
@@ -823,6 +1014,40 @@ mod tests {
             contributes: ExtensionContributions::default(),
             permissions: Vec::new(),
         }
+    }
+
+    fn manifest_with_sidebar_filter() -> ExtensionManifest {
+        let mut manifest = manifest();
+        manifest.contributes.thread_decorations = vec![ExtensionViewContribution {
+            id: "thread-colors".to_string(),
+            title: None,
+            view: "thread-colors".to_string(),
+            ui: None,
+        }];
+        manifest.contributes.sidebar_filters = vec![ExtensionViewContribution {
+            id: "colors".to_string(),
+            title: Some("Colours".to_string()),
+            view: "color-index".to_string(),
+            ui: Some(ExtensionUiDocument {
+                version: 1,
+                root: ExtensionUiNode::Select {
+                    id: "colors".to_string(),
+                    label: "Filter by colour".to_string(),
+                    multiple: true,
+                    options: vec![ExtensionUiSelectOption {
+                        value: "red".to_string(),
+                        label: "Red".to_string(),
+                        tone: Some(ExtensionUiTone::Red),
+                    }],
+                    binding: ExtensionUiFilterBinding {
+                        view: "thread-colors".to_string(),
+                        path: vec!["tagIds".to_string()],
+                        operator: ExtensionUiFilterOperator::IncludesAny,
+                    },
+                },
+            }),
+        }];
+        manifest
     }
 
     #[test]
@@ -868,6 +1093,7 @@ mod tests {
             id: "shared".to_string(),
             title: None,
             view: "result".to_string(),
+            ui: None,
         }];
         assert!(validate_manifest(&duplicate).is_err());
 
@@ -884,6 +1110,53 @@ mod tests {
             }
         });
         assert!(validate_manifest_contribution_shape(&manifest).is_err());
+    }
+
+    #[test]
+    fn manifest_accepts_bounded_sidebar_filter_ui() {
+        let manifest = manifest_with_sidebar_filter();
+
+        assert!(
+            validate_manifest(&manifest).is_ok(),
+            "valid declarative filter should be accepted"
+        );
+    }
+
+    #[test]
+    fn manifest_rejects_ui_filter_bound_to_undeclared_view() {
+        let mut manifest = manifest_with_sidebar_filter();
+        let Some(ExtensionUiNode::Select { binding, .. }) = manifest
+            .contributes
+            .sidebar_filters
+            .first_mut()
+            .and_then(|filter| filter.ui.as_mut())
+            .map(|document| &mut document.root)
+        else {
+            panic!("filter fixture must use a select root");
+        };
+        binding.view = "private-view".to_string();
+
+        let error = validate_manifest(&manifest).expect_err("undeclared view must fail");
+
+        assert!(error.to_string().contains("undeclared view"));
+    }
+
+    #[test]
+    fn manifest_rejects_ui_over_global_node_limit() {
+        let mut manifest = manifest_with_sidebar_filter();
+        manifest.contributes.sidebar_filters[0].ui = Some(ExtensionUiDocument {
+            version: 1,
+            root: ExtensionUiNode::Stack {
+                gap: None,
+                children: (0..MAX_UI_NODES)
+                    .map(|_| ExtensionUiNode::Divider {})
+                    .collect(),
+            },
+        });
+
+        let error = validate_manifest(&manifest).expect_err("oversized UI must fail");
+
+        assert!(error.to_string().contains("node limit"));
     }
 
     #[cfg(unix)]

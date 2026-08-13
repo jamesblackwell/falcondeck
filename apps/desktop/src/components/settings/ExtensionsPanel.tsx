@@ -35,7 +35,9 @@ export function ExtensionsPanel({
       </div>
       {error ? <p role="alert" className="text-[length:var(--fd-text-sm)] text-danger">{error}</p> : null}
       <div className="space-y-3">
-        {extensions.catalog.map(extension => (
+        {extensions.catalog.map(extension => {
+          const unsupportedContributions = extension.contributes.unsupported ?? []
+          return (
           <section key={extension.id} className="rounded-[var(--fd-radius-lg)] border border-border-default bg-surface-2 p-4">
             <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
@@ -55,6 +57,11 @@ export function ExtensionsPanel({
                   </p>
                 ) : null}
                 {extension.last_error ? <p className="mt-2 text-[length:var(--fd-text-xs)] text-danger">{extension.last_error}</p> : null}
+                {unsupportedContributions.length > 0 ? (
+                  <p role="status" className="mt-2 text-[length:var(--fd-text-xs)] text-warning">
+                    This FalconDeck client cannot render: {unsupportedContributions.map(contribution => contribution.kind).join(', ')}.
+                  </p>
+                ) : null}
               </div>
               <Button
                 type="button"
@@ -67,7 +74,8 @@ export function ExtensionsPanel({
               </Button>
             </div>
           </section>
-        ))}
+          )
+        })}
         {extensions.catalog.length === 0 ? (
           <p className="rounded-[var(--fd-radius-lg)] border border-border-subtle p-4 text-[length:var(--fd-text-sm)] text-fg-muted">
             No extensions are installed.

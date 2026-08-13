@@ -26,6 +26,7 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import { dedupeCitations } from "./citation";
+import { normalizeExtensionUiDocument } from "./extension-ui";
 import { formatInspectableValue } from "./inspectable-value";
 
 const DEFAULT_ACCOUNT: AccountSummary = {
@@ -1431,6 +1432,8 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
             const view = candidate as Record<string, unknown>;
             const id = normalizeId(view.id);
             const viewId = normalizeId(view.view);
+            const normalizedUi = normalizeExtensionUiDocument(view.ui);
+            const hasUi = Object.hasOwn(view, "ui");
             return id && viewId
               ? [
                   {
@@ -1438,15 +1441,30 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
                     view: viewId,
                     title:
                       typeof view.title === "string" ? view.title : undefined,
+                    ui: normalizedUi.ok ? normalizedUi.document : null,
+                    uiUnsupportedReason:
+                      hasUi && !normalizedUi.ok ? normalizedUi.reason : null,
                   },
                 ]
               : [];
           })
         : [];
+    const knownKinds = new Set([
+      "threadMenuActions",
+      "threadDecorations",
+      "sidebarFilters",
+    ]);
+    const unsupported = Object.entries(contributions).flatMap(
+      ([kind, entries]) =>
+        !knownKinds.has(kind) && Array.isArray(entries)
+          ? [{ kind, entries }]
+          : [],
+    );
     return {
       threadMenuActions: actions,
       threadDecorations: normalizeViews(contributions.threadDecorations),
       sidebarFilters: normalizeViews(contributions.sidebarFilters),
+      unsupported,
     };
   };
   return {

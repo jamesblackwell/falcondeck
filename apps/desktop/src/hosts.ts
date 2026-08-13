@@ -19,10 +19,13 @@ import {
   type ConversationItem,
   type DaemonSnapshot,
   type EventEnvelope,
+  type ExtensionActionResponse,
+  type ExtensionSnapshot,
   type GitDiffResponse,
   type GitFileStatus,
   type GitStatusResponse,
   type InteractiveResponsePayload,
+  type InvokeExtensionActionPayload,
   type MachinePresence,
   type MarkThreadReadPayload,
   type PersistedRemoteSession,
@@ -107,6 +110,11 @@ export function saveStoredHosts(hosts: StoredHost[]) {
 // createDaemonApiClient's method shapes so call sites can swap clients by
 // workspace owner without branching on payload format.
 export type WorkspaceScopedApi = {
+  invokeExtensionAction(
+    extensionId: string,
+    actionId: string,
+    payload: InvokeExtensionActionPayload,
+  ): Promise<ExtensionActionResponse>
   startThread(payload: StartThreadPayload): Promise<ThreadHandle>
   forkThread(payload: ForkThreadPayload): Promise<ThreadHandle>
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
@@ -419,6 +427,18 @@ export class HostConnection {
 
   api(): WorkspaceScopedApi {
     return {
+      invokeExtensionAction: async (extensionId, actionId, payload) => {
+        const result = await this.rpc<ExtensionActionResponse>(
+          'extensions.action.invoke',
+          {
+            extension_id: extensionId,
+            action_id: actionId,
+            ...payload,
+          },
+        )
+        await this.refreshSnapshot()
+        return result
+      },
       startThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.start', payload)),
       forkThread: async (payload) =>
@@ -726,6 +746,43 @@ export function mergeSnapshots(
       base?.thread_token_usage ?? {},
       ...hostSnapshots.map((snapshot) => snapshot.thread_token_usage ?? {}),
     ),
+    extensions: mergeExtensionSnapshots([
+      ...(local ? [local.extensions] : []),
+      ...hostSnapshots.map((snapshot) => snapshot.extensions),
+    ]),
+  }
+}
+
+function mergeExtensionSnapshots(
+  snapshots: ExtensionSnapshot[],
+): ExtensionSnapshot {
+  const catalog = new Map<string, ExtensionSnapshot['catalog'][number]>()
+  const views = new Map<string, ExtensionSnapshot['views'][number]>()
+
+  for (const snapshot of snapshots) {
+    const enabledExtensionIds = new Set(
+      snapshot.catalog
+        .filter((extension) => extension.enabled)
+        .map((extension) => extension.id),
+    )
+    for (const extension of snapshot.catalog) {
+      const existing = catalog.get(extension.id)
+      if (!existing || (!existing.enabled && extension.enabled)) {
+        catalog.set(extension.id, extension)
+      }
+    }
+    for (const view of snapshot.views) {
+      if (!enabledExtensionIds.has(view.extension_id)) continue
+      const scope = view.scope
+        ? `${view.scope.kind}:${view.scope.id}`
+        : 'global'
+      views.set(`${view.extension_id}:${view.view_id}:${scope}`, view)
+    }
+  }
+
+  return {
+    catalog: [...catalog.values()],
+    views: [...views.values()],
   }
 }
 

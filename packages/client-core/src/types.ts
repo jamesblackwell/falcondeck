@@ -833,12 +833,110 @@ export type ExtensionViewContribution = {
   id: string;
   title?: string | null;
   view: string;
+  /** Static declarative fallback used before a host publishes this view. */
+  ui?: ExtensionUiDocument | null;
+  /** Client-only diagnostic retained when a newer or malformed UI document is normalized. */
+  uiUnsupportedReason?: string | null;
+};
+
+export type ExtensionUiGap = "none" | "small" | "medium" | "large";
+export type ExtensionUiTextStyle = "body" | "heading" | "caption" | "mono";
+export type ExtensionUiTone =
+  | "default"
+  | "muted"
+  | "accent"
+  | "success"
+  | "warning"
+  | "danger"
+  | "info"
+  | "gray"
+  | "red"
+  | "orange"
+  | "yellow"
+  | "green"
+  | "blue"
+  | "purple"
+  | "pink";
+export type ExtensionUiButtonVariant =
+  | "secondary"
+  | "primary"
+  | "ghost"
+  | "danger";
+export type ExtensionUiStateKind = "loading" | "empty" | "error";
+
+export type ExtensionUiActionBinding = {
+  actionId: string;
+  input?: unknown;
+  target?: ExtensionViewScope | null;
+};
+
+export type ExtensionUiSelectOption = {
+  value: string;
+  label: string;
+  tone?: ExtensionUiTone | null;
+};
+
+export type ExtensionUiFilterBinding = {
+  view: string;
+  path: string[];
+  operator: "includes_any";
+};
+
+export type ExtensionUiNode =
+  | { type: "stack"; gap?: ExtensionUiGap | null; children: ExtensionUiNode[] }
+  | {
+      type: "row";
+      gap?: ExtensionUiGap | null;
+      wrap?: boolean;
+      children: ExtensionUiNode[];
+    }
+  | {
+      type: "text";
+      text: string;
+      style?: ExtensionUiTextStyle | null;
+      tone?: ExtensionUiTone | null;
+    }
+  | { type: "badge"; text: string; tone?: ExtensionUiTone | null }
+  | { type: "divider" }
+  | {
+      type: "button";
+      label: string;
+      action: ExtensionUiActionBinding;
+      variant?: ExtensionUiButtonVariant | null;
+      disabled?: boolean;
+    }
+  | { type: "list"; items: ExtensionUiNode[] }
+  | {
+      type: "select";
+      id: string;
+      label: string;
+      multiple?: boolean;
+      options: ExtensionUiSelectOption[];
+      binding: ExtensionUiFilterBinding;
+    }
+  | {
+      type: "state";
+      state: ExtensionUiStateKind;
+      title: string;
+      description?: string | null;
+    };
+
+export type ExtensionUiDocument = {
+  version: 1;
+  root: ExtensionUiNode;
+};
+
+export type UnsupportedExtensionContribution = {
+  kind: string;
+  entries: unknown[];
 };
 
 export type ExtensionContributions = {
   threadMenuActions: ExtensionActionContribution[];
   threadDecorations: ExtensionViewContribution[];
   sidebarFilters: ExtensionViewContribution[];
+  /** Contribution kinds introduced by a newer daemon. */
+  unsupported?: UnsupportedExtensionContribution[];
 };
 
 export type ExtensionSummary = {

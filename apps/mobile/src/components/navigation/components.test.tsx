@@ -67,4 +67,9 @@ describe('SidebarView component', () => {
     const groups: ProjectGroup[] = [{ workspace: workspace({ id: 'w1' }), threads: [thread({ id: 't1', workspace_id: 'w1', title: '' })] }]
     expect(renderComponent(<SidebarView {...base} groups={groups} />).toJSON()).toBeTruthy()
   })
+  it('shows a visible fallback for extension filters not supported on mobile', () => {
+    const r = renderComponent(<SidebarView {...base} extensionFilterCount={1} />)
+
+    expect(textOf(r)).toContain('An extension filter is available on desktop and web.')
+  })
 })

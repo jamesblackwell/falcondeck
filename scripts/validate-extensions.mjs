@@ -18,13 +18,228 @@ const allowedTopLevelKeys = new Set([
   "permissions",
 ]);
 const contributionShapes = {
-  threadMenuActions: { title: true, view: false },
-  threadDecorations: { title: false, view: true },
-  sidebarFilters: { title: true, view: true },
+  threadMenuActions: { title: true, view: false, ui: false },
+  threadDecorations: { title: false, view: true, ui: true },
+  sidebarFilters: { title: true, view: true, ui: true },
 };
+const identifierPattern = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const uiTones = new Set([
+  "default",
+  "muted",
+  "accent",
+  "success",
+  "warning",
+  "danger",
+  "info",
+  "gray",
+  "red",
+  "orange",
+  "yellow",
+  "green",
+  "blue",
+  "purple",
+  "pink",
+]);
+const uiGaps = new Set(["none", "small", "medium", "large"]);
+const uiTextStyles = new Set(["body", "heading", "caption", "mono"]);
+const uiButtonVariants = new Set(["secondary", "primary", "ghost", "danger"]);
+const uiStateKinds = new Set(["loading", "empty", "error"]);
+const unsafePathSegments = new Set(["__proto__", "constructor", "prototype"]);
 
 function report(code, message, pointer = "") {
   diagnostics.push({ code, message, file: manifestPath, pointer });
+}
+
+function isObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value, allowed) {
+  const keys = new Set(allowed);
+  return Object.keys(value).every((key) => keys.has(key));
+}
+
+function validUiText(value, allowEmpty = true) {
+  return (
+    typeof value === "string" &&
+    [...value].length <= 4096 &&
+    (allowEmpty || value.trim().length > 0)
+  );
+}
+
+function reportUi(pointer, message) {
+  report("FDX1021", message, pointer);
+  return false;
+}
+
+function validateUiNode(node, pointer, depth, counter, declaredActions, declaredViews) {
+  counter.nodes += 1;
+  if (depth > 32 || counter.nodes > 256) {
+    return reportUi(pointer, "declarative UI exceeds 32 levels or 256 nodes");
+  }
+  if (!isObject(node) || typeof node.type !== "string") {
+    return reportUi(pointer, "declarative UI node must be an object with a type");
+  }
+  if (node.type === "stack" || node.type === "row") {
+    const allowed = node.type === "row"
+      ? ["type", "gap", "wrap", "children"]
+      : ["type", "gap", "children"];
+    if (
+      !hasOnlyKeys(node, allowed) ||
+      (node.gap !== undefined && !uiGaps.has(node.gap)) ||
+      (node.type === "row" && node.wrap !== undefined && typeof node.wrap !== "boolean") ||
+      !Array.isArray(node.children) ||
+      node.children.length > 256
+    ) {
+      return reportUi(pointer, `invalid ${node.type} node`);
+    }
+    return node.children.every((child, index) =>
+      validateUiNode(
+        child,
+        `${pointer}/children/${index}`,
+        depth + 1,
+        counter,
+        declaredActions,
+        declaredViews,
+      ),
+    );
+  }
+  if (node.type === "text") {
+    return (
+      hasOnlyKeys(node, ["type", "text", "style", "tone"]) &&
+      validUiText(node.text) &&
+      (node.style === undefined || uiTextStyles.has(node.style)) &&
+      (node.tone === undefined || uiTones.has(node.tone))
+    ) || reportUi(pointer, "invalid text node");
+  }
+  if (node.type === "badge") {
+    return (
+      hasOnlyKeys(node, ["type", "text", "tone"]) &&
+      validUiText(node.text) &&
+      (node.tone === undefined || uiTones.has(node.tone))
+    ) || reportUi(pointer, "invalid badge node");
+  }
+  if (node.type === "divider") {
+    return hasOnlyKeys(node, ["type"]) || reportUi(pointer, "invalid divider node");
+  }
+  if (node.type === "button") {
+    const action = node.action;
+    if (
+      !hasOnlyKeys(node, ["type", "label", "action", "variant", "disabled"]) ||
+      !validUiText(node.label, false) ||
+      (node.variant !== undefined && !uiButtonVariants.has(node.variant)) ||
+      (node.disabled !== undefined && typeof node.disabled !== "boolean") ||
+      !isObject(action) ||
+      !hasOnlyKeys(action, ["actionId", "input", "target"]) ||
+      !identifierPattern.test(action.actionId ?? "") ||
+      !declaredActions.has(action.actionId)
+    ) {
+      return reportUi(pointer, "invalid button or undeclared action binding");
+    }
+    if (action.target !== undefined && (
+      !isObject(action.target) ||
+      !hasOnlyKeys(action.target, ["kind", "id"]) ||
+      typeof action.target.kind !== "string" ||
+      action.target.kind.length === 0 ||
+      [...action.target.kind].length > 64 ||
+      typeof action.target.id !== "string" ||
+      action.target.id.length === 0 ||
+      [...action.target.id].length > 512
+    )) {
+      return reportUi(`${pointer}/action/target`, "invalid action target");
+    }
+    if (action.input !== undefined && Buffer.byteLength(JSON.stringify(action.input)) > 64 * 1024) {
+      return reportUi(`${pointer}/action/input`, "action input exceeds 65536 bytes");
+    }
+    return true;
+  }
+  if (node.type === "list") {
+    if (!hasOnlyKeys(node, ["type", "items"]) || !Array.isArray(node.items) || node.items.length > 256) {
+      return reportUi(pointer, "invalid list node");
+    }
+    return node.items.every((item, index) =>
+      validateUiNode(
+        item,
+        `${pointer}/items/${index}`,
+        depth + 1,
+        counter,
+        declaredActions,
+        declaredViews,
+      ),
+    );
+  }
+  if (node.type === "select") {
+    const binding = node.binding;
+    const values = new Set();
+    const validOptions = Array.isArray(node.options) &&
+      node.options.length <= 256 &&
+      node.options.every((option) => {
+        if (
+          !isObject(option) ||
+          !hasOnlyKeys(option, ["value", "label", "tone"]) ||
+          typeof option.value !== "string" ||
+          option.value.length === 0 ||
+          [...option.value].length > 256 ||
+          values.has(option.value) ||
+          !validUiText(option.label, false) ||
+          (option.tone !== undefined && !uiTones.has(option.tone))
+        ) return false;
+        values.add(option.value);
+        return true;
+      });
+    const validBinding = isObject(binding) &&
+      hasOnlyKeys(binding, ["view", "path", "operator"]) &&
+      identifierPattern.test(binding.view ?? "") &&
+      declaredViews.has(binding.view) &&
+      binding.operator === "includes_any" &&
+      Array.isArray(binding.path) &&
+      binding.path.length > 0 &&
+      binding.path.length <= 16 &&
+      binding.path.every((segment) =>
+        typeof segment === "string" &&
+        segment.length > 0 &&
+        [...segment].length <= 128 &&
+        !unsafePathSegments.has(segment),
+      );
+    return (
+      hasOnlyKeys(node, ["type", "id", "label", "multiple", "options", "binding"]) &&
+      identifierPattern.test(node.id ?? "") &&
+      validUiText(node.label, false) &&
+      (node.multiple === undefined || typeof node.multiple === "boolean") &&
+      validOptions &&
+      validBinding
+    ) || reportUi(pointer, "invalid select or thread-filter binding");
+  }
+  if (node.type === "state") {
+    return (
+      hasOnlyKeys(node, ["type", "state", "title", "description"]) &&
+      uiStateKinds.has(node.state) &&
+      validUiText(node.title, false) &&
+      (node.description === undefined || validUiText(node.description))
+    ) || reportUi(pointer, "invalid state node");
+  }
+  return reportUi(pointer, `unsupported declarative UI node: ${node.type}`);
+}
+
+function validateUiDocument(document, pointer, declaredActions, declaredViews, requireSelectRoot) {
+  if (
+    !isObject(document) ||
+    !hasOnlyKeys(document, ["version", "root"]) ||
+    document.version !== 1
+  ) {
+    return reportUi(pointer, "declarative UI must use version 1");
+  }
+  if (requireSelectRoot && document.root?.type !== "select") {
+    return reportUi(`${pointer}/root`, "sidebar filter UI must use a select root");
+  }
+  return validateUiNode(
+    document.root,
+    `${pointer}/root`,
+    1,
+    { nodes: 0 },
+    declaredActions,
+    declaredViews,
+  );
 }
 
 let manifest;
@@ -89,6 +304,9 @@ if (manifest) {
     report("FDX1011", "name must contain 1–80 characters", "/name");
   }
   const ids = new Set();
+  const declaredActions = new Set();
+  const declaredViews = new Set();
+  const uiDocuments = [];
   let contributionCount = 0;
   const contributes = manifest.contributes;
   if (
@@ -132,6 +350,7 @@ if (manifest) {
         "id",
         ...(shape.title ? ["title"] : []),
         ...(shape.view ? ["view"] : []),
+        ...(shape.ui ? ["ui"] : []),
       ]);
       for (const property of Object.keys(contribution)) {
         if (!allowedKeys.has(property)) {
@@ -160,6 +379,7 @@ if (manifest) {
         );
       } else {
         ids.add(id);
+        if (key === "threadMenuActions") declaredActions.add(id);
       }
       if (
         shape.title &&
@@ -182,8 +402,26 @@ if (manifest) {
           "view must be a kebab-case identifier",
           `/contributes/${key}/${index}/view`,
         );
+      } else if (shape.view) {
+        declaredViews.add(contribution.view);
+      }
+      if (shape.ui && contribution.ui !== undefined) {
+        uiDocuments.push({
+          document: contribution.ui,
+          pointer: `/contributes/${key}/${index}/ui`,
+          requireSelectRoot: key === "sidebarFilters",
+        });
       }
     }
+  }
+  for (const ui of uiDocuments) {
+    validateUiDocument(
+      ui.document,
+      ui.pointer,
+      declaredActions,
+      declaredViews,
+      ui.requireSelectRoot,
+    );
   }
   if (contributionCount > 256) {
     report(

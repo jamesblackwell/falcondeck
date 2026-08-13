@@ -789,6 +789,244 @@ pub struct ExtensionViewContribution {
     pub title: Option<String>,
     /// Manifest-declared view id consumed by the contribution.
     pub view: String,
+    /// Optional declarative fallback rendered before the host publishes a view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<ExtensionUiDocument>,
+}
+
+/// Versioned declarative UI rendered by FalconDeck clients without extension code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionUiDocument {
+    /// Declarative component vocabulary version.
+    pub version: u16,
+    /// Root component for this contribution.
+    pub root: ExtensionUiNode,
+}
+
+/// A bounded component in the extension declarative UI vocabulary.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ExtensionUiNode {
+    /// Vertical layout.
+    Stack {
+        /// Spacing between children.
+        #[serde(default)]
+        gap: Option<ExtensionUiGap>,
+        /// Child components.
+        children: Vec<ExtensionUiNode>,
+    },
+    /// Horizontal layout.
+    Row {
+        /// Spacing between children.
+        #[serde(default)]
+        gap: Option<ExtensionUiGap>,
+        /// Whether children may wrap onto another line.
+        #[serde(default)]
+        wrap: bool,
+        /// Child components.
+        children: Vec<ExtensionUiNode>,
+    },
+    /// Plain localized display text supplied by the extension.
+    Text {
+        /// Text content.
+        text: String,
+        /// Semantic text treatment.
+        #[serde(default)]
+        style: Option<ExtensionUiTextStyle>,
+        /// Semantic colour treatment.
+        #[serde(default)]
+        tone: Option<ExtensionUiTone>,
+    },
+    /// Compact label.
+    Badge {
+        /// Badge content.
+        text: String,
+        /// Semantic colour treatment.
+        #[serde(default)]
+        tone: Option<ExtensionUiTone>,
+    },
+    /// Visual and semantic separation between adjacent content.
+    Divider {},
+    /// Button bound to a manifest-declared extension action.
+    Button {
+        /// Visible control label.
+        label: String,
+        /// Action invocation data.
+        action: ExtensionUiActionBinding,
+        /// Semantic button treatment.
+        #[serde(default)]
+        variant: Option<ExtensionUiButtonVariant>,
+        /// Whether the control is unavailable.
+        #[serde(default)]
+        disabled: bool,
+    },
+    /// Semantic list of declarative child components.
+    List {
+        /// Items rendered in source order.
+        items: Vec<ExtensionUiNode>,
+    },
+    /// Client-local selection bound to bounded thread-scoped extension views.
+    Select {
+        /// Stable state key within this document.
+        id: String,
+        /// Accessible and visible control label.
+        label: String,
+        /// Whether more than one option can be selected.
+        #[serde(default)]
+        multiple: bool,
+        /// Available choices.
+        options: Vec<ExtensionUiSelectOption>,
+        /// Declarative predicate applied by the client.
+        binding: ExtensionUiFilterBinding,
+    },
+    /// Standard lifecycle, empty, or failure presentation.
+    State {
+        /// State presentation kind.
+        state: ExtensionUiStateKind,
+        /// Short state title.
+        title: String,
+        /// Optional supporting copy.
+        #[serde(default)]
+        description: Option<String>,
+    },
+}
+
+/// Spacing tokens available to declarative extension layouts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionUiGap {
+    /// No added spacing.
+    None,
+    /// Compact spacing.
+    Small,
+    /// Default spacing.
+    Medium,
+    /// Spacious grouping.
+    Large,
+}
+
+/// Typography roles available to extension text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionUiTextStyle {
+    /// Default body copy.
+    Body,
+    /// Section heading.
+    Heading,
+    /// Supporting copy.
+    Caption,
+    /// Machine-readable content.
+    Mono,
+}
+
+/// Semantic colours mapped to the active FalconDeck theme.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionUiTone {
+    /// Default foreground.
+    Default,
+    /// De-emphasized foreground.
+    Muted,
+    /// FalconDeck accent.
+    Accent,
+    /// Successful state.
+    Success,
+    /// Warning state.
+    Warning,
+    /// Dangerous or failed state.
+    Danger,
+    /// Informational state.
+    Info,
+    /// Neutral grey swatch.
+    Gray,
+    /// Red swatch.
+    Red,
+    /// Orange swatch.
+    Orange,
+    /// Yellow swatch.
+    Yellow,
+    /// Green swatch.
+    Green,
+    /// Blue swatch.
+    Blue,
+    /// Purple swatch.
+    Purple,
+    /// Pink swatch.
+    Pink,
+}
+
+/// Semantic visual treatments for extension buttons.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionUiButtonVariant {
+    /// Standard secondary action.
+    Secondary,
+    /// Primary action.
+    Primary,
+    /// Low-emphasis action.
+    Ghost,
+    /// Destructive action.
+    Danger,
+}
+
+/// Manifest-declared action invocation emitted by a declarative button.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionUiActionBinding {
+    /// Action identifier declared by this extension.
+    pub action_id: String,
+    /// Bounded action-specific input.
+    #[serde(default)]
+    pub input: Value,
+    /// Optional literal entity target.
+    #[serde(default)]
+    pub target: Option<ExtensionViewScope>,
+}
+
+/// Choice available in a declarative select control.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionUiSelectOption {
+    /// Stable value used by the binding.
+    pub value: String,
+    /// Visible option label.
+    pub label: String,
+    /// Optional semantic swatch or tone.
+    #[serde(default)]
+    pub tone: Option<ExtensionUiTone>,
+}
+
+/// Bounded client-side filter over thread-scoped extension projections.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionUiFilterBinding {
+    /// Thread-scoped view id containing filter membership values.
+    pub view: String,
+    /// Object-key path to an array of option values.
+    pub path: Vec<String>,
+    /// Matching operation.
+    pub operator: ExtensionUiFilterOperator,
+}
+
+/// Matching operations supported by declarative extension filters.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionUiFilterOperator {
+    /// A thread matches when any selected value appears in its projection.
+    IncludesAny,
+}
+
+/// Standard presentation kinds for declarative states.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionUiStateKind {
+    /// Work is in progress.
+    Loading,
+    /// No content is available.
+    Empty,
+    /// Content could not be produced.
+    Error,
 }
 
 /// Bounded non-secret extension state synchronized to clients.

@@ -34,6 +34,7 @@ describe("extension snapshot normalization", () => {
         threadMenuActions: [],
         threadDecorations: [],
         sidebarFilters: [],
+        unsupported: [],
       },
       permissions: [],
     });
@@ -60,6 +61,29 @@ describe("extension snapshot normalization", () => {
     });
     expect(normalized.catalog[0]?.contributes.threadMenuActions).toEqual([]);
     expect(normalized.views).toEqual([]);
+  });
+
+  it("preserves newer contribution kinds for an inspectable fallback", () => {
+    const normalized = normalizeExtensionSnapshot({
+      catalog: [
+        {
+          id: "example.extension",
+          name: "Example",
+          version: "1.0.0",
+          contributes: {
+            panels: [{ id: "future", title: "Future panel", view: "future" }],
+          },
+        },
+      ],
+      views: [],
+    });
+
+    expect(normalized.catalog[0]?.contributes.unsupported).toEqual([
+      {
+        kind: "panels",
+        entries: [{ id: "future", title: "Future panel", view: "future" }],
+      },
+    ]);
   });
 });
 

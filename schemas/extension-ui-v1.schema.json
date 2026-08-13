@@ -1,0 +1,201 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://falcondeck.com/schemas/extension-ui-v1.schema.json",
+  "title": "FalconDeck Declarative Extension UI v1",
+  "type": "object",
+  "required": ["version", "root"],
+  "properties": {
+    "version": { "const": 1 },
+    "root": { "$ref": "#/$defs/node" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"
+    },
+    "tone": {
+      "enum": [
+        "default",
+        "muted",
+        "accent",
+        "success",
+        "warning",
+        "danger",
+        "info",
+        "gray",
+        "red",
+        "orange",
+        "yellow",
+        "green",
+        "blue",
+        "purple",
+        "pink"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "id": { "type": "string", "minLength": 1, "maxLength": 512 }
+      },
+      "additionalProperties": false
+    },
+    "actionBinding": {
+      "type": "object",
+      "required": ["actionId"],
+      "properties": {
+        "actionId": { "$ref": "#/$defs/identifier" },
+        "input": true,
+        "target": { "$ref": "#/$defs/scope" }
+      },
+      "additionalProperties": false
+    },
+    "filterBinding": {
+      "type": "object",
+      "required": ["view", "path", "operator"],
+      "properties": {
+        "view": { "$ref": "#/$defs/identifier" },
+        "path": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "not": {
+              "enum": ["__proto__", "constructor", "prototype"]
+            }
+          }
+        },
+        "operator": { "const": "includes_any" }
+      },
+      "additionalProperties": false
+    },
+    "selectOption": {
+      "type": "object",
+      "required": ["value", "label"],
+      "properties": {
+        "value": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "tone": { "$ref": "#/$defs/tone" }
+      },
+      "additionalProperties": false
+    },
+    "node": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["type", "children"],
+          "properties": {
+            "type": { "const": "stack" },
+            "gap": { "enum": ["none", "small", "medium", "large"] },
+            "children": {
+              "type": "array",
+              "maxItems": 256,
+              "items": { "$ref": "#/$defs/node" }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "children"],
+          "properties": {
+            "type": { "const": "row" },
+            "gap": { "enum": ["none", "small", "medium", "large"] },
+            "wrap": { "type": "boolean" },
+            "children": {
+              "type": "array",
+              "maxItems": 256,
+              "items": { "$ref": "#/$defs/node" }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "text" },
+            "text": { "type": "string", "maxLength": 4096 },
+            "style": { "enum": ["body", "heading", "caption", "mono"] },
+            "tone": { "$ref": "#/$defs/tone" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "text"],
+          "properties": {
+            "type": { "const": "badge" },
+            "text": { "type": "string", "maxLength": 4096 },
+            "tone": { "$ref": "#/$defs/tone" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type"],
+          "properties": { "type": { "const": "divider" } },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "label", "action"],
+          "properties": {
+            "type": { "const": "button" },
+            "label": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "action": { "$ref": "#/$defs/actionBinding" },
+            "variant": { "enum": ["secondary", "primary", "ghost", "danger"] },
+            "disabled": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "items"],
+          "properties": {
+            "type": { "const": "list" },
+            "items": {
+              "type": "array",
+              "maxItems": 256,
+              "items": { "$ref": "#/$defs/node" }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "id", "label", "options", "binding"],
+          "properties": {
+            "type": { "const": "select" },
+            "id": { "$ref": "#/$defs/identifier" },
+            "label": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "multiple": { "type": "boolean" },
+            "options": {
+              "type": "array",
+              "maxItems": 256,
+              "items": { "$ref": "#/$defs/selectOption" }
+            },
+            "binding": { "$ref": "#/$defs/filterBinding" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": ["type", "state", "title"],
+          "properties": {
+            "type": { "const": "state" },
+            "state": { "enum": ["loading", "empty", "error"] },
+            "title": { "type": "string", "minLength": 1, "maxLength": 4096 },
+            "description": { "type": "string", "maxLength": 4096 }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

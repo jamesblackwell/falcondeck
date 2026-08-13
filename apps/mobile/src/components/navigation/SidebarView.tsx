@@ -30,6 +30,8 @@ interface SidebarViewProps {
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
   onClose?: () => void
   threadTagsById?: Record<string, ThreadTag[]>
+  /** Visible fallback for declarative sidebar filters not rendered on mobile v1. */
+  extensionFilterCount?: number
 }
 
 // Rotating one chevron rather than swapping two icons, so the open/close
@@ -108,6 +110,7 @@ export const SidebarView = memo(function SidebarView({
   onOpenSettings,
   onClose,
   threadTagsById,
+  extensionFilterCount = 0,
 }: SidebarViewProps) {
   const { theme } = useUnistyles()
   const insets = useSafeAreaInsets()
@@ -297,6 +300,16 @@ export const SidebarView = memo(function SidebarView({
 
       <SyncBanner status={syncStatus} />
 
+      {extensionFilterCount > 0 ? (
+        <View style={styles.extensionFallback} accessibilityRole="text">
+          <Text variant="caption" color="muted">
+            {extensionFilterCount === 1
+              ? 'An extension filter is available on desktop and web.'
+              : `${extensionFilterCount} extension filters are available on desktop and web.`}
+          </Text>
+        </View>
+      ) : null}
+
       <View style={styles.list}>
         {rows.length === 0 ? (
           // 'offline' is a dead end rather than a wait, so it keeps the
@@ -351,6 +364,17 @@ const styles = StyleSheet.create((theme) => ({
   },
   list: {
     flex: 1,
+  },
+  extensionFallback: {
+    marginHorizontal: theme.spacing[3],
+    marginTop: theme.spacing[2],
+    paddingHorizontal: theme.spacing[3],
+    paddingVertical: theme.spacing[2],
+    borderWidth: 1,
+    borderColor: theme.colors.border.subtle,
+    borderRadius: theme.radius.lg,
+    borderCurve: 'continuous',
+    backgroundColor: theme.colors.surface[2],
   },
   header: {
     flexDirection: 'row',

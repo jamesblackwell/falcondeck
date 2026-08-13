@@ -1,8 +1,9 @@
 # FalconDeck Extensions
 
 Status: canonical architecture and implementation plan. The v0 foundation and
-Thread Colours vertical slice are implemented; later capabilities are explicitly
-tracked below. Last reconciled with the code on 2026-08-12.
+Thread Colours vertical slice and the scoped declarative UI v1 foundation are
+implemented; later capabilities are explicitly tracked below. Last reconciled
+with the code on 2026-08-13.
 
 This document is the source of truth for code that extends FalconDeck itself.
 If implementation conflicts with it, update this document and record the
@@ -22,12 +23,19 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 - one-click Thread Colours context-menu selection, colour markers, optimistic
   updates, and sidebar filtering on desktop
   and remote web, with read-only colour markers on mobile;
+- a bounded declarative UI v1 schema, public SDK types/builder, defensive client
+  normalizer, shared web renderer, generic sidebar-filter host, and visible
+  unsupported-contribution fallback;
+- `packages/extension-testing`, with deterministic public-SDK activation,
+  storage, actions, view publications, failure injection, declaration checks,
+  daemon-equivalent limits, and atomic rollback;
 - persistence, size/path validation, host-contract, normalization, and shared
   projection tests.
 
 The following planned parts are not yet public API: user/local-path install,
 permission grants beyond the baseline sandbox,
-the general declarative form renderer, migrations/transactions beyond atomic
+the remaining declarative form primitives and mobile renderer,
+migrations/transactions beyond atomic
 action commits, the full `create|test|dev|pack` CLI, archive signing/update, and
 a bundled Deno executable for standalone daemon releases. Do not document those as
 shipping behaviour until their phase gates pass.
@@ -190,8 +198,8 @@ requires an alias or migration because saved state may refer to it.
 
 ## 6. Public SDK
 
-The TypeScript SDK exposes capability-shaped facets, never daemon transport or
-internal React stores:
+The TypeScript SDK exposes capability-shaped facets and declarative UI types,
+never daemon transport or internal React stores:
 
 ```ts
 export default defineExtension({
@@ -222,8 +230,14 @@ Later facets may add schedules, notifications, agent tools, turn control,
 workspace files, and mediated network access. Plausibility alone does not put a
 facet into v1.
 
-Every registration returns a disposable. The host disposes resources in
-reverse order when an extension is disabled, reloaded, or replaced.
+The v0.1 action registration is process-lifetime and returns `void`; disabling
+the extension terminates that isolated host. Subscription facets introduced in
+later slices return disposables and are released in reverse registration order.
+
+`defineExtensionUi(...)` type-checks UI v1 documents while preserving literal
+component, control, view, and action identifiers. The same checked document
+shape is mirrored in Rust, `packages/client-core`, and
+`schemas/extension-ui-v1.schema.json`.
 
 ## 7. State and synchronization
 
@@ -280,14 +294,32 @@ The first API provides named contribution points:
 Thread Colours uses the first three; its fixed palette is rendered directly in
 the context menu and does not open a modal.
 
-Contributions bind manifest declarations to view state and actions. Clients
-render a versioned JSON vocabulary: stack, row, text, icon, divider, button,
-menu, list, input, select, colour picker, Markdown, and standard loading,
-empty, and error states.
+Contributions bind manifest declarations to view state and actions. The scoped
+implemented v1 vocabulary is stack, row, text, badge, divider, button, list,
+select, and standard loading, empty, and error states. Button bindings carry
+only a declared action id, bounded literal input, and an optional literal
+target. Select bindings carry a declared thread-scoped view id, a bounded safe
+object path, and the `includes_any` comparison; clients keep the selection
+itself local and never evaluate extension expressions.
 
-The vocabulary supplies accessibility and keyboard semantics, theme tokens,
+The generic web host currently consumes `sidebarFilters`. Static manifest UI
+lets a lazy extension render on first paint; a synchronized global projection
+with the contribution's view id may replace that document later. Thread
+Colours now uses this path, while its thread menu action and row decoration
+remain on their existing shared compatibility adapter. Header/composer actions,
+forms, modal hosts, colour picker, Markdown, icons, and the full mobile
+vocabulary remain planned rather than silently treated as implemented.
+Mobile shows an attributed notice when one or more enabled sidebar filters are
+available on desktop/web; it does not silently discard the contribution.
+
+The renderer supplies accessibility and keyboard semantics, theme tokens,
 localization-ready strings, and validation without extension-authored CSS.
-Bindings are data, not executable expressions.
+Documents are limited to 32 levels, 256 nodes, 256 select options, and 4,096
+characters per text field, in addition to manifest and retained-view byte
+limits. Bindings are data, not executable expressions. Newer or malformed
+documents produce an attributed, inspectable fallback; newer contribution
+kinds are listed by name in desktop Extensions settings even when that client
+has no renderer for their surface.
 
 Sandboxed webviews are a later desktop/web escape hatch. Mobile always needs a
 useful declarative or generic fallback. Whole-region replacement, same-origin
@@ -309,12 +341,13 @@ The daemon owns this lifecycle:
 
 1. Discover bundled manifests from the FalconDeck-owned catalog.
 2. Validate paths, compatibility, declarations, and the empty v0.1 permission set.
-3. Lazily start that extension's host on its first executable action.
-4. Activate the package and collect its action registrations.
-5. Route a declared action with a bounded target, input, and private-state copy.
-6. Validate and atomically persist the returned storage and view projections.
-7. Publish status and view changes through the unified event stream.
-8. Dispose the process on disable, shutdown, timeout, or protocol failure.
+3. Validate static declarative UI and render it without starting extension code.
+4. Lazily start that extension's host on its first executable action.
+5. Activate the package and collect its action registrations.
+6. Route a declared action with a bounded target, input, and private-state copy.
+7. Validate and atomically persist the returned storage and view projections.
+8. Publish status and view changes through the unified event stream.
+9. Dispose the process on disable, shutdown, timeout, or protocol failure.
 
 The daemon is the supervisor. Each extension executes in its own Deno process
 with independent lifecycle, timeout, status, and runtime permissions. Calls
@@ -384,8 +417,10 @@ test, fixtures for selected contributions, and an extension-local `AGENTS.md`
 pointing here. It adds no unrelated placeholder dependencies.
 
 The SDK exports types and builders. The manifest schema powers completion. The
-test package provides a fake daemon, permission grants, time control, action
-invocation, rendering fixtures, and failure injection.
+implemented test package provides activation, private storage, declared action
+invocation, bounded view publications, diagnostics, failure injection, and
+atomic rollback. Permission grants, time control, and later SDK facets join it
+in the same slice that introduces each capability.
 
 Canonical starter prompt:
 
@@ -413,8 +448,10 @@ Initial behaviour:
   sequenced updates.
 - Render tags read-only when a client cannot edit them.
 
-Assignments live in private storage. The fixed palette and per-thread colour
-assignments are view state. v0.1 named, multi-tag data migrates by retaining the
+Assignments live in private storage. The fixed filter palette is static
+declarative manifest UI; per-thread colour assignments are synchronized view
+state, and the action retains the global `tag-index` projection for older
+clients. v0.1 named, multi-tag data migrates by retaining the
 first assigned tag's colour for each thread.
 
 Required contributions:
@@ -514,6 +551,13 @@ Gate:
 - an older client preserves state and shows an inspectable fallback;
 - disabling disposes UI without a client reload.
 
+Progress (2026-08-13): the panel-prerequisite subset is implemented: UI v1
+wire/schema/SDK contracts, bounded validation, defensive normalization, the
+shared web renderer, generic unsupported fallback, fake-host package, and the
+generic `sidebarFilters` host proven by Thread Colours. Mobile vocabulary,
+thread action/decoration generic hosts, forms/modals, and local-path install
+remain open, so Phase 3 as originally scoped is not marked complete.
+
 ### Phase 4 — Thread Colours vertical slice
 
 Deliver section 13 using only public SDK facets, enabled by default in the
@@ -550,6 +594,13 @@ Candidates include standalone panels for Notepad, settings, conversation cards,
 automations, agent tools, schedules, and notifications. Each new capability
 needs a permission, limits, fake-host support, client fallback, and official or
 example consumer.
+
+The active Phase 6 sequence is: finish the panel-scoped Phase 3 renderer
+prerequisite; add standalone panels and the desktop main-view registry; add
+permission grants plus summary-only `threads:read`; add bounded event delivery;
+then prove the whole public surface with an official mini-Zen attention panel.
+Permission enforcement comes before thread-bearing events so no temporary
+unguarded read path ships.
 
 Do not begin marketplace, signing, arbitrary webviews, whole-region UI
 replacement, extension dependencies, or cross-extension calls until local

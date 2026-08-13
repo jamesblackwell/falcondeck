@@ -24,7 +24,31 @@
       {
         "id": "tags",
         "title": "Colours",
-        "view": "tag-index"
+        "view": "tag-index",
+        "ui": {
+          "version": 1,
+          "root": {
+            "type": "select",
+            "id": "colors",
+            "label": "Filter by colour",
+            "multiple": true,
+            "options": [
+              { "value": "gray", "label": "Gray", "tone": "gray" },
+              { "value": "red", "label": "Red", "tone": "red" },
+              { "value": "orange", "label": "Orange", "tone": "orange" },
+              { "value": "yellow", "label": "Yellow", "tone": "yellow" },
+              { "value": "green", "label": "Green", "tone": "green" },
+              { "value": "blue", "label": "Blue", "tone": "blue" },
+              { "value": "purple", "label": "Purple", "tone": "purple" },
+              { "value": "pink", "label": "Pink", "tone": "pink" }
+            ],
+            "binding": {
+              "view": "thread-tags",
+              "path": ["tagIds"],
+              "operator": "includes_any"
+            }
+          }
+        }
       }
     ]
   },

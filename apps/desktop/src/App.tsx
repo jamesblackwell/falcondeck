@@ -21,6 +21,7 @@ import {
   countActivityEntries,
   conversationItemsForSelection,
   deriveThreadAttentionPresentation,
+  deriveExtensionSidebarFilters,
   deriveThreadTags,
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
@@ -220,16 +221,6 @@ function AppInner() {
     hideRail,
   } = usePanelVisibility();
   const shortcutSettings = useShortcutSettings();
-  const threadTags = useMemo(
-    () => deriveThreadTags(snapshot?.extensions),
-    [snapshot?.extensions],
-  );
-  const threadTagsEnabled =
-    snapshot?.extensions.catalog.some(
-      (extension) =>
-        extension.id === THREAD_TAGS_EXTENSION_ID && extension.enabled,
-    ) ?? false;
-
   const [drafts, setDrafts] = useState<ComposerDrafts>(() =>
     readStoredDrafts(),
   );
@@ -310,29 +301,33 @@ function AppInner() {
   const [actionError, setActionError] = useState<string | null>(null);
   const handleSetThreadColor = useCallback(
     async (
-      _workspaceId: string,
+      workspaceId: string,
       thread: ThreadSummary,
       color: ThreadTag | null,
     ) => {
-      if (!api) {
+      const host = remoteHosts.hostForWorkspace(workspaceId);
+      const actionApi = host ? host.api() : api;
+      if (!actionApi) {
         setActionError("The FalconDeck daemon is not connected");
         return;
       }
       try {
         setActionError(null);
-        setSnapshot((current) =>
-          current
-            ? {
-                ...current,
-                extensions: optimisticallySetThreadColor(
-                  current.extensions,
-                  thread.id,
-                  color?.color ?? null,
-                ),
-              }
-            : current,
-        );
-        await api.invokeExtensionAction(
+        if (!host) {
+          setSnapshot((current) =>
+            current
+              ? {
+                  ...current,
+                  extensions: optimisticallySetThreadColor(
+                    current.extensions,
+                    thread.id,
+                    color?.color ?? null,
+                  ),
+                }
+              : current,
+          );
+        }
+        await actionApi.invokeExtensionAction(
           THREAD_TAGS_EXTENSION_ID,
           THREAD_TAGS_ACTION_ID,
           {
@@ -344,10 +339,14 @@ function AppInner() {
           },
         );
       } catch (error) {
-        void api
-          .snapshot()
-          .then(setSnapshot)
-          .catch(() => {});
+        if (host) {
+          void host.refresh().catch(() => {});
+        } else {
+          void api
+            ?.snapshot()
+            .then(setSnapshot)
+            .catch(() => {});
+        }
         const message =
           error instanceof Error
             ? error.message
@@ -360,7 +359,7 @@ function AppInner() {
         });
       }
     },
-    [api, setSnapshot, toast],
+    [api, remoteHosts, setSnapshot, toast],
   );
 
   const handleSetExtensionEnabled = useCallback(
@@ -595,6 +594,19 @@ function AppInner() {
     () => mergeSnapshots(snapshot, remoteHosts.hosts),
     [remoteHosts.hosts, snapshot],
   );
+  const threadTags = useMemo(
+    () => deriveThreadTags(viewSnapshot?.extensions),
+    [viewSnapshot?.extensions],
+  );
+  const extensionSidebarFilters = useMemo(
+    () => deriveExtensionSidebarFilters(viewSnapshot?.extensions),
+    [viewSnapshot?.extensions],
+  );
+  const threadTagsEnabled =
+    viewSnapshot?.extensions.catalog.some(
+      (extension) =>
+        extension.id === THREAD_TAGS_EXTENSION_ID && extension.enabled,
+    ) ?? false;
   const workspaceHostIndex = useMemo(
     () => hostLabelByWorkspaceId(remoteHosts.hosts),
     [remoteHosts.hosts],
@@ -611,6 +623,19 @@ function AppInner() {
     }
     return badges;
   }, [workspaceHostIndex]);
+  const canSetThreadColor = useCallback(
+    (workspaceId: string) => {
+      const hostSnapshot = workspaceHostIndex.get(workspaceId)?.snapshot;
+      const extensions = hostSnapshot?.extensions ?? snapshot?.extensions;
+      return (
+        extensions?.catalog.some(
+          (extension) =>
+            extension.id === THREAD_TAGS_EXTENSION_ID && extension.enabled,
+        ) ?? false
+      );
+    },
+    [snapshot?.extensions, workspaceHostIndex],
+  );
   const apiFor = useCallback(
     (workspaceId: string | null | undefined) => {
       const host = remoteHosts.hostForWorkspace(workspaceId);
@@ -3986,9 +4011,12 @@ function AppInner() {
             errors={sidebarErrors}
             threadTagsById={threadTags.byThreadId}
             threadTagOptions={threadTags.tags}
+            extensionSidebarFilters={extensionSidebarFilters}
+            extensionSnapshot={viewSnapshot?.extensions}
             onSetThreadColor={
               threadTagsEnabled ? handleSetThreadColor : undefined
             }
+            canSetThreadColor={canSetThreadColor}
           />
         }
         main={

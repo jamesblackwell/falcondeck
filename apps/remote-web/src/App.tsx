@@ -24,6 +24,7 @@ import {
   decryptJson,
   decryptJsonBatch,
   deriveThreadAttentionPresentation,
+  deriveExtensionSidebarFilters,
   deriveThreadTags,
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
@@ -304,6 +305,10 @@ function RemoteApp() {
   );
   const threadTags = useMemo(
     () => deriveThreadTags(snapshot?.extensions),
+    [snapshot?.extensions],
+  );
+  const extensionSidebarFilters = useMemo(
+    () => deriveExtensionSidebarFilters(snapshot?.extensions),
     [snapshot?.extensions],
   );
   const threadTagsEnabled =
@@ -4059,6 +4064,8 @@ function RemoteApp() {
                 errors={error ? [error] : []}
                 threadTagsById={threadTags.byThreadId}
                 threadTagOptions={threadTags.tags}
+                extensionSidebarFilters={extensionSidebarFilters}
+                extensionSnapshot={snapshot?.extensions}
                 onSetThreadColor={
                   threadTagsEnabled ? handleSetThreadColor : undefined
                 }
@@ -4109,6 +4116,8 @@ function RemoteApp() {
           errors={error ? [error] : []}
           threadTagsById={threadTags.byThreadId}
           threadTagOptions={threadTags.tags}
+          extensionSidebarFilters={extensionSidebarFilters}
+          extensionSnapshot={snapshot?.extensions}
           onSetThreadColor={
             threadTagsEnabled ? handleSetThreadColor : undefined
           }

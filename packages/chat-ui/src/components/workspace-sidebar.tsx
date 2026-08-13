@@ -1,15 +1,22 @@
-import * as React from 'react'
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import { ChevronDown, FolderClosed, FolderPlus, SquarePen } from 'lucide-react'
+import * as React from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { ChevronDown, FolderClosed, FolderPlus, SquarePen } from "lucide-react";
 
-import { compareThreads, threadPriorityRank } from '@falcondeck/client-core'
+import {
+  compareThreads,
+  filterProjectGroupsByExtensions,
+  threadPriorityRank,
+} from "@falcondeck/client-core";
 import type {
+  ActiveExtensionThreadFilter,
+  ExtensionSidebarFilterDefinition,
+  ExtensionSnapshot,
   ProjectGroup,
   ThreadSortMode,
   ThreadSummary,
   ThreadTag,
-} from '@falcondeck/client-core'
+} from "@falcondeck/client-core";
 import {
   ActivityDiamond,
   Button,
@@ -18,11 +25,12 @@ import {
   SidebarContent,
   SidebarHeader,
   cn,
-} from '@falcondeck/ui'
+} from "@falcondeck/ui";
 
-import { AttentionInbox } from './attention-inbox'
-import { ThreadColorFilterMenu } from './thread-color-filter-menu'
-import { ThreadSortMenu } from './thread-sort-menu'
+import { AttentionInbox } from "./attention-inbox";
+import { ExtensionSidebarFilters } from "./extension-sidebar-filters";
+import { ThreadColorFilterMenu } from "./thread-color-filter-menu";
+import { ThreadSortMenu } from "./thread-sort-menu";
 import {
   DeleteThreadDialog,
   RemoveWorkspaceDialog,
@@ -31,88 +39,93 @@ import {
   WorkspaceContextMenu,
   type ThreadContextMenuState,
   type WorkspaceContextMenuState,
-} from './sidebar-menus'
-import { ThreadItem, type ThreadItemArchiveHandler } from './thread-item'
-import { WorkspaceGroup, type WorkspaceHostBadge } from './workspace-group'
+} from "./sidebar-menus";
+import { ThreadItem, type ThreadItemArchiveHandler } from "./thread-item";
+import { WorkspaceGroup, type WorkspaceHostBadge } from "./workspace-group";
 
-const VISIBLE_THREAD_LIMIT = 5
-const SHOW_MORE_STEP = 10
+const VISIBLE_THREAD_LIMIT = 5;
+const SHOW_MORE_STEP = 10;
 const THREAD_PAGER_BUTTON_CLASS =
-  'fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary'
-const RELATIVE_TIME_TICK_MS = 60_000
-const OPTIMISTIC_SELECTION_TTL_MS = 1_500
-const WORKSPACE_DRAG_THRESHOLD_PX = 4
-const PRIORITY_THREAD_COMPARATOR = compareThreads('priority')
+  "fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2.5 py-1.5 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary";
+const RELATIVE_TIME_TICK_MS = 60_000;
+const OPTIMISTIC_SELECTION_TTL_MS = 1_500;
+const WORKSPACE_DRAG_THRESHOLD_PX = 4;
+const PRIORITY_THREAD_COMPARATOR = compareThreads("priority");
 
 type SidebarEmptyState = {
-  title: string
-  description?: string
-}
+  title: string;
+  description?: string;
+};
 
 export type WorkspaceSidebarProps = {
-  groups: ProjectGroup[]
+  groups: ProjectGroup[];
   // Host badges for workspaces that live on enrolled remote servers,
   // keyed by workspace id.
-  workspaceHosts?: Record<string, WorkspaceHostBadge>
-  selectedWorkspaceId: string | null
-  selectedThreadId: string | null
-  onSelectWorkspace: (workspaceId: string, threadId: string | null) => void
-  onSelectThread: (workspaceId: string, threadId: string) => void
-  onNewThread?: (workspaceId: string) => void
-  onArchiveThread?: ThreadItemArchiveHandler
+  workspaceHosts?: Record<string, WorkspaceHostBadge>;
+  selectedWorkspaceId: string | null;
+  selectedThreadId: string | null;
+  onSelectWorkspace: (workspaceId: string, threadId: string | null) => void;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onNewThread?: (workspaceId: string) => void;
+  onArchiveThread?: ThreadItemArchiveHandler;
   /** Permanent, unlike archive: also removes a variant thread's checkout. */
   onDeleteThread?: (
     workspaceId: string,
     threadId: string,
-  ) => Promise<void> | void
+  ) => Promise<void> | void;
   onRenameThread?: (
     workspaceId: string,
     threadId: string,
     title: string,
-  ) => Promise<void> | void
+  ) => Promise<void> | void;
   onTogglePinThread?: (
     workspaceId: string,
     threadId: string,
     pinned: boolean,
-  ) => Promise<void> | void
+  ) => Promise<void> | void;
   onMarkThreadRead?: (
     workspaceId: string,
     threadId: string,
-  ) => Promise<void> | void
-  onAddProject?: () => void
-  onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void
+  ) => Promise<void> | void;
+  onAddProject?: () => void;
+  onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void;
   /** How chats order within each project; also applies to the pinned list. */
-  threadSort?: ThreadSortMode
+  threadSort?: ThreadSortMode;
   /** Enables the sort menu on the Projects heading. */
-  onThreadSortChange?: (mode: ThreadSortMode) => void
+  onThreadSortChange?: (mode: ThreadSortMode) => void;
   /** Called with the new project order after a drag completes. */
-  onWorkspaceOrderChange?: (workspaceIds: string[]) => Promise<void> | void
-  isAddingProject?: boolean
-  title?: string
-  errors?: string[]
-  emptyState?: SidebarEmptyState
-  footer?: React.ReactNode
+  onWorkspaceOrderChange?: (workspaceIds: string[]) => Promise<void> | void;
+  isAddingProject?: boolean;
+  title?: string;
+  errors?: string[];
+  emptyState?: SidebarEmptyState;
+  footer?: React.ReactNode;
   /** First-class navigation rendered before pinned threads and projects. */
-  topNavigation?: React.ReactNode
-  className?: string
-  headerClassName?: string
-  contentClassName?: string
-  threadTagsById?: Record<string, ThreadTag[]>
-  threadTagOptions?: ThreadTag[]
+  topNavigation?: React.ReactNode;
+  className?: string;
+  headerClassName?: string;
+  contentClassName?: string;
+  threadTagsById?: Record<string, ThreadTag[]>;
+  threadTagOptions?: ThreadTag[];
   onSetThreadColor?: (
     workspaceId: string,
     thread: ThreadSummary,
     color: ThreadTag | null,
-  ) => Promise<void> | void
-}
+  ) => Promise<void> | void;
+  canSetThreadColor?: (workspaceId: string) => boolean;
+  /** Generic manifest-declared sidebar filters rendered from extension UI v1. */
+  extensionSidebarFilters?: ExtensionSidebarFilterDefinition[];
+  /** Synchronized projections inspected by declarative filter bindings. */
+  extensionSnapshot?: ExtensionSnapshot | null;
+};
 
 type PriorityQueueState = {
-  bucket: number
-  order: number
-}
+  bucket: number;
+  order: number;
+};
 
-const summaryKey = (thread: ThreadSummary) => thread.id
-const summaryThread = (thread: ThreadSummary) => thread
+const summaryKey = (thread: ThreadSummary) => thread.id;
+const summaryThread = (thread: ThreadSummary) => thread;
 
 /**
  * Keeps Priority useful as a work queue instead of a live activity sort.
@@ -126,73 +139,75 @@ function useStablePriorityOrder<Item>(
   keyFor: (item: Item) => string,
   threadFor: (item: Item) => ThreadSummary,
 ) {
-  const queueRef = useRef(new Map<string, PriorityQueueState>())
-  const previousSelectionRef = useRef(selectedThreadId)
-  const wasActiveRef = useRef(false)
-  const nextFrontOrderRef = useRef(-1)
+  const queueRef = useRef(new Map<string, PriorityQueueState>());
+  const previousSelectionRef = useRef(selectedThreadId);
+  const wasActiveRef = useRef(false);
+  const nextFrontOrderRef = useRef(-1);
 
   return useMemo(() => {
     if (!active) {
-      wasActiveRef.current = false
-      return items
+      wasActiveRef.current = false;
+      return items;
     }
 
-    const enteringPriority = !wasActiveRef.current
-    const navigated = previousSelectionRef.current !== selectedThreadId
-    wasActiveRef.current = true
-    previousSelectionRef.current = selectedThreadId
+    const enteringPriority = !wasActiveRef.current;
+    const navigated = previousSelectionRef.current !== selectedThreadId;
+    wasActiveRef.current = true;
+    previousSelectionRef.current = selectedThreadId;
 
-    const liveIds = new Set(items.map(keyFor))
+    const liveIds = new Set(items.map(keyFor));
     for (const id of queueRef.current.keys()) {
-      if (!liveIds.has(id)) queueRef.current.delete(id)
+      if (!liveIds.has(id)) queueRef.current.delete(id);
     }
 
     if (enteringPriority) {
-      queueRef.current.clear()
+      queueRef.current.clear();
       const seeded = [...items].sort((left, right) =>
         PRIORITY_THREAD_COMPARATOR(threadFor(left), threadFor(right)),
-      )
-      seeded.forEach((item, order) => queueRef.current.set(keyFor(item), {
-        bucket: threadPriorityRank(threadFor(item)),
-        order,
-      }))
-      nextFrontOrderRef.current = -1
+      );
+      seeded.forEach((item, order) =>
+        queueRef.current.set(keyFor(item), {
+          bucket: threadPriorityRank(threadFor(item)),
+          order,
+        }),
+      );
+      nextFrontOrderRef.current = -1;
     } else {
       const arrivals = items
         .filter((item) => !queueRef.current.has(keyFor(item)))
         .sort((left, right) =>
           PRIORITY_THREAD_COMPARATOR(threadFor(left), threadFor(right)),
-        )
-      let arrivalOrder = nextFrontOrderRef.current - arrivals.length + 1
+        );
+      let arrivalOrder = nextFrontOrderRef.current - arrivals.length + 1;
       for (const item of arrivals) {
         queueRef.current.set(keyFor(item), {
           bucket: threadPriorityRank(threadFor(item)),
           order: arrivalOrder++,
-        })
+        });
       }
-      nextFrontOrderRef.current -= arrivals.length
+      nextFrontOrderRef.current -= arrivals.length;
 
       for (const item of items) {
-        const desiredBucket = threadPriorityRank(threadFor(item))
-        const current = queueRef.current.get(keyFor(item))
+        const desiredBucket = threadPriorityRank(threadFor(item));
+        const current = queueRef.current.get(keyFor(item));
         if (current && (desiredBucket < current.bucket || navigated)) {
-          current.bucket = desiredBucket
+          current.bucket = desiredBucket;
         }
       }
     }
 
     return [...items].sort((left, right) => {
-      const leftKey = keyFor(left)
-      const rightKey = keyFor(right)
-      const leftState = queueRef.current.get(leftKey)
-      const rightState = queueRef.current.get(rightKey)
+      const leftKey = keyFor(left);
+      const rightKey = keyFor(right);
+      const leftState = queueRef.current.get(leftKey);
+      const rightState = queueRef.current.get(rightKey);
       return (
         (leftState?.bucket ?? 4) - (rightState?.bucket ?? 4) ||
         (leftState?.order ?? 0) - (rightState?.order ?? 0) ||
         leftKey.localeCompare(rightKey)
-      )
-    })
-  }, [active, items, keyFor, selectedThreadId, threadFor])
+      );
+    });
+  }, [active, items, keyFor, selectedThreadId, threadFor]);
 }
 
 const ThreadList = memo(function ThreadList({
@@ -206,40 +221,41 @@ const ThreadList = memo(function ThreadList({
   nowTick,
   threadTagsById,
 }: {
-  group: ProjectGroup
-  sortMode: ThreadSortMode
-  selectedThreadId: string | null
-  onSelectThread: (workspaceId: string, threadId: string) => void
-  onArchiveThread?: ThreadItemArchiveHandler
-  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void
+  group: ProjectGroup;
+  sortMode: ThreadSortMode;
+  selectedThreadId: string | null;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onArchiveThread?: ThreadItemArchiveHandler;
+  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void;
   onRequestRenameThread?: (args: {
-    workspaceId: string
-    thread: ThreadSummary
-  }) => void
-  nowTick: number
-  threadTagsById?: Record<string, ThreadTag[]>
+    workspaceId: string;
+    thread: ThreadSummary;
+  }) => void;
+  nowTick: number;
+  threadTagsById?: Record<string, ThreadTag[]>;
 }) {
-  const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT)
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_THREAD_LIMIT);
   const unpinned = useMemo(
     () => group.threads.filter((thread) => !thread.is_pinned),
     [group.threads],
-  )
+  );
   const stablePriorityThreads = useStablePriorityOrder(
     unpinned,
     selectedThreadId,
-    sortMode === 'priority',
+    sortMode === "priority",
     summaryKey,
     summaryThread,
-  )
+  );
   const unpinnedThreads = useMemo(
-    () => sortMode === 'priority'
-      ? stablePriorityThreads
-      : [...unpinned].sort(compareThreads(sortMode)),
+    () =>
+      sortMode === "priority"
+        ? stablePriorityThreads
+        : [...unpinned].sort(compareThreads(sortMode)),
     [sortMode, stablePriorityThreads, unpinned],
-  )
+  );
 
-  const visible = unpinnedThreads.slice(0, visibleCount)
-  const hiddenCount = Math.max(0, unpinnedThreads.length - visible.length)
+  const visible = unpinnedThreads.slice(0, visibleCount);
+  const hiddenCount = Math.max(0, unpinnedThreads.length - visible.length);
   // The open thread can sit well outside the window (opening a project resumes
   // its last thread, which may be days old). Trail it below the window as a
   // single extra row rather than unrolling every thread above it — the list
@@ -250,11 +266,11 @@ const ThreadList = memo(function ThreadList({
       ? (unpinnedThreads
           .slice(visibleCount)
           .find((thread) => thread.id === selectedThreadId) ?? null)
-      : null
+      : null;
   // "Show less" rides alongside "Show more" as soon as the list has grown past
   // its resting length, so a partly-expanded project can be wound back without
   // first paging all the way to the end.
-  const canCollapse = visibleCount > VISIBLE_THREAD_LIMIT
+  const canCollapse = visibleCount > VISIBLE_THREAD_LIMIT;
 
   return (
     <>
@@ -311,7 +327,7 @@ const ThreadList = memo(function ThreadList({
                 THREAD_PAGER_BUTTON_CLASS,
                 // Pushed right only while it shares the row with "Show more";
                 // on its own it keeps the list's left edge.
-                hiddenCount > 0 && 'ml-auto',
+                hiddenCount > 0 && "ml-auto",
               )}
             >
               Show less
@@ -321,17 +337,17 @@ const ThreadList = memo(function ThreadList({
         </div>
       ) : null}
     </>
-  )
-})
+  );
+});
 
 type PinnedThreadEntry = {
-  workspaceId: string
-  thread: ThreadSummary
-}
+  workspaceId: string;
+  thread: ThreadSummary;
+};
 
 const pinnedEntryKey = (entry: PinnedThreadEntry) =>
-  `${entry.workspaceId}:${entry.thread.id}`
-const pinnedEntryThread = (entry: PinnedThreadEntry) => entry.thread
+  `${entry.workspaceId}:${entry.thread.id}`;
+const pinnedEntryThread = (entry: PinnedThreadEntry) => entry.thread;
 
 function WorkspaceDropIndicator() {
   return (
@@ -340,7 +356,7 @@ function WorkspaceDropIndicator() {
       data-workspace-drop-indicator="true"
       className="mx-1 h-0.5 rounded-full bg-info shadow-[var(--fd-shadow-sm)]"
     />
-  )
+  );
 }
 
 const PinnedThreadList = memo(function PinnedThreadList({
@@ -353,19 +369,19 @@ const PinnedThreadList = memo(function PinnedThreadList({
   nowTick,
   threadTagsById,
 }: {
-  entries: PinnedThreadEntry[]
-  selectedThreadId: string | null
-  onSelectThread: (workspaceId: string, threadId: string) => void
-  onArchiveThread?: ThreadItemArchiveHandler
-  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void
+  entries: PinnedThreadEntry[];
+  selectedThreadId: string | null;
+  onSelectThread: (workspaceId: string, threadId: string) => void;
+  onArchiveThread?: ThreadItemArchiveHandler;
+  onOpenThreadContextMenu?: (args: ThreadContextMenuState) => void;
   onRequestRenameThread?: (args: {
-    workspaceId: string
-    thread: ThreadSummary
-  }) => void
-  nowTick: number
-  threadTagsById?: Record<string, ThreadTag[]>
+    workspaceId: string;
+    thread: ThreadSummary;
+  }) => void;
+  nowTick: number;
+  threadTagsById?: Record<string, ThreadTag[]>;
 }) {
-  if (entries.length === 0) return null
+  if (entries.length === 0) return null;
 
   return (
     <section aria-labelledby="fd-pinned-threads-heading" className="mb-4">
@@ -392,8 +408,8 @@ const PinnedThreadList = memo(function PinnedThreadList({
         ))}
       </div>
     </section>
-  )
-})
+  );
+});
 
 export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   groups,
@@ -410,15 +426,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onMarkThreadRead,
   onAddProject,
   onRemoveWorkspace,
-  threadSort = 'last_updated',
+  threadSort = "last_updated",
   onThreadSortChange,
   onWorkspaceOrderChange,
   isAddingProject = false,
-  title = 'Threads',
+  title = "Threads",
   errors = [],
   emptyState = {
-    title: 'No projects',
-    description: 'Add a project folder to get started.',
+    title: "No projects",
+    description: "Add a project folder to get started.",
   },
   footer,
   topNavigation,
@@ -428,154 +444,204 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   threadTagsById,
   threadTagOptions = [],
   onSetThreadColor,
+  canSetThreadColor,
+  extensionSidebarFilters = [],
+  extensionSnapshot,
 }: WorkspaceSidebarProps) {
   const [optimisticSelection, setOptimisticSelection] = useState<{
-    workspaceId: string | null
-    threadId: string | null
-  } | null>(null)
+    workspaceId: string | null;
+    threadId: string | null;
+  } | null>(null);
   const [nowTick, setNowTick] = useState(() =>
     Math.floor(Date.now() / RELATIVE_TIME_TICK_MS),
-  )
+  );
   const [selectedTagIds, setSelectedTagIds] = useState<Set<string>>(
     () => new Set(),
-  )
+  );
+  const [selectedExtensionFilterValues, setSelectedExtensionFilterValues] =
+    useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const [threadContextMenu, setThreadContextMenu] =
-    useState<ThreadContextMenuState | null>(null)
+    useState<ThreadContextMenuState | null>(null);
   const [renameTarget, setRenameTarget] = useState<{
-    workspaceId: string
-    thread: ThreadSummary
-  } | null>(null)
-  const [renameValue, setRenameValue] = useState('')
-  const [renameError, setRenameError] = useState<string | null>(null)
-  const [isRenamingThread, setIsRenamingThread] = useState(false)
+    workspaceId: string;
+    thread: ThreadSummary;
+  } | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const [isRenamingThread, setIsRenamingThread] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<{
-    workspaceId: string
-    thread: ThreadSummary
-  } | null>(null)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
-  const [isDeletingThread, setIsDeletingThread] = useState(false)
+    workspaceId: string;
+    thread: ThreadSummary;
+  } | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isDeletingThread, setIsDeletingThread] = useState(false);
   const [workspaceContextMenu, setWorkspaceContextMenu] =
-    useState<WorkspaceContextMenuState | null>(null)
+    useState<WorkspaceContextMenuState | null>(null);
   const [removeTarget, setRemoveTarget] = useState<{
-    workspaceId: string
-    path: string
-  } | null>(null)
-  const [removeError, setRemoveError] = useState<string | null>(null)
-  const [isRemovingWorkspace, setIsRemovingWorkspace] = useState(false)
-  const threadContextMenuRef = useRef<HTMLDivElement | null>(null)
-  const workspaceContextMenuRef = useRef<HTMLDivElement | null>(null)
+    workspaceId: string;
+    path: string;
+  } | null>(null);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const [isRemovingWorkspace, setIsRemovingWorkspace] = useState(false);
+  const threadContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const workspaceContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [draggingWorkspaceId, setDraggingWorkspaceId] = useState<string | null>(
     null,
-  )
-  const [dropIndex, setDropIndex] = useState<number | null>(null)
+  );
+  const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [workspaceDragPosition, setWorkspaceDragPosition] = useState<{
-    x: number
-    y: number
-  } | null>(null)
+    x: number;
+    y: number;
+  } | null>(null);
   const [optimisticWorkspaceOrder, setOptimisticWorkspaceOrder] = useState<
     string[] | null
-  >(null)
+  >(null);
   const workspaceDragRef = useRef<{
-    pointerId: number
-    workspaceId: string
-    startX: number
-    startY: number
-    active: boolean
-    dropIndex: number | null
-  } | null>(null)
-  const workspaceRowRefs = useRef(new Map<string, HTMLDivElement>())
-  const suppressNextWorkspaceClickRef = useRef(false)
+    pointerId: number;
+    workspaceId: string;
+    startX: number;
+    startY: number;
+    active: boolean;
+    dropIndex: number | null;
+  } | null>(null);
+  const workspaceRowRefs = useRef(new Map<string, HTMLDivElement>());
+  const suppressNextWorkspaceClickRef = useRef(false);
   const pendingSelection =
     optimisticSelection &&
     (optimisticSelection.workspaceId !== selectedWorkspaceId ||
       optimisticSelection.threadId !== selectedThreadId)
       ? optimisticSelection
-      : null
+      : null;
 
   const visualSelectedWorkspaceId =
-    pendingSelection?.workspaceId ?? selectedWorkspaceId
-  const visualSelectedThreadId = pendingSelection?.threadId ?? selectedThreadId
+    pendingSelection?.workspaceId ?? selectedWorkspaceId;
+  const visualSelectedThreadId = pendingSelection?.threadId ?? selectedThreadId;
 
   const availableTagIds = useMemo(
     () => new Set(threadTagOptions.map((tag) => tag.id)),
     [threadTagOptions],
-  )
+  );
   const activeTagIds = useMemo(
     () =>
       new Set(
         [...selectedTagIds].filter((tagId) => availableTagIds.has(tagId)),
       ),
     [availableTagIds, selectedTagIds],
-  )
+  );
   const handleToggleTagFilter = useCallback((tagId: string) => {
     setSelectedTagIds((current) => {
-      const next = new Set(current)
-      if (next.has(tagId)) next.delete(tagId)
-      else next.add(tagId)
-      return next
-    })
-  }, [])
+      const next = new Set(current);
+      if (next.has(tagId)) next.delete(tagId);
+      else next.add(tagId);
+      return next;
+    });
+  }, []);
   const handleClearTagFilters = useCallback(
     () => setSelectedTagIds(new Set()),
     [],
-  )
-  const displayGroups = useMemo(() => {
-    if (activeTagIds.size === 0) return groups
+  );
+  const legacyDisplayGroups = useMemo(() => {
+    if (activeTagIds.size === 0) return groups;
     return groups.flatMap((group) => {
       const threads = group.threads.filter((thread) =>
         (threadTagsById?.[thread.id] ?? []).some((tag) =>
           activeTagIds.has(tag.id),
         ),
-      )
-      return threads.length > 0 ? [{ ...group, threads }] : []
-    })
-  }, [activeTagIds, groups, threadTagsById])
+      );
+      return threads.length > 0 ? [{ ...group, threads }] : [];
+    });
+  }, [activeTagIds, groups, threadTagsById]);
+  const activeExtensionFilters = useMemo(
+    () =>
+      extensionSidebarFilters.flatMap(
+        (filter): ActiveExtensionThreadFilter[] => {
+          const root = filter.document?.root;
+          if (!root || root.type !== "select") return [];
+          return [
+            {
+              key: filter.key,
+              extensionId: filter.extensionId,
+              binding: root.binding,
+              selectedValues:
+                selectedExtensionFilterValues.get(filter.key) ?? new Set(),
+            },
+          ];
+        },
+      ),
+    [extensionSidebarFilters, selectedExtensionFilterValues],
+  );
+  const displayGroups = useMemo(
+    () =>
+      extensionSidebarFilters.length > 0
+        ? filterProjectGroupsByExtensions(
+            legacyDisplayGroups,
+            extensionSnapshot,
+            activeExtensionFilters,
+          )
+        : legacyDisplayGroups,
+    [
+      activeExtensionFilters,
+      extensionSidebarFilters.length,
+      extensionSnapshot,
+      legacyDisplayGroups,
+    ],
+  );
+  const handleExtensionFilterChange = useCallback(
+    (filterKey: string, values: ReadonlySet<string>) => {
+      setSelectedExtensionFilterValues((current) => {
+        const next = new Map(current);
+        next.set(filterKey, values);
+        return next;
+      });
+    },
+    [],
+  );
 
   const orderedGroups = useMemo(() => {
-    if (!optimisticWorkspaceOrder) return displayGroups
+    if (!optimisticWorkspaceOrder) return displayGroups;
     const groupsById = new Map(
       displayGroups.map((group) => [group.workspace.id, group]),
-    )
+    );
     const orderedIds = [
       ...optimisticWorkspaceOrder,
       ...displayGroups.map((group) => group.workspace.id),
-    ]
-    const seen = new Set<string>()
+    ];
+    const seen = new Set<string>();
     return orderedIds.flatMap((workspaceId) => {
-      if (seen.has(workspaceId)) return []
-      seen.add(workspaceId)
-      const group = groupsById.get(workspaceId)
-      return group ? [group] : []
-    })
-  }, [displayGroups, optimisticWorkspaceOrder])
+      if (seen.has(workspaceId)) return [];
+      seen.add(workspaceId);
+      const group = groupsById.get(workspaceId);
+      return group ? [group] : [];
+    });
+  }, [displayGroups, optimisticWorkspaceOrder]);
 
   const workspaceOrder = useMemo(
     () => orderedGroups.map((group) => group.workspace.id),
     [orderedGroups],
-  )
+  );
 
   const updateWorkspaceDropIndex = useCallback(
     (clientY: number, workspaceId: string) => {
       const remainingWorkspaceIds = workspaceOrder.filter(
         (id) => id !== workspaceId,
-      )
-      let nextIndex = remainingWorkspaceIds.length
+      );
+      let nextIndex = remainingWorkspaceIds.length;
       for (let index = 0; index < remainingWorkspaceIds.length; index += 1) {
-        const row = workspaceRowRefs.current.get(remainingWorkspaceIds[index])
-        if (!row) continue
-        const rect = row.getBoundingClientRect()
+        const row = workspaceRowRefs.current.get(remainingWorkspaceIds[index]);
+        if (!row) continue;
+        const rect = row.getBoundingClientRect();
         if (clientY < rect.top + rect.height / 2) {
-          nextIndex = index
-          break
+          nextIndex = index;
+          break;
         }
       }
       workspaceDragRef.current = workspaceDragRef.current
         ? { ...workspaceDragRef.current, dropIndex: nextIndex }
-        : workspaceDragRef.current
-      setDropIndex(nextIndex)
+        : workspaceDragRef.current;
+      setDropIndex(nextIndex);
     },
     [workspaceOrder],
-  )
+  );
 
   const handleWorkspacePointerDown = useCallback(
     (workspaceId: string, event: React.PointerEvent<HTMLDivElement>) => {
@@ -584,12 +650,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         event.button !== 0 ||
         event.isPrimary === false
       )
-        return
-      const target = event.target as HTMLElement
+        return;
+      const target = event.target as HTMLElement;
       if (
-        target.closest('a, input, textarea, select, [data-no-workspace-drag]')
+        target.closest("a, input, textarea, select, [data-no-workspace-drag]")
       )
-        return
+        return;
       // Capture is deferred until the drag threshold is crossed: capturing on
       // pointerdown retargets the follow-up click to this row, so the
       // collapse trigger nested inside it would never see the click.
@@ -600,96 +666,96 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         startY: event.clientY,
         active: false,
         dropIndex: null,
-      }
+      };
     },
     [onWorkspaceOrderChange],
-  )
+  );
 
   const handleWorkspacePointerMove = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      const drag = workspaceDragRef.current
-      if (!drag || drag.pointerId !== event.pointerId) return
+      const drag = workspaceDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
       const distance = Math.hypot(
         event.clientX - drag.startX,
         event.clientY - drag.startY,
-      )
-      if (!drag.active && distance < WORKSPACE_DRAG_THRESHOLD_PX) return
+      );
+      if (!drag.active && distance < WORKSPACE_DRAG_THRESHOLD_PX) return;
       if (!drag.active) {
-        drag.active = true
-        event.currentTarget.setPointerCapture(event.pointerId)
-        setDraggingWorkspaceId(drag.workspaceId)
+        drag.active = true;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        setDraggingWorkspaceId(drag.workspaceId);
       }
-      setWorkspaceDragPosition({ x: event.clientX, y: event.clientY })
-      event.preventDefault()
-      updateWorkspaceDropIndex(event.clientY, drag.workspaceId)
+      setWorkspaceDragPosition({ x: event.clientX, y: event.clientY });
+      event.preventDefault();
+      updateWorkspaceDropIndex(event.clientY, drag.workspaceId);
     },
     [updateWorkspaceDropIndex],
-  )
+  );
 
   const finishWorkspaceDrag = useCallback(
     (event?: React.PointerEvent<HTMLDivElement>) => {
-      const drag = workspaceDragRef.current
-      if (!drag) return
+      const drag = workspaceDragRef.current;
+      if (!drag) return;
       if (
         event &&
         event.pointerId === drag.pointerId &&
         event.currentTarget.hasPointerCapture(event.pointerId)
       ) {
-        event.currentTarget.releasePointerCapture(event.pointerId)
+        event.currentTarget.releasePointerCapture(event.pointerId);
       }
-      workspaceDragRef.current = null
-      setDraggingWorkspaceId(null)
-      setDropIndex(null)
-      setWorkspaceDragPosition(null)
+      workspaceDragRef.current = null;
+      setDraggingWorkspaceId(null);
+      setDropIndex(null);
+      setWorkspaceDragPosition(null);
       if (!drag.active || drag.dropIndex == null || !onWorkspaceOrderChange)
-        return
+        return;
 
-      suppressNextWorkspaceClickRef.current = true
+      suppressNextWorkspaceClickRef.current = true;
       window.setTimeout(() => {
-        suppressNextWorkspaceClickRef.current = false
-      }, 0)
+        suppressNextWorkspaceClickRef.current = false;
+      }, 0);
 
       const remainingWorkspaceIds = workspaceOrder.filter(
         (id) => id !== drag.workspaceId,
-      )
-      const nextOrder = [...remainingWorkspaceIds]
+      );
+      const nextOrder = [...remainingWorkspaceIds];
       nextOrder.splice(
         Math.min(drag.dropIndex, nextOrder.length),
         0,
         drag.workspaceId,
-      )
-      if (nextOrder.join('\0') === workspaceOrder.join('\0')) return
+      );
+      if (nextOrder.join("\0") === workspaceOrder.join("\0")) return;
 
-      setOptimisticWorkspaceOrder(nextOrder)
+      setOptimisticWorkspaceOrder(nextOrder);
       void Promise.resolve(onWorkspaceOrderChange(nextOrder)).catch(() => {
-        setOptimisticWorkspaceOrder(null)
-      })
+        setOptimisticWorkspaceOrder(null);
+      });
     },
     [onWorkspaceOrderChange, workspaceOrder],
-  )
+  );
 
   const handleWorkspaceClickCapture = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
-      if (!suppressNextWorkspaceClickRef.current) return
-      suppressNextWorkspaceClickRef.current = false
-      event.preventDefault()
-      event.stopPropagation()
+      if (!suppressNextWorkspaceClickRef.current) return;
+      suppressNextWorkspaceClickRef.current = false;
+      event.preventDefault();
+      event.stopPropagation();
     },
     [],
-  )
+  );
 
   useEffect(() => {
-    if (!optimisticWorkspaceOrder) return
-    const currentOrder = groups.map((group) => group.workspace.id)
+    if (!optimisticWorkspaceOrder) return;
+    const currentOrder = groups.map((group) => group.workspace.id);
     if (
       currentOrder.length === optimisticWorkspaceOrder.length &&
       currentOrder.every(
         (workspaceId, index) => workspaceId === optimisticWorkspaceOrder[index],
       )
     ) {
-      setOptimisticWorkspaceOrder(null)
+      setOptimisticWorkspaceOrder(null);
     }
-  }, [groups, optimisticWorkspaceOrder])
+  }, [groups, optimisticWorkspaceOrder]);
 
   const groupMetadata = useMemo(
     () =>
@@ -704,104 +770,104 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         ]),
       ),
     [groups],
-  )
+  );
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      setNowTick(Math.floor(Date.now() / RELATIVE_TIME_TICK_MS))
-    }, RELATIVE_TIME_TICK_MS)
+      setNowTick(Math.floor(Date.now() / RELATIVE_TIME_TICK_MS));
+    }, RELATIVE_TIME_TICK_MS);
 
     return () => {
-      window.clearInterval(interval)
-    }
-  }, [])
+      window.clearInterval(interval);
+    };
+  }, []);
 
   useEffect(() => {
     setOptimisticSelection((current) => {
-      if (!current) return null
+      if (!current) return null;
       if (
         current.workspaceId === selectedWorkspaceId &&
         current.threadId === selectedThreadId
       ) {
-        return null
+        return null;
       }
 
       const metadata = current.workspaceId
         ? groupMetadata.get(current.workspaceId)
-        : null
+        : null;
       if (!metadata) {
-        return null
+        return null;
       }
       if (current.threadId === null) {
-        return current
+        return current;
       }
-      return metadata.threadIds.has(current.threadId) ? current : null
-    })
-  }, [groupMetadata, selectedThreadId, selectedWorkspaceId])
+      return metadata.threadIds.has(current.threadId) ? current : null;
+    });
+  }, [groupMetadata, selectedThreadId, selectedWorkspaceId]);
 
   useEffect(() => {
-    if (!pendingSelection) return
+    if (!pendingSelection) return;
 
     const timeout = window.setTimeout(() => {
       setOptimisticSelection((current) =>
         current === pendingSelection ? null : current,
-      )
-    }, OPTIMISTIC_SELECTION_TTL_MS)
+      );
+    }, OPTIMISTIC_SELECTION_TTL_MS);
 
     return () => {
-      window.clearTimeout(timeout)
-    }
-  }, [pendingSelection])
+      window.clearTimeout(timeout);
+    };
+  }, [pendingSelection]);
 
   const handleSelectWorkspace = useCallback(
     (workspaceId: string, threadId: string | null) => {
-      setOptimisticSelection({ workspaceId, threadId })
-      onSelectWorkspace(workspaceId, threadId)
+      setOptimisticSelection({ workspaceId, threadId });
+      onSelectWorkspace(workspaceId, threadId);
     },
     [onSelectWorkspace],
-  )
+  );
 
   const handleSelectThread = useCallback(
     (workspaceId: string, threadId: string) => {
-      setOptimisticSelection({ workspaceId, threadId })
-      onSelectThread(workspaceId, threadId)
+      setOptimisticSelection({ workspaceId, threadId });
+      onSelectThread(workspaceId, threadId);
     },
     [onSelectThread],
-  )
+  );
 
   const handleNewThread = useCallback(
     (workspaceId: string) => {
-      if (!onNewThread) return
-      setOptimisticSelection({ workspaceId, threadId: null })
-      onNewThread(workspaceId)
+      if (!onNewThread) return;
+      setOptimisticSelection({ workspaceId, threadId: null });
+      onNewThread(workspaceId);
     },
     [onNewThread],
-  )
+  );
 
   const closeThreadContextMenu = useCallback(() => {
-    setThreadContextMenu(null)
-  }, [])
+    setThreadContextMenu(null);
+  }, []);
 
   const resetRenameDialog = useCallback(() => {
-    setRenameTarget(null)
-    setRenameValue('')
-    setRenameError(null)
-  }, [])
+    setRenameTarget(null);
+    setRenameValue("");
+    setRenameError(null);
+  }, []);
 
   const closeRenameDialog = useCallback(() => {
-    if (isRenamingThread) return
-    resetRenameDialog()
-  }, [isRenamingThread, resetRenameDialog])
+    if (isRenamingThread) return;
+    resetRenameDialog();
+  }, [isRenamingThread, resetRenameDialog]);
 
   const openRenameDialog = useCallback(
     (workspaceId: string, thread: ThreadSummary) => {
-      setThreadContextMenu(null)
-      setRenameTarget({ workspaceId, thread })
-      setRenameValue(thread.title)
-      setRenameError(null)
+      setThreadContextMenu(null);
+      setRenameTarget({ workspaceId, thread });
+      setRenameValue(thread.title);
+      setRenameError(null);
     },
     [],
-  )
+  );
 
   const handleOpenThreadContextMenu = useCallback(
     (args: ThreadContextMenuState) => {
@@ -813,9 +879,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !onMarkThreadRead &&
         !onSetThreadColor
       ) {
-        return
+        return;
       }
-      setThreadContextMenu(args)
+      setThreadContextMenu(args);
     },
     [
       onArchiveThread,
@@ -825,143 +891,148 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       onSetThreadColor,
       onTogglePinThread,
     ],
-  )
+  );
 
   const openDeleteDialog = useCallback(() => {
-    if (!threadContextMenu || !onDeleteThread) return
-    const { workspaceId, thread } = threadContextMenu
-    setThreadContextMenu(null)
-    setDeleteError(null)
-    setDeleteTarget({ workspaceId, thread })
-  }, [onDeleteThread, threadContextMenu])
+    if (!threadContextMenu || !onDeleteThread) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
+    setDeleteError(null);
+    setDeleteTarget({ workspaceId, thread });
+  }, [onDeleteThread, threadContextMenu]);
 
   const closeDeleteDialog = useCallback(() => {
-    if (isDeletingThread) return
-    setDeleteTarget(null)
-    setDeleteError(null)
-  }, [isDeletingThread])
+    if (isDeletingThread) return;
+    setDeleteTarget(null);
+    setDeleteError(null);
+  }, [isDeletingThread]);
 
   const handleConfirmDeleteThread = useCallback(async () => {
-    if (!deleteTarget || !onDeleteThread) return
+    if (!deleteTarget || !onDeleteThread) return;
 
-    setIsDeletingThread(true)
-    setDeleteError(null)
+    setIsDeletingThread(true);
+    setDeleteError(null);
     try {
-      await onDeleteThread(deleteTarget.workspaceId, deleteTarget.thread.id)
-      setDeleteTarget(null)
+      await onDeleteThread(deleteTarget.workspaceId, deleteTarget.thread.id);
+      setDeleteTarget(null);
     } catch (error) {
       setDeleteError(
-        error instanceof Error ? error.message : 'Failed to delete thread',
-      )
+        error instanceof Error ? error.message : "Failed to delete thread",
+      );
     } finally {
-      setIsDeletingThread(false)
+      setIsDeletingThread(false);
     }
-  }, [deleteTarget, onDeleteThread])
+  }, [deleteTarget, onDeleteThread]);
 
   const handleArchiveFromContextMenu = useCallback(() => {
-    if (!threadContextMenu || !onArchiveThread) return
-    const { workspaceId, thread } = threadContextMenu
-    setThreadContextMenu(null)
+    if (!threadContextMenu || !onArchiveThread) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
     void Promise.resolve(onArchiveThread(workspaceId, thread.id)).catch(
       () => {},
-    )
-  }, [onArchiveThread, threadContextMenu])
+    );
+  }, [onArchiveThread, threadContextMenu]);
 
   const handleStartRenameFromContextMenu = useCallback(() => {
-    if (!threadContextMenu || !onRenameThread) return
-    openRenameDialog(threadContextMenu.workspaceId, threadContextMenu.thread)
-  }, [onRenameThread, openRenameDialog, threadContextMenu])
+    if (!threadContextMenu || !onRenameThread) return;
+    openRenameDialog(threadContextMenu.workspaceId, threadContextMenu.thread);
+  }, [onRenameThread, openRenameDialog, threadContextMenu]);
 
   const handleRequestRenameThreadFromRow = useCallback(
     ({
       workspaceId,
       thread,
     }: {
-      workspaceId: string
-      thread: ThreadSummary
+      workspaceId: string;
+      thread: ThreadSummary;
     }) => {
-      openRenameDialog(workspaceId, thread)
+      openRenameDialog(workspaceId, thread);
     },
     [openRenameDialog],
-  )
+  );
   const handleRequestRenameThread = onRenameThread
     ? handleRequestRenameThreadFromRow
-    : undefined
+    : undefined;
 
   const handleTogglePinFromContextMenu = useCallback(() => {
-    if (!threadContextMenu || !onTogglePinThread) return
-    const { workspaceId, thread } = threadContextMenu
-    setThreadContextMenu(null)
+    if (!threadContextMenu || !onTogglePinThread) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
     void Promise.resolve(
       onTogglePinThread(workspaceId, thread.id, !thread.is_pinned),
-    ).catch(() => {})
-  }, [onTogglePinThread, threadContextMenu])
+    ).catch(() => {});
+  }, [onTogglePinThread, threadContextMenu]);
 
   const handleMarkReadFromContextMenu = useCallback(() => {
-    if (!threadContextMenu || !onMarkThreadRead) return
-    const { workspaceId, thread } = threadContextMenu
-    setThreadContextMenu(null)
+    if (!threadContextMenu || !onMarkThreadRead) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
     void Promise.resolve(onMarkThreadRead(workspaceId, thread.id)).catch(
       () => {},
-    )
-  }, [onMarkThreadRead, threadContextMenu])
+    );
+  }, [onMarkThreadRead, threadContextMenu]);
 
   const handleSetColorFromContextMenu = useCallback(
     (color: ThreadTag | null) => {
-      if (!threadContextMenu || !onSetThreadColor) return
-      const { workspaceId, thread } = threadContextMenu
-      setThreadContextMenu(null)
+      if (
+        !threadContextMenu ||
+        !onSetThreadColor ||
+        (canSetThreadColor && !canSetThreadColor(threadContextMenu.workspaceId))
+      )
+        return;
+      const { workspaceId, thread } = threadContextMenu;
+      setThreadContextMenu(null);
       void Promise.resolve(onSetThreadColor(workspaceId, thread, color)).catch(
         () => {},
-      )
+      );
     },
-    [onSetThreadColor, threadContextMenu],
-  )
+    [canSetThreadColor, onSetThreadColor, threadContextMenu],
+  );
 
   const handleOpenWorkspaceContextMenu = useCallback(
     (workspaceId: string, path: string, position: { x: number; y: number }) => {
-      if (!onRemoveWorkspace) return
-      setThreadContextMenu(null)
+      if (!onRemoveWorkspace) return;
+      setThreadContextMenu(null);
       setWorkspaceContextMenu({
         workspaceId,
         path,
         x: position.x,
         y: position.y,
-      })
+      });
     },
     [onRemoveWorkspace],
-  )
+  );
 
   const openRemoveDialog = useCallback(() => {
-    if (!workspaceContextMenu) return
-    const { workspaceId, path } = workspaceContextMenu
-    setWorkspaceContextMenu(null)
-    setRemoveError(null)
-    setRemoveTarget({ workspaceId, path })
-  }, [workspaceContextMenu])
+    if (!workspaceContextMenu) return;
+    const { workspaceId, path } = workspaceContextMenu;
+    setWorkspaceContextMenu(null);
+    setRemoveError(null);
+    setRemoveTarget({ workspaceId, path });
+  }, [workspaceContextMenu]);
 
   const closeRemoveDialog = useCallback(() => {
-    if (isRemovingWorkspace) return
-    setRemoveTarget(null)
-    setRemoveError(null)
-  }, [isRemovingWorkspace])
+    if (isRemovingWorkspace) return;
+    setRemoveTarget(null);
+    setRemoveError(null);
+  }, [isRemovingWorkspace]);
 
   const handleConfirmRemoveWorkspace = useCallback(async () => {
-    if (!removeTarget || !onRemoveWorkspace) return
+    if (!removeTarget || !onRemoveWorkspace) return;
 
-    setIsRemovingWorkspace(true)
-    setRemoveError(null)
+    setIsRemovingWorkspace(true);
+    setRemoveError(null);
     try {
-      await onRemoveWorkspace(removeTarget.workspaceId)
-      setRemoveTarget(null)
+      await onRemoveWorkspace(removeTarget.workspaceId);
+      setRemoveTarget(null);
     } catch (error) {
       setRemoveError(
-        error instanceof Error ? error.message : 'Failed to remove project',
-      )
+        error instanceof Error ? error.message : "Failed to remove project",
+      );
     } finally {
-      setIsRemovingWorkspace(false)
+      setIsRemovingWorkspace(false);
     }
-  }, [onRemoveWorkspace, removeTarget])
+  }, [onRemoveWorkspace, removeTarget]);
 
   const workspacePathById = useMemo(
     () =>
@@ -969,7 +1040,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         groups.map((group) => [group.workspace.id, group.workspace.path]),
       ),
     [groups],
-  )
+  );
   // Pinned chats come from every project, so they get a single global sort
   // rather than the per-project ordering below.
   const pinnedCandidates = useMemo(
@@ -980,157 +1051,157 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           .map((thread) => ({ workspaceId: group.workspace.id, thread })),
       ),
     [displayGroups],
-  )
+  );
   const stablePinnedThreads = useStablePriorityOrder(
     pinnedCandidates,
     visualSelectedThreadId,
-    threadSort === 'priority',
+    threadSort === "priority",
     pinnedEntryKey,
     pinnedEntryThread,
-  )
+  );
   const pinnedThreads = useMemo(() => {
-    if (threadSort === 'priority') return stablePinnedThreads
-    const compare = compareThreads(threadSort)
+    if (threadSort === "priority") return stablePinnedThreads;
+    const compare = compareThreads(threadSort);
     return [...pinnedCandidates].sort((left, right) =>
       compare(left.thread, right.thread),
-    )
-  }, [pinnedCandidates, stablePinnedThreads, threadSort])
+    );
+  }, [pinnedCandidates, stablePinnedThreads, threadSort]);
 
   const handleRenameSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
-      event.preventDefault()
-      if (!renameTarget || !onRenameThread) return
+      event.preventDefault();
+      if (!renameTarget || !onRenameThread) return;
 
-      const nextTitle = renameValue.trim()
+      const nextTitle = renameValue.trim();
       if (!nextTitle) {
-        setRenameError('Title cannot be empty')
-        return
+        setRenameError("Title cannot be empty");
+        return;
       }
 
-      setIsRenamingThread(true)
-      setRenameError(null)
+      setIsRenamingThread(true);
+      setRenameError(null);
       try {
         await onRenameThread(
           renameTarget.workspaceId,
           renameTarget.thread.id,
           nextTitle,
-        )
-        resetRenameDialog()
+        );
+        resetRenameDialog();
       } catch (error) {
         setRenameError(
-          error instanceof Error ? error.message : 'Failed to rename thread',
-        )
+          error instanceof Error ? error.message : "Failed to rename thread",
+        );
       } finally {
-        setIsRenamingThread(false)
+        setIsRenamingThread(false);
       }
     },
     [onRenameThread, renameTarget, renameValue, resetRenameDialog],
-  )
+  );
 
   useEffect(() => {
-    if (!threadContextMenu) return
+    if (!threadContextMenu) return;
 
     const handlePointerDown = (event: PointerEvent) => {
-      if (threadContextMenuRef.current?.contains(event.target as Node)) return
-      setThreadContextMenu(null)
-    }
+      if (threadContextMenuRef.current?.contains(event.target as Node)) return;
+      setThreadContextMenu(null);
+    };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      setThreadContextMenu(null)
-    }
+      if (event.key !== "Escape") return;
+      setThreadContextMenu(null);
+    };
 
     const handleViewportChange = () => {
-      setThreadContextMenu(null)
-    }
+      setThreadContextMenu(null);
+    };
 
-    document.addEventListener('pointerdown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
-    document.addEventListener('scroll', handleViewportChange, true)
-    window.addEventListener('resize', handleViewportChange)
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("scroll", handleViewportChange, true);
+    window.addEventListener("resize", handleViewportChange);
 
     return () => {
-      document.removeEventListener('pointerdown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
-      document.removeEventListener('scroll', handleViewportChange, true)
-      window.removeEventListener('resize', handleViewportChange)
-    }
-  }, [threadContextMenu])
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("scroll", handleViewportChange, true);
+      window.removeEventListener("resize", handleViewportChange);
+    };
+  }, [threadContextMenu]);
 
   useEffect(() => {
-    if (!workspaceContextMenu) return
+    if (!workspaceContextMenu) return;
 
     const handlePointerDown = (event: PointerEvent) => {
       if (workspaceContextMenuRef.current?.contains(event.target as Node))
-        return
-      setWorkspaceContextMenu(null)
-    }
+        return;
+      setWorkspaceContextMenu(null);
+    };
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      setWorkspaceContextMenu(null)
-    }
+      if (event.key !== "Escape") return;
+      setWorkspaceContextMenu(null);
+    };
 
     const handleViewportChange = () => {
-      setWorkspaceContextMenu(null)
-    }
+      setWorkspaceContextMenu(null);
+    };
 
-    document.addEventListener('pointerdown', handlePointerDown)
-    document.addEventListener('keydown', handleKeyDown)
-    document.addEventListener('scroll', handleViewportChange, true)
-    window.addEventListener('resize', handleViewportChange)
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("scroll", handleViewportChange, true);
+    window.addEventListener("resize", handleViewportChange);
 
     return () => {
-      document.removeEventListener('pointerdown', handlePointerDown)
-      document.removeEventListener('keydown', handleKeyDown)
-      document.removeEventListener('scroll', handleViewportChange, true)
-      window.removeEventListener('resize', handleViewportChange)
-    }
-  }, [workspaceContextMenu])
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("scroll", handleViewportChange, true);
+      window.removeEventListener("resize", handleViewportChange);
+    };
+  }, [workspaceContextMenu]);
 
   useEffect(() => {
-    if (!renameTarget) return
+    if (!renameTarget) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || isRenamingThread) return
-      resetRenameDialog()
-    }
+      if (event.key !== "Escape" || isRenamingThread) return;
+      resetRenameDialog();
+    };
 
-    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [isRenamingThread, renameTarget, resetRenameDialog])
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isRenamingThread, renameTarget, resetRenameDialog]);
 
   useEffect(() => {
-    if (!deleteTarget) return
+    if (!deleteTarget) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || isDeletingThread) return
-      setDeleteTarget(null)
-      setDeleteError(null)
-    }
+      if (event.key !== "Escape" || isDeletingThread) return;
+      setDeleteTarget(null);
+      setDeleteError(null);
+    };
 
-    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [deleteTarget, isDeletingThread])
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [deleteTarget, isDeletingThread]);
 
   useEffect(() => {
-    if (!removeTarget) return
+    if (!removeTarget) return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape' || isRemovingWorkspace) return
-      setRemoveTarget(null)
-      setRemoveError(null)
-    }
+      if (event.key !== "Escape" || isRemovingWorkspace) return;
+      setRemoveTarget(null);
+      setRemoveError(null);
+    };
 
-    document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [isRemovingWorkspace, removeTarget])
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [isRemovingWorkspace, removeTarget]);
 
   return (
     <SidebarShell className={className}>
@@ -1207,7 +1278,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               Projects
             </h2>
             <div className="flex items-center gap-1">
-              {threadTagOptions.length > 0 ? (
+              {extensionSidebarFilters.length > 0 ? (
+                <ExtensionSidebarFilters
+                  definitions={extensionSidebarFilters}
+                  selections={selectedExtensionFilterValues}
+                  onChange={handleExtensionFilterChange}
+                />
+              ) : threadTagOptions.length > 0 ? (
                 <ThreadColorFilterMenu
                   options={threadTagOptions}
                   selectedIds={activeTagIds}
@@ -1225,25 +1302,25 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           </div>
           <div className="space-y-4">
             {(() => {
-              let remainingIndex = 0
+              let remainingIndex = 0;
               const remainingWorkspaceIds = orderedGroups
                 .map((group) => group.workspace.id)
-                .filter((workspaceId) => workspaceId !== draggingWorkspaceId)
-              const lastRemainingWorkspaceId = remainingWorkspaceIds.at(-1)
+                .filter((workspaceId) => workspaceId !== draggingWorkspaceId);
+              const lastRemainingWorkspaceId = remainingWorkspaceIds.at(-1);
               return orderedGroups.map((group) => {
-                const workspaceId = group.workspace.id
-                const isDragged = draggingWorkspaceId === workspaceId
+                const workspaceId = group.workspace.id;
+                const isDragged = draggingWorkspaceId === workspaceId;
                 const showDropBefore =
                   draggingWorkspaceId != null &&
                   !isDragged &&
-                  dropIndex === remainingIndex
-                if (!isDragged) remainingIndex += 1
+                  dropIndex === remainingIndex;
+                if (!isDragged) remainingIndex += 1;
                 const dragHandleProps = onWorkspaceOrderChange
                   ? {
                       ref: (node: HTMLDivElement | null) => {
                         if (node)
-                          workspaceRowRefs.current.set(workspaceId, node)
-                        else workspaceRowRefs.current.delete(workspaceId)
+                          workspaceRowRefs.current.set(workspaceId, node);
+                        else workspaceRowRefs.current.delete(workspaceId);
                       },
                       onPointerDown: (
                         event: React.PointerEvent<HTMLDivElement>,
@@ -1252,15 +1329,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                       onPointerUp: finishWorkspaceDrag,
                       onPointerCancel: finishWorkspaceDrag,
                       onClickCapture: handleWorkspaceClickCapture,
-                      'data-workspace-drag-id': workspaceId,
-                      'aria-grabbed': isDragged ? true : undefined,
+                      "data-workspace-drag-id": workspaceId,
+                      "aria-grabbed": isDragged ? true : undefined,
                       className: cn(
-                        'cursor-grab select-none',
-                        isDragged && 'cursor-grabbing opacity-50',
+                        "cursor-grab select-none",
+                        isDragged && "cursor-grabbing opacity-50",
                       ),
-                      style: { touchAction: 'none' },
+                      style: { touchAction: "none" },
                     }
-                  : undefined
+                  : undefined;
 
                 return (
                   <React.Fragment key={workspaceId}>
@@ -1311,8 +1388,8 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                       <WorkspaceDropIndicator />
                     ) : null}
                   </React.Fragment>
-                )
-              })
+                );
+              });
             })()}
             {groups.length === 0 ? (
               <EmptyState
@@ -1342,7 +1419,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         canDelete={Boolean(onDeleteThread)}
         canPin={Boolean(onTogglePinThread)}
         canMarkRead={Boolean(onMarkThreadRead)}
-        colorOptions={onSetThreadColor ? threadTagOptions : []}
+        colorOptions={
+          onSetThreadColor &&
+          threadContextMenu &&
+          (!canSetThreadColor || canSetThreadColor(threadContextMenu.workspaceId))
+            ? threadTagOptions
+            : []
+        }
         selectedColor={
           threadContextMenu
             ? (threadTagsById?.[threadContextMenu.thread.id]?.[0] ?? null)
@@ -1398,13 +1481,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               <span className="truncate">
                 {orderedGroups
                   .find((group) => group.workspace.id === draggingWorkspaceId)
-                  ?.workspace.path.split('/')
-                  .pop() ?? 'Project'}
+                  ?.workspace.path.split("/")
+                  .pop() ?? "Project"}
               </span>
             </div>,
             document.body,
           )
         : null}
     </SidebarShell>
-  )
-})
+  );
+});
