@@ -303,6 +303,9 @@ pub(crate) struct TrustedDeviceRecord {
 #[derive(Default)]
 struct LiveSession {
     peers: HashMap<String, PeerHandle>,
+    /// Live daemon peers in registration order. Connections can overlap
+    /// during reconnect, so new actions should prefer the newest peer.
+    daemon_peer_ids: Vec<String>,
     /// Live daemon peers in registration order for each method. Connections
     /// can overlap during reconnect; the most recently registered owner serves
     /// new calls while older owners remain as deterministic fallbacks.
@@ -335,6 +338,15 @@ impl LiveSession {
                     .filter(|peer| matches!(peer.role, RelayPeerRole::Daemon))
                     .map(|peer| (peer_id.as_str(), peer))
             })
+    }
+
+    fn newest_daemon_peer(&self) -> Option<(&str, &PeerHandle)> {
+        self.daemon_peer_ids.iter().rev().find_map(|peer_id| {
+            self.peers
+                .get(peer_id)
+                .filter(|peer| matches!(peer.role, RelayPeerRole::Daemon))
+                .map(|peer| (peer_id.as_str(), peer))
+        })
     }
 
     fn daemon_rpc_ready(&self) -> bool {
@@ -1231,11 +1243,14 @@ impl AppState {
                 session.daemon_last_seen_at = Some(now);
             }
             RelayPeerRole::Client => {
-                if let Some(current_device_id) = device_id.as_ref()
-                    && let Some(device) = session.devices.get_mut(current_device_id)
-                {
-                    device.last_seen_at = Some(now);
-                }
+                let device = device_id
+                    .as_ref()
+                    .and_then(|current_device_id| session.devices.get_mut(current_device_id))
+                    .filter(|device| device.revoked_at.is_none())
+                    .ok_or_else(|| {
+                        RelayError::Unauthorized("trusted device is revoked or missing".to_string())
+                    })?;
+                device.last_seen_at = Some(now);
             }
         }
         session.updated_at = now;
@@ -1253,6 +1268,9 @@ impl AppState {
                 tx,
             },
         );
+        if matches!(role, RelayPeerRole::Daemon) {
+            live.daemon_peer_ids.push(peer_id.clone());
+        }
 
         Ok((
             peer_id,
@@ -1283,6 +1301,8 @@ impl AppState {
             let mut store = self.inner.store.lock().await;
             if let Some(live) = store.live_sessions.get_mut(session_id) {
                 removed_peer = live.peers.remove(peer_id).is_some();
+                live.daemon_peer_ids
+                    .retain(|daemon_peer_id| daemon_peer_id != peer_id);
                 live.rpc_methods.retain(|_, owner_peer_ids| {
                     owner_peer_ids.retain(|owner_peer_id| owner_peer_id != peer_id);
                     !owner_peer_ids.is_empty()
@@ -2618,43 +2638,60 @@ impl AppState {
     async fn dispatch_pending_actions(&self, session_id: &str) {
         let mut to_send = Vec::new();
         let mut dispatched_records = Vec::new();
+        let mut dispatched_updates = Vec::new();
         let session_snapshot = {
             let mut store = self.inner.store.lock().await;
-            let Some(live) = store.live_sessions.get_mut(session_id) else {
+            let Some(live) = store.live_sessions.get(session_id) else {
                 return;
             };
             let Some((target_peer_id, target)) = live
-                .peers
-                .iter()
-                .find(|(_, peer)| matches!(peer.role, RelayPeerRole::Daemon))
-                .map(|(peer_id, peer)| (peer_id.clone(), peer.tx.clone()))
+                .newest_daemon_peer()
+                .map(|(peer_id, peer)| (peer_id.to_string(), peer.tx.clone()))
             else {
                 return;
             };
-            let Some(session) = store.data.sessions.get_mut(session_id) else {
-                return;
-            };
-            for action in session.actions.values_mut() {
-                if to_send.len() >= MAX_ACTIONS_PER_DISPATCH {
-                    break;
+            {
+                let Some(session) = store.data.sessions.get_mut(session_id) else {
+                    return;
+                };
+                for action in session.actions.values_mut() {
+                    if to_send.len() >= MAX_ACTIONS_PER_DISPATCH {
+                        break;
+                    }
+                    if !matches!(action.status, QueuedRemoteActionStatus::Queued) {
+                        continue;
+                    }
+                    action.status = QueuedRemoteActionStatus::Dispatched;
+                    action.updated_at = Utc::now();
+                    action.error = None;
+                    action.result = None;
+                    action.owner_peer_id = Some(target_peer_id.clone());
+                    dispatched_records.push(action.clone());
+                    to_send.push((
+                        target_peer_id.clone(),
+                        target.clone(),
+                        action.to_public(),
+                        action.payload.clone(),
+                    ));
                 }
-                if !matches!(action.status, QueuedRemoteActionStatus::Queued) {
-                    continue;
-                }
-                action.status = QueuedRemoteActionStatus::Dispatched;
-                action.updated_at = Utc::now();
-                action.error = None;
-                action.result = None;
-                action.owner_peer_id = Some(target_peer_id.clone());
-                dispatched_records.push(action.clone());
-                to_send.push((
-                    target_peer_id.clone(),
-                    target.clone(),
-                    action.to_public(),
-                    action.payload.clone(),
-                ));
             }
-            Some(session.meta())
+
+            // Reserve and fan out every Dispatched sequence while still
+            // holding the action-transition lock. The daemon cannot report a
+            // later state until these rows precede it in the replay log.
+            for (_, _, action, _) in &to_send {
+                let Ok(appended) = self.append_update_locked(
+                    &mut store,
+                    session_id,
+                    RelayUpdateBody::ActionStatus {
+                        action: action.clone(),
+                    },
+                ) else {
+                    return;
+                };
+                dispatched_updates.push(appended);
+            }
+            store.data.sessions.get(session_id).map(SessionRecord::meta)
         };
 
         if let Some(session) = session_snapshot.as_ref()
@@ -2662,6 +2699,18 @@ impl AppState {
         {
             let _ = self
                 .persist_action_state(session, &dispatched_records, PersistMode::Immediate)
+                .await;
+        }
+
+        for (update, session, superseded_presence_ids) in dispatched_updates {
+            let _ = self
+                .persist_appended_update(
+                    session_id,
+                    &session,
+                    &update,
+                    &superseded_presence_ids,
+                    PersistMode::Immediate,
+                )
                 .await;
         }
 
@@ -2675,13 +2724,6 @@ impl AppState {
                     payload,
                 },
             );
-            let _ = self
-                .append_update(
-                    session_id,
-                    RelayUpdateBody::ActionStatus { action },
-                    PersistMode::Immediate,
-                )
-                .await;
         }
     }
 
@@ -3731,6 +3773,27 @@ mod tests {
         let owner = live
             .rpc_owner(REQUIRED_SYNC_RPC_METHOD)
             .map(|(peer_id, _)| peer_id);
+
+        assert_eq!(owner, Some("daemon-2"));
+    }
+
+    #[test]
+    fn action_routing_prefers_the_newest_live_daemon_peer() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let mut live = LiveSession::default();
+        for peer_id in ["daemon-1", "daemon-2"] {
+            live.peers.insert(
+                peer_id.to_string(),
+                PeerHandle {
+                    role: falcondeck_core::RelayPeerRole::Daemon,
+                    device_id: None,
+                    tx: tx.clone(),
+                },
+            );
+            live.daemon_peer_ids.push(peer_id.to_string());
+        }
+
+        let owner = live.newest_daemon_peer().map(|(peer_id, _)| peer_id);
 
         assert_eq!(owner, Some("daemon-2"));
     }

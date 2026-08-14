@@ -414,6 +414,42 @@ async fn query_tokens_are_rejected_and_ws_tickets_are_required() {
 }
 
 #[tokio::test]
+async fn peer_registration_rechecks_device_revocation_after_ticket_consumption() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let ticket = server
+        .state
+        .issue_ws_ticket(&claim.session_id, &claim.client_token)
+        .await
+        .unwrap();
+    let auth = server
+        .state
+        .consume_ws_ticket(&claim.session_id, &ticket.ticket)
+        .await
+        .unwrap();
+
+    server
+        .state
+        .revoke_trusted_device(&claim.session_id, &pairing.daemon_token, &claim.device_id)
+        .await
+        .unwrap();
+
+    let result = server
+        .state
+        .register_peer(&auth.session_id, auth.role, auth.device_id)
+        .await;
+    let Err(error) = result else {
+        panic!("revoked device registered a websocket peer");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("trusted device is revoked or missing")
+    );
+}
+
+#[tokio::test]
 async fn websocket_fanout_and_rpc_forwarding_work() {
     let server = spawn_server().await;
     let client = reqwest::Client::new();
@@ -1218,6 +1254,155 @@ async fn queued_actions_are_not_redispatched_while_the_daemon_is_still_connected
     assert!(
         unexpected.is_err(),
         "first queued action was redispatched unexpectedly"
+    );
+}
+
+#[tokio::test]
+async fn dispatched_status_precedes_fast_daemon_action_updates() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let daemon_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut daemon_ws, _) = connect_async(daemon_url).await.unwrap();
+    let _ = recv_server_message(&mut daemon_ws).await;
+
+    let submit_client = client.clone();
+    let submit_url = format!(
+        "{}/v1/sessions/{}/actions",
+        server.http_base, claim.session_id
+    );
+    let submit_token = claim.client_token.clone();
+    let submit = tokio::spawn(async move {
+        post_json::<_, falcondeck_core::QueuedRemoteAction>(
+            &submit_client,
+            &submit_url,
+            &SubmitQueuedActionRequest {
+                idempotency_key: "fast-daemon-status".to_string(),
+                action_type: "turn.start".to_string(),
+                payload: test_envelope("fast-daemon-status"),
+            },
+            Some(&submit_token),
+        )
+        .await
+    });
+    let RelayServerMessage::ActionRequested { action, .. } =
+        recv_until_action_requested(&mut daemon_ws).await
+    else {
+        unreachable!();
+    };
+    send_client_message(
+        &mut daemon_ws,
+        &RelayClientMessage::ActionUpdate {
+            action_id: action.action_id.clone(),
+            status: falcondeck_core::QueuedRemoteActionStatus::Executing,
+            error: None,
+            result: None,
+        },
+    )
+    .await;
+    let submitted = submit.await.unwrap();
+
+    let statuses = timeout(TokioDuration::from_secs(5), async {
+        loop {
+            let history = server
+                .state
+                .session_updates(&claim.session_id, &claim.client_token, 0)
+                .await
+                .unwrap();
+            let statuses = history
+                .updates
+                .into_iter()
+                .filter_map(|update| match update.body {
+                    RelayUpdateBody::ActionStatus { action }
+                        if action.action_id == submitted.action_id =>
+                    {
+                        Some(action.status)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if statuses.last() == Some(&falcondeck_core::QueuedRemoteActionStatus::Executing) {
+                break statuses;
+            }
+            tokio::time::sleep(TokioDuration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+        statuses,
+        vec![
+            falcondeck_core::QueuedRemoteActionStatus::Queued,
+            falcondeck_core::QueuedRemoteActionStatus::Dispatched,
+            falcondeck_core::QueuedRemoteActionStatus::Executing,
+        ]
+    );
+}
+
+#[tokio::test]
+async fn queued_actions_are_dispatched_to_the_newest_daemon_peer() {
+    let server = spawn_server().await;
+    let client = reqwest::Client::new();
+    let (pairing, claim) = create_claimed_session(&client, &server.http_base).await;
+    let first_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut first_daemon, _) = connect_async(first_url).await.unwrap();
+    let _ = recv_server_message(&mut first_daemon).await;
+    let second_url = ws_url_for(
+        &client,
+        &server.http_base,
+        &server.ws_base,
+        &claim.session_id,
+        &pairing.daemon_token,
+    )
+    .await;
+    let (mut second_daemon, _) = connect_async(second_url).await.unwrap();
+    let _ = recv_server_message(&mut second_daemon).await;
+
+    let action = post_json::<_, falcondeck_core::QueuedRemoteAction>(
+        &client,
+        &format!(
+            "{}/v1/sessions/{}/actions",
+            server.http_base, claim.session_id
+        ),
+        &SubmitQueuedActionRequest {
+            idempotency_key: "newest-daemon-action-owner".to_string(),
+            action_type: "thread.start".to_string(),
+            payload: test_envelope("newest-daemon-action-owner"),
+        },
+        Some(&claim.client_token),
+    )
+    .await;
+    let RelayServerMessage::ActionRequested {
+        action: requested, ..
+    } = recv_until_action_requested(&mut second_daemon).await
+    else {
+        unreachable!();
+    };
+
+    assert_eq!(requested.action_id, action.action_id);
+    assert!(
+        timeout(
+            TokioDuration::from_millis(250),
+            recv_until_action_requested(&mut first_daemon)
+        )
+        .await
+        .is_err(),
+        "older daemon unexpectedly received the action"
     );
 }
 
