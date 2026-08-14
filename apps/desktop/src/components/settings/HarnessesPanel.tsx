@@ -176,6 +176,19 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         const response = await fetch(
           `${baseUrl}/api/harnesses/jobs/${encodeURIComponent(activeJob.jobId)}`,
         )
+        if (response.status === 404) {
+          // Jobs are in-memory on the daemon: a 404 means a restart (or
+          // pruning) erased it. Polling forever would leave every upgrade
+          // button disabled with no recovery, so treat it as terminal.
+          setActiveJob(null)
+          onToast({
+            variant: 'warning',
+            title: `${activeJob.harnessId} upgrade status lost`,
+            description:
+              'The daemon restarted while the upgrade was running. Check the harness version after a moment.',
+          })
+          return
+        }
         if (!response.ok) throw new Error(`daemon returned ${response.status}`)
         const job = normalizeHarnessUpgradeJob(await response.json())
         if (!job) throw new Error('invalid job response')
@@ -195,8 +208,12 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
               description: job.error ?? 'The upgrade command reported an error.',
             })
           }
-          // Re-probe so the panel reflects the new binary.
-          void fetchOverview(activeJob.hostKey, true)
+          // Re-probe so the panel reflects the new binary — but only if
+          // the job's host is still the selected one; fetching another
+          // host would render its data under the current selection.
+          if (activeJob.hostKey === hostKey) {
+            void fetchOverview(activeJob.hostKey, true)
+          }
         }
       } catch {
         // Transient poll failures keep the job running from the UI's point
@@ -208,7 +225,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
     return () => {
       if (pollRef.current != null) window.clearInterval(pollRef.current)
     }
-  }, [activeJob, baseUrl, fetchOverview, hostLabel, onToast])
+  }, [activeJob, baseUrl, fetchOverview, hostKey, hostLabel, onToast])
 
   const startUpgrade = useCallback(
     async (harness: HarnessSummary) => {

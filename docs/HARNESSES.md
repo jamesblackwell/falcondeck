@@ -36,7 +36,10 @@ Entries come from two sources, merged by id:
    probing pick it up automatically.
 2. **`providers.json` ACP entries**: overlaid on the curated list (matching
    ids switch to `kind: acp` and probe the configured command), and appended
-   as new entries otherwise. Custom entries are listed with status but never
+   as new entries otherwise. Local overviews only: ACP commands are
+   arbitrary argv that cannot go into the batched remote probe script, and
+   asserting an install state without probing would be a guess, so remote
+   overviews omit them. Custom entries are listed with status but never
    auto-upgraded (`upgrade_command: null`).
 
 ## API surface

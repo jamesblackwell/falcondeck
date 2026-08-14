@@ -310,8 +310,14 @@ impl AppState {
     ) -> Result<HarnessesOverview, DaemonError> {
         // providers.json entries overlay the curated list: a configured
         // harness is reported through its configured command even when the
-        // curated bin differs.
-        let acp_entries = self.harness_acp_entries();
+        // curated bin differs. Remote hosts only probe the curated list —
+        // ACP commands are arbitrary argv that can't go into the batched
+        // remote script — so claiming an install state for them there
+        // would be a guess; they are omitted from remote overviews.
+        let mut acp_entries = self.harness_acp_entries();
+        if host != LOCAL_HOST {
+            acp_entries.clear();
+        }
 
         let mut summaries: Vec<HarnessSummary> = if host == LOCAL_HOST {
             join_all(KNOWN_HARNESSES.iter().map(|harness| {
