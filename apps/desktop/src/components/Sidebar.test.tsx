@@ -201,6 +201,32 @@ describe("DesktopSidebar", () => {
     expect(onAddProject).toHaveBeenCalledOnce();
   });
 
+  it("starts a thread from a row above every other navigation", () => {
+    const onNewThread = vi.fn();
+    renderSidebar({ onNewThread, onOpenActivity: vi.fn() });
+
+    const newThread = screen.getByRole("button", { name: "New thread" });
+    const activity = screen.getByRole("button", { name: "Activity" });
+    expect(newThread.compareDocumentPosition(activity)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+
+    fireEvent.click(newThread);
+    expect(onNewThread).toHaveBeenCalledWith("workspace-1");
+  });
+
+  it("keeps the new-thread row usable before a project is selected", () => {
+    const onNewThread = vi.fn();
+    renderSidebar({
+      onNewThread,
+      selectedWorkspaceId: null,
+      selectedThreadId: null,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "New thread" }));
+    expect(onNewThread).toHaveBeenCalledWith("workspace-1");
+  });
+
   it("renders Scheduled as first-class navigation above Projects", () => {
     const onOpenScheduled = vi.fn();
     renderSidebar({ onOpenScheduled, scheduledOpen: true });

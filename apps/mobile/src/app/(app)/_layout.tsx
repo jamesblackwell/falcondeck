@@ -85,6 +85,7 @@ export default function AppLayout() {
     ({ navigation }: DrawerContentComponentProps) => (
       <SidebarView
         groups={groups}
+        selectedWorkspaceId={selectedWorkspaceId}
         selectedThreadId={selectedThreadId}
         onSelectThread={handleSelectThread}
         onNewThread={handleNewThread}
@@ -105,6 +106,7 @@ export default function AppLayout() {
       handleNewThread,
       handleOpenSettings,
       selectedThreadId,
+      selectedWorkspaceId,
       threadTags.byThreadId,
     ],
   );

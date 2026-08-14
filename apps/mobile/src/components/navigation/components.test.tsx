@@ -124,6 +124,59 @@ describe("SidebarView component", () => {
     settings.props.onPress();
     expect(onOpenSettings).toHaveBeenCalledTimes(1);
   });
+  it("starts a thread from a row above the project list", () => {
+    const onNewThread = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [thread({ id: "t1", workspace_id: "w1" })],
+      },
+      {
+        workspace: workspace({ id: "w2", path: "/tmp/other" }),
+        threads: [],
+      },
+    ];
+    const r = renderComponent(
+      <SidebarView
+        {...base}
+        groups={groups}
+        selectedWorkspaceId="w2"
+        onNewThread={onNewThread}
+      />,
+    );
+
+    const newThread = r.root.find(
+      (node) => node.props.accessibilityLabel === "New thread",
+    );
+    newThread.props.onPress();
+    expect(onNewThread).toHaveBeenCalledWith("w2");
+  });
+
+  it("aims the new-thread row at the first project before anything is open", () => {
+    const onNewThread = vi.fn();
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace({ id: "w1", path: "/tmp/proj" }),
+        threads: [],
+      },
+    ];
+    const r = renderComponent(
+      <SidebarView {...base} groups={groups} onNewThread={onNewThread} />,
+    );
+
+    r.root
+      .find((node) => node.props.accessibilityLabel === "New thread")
+      .props.onPress();
+    expect(onNewThread).toHaveBeenCalledWith("w1");
+  });
+
+  it("hides the new-thread row until there is a project to start it in", () => {
+    const r = renderComponent(<SidebarView {...base} />);
+    expect(
+      r.root.findAll((node) => node.props.accessibilityLabel === "New thread"),
+    ).toHaveLength(0);
+  });
+
   it("renders groups", () => {
     const groups: ProjectGroup[] = [
       {

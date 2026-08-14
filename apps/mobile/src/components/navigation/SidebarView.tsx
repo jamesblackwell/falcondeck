@@ -21,6 +21,7 @@ import {
   ChevronDown,
   ChevronRight,
   ListFilter,
+  Plus,
   Settings,
   SquarePen,
   X,
@@ -51,6 +52,8 @@ import { ExtensionFilterSheet } from "./ExtensionFilterSheet";
 
 interface SidebarViewProps {
   groups: ProjectGroup[];
+  /** Target for the top-level "New thread" row, before any per-project pick. */
+  selectedWorkspaceId?: string | null;
   selectedThreadId: string | null;
   onSelectThread: (workspaceId: string, threadId: string) => void;
   onNewThread: (workspaceId: string) => void;
@@ -137,6 +140,7 @@ const CollapsibleRow = memo(function CollapsibleRow({
 
 export const SidebarView = memo(function SidebarView({
   groups,
+  selectedWorkspaceId = null,
   selectedThreadId,
   onSelectThread,
   onNewThread,
@@ -211,6 +215,18 @@ export const SidebarView = memo(function SidebarView({
       ),
     [activeExtensionFilters],
   );
+
+  // Starting a thread should never depend on first finding a project row: the
+  // open one is the obvious target, and the top of the list stands in before
+  // anything is selected.
+  const newThreadWorkspaceId = useMemo(() => {
+    const selected = displayGroups.some(
+      (group) => group.workspace.id === selectedWorkspaceId,
+    )
+      ? selectedWorkspaceId
+      : null;
+    return selected ?? displayGroups[0]?.workspace.id ?? null;
+  }, [displayGroups, selectedWorkspaceId]);
 
   const rows = useMemo(
     () =>
@@ -460,6 +476,26 @@ export const SidebarView = memo(function SidebarView({
 
       <SyncBanner status={syncStatus} />
 
+      {newThreadWorkspaceId ? (
+        <Pressable
+          style={({ pressed }) => [
+            styles.newThreadRow,
+            pressed ? styles.newThreadRowPressed : undefined,
+          ]}
+          onPress={() => onNewThread(newThreadWorkspaceId)}
+          accessibilityRole="button"
+          accessibilityLabel="New thread"
+          accessibilityHint="Starts a conversation in the open project"
+        >
+          <View style={styles.newThreadIcon}>
+            <Plus size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
+          </View>
+          <Text variant="label" color="primary" weight="semibold">
+            New thread
+          </Text>
+        </Pressable>
+      ) : null}
+
       {extensionPanelCount > 0 ? (
         <View style={styles.extensionFallback} accessibilityRole="text">
           <Text variant="caption" color="muted">
@@ -648,6 +684,27 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.lg,
   },
   settingsRowPressed: { backgroundColor: theme.colors.surface[2] },
+  newThreadRow: {
+    minHeight: theme.minTouchTarget,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing[2],
+    marginHorizontal: theme.spacing[3],
+    marginTop: theme.spacing[1],
+    paddingLeft: theme.spacing[1.5],
+    paddingRight: theme.spacing[3],
+    borderRadius: theme.radius.lg,
+    borderCurve: "continuous",
+  },
+  newThreadRowPressed: { backgroundColor: theme.colors.surface[2] },
+  newThreadIcon: {
+    width: 32,
+    height: 32,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surface[2],
+  },
   workspaceHeader: {
     flexDirection: "row",
     alignItems: "center",

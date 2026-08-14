@@ -5,8 +5,8 @@ import {
   ChevronDown,
   FolderClosed,
   FolderPlus,
+  Plus,
   Search,
-  SquarePen,
 } from "lucide-react";
 
 import {
@@ -1116,6 +1116,44 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     );
   }, [pinnedCandidates, stablePinnedThreads, threadSort]);
 
+  // Starting a thread should never depend on first picking a project: the
+  // selected one is the obvious target, and the top of the list stands in
+  // before anything is selected.
+  const newThreadWorkspaceId =
+    (visualSelectedWorkspaceId &&
+    orderedGroups.some(
+      (group) => group.workspace.id === visualSelectedWorkspaceId,
+    )
+      ? visualSelectedWorkspaceId
+      : null) ??
+    orderedGroups[0]?.workspace.id ??
+    null;
+
+  const newThreadRow =
+    onNewThread && newThreadWorkspaceId ? (
+      <button
+        type="button"
+        onClick={() => handleNewThread(newThreadWorkspaceId)}
+        title={
+          newThreadShortcut ? `New thread (${newThreadShortcut})` : "New thread"
+        }
+        className="fd-focus group mb-1 flex w-full items-center gap-1.5 rounded-[var(--fd-radius-md)] py-1.5 pl-1.5 pr-3 text-left text-[length:var(--fd-text-sm)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
+      >
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-3 text-fg-secondary transition-colors group-hover:bg-surface-4 group-hover:text-fg-primary">
+          <Plus aria-hidden="true" className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 flex-1">New thread</span>
+        {newThreadShortcut ? (
+          <span
+            aria-hidden="true"
+            className="fd-readout shrink-0 text-[length:var(--fd-text-xs)] text-fg-muted"
+          >
+            {newThreadShortcut}
+          </span>
+        ) : null}
+      </button>
+    ) : null;
+
   const handleRenameSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -1260,25 +1298,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         data-tauri-drag-region="deep"
       >
         <div className="flex items-center justify-between">
-          {visualSelectedWorkspaceId && onNewThread ? (
-            <button
-              type="button"
-              onClick={() => handleNewThread(visualSelectedWorkspaceId)}
-              title={
-                newThreadShortcut
-                  ? `New thread (${newThreadShortcut})`
-                  : "New thread"
-              }
-              className="fd-focus flex items-center gap-1.5 rounded-[var(--fd-radius-md)] px-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
-            >
-              <SquarePen aria-hidden="true" className="h-3.5 w-3.5" />
-              New thread
-            </button>
-          ) : (
-            <span className="text-[length:var(--fd-text-sm)] text-fg-muted">
-              {title}
-            </span>
-          )}
+          {/* Starting a thread is the sidebar's primary action, so it gets a
+              row of its own at the top of the list rather than a quiet header
+              link competing with the window controls. */}
+          <span className="text-[length:var(--fd-text-sm)] text-fg-muted">
+            {title}
+          </span>
           {onSearch ? (
             <Button
               type="button"
@@ -1305,7 +1330,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       </SidebarHeader>
 
       <SidebarContent className={contentClassName}>
-        {topNavigation ? <nav className="mb-4">{topNavigation}</nav> : null}
+        {newThreadRow || topNavigation ? (
+          <nav className="mb-4">
+            {newThreadRow}
+            {topNavigation}
+          </nav>
+        ) : null}
         <PinnedThreadList
           entries={pinnedThreads}
           selectedThreadId={visualSelectedThreadId}
