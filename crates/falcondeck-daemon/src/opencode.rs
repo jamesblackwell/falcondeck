@@ -6,7 +6,11 @@
 //! an ACP fallback: an HTTP request is only safe to retry after its admission
 //! status has been established.
 
-use std::{collections::HashMap, process::Stdio, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    process::Stdio,
+    sync::Arc,
+};
 
 use serde_json::{Value, json};
 use tokio::{
@@ -21,6 +25,9 @@ use crate::error::DaemonError;
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const INACTIVE_TERMINAL_GRACE: Duration = Duration::from_secs(5);
+const POLL_ERROR_GRACE: Duration = Duration::from_secs(5);
 const LISTENING_PREFIX: &str = "opencode server listening on http://127.0.0.1:";
 const MAX_MESSAGE_PAGE_SIZE: usize = 200;
 
@@ -28,6 +35,16 @@ const MAX_MESSAGE_PAGE_SIZE: usize = 200;
 pub enum Delivery {
     Queue,
     Steer,
+}
+
+enum SessionPoll {
+    Active,
+    Inactive(Vec<Value>),
+}
+
+struct MessagePage {
+    messages: Vec<Value>,
+    previous: Option<String>,
 }
 
 impl Delivery {
@@ -240,24 +257,130 @@ impl OpenCodeRuntime {
         .map(|_| ())
     }
 
-    pub async fn wait_until_idle(&self, session_id: &str) -> Result<(), DaemonError> {
-        // The server deliberately holds this request until the session is
-        // idle, so it must not use the ordinary control-plane timeout.
-        self.request_inner(
-            reqwest::Method::POST,
-            &format!("/api/session/{session_id}/wait"),
-            None,
-            None,
-        )
-        .await
-        .map(|_| ())
+    pub async fn wait_until_idle(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Vec<Value>, DaemonError> {
+        // OpenCode 1.18 advertises `session.wait`, but the route returns 503
+        // (`Session wait is not available yet`). Poll the implemented active
+        // drain instead. Checking the admitted message as well prevents an
+        // accepted queued prompt from looking idle before its drain starts.
+        let mut inactive_since = None;
+        let mut inactive_messages = None;
+        let mut poll_error_since = None;
+        loop {
+            let poll = match self.poll_session(session_id, message_id).await {
+                Ok(poll) => {
+                    poll_error_since = None;
+                    poll
+                }
+                Err(error) => {
+                    let since = poll_error_since.get_or_insert_with(tokio::time::Instant::now);
+                    if since.elapsed() >= POLL_ERROR_GRACE {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(IDLE_POLL_INTERVAL).await;
+                    continue;
+                }
+            };
+            let SessionPoll::Inactive(messages) = poll else {
+                inactive_since = None;
+                inactive_messages = None;
+                tokio::time::sleep(IDLE_POLL_INTERVAL).await;
+                continue;
+            };
+            if messages_are_settled(&messages) {
+                return Ok(messages);
+            }
+            if inactive_messages.as_ref() != Some(&messages) {
+                inactive_since = Some(tokio::time::Instant::now());
+                inactive_messages = Some(messages);
+            } else if inactive_since.is_some_and(|since| since.elapsed() >= INACTIVE_TERMINAL_GRACE)
+            {
+                return Err(DaemonError::Rpc(
+                    "OpenCode session became idle without a terminal assistant response"
+                        .to_string(),
+                ));
+            }
+            tokio::time::sleep(IDLE_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn poll_session(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<SessionPoll, DaemonError> {
+        if self.session_is_active(session_id).await? {
+            Ok(SessionPoll::Active)
+        } else {
+            self.messages_since(session_id, message_id)
+                .await
+                .map(SessionPoll::Inactive)
+        }
+    }
+
+    pub async fn session_is_active(&self, session_id: &str) -> Result<bool, DaemonError> {
+        let value = self
+            .request(reqwest::Method::GET, "/api/session/active", None)
+            .await?;
+        session_is_active(&value, session_id)
     }
 
     pub async fn messages(&self, session_id: &str) -> Result<Vec<Value>, DaemonError> {
+        let mut messages = self.message_page(session_id, None).await?.messages;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    async fn messages_since(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> Result<Vec<Value>, DaemonError> {
+        let mut cursor = None;
+        let mut seen_cursors = HashSet::new();
+        let mut newest_first = Vec::new();
+        loop {
+            let page = self.message_page(session_id, cursor.as_deref()).await?;
+            let admitted_index = page
+                .messages
+                .iter()
+                .position(|message| message.get("id").and_then(Value::as_str) == Some(message_id));
+            if let Some(admitted_index) = admitted_index {
+                newest_first.extend(page.messages.into_iter().take(admitted_index));
+                newest_first.reverse();
+                return Ok(newest_first);
+            }
+            newest_first.extend(page.messages);
+            let Some(previous) = page.previous else {
+                return Err(DaemonError::Rpc(
+                    "OpenCode admitted the prompt but did not project its user message".to_string(),
+                ));
+            };
+            if !seen_cursors.insert(previous.clone()) {
+                return Err(DaemonError::Rpc(
+                    "OpenCode repeated a message pagination cursor".to_string(),
+                ));
+            }
+            cursor = Some(previous);
+        }
+    }
+
+    async fn message_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<MessagePage, DaemonError> {
         let value = self
-            .request(reqwest::Method::GET, &messages_path(session_id), None)
+            .request(
+                reqwest::Method::GET,
+                &messages_path(session_id, cursor),
+                None,
+            )
             .await?;
-        response_data_array(value, "messages")
+        response_message_page(value)
     }
 
     pub async fn pending_permissions(&self, session_id: &str) -> Result<Vec<Value>, DaemonError> {
@@ -394,8 +517,54 @@ fn response_data_array(value: Value, endpoint: &str) -> Result<Vec<Value>, Daemo
         })
 }
 
-fn messages_path(session_id: &str) -> String {
-    format!("/api/session/{session_id}/message?order=asc&limit={MAX_MESSAGE_PAGE_SIZE}")
+fn session_is_active(value: &Value, session_id: &str) -> Result<bool, DaemonError> {
+    value
+        .get("data")
+        .and_then(Value::as_object)
+        .map(|active| active.contains_key(session_id))
+        .ok_or_else(|| {
+            DaemonError::Rpc(
+                "OpenCode native active sessions response did not contain a data object"
+                    .to_string(),
+            )
+        })
+}
+
+fn messages_are_settled(messages: &[Value]) -> bool {
+    let Some(message) = messages
+        .iter()
+        .rev()
+        .find(|message| message.get("type").and_then(Value::as_str) == Some("assistant"))
+    else {
+        return false;
+    };
+    message
+        .pointer("/time/completed")
+        .is_some_and(|completed| !completed.is_null())
+        || message.get("error").is_some_and(|error| !error.is_null())
+}
+
+fn messages_path(session_id: &str, cursor: Option<&str>) -> String {
+    let mut url = reqwest::Url::parse("http://localhost").expect("static URL is valid");
+    url.set_path(&format!("/api/session/{session_id}/message"));
+    let mut query = url.query_pairs_mut();
+    query.append_pair("limit", &MAX_MESSAGE_PAGE_SIZE.to_string());
+    if let Some(cursor) = cursor {
+        query.append_pair("cursor", cursor);
+    } else {
+        query.append_pair("order", "desc");
+    }
+    drop(query);
+    format!("{}?{}", url.path(), url.query().unwrap_or_default())
+}
+
+fn response_message_page(value: Value) -> Result<MessagePage, DaemonError> {
+    let previous = value
+        .pointer("/cursor/previous")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let messages = response_data_array(value, "messages")?;
+    Ok(MessagePage { messages, previous })
 }
 
 fn model_ref(model: &str) -> Option<Value> {
@@ -444,11 +613,64 @@ mod tests {
     }
 
     #[test]
+    fn active_sessions_require_the_native_data_object() {
+        assert!(
+            session_is_active(
+                &json!({ "data": { "ses_busy": { "type": "running" } } }),
+                "ses_busy"
+            )
+            .unwrap()
+        );
+        assert!(!session_is_active(&json!({ "data": {} }), "ses_idle").unwrap());
+        assert!(session_is_active(&json!({ "sessions": {} }), "ses_busy").is_err());
+    }
+
+    #[test]
+    fn admitted_message_settles_only_after_a_terminal_assistant_message() {
+        let messages =
+            vec![json!({ "id": "msg_assistant", "type": "assistant", "time": { "created": 1 } })];
+        assert!(!messages_are_settled(&messages));
+
+        let mut completed = messages.clone();
+        completed[0]["time"]["completed"] = json!(2);
+        assert!(messages_are_settled(&completed));
+
+        completed.push(
+            json!({ "id": "msg_still_running", "type": "assistant", "time": { "created": 3 } }),
+        );
+        assert!(!messages_are_settled(&completed));
+
+        let failed = vec![
+            json!({ "id": "msg_assistant", "type": "assistant", "error": { "name": "APIError" } }),
+        ];
+        assert!(messages_are_settled(&failed));
+    }
+
+    #[test]
     fn message_query_respects_opencode_page_limit() {
         assert_eq!(
-            messages_path("ses_test"),
-            "/api/session/ses_test/message?order=asc&limit=200"
+            messages_path("ses_test", None),
+            "/api/session/ses_test/message?limit=200&order=desc"
         );
+        assert_eq!(
+            messages_path("ses_test", Some("older page/+")),
+            "/api/session/ses_test/message?limit=200&cursor=older+page%2F%2B"
+        );
+    }
+
+    #[test]
+    fn message_page_preserves_descending_data_and_previous_cursor() {
+        let page = response_message_page(json!({
+            "data": [
+                { "id": "msg_newest" },
+                { "id": "msg_older" }
+            ],
+            "cursor": { "previous": "cursor_older", "next": null }
+        }))
+        .unwrap();
+        assert_eq!(page.messages[0]["id"], "msg_newest");
+        assert_eq!(page.messages[1]["id"], "msg_older");
+        assert_eq!(page.previous.as_deref(), Some("cursor_older"));
     }
 
     #[test]

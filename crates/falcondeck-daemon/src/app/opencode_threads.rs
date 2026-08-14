@@ -297,14 +297,13 @@ pub(super) async fn start_opencode_turn(
     let thread_id = thread_id.to_string();
     tokio::spawn(async move {
         let outcome = async {
-            let wait = runtime.wait_until_idle(&session_id);
+            let wait = runtime.wait_until_idle(&session_id, &message_id);
             tokio::pin!(wait);
             let mut permissions = tokio::time::interval(std::time::Duration::from_millis(400));
-            loop {
+            let current_messages = loop {
                 tokio::select! {
                     result = &mut wait => {
-                        result?;
-                        break;
+                        break result?;
                     }
                     _ = permissions.tick() => {
                         let pending = runtime.pending_permissions(&session_id).await?;
@@ -329,19 +328,8 @@ pub(super) async fn start_opencode_turn(
                         surface_questions(&app, &workspace_id, &thread_id, &pending).await?;
                     }
                 }
-            }
-            let messages = runtime.messages(&session_id).await?;
-            let current_messages = messages
-                .iter()
-                .position(|message| message.get("id").and_then(Value::as_str) == Some(&message_id))
-                .map(|index| &messages[index.saturating_add(1)..])
-                .ok_or_else(|| {
-                    DaemonError::Rpc(
-                        "OpenCode admitted the prompt but did not project its user message"
-                            .to_string(),
-                    )
-                })?;
-            project_messages(&app, &workspace_id, &thread_id, current_messages).await
+            };
+            project_messages(&app, &workspace_id, &thread_id, &current_messages).await
         }
         .await;
         let (status, error, settlement) = match outcome {

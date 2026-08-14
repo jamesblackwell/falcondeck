@@ -250,6 +250,12 @@ Agents settings panel's **Use ACP** action if that tradeoff or a particular
 OpenCode release proves unreliable; the change applies to new threads and does
 not mutate existing sessions.
 
+OpenCode 1.18 advertises `session.wait` but can return a 503 response saying the
+service is not available yet. FalconDeck therefore detects turn completion from
+the implemented active-session endpoint and the admitted message's terminal
+state. The native compatibility probe includes that endpoint, so `auto` falls
+back to ACP before admitting a turn when an OpenCode release lacks it.
+
 When a workspace attaches, the native path loads OpenCode's provider model
 catalog and its visible primary agents. The composer therefore exposes native
 model selection plus OpenCode modes such as **Build** and **Plan**. The

@@ -182,6 +182,7 @@ impl ProviderRuntime {
                             {
                                 Ok(session_id) => {
                                     let compatible = async {
+                                        runtime.session_is_active(&session_id).await?;
                                         runtime.messages(&session_id).await?;
                                         runtime.pending_permissions(&session_id).await?;
                                         runtime.pending_questions(&session_id).await?;
