@@ -64,7 +64,7 @@ const STATUS_TONE_CLASS: Record<PaletteThreadStatus['tone'], string> = {
   warning: 'text-warning',
   danger: 'text-danger',
   info: 'text-info',
-  muted: 'text-fg-faint',
+  muted: 'text-fg-muted',
 }
 
 /**

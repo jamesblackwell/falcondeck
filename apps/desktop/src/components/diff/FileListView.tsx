@@ -147,7 +147,7 @@ export const FileListView = memo(function FileListView({
             >
               {tab}
               {tab === 'changes' && entries.length > 0 ? (
-                <span className="ml-1 text-[length:var(--fd-text-xs)] text-fg-faint">
+                <span className="fd-type-meta ml-1 text-fg-muted">
                   {entries.length}
                 </span>
               ) : null}

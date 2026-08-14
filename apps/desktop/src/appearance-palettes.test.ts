@@ -36,6 +36,25 @@ function selectorsFor(palette: string) {
       };
 }
 
+function relativeLuminance(hex: string): number {
+  const channels = hex
+    .slice(1)
+    .match(/.{2}/g)!
+    .map((channel) => Number.parseInt(channel, 16) / 255)
+    .map((channel) =>
+      channel <= 0.04045
+        ? channel / 12.92
+        : ((channel + 0.055) / 1.055) ** 2.4,
+    );
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const lighter = Math.max(relativeLuminance(foreground), relativeLuminance(background));
+  const darker = Math.min(relativeLuminance(foreground), relativeLuminance(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 describe("color palettes", () => {
   it("ships a dark and a light CSS block for every option", () => {
     for (const option of PALETTE_OPTIONS) {
@@ -69,6 +88,25 @@ describe("color palettes", () => {
         Object.values(option.preview[mode]).join("/"),
       );
       expect(new Set(swatches).size).toBe(swatches.length);
+    }
+  });
+
+  it("keeps copy and decorative foregrounds above their documented contrast floors", () => {
+    for (const option of PALETTE_OPTIONS) {
+      const selectors = selectorsFor(option.value);
+      for (const mode of ["dark", "light"] as const) {
+        const tokens = { ...tokensFor(selectors.dark), ...tokensFor(selectors[mode]) };
+        for (const foreground of ["--fd-fg-0", "--fd-fg-1", "--fd-fg-2", "--fd-fg-3"]) {
+          expect(
+            contrastRatio(tokens[foreground], tokens["--fd-bg-1"]),
+            `${option.value} ${mode} ${foreground}`,
+          ).toBeGreaterThanOrEqual(4.5);
+        }
+        expect(
+          contrastRatio(tokens["--fd-fg-4"], tokens["--fd-bg-1"]),
+          `${option.value} ${mode} --fd-fg-4`,
+        ).toBeGreaterThanOrEqual(3);
+      }
     }
   });
 });

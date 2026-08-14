@@ -7,7 +7,7 @@ export function Sidebar({ className, children, ...props }: React.HTMLAttributes<
   return (
     <aside
       className={cn(
-        'flex h-full min-h-0 flex-col bg-[color-mix(in_oklab,var(--color-surface-1)_92%,white)]',
+        'flex h-full min-h-0 flex-col bg-surface-1',
         className,
       )}
       {...props}

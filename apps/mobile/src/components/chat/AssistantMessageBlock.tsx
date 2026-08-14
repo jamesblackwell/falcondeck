@@ -186,7 +186,7 @@ const CitationBlock = memo(function CitationBlock({
                       </Text>
                     )}
                     {locatorLabel ? (
-                      <Text selectable variant="mono" size="2xs" color="faint">
+                      <Text selectable variant="mono" size="2xs" color="muted">
                         {locatorLabel}
                       </Text>
                     ) : null}
@@ -207,7 +207,7 @@ const CitationBlock = memo(function CitationBlock({
                       <Text
                         variant="caption"
                         size="2xs"
-                        color="faint"
+                        color="muted"
                         style={styles.citationLimitNotice}
                       >
                         Excerpt limited for performance.
@@ -285,7 +285,7 @@ const MemoryCitationBlock = memo(function MemoryCitationBlock({
           {count} memory source{count === 1 ? "" : "s"}
         </Text>
         {citation.thread_ids.length > 0 ? (
-          <Text variant="caption" size="2xs" color="faint">
+          <Text variant="meta" size="2xs">
             {citation.thread_ids.length} thread
             {citation.thread_ids.length === 1 ? "" : "s"}
           </Text>
@@ -348,7 +348,7 @@ const MemoryCitationBlock = memo(function MemoryCitationBlock({
                   <Text
                     variant="caption"
                     size="2xs"
-                    color="faint"
+                    color="muted"
                     style={styles.citationNote}
                   >
                     Source details limited for performance.
@@ -394,7 +394,7 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
   return (
     <View style={[styles.row, isCommentary ? styles.commentaryRow : undefined]}>
       {isCommentary ? (
-        <Text variant="caption" size="2xs" color="faint" weight="medium">
+        <Text variant="meta" size="2xs" weight="medium">
           PROGRESS UPDATE
         </Text>
       ) : null}

@@ -108,7 +108,7 @@ export default function ConnectionsSettingsScreen() {
         </View>
       </SettingsSection>
 
-      <Text variant="caption" color="faint">
+      <Text variant="meta">
         Simultaneous connections to several daemons require host-scoped encrypted storage and session routing. This screen deliberately manages the single active mobile connection until that transport work lands.
       </Text>
     </ScrollView>

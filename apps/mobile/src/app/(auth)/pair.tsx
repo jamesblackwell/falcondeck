@@ -301,7 +301,7 @@ export default function PairScreen() {
 
           <View style={styles.footer}>
             <Lock size={11} color={theme.colors.fg.faint} />
-            <Text variant="caption" color="faint" size="2xs">
+            <Text variant="meta" size="2xs">
               End-to-end encrypted
             </Text>
           </View>
@@ -349,7 +349,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   connectingBody: {
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
   },
   codeInput: {
     textAlign: 'center',

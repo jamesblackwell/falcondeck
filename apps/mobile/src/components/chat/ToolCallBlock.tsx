@@ -439,14 +439,14 @@ function CollabDetail({
             {state.message || compactThreadId(threadId)}
           </Text>
           {state.message ? (
-            <Text selectable variant="mono" color="faint" size="2xs">
+            <Text selectable variant="mono" color="muted" size="2xs">
               {compactThreadId(threadId)}
             </Text>
           ) : null}
         </View>
       ))}
       {states.length === 0 && detail.receiver_thread_ids.length > 0 ? (
-        <Text selectable variant="mono" color="faint" size="2xs">
+        <Text selectable variant="mono" color="muted" size="2xs">
           {detail.receiver_thread_ids.join(", ")}
         </Text>
       ) : null}
@@ -474,7 +474,7 @@ function SubagentActivityDetail({
       <Text selectable variant="caption" color="muted" size="2xs">
         {detail.agent_path}
       </Text>
-      <Text selectable variant="mono" color="faint" size="2xs">
+      <Text selectable variant="mono" color="muted" size="2xs">
         {compactThreadId(detail.agent_thread_id)}
       </Text>
     </View>
@@ -498,7 +498,7 @@ function HookDetail({
           />
         ) : null}
       </View>
-      <Text selectable variant="mono" color="faint" size="2xs">
+      <Text selectable variant="mono" color="muted" size="2xs">
         {detail.source_path}
       </Text>
       {detail.status_message ? (
@@ -587,12 +587,12 @@ function GuardianReviewDetail({
         {detail.action}
       </Text>
       {detail.cwd ? (
-        <Text selectable variant="mono" color="faint" size="2xs">
+        <Text selectable variant="mono" color="muted" size="2xs">
           cwd: {detail.cwd}
         </Text>
       ) : null}
       {detail.target_item_id ? (
-        <Text selectable variant="mono" color="faint" size="2xs">
+        <Text selectable variant="mono" color="muted" size="2xs">
           target: {detail.target_item_id}
         </Text>
       ) : null}
@@ -666,7 +666,7 @@ function CommandDetail({
           </Text>
         ) : null}
         {detail.duration_ms != null ? (
-          <Text variant="caption" color="faint" size="2xs">
+          <Text variant="meta" size="2xs">
             {Math.max(1, Math.round(detail.duration_ms))} ms
           </Text>
         ) : null}
@@ -717,7 +717,7 @@ function McpDetail({
           {detail.app_context?.app_name || detail.server} · {detail.tool}
         </Text>
         {detail.duration_ms != null ? (
-          <Text variant="caption" color="faint" size="2xs">
+          <Text variant="meta" size="2xs">
             {Math.max(1, Math.round(detail.duration_ms))} ms
           </Text>
         ) : null}
@@ -736,7 +736,7 @@ function McpDetail({
           <Text variant="caption" color="secondary" size="xs" weight="semibold">
             Provider artifacts
           </Text>
-          <Text variant="caption" color="faint" size="2xs">
+          <Text variant="meta" size="2xs">
             {artifactSummary.total} item{artifactSummary.total === 1 ? "" : "s"}
           </Text>
         </View>
@@ -782,7 +782,7 @@ function McpDetail({
                   >
                     {filename}
                   </Text>
-                  <Text variant="caption" color="faint" size="2xs">
+                  <Text variant="meta" size="2xs">
                     Embedded artifact
                     {content.mime_type ? ` · ${content.mime_type}` : ""}
                     {size ? ` · ${size}` : ""}
@@ -798,7 +798,7 @@ function McpDetail({
                   />
                 ) : null}
               </View>
-              <Text selectable variant="mono" color="faint" size="2xs">
+              <Text selectable variant="mono" color="muted" size="2xs">
                 {content.uri}
               </Text>
               {content.text != null ? (
@@ -920,7 +920,7 @@ function ProviderResourceLink({
             >
               {label}
             </Text>
-            <Text variant="caption" color="faint" size="2xs">
+            <Text variant="meta" size="2xs">
               Reference{content.mime_type ? ` · ${content.mime_type}` : ""}
               {size ? ` · ${size}` : ""}
             </Text>
@@ -936,7 +936,7 @@ function ProviderResourceLink({
             {content.description}
           </Text>
         ) : null}
-        <Text variant="mono" color="faint" size="2xs">
+        <Text variant="mono" color="muted" size="2xs">
           {content.uri}
         </Text>
       </Pressable>
@@ -1002,7 +1002,7 @@ function ArtifactTextPreview({
         {text}
       </Text>
       {truncated ? (
-        <Text variant="caption" color="faint" size="2xs">
+        <Text variant="meta" size="2xs">
           Preview limited to 40 lines · Share to open the complete artifact.
         </Text>
       ) : null}
@@ -1072,7 +1072,7 @@ function AudioOutput({
         </Text>
         <Text
           variant="caption"
-          color={state === "error" ? "danger" : "faint"}
+          color={state === "error" ? "danger" : "muted"}
           size="2xs"
         >
           {state === "loading"
@@ -1103,7 +1103,7 @@ function DynamicDetail({
           {detail.tool}
         </Text>
         {detail.duration_ms != null ? (
-          <Text variant="caption" color="faint" size="2xs">
+          <Text variant="meta" size="2xs">
             {Math.max(1, Math.round(detail.duration_ms))} ms
           </Text>
         ) : null}
@@ -1205,12 +1205,12 @@ function JsonDetail({ label, value }: { label: string; value: unknown }) {
   const inspection = useMemo(() => formatInspectableValue(value), [value]);
   return (
     <View style={styles.jsonDetail}>
-      <Text variant="caption" color="faint" size="2xs" weight="semibold">
+      <Text variant="meta" size="2xs" weight="semibold">
         {label}
       </Text>
       <CodeBlock code={inspection.text} language="json" previewLines={12} />
       {inspection.truncated ? (
-        <Text variant="caption" color="faint" size="2xs">
+        <Text variant="meta" size="2xs">
           Display limited for performance and safety.
         </Text>
       ) : null}
@@ -1256,7 +1256,7 @@ function JsonDisclosure({
         </Text>
         <Text
           variant="caption"
-          color="faint"
+          color="muted"
           size="2xs"
           style={styles.jsonDisclosureSummary}
         >

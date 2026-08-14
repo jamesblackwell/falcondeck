@@ -53,7 +53,7 @@ export function PlanBar({
           className="fd-focus-inset flex w-full items-center gap-2 px-3 py-2 text-left transition-colors hover:bg-surface-3"
         >
           <PlanStepIcon state={currentState} />
-          <span className="text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-wide text-fg-faint">
+          <span className="fd-type-microlabel text-fg-muted">
             Plan
           </span>
           <span

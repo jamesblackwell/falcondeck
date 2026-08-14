@@ -3806,7 +3806,7 @@ function RemoteApp() {
               </Button>
             ))
           ) : (
-            <p className="text-[length:var(--fd-text-sm)] text-fg-faint">
+            <p className="fd-type-supporting text-fg-muted">
               Waiting for projects from your desktop session.
             </p>
           )}

@@ -113,15 +113,34 @@ Mobile:
 Type scale:
 
 - Small UI text starts at `12px`
-- Default body text is `15px` web and `16px` mobile
+- Default shell text is `15px` web; readable content is `16px` web
+- Mobile deliberately runs one scale step larger (`17px` body) because native
+  text renders smaller at the same nominal value
 - Heading scale tops out at `32px`
+
+Semantic roles:
+
+- `body`: readable content, `16px` web with relaxed leading
+- `supporting`: secondary descriptions and helper copy, `14px`
+- `label`: names and control labels, `15px` medium
+- `meta`: timestamps and compact supporting facts, `12px`
+- `microlabel`: authored technical chrome, `11px` mono uppercase
+- `heading`: section structure, `22px` semibold by default
+
+Typography and emphasis are two separate decisions. Choose one role for size,
+leading, weight, and tracking, then one foreground role: primary, secondary,
+muted, or decorative. `fg-faint` is decorative and must not carry timestamps,
+status, helper copy, or other information.
 
 Rules:
 
 - Prefer medium and semibold weight for structure instead of oversized text
 - Use mono selectively for paths, ids, timestamps, and machine output
 - Keep copy dense but readable; FalconDeck is a tool, not a marketing-heavy product surface
-- On web, always size text through the scale: `text-[length:var(--fd-text-*)]`, never a raw `text-[13px]`. The smallest step is `--fd-text-2xs` at `11px`
+- On web, prefer the semantic `fd-type-*` roles. Tailwind's standard
+  `text-*`, `leading-*`, and `tracking-*` utilities are mapped to FalconDeck's
+  scalable tokens, so `text-sm` is valid and responds to the appearance text
+  scale. Never use an arbitrary pixel size such as `text-[13px]`.
 - On mobile, size text through `theme.fontSize.*`, and derive `lineHeight` as `fontSize * theme.lineHeight.*` rather than hardcoding a pixel value
 - `--fd-text-md` (`16px`) is the deliberate size for text inputs on small screens, because anything smaller makes iOS Safari zoom on focus. Step down to `--fd-text-base` at the `md` breakpoint
 

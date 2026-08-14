@@ -2,7 +2,15 @@ import { memo } from 'react'
 import { Text as RNText, type TextProps as RNTextProps } from 'react-native'
 import { StyleSheet } from 'react-native-unistyles'
 
-type TextVariant = 'body' | 'label' | 'caption' | 'heading' | 'mono'
+type TextVariant =
+  | 'body'
+  | 'supporting'
+  | 'label'
+  | 'meta'
+  | 'microlabel'
+  | 'heading'
+  | 'mono'
+  | 'caption'
 type TextColor = 'primary' | 'secondary' | 'tertiary' | 'muted' | 'faint' | 'accent' | 'danger' | 'warning' | 'success' | 'info'
 
 interface TextProps extends RNTextProps {
@@ -15,7 +23,7 @@ interface TextProps extends RNTextProps {
 export const Text = memo(function Text({
   variant = 'body',
   size,
-  color = 'primary',
+  color,
   weight,
   style,
   ...props
@@ -26,7 +34,7 @@ export const Text = memo(function Text({
         styles.base,
         styles[variant],
         size ? styles[`size_${size}`] : undefined,
-        styles[`color_${color}`],
+        color ? styles[`color_${color}`] : undefined,
         weight ? styles[`weight_${weight}`] : undefined,
         style,
       ]}
@@ -44,6 +52,12 @@ const styles = StyleSheet.create((theme) => ({
   body: {
     fontFamily: theme.fontFamily.sans,
   },
+  supporting: {
+    color: theme.colors.fg.secondary,
+    fontFamily: theme.fontFamily.sans,
+    fontSize: theme.fontSize.sm,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.normal,
+  },
   label: {
     fontFamily: theme.fontFamily.sans,
     fontSize: theme.fontSize.sm,
@@ -55,6 +69,21 @@ const styles = StyleSheet.create((theme) => ({
     fontSize: theme.fontSize.xs,
     lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
     color: theme.colors.fg.tertiary,
+  },
+  meta: {
+    color: theme.colors.fg.muted,
+    fontFamily: theme.fontFamily.sans,
+    fontSize: theme.fontSize.xs,
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
+  },
+  microlabel: {
+    color: theme.colors.fg.muted,
+    fontFamily: theme.fontFamily.mono,
+    fontSize: theme.fontSize['2xs'],
+    fontWeight: '500',
+    letterSpacing: 1.2,
+    lineHeight: theme.fontSize['2xs'] * theme.lineHeight.tight,
+    textTransform: 'uppercase',
   },
   heading: {
     fontFamily: theme.fontFamily.sans,

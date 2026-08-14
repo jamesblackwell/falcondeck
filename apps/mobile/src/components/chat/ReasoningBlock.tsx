@@ -122,7 +122,7 @@ export const ReasoningBlock = memo(function ReasoningBlock({
           {label}
         </Text>
         {durationLabel ? (
-          <Text variant="caption" size="xs" color="faint">
+          <Text variant="meta">
             · {durationLabel}
           </Text>
         ) : null}

@@ -153,7 +153,7 @@ function DirectiveAnnotation({
         <Text
           variant="mono"
           size="xs"
-          color="faint"
+          color="muted"
           numberOfLines={1}
           style={styles.directiveAttrs}
         >
@@ -869,7 +869,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: 10,
   },
   tableCellText: {
-    lineHeight: 22,
+    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
   },
   tableHeaderCell: {
     backgroundColor: theme.colors.surface[1],
@@ -894,6 +894,6 @@ const styles = StyleSheet.create((theme) => ({
   },
   footnoteReference: {
     fontSize: theme.fontSize.xs,
-    lineHeight: 16,
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
   },
 }));

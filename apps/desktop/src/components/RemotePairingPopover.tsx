@@ -313,7 +313,7 @@ export function RemotePairingPopover({
                           {d.label ?? 'Unknown device'}
                         </span>
                         {!d.connected ? (
-                          <span className="shrink-0 text-[length:var(--fd-text-2xs)] text-fg-faint">
+                          <span className="fd-type-meta shrink-0 text-fg-muted">
                             {formatRelative(d.last_seen_at)}
                           </span>
                         ) : null}

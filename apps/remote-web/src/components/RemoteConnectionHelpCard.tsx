@@ -62,7 +62,7 @@ export function RemoteConnectionHelpCard({
               </div>
             ))}
             {variant === 'pairing' ? (
-              <p className="pt-1 text-fg-faint">
+              <p className="pt-1 text-fg-muted">
                 Local-only diagnostics. Do not share active pairing codes or tokens in screenshots.
               </p>
             ) : null}

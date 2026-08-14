@@ -43,7 +43,7 @@ export const ContextCompactionBlock = memo(function ContextCompactionBlock({
         <Text variant="caption" color="secondary" size="xs" weight="medium" style={styles.text}>
           {presentation.label}
         </Text>
-        <Text variant="caption" color="faint" size="2xs" style={styles.text}>
+        <Text variant="meta" size="2xs" style={styles.text}>
           {presentation.detail}
         </Text>
       </View>

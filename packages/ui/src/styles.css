@@ -10,6 +10,37 @@
   --font-sans: var(--fd-font-sans);
   --font-mono: var(--fd-font-mono);
 
+  /* Keep Tailwind's concise typography utilities on FalconDeck's scalable
+     type system. Components can use `text-sm`, `leading-relaxed`, and
+     `tracking-wide` without bypassing the appearance text-size setting. */
+  --text-2xs: var(--fd-text-2xs);
+  --text-2xs--line-height: var(--fd-leading-normal);
+  --text-xs: var(--fd-text-xs);
+  --text-xs--line-height: var(--fd-leading-normal);
+  --text-sm: var(--fd-text-sm);
+  --text-sm--line-height: var(--fd-leading-normal);
+  --text-base: var(--fd-text-base);
+  --text-base--line-height: var(--fd-leading-normal);
+  --text-md: var(--fd-text-md);
+  --text-md--line-height: var(--fd-leading-normal);
+  --text-lg: var(--fd-text-lg);
+  --text-lg--line-height: var(--fd-leading-tight);
+  --text-xl: var(--fd-text-xl);
+  --text-xl--line-height: var(--fd-leading-tight);
+  --text-2xl: var(--fd-text-2xl);
+  --text-2xl--line-height: var(--fd-leading-tight);
+  --text-3xl: var(--fd-text-3xl);
+  --text-3xl--line-height: var(--fd-leading-tight);
+
+  --leading-tight: var(--fd-leading-tight);
+  --leading-normal: var(--fd-leading-normal);
+  --leading-relaxed: var(--fd-leading-relaxed);
+
+  --tracking-tight: var(--fd-tracking-tight);
+  --tracking-normal: var(--fd-tracking-normal);
+  --tracking-wide: var(--fd-tracking-wide);
+  --tracking-widest: var(--fd-tracking-widest);
+
   /* Tailwind v4 color aliases — enables bg-surface-0, text-fg-primary, etc. */
   --color-surface-0: var(--fd-bg-0);
   --color-surface-1: var(--fd-bg-1);
@@ -400,8 +431,8 @@
   --fd-fg-0: #2e3350;
   --fd-fg-1: #40456b;
   --fd-fg-2: #545a80;
-  --fd-fg-3: #616894;
-  --fd-fg-4: #7d84a8;
+  --fd-fg-3: #5d648d;
+  --fd-fg-4: #7b82a6;
 
   --fd-border-0: rgba(52, 59, 88, 0.09);
   --fd-border-1: rgba(52, 59, 88, 0.14);
@@ -899,6 +930,50 @@ body {
   user-select: none;
 }
 
+/* === Semantic typography ===
+   Six roles replace component-local combinations of size, leading, weight,
+   and tracking. Foreground remains a separate semantic choice so status
+   colors can be applied without inventing a new typography variant. */
+.fd-type-body {
+  font-size: var(--fd-text-md);
+  line-height: var(--fd-leading-relaxed);
+}
+
+.fd-type-supporting {
+  font-size: var(--fd-text-sm);
+  line-height: var(--fd-leading-normal);
+}
+
+.fd-type-label {
+  font-size: var(--fd-text-base);
+  font-weight: 500;
+  line-height: var(--fd-leading-normal);
+}
+
+.fd-type-meta {
+  font-size: var(--fd-text-xs);
+  line-height: var(--fd-leading-normal);
+}
+
+.fd-type-heading {
+  font-size: var(--fd-text-xl);
+  font-weight: 600;
+  letter-spacing: var(--fd-tracking-tight);
+  line-height: var(--fd-leading-tight);
+}
+
+.fd-type-heading--sm {
+  font-size: var(--fd-text-lg);
+}
+
+.fd-type-heading--lg {
+  font-size: var(--fd-text-2xl);
+}
+
+.fd-type-mono {
+  font-family: var(--fd-font-mono);
+}
+
 /* === Focus Ring ===
    Add the `fd-focus` class to any interactive element — Button/Input/Textarea
    already include it. Keyboard-only by design (`:focus-visible`), so pointer
@@ -1072,20 +1147,28 @@ body {
    `fd-microlabel` is chrome the app authored (section headings, stat labels);
    `fd-readout` is data the system reported (project, host, age, payload),
    left in its own case because upcasing a hostname distorts it. */
+.fd-type-readout,
 .fd-readout {
   font-family: var(--fd-font-mono);
   font-size: var(--fd-text-2xs);
+  line-height: var(--fd-leading-normal);
   letter-spacing: var(--fd-tracking-normal);
 }
+.fd-type-microlabel,
 .fd-microlabel {
   font-family: var(--fd-font-mono);
   font-size: var(--fd-text-2xs);
+  line-height: var(--fd-leading-tight);
   letter-spacing: var(--fd-tracking-widest);
   text-transform: uppercase;
+}
+.fd-type-microlabel {
+  font-weight: 500;
 }
 /* Section headings carry the same treatment one step up, where the label is
    the heading rather than an annotation. Declared after the base so it wins
    without extra specificity — both rules are unlayered. */
+.fd-type-microlabel--md,
 .fd-microlabel--md {
   font-size: var(--fd-text-xs);
   letter-spacing: var(--fd-tracking-wide);

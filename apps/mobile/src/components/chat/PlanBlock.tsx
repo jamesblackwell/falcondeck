@@ -35,7 +35,7 @@ export const PlanBlock = memo(function PlanBlock({ item }: PlanBlockProps) {
         Plan
       </Text>
       {item.plan.explanation ? (
-        <Text selectable color="secondary" size="sm" style={styles.explanation}>
+        <Text selectable variant="supporting">
           {item.plan.explanation}
         </Text>
       ) : null}
@@ -108,9 +108,6 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.spacing[3],
     gap: theme.spacing[2],
   },
-  explanation: {
-    lineHeight: 20,
-  },
   steps: {
     gap: theme.spacing[2],
   },
@@ -121,7 +118,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   stepText: {
     flex: 1,
-    lineHeight: 20,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.normal,
   },
   stepDone: {
     textDecorationLine: 'line-through',

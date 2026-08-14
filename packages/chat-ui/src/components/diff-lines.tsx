@@ -144,16 +144,16 @@ export const DiffChangeLine = memo(function DiffChangeLine({
         change.type === 'del' && 'bg-danger-muted/20',
       )}
     >
-      <span className="sticky left-0 z-10 w-7 shrink-0 select-none bg-inherit pr-0.5 text-right text-fg-faint">
+      <span className="sticky left-0 z-10 w-7 shrink-0 select-none bg-inherit pr-0.5 text-right text-fg-muted">
         {oldLineNumber(change)}
       </span>
-      <span className="w-7 shrink-0 select-none pr-1 text-right text-fg-faint">
+      <span className="w-7 shrink-0 select-none pr-1 text-right text-fg-muted">
         {newLineNumber(change)}
       </span>
       <span
         className={cn(
           'w-3 shrink-0 select-none text-center',
-          change.type === 'add' ? 'text-success' : change.type === 'del' ? 'text-danger' : 'text-fg-faint',
+          change.type === 'add' ? 'text-success' : change.type === 'del' ? 'text-danger' : 'text-fg-muted',
         )}
       >
         {prefix}
@@ -182,7 +182,7 @@ export const HighlightedFileLine = memo(function HighlightedFileLine({
 }) {
   return (
     <div className="flex">
-      <span className="sticky left-0 z-10 w-12 shrink-0 select-none bg-surface-1 pr-2 text-right text-fg-faint">
+      <span className="sticky left-0 z-10 w-12 shrink-0 select-none bg-surface-1 pr-2 text-right text-fg-muted">
         {lineNumber}
       </span>
       <span className="whitespace-pre">

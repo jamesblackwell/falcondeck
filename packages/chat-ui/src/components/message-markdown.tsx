@@ -402,7 +402,7 @@ function DirectiveChip({
         <span
           key={`${key}-${index}`}
           title={`${key}=${value}`}
-          className="max-w-56 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-faint"
+          className="fd-type-meta fd-type-mono max-w-56 truncate text-fg-muted"
         >
           {directiveAttrLabel(key, value)}
         </span>
@@ -410,7 +410,7 @@ function DirectiveChip({
       {unparsed ? (
         <span
           title={`detail=${unparsed}`}
-          className="max-w-56 truncate font-mono text-[length:var(--fd-text-xs)] text-fg-faint"
+          className="fd-type-meta fd-type-mono max-w-56 truncate text-fg-muted"
         >
           {unparsed}
         </span>

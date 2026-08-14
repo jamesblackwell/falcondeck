@@ -19,7 +19,7 @@ afterEach(cleanup)
 describe('Text', () => {
   it('renders body variant', () => { expect(renderPure(Text, { children: 'Hello' })).toBeTruthy() })
   it('renders all variants', () => {
-    for (const v of ['body', 'label', 'caption', 'heading', 'mono'] as const)
+    for (const v of ['body', 'supporting', 'label', 'meta', 'microlabel', 'caption', 'heading', 'mono'] as const)
       expect(renderPure(Text, { variant: v, children: v })).toBeTruthy()
   })
   it('renders all colors', () => {
@@ -46,6 +46,19 @@ describe('Text', () => {
     const largeNode = large.root.findByType('Text' as never)
     expect(largeNode.props.style).toEqual(
       expect.arrayContaining([expect.objectContaining({ fontSize: 19, lineHeight: 28.5 })]),
+    )
+  })
+  it('applies semantic emphasis unless the caller overrides it', () => {
+    const meta = renderComponent(<Text variant="meta">Metadata</Text>)
+    const metaNode = meta.root.findByType('Text' as never)
+    expect(metaNode.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ color: '#666', fontSize: 12 })]),
+    )
+
+    const overridden = renderComponent(<Text variant="meta" color="danger">Error</Text>)
+    const overriddenNode = overridden.root.findByType('Text' as never)
+    expect(overriddenNode.props.style).toEqual(
+      expect.arrayContaining([expect.objectContaining({ color: '#f00' })]),
     )
   })
 })

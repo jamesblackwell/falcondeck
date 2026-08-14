@@ -60,7 +60,7 @@ function TrustedDeviceRow({
         </div>
       </div>
       <div className="flex items-center gap-2">
-        <span className="truncate text-[length:var(--fd-text-2xs)] text-fg-faint">
+        <span className="fd-type-readout truncate text-fg-muted">
           {device.device_id}
         </span>
         <Button

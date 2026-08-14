@@ -74,7 +74,7 @@ export function ResumeStoppedThreadsDialog({
             </li>
           ))}
           {hidden > 0 ? (
-            <li className="text-[length:var(--fd-text-sm)] text-fg-faint">
+            <li className="fd-type-supporting text-fg-muted">
               and {hidden} more
             </li>
           ) : null}

@@ -135,7 +135,7 @@ export const ThreadItem = memo(
               <span className="h-2.5 w-2.5 rounded-full bg-info" />
             ) : null}
           </span>
-          <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
+          <span className="fd-type-label min-w-0 flex-1 truncate text-fg-primary">
             {thread.title}
           </span>
           {thread.origin?.kind === 'scheduled_task' ? (
@@ -189,7 +189,7 @@ export const ThreadItem = memo(
             {attention.badgeLabel}
           </Badge>
         ) : (
-          <span className="shrink-0 text-[length:var(--fd-text-sm)] text-fg-faint group-hover:hidden">
+          <span className="fd-type-meta shrink-0 text-fg-muted group-hover:hidden">
             {timeString}
           </span>
         )}

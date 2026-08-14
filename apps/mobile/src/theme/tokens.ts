@@ -233,8 +233,8 @@ export const tokyoNightLightColors: typeof darkColors = {
     primary: '#2e3350',
     secondary: '#40456b',
     tertiary: '#545a80',
-    muted: '#616894',
-    faint: '#7d84a8',
+    muted: '#5d648d',
+    faint: '#7b82a6',
   },
   border: { subtle: '#d4d7e2', default: '#c9cdda', emphasis: '#bbc0d0', strong: '#a6acc1' },
   accent: {

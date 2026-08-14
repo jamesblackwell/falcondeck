@@ -67,7 +67,7 @@ export class RemoteErrorBoundary extends Component<
               Clear saved state and reload
             </Button>
           </div>
-          <p className="text-[length:var(--fd-text-xs)] text-fg-faint">
+          <p className="fd-type-meta text-fg-muted">
             Clearing saved state unpairs this browser; you will need a fresh pairing code.
           </p>
         </div>

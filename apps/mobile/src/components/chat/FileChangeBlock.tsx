@@ -114,7 +114,7 @@ export const FileChangeBlock = memo(function FileChangeBlock({
                     {change.path}
                     {change.move_path ? ` → ${change.move_path}` : ''}
                   </Text>
-                  <Text variant="caption" color="faint" size="2xs">
+                  <Text variant="meta" size="2xs">
                     {changeKindLabel(change).toUpperCase()}
                   </Text>
                 </View>

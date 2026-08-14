@@ -74,7 +74,7 @@ export const CodeReviewBlock = memo(function CodeReviewBlock({
           <Text
             variant="caption"
             size="2xs"
-            color="faint"
+            color="muted"
             style={styles.centeredText}
           >
             {presentation.detail}

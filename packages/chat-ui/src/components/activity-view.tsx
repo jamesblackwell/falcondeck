@@ -373,7 +373,7 @@ const ActivityRow = memo(
               {offline ? " · Offline" : ""}
             </Badge>
           ) : null}
-          <span className="fd-readout shrink-0 tabular-nums text-fg-faint">
+          <span className="fd-readout shrink-0 tabular-nums text-fg-muted">
             {timeAgo(entry.thread.updated_at, nowMs)}
           </span>
           {entry.section === "failed" || entry.section === "ready" ? (
@@ -576,10 +576,10 @@ const RecentTrail = memo(function RecentTrail({
                   <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
                     {entry.thread.title}
                   </span>
-                  <span className="fd-readout shrink-0 truncate text-fg-faint">
+                  <span className="fd-readout shrink-0 truncate text-fg-muted">
                     {entry.projectLabel}
                   </span>
-                  <span className="fd-readout w-8 shrink-0 text-right tabular-nums text-fg-faint">
+                  <span className="fd-readout w-8 shrink-0 text-right tabular-nums text-fg-muted">
                     {timeAgo(entry.thread.updated_at, nowMs)}
                   </span>
                 </button>
@@ -1058,7 +1058,7 @@ export const ActivityView = memo(function ActivityView({
               <kbd className="fd-readout rounded-[var(--fd-radius-sm)] border border-border-default px-1.5 py-0.5 text-fg-secondary">
                 {hint.key}
               </kbd>
-              <span className="fd-microlabel text-fg-faint">
+              <span className="fd-microlabel text-fg-muted">
                 {hint.key === "esc" && onReturnFocus ? "main app" : hint.label}
               </span>
             </li>

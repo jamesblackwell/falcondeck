@@ -62,7 +62,7 @@ export const WebSearchBlock = memo(function WebSearchBlock({
         )}
       </View>
       <View style={styles.content}>
-        <Text variant="caption" size="xs" color="faint">
+        <Text variant="meta">
           {actionLabel}
         </Text>
         <Text variant="body" size="sm" color="primary" selectable>

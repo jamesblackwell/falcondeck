@@ -16,7 +16,7 @@ export const TechnicalPayloadDetail = memo(function TechnicalPayloadDetail({
     <>
       <CodeBlock code={inspection.text} language="json" previewLines={8} />
       {inspection.truncated ? (
-        <Text variant="caption" color="faint" size="2xs">
+        <Text variant="meta" size="2xs">
           Display limited for performance and safety.
         </Text>
       ) : null}
