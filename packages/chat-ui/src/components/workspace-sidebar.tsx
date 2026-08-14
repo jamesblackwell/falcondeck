@@ -111,10 +111,7 @@ export type WorkspaceSidebarProps = {
   onThreadSortChange?: (mode: ThreadSortMode) => void;
   /** Called with the new project order after a drag completes. */
   onWorkspaceOrderChange?: (workspaceIds: string[]) => Promise<void> | void;
-  /**
-   * Projects the host wants rendered collapsed. Only takes effect alongside
-   * `onWorkspaceCollapsedChange`; without it each group owns its own state.
-   */
+  /** Projects the host wants rendered collapsed. */
   collapsedWorkspaceIds?: readonly string[];
   onWorkspaceCollapsedChange?: (
     workspaceId: string,
@@ -490,6 +487,10 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const [selectedTagIds, setSelectedTagIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const [
+    uncontrolledCollapsedWorkspaceIds,
+    setUncontrolledCollapsedWorkspaceIds,
+  ] = useState<Set<string>>(() => new Set());
   const [selectedExtensionFilterValues, setSelectedExtensionFilterValues] =
     useState<ReadonlyMap<string, ReadonlySet<string>>>(() => new Map());
   const [threadContextMenu, setThreadContextMenu] =
@@ -654,9 +655,53 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   const collapsedWorkspaces = useMemo(
     () =>
-      onWorkspaceCollapsedChange ? new Set(collapsedWorkspaceIds ?? []) : null,
-    [collapsedWorkspaceIds, onWorkspaceCollapsedChange],
+      onWorkspaceCollapsedChange
+        ? new Set(collapsedWorkspaceIds ?? [])
+        : uncontrolledCollapsedWorkspaceIds,
+    [
+      collapsedWorkspaceIds,
+      onWorkspaceCollapsedChange,
+      uncontrolledCollapsedWorkspaceIds,
+    ],
   );
+
+  const allProjectsCollapsed =
+    workspaceOrder.length > 0 &&
+    workspaceOrder.every((workspaceId) => collapsedWorkspaces.has(workspaceId));
+
+  const handleWorkspaceOpenChange = useCallback(
+    (workspaceId: string, open: boolean) => {
+      if (onWorkspaceCollapsedChange) {
+        onWorkspaceCollapsedChange(workspaceId, !open);
+        return;
+      }
+      setUncontrolledCollapsedWorkspaceIds((current) => {
+        const next = new Set(current);
+        if (open) next.delete(workspaceId);
+        else next.add(workspaceId);
+        return next;
+      });
+    },
+    [onWorkspaceCollapsedChange],
+  );
+
+  const handleToggleAllProjects = useCallback(() => {
+    const collapse = !allProjectsCollapsed;
+    if (onWorkspaceCollapsedChange) {
+      workspaceOrder.forEach((workspaceId) => {
+        onWorkspaceCollapsedChange(workspaceId, collapse);
+      });
+      return;
+    }
+    setUncontrolledCollapsedWorkspaceIds((current) => {
+      const next = new Set(current);
+      workspaceOrder.forEach((workspaceId) => {
+        if (collapse) next.add(workspaceId);
+        else next.delete(workspaceId);
+      });
+      return next;
+    });
+  }, [allProjectsCollapsed, onWorkspaceCollapsedChange, workspaceOrder]);
 
   const updateWorkspaceDropIndex = useCallback(
     (clientY: number, workspaceId: string) => {
@@ -1357,11 +1402,33 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               (px-2 row + p-0.5 button), while these 24px icon buttons inset
               their 14px glyph by 5px — so the trailing padding drops to match. */}
           <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-[5px]">
-            <h2
-              id="fd-projects-heading"
-              className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted"
-            >
-              Projects
+            <h2 id="fd-projects-heading">
+              <button
+                type="button"
+                className="group/projects fd-focus relative rounded-[var(--fd-radius-sm)] pr-4 text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted transition-colors hover:text-fg-secondary disabled:cursor-default disabled:opacity-60"
+                onClick={handleToggleAllProjects}
+                disabled={workspaceOrder.length === 0}
+                aria-expanded={!allProjectsCollapsed}
+                aria-label={
+                  allProjectsCollapsed
+                    ? "Expand all projects"
+                    : "Collapse all projects"
+                }
+                title={
+                  allProjectsCollapsed
+                    ? "Expand all projects"
+                    : "Collapse all projects"
+                }
+              >
+                Projects
+                <ChevronDown
+                  aria-hidden="true"
+                  className={cn(
+                    "absolute right-0 top-1/2 h-3 w-3 -translate-y-1/2 opacity-0 transition-[transform,opacity] duration-[var(--fd-duration-fast)] group-hover/projects:opacity-100 group-focus-visible/projects:opacity-100",
+                    allProjectsCollapsed && "-rotate-90",
+                  )}
+                />
+              </button>
             </h2>
             <div className="flex items-center gap-1">
               {extensionSidebarFilters.length > 0 ? (
@@ -1479,16 +1546,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                           : undefined
                       }
                       dragHandleProps={dragHandleProps}
-                      open={
-                        collapsedWorkspaces
-                          ? !collapsedWorkspaces.has(workspaceId)
-                          : undefined
-                      }
-                      onOpenChange={
-                        onWorkspaceCollapsedChange
-                          ? (open) =>
-                              onWorkspaceCollapsedChange(workspaceId, !open)
-                          : undefined
+                      open={!collapsedWorkspaces.has(workspaceId)}
+                      onOpenChange={(open) =>
+                        handleWorkspaceOpenChange(workspaceId, open)
                       }
                       collapsedThreadCount={group.threads.length}
                     >

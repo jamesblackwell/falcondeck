@@ -893,6 +893,48 @@ describe("DesktopSidebar", () => {
     expect(onSelectWorkspace).toHaveBeenCalledWith("workspace-1", "thread-1");
   });
 
+  it("collapses and expands every project from the Projects heading", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [thread()],
+      },
+      {
+        workspace: workspace({
+          id: "workspace-2",
+          path: "/Users/james/second-project",
+          current_thread_id: "thread-2",
+        }),
+        threads: [
+          thread({
+            id: "thread-2",
+            workspace_id: "workspace-2",
+            title: "Second thread",
+          }),
+        ],
+      },
+    ];
+    renderSidebar({ groups });
+
+    const collapseAll = screen.getByRole("button", {
+      name: "Collapse all projects",
+    });
+    expect(collapseAll).toHaveAttribute("aria-expanded", "true");
+
+    fireEvent.click(collapseAll);
+    expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
+    expect(screen.queryByText("Second thread")).not.toBeInTheDocument();
+
+    const expandAll = screen.getByRole("button", {
+      name: "Expand all projects",
+    });
+    expect(expandAll).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(expandAll);
+
+    expect(screen.getByText("Main thread")).toBeInTheDocument();
+    expect(screen.getByText("Second thread")).toBeInTheDocument();
+  });
+
   it("honors a host-owned collapsed set and reports toggles back to it", () => {
     const onWorkspaceCollapsedChange = vi.fn();
     const { rerenderSidebar } = renderSidebar({
@@ -915,9 +957,10 @@ describe("DesktopSidebar", () => {
     expect(toggle).toHaveAttribute("aria-expanded", "false");
 
     rerenderSidebar({ collapsedWorkspaceIds: [] });
-    expect(
-      screen.getByRole("button", { name: /falcondeck/ }),
-    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByRole("button", { name: /falcondeck/ })).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
     expect(screen.getByText("Main thread")).toBeInTheDocument();
   });
 
