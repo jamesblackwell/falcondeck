@@ -1,5 +1,5 @@
 import React from 'react'
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { QueuedTurns } from '@falcondeck/chat-ui'
@@ -56,7 +56,7 @@ describe('QueuedTurns', () => {
     expect(screen.getByRole('button', { name: /Remove queued message/ })).not.toBeDisabled()
   })
 
-  it('shows an attachment thumbnail when a preview URL is available', () => {
+  it('shows an attachment thumbnail when a preview URL is available', async () => {
     render(
       <QueuedTurns
         queuedTurns={[{ ...queuedTurns[0]!, attachment_count: 1 }]}
@@ -67,9 +67,30 @@ describe('QueuedTurns', () => {
       />,
     )
 
-    expect(document.querySelector('img')).toHaveAttribute(
-      'src',
-      'http://daemon.test/queued-1.png',
+    await waitFor(() =>
+      expect(document.querySelector('img')).toHaveAttribute(
+        'src',
+        'http://daemon.test/queued-1.png',
+      ),
+    )
+  })
+
+  it('shows an attachment thumbnail when the preview loader is async', async () => {
+    render(
+      <QueuedTurns
+        queuedTurns={[{ ...queuedTurns[0]!, attachment_count: 1 }]}
+        canSteer
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        getAttachmentPreviewUrl={(id) => Promise.resolve(`data:image/png;base64,${id}`)}
+      />,
+    )
+
+    await waitFor(() =>
+      expect(document.querySelector('img')).toHaveAttribute(
+        'src',
+        'data:image/png;base64,queued-1',
+      ),
     )
   })
 

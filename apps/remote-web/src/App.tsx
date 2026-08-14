@@ -3632,6 +3632,29 @@ function RemoteApp() {
     }
   }
 
+  // Read-only, so a miss just leaves the row image-free rather than raising
+  // a banner over a cosmetic failure. Remote clients have no loopback HTTP
+  // route to the daemon, so the bytes travel as a data URL over the relay.
+  const handleQueuedTurnAttachmentPreview = useCallback(
+    async (queuedId: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return undefined;
+      try {
+        const result = await callRpc<{ url?: string }>(
+          "thread.queue.attachment_preview",
+          {
+            workspace_id: selectedWorkspaceId,
+            thread_id: selectedThreadId,
+            queued_id: queuedId,
+          },
+        );
+        return result.url;
+      } catch {
+        return undefined;
+      }
+    },
+    [callRpc, selectedThreadId, selectedWorkspaceId],
+  );
+
   async function handleSetGoal(objective: string, tokenBudget: number | null) {
     if (!selectedWorkspaceId || !selectedWorkspace)
       throw new Error("Select a project first");
@@ -4314,6 +4337,7 @@ function RemoteApp() {
                     onEdit={(queuedId, text) =>
                       void handleEditQueuedTurn(queuedId, text)
                     }
+                    getAttachmentPreviewUrl={handleQueuedTurnAttachmentPreview}
                   />
                 ) : null}
                 <PromptInput

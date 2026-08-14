@@ -1,6 +1,6 @@
 import * as Popover from '@radix-ui/react-popover'
 import { CornerDownRight, MoreHorizontal, Paperclip, Pencil, Trash2 } from 'lucide-react'
-import { useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
+import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react'
 
 import type { QueuedTurnSummary } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
@@ -112,7 +112,7 @@ function QueuedTurnChip({
   onRemove,
   onSteer,
   onEdit,
-  attachmentPreviewUrl,
+  getAttachmentPreviewUrl,
   draggable,
   onDragStart,
   onDragOver,
@@ -125,7 +125,7 @@ function QueuedTurnChip({
   onRemove: () => void
   onSteer: () => void
   onEdit?: (text: string) => void
-  attachmentPreviewUrl?: string
+  getAttachmentPreviewUrl?: (queuedId: string) => string | undefined | Promise<string | undefined>
   draggable: boolean
   onDragStart: (event: DragEvent<HTMLDivElement>) => void
   onDragOver: (event: DragEvent<HTMLDivElement>) => void
@@ -136,6 +136,26 @@ function QueuedTurnChip({
   const [isEditing, setIsEditing] = useState(false)
   const label = queued.preview || 'Queued message'
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
+
+  const hasAttachment = Boolean(queued.attachment_count)
+  const [attachmentPreviewUrl, setAttachmentPreviewUrl] = useState<string | undefined>(undefined)
+  useEffect(() => {
+    if (!hasAttachment || !getAttachmentPreviewUrl) {
+      setAttachmentPreviewUrl(undefined)
+      return
+    }
+    let active = true
+    Promise.resolve(getAttachmentPreviewUrl(queued.id))
+      .then((url) => {
+        if (active) setAttachmentPreviewUrl(url)
+      })
+      .catch(() => {
+        if (active) setAttachmentPreviewUrl(undefined)
+      })
+    return () => {
+      active = false
+    }
+  }, [getAttachmentPreviewUrl, hasAttachment, queued.id])
 
   if (isEditing && onEdit) {
     return (
@@ -272,7 +292,7 @@ export function QueuedTurns({
   onSteer: (queuedId: string) => void
   onEdit?: (queuedId: string, text: string) => void
   onReorder?: (queuedIds: string[]) => void
-  getAttachmentPreviewUrl?: (queuedId: string) => string | undefined
+  getAttachmentPreviewUrl?: (queuedId: string) => string | undefined | Promise<string | undefined>
 }) {
   const draggedIdRef = useRef<string | null>(null)
   const [previewOrder, setPreviewOrder] = useState<string[] | null>(null)
@@ -309,9 +329,7 @@ export function QueuedTurns({
             onRemove={() => onRemove(queued.id)}
             onSteer={() => onSteer(queued.id)}
             onEdit={onEdit ? (text) => onEdit(queued.id, text) : undefined}
-            attachmentPreviewUrl={
-              queued.attachment_count ? getAttachmentPreviewUrl?.(queued.id) : undefined
-            }
+            getAttachmentPreviewUrl={getAttachmentPreviewUrl}
             draggable={queuedTurns.length > 1 && Boolean(onReorder)}
             onDragStart={(event) => {
               draggedIdRef.current = queued.id
