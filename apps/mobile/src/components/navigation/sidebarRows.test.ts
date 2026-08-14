@@ -36,7 +36,6 @@ describe('buildSidebarRows', () => {
         workspaceId: 'w1',
         workspaceName: 'project-one',
         isOpen: true,
-        threadCount: 2,
       },
       expect.objectContaining({
         key: 'thread:t1',
@@ -70,7 +69,6 @@ describe('buildSidebarRows', () => {
       workspaceId: 'w1',
       workspaceName: 'Workspace',
       isOpen: true,
-      threadCount: 0,
     })
   })
 

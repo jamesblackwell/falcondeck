@@ -25,8 +25,6 @@ export type WorkspaceGroupProps = {
   /** Controlled open state; omit to let the group own it. */
   open?: boolean
   onOpenChange?: (open: boolean) => void
-  /** Shown on the row while collapsed so hidden chats stay accounted for. */
-  collapsedThreadCount?: number
   children: React.ReactNode
 }
 
@@ -40,7 +38,6 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   dragHandleProps,
   open,
   onOpenChange,
-  collapsedThreadCount = 0,
   children,
 }: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
@@ -75,7 +72,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
               : undefined
           }
           className={cn(
-            'group flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5',
+            'group flex w-full items-stretch gap-2 rounded-[var(--fd-radius-md)] px-2 py-1.5',
             'transition-colors duration-[var(--fd-duration-fast)]',
             // The project row is a header, not a selection target — the
             // selected thread inside it already carries the highlight, so this
@@ -85,6 +82,9 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
             dragHandleProps?.className,
           )}
         >
+          {/* Stretched to the full row height (not just text height) so
+              clicking anywhere in the row — not just on the label — toggles
+              the collapse, matching the drag hit area on the row itself. */}
           <Collapsible.Trigger className="fd-focus-inset flex min-w-0 flex-1 items-center gap-2 rounded-[var(--fd-radius-sm)] text-left">
             {/* Folder and chevron are stacked so they can crossfade on hover
                 while the chevron keeps rotating through the open/close toggle. */}
@@ -150,18 +150,6 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
                   </span>
                 </span>
               ) : null}
-              {/* Collapsed projects still say how much is tucked away, so the
-                  row does not read as an empty folder. */}
-              {!isOpen && collapsedThreadCount > 0 ? (
-                <span
-                  className={cn(
-                    'shrink-0 text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted',
-                    host ? null : 'ml-auto',
-                  )}
-                >
-                  {collapsedThreadCount}
-                </span>
-              ) : null}
             </span>
           </Collapsible.Trigger>
           {onNewThread ? (
@@ -171,7 +159,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
               onClick={onNewThread}
               title={`Start new thread in ${pathLabel}`}
               aria-label={`Start new thread in ${pathLabel}`}
-              className="fd-focus shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary"
+              className="fd-focus shrink-0 self-center rounded-[var(--fd-radius-sm)] p-0.5 text-fg-muted transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary"
             >
               <SquarePen aria-hidden="true" className="h-3.5 w-3.5" />
             </button>

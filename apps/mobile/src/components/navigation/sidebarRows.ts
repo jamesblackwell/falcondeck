@@ -15,7 +15,6 @@ export type SidebarRow =
       workspaceId: string
       workspaceName: string
       isOpen: boolean
-      threadCount: number
     }
   | {
       key: string
@@ -69,7 +68,6 @@ export function buildSidebarRows(
       workspaceId: group.workspace.id,
       workspaceName,
       isOpen,
-      threadCount: group.threads.length,
     }
 
     const unpinnedThreads = group.threads.filter((thread) => !thread.is_pinned)

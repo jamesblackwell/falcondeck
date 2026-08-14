@@ -1550,7 +1550,6 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                       onOpenChange={(open) =>
                         handleWorkspaceOpenChange(workspaceId, open)
                       }
-                      collapsedThreadCount={group.threads.length}
                     >
                       <ThreadList
                         group={group}
