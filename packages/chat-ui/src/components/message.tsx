@@ -3128,35 +3128,22 @@ export const WorkSessionCard = memo(
       (entry): entry is Extract<ConversationItem, { kind: "tool_call" }> =>
         entry.kind === "tool_call",
     );
+    const activeTool = [...toolCalls].reverse().find((item) => {
+      const lifecycle = toolLifecycle(item);
+      return (
+        lifecycle === "running" ||
+        lifecycle === "queued" ||
+        lifecycle === "awaiting_approval"
+      );
+    });
     // A session can be live past its last tool call — the agent is thinking
     // about what it just did. Labelling that state with the finished tool's
     // name would claim work that already ended.
     const thinkingTail =
       running &&
       items[items.length - 1]?.kind === "reasoning" &&
-      !toolCalls.some((item) => {
-        const lifecycle = toolLifecycle(item);
-        return (
-          lifecycle === "running" ||
-          lifecycle === "queued" ||
-          lifecycle === "awaiting_approval"
-        );
-      });
-    const currentLabel =
-      running && !thinkingTail
-        ? toolCallLabel(
-            [...toolCalls].reverse().find((item) => {
-              const lifecycle = toolLifecycle(item);
-              return (
-                lifecycle === "running" ||
-                lifecycle === "queued" ||
-                lifecycle === "awaiting_approval"
-              );
-            })?.title ??
-              toolCalls[toolCalls.length - 1]?.title ??
-              "",
-          )
-        : null;
+      !activeTool;
+    const currentLabel = activeTool ? toolCallLabel(activeTool.title) : null;
 
     return (
       <Collapsible.Root open={open} onOpenChange={setOpen}>

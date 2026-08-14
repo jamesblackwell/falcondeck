@@ -236,16 +236,25 @@ describe('collapsed mode grouping', () => {
     expect(settledTail.running).toBe(false)
   })
 
-  it('keeps a settled tool session live between calls while streaming', () => {
+  it('keeps a settled tool session live through trailing receipts while streaming', () => {
     const presentation = deriveConversationPresentation(
-      [toolCall({ id: 'tool-1' })],
+      [
+        toolCall({ id: 'tool-1' }),
+        {
+          kind: 'service',
+          id: 'service-tail',
+          level: 'info',
+          message: 'hook finished',
+          created_at: '2026-03-16T10:00:02Z',
+        },
+      ],
       collapsed,
       { is_streaming: true },
     )
 
-    const tail = presentation.history_blocks.at(-1)
-    if (tail?.kind !== 'work_session') throw new Error('expected a work session tail')
-    expect(tail.running).toBe(true)
-    expect(tail.completed_at).toBeNull()
+    const session = presentation.history_blocks.find((block) => block.kind === 'work_session')
+    if (session?.kind !== 'work_session') throw new Error('expected a work session')
+    expect(session.running).toBe(true)
+    expect(session.completed_at).toBeNull()
   })
 })

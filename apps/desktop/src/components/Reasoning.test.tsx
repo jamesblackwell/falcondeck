@@ -187,7 +187,8 @@ describe('live thread indicators', () => {
     )
 
     expect(screen.queryByRole('button', { name: /Worked for/ })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Working…/ })).toBeInTheDocument()
+    // The completed tool's title must not linger as if it were still active.
+    expect(screen.getByRole('button', { name: 'Working…' })).toBeInTheDocument()
 
     rerender(<Conversation items={[toolCall({ id: 'tool-1' })]} isThinking={false} />)
     expect(screen.getByRole('button', { name: /Worked for/ })).toBeInTheDocument()

@@ -1672,14 +1672,16 @@ export function deriveConversationPresentation(
       }
       buriedReceipts = [];
     };
-    const flushWork = () => {
+    const flushWork = (keepAlive = false) => {
       if (workBuffer.length === 0) {
         flushReceipts();
         return;
       }
-      const running = workBuffer.some(
-        (entry) => entry.kind === "tool_call" && isActiveTool(entry),
-      );
+      const running =
+        keepAlive ||
+        workBuffer.some(
+          (entry) => entry.kind === "tool_call" && isActiveTool(entry),
+        );
       const last = workBuffer[workBuffer.length - 1]!;
       historyBlocks.push({
         kind: "work_session",
@@ -1776,20 +1778,10 @@ export function deriveConversationPresentation(
         ),
       });
     }
-    flushWork();
-
-    // Keep the trailing work session live for the whole turn, including the
-    // short gaps between fast tool calls. Settling it as soon as each tool
-    // completes makes the row flash "Worked" before returning to "Working".
-    // A trailing thought needs the same treatment: it is buried in this fold,
-    // so the standalone "Thinking…" line is intentionally suppressed.
-    if (options.is_streaming) {
-      const tail = historyBlocks[historyBlocks.length - 1];
-      if (tail?.kind === "work_session" && !tail.running) {
-        tail.running = true;
-        tail.completed_at = null;
-      }
-    }
+    // Keep the final work session live for the whole turn, including short
+    // gaps between fast tool calls and any trailing service receipts. Earlier
+    // sessions remain settled when a high-signal item splits the transcript.
+    flushWork(options.is_streaming);
 
     // Running work renders as its own "Working…" block, so the pinned live
     // lane stays empty in this mode.
