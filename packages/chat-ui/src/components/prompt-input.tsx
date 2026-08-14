@@ -129,9 +129,8 @@ export type PromptInputProps = {
   contextBar?: ReactNode;
   /**
    * Focuses the textarea whenever this changes to a non-null value. Hosts pass
-   * a key that changes when a new conversation opens (and null while a thread
-   * is selected) so the caret lands in the composer without stealing focus on
-   * ordinary thread switches.
+   * the active conversation key so the caret lands in the composer whenever a
+   * new or existing thread opens.
    */
   autoFocusKey?: string | null;
   /** Focus request for app-level shortcuts; unlike autoFocusKey it may repeat in an existing chat. */

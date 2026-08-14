@@ -2799,6 +2799,7 @@ function AppInner() {
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
+      setComposerFocusRequestKey((current) => current + 1);
     },
     [setSelectedWorkspaceId, setSelectedThreadId],
   );
@@ -2811,6 +2812,7 @@ function AppInner() {
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(threadId);
+      setComposerFocusRequestKey((current) => current + 1);
     },
     [setSelectedWorkspaceId, setSelectedThreadId],
   );
@@ -2823,6 +2825,7 @@ function AppInner() {
       setActiveExtensionPanelKey(null);
       setSelectedWorkspaceId(workspaceId);
       setSelectedThreadId(null);
+      setComposerFocusRequestKey((current) => current + 1);
       // Clear the detail at the same time as the selection. The connection
       // hook also reconciles this during layout, but the new-thread surface
       // must never briefly inherit the previous thread's transcript while
@@ -4853,12 +4856,9 @@ function AppInner() {
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,
-                // Land the caret in the composer when a new conversation
-                // opens; null while a thread is selected keeps thread
-                // switches from stealing focus.
-                autoFocusKey: selectedThread
-                  ? null
-                  : (selectedWorkspaceId ?? "new"),
+                // Opening a conversation is a writing action: land the caret
+                // in its composer whether it is a new or existing thread.
+                autoFocusKey: conversationKey,
                 onSubmit: handleSubmitCallback,
                 onVoiceInput: baseUrl
                   ? () => setIsVoiceInputOpen(true)

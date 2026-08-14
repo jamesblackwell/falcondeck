@@ -71,6 +71,40 @@ describe("PromptInput", () => {
     ).toBeDisabled();
   });
 
+  it("focuses the composer when a conversation opens", () => {
+    const { rerender } = render(
+      <PromptInput {...promptInputProps} autoFocusKey="workspace-1:thread-1" />,
+    );
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    expect(composer).toHaveFocus();
+
+    const elsewhere = document.createElement("button");
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+
+    rerender(
+      <PromptInput {...promptInputProps} autoFocusKey="workspace-1:thread-2" />,
+    );
+    expect(composer).toHaveFocus();
+    elsewhere.remove();
+  });
+
+  it("honors repeated app-level focus requests in the same conversation", () => {
+    const { rerender } = render(
+      <PromptInput {...promptInputProps} focusRequestKey={1} />,
+    );
+    const composer = screen.getByRole("textbox", { name: "Message composer" });
+    expect(composer).toHaveFocus();
+
+    const elsewhere = document.createElement("button");
+    document.body.appendChild(elsewhere);
+    elsewhere.focus();
+
+    rerender(<PromptInput {...promptInputProps} focusRequestKey={2} />);
+    expect(composer).toHaveFocus();
+    elsewhere.remove();
+  });
+
   it("uses voice input as the empty composer action and restores Send after typing", () => {
     const onVoiceInput = vi.fn();
     const { rerender } = render(
