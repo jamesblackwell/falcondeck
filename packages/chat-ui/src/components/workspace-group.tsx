@@ -63,6 +63,14 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
       <section className="min-w-0 overflow-hidden">
         <div
           {...dragHandleProps}
+          onClick={(event) => {
+            // The drag wrapper includes the row's vertical padding. When a
+            // click lands there, the trigger is not the event target, so
+            // route it through the same collapse state transition.
+            if (event.target === event.currentTarget) {
+              handleOpenChange(!isOpen)
+            }
+          }}
           onContextMenu={
             onOpenContextMenu
               ? (event) => {

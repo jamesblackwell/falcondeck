@@ -720,6 +720,40 @@ describe("DesktopSidebar", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("collapses a project when clicking its drag row padding", () => {
+    const project = workspace({
+      id: "workspace-a",
+      path: "/Users/james/alpha",
+    });
+
+    renderSidebar({
+      groups: [
+        {
+          workspace: project,
+          threads: [
+            thread({
+              workspace_id: project.id,
+              id: "thread-a",
+              title: "Alpha chat",
+            }),
+          ],
+        },
+      ],
+      onWorkspaceOrderChange: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const row = document.querySelector(
+      '[data-workspace-drag-id="workspace-a"]',
+    );
+    if (!(row instanceof HTMLElement)) {
+      throw new Error("Expected draggable workspace row");
+    }
+
+    fireEvent.click(row);
+
+    expect(screen.queryByText("Alpha chat")).not.toBeInTheDocument();
+  });
+
   it("reorders projects by dragging across the project rows", () => {
     const onWorkspaceOrderChange = vi.fn().mockResolvedValue(undefined);
     const first = workspace({ id: "workspace-a", path: "/Users/james/alpha" });
