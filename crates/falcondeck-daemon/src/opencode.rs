@@ -238,11 +238,7 @@ impl OpenCodeRuntime {
         self.request(
             reqwest::Method::POST,
             &format!("/api/session/{session_id}/prompt"),
-            Some(json!({
-                "id": message_id,
-                "prompt": prompt,
-                "delivery": delivery.as_str(),
-            })),
+            Some(prompt_request_body(message_id, prompt, delivery)),
         )
         .await
     }
@@ -558,6 +554,17 @@ fn messages_path(session_id: &str, cursor: Option<&str>) -> String {
     format!("{}?{}", url.path(), url.query().unwrap_or_default())
 }
 
+fn prompt_request_body(message_id: &str, prompt: Value, delivery: Delivery) -> Value {
+    json!({
+        "id": message_id,
+        "prompt": prompt,
+        "delivery": delivery.as_str(),
+        // OpenCode admits the message but does not wake the agent loop when
+        // this flag is omitted or false.
+        "resume": true,
+    })
+}
+
 fn response_message_page(value: Value) -> Result<MessagePage, DaemonError> {
     let previous = value
         .pointer("/cursor/previous")
@@ -604,6 +611,19 @@ mod tests {
     fn delivery_uses_the_native_wire_values() {
         assert_eq!(Delivery::Queue.as_str(), "queue");
         assert_eq!(Delivery::Steer.as_str(), "steer");
+    }
+
+    #[test]
+    fn prompt_admission_resumes_the_agent_loop() {
+        assert_eq!(
+            prompt_request_body("msg_test", json!({ "text": "hello" }), Delivery::Queue),
+            json!({
+                "id": "msg_test",
+                "prompt": { "text": "hello" },
+                "delivery": "queue",
+                "resume": true,
+            })
+        );
     }
 
     #[test]
