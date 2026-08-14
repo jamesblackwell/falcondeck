@@ -1851,12 +1851,6 @@ function ConversationQa() {
               </div>
             ) : undefined
           }
-          onEditResend={actionsUnavailable ? undefined : simulateBranchAction}
-          editResendUnavailableReason={
-            actionsUnavailable
-              ? "Edit and resend is unavailable because Claude does not support conversation branching."
-              : null
-          }
           onRetryResponse={
             actionsUnavailable ? undefined : simulateBranchAction
           }

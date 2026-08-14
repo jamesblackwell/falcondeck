@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState } from "react";
 
 import type {
   FalconDeckPreferences,
@@ -7,69 +7,72 @@ import type {
   UpdatePreferencesPayload,
   WorkspaceSummary,
   ExtensionSnapshot,
-} from '@falcondeck/client-core'
+} from "@falcondeck/client-core";
 
-import type { AppUpdaterState } from '../hooks/useAppUpdater'
-import type { HostManager, HostView } from '../hosts'
-import { AgentsPanel } from './settings/AgentsPanel'
-import { AppearanceSettingsPanel } from './settings/AppearanceSettingsPanel'
-import { ConnectorsPanel } from './settings/ConnectorsPanel'
-import { GeneralSettingsPanel } from './settings/GeneralSettingsPanel'
-import { ExtensionsPanel } from './settings/ExtensionsPanel'
-import { KeyboardShortcutsPanel } from './settings/KeyboardShortcutsPanel'
-import { RemoteAccessPanel } from './settings/RemoteAccessPanel'
-import { ServersPanel, type ServersPanelProps } from './settings/ServersPanel'
-import { SettingsSidebar } from './settings/SettingsSidebar'
-import { SpeechSettingsPanel } from './settings/SpeechSettingsPanel'
-import type { SettingsSectionId } from './settings/settings-utils'
+import type { AppUpdaterState } from "../hooks/useAppUpdater";
+import type { HostManager, HostView } from "../hosts";
+import { AgentsPanel } from "./settings/AgentsPanel";
+import { AppearanceSettingsPanel } from "./settings/AppearanceSettingsPanel";
+import { ConnectorsPanel } from "./settings/ConnectorsPanel";
+import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
+import { ExtensionsPanel } from "./settings/ExtensionsPanel";
+import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
+import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
+import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
+import { SettingsSidebar } from "./settings/SettingsSidebar";
+import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
+import type { SettingsSectionId } from "./settings/settings-utils";
 
 export type SettingsViewProps = {
   /** Section shown when the view mounts; deep-links like the composer's
    * connectors chip land directly on their panel. */
-  initialSection?: SettingsSectionId
+  initialSection?: SettingsSectionId;
   /** Changes for every deep-link request, including repeats of the same section. */
-  sectionRequestKey?: number
-  workspace?: WorkspaceSummary | null
-  localWorkspaces: WorkspaceSummary[]
-  baseUrl: string | null
-  hostManager: HostManager
-  hosts: HostView[]
-  onToast: ServersPanelProps['onToast']
-  preferences: FalconDeckPreferences | null
-  remoteStatus: RemoteStatusResponse | null
-  pairingLink: string | null
-  relayUrl: string
-  isStartingRemote: boolean
-  remoteControlsDisabled: boolean
-  remoteControlsUnavailableReason: string | null
-  revokingDeviceId: string | null
-  updater: AppUpdaterState
-  updaterProgressPercent: number | null
-  onUpdatePreferences: (payload: UpdatePreferencesPayload) => void
-  onStartPairing: () => void
-  onRefreshRemoteStatus: () => void
-  onRevokeDevice: (device: TrustedDevice) => void
-  onCheckForUpdates: () => void
-  onDownloadUpdate: () => void
-  onRestartToInstallUpdate: () => void
-  onClose: () => void
-  extensions: ExtensionSnapshot
-  onSetExtensionEnabled: (extensionId: string, enabled: boolean) => Promise<void>
+  sectionRequestKey?: number;
+  workspace?: WorkspaceSummary | null;
+  localWorkspaces: WorkspaceSummary[];
+  baseUrl: string | null;
+  hostManager: HostManager;
+  hosts: HostView[];
+  onToast: ServersPanelProps["onToast"];
+  preferences: FalconDeckPreferences | null;
+  remoteStatus: RemoteStatusResponse | null;
+  pairingLink: string | null;
+  relayUrl: string;
+  isStartingRemote: boolean;
+  remoteControlsDisabled: boolean;
+  remoteControlsUnavailableReason: string | null;
+  revokingDeviceId: string | null;
+  updater: AppUpdaterState;
+  updaterProgressPercent: number | null;
+  onUpdatePreferences: (payload: UpdatePreferencesPayload) => void;
+  onStartPairing: () => void;
+  onRefreshRemoteStatus: () => void;
+  onRevokeDevice: (device: TrustedDevice) => void;
+  onCheckForUpdates: () => void;
+  onDownloadUpdate: () => void;
+  onRestartToInstallUpdate: () => void;
+  onClose: () => void;
+  extensions: ExtensionSnapshot;
+  onSetExtensionEnabled: (
+    extensionId: string,
+    enabled: boolean,
+  ) => Promise<void>;
   onSetExtensionPermission: (
     extensionId: string,
     permission: string,
     granted: boolean,
-  ) => Promise<void>
-}
+  ) => Promise<void>;
+};
 
 export function SettingsView(props: SettingsViewProps) {
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
-    props.initialSection ?? 'general',
-  )
+    props.initialSection ?? "general",
+  );
 
   useEffect(() => {
-    setActiveSection(props.initialSection ?? 'general')
-  }, [props.initialSection, props.sectionRequestKey])
+    setActiveSection(props.initialSection ?? "general");
+  }, [props.initialSection, props.sectionRequestKey]);
 
   return (
     <section className="flex h-full min-h-0 bg-surface-1">
@@ -81,20 +84,20 @@ export function SettingsView(props: SettingsViewProps) {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-8 py-10">
         <div className="mx-auto w-full max-w-4xl">
-          {activeSection === 'appearance' ? (
+          {activeSection === "appearance" ? (
             <AppearanceSettingsPanel />
-          ) : activeSection === 'keyboard' ? (
+          ) : activeSection === "keyboard" ? (
             <KeyboardShortcutsPanel />
-          ) : activeSection === 'servers' ? (
+          ) : activeSection === "servers" ? (
             <ServersPanel
               baseUrl={props.baseUrl}
               manager={props.hostManager}
               hosts={props.hosts}
               onToast={props.onToast}
             />
-          ) : activeSection === 'agents' ? (
+          ) : activeSection === "agents" ? (
             <AgentsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
-          ) : activeSection === 'connectors' ? (
+          ) : activeSection === "connectors" ? (
             <ConnectorsPanel
               baseUrl={props.baseUrl}
               workspaces={props.localWorkspaces.map((workspace) => ({
@@ -103,15 +106,18 @@ export function SettingsView(props: SettingsViewProps) {
               }))}
               onToast={props.onToast}
             />
-          ) : activeSection === 'extensions' ? (
+          ) : activeSection === "extensions" ? (
             <ExtensionsPanel
               extensions={props.extensions}
               onSetEnabled={props.onSetExtensionEnabled}
               onSetPermission={props.onSetExtensionPermission}
             />
-          ) : activeSection === 'speech' ? (
-            <SpeechSettingsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
-          ) : activeSection === 'general' ? (
+          ) : activeSection === "speech" ? (
+            <SpeechSettingsPanel
+              baseUrl={props.baseUrl}
+              onToast={props.onToast}
+            />
+          ) : activeSection === "general" ? (
             <GeneralSettingsPanel
               workspace={props.workspace}
               preferences={props.preferences}
@@ -129,7 +135,9 @@ export function SettingsView(props: SettingsViewProps) {
               relayUrl={props.relayUrl}
               isStartingRemote={props.isStartingRemote}
               remoteControlsDisabled={props.remoteControlsDisabled}
-              remoteControlsUnavailableReason={props.remoteControlsUnavailableReason}
+              remoteControlsUnavailableReason={
+                props.remoteControlsUnavailableReason
+              }
               revokingDeviceId={props.revokingDeviceId}
               onStartPairing={props.onStartPairing}
               onRefreshRemoteStatus={props.onRefreshRemoteStatus}
@@ -139,5 +147,5 @@ export function SettingsView(props: SettingsViewProps) {
         </div>
       </div>
     </section>
-  )
+  );
 }

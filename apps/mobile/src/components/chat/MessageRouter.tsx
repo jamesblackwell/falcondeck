@@ -33,11 +33,7 @@ interface MessageRouterProps {
    * decisions); the transcript only renders resolved receipts.
    */
   onApprovalDecision?: (requestId: string, decision: "allow" | "deny") => void;
-  canEditResend?: boolean;
-  editResendUnavailableReason?: string | null;
-  onEditResend?: (
-    item: Extract<ConversationItem, { kind: "user_message" }>,
-  ) => void;
+  canRetryResponse?: boolean;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
@@ -46,9 +42,7 @@ interface MessageRouterProps {
 
 export const MessageRouter = memo(function MessageRouter({
   item: block,
-  canEditResend = false,
-  editResendUnavailableReason = null,
-  onEditResend,
+  canRetryResponse = false,
   retrySource = null,
   onRetryResponse,
 }: MessageRouterProps) {
@@ -80,21 +74,14 @@ export const MessageRouter = memo(function MessageRouter({
 
   switch (item.kind) {
     case "user_message":
-      return (
-        <UserMessageBlock
-          key={block.id}
-          item={item}
-          onEditResend={canEditResend ? onEditResend : undefined}
-          editResendUnavailableReason={editResendUnavailableReason}
-        />
-      );
+      return <UserMessageBlock key={block.id} item={item} />;
     case "assistant_message":
       return (
         <AssistantMessageBlock
           key={block.id}
           item={item}
-          retrySource={canEditResend ? retrySource : null}
-          onRetryResponse={canEditResend ? onRetryResponse : undefined}
+          retrySource={canRetryResponse ? retrySource : null}
+          onRetryResponse={canRetryResponse ? onRetryResponse : undefined}
         />
       );
     case "image":

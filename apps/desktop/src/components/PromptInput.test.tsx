@@ -291,7 +291,11 @@ describe("PromptInput", () => {
         capabilities={imageCapableAgent}
       />,
     );
-    expect(screen.queryByText("The selected agent does not support image attachments.")).toBeNull();
+    expect(
+      screen.queryByText(
+        "The selected agent does not support image attachments.",
+      ),
+    ).toBeNull();
   });
 
   it("attaches an image pasted directly into the composer", () => {
@@ -883,7 +887,9 @@ describe("PromptInput", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Model" }));
-    expect(screen.queryByRole("menuitem", { name: "Claude" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("menuitem", { name: "Claude" }),
+    ).not.toBeInTheDocument();
 
     fireEvent.click(
       screen.getByRole("menuitem", { name: /Continue in another harness/ }),
@@ -921,7 +927,9 @@ describe("PromptInput", () => {
     ).not.toBeInTheDocument();
 
     fireEvent.change(search, { target: { value: "no-such-model" } });
-    expect(screen.getByText("No models match “no-such-model”")).toBeInTheDocument();
+    expect(
+      screen.getByText("No models match “no-such-model”"),
+    ).toBeInTheDocument();
   });
 
   describe("fast mode toggle", () => {

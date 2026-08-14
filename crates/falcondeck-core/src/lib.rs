@@ -28,6 +28,17 @@ pub struct DaemonInfo {
     pub version: String,
     /// Timestamp when the daemon process started.
     pub started_at: DateTime<Utc>,
+    /// Optional daemon features clients may negotiate without version checks.
+    #[serde(default)]
+    pub capabilities: DaemonCapabilities,
+}
+
+/// Feature capabilities supported by a daemon instance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct DaemonCapabilities {
+    /// Whether this daemon owns and executes scheduled tasks.
+    #[serde(default)]
+    pub scheduled_tasks: bool,
 }
 
 /// Global FalconDeck preferences persisted by the daemon.
@@ -45,6 +56,9 @@ pub struct FalconDeckPreferences {
     /// Notifications and cross-device attention policy.
     #[serde(default)]
     pub notifications: NotificationPreferences,
+    /// Cheap models FalconDeck uses for its own background work.
+    #[serde(default)]
+    pub utility_models: UtilityModelPreferences,
 }
 
 impl Default for FalconDeckPreferences {
@@ -54,8 +68,68 @@ impl Default for FalconDeckPreferences {
             workspace_order: Vec::new(),
             conversation: ConversationPreferences::default(),
             notifications: NotificationPreferences::default(),
+            utility_models: UtilityModelPreferences::default(),
         }
     }
+}
+
+/// Models used for FalconDeck's own background work — thread titles and
+/// handoff briefs — rather than for user turns. These runs are short, tool-free
+/// and frequent, so they default to the cheapest model each provider offers and
+/// fall back across providers because most users have only one CLI installed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UtilityModelPreferences {
+    /// Providers to try in order; the first installed and ready one wins.
+    #[serde(default = "default_utility_provider_order")]
+    pub provider_order: Vec<AgentProvider>,
+    /// Per-provider model override. A provider missing here (or mapped to an
+    /// empty string) runs on its own default model.
+    #[serde(default)]
+    pub models: Vec<UtilityModelChoice>,
+}
+
+impl Default for UtilityModelPreferences {
+    fn default() -> Self {
+        Self {
+            provider_order: default_utility_provider_order(),
+            // Only Claude ships a stable curated id for its cheapest model;
+            // the other CLIs discover models at runtime, so they stay on their
+            // own default until the user picks one.
+            models: vec![UtilityModelChoice {
+                provider: AgentProvider::CLAUDE,
+                model_id: "haiku".to_string(),
+            }],
+        }
+    }
+}
+
+impl UtilityModelPreferences {
+    /// Returns the configured model id for a provider, if any.
+    pub fn model_for(&self, provider: &AgentProvider) -> Option<&str> {
+        self.models
+            .iter()
+            .find(|choice| &choice.provider == provider)
+            .map(|choice| choice.model_id.trim())
+            .filter(|model_id| !model_id.is_empty())
+    }
+}
+
+/// A provider-scoped utility model selection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UtilityModelChoice {
+    /// Provider the model belongs to.
+    pub provider: AgentProvider,
+    /// Provider-native model id, or an empty string for the provider default.
+    pub model_id: String,
+}
+
+fn default_utility_provider_order() -> Vec<AgentProvider> {
+    vec![
+        AgentProvider::CLAUDE,
+        AgentProvider::CODEX,
+        AgentProvider::new("opencode"),
+        AgentProvider::new("grok"),
+    ]
 }
 
 /// User-configurable policy for agent attention notifications.
@@ -178,6 +252,20 @@ pub struct UpdatePreferencesRequest {
     /// Optional notification preference updates.
     #[serde(default)]
     pub notifications: Option<NotificationPreferencesPatch>,
+    /// Optional background utility model updates.
+    #[serde(default)]
+    pub utility_models: Option<UtilityModelPreferencesPatch>,
+}
+
+/// Partial update payload for background utility model preferences.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UtilityModelPreferencesPatch {
+    /// Optional replacement provider fallback order.
+    #[serde(default)]
+    pub provider_order: Option<Vec<AgentProvider>>,
+    /// Optional replacement per-provider model selections.
+    #[serde(default)]
+    pub models: Option<Vec<UtilityModelChoice>>,
 }
 
 /// Partial update payload for notification preferences.
@@ -703,6 +791,261 @@ pub struct DaemonSnapshot {
     /// Installed extensions and their synchronized client-facing projections.
     #[serde(default)]
     pub extensions: ExtensionSnapshot,
+    /// Bounded summaries for automation owned by this daemon.
+    #[serde(default)]
+    pub scheduled_tasks: Vec<ScheduledTaskSummary>,
+}
+
+/// Current lifecycle of a scheduled task definition.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledTaskStatus {
+    /// Future occurrences may be dispatched.
+    #[default]
+    Active,
+    /// Future occurrences are suppressed until resumed.
+    Paused,
+    /// A one-time task reached a terminal run.
+    Completed,
+}
+
+/// Recurrence definition evaluated in an explicit IANA timezone.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ScheduledTaskSchedule {
+    /// A single wall-clock occurrence.
+    Once {
+        /// UTC instant at which the task is due.
+        run_at: DateTime<Utc>,
+        /// IANA timezone retained for display and edits.
+        timezone: String,
+    },
+    /// A recurring RFC 5545 rule from the supported FalconDeck subset.
+    Recurring {
+        /// RFC 5545 RRULE string.
+        rrule: String,
+        /// IANA timezone used to resolve future wall-clock occurrences.
+        timezone: String,
+    },
+}
+
+/// State of one scheduled invocation.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledTaskRunStatus {
+    /// Accepted but waiting for daemon capacity.
+    Queued,
+    /// Native agent execution is active.
+    Running,
+    /// The provider requires a user response or approval.
+    AwaitingInput,
+    /// The native turn completed successfully.
+    Succeeded,
+    /// The native turn failed.
+    Failed,
+    /// Execution ended because the daemon or user interrupted it.
+    Interrupted,
+    /// An offline or overlapping recurring occurrence was intentionally omitted.
+    Skipped,
+}
+
+/// Why a scheduled task invocation was created.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduledTaskRunTrigger {
+    /// The scheduler reached the next occurrence normally.
+    Scheduled,
+    /// A missed one-time occurrence was recovered after daemon startup.
+    Late,
+    /// A user explicitly selected Run now.
+    Manual,
+}
+
+/// Bounded ledger entry for a scheduled invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledTaskRunSummary {
+    /// Stable run identifier.
+    pub id: String,
+    /// Owning scheduled task identifier.
+    pub task_id: String,
+    /// Run lifecycle state.
+    pub status: ScheduledTaskRunStatus,
+    /// Source of this invocation.
+    pub trigger: ScheduledTaskRunTrigger,
+    /// Occurrence time that caused the run.
+    pub scheduled_for: DateTime<Utc>,
+    /// Actual execution start, when dispatch began.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// Terminal time, when available.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Native workspace containing the generated thread.
+    pub workspace_id: String,
+    /// Native provider-backed thread created for this run.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Short result or failure preview; transcripts remain provider-owned.
+    #[serde(default)]
+    pub preview: Option<String>,
+}
+
+/// Compact scheduled task representation included in daemon snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledTaskSummary {
+    /// Stable task identifier.
+    pub id: String,
+    /// User-visible title.
+    pub title: String,
+    /// Short prompt excerpt for bounded list/search presentation.
+    #[serde(default)]
+    pub prompt_preview: String,
+    /// Current lifecycle state.
+    pub status: ScheduledTaskStatus,
+    /// Recurrence definition.
+    pub schedule: ScheduledTaskSchedule,
+    /// Workspace that receives generated threads.
+    pub workspace_id: String,
+    /// Provider used for every run.
+    pub provider: AgentProvider,
+    /// Next due UTC instant, absent for paused or completed tasks.
+    #[serde(default)]
+    pub next_run_at: Option<DateTime<Utc>>,
+    /// Latest ledger entry, when the task has run.
+    #[serde(default)]
+    pub last_run: Option<ScheduledTaskRunSummary>,
+    /// Last definition update time.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Complete daemon-owned scheduled task definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ScheduledTaskDetail {
+    /// Snapshot-friendly summary fields.
+    #[serde(flatten)]
+    pub summary: ScheduledTaskSummary,
+    /// Durable prompt sent in a fresh native thread for every invocation.
+    pub prompt: String,
+    /// Optional provider model override.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Optional reasoning effort override.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Optional provider collaboration mode.
+    #[serde(default)]
+    pub collaboration_mode_id: Option<String>,
+    /// Captured approval policy for unattended execution.
+    #[serde(default)]
+    pub approval_policy: Option<String>,
+    /// Captured provider permission mode.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Captured Codex sandbox mode.
+    #[serde(default)]
+    pub sandbox_mode: Option<String>,
+    /// Whether each run uses the project folder or an isolated checkout.
+    #[serde(default)]
+    pub isolation: ThreadIsolation,
+    /// Skills explicitly selected for every run.
+    #[serde(default)]
+    pub selected_skills: Vec<SelectedSkillReference>,
+    /// Creation time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Payload used to create a daemon-owned scheduled task.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateScheduledTaskRequest {
+    /// User-visible title.
+    pub title: String,
+    /// Durable prompt sent on every invocation.
+    pub prompt: String,
+    /// Workspace that receives generated threads.
+    pub workspace_id: String,
+    /// Explicit provider used on every invocation.
+    pub provider: AgentProvider,
+    /// One-time or recurring schedule.
+    pub schedule: ScheduledTaskSchedule,
+    /// Optional provider model override.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Optional reasoning effort override.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Optional provider collaboration mode.
+    #[serde(default)]
+    pub collaboration_mode_id: Option<String>,
+    /// Captured approval policy.
+    #[serde(default)]
+    pub approval_policy: Option<String>,
+    /// Captured permission mode.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Captured sandbox mode.
+    #[serde(default)]
+    pub sandbox_mode: Option<String>,
+    /// Checkout isolation for generated threads.
+    #[serde(default)]
+    pub isolation: ThreadIsolation,
+    /// Skills explicitly selected for every run.
+    #[serde(default)]
+    pub selected_skills: Vec<SelectedSkillReference>,
+}
+
+/// Partial update for a scheduled task definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UpdateScheduledTaskRequest {
+    /// Replacement title.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Replacement durable prompt.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Replacement status; completed is reserved for scheduler transitions.
+    #[serde(default)]
+    pub status: Option<ScheduledTaskStatus>,
+    /// Replacement recurrence definition.
+    #[serde(default)]
+    pub schedule: Option<ScheduledTaskSchedule>,
+    /// Replacement workspace on the same owning daemon.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+    /// Replacement provider on the same owning host and workspace.
+    #[serde(default)]
+    pub provider: Option<AgentProvider>,
+    /// Replacement model; omitted leaves the current value unchanged.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub model_id: Option<Option<String>>,
+    /// Replacement reasoning effort.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub reasoning_effort: Option<Option<String>>,
+    /// Replacement collaboration mode.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub collaboration_mode_id: Option<Option<String>>,
+    /// Replacement approval policy.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub approval_policy: Option<Option<String>>,
+    /// Replacement permission mode.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub permission_mode: Option<Option<String>>,
+    /// Replacement sandbox mode.
+    #[serde(default, deserialize_with = "deserialize_present_option")]
+    pub sandbox_mode: Option<Option<String>>,
+    /// Replacement checkout isolation.
+    #[serde(default)]
+    pub isolation: Option<ThreadIsolation>,
+    /// Replacement selected skills.
+    #[serde(default)]
+    pub selected_skills: Option<Vec<SelectedSkillReference>>,
+}
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
 }
 
 /// Installed extension catalog plus bounded client-facing view state.
@@ -1259,6 +1602,39 @@ pub struct ThreadHandoffSource {
     pub thread_id: String,
     /// Provider that owns the source thread.
     pub provider: AgentProvider,
+}
+
+/// Request payload for compacting a source transcript into a handoff brief.
+/// The transcript is rendered by the client that already holds the full
+/// conversation, so the daemon never re-hydrates a thread it may have dropped.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandoffBriefRequest {
+    /// Workspace whose working directory the utility model runs in.
+    pub workspace_id: String,
+    /// Source thread the transcript came from.
+    pub thread_id: String,
+    /// Rendered markdown transcript of the source thread.
+    pub transcript: String,
+    /// Human-readable label of the provider handing the work over.
+    #[serde(default)]
+    pub source_provider_label: Option<String>,
+}
+
+/// A background-generated handoff brief plus how it was produced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandoffBriefResponse {
+    /// Compacted brief to seed the destination thread with.
+    pub brief: String,
+    /// Provider that produced the brief.
+    pub provider: AgentProvider,
+    /// Model the provider ran, when a specific one was requested.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Transcript segments summarized before merging.
+    pub segments: usize,
+    /// Whether the oldest middle segments were dropped to bound the work.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 /// Request payload used to fork a provider-owned thread at a completed turn.
@@ -2401,12 +2777,17 @@ pub struct ThreadSummary {
     /// Provider-native session identifier, if one exists.
     #[serde(default)]
     pub native_session_id: Option<String>,
-    /// Runtime pinned when the thread was created (`native` or `acp`).
+    /// Runtime transport selected when this thread was created.  This is
+    /// intentionally thread-scoped: an active OpenCode session must never
+    /// silently flip between native HTTP and ACP after an adapter failure.
     #[serde(default)]
     pub provider_transport: Option<String>,
     /// Source thread when this thread was created by a cross-provider handoff.
     #[serde(default)]
     pub handoff_from: Option<ThreadHandoffSource>,
+    /// FalconDeck feature that created this native provider-backed thread.
+    #[serde(default)]
+    pub origin: Option<ThreadOrigin>,
     /// Current lifecycle state of the thread.
     pub status: ThreadStatus,
     /// Timestamp when the thread summary last changed.
@@ -2446,6 +2827,19 @@ pub struct ThreadSummary {
     /// Absent means the thread runs in the workspace folder.
     #[serde(default)]
     pub variant: Option<ThreadVariant>,
+}
+
+/// FalconDeck-owned provenance attached to a native agent thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ThreadOrigin {
+    /// A daemon-owned scheduled task created the thread for one invocation.
+    ScheduledTask {
+        /// Owning task identifier.
+        task_id: String,
+        /// Task title captured when the invocation started.
+        title: String,
+    },
 }
 
 impl ThreadSummary {
@@ -2732,6 +3126,9 @@ pub enum ConversationItem {
         /// Streaming and terminal state for this response block.
         #[serde(default)]
         lifecycle: ContentLifecycle,
+        /// Provider-reported explanation when the response failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
         /// Timestamp when the item was created.
         created_at: DateTime<Utc>,
     },
@@ -3186,6 +3583,35 @@ pub enum UnifiedEvent {
         /// Replacement view; null removes the prior projection.
         #[serde(default)]
         view: Option<ExtensionView>,
+    },
+    /// A daemon-owned scheduled task was created.
+    ScheduledTaskCreated {
+        /// New task summary.
+        task: ScheduledTaskSummary,
+    },
+    /// A daemon-owned scheduled task changed.
+    ScheduledTaskUpdated {
+        /// Replacement task summary.
+        task: ScheduledTaskSummary,
+    },
+    /// A daemon-owned scheduled task was deleted.
+    ScheduledTaskDeleted {
+        /// Deleted task identifier.
+        task_id: String,
+    },
+    /// A scheduled invocation was accepted for execution.
+    ScheduledTaskRunStarted {
+        /// Owning task identifier.
+        task_id: String,
+        /// New run ledger entry.
+        run: ScheduledTaskRunSummary,
+    },
+    /// A scheduled invocation changed lifecycle state.
+    ScheduledTaskRunUpdated {
+        /// Owning task identifier.
+        task_id: String,
+        /// Replacement run ledger entry.
+        run: ScheduledTaskRunSummary,
     },
     /// New conversation item event.
     ConversationItemAdded {
@@ -4005,6 +4431,7 @@ mod tests {
             daemon: DaemonInfo {
                 version: "0.1.0".to_string(),
                 started_at: Utc::now(),
+                capabilities: DaemonCapabilities::default(),
             },
             workspaces: Vec::new(),
             threads: Vec::new(),
@@ -4014,10 +4441,28 @@ mod tests {
             thread_token_usage: std::collections::BTreeMap::new(),
             preferences: FalconDeckPreferences::default(),
             extensions: ExtensionSnapshot::default(),
+            scheduled_tasks: Vec::new(),
         };
 
         let json = serde_json::to_value(UnifiedEvent::Snapshot { snapshot }).unwrap();
         assert_eq!(json["type"], "snapshot");
+    }
+
+    #[test]
+    fn scheduled_task_patch_distinguishes_missing_and_null_values() {
+        let missing: UpdateScheduledTaskRequest = serde_json::from_str("{}").unwrap();
+        let cleared: UpdateScheduledTaskRequest =
+            serde_json::from_str(r#"{"model_id":null}"#).unwrap();
+        let replaced: UpdateScheduledTaskRequest = serde_json::from_str(
+            r#"{"model_id":"gpt-5","workspace_id":"workspace-2","provider":"claude"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(missing.model_id, None);
+        assert_eq!(cleared.model_id, Some(None));
+        assert_eq!(replaced.model_id, Some(Some("gpt-5".to_string())));
+        assert_eq!(replaced.workspace_id.as_deref(), Some("workspace-2"));
+        assert_eq!(replaced.provider, Some(AgentProvider::CLAUDE));
     }
 
     #[test]

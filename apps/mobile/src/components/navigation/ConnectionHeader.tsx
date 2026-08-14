@@ -13,10 +13,10 @@ interface ConnectionHeaderProps {
 
 export function connectionLabel(status: string): string {
   if (status === 'encrypted') return 'Connected'
-  if (status === 'connected') return 'Securing session...'
-  if (status === 'connecting') return 'Connecting...'
+  if (status === 'connected') return 'Securing session…'
+  if (status === 'connecting') return 'Connecting…'
   if (status === 'disconnected') return 'Disconnected'
-  if (status === 'claiming') return 'Pairing...'
+  if (status === 'claiming') return 'Pairing…'
   return 'Not connected'
 }
 
@@ -32,8 +32,8 @@ export function connectionState(
   const relayReady = connectionStatus === 'encrypted' && isEncrypted
 
   if (relayReady) {
-    if (!daemonPresenceKnown) return { tone: 'repairing', label: 'Checking desktop' }
-    if (!desktopOnline) return { tone: 'disconnected', label: 'Desktop offline' }
+    if (!daemonPresenceKnown) return { tone: 'repairing', label: 'Checking your Mac…' }
+    if (!desktopOnline) return { tone: 'disconnected', label: 'Your Mac is offline' }
     if (!daemonRpcReady) return { tone: 'repairing', label: 'Sync repairing' }
     return { tone: 'connected', label: 'Connected' }
   }

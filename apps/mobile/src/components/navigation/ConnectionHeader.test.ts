@@ -13,20 +13,20 @@ describe('ConnectionHeader logic', () => {
       expect(connectionLabel('encrypted')).toBe('Connected')
     })
 
-    it('returns "Securing session..." for connected status', () => {
-      expect(connectionLabel('connected')).toBe('Securing session...')
+    it('returns "Securing session…" for connected status', () => {
+      expect(connectionLabel('connected')).toBe('Securing session…')
     })
 
-    it('returns "Connecting..." for connecting status', () => {
-      expect(connectionLabel('connecting')).toBe('Connecting...')
+    it('returns "Connecting…" for connecting status', () => {
+      expect(connectionLabel('connecting')).toBe('Connecting…')
     })
 
     it('returns "Disconnected" for disconnected status', () => {
       expect(connectionLabel('disconnected')).toBe('Disconnected')
     })
 
-    it('returns "Pairing..." for claiming status', () => {
-      expect(connectionLabel('claiming')).toBe('Pairing...')
+    it('returns "Pairing…" for claiming status', () => {
+      expect(connectionLabel('claiming')).toBe('Pairing…')
     })
 
     it('returns "Not connected" for unknown/not_connected status', () => {
@@ -46,7 +46,7 @@ describe('ConnectionHeader logic', () => {
     it('returns desktop offline warning when relay is ready but desktop is offline', () => {
       expect(connectionState('encrypted', true, false)).toEqual({
         tone: 'disconnected',
-        label: 'Desktop offline',
+        label: 'Your Mac is offline',
       })
     })
 
@@ -60,7 +60,7 @@ describe('ConnectionHeader logic', () => {
     it('waits for presence rather than claiming the desktop is offline', () => {
       expect(connectionState('encrypted', true, false, false, false)).toEqual({
         tone: 'repairing',
-        label: 'Checking desktop',
+        label: 'Checking your Mac…',
       })
     })
 
@@ -74,11 +74,11 @@ describe('ConnectionHeader logic', () => {
     it('returns warning for connecting and claiming states', () => {
       expect(connectionState('connecting', false, false)).toEqual({
         tone: 'disconnected',
-        label: 'Connecting...',
+        label: 'Connecting…',
       })
       expect(connectionState('claiming', false, false)).toEqual({
         tone: 'disconnected',
-        label: 'Pairing...',
+        label: 'Pairing…',
       })
     })
 

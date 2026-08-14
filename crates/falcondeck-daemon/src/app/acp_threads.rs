@@ -60,7 +60,8 @@ impl AppState {
                                 %error,
                                 "native OpenCode metadata hydration failed"
                             );
-                            app.set_opencode_native_available(&workspace_id, false).await;
+                            app.set_opencode_native_available(&workspace_id, false)
+                                .await;
                             if matches!(config.transport, crate::acp::ProviderTransport::Native) {
                                 continue;
                             }
@@ -106,7 +107,7 @@ impl AppState {
         let thread_id = thread_id.to_string();
         tokio::spawn(async move {
             async {
-                let (provider, native_session, cwd) = {
+                let (provider, native_session, cwd, prior_error) = {
                     let workspaces = app.inner.workspaces.lock().await;
                     let Some(workspace) = workspaces.get(&workspace_id) else {
                         return;
@@ -131,6 +132,9 @@ impl AppState {
                             .summary
                             .working_directory(&workspace.summary.path)
                             .to_string(),
+                        (thread.summary.status == ThreadStatus::Error)
+                            .then(|| thread.summary.last_error.clone())
+                            .flatten(),
                     )
                 };
                 let runtime = match app.acp_runtime_for(&workspace_id, &provider).await {
@@ -166,11 +170,17 @@ impl AppState {
                 // reset the runtime's accumulators so the next real turn starts
                 // fresh items instead of extending replayed ones.
                 runtime.end_turn(&native_session).await;
-                app.settle_turn_items(
+                let settlement = if prior_error.is_some() {
+                    ToolSettlement::Failed
+                } else {
+                    ToolSettlement::Completed
+                };
+                app.settle_turn_items_with_error(
                     &workspace_id,
                     &thread_id,
                     Utc::now(),
-                    ToolSettlement::Completed,
+                    settlement,
+                    prior_error.as_deref(),
                 )
                 .await;
             }
@@ -345,6 +355,47 @@ impl AppState {
         Ok(runtime)
     }
 
+    /// Replaces an unresponsive ACP process before retrying turn startup.
+    /// A runtime is shared by every thread for this provider/workspace, so do
+    /// not recycle it while that would interrupt a different live turn.
+    async fn restart_acp_runtime_for_turn_start(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        provider: &AgentProvider,
+        stalled_runtime: &Arc<AcpRuntime>,
+    ) -> Result<Option<Arc<AcpRuntime>>, DaemonError> {
+        let runtime_to_shutdown = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let workspace = workspaces
+                .get_mut(workspace_id)
+                .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+            let other_turn_is_active = workspace.threads.values().any(|thread| {
+                thread.summary.id != thread_id
+                    && thread.summary.provider == *provider
+                    && matches!(
+                        thread.summary.status,
+                        ThreadStatus::Running | ThreadStatus::WaitingForInput
+                    )
+            });
+            if other_turn_is_active {
+                return Ok(None);
+            }
+            let is_current = workspace
+                .acp_runtimes
+                .get(provider)
+                .is_some_and(|runtime| Arc::ptr_eq(runtime, stalled_runtime));
+            is_current
+                .then(|| workspace.acp_runtimes.remove(provider))
+                .flatten()
+        };
+
+        if let Some(runtime) = runtime_to_shutdown {
+            runtime.shutdown().await;
+        }
+        self.acp_runtime_for(workspace_id, provider).await.map(Some)
+    }
+
     /// Consumes runtime events and applies them to daemon state.
     async fn pump_acp_events(
         &self,
@@ -387,6 +438,7 @@ impl AppState {
                         memory_citation: None,
                         citations: Vec::new(),
                         lifecycle: ContentLifecycle::Streaming,
+                        error: None,
                         created_at: Utc::now(),
                     },
                     true,
@@ -783,6 +835,7 @@ impl AppState {
             AcpEvent::TurnEnded {
                 session_id,
                 stop_reason,
+                error,
             } => {
                 if let Some(thread_id) = runtime.thread_for_session(&session_id).await {
                     let settlement = match stop_reason.as_deref() {
@@ -790,8 +843,14 @@ impl AppState {
                         Some("cancelled") => ToolSettlement::Interrupted,
                         Some(_) => ToolSettlement::Completed,
                     };
-                    self.settle_turn_items(workspace_id, &thread_id, Utc::now(), settlement)
-                        .await;
+                    self.settle_turn_items_with_error(
+                        workspace_id,
+                        &thread_id,
+                        Utc::now(),
+                        settlement,
+                        error.as_deref(),
+                    )
+                    .await;
                     // A turn the agent cut short would otherwise be
                     // indistinguishable from a normal completion — the user
                     // just sees the agent "stop mid-answer".
@@ -826,11 +885,12 @@ impl AppState {
                             }
                         })
                         .await;
-                    self.settle_turn_items(
+                    self.settle_turn_items_with_error(
                         workspace_id,
                         &thread_id,
                         Utc::now(),
                         ToolSettlement::Failed,
+                        Some(&message),
                     )
                     .await;
                 }
@@ -931,7 +991,20 @@ impl AppState {
             ));
         };
         let provider = self.thread_provider(workspace_id, thread_id).await?;
-        let runtime = self.acp_runtime_for(workspace_id, &provider).await?;
+        // Only the process that asked can answer. `acp_runtime_for` would
+        // happily spawn a replacement agent here, which then reports the
+        // request as missing — so a dead or replaced harness is reported as a
+        // stale request straight away, and the caller retires the prompt.
+        let runtime = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.acp_runtimes.get(&provider))
+                .filter(|runtime| !runtime.is_closed())
+                .map(Arc::clone)
+        };
+        let runtime = runtime
+            .ok_or_else(|| DaemonError::NotFound("ACP permission request not found".to_string()))?;
         runtime.respond_permission(request_id, decision).await
     }
 }
@@ -1170,8 +1243,131 @@ pub(super) async fn start_acp_turn(
     provider: &AgentProvider,
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
+    wait_for_startup: bool,
 ) -> Result<(), DaemonError> {
-    let runtime = app.acp_runtime_for(workspace_id, provider).await?;
+    if wait_for_startup {
+        return run_acp_turn_startup(
+            app,
+            workspace_id,
+            thread_id,
+            provider,
+            inputs,
+            selected_skills,
+        )
+        .await;
+    }
+    let app = app.clone();
+    let workspace_id = workspace_id.to_string();
+    let thread_id = thread_id.to_string();
+    let provider = provider.clone();
+    let inputs = inputs.to_vec();
+    let selected_skills = selected_skills.to_vec();
+    tokio::spawn(async move {
+        if let Err(error) = run_acp_turn_startup(
+            &app,
+            &workspace_id,
+            &thread_id,
+            &provider,
+            &inputs,
+            &selected_skills,
+        )
+        .await
+        {
+            let provider_label = app
+                .fresh_acp_provider_configs()
+                .into_iter()
+                .find(|config| config.id == provider.as_str())
+                .map(|config| config.label)
+                .unwrap_or_else(|| provider.to_string());
+            let detail = error.to_string();
+            let message = if detail.contains("restart FalconDeck")
+                || detail.contains("Restart FalconDeck")
+            {
+                detail
+            } else {
+                format!(
+                    "{provider_label} failed to start: {detail}. Check that the {provider_label} harness is installed, authenticated, and can start in this workspace. If the problem continues, restart FalconDeck and try again."
+                )
+            };
+            let failed_at = Utc::now();
+            let _ = app
+                .with_thread_mut(&workspace_id, &thread_id, |thread| {
+                    thread.status = ThreadStatus::Error;
+                    thread.last_error = Some(message.clone());
+                    thread.updated_at = failed_at;
+                })
+                .await;
+            app.settle_turn_items_with_error(
+                &workspace_id,
+                &thread_id,
+                failed_at,
+                ToolSettlement::Failed,
+                Some(&message),
+            )
+            .await;
+            let _ = app
+                .push_conversation_item(
+                    &workspace_id,
+                    &thread_id,
+                    ConversationItem::Service {
+                        id: format!("acp-start-error-{}", uuid::Uuid::new_v4().simple()),
+                        level: ServiceLevel::Error,
+                        message: message.clone(),
+                        created_at: failed_at,
+                    },
+                    true,
+                )
+                .await;
+            if let Ok(thread) = app.thread_summary(&workspace_id, &thread_id).await {
+                app.emit(
+                    Some(workspace_id.clone()),
+                    Some(thread_id.clone()),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+            }
+            app.notify_remote_attention("turn-error", &workspace_id, Some(thread_id))
+                .await;
+        }
+    });
+    Ok(())
+}
+
+async fn run_acp_turn_startup(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+    provider: &AgentProvider,
+    inputs: &[TurnInputItem],
+    selected_skills: &[ResolvedSelectedSkill],
+) -> Result<(), DaemonError> {
+    let mut runtime = match app.acp_runtime_for(workspace_id, provider).await {
+        Ok(runtime) => runtime,
+        Err(DaemonError::AcpRequestTimeout { ref method, .. }) if method == "initialize" => {
+            let label = app
+                .fresh_acp_provider_configs()
+                .into_iter()
+                .find(|config| config.id == provider.as_str())
+                .map(|config| config.label)
+                .unwrap_or_else(|| provider.to_string());
+            let _ = app
+                .push_conversation_item(
+                    workspace_id,
+                    thread_id,
+                    ConversationItem::Service {
+                        id: format!("acp-init-retry-{}", uuid::Uuid::new_v4().simple()),
+                        level: ServiceLevel::Warning,
+                        message: format!(
+                            "{label} did not finish initializing. FalconDeck stopped that harness and is retrying once."
+                        ),
+                        created_at: Utc::now(),
+                    },
+                    true,
+                )
+                .await;
+            app.acp_runtime_for(workspace_id, provider).await?
+        }
+        Err(error) => return Err(error),
+    };
     // A native session id persisted from a previous daemon run lets the agent
     // resume via session/load instead of starting from a blank session. Only
     // offered when the in-memory history is EMPTY: session/load replays the
@@ -1207,14 +1403,70 @@ pub(super) async fn start_acp_turn(
             },
         )
     };
-    let session_id = runtime
+    let first_start = runtime
         .ensure_session(
             thread_id,
             known_native_session.as_deref(),
             &cwd,
             requested_permission_mode.as_deref(),
         )
-        .await?;
+        .await;
+    let session_id = match first_start {
+        Ok(session_id) => session_id,
+        Err(DaemonError::AcpRequestTimeout { ref method, .. }) if method == "session/new" => {
+            let label = runtime.config.label.clone();
+            tracing::warn!(
+                provider = %runtime.config.id,
+                %thread_id,
+                "ACP session creation timed out; recycling the harness before one retry"
+            );
+
+            let Some(fresh_runtime) = app
+                .restart_acp_runtime_for_turn_start(workspace_id, thread_id, provider, &runtime)
+                .await?
+            else {
+                let message = format!(
+                    "{label} did not finish starting. FalconDeck could not safely restart its shared harness because another {label} turn is active. Wait for that turn to finish or restart FalconDeck, then check the {label} harness and try again."
+                );
+                return Err(DaemonError::Process(message));
+            };
+            runtime = fresh_runtime;
+            let retry_notice = format!(
+                "{label} took too long to start. FalconDeck restarted its local harness and is retrying once."
+            );
+            let _ = app
+                .push_conversation_item(
+                    workspace_id,
+                    thread_id,
+                    ConversationItem::Service {
+                        id: format!("acp-start-retry-{}", uuid::Uuid::new_v4().simple()),
+                        level: ServiceLevel::Warning,
+                        message: retry_notice,
+                        created_at: Utc::now(),
+                    },
+                    true,
+                )
+                .await;
+            match runtime
+                .ensure_session(
+                    thread_id,
+                    known_native_session.as_deref(),
+                    &cwd,
+                    requested_permission_mode.as_deref(),
+                )
+                .await
+            {
+                Ok(session_id) => session_id,
+                Err(retry_error) => {
+                    let message = format!(
+                        "{label} did not finish starting after FalconDeck restarted its harness and retried. Restart FalconDeck, then check that the {label} harness is installed, authenticated, and can start in this workspace. Last error: {retry_error}"
+                    );
+                    return Err(DaemonError::Process(message));
+                }
+            }
+        }
+        Err(error) => return Err(error),
+    };
     app.with_thread_mut(workspace_id, thread_id, |thread| {
         thread.native_session_id = Some(session_id.clone());
     })
@@ -1561,6 +1813,7 @@ mod tests {
                 memory_citation: None,
                 citations: Vec::new(),
                 lifecycle: falcondeck_core::ContentLifecycle::Complete,
+                error: None,
                 created_at: Utc::now(),
             },
         ];

@@ -353,8 +353,14 @@ pub(super) async fn start_opencode_turn(
             ),
         };
         let settled_at = Utc::now();
-        app.settle_turn_items(&workspace_id, &thread_id, settled_at, settlement)
-            .await;
+        app.settle_turn_items_with_error(
+            &workspace_id,
+            &thread_id,
+            settled_at,
+            settlement,
+            error.as_deref(),
+        )
+        .await;
         if let Ok(thread) = app
             .upsert_thread(&workspace_id, &thread_id, |thread| {
                 thread.status = status;
@@ -518,7 +524,13 @@ async fn approve_permissions_once(
         .filter_map(|permission| permission.get("id").and_then(Value::as_str))
     {
         let key = (workspace_id.to_string(), request_id.to_string());
-        if app.inner.interactive_requests.lock().await.contains_key(&key) {
+        if app
+            .inner
+            .interactive_requests
+            .lock()
+            .await
+            .contains_key(&key)
+        {
             // A mode change must not silently dismiss an approval already
             // shown to the user; apply blanket approval to later requests.
             continue;
@@ -883,6 +895,7 @@ async fn project_messages(
                                 memory_citation: None,
                                 citations: Vec::new(),
                                 lifecycle: ContentLifecycle::Complete,
+                                error: None,
                                 created_at: Utc::now(),
                             },
                             true,

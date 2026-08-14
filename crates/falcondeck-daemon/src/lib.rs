@@ -157,6 +157,11 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
         }),
         config.deno_bin,
     );
+    // Scheduled definitions are small, local, and must be present before the
+    // listener advertises readiness. Otherwise an early snapshot or mutation
+    // can observe an empty registry and the background restore can overwrite
+    // a newly-created task.
+    state.restore_scheduled_tasks().await?;
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
     // The Claude PreToolUse hook posts back to this URL; record the actual

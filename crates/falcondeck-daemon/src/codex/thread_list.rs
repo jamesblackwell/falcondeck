@@ -131,11 +131,13 @@ pub(super) fn parse_threads(
         .filter_map(|entry| {
             let id = extract_thread_id(entry)?;
             let preview = extract_string(entry, &["preview"]);
+            let provider_title = extract_thread_title(entry);
             Some(ParsedThreadRecord {
                 summary: ThreadSummary {
                     id,
                     workspace_id: workspace_id.to_string(),
-                    title: extract_thread_title(entry)
+                    title: provider_title
+                        .clone()
                         .or(preview.clone())
                         .map(|title| truncate_preview(&title))
                         .unwrap_or_else(|| "Untitled thread".to_string()),
@@ -143,6 +145,7 @@ pub(super) fn parse_threads(
                     native_session_id: None,
                     provider_transport: None,
                     handoff_from: None,
+                    origin: None,
                     status: ThreadStatus::Idle,
                     updated_at: extract_datetime_or_timestamp(
                         entry,
@@ -158,7 +161,7 @@ pub(super) fn parse_threads(
                         ],
                     )
                     .unwrap_or(now),
-                    last_message_preview: preview.map(|value| truncate_preview(&value)),
+                    last_message_preview: preview.as_deref().map(truncate_preview),
                     latest_turn_id: None,
                     latest_plan: None,
                     latest_diff: None,
@@ -190,6 +193,7 @@ pub(super) fn parse_threads(
                     variant: None,
                 },
                 session_path: extract_string(entry, &["path"]),
+                title_is_provider_preview: provider_title.is_none() && preview.is_some(),
             })
         })
         .collect()

@@ -22,6 +22,11 @@ export type WorkspaceGroupProps = {
   onOpenContextMenu?: (position: { x: number; y: number }) => void
   dragHandleProps?: React.HTMLAttributes<HTMLDivElement> &
     React.RefAttributes<HTMLDivElement>
+  /** Controlled open state; omit to let the group own it. */
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  /** Shown on the row while collapsed so hidden chats stay accounted for. */
+  collapsedThreadCount?: number
   children: React.ReactNode
 }
 
@@ -33,18 +38,23 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
   onNewThread,
   onOpenContextMenu,
   dragHandleProps,
+  open,
+  onOpenChange,
+  collapsedThreadCount = 0,
   children,
 }: WorkspaceGroupProps) {
   const pathLabel = workspace.path.split('/').pop() ?? workspace.path
-  const [isOpen, setIsOpen] = useState(true)
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(true)
+  const isOpen = open ?? uncontrolledOpen
 
   // Opening a folder also selects it; closing one leaves the selection alone.
   const handleOpenChange = useCallback(
-    (open: boolean) => {
-      setIsOpen(open)
-      if (open) onSelect()
+    (next: boolean) => {
+      if (open === undefined) setUncontrolledOpen(next)
+      onOpenChange?.(next)
+      if (next) onSelect()
     },
-    [onSelect],
+    [onOpenChange, onSelect, open],
   )
 
   const hostLabel = host
@@ -140,6 +150,18 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
                   </span>
                 </span>
               ) : null}
+              {/* Collapsed projects still say how much is tucked away, so the
+                  row does not read as an empty folder. */}
+              {!isOpen && collapsedThreadCount > 0 ? (
+                <span
+                  className={cn(
+                    'shrink-0 text-[length:var(--fd-text-xs)] tabular-nums text-fg-muted',
+                    host ? null : 'ml-auto',
+                  )}
+                >
+                  {collapsedThreadCount}
+                </span>
+              ) : null}
             </span>
           </Collapsible.Trigger>
           {onNewThread ? (
@@ -156,7 +178,10 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
           ) : null}
         </div>
         <Collapsible.Content className="min-w-0 overflow-hidden data-[state=closed]:animate-collapse-fast data-[state=open]:animate-expand-fast">
-          {children}
+          {/* Padding lives inside the animated element: Radix measures this
+              wrapper's height, so putting it on Content would make the gap pop
+              in before the rows finish expanding. */}
+          <div className="min-w-0 pt-1.5">{children}</div>
         </Collapsible.Content>
       </section>
     </Collapsible.Root>

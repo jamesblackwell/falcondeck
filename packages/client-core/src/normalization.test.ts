@@ -349,6 +349,64 @@ describe("interactive request boundary normalization", () => {
       snapshot.interactive_requests.map((request) => request.request_id),
     ).toEqual(["valid"]);
   });
+
+  it("normalizes scheduled-task capabilities and filters malformed tasks", () => {
+    const snapshot = normalizeDaemonSnapshot({
+      daemon: {
+        version: "0.1.0",
+        started_at: "2026-08-13T09:00:00Z",
+        capabilities: { scheduled_tasks: true },
+      },
+      scheduled_tasks: [
+        {
+          id: "scheduled-1",
+          title: "Daily briefing",
+          status: "active",
+          schedule: {
+            kind: "recurring",
+            rrule: "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+            timezone: "Europe/London",
+          },
+          workspace_id: "workspace-1",
+          provider: "codex",
+          updated_at: "2026-08-13T09:00:00Z",
+        },
+        { id: "broken" },
+      ],
+    });
+
+    expect(snapshot.daemon.capabilities?.scheduled_tasks).toBe(true);
+    expect(snapshot.scheduled_tasks?.map((task) => task.id)).toEqual([
+      "scheduled-1",
+    ]);
+    expect(snapshot.scheduled_tasks?.[0]?.prompt_preview).toBe("");
+  });
+
+  it("normalizes scheduled-task run events at the relay boundary", () => {
+    const envelope = normalizeEventEnvelope({
+      seq: 1,
+      emitted_at: "2026-08-13T09:00:00Z",
+      workspace_id: null,
+      thread_id: null,
+      event: {
+        type: "scheduled-task-run-updated",
+        task_id: "scheduled-1",
+        run: {
+          id: "run-1",
+          task_id: "scheduled-1",
+          status: "succeeded",
+          trigger: "manual",
+          scheduled_for: "2026-08-13T09:00:00Z",
+          workspace_id: "workspace-1",
+        },
+      },
+    });
+
+    expect(envelope.event.type).toBe("scheduled-task-run-updated");
+    if (envelope.event.type === "scheduled-task-run-updated") {
+      expect(envelope.event.run.status).toBe("succeeded");
+    }
+  });
 });
 
 describe("malformed conversation output normalization", () => {

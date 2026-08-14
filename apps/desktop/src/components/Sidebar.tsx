@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Activity, Clock3, Settings } from "lucide-react";
+import { Activity, Clock3, PanelsTopLeft, Settings } from "lucide-react";
 
 import {
   ExtensionPanelNavigation,
@@ -18,6 +18,7 @@ export type DesktopSidebarProps = WorkspaceSidebarProps & {
   scheduledOpen?: boolean;
   scheduledAttention?: boolean;
   onOpenActivity?: () => void;
+  onPopOutActivity?: () => void;
   activityOpen?: boolean;
   activityCount?: number;
   activityHasFailure?: boolean;
@@ -33,6 +34,7 @@ export const DesktopSidebar = memo(function DesktopSidebar({
   scheduledOpen = false,
   scheduledAttention = false,
   onOpenActivity,
+  onPopOutActivity,
   activityOpen = false,
   activityCount = 0,
   activityHasFailure = false,
@@ -47,43 +49,62 @@ export const DesktopSidebar = memo(function DesktopSidebar({
       {...props}
       newThreadShortcut={shortcutHint("newThread", shortcutSettings) ?? undefined}
       addProjectShortcut={shortcutHint("openProject", shortcutSettings) ?? undefined}
+      searchShortcut={shortcutHint("commandPalette", shortcutSettings) ?? undefined}
       headerClassName="min-h-12 justify-center gap-1 pb-1 pl-20 pr-3 pt-1"
       topNavigation={
         onOpenScheduled || onOpenActivity || extensionPanels.length > 0 ? (
           <>
             {onOpenActivity ? (
-              <button
-                type="button"
-                onClick={onOpenActivity}
-                className={cn(
-                  "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
-                  activityOpen
-                    ? "bg-surface-3 text-fg-primary"
-                    : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
-                )}
-                aria-current={activityOpen ? "page" : undefined}
-                aria-label="Activity"
-                title={shortcutTitle(
-                  "Activity — attention queue across projects",
-                  "openActivity",
-                  shortcutSettings,
-                )}
-              >
-                <Activity aria-hidden="true" className="h-4 w-4 shrink-0" />
-                <span className="min-w-0 flex-1">Activity</span>
-                {activityCount > 0 ? (
-                  <span
-                    className={cn(
-                      "rounded-full px-1.5 py-0.5 text-[length:var(--fd-text-2xs)] font-semibold",
-                      activityHasFailure
-                        ? "bg-danger-muted text-danger"
-                        : "bg-warning-muted text-warning",
-                    )}
+              // The detach action rides on the row rather than taking a line
+              // of its own: it swaps in for the count on hover, the way a
+              // native list reveals row actions.
+              <div className="group relative">
+                <button
+                  type="button"
+                  onClick={onOpenActivity}
+                  className={cn(
+                    "fd-focus flex w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-left text-[length:var(--fd-text-sm)] transition-colors",
+                    activityOpen
+                      ? "bg-surface-3 text-fg-primary"
+                      : "text-fg-secondary hover:bg-surface-3 hover:text-fg-primary",
+                  )}
+                  aria-current={activityOpen ? "page" : undefined}
+                  aria-label="Activity"
+                  title={shortcutTitle(
+                    "Activity — attention queue across projects",
+                    "openActivity",
+                    shortcutSettings,
+                  )}
+                >
+                  <Activity aria-hidden="true" className="h-4 w-4 shrink-0" />
+                  <span className="min-w-0 flex-1">Activity</span>
+                  {activityCount > 0 ? (
+                    <span
+                      className={cn(
+                        "rounded-full px-1.5 py-0.5 text-[length:var(--fd-text-2xs)] font-semibold",
+                        activityHasFailure
+                          ? "bg-danger-muted text-danger"
+                          : "bg-warning-muted text-warning",
+                        onPopOutActivity &&
+                          "transition-opacity group-hover:opacity-0 group-focus-within:opacity-0",
+                      )}
+                    >
+                      {activityCount}
+                    </span>
+                  ) : null}
+                </button>
+                {onPopOutActivity ? (
+                  <button
+                    type="button"
+                    onClick={onPopOutActivity}
+                    className="fd-focus absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-[var(--fd-radius-sm)] text-fg-muted opacity-0 transition-opacity hover:bg-surface-4 hover:text-fg-primary focus-visible:opacity-100 group-hover:opacity-100"
+                    aria-label="Open Activity in a new window"
+                    title="Open Activity in a new window"
                   >
-                    {activityCount}
-                  </span>
+                    <PanelsTopLeft aria-hidden="true" className="h-3.5 w-3.5" />
+                  </button>
                 ) : null}
-              </button>
+              </div>
             ) : null}
             {onOpenScheduled ? (
               <button

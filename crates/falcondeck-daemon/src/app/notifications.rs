@@ -445,8 +445,14 @@ pub(super) async fn ingest_notification(
                 } else {
                     ToolSettlement::Completed
                 };
-                app.settle_turn_items(workspace_id, &thread_id, updated_at, tool_settlement)
-                    .await;
+                app.settle_turn_items_with_error(
+                    workspace_id,
+                    &thread_id,
+                    updated_at,
+                    tool_settlement,
+                    error.as_deref(),
+                )
+                .await;
                 app.emit(
                     Some(workspace_id.to_string()),
                     Some(thread_id.clone()),
@@ -819,6 +825,7 @@ pub(super) async fn ingest_notification(
                             memory_citation,
                             citations,
                             lifecycle,
+                            error,
                             created_at,
                         }) => ConversationItem::AssistantMessage {
                             id: id.clone(),
@@ -827,6 +834,7 @@ pub(super) async fn ingest_notification(
                             memory_citation: memory_citation.clone(),
                             citations: citations.clone(),
                             lifecycle: *lifecycle,
+                            error: error.clone(),
                             created_at: *created_at,
                         },
                         _ => ConversationItem::AssistantMessage {
@@ -836,6 +844,7 @@ pub(super) async fn ingest_notification(
                             memory_citation: None,
                             citations: Vec::new(),
                             lifecycle: ContentLifecycle::Streaming,
+                            error: None,
                             created_at: Utc::now(),
                         },
                     };
@@ -1970,6 +1979,7 @@ async fn ingest_realtime_transcript_delta(
         memory_citation: None,
         citations: Vec::new(),
         lifecycle: ContentLifecycle::Streaming,
+        error: None,
         created_at: state.created_at,
     };
     let existed = {
@@ -2046,6 +2056,7 @@ async fn finish_realtime_transcript(
             memory_citation: None,
             citations: Vec::new(),
             lifecycle,
+            error: None,
             created_at: state.created_at,
         }
     } else {

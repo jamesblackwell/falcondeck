@@ -13,6 +13,8 @@ import {
 import {
   buildOptimisticUserItem,
   buildHandoffPrompt,
+  buildHandoffSeedPrompt,
+  buildHandoffTranscript,
   buildProjectGroups,
   approvalPolicyForProvider,
   composerProviderFor,
@@ -27,7 +29,6 @@ import {
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
   draftKeyFor,
-  editResendUnavailableReason,
   filesToImageInputs,
   generateUserItemId,
   imageAttachmentSendBlockReason,
@@ -104,9 +105,20 @@ import {
 import {
   markInteractiveRequestResolved,
   normalizeSendError,
+  stoppedThreadsToOffer,
   workspaceComposerDisabled,
   workspaceSendBlockReason,
 } from "./app-utils";
+import { isTauriDesktop, openActivityWindow } from "./api";
+import {
+  ACTIVITY_WINDOW_EVENTS,
+  ACTIVITY_WINDOW_LABEL,
+  activityStateChanged,
+  projectActivityWindowState,
+  type ActivityRespondMessage,
+  type ActivityThreadRef,
+  type ActivityWindowState,
+} from "./activity-window-bridge";
 import {
   readPersistedComposerState,
   readStoredDrafts,
@@ -116,9 +128,11 @@ import {
 } from "./composer-persistence";
 import {
   preferencesWithThinkingDisplay,
+  readStoredCollapsedWorkspaces,
   readStoredThinkingDisplay,
   readStoredThreadSort,
   splitPreferencesUpdate,
+  writeStoredCollapsedWorkspaces,
   writeStoredThinkingDisplay,
   writeStoredThreadSort,
 } from "./preferences";
@@ -135,13 +149,18 @@ import { DesktopShell } from "./components/DesktopShell";
 import type { DiffPanelSelection } from "./components/DiffPanel";
 import { PanelToggles } from "./components/PanelToggles";
 import { ProjectImportOverlay } from "./components/ProjectImportOverlay";
+import { ResumeStoppedThreadsDialog } from "./components/ResumeStoppedThreadsDialog";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { useDaemonConnection } from "./hooks/useDaemonConnection";
 import { useGitBranches } from "./hooks/useGitBranches";
 import { usePanelVisibility } from "./hooks/usePanelVisibility";
 import { useRemoteHosts } from "./hooks/useRemoteHosts";
-import { hostLabelByWorkspaceId, mergeSnapshots } from "./hosts";
+import {
+  hostLabelByWorkspaceId,
+  mergeSnapshots,
+  type HostScopedApi,
+} from "./hosts";
 import {
   commandForEvent,
   getShortcutSettings,
@@ -173,6 +192,11 @@ function lastAgentItemId(items: ConversationItem[]) {
 const SettingsView = lazy(() =>
   import("./components/SettingsView").then((module) => ({
     default: module.SettingsView,
+  })),
+);
+const ScheduledTasksView = lazy(() =>
+  import("./components/ScheduledTasksView").then((module) => ({
+    default: module.ScheduledTasksView,
   })),
 );
 const ActivityView = lazy(() =>
@@ -304,6 +328,14 @@ function AppInner() {
   const [isStartingRemote, setIsStartingRemote] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isVoiceInputOpen, setIsVoiceInputOpen] = useState(false);
+  // Launch-time "continue everything the quit stopped" prompt. Null means no
+  // prompt; the ref makes the offer once per app launch.
+  const [resumePromptThreads, setResumePromptThreads] = useState<
+    ThreadSummary[] | null
+  >(null);
+  const [isContinuingStoppedThreads, setIsContinuingStoppedThreads] =
+    useState(false);
+  const resumePromptSettledRef = useRef(false);
   const [isScheduledOpen, setIsScheduledOpen] = useState(false);
   const [isActivityOpen, setIsActivityOpen] = useState(false);
   const [activeExtensionPanelKey, setActiveExtensionPanelKey] = useState<
@@ -460,6 +492,9 @@ function AppInner() {
   );
   const [threadSort, setThreadSort] =
     useState<ThreadSortMode>(readStoredThreadSort);
+  const [collapsedWorkspaceIds, setCollapsedWorkspaceIds] = useState<string[]>(
+    readStoredCollapsedWorkspaces,
+  );
   const selectionSeedRef = useRef<string | null>(null);
   const threadSettingsRequestRef = useRef(0);
   const notifiedAttentionRef = useRef(new Map<string, string>());
@@ -528,10 +563,7 @@ function AppInner() {
       recoverable = upsertComposerDraft(
         recoverable,
         key,
-        mergeFailedComposerDraft(
-          submittedDraft,
-          recoverable[key]?.text ?? "",
-        ),
+        mergeFailedComposerDraft(submittedDraft, recoverable[key]?.text ?? ""),
       );
     }
     writeStoredDrafts(recoverable);
@@ -893,7 +925,8 @@ function AppInner() {
     ],
   );
   const activityCounts = useMemo(
-    () => countActivityEntries(groups, viewSnapshot?.interactive_requests ?? []),
+    () =>
+      countActivityEntries(groups, viewSnapshot?.interactive_requests ?? []),
     [groups, viewSnapshot?.interactive_requests],
   );
   const conversationItems: ConversationItem[] = useMemo(() => {
@@ -1307,11 +1340,29 @@ function AppInner() {
     };
   }, [api]);
 
+  // Set by "Mark as unread" so this effect does not immediately undo it while
+  // the thread is still the selected one. Cleared as soon as the selection
+  // moves elsewhere or the agent adds activity the user has genuinely not seen.
+  const suppressAutoReadRef = useRef<{
+    threadId: string;
+    activitySeq: number;
+  } | null>(null);
+
   useEffect(() => {
     const client = apiFor(selectedWorkspaceId);
     if (!client || !selectedWorkspaceId || !selectedThread) return;
     if (!windowFocused) return;
     const readSeq = selectedThread.attention.last_agent_activity_seq;
+    const suppressed = suppressAutoReadRef.current;
+    if (
+      suppressed &&
+      (suppressed.threadId !== selectedThread.id ||
+        suppressed.activitySeq !== readSeq)
+    ) {
+      suppressAutoReadRef.current = null;
+    } else if (suppressed) {
+      return;
+    }
     if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return;
 
     void client
@@ -2001,11 +2052,9 @@ function AppInner() {
           preferred?.sandboxMode,
           targetCapabilities.sandbox_modes,
         );
-        handoffPrompt = buildHandoffPrompt({
+        const transcript = buildHandoffTranscript({
           items: sourceDetail.items,
           sourceTitle: selectedThread.title,
-          sourceProvider: selectedThread.provider,
-          sourceProviderLabel: sourceLabel,
         });
         const started = await client.startThread({
           workspace_id: selectedWorkspace.id,
@@ -2029,6 +2078,37 @@ function AppInner() {
         createdHandoff = titled;
         showHandoffThread(titled);
 
+        // Compaction runs out of band on a cheap utility model, so the
+        // destination spends neither its first turn nor its context window
+        // re-reading a transcript that may not even fit. If no utility
+        // provider is available the destination compacts it itself, which is
+        // the old behaviour and still correct — just more expensive.
+        let summarizedBy: string | null = null;
+        try {
+          const summary = await client.handoffBrief({
+            workspace_id: selectedWorkspace.id,
+            thread_id: selectedThread.id,
+            transcript,
+            source_provider_label: sourceLabel,
+          });
+          handoffPrompt = buildHandoffSeedPrompt({
+            brief: summary.brief,
+            sourceProvider: selectedThread.provider,
+            sourceProviderLabel: sourceLabel,
+            truncated: summary.truncated ?? false,
+          });
+          summarizedBy = summary.model_id
+            ? `${summary.provider} · ${summary.model_id}`
+            : summary.provider;
+        } catch {
+          handoffPrompt = buildHandoffPrompt({
+            items: sourceDetail.items,
+            sourceTitle: selectedThread.title,
+            sourceProvider: selectedThread.provider,
+            sourceProviderLabel: sourceLabel,
+          });
+        }
+
         await client.sendTurn({
           workspace_id: titled.workspace.id,
           thread_id: titled.thread.id,
@@ -2048,8 +2128,9 @@ function AppInner() {
         toast({
           variant: "success",
           title: `Continuing with ${targetLabel}`,
-          description:
-            "A linked thread is preparing its handoff. The original is unchanged.",
+          description: summarizedBy
+            ? `Handoff summarized in the background by ${summarizedBy}. The original is unchanged.`
+            : "No background summarizer was available, so the linked thread is compacting the transcript itself. The original is unchanged.",
         });
       } catch (error: unknown) {
         const message =
@@ -2318,8 +2399,7 @@ function AppInner() {
     if (
       !client ||
       !selectedWorkspace ||
-      (!submittedDraft.trim() &&
-        (override ? 0 : attachments.length) === 0)
+      (!submittedDraft.trim() && (override ? 0 : attachments.length) === 0)
     )
       return;
     const submittedAttachments = override ? NO_ATTACHMENTS : attachments;
@@ -2418,7 +2498,8 @@ function AppInner() {
           activeThreadId,
         );
         if (!override?.preserveComposer) {
-          const pendingBackup = pendingDraftBackupsRef.current.get(submittedKey);
+          const pendingBackup =
+            pendingDraftBackupsRef.current.get(submittedKey);
           if (pendingBackup !== undefined) {
             pendingDraftBackupsRef.current.delete(submittedKey);
             pendingDraftBackupsRef.current.set(
@@ -2594,7 +2675,9 @@ function AppInner() {
         if (submittedSelections.length > 0) {
           setQuotedSelectionsByConversation((current) => {
             const existing = current[restoreKey] ?? [];
-            const existingIds = new Set(existing.map((selection) => selection.id));
+            const existingIds = new Set(
+              existing.map((selection) => selection.id),
+            );
             return {
               ...current,
               [restoreKey]: [
@@ -2848,6 +2931,20 @@ function AppInner() {
   ]);
 
   const handleContinueInterruptedTurn = useCallback(() => {
+    // Retire the interruption as part of continuing. Without this the thread
+    // keeps its stopped marker in persisted state, and the next reconnect
+    // restores it as stopped even though the turn is running again.
+    const client = apiFor(selectedWorkspace?.id);
+    if (client && selectedWorkspace && selectedThreadId) {
+      void client
+        .updateThread({
+          workspace_id: selectedWorkspace.id,
+          thread_id: selectedThreadId,
+          acknowledge_interruption: true,
+        })
+        .then(applyThreadHandle)
+        .catch(() => {});
+    }
     void handleSubmit(false, { text: "Continue", preserveComposer: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
@@ -2899,6 +2996,117 @@ function AppInner() {
     setActionError,
     toast,
   ]);
+
+  // Threads whose turn died with the app, offered as one batch at launch.
+  // Read from the merged snapshot so remote hosts are covered too; null
+  // while the daemon is still hydrating and the answer would be premature.
+  const stoppedThreadOffer = useMemo(
+    () =>
+      snapshot
+        ? stoppedThreadsToOffer({
+            threads: viewSnapshot?.threads,
+            workspaces: viewSnapshot?.workspaces,
+            remoteHosts: remoteHosts.hosts.map((host) => ({
+              hasSnapshot: host.snapshot !== null,
+              isConnected: host.status === "encrypted",
+            })),
+          })
+        : null,
+    [
+      remoteHosts.hosts,
+      snapshot,
+      viewSnapshot?.threads,
+      viewSnapshot?.workspaces,
+    ],
+  );
+  // The prompt is a snapshot taken once per launch: it must not grow or
+  // reshuffle while the user is reading it, and it must not come back after
+  // "Not now".
+  useEffect(() => {
+    if (resumePromptSettledRef.current) return;
+    if (!stoppedThreadOffer) return;
+    resumePromptSettledRef.current = true;
+    if (stoppedThreadOffer.length === 0) return;
+    setResumePromptThreads(stoppedThreadOffer);
+  }, [stoppedThreadOffer]);
+
+  const handleContinueStoppedThreads = useCallback(async () => {
+    const targets = resumePromptThreads ?? [];
+    if (targets.length === 0) {
+      setResumePromptThreads(null);
+      return;
+    }
+    setIsContinuingStoppedThreads(true);
+    const failures: string[] = [];
+    // Sequential: a burst of parallel turns would have every agent CLI cold
+    // starting at once on the machine the user just opened.
+    for (const thread of targets) {
+      const client = apiFor(thread.workspace_id);
+      if (!client) {
+        failures.push(thread.title);
+        continue;
+      }
+      try {
+        // Clear the interruption before sending. The daemon persists that
+        // acknowledgement, so a later reconnect cannot restore the thread
+        // from state that still calls the last turn interrupted.
+        await client
+          .updateThread({
+            workspace_id: thread.workspace_id,
+            thread_id: thread.id,
+            acknowledge_interruption: true,
+          })
+          .catch(() => {});
+        await client.sendTurn({
+          workspace_id: thread.workspace_id,
+          thread_id: thread.id,
+          inputs: [{ type: "text", text: "Continue" }],
+          // The thread's own settings, not the composer's current selection.
+          provider: thread.provider,
+          model_id: thread.agent.model_id,
+          reasoning_effort: thread.agent.reasoning_effort,
+          approval_policy: thread.agent.approval_policy,
+          service_tier: thread.agent.service_tier,
+          permission_mode: thread.agent.permission_mode ?? null,
+          sandbox_mode: thread.agent.sandbox_mode ?? null,
+        });
+      } catch {
+        failures.push(thread.title);
+      }
+    }
+    setIsContinuingStoppedThreads(false);
+    setResumePromptThreads(null);
+    if (api) {
+      try {
+        setSnapshot(await api.snapshot());
+      } catch {
+        // The event stream refreshes the snapshot on its own.
+      }
+    }
+    const continued = targets.length - failures.length;
+    if (failures.length > 0) {
+      toast({
+        variant: "danger",
+        title:
+          continued > 0
+            ? `Continued ${continued} of ${targets.length} sessions`
+            : "Failed to continue stopped sessions",
+        description: failures.join(", "),
+      });
+      return;
+    }
+    toast({
+      variant: "success",
+      title:
+        continued === 1
+          ? "Continued 1 stopped session"
+          : `Continued ${continued} stopped sessions`,
+    });
+  }, [api, apiFor, resumePromptThreads, setSnapshot, toast]);
+
+  const handleDismissStoppedThreadsPrompt = useCallback(() => {
+    setResumePromptThreads(null);
+  }, []);
 
   const handleAlternateSubmitCallback = useCallback(() => {
     const settings = getShortcutSettings();
@@ -3107,6 +3315,32 @@ function AppInner() {
     setIsScheduledOpen(false);
     setIsActivityOpen(true);
     setActiveExtensionPanelKey(null);
+  }, []);
+
+  // Detaching gives Activity its own screen, so the takeover steps aside and
+  // the main window goes back to the thread it was on.
+  const handlePopOutActivity = useCallback(() => {
+    setIsActivityOpen(false);
+    void openActivityWindow().catch((error) => {
+      setIsActivityOpen(true);
+      toast({
+        title: "Couldn’t open the Activity window",
+        description:
+          error instanceof Error ? error.message : "Unknown window error",
+        variant: "danger",
+      });
+    });
+  }, [toast]);
+
+  // Same entry point as the keyboard binding, so the sidebar's search button
+  // toggles the palette rather than stacking opens.
+  const handleOpenCommandPalette = useCallback(() => {
+    setPaletteRequest((current) => ({
+      key: current.key + 1,
+      query: "",
+      scope: "all",
+      mode: "toggle",
+    }));
   }, []);
 
   const handleOpenExtensionPanel = useCallback((panelKey: string) => {
@@ -3527,49 +3761,6 @@ function AppInner() {
     ],
   );
 
-  const handleEditResend = useCallback(
-    async (item: Extract<ConversationItem, { kind: "user_message" }>) => {
-      try {
-        const branch = await branchFromMessage(item);
-        if (!branch) return;
-        const key = draftKeyFor(
-          branch.handle.workspace.id,
-          branch.handle.thread.id,
-        );
-        setDraftForConversation(key, item.text);
-        setAttachmentsForConversation(key, () => item.attachments);
-        setActionError(null);
-        toast({
-          variant: "success",
-          title: branch.adopted ? "New branch ready" : "Branch created",
-          description: branch.adopted
-            ? "Edit the message in the composer, then send when ready."
-            : "Your current thread stayed open. Select the new branch to edit the saved message.",
-        });
-      } catch (error: unknown) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Failed to branch conversation";
-        setActionError(message);
-        toast({
-          variant: "danger",
-          title: "Failed to branch conversation",
-          description: message,
-        });
-        throw error instanceof Error
-          ? error
-          : new Error("Failed to branch conversation");
-      }
-    },
-    [
-      branchFromMessage,
-      setAttachmentsForConversation,
-      setDraftForConversation,
-      toast,
-    ],
-  );
-
   const handleRetryResponse = useCallback(
     async (item: Extract<ConversationItem, { kind: "user_message" }>) => {
       if (!selectedWorkspace || !selectedThread) return;
@@ -3713,10 +3904,234 @@ function AppInner() {
     [apiFor, setActionError, setSnapshot, viewSnapshot?.threads],
   );
 
+  /* ================================================================
+     Detached Activity window.
+
+     It renders Activity on another screen but holds no client of its
+     own, so this window answers for it: push the projection whenever
+     it changes, and perform the actions it asks for. Nothing here runs
+     until the window announces itself.
+     ================================================================ */
+  const [activityWindowOpen, setActivityWindowOpen] = useState(false);
+  const lastActivityStateRef = useRef<ActivityWindowState | null>(null);
+
+  const activityWindowState = useMemo(
+    () =>
+      projectActivityWindowState(
+        groups,
+        viewSnapshot?.interactive_requests ?? [],
+        workspaceHostBadges,
+        Boolean(selectedWorkspaceId),
+      ),
+    [
+      groups,
+      selectedWorkspaceId,
+      viewSnapshot?.interactive_requests,
+      workspaceHostBadges,
+    ],
+  );
+
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let disposed = false;
+    const unlisteners: (() => void)[] = [];
+    const track = (pending: Promise<() => void>) => {
+      void pending.then((off) => {
+        if (disposed) off();
+        else unlisteners.push(off);
+      });
+    };
+
+    void import("@tauri-apps/api/event").then(({ emit, listen }) => {
+      if (disposed) return;
+
+      track(
+        listen(ACTIVITY_WINDOW_EVENTS.ready, () => {
+          // A reload leaves the window with no state and us none the wiser,
+          // so treat every announcement as "send everything again".
+          lastActivityStateRef.current = null;
+          setActivityWindowOpen(true);
+        }),
+      );
+      track(
+        listen(ACTIVITY_WINDOW_EVENTS.closed, () =>
+          setActivityWindowOpen(false),
+        ),
+      );
+      track(
+        listen<ActivityThreadRef>(
+          ACTIVITY_WINDOW_EVENTS.openThread,
+          (event) =>
+            handleSelectThread(
+              event.payload.workspaceId,
+              event.payload.threadId,
+            ),
+        ),
+      );
+      track(
+        listen<ActivityThreadRef>(ACTIVITY_WINDOW_EVENTS.markRead, (event) => {
+          void handleMarkThreadRead(
+            event.payload.workspaceId,
+            event.payload.threadId,
+          );
+        }),
+      );
+      track(
+        listen(ACTIVITY_WINDOW_EVENTS.newThread, () => {
+          if (selectedWorkspaceId) handleNewThread(selectedWorkspaceId);
+        }),
+      );
+      track(
+        listen<ActivityRespondMessage>(
+          ACTIVITY_WINDOW_EVENTS.respond,
+          (event) => {
+            const { callId, request, response } = event.payload;
+            void handleInteractiveResponseCallback(request, response)
+              .then(() =>
+                emit(ACTIVITY_WINDOW_EVENTS.respondResult, { callId }),
+              )
+              .catch((error: unknown) =>
+                emit(ACTIVITY_WINDOW_EVENTS.respondResult, {
+                  callId,
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : "Failed to send your response",
+                }),
+              );
+          },
+        ),
+      );
+    });
+
+    return () => {
+      disposed = true;
+      for (const off of unlisteners) off();
+    };
+  }, [
+    handleInteractiveResponseCallback,
+    handleMarkThreadRead,
+    handleNewThread,
+    handleSelectThread,
+    selectedWorkspaceId,
+  ]);
+
+  // Reloading the main window (an update, dev HMR) loses the fact that the
+  // Activity window is out there; it does not re-announce, so ask the frame.
+  useEffect(() => {
+    if (!isTauriDesktop()) return;
+    let disposed = false;
+    void import("@tauri-apps/api/webviewWindow").then(
+      async ({ getAllWebviewWindows }) => {
+        const windows = await getAllWebviewWindows();
+        if (disposed) return;
+        if (windows.some((window) => window.label === ACTIVITY_WINDOW_LABEL)) {
+          setActivityWindowOpen(true);
+        }
+      },
+    );
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activityWindowOpen || !isTauriDesktop()) return;
+    if (!activityStateChanged(lastActivityStateRef.current, activityWindowState))
+      return;
+    lastActivityStateRef.current = activityWindowState;
+    void import("@tauri-apps/api/event").then(({ emit }) =>
+      emit(ACTIVITY_WINDOW_EVENTS.state, activityWindowState),
+    );
+  }, [activityWindowOpen, activityWindowState]);
+
+  const handleMarkThreadUnread = useCallback(
+    async (workspaceId: string, threadId: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) return;
+      // The auto-read effect below re-reads whatever thread is selected and
+      // focused, which would undo this the moment it lands. Park the thread on
+      // the suppression ref first; the effect skips it until the selection
+      // moves away or the agent produces new activity.
+      const thread = viewSnapshot?.threads.find(
+        (entry) => entry.workspace_id === workspaceId && entry.id === threadId,
+      );
+      suppressAutoReadRef.current = {
+        threadId,
+        activitySeq: thread?.attention.last_agent_activity_seq ?? 0,
+      };
+      try {
+        const updated = await client.markThreadUnread({
+          workspace_id: workspaceId,
+          thread_id: threadId,
+        });
+        suppressAutoReadRef.current = {
+          threadId,
+          activitySeq: updated.attention.last_agent_activity_seq,
+        };
+        setSnapshot((current) =>
+          current
+            ? {
+                ...current,
+                threads: current.threads.map((entry) =>
+                  entry.id === updated.id ? updated : entry,
+                ),
+              }
+            : current,
+        );
+      } catch (error: unknown) {
+        suppressAutoReadRef.current = null;
+        const msg =
+          error instanceof Error
+            ? error.message
+            : "Failed to mark thread as unread";
+        setActionError(msg);
+        toast({
+          variant: "danger",
+          title: "Failed to mark as unread",
+          description: msg,
+        });
+      }
+    },
+    [apiFor, setActionError, setSnapshot, toast, viewSnapshot?.threads],
+  );
+
   const handleThreadSortChange = useCallback((mode: ThreadSortMode) => {
     setThreadSort(mode);
     writeStoredThreadSort(mode);
   }, []);
+
+  // Navigating into a project (command palette, new thread, notification)
+  // unfolds it, otherwise the chat you just opened would sit inside a closed
+  // folder. Keyed on the selection *changing*, so folding the project you are
+  // currently in does not snap straight back open.
+  const lastExpandedWorkspaceRef = useRef<string | null>(selectedWorkspaceId);
+  useEffect(() => {
+    if (lastExpandedWorkspaceRef.current === selectedWorkspaceId) return;
+    lastExpandedWorkspaceRef.current = selectedWorkspaceId;
+    if (!selectedWorkspaceId) return;
+    setCollapsedWorkspaceIds((current) => {
+      if (!current.includes(selectedWorkspaceId)) return current;
+      const next = current.filter((id) => id !== selectedWorkspaceId);
+      writeStoredCollapsedWorkspaces(next);
+      return next;
+    });
+  }, [selectedWorkspaceId]);
+
+  const handleWorkspaceCollapsedChange = useCallback(
+    (workspaceId: string, collapsed: boolean) => {
+      setCollapsedWorkspaceIds((current) => {
+        const next = collapsed
+          ? current.includes(workspaceId)
+            ? current
+            : [...current, workspaceId]
+          : current.filter((id) => id !== workspaceId);
+        if (next !== current) writeStoredCollapsedWorkspaces(next);
+        return next;
+      });
+    },
+    [],
+  );
 
   // Memoized derived values
   const isThreadDetailPending = Boolean(
@@ -3821,17 +4236,6 @@ function AppInner() {
       ),
     [activeProvider, selectedThread, selectedWorkspace],
   );
-  const editResendReason = selectedThread
-    ? editResendUnavailableReason({
-        providerLabel: workspaceProviderLabel(
-          selectedWorkspace,
-          selectedThread.provider,
-        ),
-        supportsForking: activeCapabilities.supports_forking,
-        isIsolated: Boolean(selectedThread.variant),
-        threadStatus: selectedThread.status,
-      })
-    : null;
   const sendBlockReason = workspaceSendBlockReason(
     selectedWorkspace,
     activeProvider,
@@ -3919,6 +4323,7 @@ function AppInner() {
       const next = threads[(index + offset + threads.length) % threads.length];
       if (!next) return;
       setIsSettingsOpen(false);
+      setIsScheduledOpen(false);
       setIsActivityOpen(false);
       setSelectedWorkspaceId(next.workspace_id);
       setSelectedThreadId(next.id);
@@ -3934,6 +4339,7 @@ function AppInner() {
       navigatingHistoryRef.current = true;
       selectionHistoryIndexRef.current = nextIndex;
       setIsSettingsOpen(false);
+      setIsScheduledOpen(false);
       setIsActivityOpen(false);
       setSelectedWorkspaceId(entry.workspaceId);
       setSelectedThreadId(entry.threadId);
@@ -3977,6 +4383,7 @@ function AppInner() {
           setSettingsSection("general");
           setSettingsRequestKey((current) => current + 1);
           setIsSettingsOpen(true);
+          setIsScheduledOpen(false);
           setIsActivityOpen(false);
           break;
         case "openActivity":
@@ -4037,12 +4444,14 @@ function AppInner() {
           break;
         case "focusComposer":
           setIsSettingsOpen(false);
+          setIsScheduledOpen(false);
           setIsActivityOpen(false);
           setComposerFocusRequestKey((current) => current + 1);
           break;
         case "openProjectMenu":
           if (!selectedThreadId) {
             setIsSettingsOpen(false);
+            setIsScheduledOpen(false);
             setIsActivityOpen(false);
             setProjectMenuRequestKey((current) => current + 1);
           }
@@ -4060,6 +4469,7 @@ function AppInner() {
                   ? ("sandbox" as const)
                   : ("model" as const);
           setIsSettingsOpen(false);
+          setIsScheduledOpen(false);
           setIsActivityOpen(false);
           setComposerMenuRequest((current) => ({ key: current.key + 1, menu }));
           break;
@@ -4195,18 +4605,41 @@ function AppInner() {
             onRenameThread={handleRenameThread}
             onTogglePinThread={handleTogglePinThread}
             onMarkThreadRead={handleMarkThreadRead}
+            onMarkThreadUnread={handleMarkThreadUnread}
             onAddProject={handleAddProject}
+            onSearch={handleOpenCommandPalette}
             onRemoveWorkspace={handleRemoveWorkspace}
             threadSort={threadSort}
             onThreadSortChange={handleThreadSortChange}
             onWorkspaceOrderChange={handleWorkspaceOrderChange}
+            collapsedWorkspaceIds={collapsedWorkspaceIds}
+            onWorkspaceCollapsedChange={handleWorkspaceCollapsedChange}
             isAddingProject={isAddingProject}
             onOpenSettings={handleOpenSettings}
             settingsOpen={isSettingsOpen}
+            onOpenScheduled={handleOpenScheduled}
+            scheduledOpen={isScheduledOpen}
             onOpenActivity={handleOpenActivity}
+            onPopOutActivity={
+              isTauriDesktop() ? handlePopOutActivity : undefined
+            }
             activityOpen={isActivityOpen}
-            activityCount={activityCounts.blocked + activityCounts.failed + activityCounts.ready}
+            activityCount={
+              activityCounts.blocked +
+              activityCounts.failed +
+              activityCounts.ready
+            }
             activityHasFailure={activityCounts.failed > 0}
+            scheduledAttention={[
+              ...(snapshot?.scheduled_tasks ?? []),
+              ...remoteHosts.hosts.flatMap(
+                (host) => host.snapshot?.scheduled_tasks ?? [],
+              ),
+            ].some((task) =>
+              ["failed", "awaiting_input"].includes(
+                task.last_run?.status ?? "",
+              ),
+            )}
             errors={sidebarErrors}
             threadTagsById={threadTags.byThreadId}
             threadTagOptions={threadTags.tags}
@@ -4241,6 +4674,29 @@ function AppInner() {
                         ? () => handleNewThread(selectedWorkspaceId)
                         : undefined
                     }
+                    onPopOut={
+                      isTauriDesktop() ? handlePopOutActivity : undefined
+                    }
+                  />
+                </Suspense>
+              ),
+              "core.scheduled": (
+                <Suspense fallback={loadingThreadState}>
+                  <ScheduledTasksView
+                    localSnapshot={snapshot}
+                    localApi={api as HostScopedApi | null}
+                    hosts={remoteHosts.hosts}
+                    manager={remoteHosts.manager}
+                    onRefreshLocal={async () => {
+                      if (api) setSnapshot(await api.snapshot());
+                    }}
+                    onOpenThread={(workspaceId, threadId) => {
+                      setIsScheduledOpen(false);
+                      setIsActivityOpen(false);
+                      setSelectedWorkspaceId(workspaceId);
+                      setSelectedThreadId(threadId);
+                    }}
+                    onToast={toast}
                   />
                 </Suspense>
               ),
@@ -4350,16 +4806,6 @@ function AppInner() {
               onNewThread={
                 selectedThread ? handleNewThreadFromCurrent : undefined
               }
-              onEditResend={
-                selectedThread &&
-                activeCapabilities.supports_forking &&
-                !selectedThread.variant &&
-                selectedThread.status !== "running" &&
-                selectedThread.status !== "waiting_for_input"
-                  ? handleEditResend
-                  : undefined
-              }
-              editResendUnavailableReason={editResendReason}
               onRetryResponse={
                 selectedThread &&
                 activeCapabilities.supports_forking &&
@@ -4475,6 +4921,7 @@ function AppInner() {
                   setSettingsSection("connectors");
                   setSettingsRequestKey((current) => current + 1);
                   setIsSettingsOpen(true);
+                  setIsScheduledOpen(false);
                   setIsActivityOpen(false);
                 },
                 // Goals live in the composer's plus menu, not the header.
@@ -4525,6 +4972,16 @@ function AppInner() {
         onRailCollapsedByDrag={hideRail}
       />
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
+      {resumePromptThreads && resumePromptThreads.length > 0 ? (
+        <ResumeStoppedThreadsDialog
+          threads={resumePromptThreads}
+          onContinueAll={() => {
+            void handleContinueStoppedThreads();
+          }}
+          onDismiss={handleDismissStoppedThreadsPrompt}
+          isContinuing={isContinuingStoppedThreads}
+        />
+      ) : null}
       {isVoiceInputOpen && baseUrl ? (
         <DesktopVoiceInput
           baseUrl={baseUrl}

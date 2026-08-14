@@ -237,224 +237,6 @@ describe("chat behavior components", () => {
     copy.mockRestore();
   });
 
-  it("invokes provider-backed edit/resend with the complete user message", async () => {
-    const onEditResend = vi.fn();
-    const item = {
-      kind: "user_message" as const,
-      id: "u-edit",
-      text: "Revise this",
-      attachments: [],
-      turn_id: "turn-2",
-      previous_turn_id: "turn-1",
-      created_at: "2026-03-16T10:00:00Z",
-    };
-    const rendered = renderComponent(
-      <UserMessageBlock item={item} onEditResend={onEditResend} />,
-    );
-    const button = rendered.root.findByProps({
-      accessibilityLabel: "Edit and resend in a new branch",
-    });
-
-    await act(async () => {
-      await button.props.onPress({});
-    });
-
-    expect(onEditResend).toHaveBeenCalledWith(item);
-  });
-
-  it("locks native edit/resend while its provider branch is being created", async () => {
-    let resolveBranch!: () => void;
-    const onEditResend = vi.fn(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveBranch = resolve;
-        }),
-    );
-    const item = {
-      kind: "user_message" as const,
-      id: "u-edit-pending",
-      text: "Revise this once",
-      attachments: [],
-      turn_id: "turn-2",
-      previous_turn_id: "turn-1",
-      created_at: "2026-03-16T10:00:00Z",
-    };
-    const rendered = renderComponent(
-      <UserMessageBlock item={item} onEditResend={onEditResend} />,
-    );
-
-    act(() =>
-      rendered.root
-        .findByProps({
-          accessibilityLabel: "Edit and resend in a new branch",
-        })
-        .props.onPress({}),
-    );
-    const pending = rendered.root.find(
-      (node) =>
-        node.props.accessibilityLabel === "Creating new branch" &&
-        node.props.loading === true,
-    );
-    expect(
-      rendered.root.find(
-        (node) =>
-          node.props.accessibilityLabel === "Creating new branch" &&
-          node.props.accessibilityState?.busy === true,
-      ).props.accessibilityState,
-    ).toEqual({ disabled: true, busy: true });
-    act(() => pending.props.onPress?.({}));
-    expect(onEditResend).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      resolveBranch();
-    });
-    expect(
-      rendered.root.findByProps({
-        accessibilityLabel: "Edit and resend in a new branch",
-      }),
-    ).toBeDefined();
-  });
-
-  it("keeps a failed native edit/resend visible and available to retry", async () => {
-    const onEditResend = vi
-      .fn()
-      .mockRejectedValueOnce(new Error("Branch unavailable"))
-      .mockResolvedValueOnce(undefined);
-    const item = {
-      kind: "user_message" as const,
-      id: "u-edit-failed",
-      text: "Revise after failure",
-      attachments: [],
-      turn_id: "turn-2",
-      previous_turn_id: "turn-1",
-      created_at: "2026-03-16T10:00:00Z",
-    };
-    const rendered = renderComponent(
-      <UserMessageBlock item={item} onEditResend={onEditResend} />,
-    );
-
-    await act(async () => {
-      await rendered.root
-        .findByProps({
-          accessibilityLabel: "Edit and resend in a new branch",
-        })
-        .props.onPress({});
-    });
-    const error = rendered.root.findByProps({ accessibilityRole: "alert" });
-    expect(error.props.children).toBe(
-      "Could not create a branch. Select Edit to retry.",
-    );
-    const retry = rendered.root.findByProps({
-      accessibilityLabel: "Edit and resend in a new branch",
-    });
-    expect(retry.props.accessibilityHint).toBe(
-      "Could not create a branch. Select Edit to retry.",
-    );
-
-    await act(async () => {
-      await retry.props.onPress({});
-    });
-    expect(onEditResend).toHaveBeenCalledTimes(2);
-    expect(
-      rendered.root.findAllByProps({ accessibilityRole: "alert" }),
-    ).toHaveLength(0);
-  });
-
-  it("keeps edit and resend available for an image-only provider turn", async () => {
-    const onEditResend = vi.fn();
-    const item = {
-      kind: "user_message" as const,
-      id: "u-image-only",
-      text: "",
-      attachments: [
-        {
-          type: "image" as const,
-          id: "image-only",
-          name: "reference.png",
-          mime_type: "image/png",
-          url: "data:image/png;base64,abc",
-        },
-      ],
-      turn_id: "turn-2",
-      previous_turn_id: "turn-1",
-      created_at: "2026-03-16T10:00:00Z",
-    };
-    const rendered = renderComponent(
-      <UserMessageBlock item={item} onEditResend={onEditResend} />,
-    );
-    const edit = rendered.root.findByProps({
-      accessibilityLabel: "Edit and resend in a new branch",
-    });
-
-    await act(async () => {
-      await edit.props.onPress({});
-    });
-
-    expect(onEditResend).toHaveBeenCalledWith(item);
-    expect(
-      rendered.root.findAllByProps({ accessibilityLabel: "Copy message" }),
-    ).toHaveLength(0);
-  });
-
-  it("exposes and expands a native provider capability explanation", () => {
-    const reason =
-      "Edit and resend is unavailable because Claude does not support conversation branching.";
-    const rendered = renderComponent(
-      <UserMessageBlock
-        item={{
-          kind: "user_message",
-          id: "u-unsupported-provider",
-          text: "Why can’t this be edited?",
-          attachments: [],
-          turn_id: "turn-1",
-          previous_turn_id: null,
-          created_at: "2026-03-16T10:00:00Z",
-        }}
-        editResendUnavailableReason={reason}
-      />,
-    );
-    const explanation = rendered.root.findByProps({
-      accessibilityLabel: "Why edit and resend is unavailable",
-    });
-    expect(explanation.props.accessibilityHint).toBe(reason);
-    expect(explanation.props.accessibilityState).toEqual({ expanded: false });
-
-    act(() => explanation.props.onPress({}));
-    expect(
-      rendered.root.findByProps({
-        accessibilityLabel: "Why edit and resend is unavailable",
-      }).props.accessibilityState,
-    ).toEqual({ expanded: true });
-    expect(textOf(rendered)).toContain(reason);
-  });
-
-  it("explains a missing native provider turn boundary instead of offering edit", () => {
-    const rendered = renderComponent(
-      <UserMessageBlock
-        item={{
-          kind: "user_message",
-          id: "u-legacy-history",
-          text: "Legacy history",
-          attachments: [],
-          created_at: "2026-03-16T10:00:00Z",
-        }}
-        onEditResend={vi.fn()}
-      />,
-    );
-
-    expect(
-      rendered.root.findAllByProps({
-        accessibilityLabel: "Edit and resend in a new branch",
-      }),
-    ).toHaveLength(0);
-    const explanation = rendered.root.findByProps({
-      accessibilityLabel: "Why edit and resend is unavailable",
-    });
-    expect(explanation.props.accessibilityHint).toBe(
-      "Edit and resend is unavailable because this message has no provider turn boundary.",
-    );
-  });
-
   it.each([
     ["pending", "", "Preparing response…", undefined, undefined],
     [
@@ -522,6 +304,31 @@ describe("chat behavior components", () => {
     expect(
       renderer.root.findAllByProps({ accessibilityLabel: "Copy response" }),
     ).toHaveLength(0);
+  });
+
+  it("surfaces provider detail on a failed assistant receipt", () => {
+    const renderer = renderComponent(
+      <AssistantMessageBlock
+        item={{
+          kind: "assistant_message",
+          id: "assistant-error-detail",
+          text: "",
+          lifecycle: "error",
+          error: "No endpoints match your OpenRouter privacy settings",
+          created_at: "2026-03-16T10:00:00Z",
+        }}
+      />,
+    );
+
+    expect(textOf(renderer)).toContain(
+      "No endpoints match your OpenRouter privacy settings",
+    );
+    expect(
+      renderer.root.findByProps({
+        accessibilityLabel:
+          "Response failed. No endpoints match your OpenRouter privacy settings",
+      }).props.accessibilityLiveRegion,
+    ).toBe("assertive");
   });
 
   it("renders service messages and thinking indicator", () => {

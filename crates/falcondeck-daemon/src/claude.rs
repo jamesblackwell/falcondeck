@@ -54,6 +54,10 @@ pub struct ClaudeProviderMetadata {
 pub struct HydratedClaudeThread {
     pub summary: ThreadSummary,
     pub items: Vec<ConversationItem>,
+    /// True when the title is only a preview of the opening prompt, because
+    /// the session file carries no `custom-title` or `ai-title` of its own.
+    /// FalconDeck may replace such a title with a generated one.
+    pub title_is_provider_preview: bool,
 }
 
 pub struct ClaudeTurnSpawn {
@@ -1046,6 +1050,7 @@ pub fn hydrate_threads(workspace_path: &str) -> Vec<HydratedClaudeThread> {
                     *existing = HydratedClaudeThread {
                         summary: thread.summary.clone(),
                         items: thread.items.clone(),
+                        title_is_provider_preview: thread.title_is_provider_preview,
                     };
                 }
             })
@@ -1327,18 +1332,23 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
         ConversationItem::UserMessage { text, .. } => provisional_title_from_text(text),
         _ => None,
     });
+    // Claude only writes a title of its own once the user renames a session or
+    // its own auto-titler runs, which never happens for most sessions. Falling
+    // back to the opening prompt keeps the sidebar readable, but it must stay
+    // marked as a preview so FalconDeck's titler can replace it.
+    let provider_title = custom_title.or(ai_title).or(title);
+    let title_is_provider_preview = provider_title.is_none();
     let summary = ThreadSummary {
         id: session_id.clone(),
         workspace_id: String::new(),
-        title: custom_title
-            .or(ai_title)
-            .or(title)
+        title: provider_title
             .or(first_user_message_title)
             .unwrap_or_else(|| "Claude thread".to_string()),
         provider: AgentProvider::CLAUDE,
         native_session_id: Some(session_id),
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Idle,
         updated_at: updated_at.or(file_updated_at).unwrap_or(now),
         last_message_preview,
@@ -1358,7 +1368,11 @@ fn parse_session_file(path: &Path) -> Option<ParsedSessionFile> {
 
     Some(ParsedSessionFile {
         cwd,
-        thread: HydratedClaudeThread { summary, items },
+        thread: HydratedClaudeThread {
+            summary,
+            items,
+            title_is_provider_preview,
+        },
     })
 }
 
@@ -1405,6 +1419,7 @@ fn upsert_hydrated_assistant_message(
         memory_citation: None,
         citations,
         lifecycle: ContentLifecycle::Complete,
+        error: None,
         created_at,
     });
 }
@@ -1442,6 +1457,7 @@ fn upsert_hydrated_reasoning(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn upsert_hydrated_tool_call(
     items: &mut Vec<ConversationItem>,
     item_index: &mut HashMap<String, usize>,
@@ -2030,6 +2046,7 @@ mod tests {
         .unwrap();
         let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
         assert_eq!(hydrated.summary.title, "Fix login timeout bug");
+        assert!(!hydrated.title_is_provider_preview);
 
         // custom-title (user-assigned) beats ai-title.
         fs::write(
@@ -2045,10 +2062,12 @@ mod tests {
         let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
         assert_eq!(hydrated.summary.title, "login-fix");
 
-        // With no title lines at all, fall back to the first prompt.
+        // With no title lines at all, fall back to the first prompt — but mark
+        // it as a preview so FalconDeck's own titler still runs.
         fs::write(&session_path, user_line).unwrap();
         let hydrated = hydrate_thread_from_file(&session_path, "/tmp/project").unwrap();
         assert_eq!(hydrated.summary.title, "please fix the login timeout bug");
+        assert!(hydrated.title_is_provider_preview);
     }
 
     #[test]

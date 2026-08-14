@@ -120,7 +120,8 @@ export default function AppLayout() {
         // Keep the native drawer gesture available on iOS and give users a
         // forgiving edge target for opening the sidebar.
         swipeEnabled: true,
-        swipeEdgeWidth: 80,
+        swipeEdgeWidth: 120,
+        swipeMinDistance: 24,
         // Full-width sidebar: thread titles are long and the 300pt panel
         // truncated most of them. 'front' keeps the conversation in place
         // underneath instead of shoving it entirely off-screen.

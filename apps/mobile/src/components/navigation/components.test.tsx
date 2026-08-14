@@ -5,13 +5,25 @@ import { renderComponent, cleanup, textOf } from "../../test/render";
 import { ConnectionHeader } from "./ConnectionHeader";
 import { SidebarView } from "./SidebarView";
 import { workspace, thread } from "../../test/factories";
+import { useRelayStore } from "@/store";
 import type {
   ExtensionSidebarFilterDefinition,
   ExtensionSnapshot,
   ProjectGroup,
 } from "@falcondeck/client-core";
 
-afterEach(cleanup);
+const idleRelayState = {
+  connectionStatus: useRelayStore.getState().connectionStatus,
+  isEncrypted: useRelayStore.getState().isEncrypted,
+  isSyncing: useRelayStore.getState().isSyncing,
+  hasSyncedOnce: useRelayStore.getState().hasSyncedOnce,
+  machinePresence: useRelayStore.getState().machinePresence,
+};
+
+afterEach(() => {
+  cleanup();
+  useRelayStore.setState(idleRelayState);
+});
 
 describe("ConnectionHeader component", () => {
   it("renders connected as a label-free status dot", () => {
@@ -53,7 +65,7 @@ describe("ConnectionHeader component", () => {
       />,
     );
     expect(
-      r.root.findByProps({ accessibilityLabel: "Connection: Connecting..." }),
+      r.root.findByProps({ accessibilityLabel: "Connection: Connecting…" }),
     ).toBeTruthy();
   });
   it("keeps securing detail in its accessible label", () => {
@@ -70,7 +82,7 @@ describe("ConnectionHeader component", () => {
     );
     expect(
       r.root.findByProps({
-        accessibilityLabel: "Connection: Securing session...",
+        accessibilityLabel: "Connection: Securing session…",
       }),
     ).toBeTruthy();
   });
@@ -146,6 +158,27 @@ describe("SidebarView component", () => {
     expect(
       renderComponent(<SidebarView {...base} groups={groups} />).toJSON(),
     ).toBeTruthy();
+  });
+  it("says the first sync once — banner only, no duplicate empty state", () => {
+    useRelayStore.setState({
+      connectionStatus: "encrypted",
+      isEncrypted: true,
+      isSyncing: true,
+      hasSyncedOnce: false,
+      machinePresence: {
+        session_id: "s1",
+        daemon_connected: true,
+        daemon_rpc_ready: true,
+        last_seen_at: null,
+      },
+    });
+
+    const text = textOf(renderComponent(<SidebarView {...base} />));
+
+    expect(text).toContain("Syncing your projects…");
+    expect(text.match(/Syncing your projects…/g)).toHaveLength(1);
+    expect(text).not.toContain("Loading your projects");
+    expect(text).not.toContain("No projects");
   });
   it("filters threads with a declarative colour filter", () => {
     const groups: ProjectGroup[] = [

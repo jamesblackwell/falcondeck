@@ -21,6 +21,7 @@ import {
   citationRenderKeys,
   citationTextPreview,
   contentLifecycle,
+  assistantFailureDetail,
   type ConversationCitation,
   type ConversationItem,
   type ConversationMemoryCitation,
@@ -387,6 +388,8 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
   const { theme } = useUnistyles();
   const lifecycle = contentLifecycle(item);
   const isCommentary = item.phase === "commentary";
+  const failureDetail =
+    lifecycle === "error" ? assistantFailureDetail(item) : null;
 
   return (
     <View style={[styles.row, isCommentary ? styles.commentaryRow : undefined]}>
@@ -432,7 +435,11 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
             style={styles.status}
             accessible
             accessibilityRole="alert"
-            accessibilityLabel="Response failed"
+            accessibilityLabel={
+              failureDetail
+                ? `Response failed. ${failureDetail}`
+                : "Response failed"
+            }
             accessibilityLiveRegion="assertive"
           >
             <CircleX
@@ -440,9 +447,16 @@ export const AssistantMessageBlock = memo(function AssistantMessageBlock({
               size={theme.iconSize.xs}
               color={theme.colors.danger.default}
             />
-            <Text variant="caption" size="xs" color="danger">
-              Response failed
-            </Text>
+            <View style={styles.failureCopy}>
+              <Text variant="caption" size="xs" color="danger">
+                Response failed
+              </Text>
+              {failureDetail ? (
+                <Text variant="caption" size="sm" color="danger">
+                  {failureDetail}
+                </Text>
+              ) : null}
+            </View>
           </View>
         ) : null}
       </View>
@@ -471,6 +485,10 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: theme.minTouchTarget,
     flexDirection: "row",
     alignItems: "center",
+    gap: theme.spacing[1],
+  },
+  failureCopy: {
+    flexShrink: 1,
     gap: theme.spacing[1],
   },
   citationContainer: {

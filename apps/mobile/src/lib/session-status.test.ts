@@ -52,6 +52,29 @@ describe('resolveSessionSyncStatus', () => {
     expect(status.detail).toContain('out of date')
   })
 
+  it('leaves the second line empty when it would only restate the headline', () => {
+    const firstLoad = resolveSessionSyncStatus({
+      ...ready,
+      hasSnapshot: false,
+      hasSyncedOnce: false,
+    })
+    expect(firstLoad.label).toBe('Syncing your projects…')
+    expect(firstLoad.detail).toBe('')
+
+    const securing = resolveSessionSyncStatus({
+      ...ready,
+      connectionStatus: 'connected',
+      isEncrypted: false,
+    })
+    expect(securing.detail).toBe('')
+  })
+
+  it('keeps a second line only where the user has something to do', () => {
+    const offline = resolveSessionSyncStatus({ ...ready, daemonConnected: false })
+    expect(offline.label).toBe('Your Mac is offline')
+    expect(offline.detail).toContain('Open FalconDeck')
+  })
+
   it('reports syncing again on a later refetch', () => {
     expect(resolveSessionSyncStatus({ ...ready, isSyncing: true }).stage).toBe('syncing')
   })
@@ -63,7 +86,7 @@ describe('resolveSessionSyncStatus', () => {
       daemonRpcReady: false,
     })
     expect(status.stage).toBe('repairing')
-    expect(status.detail).toContain('sync service is re-registering')
+    expect(status.detail).toContain('not answering yet')
     expect(sessionSendBlockReason(status)).toBe('Repairing sync with your Mac…')
   })
 
@@ -90,7 +113,7 @@ describe('resolveSessionSyncStatus', () => {
       daemonPresenceKnown: false,
     })
     expect(status.stage).toBe('syncing')
-    expect(status.label).toBe('Checking desktop…')
+    expect(status.label).toBe('Checking your Mac…')
   })
 
   it('surfaces an offline desktop once the session itself is healthy', () => {

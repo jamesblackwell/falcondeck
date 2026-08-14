@@ -14,7 +14,11 @@ export interface SessionSyncStatus {
   stage: SessionSyncStage
   /** Short headline, e.g. "Syncing your projects…" */
   label: string
-  /** One line explaining what the user can do about it. */
+  /**
+   * Second line, only when it adds something the label does not — what the
+   * user can do, or what they are looking at meanwhile. Empty for the ordinary
+   * waits, where restating the label just doubles the noise.
+   */
   detail: string
   /** False once the session is usable — the banner hides. */
   isBusy: boolean
@@ -59,7 +63,7 @@ export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncSt
   const busy = (
     stage: Exclude<SessionSyncStage, 'ready'>,
     label: string,
-    detail: string,
+    detail = '',
   ): SessionSyncStatus => ({
     stage,
     label,
@@ -69,58 +73,42 @@ export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncSt
   })
 
   if (connectionStatus === 'claiming') {
-    return busy('pairing', 'Pairing this device…', 'Finishing the handshake with your Mac.')
+    return busy('pairing', 'Pairing this device…')
   }
 
   if (!isEncrypted) {
     // 'connected' means the socket is up but the session data key has not
     // arrived yet, which is its own (usually brief) wait.
     if (connectionStatus === 'connected') {
-      return busy('securing', 'Securing session…', 'Exchanging encryption keys with your Mac.')
+      return busy('securing', 'Securing session…')
     }
     if (connectionStatus === 'connecting' || connectionStatus === 'disconnected') {
       return busy(
         'connecting',
-        'Reconnecting…',
-        hasSnapshot
-          ? 'Showing your last synced projects until the connection is back.'
-          : 'Waiting for the relay connection.',
+        'Reconnecting to your Mac…',
+        hasSnapshot ? 'Showing your last synced threads.' : '',
       )
     }
-    return busy('offline', 'Not connected', 'Pair this device from Settings to start a thread.')
+    return busy('offline', 'Not connected', 'Pair this device from Settings.')
   }
 
   if (input.daemonPresenceKnown === false) {
-    return busy(
-      'syncing',
-      'Checking desktop…',
-      'Waiting for your Mac\'s status from the relay.',
-    )
+    return busy('syncing', 'Checking your Mac…')
   }
 
   if (!daemonConnected) {
-    return busy(
-      'offline',
-      'Desktop offline',
-      'FalconDeck is not running on your Mac, so new threads cannot start.',
-    )
+    return busy('offline', 'Your Mac is offline', 'Open FalconDeck on your Mac to start a thread.')
   }
 
   if (input.daemonRpcReady === false) {
-    return busy(
-      'repairing',
-      'Repairing sync…',
-      'Your Mac is online, but its sync service is re-registering. Retrying automatically.',
-    )
+    return busy('repairing', 'Repairing sync…', 'Your Mac is online but not answering yet.')
   }
 
   if (isSyncing || !hasSyncedOnce) {
     return busy(
       'syncing',
       'Syncing your projects…',
-      hasSnapshot
-        ? 'Threads may be a few seconds out of date until this finishes.'
-        : 'Loading projects and threads from your Mac.',
+      hasSnapshot ? 'Threads may be a few seconds out of date.' : '',
     )
   }
 

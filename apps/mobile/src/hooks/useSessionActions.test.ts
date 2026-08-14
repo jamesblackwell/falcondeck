@@ -1,11 +1,19 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import React from 'react';
-import TestRenderer, { act } from 'react-test-renderer';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import React from "react";
+import TestRenderer, { act } from "react-test-renderer";
 
-import { useRelayStore } from '@/store/relay-store';
-import { useSessionStore } from '@/store/session-store';
-import { useUIStore } from '@/store/ui-store';
-import { useSessionActions } from './useSessionActions';
+import { useRelayStore } from "@/store/relay-store";
+import { useSessionStore } from "@/store/session-store";
+import { useUIStore } from "@/store/ui-store";
+import { useSessionActions } from "./useSessionActions";
 import {
   assistantMessage,
   snapshot,
@@ -13,7 +21,7 @@ import {
   thread,
   threadDetail,
   workspace,
-} from '../test/factories';
+} from "../test/factories";
 
 type RelayStoreState = ReturnType<typeof useRelayStore.getState>;
 const originalConsoleError = console.error;
@@ -21,25 +29,25 @@ const originalConsoleError = console.error;
 function resetAll() {
   useSessionStore.getState().reset();
   useRelayStore.setState({
-    relayUrl: 'https://relay.test',
-    pairingCode: '',
+    relayUrl: "https://relay.test",
+    pairingCode: "",
     sessionId: null,
     deviceId: null,
-    connectionStatus: 'not_connected',
+    connectionStatus: "not_connected",
     machinePresence: null,
     error: null,
     isConnected: false,
     isEncrypted: false,
   });
   useUIStore.setState({
-    conversationKey: 'none:new',
+    conversationKey: "none:new",
     drafts: {},
     attachmentsByConversation: {},
-    draft: '',
+    draft: "",
     attachments: [],
     selectedProvider: null,
     selectedModel: null,
-    selectedEffort: 'medium',
+    selectedEffort: "medium",
     pendingSubmissions: {},
     pendingNewThreadItem: null,
     isSubmitting: false,
@@ -50,11 +58,13 @@ beforeAll(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
-  vi.spyOn(console, 'error').mockImplementation((message, ...args) => {
+  vi.spyOn(console, "error").mockImplementation((message, ...args) => {
     if (
-      typeof message === 'string' &&
-      (message.includes('react-test-renderer is deprecated') ||
-        message.includes('The current testing environment is not configured to support act'))
+      typeof message === "string" &&
+      (message.includes("react-test-renderer is deprecated") ||
+        message.includes(
+          "The current testing environment is not configured to support act",
+        ))
     ) {
       return;
     }
@@ -82,7 +92,7 @@ function mountSessionActions() {
   return {
     getActions() {
       if (!actions) {
-        throw new Error('Session actions hook did not mount');
+        throw new Error("Session actions hook did not mount");
       }
       return actions;
     },
@@ -109,7 +119,7 @@ function imageAgent(provider: string, supportsImages: boolean) {
   return {
     provider,
     label: provider.toUpperCase(),
-    account: { status: 'ready' as const, label: 'ready' },
+    account: { status: "ready" as const, label: "ready" },
     models: [],
     collaboration_modes: [],
     capabilities: {
@@ -126,10 +136,10 @@ function imageAgent(provider: string, supportsImages: boolean) {
   };
 }
 
-describe('submitTurn guards', () => {
+describe("submitTurn guards", () => {
   beforeEach(resetAll);
 
-  it('requires a workspace to be selected', () => {
+  it("requires a workspace to be selected", () => {
     // No snapshot loaded → no workspace
     const session = useSessionStore.getState();
     const workspace = session.snapshot?.workspaces.find(
@@ -138,82 +148,84 @@ describe('submitTurn guards', () => {
     expect(workspace).toBeUndefined();
   });
 
-  it('requires non-empty draft', () => {
+  it("requires non-empty draft", () => {
     const ui = useUIStore.getState();
-    expect(ui.draft.trim()).toBe('');
+    expect(ui.draft.trim()).toBe("");
   });
 
-  it('requires a selected threadId', () => {
+  it("requires a selected threadId", () => {
     const snap = snapshot();
     useSessionStore.getState().applyDaemonEvent({
       seq: 1,
-      emitted_at: '2026-03-16T10:00:00Z',
+      emitted_at: "2026-03-16T10:00:00Z",
       workspace_id: null,
       thread_id: null,
-      event: { type: 'snapshot', snapshot: snap },
+      event: { type: "snapshot", snapshot: snap },
     });
-    useSessionStore.getState().selectWorkspace('workspace-1');
+    useSessionStore.getState().selectWorkspace("workspace-1");
     // selectedThreadId should be set from current_thread_id or null
     const state = useSessionStore.getState();
     // Default workspace has current_thread_id: null, so thread is null
     expect(state.selectedThreadId).toBeNull();
   });
 
-  it('all guards pass when workspace, thread, and draft are set', () => {
+  it("all guards pass when workspace, thread, and draft are set", () => {
     const snap = snapshot({
-      workspaces: [workspace({ id: 'w1', current_thread_id: 't1' })],
-      threads: [thread({ id: 't1', workspace_id: 'w1' })],
+      workspaces: [workspace({ id: "w1", current_thread_id: "t1" })],
+      threads: [thread({ id: "t1", workspace_id: "w1" })],
     });
     useSessionStore.getState().applyDaemonEvent({
       seq: 1,
-      emitted_at: '2026-03-16T10:00:00Z',
+      emitted_at: "2026-03-16T10:00:00Z",
       workspace_id: null,
       thread_id: null,
-      event: { type: 'snapshot', snapshot: snap },
+      event: { type: "snapshot", snapshot: snap },
     });
-    useSessionStore.getState().selectWorkspace('w1');
-    useUIStore.getState().setDraft('Hello world');
+    useSessionStore.getState().selectWorkspace("w1");
+    useUIStore.getState().setDraft("Hello world");
 
     const session = useSessionStore.getState();
     const ui = useUIStore.getState();
-    const ws = session.snapshot?.workspaces.find((w) => w.id === session.selectedWorkspaceId);
+    const ws = session.snapshot?.workspaces.find(
+      (w) => w.id === session.selectedWorkspaceId,
+    );
 
     expect(ws).toBeDefined();
-    expect(ws!.id).toBe('w1');
-    expect(session.selectedThreadId).toBe('t1');
-    expect(ui.draft.trim()).toBe('Hello world');
+    expect(ws!.id).toBe("w1");
+    expect(session.selectedThreadId).toBe("t1");
+    expect(ui.draft.trim()).toBe("Hello world");
   });
 
-  it('allows attachments without draft text', async () => {
+  it("allows attachments without draft text", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
           workspaces: [
             workspace({
-              id: 'w1',
-              current_thread_id: 't1',
-              agents: [imageAgent('codex', true)],
+              id: "w1",
+              current_thread_id: "t1",
+              agents: [imageAgent("codex", true)],
             }),
           ],
-          threads: [thread({ id: 't1', workspace_id: 'w1' })],
+          threads: [thread({ id: "t1", workspace_id: "w1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('w1', 't1');
+    useSessionStore.getState().selectThread("w1", "t1");
     useUIStore.getState().setAttachments([
       {
-        type: 'image',
-        id: 'img-1',
-        name: 'diagram.png',
-        mime_type: 'image/png',
-        url: 'data:image/png;base64,abc',
+        type: "image",
+        id: "img-1",
+        name: "diagram.png",
+        mime_type: "image/png",
+        url: "data:image/png;base64,abc",
       },
     ]);
 
     const rpc = vi.fn().mockResolvedValue(undefined);
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
@@ -226,58 +238,63 @@ describe('submitTurn guards', () => {
     }
 
     expect(rpc).toHaveBeenCalledWith(
-      'turn.start',
+      "turn.start",
       expect.objectContaining({
         inputs: [
           {
-            type: 'image',
-            id: 'img-1',
-            name: 'diagram.png',
-            mime_type: 'image/png',
-            url: 'data:image/png;base64,abc',
+            type: "image",
+            id: "img-1",
+            name: "diagram.png",
+            mime_type: "image/png",
+            url: "data:image/png;base64,abc",
           },
         ],
       }),
-      { requestIdPrefix: 'mobile-turn' },
+      { requestIdPrefix: "mobile-turn" },
     );
   });
 
-  it('keeps images in the composer when the authoritative thread provider rejects them', async () => {
+  it("keeps images in the composer when the authoritative thread provider rejects them", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
           workspaces: [
             workspace({
-              id: 'w1',
-              current_thread_id: 't1',
-              default_provider: 'codex',
-              agents: [imageAgent('codex', true), imageAgent('text-agent', false)],
+              id: "w1",
+              current_thread_id: "t1",
+              default_provider: "codex",
+              agents: [
+                imageAgent("codex", true),
+                imageAgent("text-agent", false),
+              ],
             }),
           ],
-          threads: [thread({ id: 't1', workspace_id: 'w1', provider: 'text-agent' })],
+          threads: [
+            thread({ id: "t1", workspace_id: "w1", provider: "text-agent" }),
+          ],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('w1', 't1');
+    useSessionStore.getState().selectThread("w1", "t1");
     useUIStore.setState({
-      draft: 'Inspect this',
-      selectedProvider: 'codex',
+      draft: "Inspect this",
+      selectedProvider: "codex",
     });
     useUIStore.getState().setAttachments([
       {
-        type: 'image',
-        id: 'img-unsupported',
-        name: 'diagram.png',
-        mime_type: 'image/png',
-        url: 'data:image/png;base64,abc',
+        type: "image",
+        id: "img-unsupported",
+        name: "diagram.png",
+        mime_type: "image/png",
+        url: "data:image/png;base64,abc",
       },
     ]);
 
     const rpc = vi.fn();
     const setError = vi.fn();
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: setError as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
@@ -291,38 +308,38 @@ describe('submitTurn guards', () => {
 
     expect(rpc).not.toHaveBeenCalled();
     expect(setError).toHaveBeenCalledWith(
-      'The selected agent does not support image attachments. Remove the image or choose an agent that supports images.',
+      "The selected agent does not support image attachments. Remove the image or choose an agent that supports images.",
     );
-    expect(useUIStore.getState().draft).toBe('Inspect this');
+    expect(useUIStore.getState().draft).toBe("Inspect this");
     expect(useUIStore.getState().attachments).toHaveLength(1);
     expect(useUIStore.getState().isSubmitting).toBe(false);
   });
 
-  it('states the advertised tier on turns when fast mode is on', async () => {
+  it("states the advertised tier on turns when fast mode is on", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
           workspaces: [
             workspace({
-              id: 'w1',
-              current_thread_id: 't1',
+              id: "w1",
+              current_thread_id: "t1",
               agents: [
                 {
-                  provider: 'codex',
-                  label: 'Codex',
-                  account: { status: 'ready', label: 'ready' },
+                  provider: "codex",
+                  label: "Codex",
+                  account: { status: "ready", label: "ready" },
                   models: [
                     {
-                      id: 'gpt-5.6-sol',
-                      label: 'GPT-5.6-Sol',
+                      id: "gpt-5.6-sol",
+                      label: "GPT-5.6-Sol",
                       is_default: true,
-                      default_reasoning_effort: 'medium',
+                      default_reasoning_effort: "medium",
                       supported_reasoning_efforts: [],
                       service_tiers: [
                         {
-                          id: 'priority',
-                          name: 'Fast',
-                          description: '1.5x speed',
+                          id: "priority",
+                          name: "Fast",
+                          description: "1.5x speed",
                         },
                       ],
                       default_service_tier: null,
@@ -333,23 +350,23 @@ describe('submitTurn guards', () => {
               ],
             }),
           ],
-          threads: [thread({ id: 't1', workspace_id: 'w1' })],
+          threads: [thread({ id: "t1", workspace_id: "w1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('w1', 't1');
+    useSessionStore.getState().selectThread("w1", "t1");
     useUIStore.setState({
-      draft: 'Quick one',
-      selectedProvider: 'codex',
-      selectedModel: 'gpt-5.6-sol',
-      selectedServiceTier: 'priority',
+      draft: "Quick one",
+      selectedProvider: "codex",
+      selectedModel: "gpt-5.6-sol",
+      selectedServiceTier: "priority",
       isSubmitting: false,
     });
 
     const rpc = vi.fn().mockResolvedValue({});
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
@@ -362,60 +379,60 @@ describe('submitTurn guards', () => {
     }
 
     expect(rpc).toHaveBeenCalledWith(
-      'turn.start',
-      expect.objectContaining({ service_tier: 'priority' }),
-      { requestIdPrefix: 'mobile-turn' },
+      "turn.start",
+      expect.objectContaining({ service_tier: "priority" }),
+      { requestIdPrefix: "mobile-turn" },
     );
   });
 
-  it('submits selected skills and restores attachments on failure', async () => {
+  it("submits selected skills and restores attachments on failure", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
           workspaces: [
             workspace({
-              id: 'w1',
-              current_thread_id: 't1',
+              id: "w1",
+              current_thread_id: "t1",
               skills: [
                 {
-                  id: 'skill-1',
-                  label: 'Lint',
-                  alias: '/lint',
-                  availability: 'both',
-                  providers: ['codex', 'claude'],
-                  source_kind: 'project_file',
-                  description: 'Run lint fixes',
+                  id: "skill-1",
+                  label: "Lint",
+                  alias: "/lint",
+                  availability: "both",
+                  providers: ["codex", "claude"],
+                  source_kind: "project_file",
+                  description: "Run lint fixes",
                 },
               ],
             }),
           ],
-          threads: [thread({ id: 't1', workspace_id: 'w1' })],
+          threads: [thread({ id: "t1", workspace_id: "w1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('w1', 't1');
+    useSessionStore.getState().selectThread("w1", "t1");
     useUIStore.setState({
-      draft: 'Please use /lint on this file',
+      draft: "Please use /lint on this file",
       attachments: [
         {
-          type: 'image',
-          id: 'img-1',
-          name: 'error.png',
-          mime_type: 'image/png',
-          url: 'data:image/png;base64,abc',
+          type: "image",
+          id: "img-1",
+          name: "error.png",
+          mime_type: "image/png",
+          url: "data:image/png;base64,abc",
         },
       ],
-      selectedProvider: 'codex',
-      selectedModel: 'gpt-5',
-      selectedEffort: 'high',
+      selectedProvider: "codex",
+      selectedModel: "gpt-5",
+      selectedEffort: "high",
       isSubmitting: false,
     });
 
-    const rpc = vi.fn().mockRejectedValue(new Error('nope'));
+    const rpc = vi.fn().mockRejectedValue(new Error("nope"));
     const setError = vi.fn();
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: setError as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
@@ -428,160 +445,172 @@ describe('submitTurn guards', () => {
     }
 
     expect(rpc).toHaveBeenCalledWith(
-      'turn.start',
+      "turn.start",
       {
-        workspace_id: 'w1',
-        thread_id: 't1',
+        workspace_id: "w1",
+        thread_id: "t1",
         inputs: [
-          { type: 'text', text: 'Please use /lint on this file' },
+          { type: "text", text: "Please use /lint on this file" },
           {
-            type: 'image',
-            id: 'img-1',
-            name: 'error.png',
-            mime_type: 'image/png',
-            url: 'data:image/png;base64,abc',
+            type: "image",
+            id: "img-1",
+            name: "error.png",
+            mime_type: "image/png",
+            url: "data:image/png;base64,abc",
           },
         ],
         user_item_id: expect.stringMatching(/^user-[0-9a-f]{32}$/),
-        selected_skills: [{ skill_id: 'skill-1', alias: '/lint' }],
-        provider: 'codex',
-        model_id: 'gpt-5',
-        reasoning_effort: 'high',
+        selected_skills: [{ skill_id: "skill-1", alias: "/lint" }],
+        provider: "codex",
+        model_id: "gpt-5",
+        reasoning_effort: "high",
         // No permission mode selected maps to codex "never", matching the
         // desktop composer (approvalPolicyForProvider).
-        approval_policy: 'never',
+        approval_policy: "never",
         service_tier: null,
         permission_mode: null,
         sandbox_mode: null,
       },
-      { requestIdPrefix: 'mobile-turn' },
+      { requestIdPrefix: "mobile-turn" },
     );
-    expect(useUIStore.getState().draft).toBe('Please use /lint on this file');
+    expect(useUIStore.getState().draft).toBe("Please use /lint on this file");
     expect(useUIStore.getState().attachments).toEqual([
       {
-        type: 'image',
-        id: 'img-1',
-        name: 'error.png',
-        mime_type: 'image/png',
-        url: 'data:image/png;base64,abc',
+        type: "image",
+        id: "img-1",
+        name: "error.png",
+        mime_type: "image/png",
+        url: "data:image/png;base64,abc",
       },
     ]);
-    expect(setError).toHaveBeenCalledWith('nope');
+    expect(setError).toHaveBeenCalledWith("nope");
   });
 
-  it('merges input added while a pending send fails', async () => {
+  it("merges input added while a pending send fails", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'w1', current_thread_id: 't1' })],
-          threads: [thread({ id: 't1', workspace_id: 'w1' })],
+          workspaces: [workspace({ id: "w1", current_thread_id: "t1" })],
+          threads: [thread({ id: "t1", workspace_id: "w1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('w1', 't1');
+    useSessionStore.getState().selectThread("w1", "t1");
     const failedImage = {
-      type: 'image' as const,
-      id: 'img-failed',
-      name: 'failed.png',
-      mime_type: 'image/png',
-      url: 'data:image/png;base64,failed',
+      type: "image" as const,
+      id: "img-failed",
+      name: "failed.png",
+      mime_type: "image/png",
+      url: "data:image/png;base64,failed",
     };
     const newerImage = {
-      type: 'image' as const,
-      id: 'img-newer',
-      name: 'newer.png',
-      mime_type: 'image/png',
-      url: 'data:image/png;base64,newer',
+      type: "image" as const,
+      id: "img-newer",
+      name: "newer.png",
+      mime_type: "image/png",
+      url: "data:image/png;base64,newer",
     };
-    useUIStore.getState().setDraft('Failed message');
+    useUIStore.getState().setDraft("Failed message");
     useUIStore.getState().setAttachments([failedImage]);
 
     const pendingRpc = createDeferred<unknown>();
     useRelayStore.setState({
-      _callRpc: vi.fn().mockReturnValue(pendingRpc.promise) as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: vi
+        .fn()
+        .mockReturnValue(pendingRpc.promise) as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
     try {
       const submission = harness.getActions().submitTurn();
-      expect(useUIStore.getState().draft).toBe('Failed message');
+      expect(useUIStore.getState().draft).toBe("Failed message");
       expect(useUIStore.getState().attachments).toEqual([failedImage]);
 
-      useUIStore.getState().setDraft('New draft');
+      useUIStore.getState().setDraft("New draft");
       useUIStore.getState().setAttachments([newerImage]);
-      pendingRpc.reject(new Error('offline'));
+      pendingRpc.reject(new Error("offline"));
       await act(async () => submission);
 
-      expect(useUIStore.getState().draft).toBe('Failed message\n\nNew draft');
-      expect(useUIStore.getState().attachments).toEqual([failedImage, newerImage]);
+      expect(useUIStore.getState().draft).toBe("Failed message\n\nNew draft");
+      expect(useUIStore.getState().attachments).toEqual([
+        failedImage,
+        newerImage,
+      ]);
     } finally {
       harness.unmount();
     }
   });
 
-  it('starts and sends a new thread without reclaiming navigation made while it was pending', async () => {
-    const existingThread = thread({ id: 't-existing', workspace_id: 'w1' });
+  it("starts and sends a new thread without reclaiming navigation made while it was pending", async () => {
+    const existingThread = thread({ id: "t-existing", workspace_id: "w1" });
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'w1', current_thread_id: 't-existing' })],
+          workspaces: [
+            workspace({ id: "w1", current_thread_id: "t-existing" }),
+          ],
           threads: [existingThread],
         }),
       ),
     );
-    useSessionStore.getState().selectNewThread('w1');
-    useUIStore.getState().setDraft('Start this in a new thread');
+    useSessionStore.getState().selectNewThread("w1");
+    useUIStore.getState().setDraft("Start this in a new thread");
 
     const start = createDeferred<{
       workspace: ReturnType<typeof workspace>;
       thread: ReturnType<typeof thread>;
     }>();
-    const rpc = vi.fn().mockReturnValueOnce(start.promise).mockResolvedValueOnce({ ok: true });
+    const rpc = vi
+      .fn()
+      .mockReturnValueOnce(start.promise)
+      .mockResolvedValueOnce({ ok: true });
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
     try {
       const submission = harness.getActions().submitTurn();
       expect(useUIStore.getState().pendingNewThreadItem).toMatchObject({
-        conversationKey: 'w1:new',
+        conversationKey: "w1:new",
         item: {
-          kind: 'user_message',
-          text: 'Start this in a new thread',
+          kind: "user_message",
+          text: "Start this in a new thread",
           pending: true,
         },
       });
-      useSessionStore.getState().selectThread('w1', 't-existing');
-      useUIStore.getState().setDraft('Keep the existing thread draft');
+      useSessionStore.getState().selectThread("w1", "t-existing");
+      useUIStore.getState().setDraft("Keep the existing thread draft");
       expect(useUIStore.getState().isSubmitting).toBe(false);
 
       start.resolve({
-        workspace: workspace({ id: 'w1', current_thread_id: 't-new' }),
-        thread: thread({ id: 't-new', workspace_id: 'w1' }),
+        workspace: workspace({ id: "w1", current_thread_id: "t-new" }),
+        thread: thread({ id: "t-new", workspace_id: "w1" }),
       });
       await act(async () => submission);
 
-      expect(useSessionStore.getState().selectedThreadId).toBe('t-existing');
-      expect(useUIStore.getState().draft).toBe('Keep the existing thread draft');
+      expect(useSessionStore.getState().selectedThreadId).toBe("t-existing");
+      expect(useUIStore.getState().draft).toBe(
+        "Keep the existing thread draft",
+      );
       expect(useUIStore.getState().pendingNewThreadItem).toBeNull();
-      expect(useSessionStore.getState().threadItems['t-new']).toEqual([
+      expect(useSessionStore.getState().threadItems["t-new"]).toEqual([
         expect.objectContaining({
-          kind: 'user_message',
-          text: 'Start this in a new thread',
+          kind: "user_message",
+          text: "Start this in a new thread",
           pending: true,
         }),
       ]);
       expect(rpc).toHaveBeenNthCalledWith(
         2,
-        'turn.start',
+        "turn.start",
         expect.objectContaining({
-          thread_id: 't-new',
-          inputs: [{ type: 'text', text: 'Start this in a new thread' }],
+          thread_id: "t-new",
+          inputs: [{ type: "text", text: "Start this in a new thread" }],
         }),
-        { requestIdPrefix: 'mobile-turn' },
+        { requestIdPrefix: "mobile-turn" },
       );
     } finally {
       harness.unmount();
@@ -589,86 +618,25 @@ describe('submitTurn guards', () => {
   });
 });
 
-describe('editResend', () => {
+describe("retryResponse", () => {
   beforeEach(resetAll);
 
-  it('keeps a newer thread selection and saves the late branch draft in place', async () => {
-    const sourceThread = thread({ id: 't1', workspace_id: 'w1' });
-    const otherThread = thread({ id: 't-other', workspace_id: 'w1' });
-    useSessionStore.getState().applyDaemonEvent(
-      snapshotEvent(
-        snapshot({
-          workspaces: [workspace({ id: 'w1', current_thread_id: 't1' })],
-          threads: [sourceThread, otherThread],
-        }),
-      ),
-    );
-    useSessionStore.getState().selectThread('w1', 't1');
-
-    const branchThread = thread({ id: 't-branch', workspace_id: 'w1' });
-    const fork = createDeferred<{
-      workspace: ReturnType<typeof workspace>;
-      thread: ReturnType<typeof thread>;
-    }>();
-    useRelayStore.setState({
-      _callRpc: vi.fn().mockReturnValue(fork.promise) as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
-    } as Partial<RelayStoreState>);
-    const message = {
-      kind: 'user_message' as const,
-      id: 'user-edit',
-      text: 'Original prompt',
-      attachments: [],
-      turn_id: 'turn-2',
-      previous_turn_id: 'turn-1',
-      created_at: '2026-08-09T12:00:00Z',
-    };
-
-    const harness = mountSessionActions();
-    try {
-      const edit = harness.getActions().editResend(message);
-      useSessionStore.getState().selectThread('w1', 't-other');
-      useUIStore.getState().setDraft('Unrelated draft');
-
-      fork.resolve({
-        workspace: workspace({ id: 'w1', current_thread_id: 't-branch' }),
-        thread: branchThread,
-      });
-      await act(async () => edit);
-
-      expect(useSessionStore.getState().selectedThreadId).toBe('t-other');
-      expect(useUIStore.getState().draft).toBe('Unrelated draft');
-      expect(
-        useSessionStore.getState().snapshot?.threads.some((entry) => entry.id === 't-branch'),
-      ).toBe(true);
-
-      useSessionStore.getState().selectThread('w1', 't-branch');
-      expect(useUIStore.getState().draft).toBe('Original prompt');
-    } finally {
-      harness.unmount();
-    }
-  });
-});
-
-describe('retryResponse', () => {
-  beforeEach(resetAll);
-
-  it('forks at the safe boundary and resends the exact original input', async () => {
+  it("forks at the safe boundary and resends the exact original input", async () => {
     const sourceThread = thread({
-      id: 't1',
-      workspace_id: 'w1',
-      provider: 'codex',
+      id: "t1",
+      workspace_id: "w1",
+      provider: "codex",
       agent: {
-        model_id: 'gpt-5',
-        reasoning_effort: 'high',
+        model_id: "gpt-5",
+        reasoning_effort: "high",
         collaboration_mode_id: null,
-        approval_policy: 'on-request',
-        service_tier: 'priority',
-        permission_mode: 'workspace-write',
-        sandbox_mode: 'workspace-write',
+        approval_policy: "on-request",
+        service_tier: "priority",
+        permission_mode: "workspace-write",
+        sandbox_mode: "workspace-write",
       },
     });
-    const sourceWorkspace = workspace({ id: 'w1', current_thread_id: 't1' });
+    const sourceWorkspace = workspace({ id: "w1", current_thread_id: "t1" });
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
@@ -677,13 +645,13 @@ describe('retryResponse', () => {
         }),
       ),
     );
-    useSessionStore.getState().selectThread('w1', 't1');
+    useSessionStore.getState().selectThread("w1", "t1");
 
-    const branchWorkspace = workspace({ id: 'w1', current_thread_id: 't2' });
+    const branchWorkspace = workspace({ id: "w1", current_thread_id: "t2" });
     const branchThread = thread({
-      id: 't2',
-      workspace_id: 'w1',
-      provider: 'codex',
+      id: "t2",
+      workspace_id: "w1",
+      provider: "codex",
     });
     const rpc = vi
       .fn()
@@ -693,25 +661,25 @@ describe('retryResponse', () => {
       })
       .mockResolvedValueOnce({ ok: true });
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
     const message = {
-      kind: 'user_message' as const,
-      id: 'user-2',
-      text: 'Retry this prompt',
+      kind: "user_message" as const,
+      id: "user-2",
+      text: "Retry this prompt",
       attachments: [
         {
-          type: 'image' as const,
-          id: 'image-1',
-          name: 'diagram.png',
-          mime_type: 'image/png',
-          url: 'data:image/png;base64,abc',
+          type: "image" as const,
+          id: "image-1",
+          name: "diagram.png",
+          mime_type: "image/png",
+          url: "data:image/png;base64,abc",
         },
       ],
-      turn_id: 'turn-2',
-      previous_turn_id: 'turn-1',
-      created_at: '2026-08-09T12:00:00Z',
+      turn_id: "turn-2",
+      previous_turn_id: "turn-1",
+      created_at: "2026-08-09T12:00:00Z",
     };
 
     const harness = mountSessionActions();
@@ -725,92 +693,98 @@ describe('retryResponse', () => {
 
     expect(rpc).toHaveBeenNthCalledWith(
       1,
-      'thread.fork',
+      "thread.fork",
       {
-        workspace_id: 'w1',
-        thread_id: 't1',
-        last_turn_id: 'turn-1',
+        workspace_id: "w1",
+        thread_id: "t1",
+        last_turn_id: "turn-1",
       },
-      { requestIdPrefix: 'mobile-fork' },
+      { requestIdPrefix: "mobile-fork" },
     );
     expect(rpc).toHaveBeenNthCalledWith(
       2,
-      'turn.start',
+      "turn.start",
       expect.objectContaining({
-        workspace_id: 'w1',
-        thread_id: 't2',
-        inputs: [{ type: 'text', text: 'Retry this prompt' }, message.attachments[0]],
-        provider: 'codex',
-        model_id: 'gpt-5',
-        reasoning_effort: 'high',
-        service_tier: 'priority',
+        workspace_id: "w1",
+        thread_id: "t2",
+        inputs: [
+          { type: "text", text: "Retry this prompt" },
+          message.attachments[0],
+        ],
+        provider: "codex",
+        model_id: "gpt-5",
+        reasoning_effort: "high",
+        service_tier: "priority",
       }),
-      { requestIdPrefix: 'mobile-retry-turn' },
+      { requestIdPrefix: "mobile-retry-turn" },
     );
-    expect(useSessionStore.getState().selectedThreadId).toBe('t2');
+    expect(useSessionStore.getState().selectedThreadId).toBe("t2");
     expect(useUIStore.getState().isSubmitting).toBe(false);
   });
 
-  it('continues a retry in its branch without hijacking a newer selection', async () => {
-    const sourceThread = thread({ id: 't1', workspace_id: 'w1' });
-    const otherThread = thread({ id: 't-other', workspace_id: 'w1' });
+  it("continues a retry in its branch without hijacking a newer selection", async () => {
+    const sourceThread = thread({ id: "t1", workspace_id: "w1" });
+    const otherThread = thread({ id: "t-other", workspace_id: "w1" });
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'w1', current_thread_id: 't1' })],
+          workspaces: [workspace({ id: "w1", current_thread_id: "t1" })],
           threads: [sourceThread, otherThread],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('w1', 't1');
+    useSessionStore.getState().selectThread("w1", "t1");
 
     const fork = createDeferred<{
       workspace: ReturnType<typeof workspace>;
       thread: ReturnType<typeof thread>;
     }>();
     const turn = createDeferred<unknown>();
-    const rpc = vi.fn().mockReturnValueOnce(fork.promise).mockReturnValueOnce(turn.promise);
+    const rpc = vi
+      .fn()
+      .mockReturnValueOnce(fork.promise)
+      .mockReturnValueOnce(turn.promise);
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
     const message = {
-      kind: 'user_message' as const,
-      id: 'user-retry-race',
-      text: 'Retry in the background',
+      kind: "user_message" as const,
+      id: "user-retry-race",
+      text: "Retry in the background",
       attachments: [],
-      turn_id: 'turn-2',
-      previous_turn_id: 'turn-1',
-      created_at: '2026-08-09T12:00:00Z',
+      turn_id: "turn-2",
+      previous_turn_id: "turn-1",
+      created_at: "2026-08-09T12:00:00Z",
     };
 
     const harness = mountSessionActions();
     try {
       const retry = harness.getActions().retryResponse(message);
       expect(useUIStore.getState().isSubmitting).toBe(true);
-      useSessionStore.getState().selectThread('w1', 't-other');
+      useSessionStore.getState().selectThread("w1", "t-other");
       expect(useUIStore.getState().isSubmitting).toBe(false);
 
       fork.resolve({
-        workspace: workspace({ id: 'w1', current_thread_id: 't-branch' }),
-        thread: thread({ id: 't-branch', workspace_id: 'w1' }),
+        workspace: workspace({ id: "w1", current_thread_id: "t-branch" }),
+        thread: thread({ id: "t-branch", workspace_id: "w1" }),
       });
       await act(async () => {
         await Promise.resolve();
       });
 
-      expect(useSessionStore.getState().selectedThreadId).toBe('t-other');
+      expect(useSessionStore.getState().selectedThreadId).toBe("t-other");
       expect(useUIStore.getState().isSubmitting).toBe(false);
       expect(rpc).toHaveBeenNthCalledWith(
         2,
-        'turn.start',
-        expect.objectContaining({ thread_id: 't-branch' }),
-        { requestIdPrefix: 'mobile-retry-turn' },
+        "turn.start",
+        expect.objectContaining({ thread_id: "t-branch" }),
+        { requestIdPrefix: "mobile-retry-turn" },
       );
 
       turn.resolve({ ok: true });
       await act(async () => retry);
-      expect(useSessionStore.getState().selectedThreadId).toBe('t-other');
+      expect(useSessionStore.getState().selectedThreadId).toBe("t-other");
       expect(useUIStore.getState().isSubmitting).toBe(false);
     } finally {
       harness.unmount();
@@ -818,107 +792,113 @@ describe('retryResponse', () => {
   });
 });
 
-describe('respondApproval', () => {
+describe("respondApproval", () => {
   beforeEach(resetAll);
 
-  it('requires a workspace to be selected', () => {
+  it("requires a workspace to be selected", () => {
     const session = useSessionStore.getState();
-    const ws = session.snapshot?.workspaces.find((w) => w.id === session.selectedWorkspaceId);
+    const ws = session.snapshot?.workspaces.find(
+      (w) => w.id === session.selectedWorkspaceId,
+    );
     expect(ws).toBeUndefined();
   });
 
-  it('workspace is available when snapshot is loaded and selected', () => {
+  it("workspace is available when snapshot is loaded and selected", () => {
     const snap = snapshot();
     useSessionStore.getState().applyDaemonEvent({
       seq: 1,
-      emitted_at: '2026-03-16T10:00:00Z',
+      emitted_at: "2026-03-16T10:00:00Z",
       workspace_id: null,
       thread_id: null,
-      event: { type: 'snapshot', snapshot: snap },
+      event: { type: "snapshot", snapshot: snap },
     });
-    useSessionStore.getState().selectWorkspace('workspace-1');
+    useSessionStore.getState().selectWorkspace("workspace-1");
 
     const session = useSessionStore.getState();
-    const ws = session.snapshot?.workspaces.find((w) => w.id === session.selectedWorkspaceId);
+    const ws = session.snapshot?.workspaces.find(
+      (w) => w.id === session.selectedWorkspaceId,
+    );
     expect(ws).toBeDefined();
-    expect(ws!.id).toBe('workspace-1');
+    expect(ws!.id).toBe("workspace-1");
   });
 });
 
-describe('respondInteractive', () => {
+describe("respondInteractive", () => {
   beforeEach(resetAll);
 
-  it('sends structured question answers through the generic interactive RPC', async () => {
+  it("sends structured question answers through the generic interactive RPC", async () => {
     const rpc = vi.fn().mockResolvedValue({ ok: true });
     const setError = vi.fn();
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: setError as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
     const harness = mountSessionActions();
     try {
       await act(async () => {
-        await harness.getActions().respondInteractive('workspace-1', 'question-1', {
-          kind: 'question',
-          answers: { framework: ['React Native'], token: ['secret'] },
-        });
+        await harness
+          .getActions()
+          .respondInteractive("workspace-1", "question-1", {
+            kind: "question",
+            answers: { framework: ["React Native"], token: ["secret"] },
+          });
       });
     } finally {
       harness.unmount();
     }
 
     expect(rpc).toHaveBeenCalledWith(
-      'interactive.respond',
+      "interactive.respond",
       {
-        workspace_id: 'workspace-1',
-        request_id: 'question-1',
+        workspace_id: "workspace-1",
+        request_id: "question-1",
         response: {
-          kind: 'question',
-          answers: { framework: ['React Native'], token: ['secret'] },
+          kind: "question",
+          answers: { framework: ["React Native"], token: ["secret"] },
         },
       },
-      { requestIdPrefix: 'mobile-interactive' },
+      { requestIdPrefix: "mobile-interactive" },
     );
     expect(setError).toHaveBeenCalledWith(null);
   });
 
-  it('reports and rethrows failures so the pinned answer remains retryable', async () => {
-    const rpc = vi.fn().mockRejectedValue(new Error('Relay disconnected'));
+  it("reports and rethrows failures so the pinned answer remains retryable", async () => {
+    const rpc = vi.fn().mockRejectedValue(new Error("Relay disconnected"));
     const setError = vi.fn();
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: setError as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
     const harness = mountSessionActions();
     try {
       await expect(
-        harness.getActions().respondInteractive('workspace-1', 'question-1', {
-          kind: 'question',
-          answers: { framework: ['React Native'] },
+        harness.getActions().respondInteractive("workspace-1", "question-1", {
+          kind: "question",
+          answers: { framework: ["React Native"] },
         }),
-      ).rejects.toThrow('Relay disconnected');
+      ).rejects.toThrow("Relay disconnected");
     } finally {
       harness.unmount();
     }
-    expect(setError).toHaveBeenCalledWith('Relay disconnected');
+    expect(setError).toHaveBeenCalledWith("Relay disconnected");
   });
 });
 
-describe('_sendMessage', () => {
+describe("_sendMessage", () => {
   beforeEach(resetAll);
 
-  it('throws when socket is not open', () => {
+  it("throws when socket is not open", () => {
     const relay = useRelayStore.getState();
     expect(() => {
-      relay._sendMessage({ type: 'ping' });
-    }).toThrow('Remote connection is not ready');
+      relay._sendMessage({ type: "ping" });
+    }).toThrow("Remote connection is not ready");
   });
 });
 
-describe('isSubmitting state management', () => {
+describe("isSubmitting state management", () => {
   beforeEach(resetAll);
 
-  it('tracks submission lifecycle', () => {
+  it("tracks submission lifecycle", () => {
     const ui = useUIStore.getState();
 
     expect(useUIStore.getState().isSubmitting).toBe(false);
@@ -930,51 +910,53 @@ describe('isSubmitting state management', () => {
     expect(useUIStore.getState().isSubmitting).toBe(false);
   });
 
-  it('clearDraft resets draft text', () => {
-    useUIStore.getState().setDraft('Some message');
-    expect(useUIStore.getState().draft).toBe('Some message');
+  it("clearDraft resets draft text", () => {
+    useUIStore.getState().setDraft("Some message");
+    expect(useUIStore.getState().draft).toBe("Some message");
 
     useUIStore.getState().clearDraft();
-    expect(useUIStore.getState().draft).toBe('');
+    expect(useUIStore.getState().draft).toBe("");
   });
 });
 
-describe('loadThreadDetail', () => {
+describe("loadThreadDetail", () => {
   beforeEach(resetAll);
 
-  it('keeps a background thread refresh failure out of the global error banner', async () => {
+  it("keeps a background thread refresh failure out of the global error banner", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
-          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+          workspaces: [
+            workspace({ id: "workspace-1", current_thread_id: "thread-1" }),
+          ],
+          threads: [thread({ id: "thread-1", workspace_id: "workspace-1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+    useSessionStore.getState().selectThread("workspace-1", "thread-1");
 
     const setError = vi.fn();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     useRelayStore.setState({
       _callRpc: vi
         .fn()
         .mockRejectedValue(
-          new Error('Timed out waiting for thread.detail'),
-        ) as RelayStoreState['_callRpc'],
-      _setError: setError as RelayStoreState['_setError'],
+          new Error("Timed out waiting for thread.detail"),
+        ) as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
     try {
       await act(async () => {
-        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1');
+        await harness.getActions().loadThreadDetail("workspace-1", "thread-1");
       });
 
       expect(setError).not.toHaveBeenCalled();
       expect(warn).toHaveBeenCalledWith(
-        'Failed to refresh thread detail',
+        "Failed to refresh thread detail",
         expect.objectContaining({
-          message: 'Timed out waiting for thread.detail',
+          message: "Timed out waiting for thread.detail",
         }),
       );
     } finally {
@@ -983,155 +965,172 @@ describe('loadThreadDetail', () => {
     }
   });
 
-  it('requests the newest tail window for the selected thread', async () => {
+  it("requests the newest tail window for the selected thread", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
-          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+          workspaces: [
+            workspace({ id: "workspace-1", current_thread_id: "thread-1" }),
+          ],
+          threads: [thread({ id: "thread-1", workspace_id: "workspace-1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+    useSessionStore.getState().selectThread("workspace-1", "thread-1");
 
     const rpc = vi.fn().mockResolvedValue(
       threadDetail({
-        items: [assistantMessage('msg-1', 'hello')],
+        items: [assistantMessage("msg-1", "hello")],
         has_older: false,
-        oldest_item_id: 'msg-1',
-        newest_item_id: 'msg-1',
+        oldest_item_id: "msg-1",
+        newest_item_id: "msg-1",
         is_partial: true,
       }),
     );
     const setError = vi.fn();
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: setError as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
     try {
       await act(async () => {
-        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1');
+        await harness.getActions().loadThreadDetail("workspace-1", "thread-1");
       });
     } finally {
       harness.unmount();
     }
 
     expect(rpc).toHaveBeenCalledWith(
-      'thread.detail',
+      "thread.detail",
       {
-        workspace_id: 'workspace-1',
-        thread_id: 'thread-1',
-        mode: 'tail',
+        workspace_id: "workspace-1",
+        thread_id: "thread-1",
+        mode: "tail",
         limit: 150,
       },
-      { requestIdPrefix: 'mobile-detail' },
+      { requestIdPrefix: "mobile-detail" },
     );
-    expect(useSessionStore.getState().threadDetail?.items.map((item) => item.id)).toEqual([
-      'msg-1',
-    ]);
+    expect(
+      useSessionStore.getState().threadDetail?.items.map((item) => item.id),
+    ).toEqual(["msg-1"]);
     expect(setError).toHaveBeenCalledWith(null);
   });
 
-  it('requests older history from the current cached oldest item and prepends it', async () => {
+  it("requests older history from the current cached oldest item and prepends it", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
-          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+          workspaces: [
+            workspace({ id: "workspace-1", current_thread_id: "thread-1" }),
+          ],
+          threads: [thread({ id: "thread-1", workspace_id: "workspace-1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+    useSessionStore.getState().selectThread("workspace-1", "thread-1");
     useSessionStore.getState().setThreadDetail(
       threadDetail({
-        items: [assistantMessage('msg-2', 'second'), assistantMessage('msg-3', 'third')],
+        items: [
+          assistantMessage("msg-2", "second"),
+          assistantMessage("msg-3", "third"),
+        ],
         has_older: true,
-        oldest_item_id: 'msg-2',
-        newest_item_id: 'msg-3',
+        oldest_item_id: "msg-2",
+        newest_item_id: "msg-3",
         is_partial: true,
       }),
     );
 
     const rpc = vi.fn().mockResolvedValue(
       threadDetail({
-        items: [assistantMessage('msg-0', 'zero'), assistantMessage('msg-1', 'one')],
+        items: [
+          assistantMessage("msg-0", "zero"),
+          assistantMessage("msg-1", "one"),
+        ],
         has_older: false,
-        oldest_item_id: 'msg-0',
-        newest_item_id: 'msg-1',
+        oldest_item_id: "msg-0",
+        newest_item_id: "msg-1",
         is_partial: true,
       }),
     );
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
     try {
       await act(async () => {
-        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1', { older: true });
+        await harness
+          .getActions()
+          .loadThreadDetail("workspace-1", "thread-1", { older: true });
       });
     } finally {
       harness.unmount();
     }
 
     expect(rpc).toHaveBeenCalledWith(
-      'thread.detail',
+      "thread.detail",
       {
-        workspace_id: 'workspace-1',
-        thread_id: 'thread-1',
-        mode: 'before',
-        before_item_id: 'msg-2',
+        workspace_id: "workspace-1",
+        thread_id: "thread-1",
+        mode: "before",
+        before_item_id: "msg-2",
         limit: 100,
       },
-      { requestIdPrefix: 'mobile-detail-older' },
+      { requestIdPrefix: "mobile-detail-older" },
     );
-    expect(useSessionStore.getState().threadItems['thread-1']?.map((item) => item.id)).toEqual([
-      'msg-0',
-      'msg-1',
-      'msg-2',
-      'msg-3',
-    ]);
+    expect(
+      useSessionStore
+        .getState()
+        .threadItems["thread-1"]?.map((item) => item.id),
+    ).toEqual(["msg-0", "msg-1", "msg-2", "msg-3"]);
   });
 
-  it('shows a friendly error when user-requested older history fails', async () => {
+  it("shows a friendly error when user-requested older history fails", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
-          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+          workspaces: [
+            workspace({ id: "workspace-1", current_thread_id: "thread-1" }),
+          ],
+          threads: [thread({ id: "thread-1", workspace_id: "workspace-1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+    useSessionStore.getState().selectThread("workspace-1", "thread-1");
     useSessionStore.getState().setThreadDetail(
       threadDetail({
-        items: [assistantMessage('msg-2', 'second')],
+        items: [assistantMessage("msg-2", "second")],
         has_older: true,
-        oldest_item_id: 'msg-2',
+        oldest_item_id: "msg-2",
       }),
     );
 
     const setError = vi.fn();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     useRelayStore.setState({
       _callRpc: vi
         .fn()
         .mockRejectedValue(
-          new Error('Timed out waiting for thread.detail'),
-        ) as RelayStoreState['_callRpc'],
-      _setError: setError as RelayStoreState['_setError'],
+          new Error("Timed out waiting for thread.detail"),
+        ) as RelayStoreState["_callRpc"],
+      _setError: setError as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
     try {
       await act(async () => {
-        await harness.getActions().loadThreadDetail('workspace-1', 'thread-1', { older: true });
+        await harness
+          .getActions()
+          .loadThreadDetail("workspace-1", "thread-1", { older: true });
       });
 
-      expect(setError).toHaveBeenCalledWith("Couldn't load older messages. Try again.");
+      expect(setError).toHaveBeenCalledWith(
+        "Couldn't load older messages. Try again.",
+      );
       expect(warn).not.toHaveBeenCalled();
     } finally {
       harness.unmount();
@@ -1139,38 +1138,42 @@ describe('loadThreadDetail', () => {
     }
   });
 
-  it('ignores stale detail responses after the user switches threads', async () => {
+  it("ignores stale detail responses after the user switches threads", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
+          workspaces: [
+            workspace({ id: "workspace-1", current_thread_id: "thread-1" }),
+          ],
           threads: [
-            thread({ id: 'thread-1', workspace_id: 'workspace-1' }),
-            thread({ id: 'thread-2', workspace_id: 'workspace-1' }),
+            thread({ id: "thread-1", workspace_id: "workspace-1" }),
+            thread({ id: "thread-2", workspace_id: "workspace-1" }),
           ],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+    useSessionStore.getState().selectThread("workspace-1", "thread-1");
 
     const deferred = createDeferred<ReturnType<typeof threadDetail>>();
     const rpc = vi.fn().mockReturnValue(deferred.promise);
     useRelayStore.setState({
-      _callRpc: rpc as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: rpc as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
     try {
       const loadPromise = act(async () => {
-        const pending = harness.getActions().loadThreadDetail('workspace-1', 'thread-1');
-        useSessionStore.getState().selectThread('workspace-1', 'thread-2');
+        const pending = harness
+          .getActions()
+          .loadThreadDetail("workspace-1", "thread-1");
+        useSessionStore.getState().selectThread("workspace-1", "thread-2");
         deferred.resolve(
           threadDetail({
-            items: [assistantMessage('msg-late', 'late')],
+            items: [assistantMessage("msg-late", "late")],
             has_older: false,
-            oldest_item_id: 'msg-late',
-            newest_item_id: 'msg-late',
+            oldest_item_id: "msg-late",
+            newest_item_id: "msg-late",
             is_partial: true,
           }),
         );
@@ -1181,33 +1184,37 @@ describe('loadThreadDetail', () => {
       harness.unmount();
     }
 
-    expect(useSessionStore.getState().selectedThreadId).toBe('thread-2');
+    expect(useSessionStore.getState().selectedThreadId).toBe("thread-2");
     expect(useSessionStore.getState().threadDetail).toBeNull();
-    expect(useSessionStore.getState().threadItems['thread-1']).toBeUndefined();
+    expect(useSessionStore.getState().threadItems["thread-1"]).toBeUndefined();
   });
 
-  it('discards an older page when a refresh changes its requested boundary', async () => {
+  it("discards an older page when a refresh changes its requested boundary", async () => {
     useSessionStore.getState().applyDaemonEvent(
       snapshotEvent(
         snapshot({
-          workspaces: [workspace({ id: 'workspace-1', current_thread_id: 'thread-1' })],
-          threads: [thread({ id: 'thread-1', workspace_id: 'workspace-1' })],
+          workspaces: [
+            workspace({ id: "workspace-1", current_thread_id: "thread-1" }),
+          ],
+          threads: [thread({ id: "thread-1", workspace_id: "workspace-1" })],
         }),
       ),
     );
-    useSessionStore.getState().selectThread('workspace-1', 'thread-1');
+    useSessionStore.getState().selectThread("workspace-1", "thread-1");
     useSessionStore.getState().setThreadDetail(
       threadDetail({
-        items: [assistantMessage('old-boundary', 'cached tail')],
+        items: [assistantMessage("old-boundary", "cached tail")],
         has_older: true,
-        oldest_item_id: 'old-boundary',
+        oldest_item_id: "old-boundary",
       }),
     );
 
     const deferred = createDeferred<ReturnType<typeof threadDetail>>();
     useRelayStore.setState({
-      _callRpc: vi.fn().mockReturnValue(deferred.promise) as RelayStoreState['_callRpc'],
-      _setError: vi.fn() as RelayStoreState['_setError'],
+      _callRpc: vi
+        .fn()
+        .mockReturnValue(deferred.promise) as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
     } as Partial<RelayStoreState>);
 
     const harness = mountSessionActions();
@@ -1215,19 +1222,19 @@ describe('loadThreadDetail', () => {
       await act(async () => {
         const pending = harness
           .getActions()
-          .loadThreadDetail('workspace-1', 'thread-1', { older: true });
+          .loadThreadDetail("workspace-1", "thread-1", { older: true });
         useSessionStore.getState().setThreadDetail(
           threadDetail({
-            items: [assistantMessage('fresh-boundary', 'fresh tail')],
+            items: [assistantMessage("fresh-boundary", "fresh tail")],
             has_older: true,
-            oldest_item_id: 'fresh-boundary',
+            oldest_item_id: "fresh-boundary",
           }),
         );
         deferred.resolve(
           threadDetail({
-            items: [assistantMessage('stale-older', 'stale page')],
+            items: [assistantMessage("stale-older", "stale page")],
             has_older: false,
-            oldest_item_id: 'stale-older',
+            oldest_item_id: "stale-older",
           }),
         );
         await pending;
@@ -1236,8 +1243,10 @@ describe('loadThreadDetail', () => {
       harness.unmount();
     }
 
-    expect(useSessionStore.getState().threadItems['thread-1']?.map((item) => item.id)).toEqual([
-      'fresh-boundary',
-    ]);
+    expect(
+      useSessionStore
+        .getState()
+        .threadItems["thread-1"]?.map((item) => item.id),
+    ).toEqual(["fresh-boundary"]);
   });
 });

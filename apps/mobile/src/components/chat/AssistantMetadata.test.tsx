@@ -39,8 +39,8 @@ describe("AssistantMessageBlock metadata", () => {
     );
     expect(textOf(renderer)).toContain("PROGRESS UPDATE");
     expect(
-      renderer.root.findByProps({ accessibilityLabel: "Response streaming" }),
-    ).toBeDefined();
+      renderer.root.findAllByProps({ accessibilityLabel: "Response streaming" }),
+    ).toHaveLength(0);
   });
 
   it("expands structured memory evidence accessibly", () => {

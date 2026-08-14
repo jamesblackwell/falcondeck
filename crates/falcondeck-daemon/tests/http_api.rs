@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use chrono::Duration;
+use chrono::{Duration, Utc};
 use falcondeck_core::{
     ClaimPairingRequest, ClaimPairingResponse, DaemonSnapshot, HealthResponse,
     PairingChallengeRequest, PairingChallengeResponse, RelayUpdateBody, RelayUpdatesResponse,
@@ -83,6 +83,8 @@ async fn health_and_snapshot_routes_work_with_cors() {
         .unwrap();
     let snapshot: DaemonSnapshot = snapshot.json().await.unwrap();
     assert!(snapshot.workspaces.is_empty());
+    assert!(snapshot.daemon.capabilities.scheduled_tasks);
+    assert!(snapshot.scheduled_tasks.is_empty());
 
     let preflight = client
         .request(
@@ -208,6 +210,160 @@ async fn extension_permission_grants_are_explicit_and_persisted() {
 }
 
 #[tokio::test]
+async fn scheduled_task_routes_are_host_scoped_and_validate_workspaces() {
+    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let client = reqwest::Client::new();
+
+    let tasks = client
+        .get(format!("{}/api/scheduled-tasks", daemon.base_url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(tasks.status(), reqwest::StatusCode::OK);
+    assert!(
+        tasks
+            .json::<Vec<falcondeck_core::ScheduledTaskSummary>>()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let create = client
+        .post(format!("{}/api/scheduled-tasks", daemon.base_url()))
+        .json(&serde_json::json!({
+            "title": "Daily briefing",
+            "prompt": "Prepare a concise briefing",
+            "workspace_id": "missing-workspace",
+            "provider": "codex",
+            "schedule": {
+                "kind": "recurring",
+                "rrule": "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+                "timezone": "Europe/London"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(create.status(), reqwest::StatusCode::NOT_FOUND);
+
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn scheduled_task_crud_survives_a_daemon_restart() {
+    if std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let temp_dir = tempfile::tempdir().unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let daemon = spawn_embedded(test_config_with_state_path(state_path.clone()))
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let workspace = client
+        .post(format!("{}/api/workspaces/connect", daemon.base_url()))
+        .json(&serde_json::json!({ "path": repo_root() }))
+        .send()
+        .await
+        .unwrap()
+        .json::<falcondeck_core::WorkspaceSummary>()
+        .await
+        .unwrap();
+    if workspace.status != WorkspaceStatus::Ready {
+        daemon.shutdown().await.unwrap();
+        return;
+    }
+
+    let created = client
+        .post(format!("{}/api/scheduled-tasks", daemon.base_url()))
+        .json(&serde_json::json!({
+            "title": "Restart-safe briefing",
+            "prompt": "Prepare a concise restart-safe briefing",
+            "workspace_id": workspace.id,
+            "provider": workspace.default_provider,
+            "schedule": {
+                "kind": "once",
+                "run_at": Utc::now() + Duration::hours(1),
+                "timezone": "Europe/London"
+            }
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), reqwest::StatusCode::OK);
+    let created = created
+        .json::<falcondeck_core::ScheduledTaskDetail>()
+        .await
+        .unwrap();
+    assert_eq!(
+        created.summary.prompt_preview,
+        "Prepare a concise restart-safe briefing"
+    );
+
+    let updated = client
+        .patch(format!(
+            "{}/api/scheduled-tasks/{}",
+            daemon.base_url(),
+            created.summary.id
+        ))
+        .json(&serde_json::json!({
+            "title": "Paused restart-safe briefing",
+            "status": "paused"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(updated.status(), reqwest::StatusCode::OK);
+    let runs = client
+        .get(format!(
+            "{}/api/scheduled-tasks/{}/runs",
+            daemon.base_url(),
+            created.summary.id
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<falcondeck_core::ScheduledTaskRunSummary>>()
+        .await
+        .unwrap();
+    assert!(runs.is_empty());
+    daemon.shutdown().await.unwrap();
+
+    let daemon = spawn_embedded(test_config_with_state_path(state_path))
+        .await
+        .unwrap();
+    let restored = client
+        .get(format!("{}/api/scheduled-tasks", daemon.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .json::<Vec<falcondeck_core::ScheduledTaskSummary>>()
+        .await
+        .unwrap();
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].title, "Paused restart-safe briefing");
+    assert_eq!(
+        restored[0].status,
+        falcondeck_core::ScheduledTaskStatus::Paused
+    );
+    let deleted = client
+        .delete(format!(
+            "{}/api/scheduled-tasks/{}",
+            daemon.base_url(),
+            created.summary.id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), reqwest::StatusCode::OK);
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn rejects_requests_with_non_loopback_host_headers() {
     let daemon = spawn_embedded(test_config()).await.unwrap();
     let client = reqwest::Client::new();
@@ -283,7 +439,8 @@ async fn connect_workspace_bootstraps_codex_when_available() {
 async fn remote_pairing_streams_snapshot_updates_into_the_relay() {
     let relay_dir = tempfile::tempdir().unwrap();
     let relay_base = spawn_relay(&relay_dir).await;
-    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let mut daemon = spawn_embedded(test_config()).await.unwrap();
+    daemon.wait_until_restored().await.unwrap();
     let client = reqwest::Client::new();
 
     let remote = client
@@ -460,7 +617,8 @@ async fn trusted_remote_reconnects_after_daemon_restart_without_repairing() {
 async fn additional_remote_pairings_reuse_the_session_and_publish_a_new_bootstrap() {
     let relay_dir = tempfile::tempdir().unwrap();
     let relay_base = spawn_relay(&relay_dir).await;
-    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let mut daemon = spawn_embedded(test_config()).await.unwrap();
+    daemon.wait_until_restored().await.unwrap();
     let client = reqwest::Client::new();
 
     let first_remote = client
@@ -549,7 +707,8 @@ async fn keyless_trusted_client_can_request_a_fresh_bootstrap_over_the_ephemeral
 
     let relay_dir = tempfile::tempdir().unwrap();
     let relay_base = spawn_relay(&relay_dir).await;
-    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let mut daemon = spawn_embedded(test_config()).await.unwrap();
+    daemon.wait_until_restored().await.unwrap();
     let client = reqwest::Client::new();
 
     let remote = client

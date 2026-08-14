@@ -1,4 +1,4 @@
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef } from "react";
 
 import {
   approvalPolicyForProvider,
@@ -15,15 +15,15 @@ import {
   THREAD_DETAIL_TAIL_LIMIT,
   workspaceModels,
   workspaceAgentCapabilities,
-} from '@falcondeck/client-core';
+} from "@falcondeck/client-core";
 import type {
   ConversationItem,
   InteractiveResponsePayload,
   ThreadDetail,
   ThreadHandle,
-} from '@falcondeck/client-core';
+} from "@falcondeck/client-core";
 
-import { useRelayStore, useSessionStore, useUIStore } from '@/store';
+import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
 export function useSessionActions() {
   const detailRequestVersion = useRef(0);
@@ -35,26 +35,32 @@ export function useSessionActions() {
     const workspace = session.snapshot?.workspaces.find(
       (entry) => entry.id === session.selectedWorkspaceId,
     );
-    if (!workspace) throw new Error('Select a project first');
-    const provider = ui.selectedProvider ?? workspace.default_provider ?? 'codex';
+    if (!workspace) throw new Error("Select a project first");
+    const provider =
+      ui.selectedProvider ?? workspace.default_provider ?? "codex";
     const conversationKey = ui.conversationKey;
     const handle = normalizeThreadHandle(
       await relay._callRpc<ThreadHandle>(
-        'thread.start',
+        "thread.start",
         {
           workspace_id: workspace.id,
           provider,
           model_id: ui.selectedModel,
-          approval_policy: approvalPolicyForProvider(provider, ui.selectedPermissionMode),
+          approval_policy: approvalPolicyForProvider(
+            provider,
+            ui.selectedPermissionMode,
+          ),
           permission_mode: ui.selectedPermissionMode,
           sandbox_mode: ui.selectedSandboxMode,
         },
-        { requestIdPrefix: 'mobile-thread' },
+        { requestIdPrefix: "mobile-thread" },
       ),
     );
     useSessionStore.getState().applyThreadHandle(handle);
     if (useUIStore.getState().conversationKey === conversationKey) {
-      useSessionStore.getState().selectThread(handle.workspace.id, handle.thread.id);
+      useSessionStore
+        .getState()
+        .selectThread(handle.workspace.id, handle.thread.id);
     }
     return handle;
   }, []);
@@ -70,14 +76,21 @@ export function useSessionActions() {
     const submittedDraft = ui.draft;
     const submittedAttachments = ui.attachments;
     const submittedKey = ui.conversationKey;
-    if (!workspace || (!submittedDraft.trim() && submittedAttachments.length === 0)) return;
+    if (
+      !workspace ||
+      (!submittedDraft.trim() && submittedAttachments.length === 0)
+    )
+      return;
     const activeThread = threadForSelection(
       session.snapshot?.threads ?? [],
       session.selectedWorkspaceId,
       session.selectedThreadId,
     );
     const provider =
-      activeThread?.provider ?? ui.selectedProvider ?? workspace.default_provider ?? 'codex';
+      activeThread?.provider ??
+      ui.selectedProvider ??
+      workspace.default_provider ??
+      "codex";
     const imageBlockReason = imageAttachmentSendBlockReason(
       workspaceAgentCapabilities(workspace, provider),
       submittedAttachments.length,
@@ -86,7 +99,10 @@ export function useSessionActions() {
       relay._setError(imageBlockReason);
       return;
     }
-    const submittedSkills = selectedSkillsFromText(submittedDraft, workspace.skills ?? []);
+    const submittedSkills = selectedSkillsFromText(
+      submittedDraft,
+      workspace.skills ?? [],
+    );
 
     ui.setIsSubmitting(true, submittedKey);
 
@@ -94,10 +110,16 @@ export function useSessionActions() {
     // already have committed a user item under.
     const userItemId = generateUserItemId();
     const inputs = [
-      ...(submittedDraft.trim() ? [{ type: 'text' as const, text: submittedDraft }] : []),
+      ...(submittedDraft.trim()
+        ? [{ type: "text" as const, text: submittedDraft }]
+        : []),
       ...submittedAttachments,
     ];
-    const optimisticItem = buildOptimisticUserItem(userItemId, inputs, new Date().toISOString());
+    const optimisticItem = buildOptimisticUserItem(
+      userItemId,
+      inputs,
+      new Date().toISOString(),
+    );
     let activeThreadId = session.selectedThreadId;
     let pendingConversationKey = submittedKey;
     if (!activeThreadId) {
@@ -114,8 +136,12 @@ export function useSessionActions() {
         // Copy before deleting the temporary new-thread composer. A process
         // death between MMKV writes can duplicate the recoverable draft, but
         // cannot erase it from both keys.
-        ui.setComposerForConversation(branchKey, submittedDraft, submittedAttachments);
-        ui.setComposerForConversation(submittedKey, '', []);
+        ui.setComposerForConversation(
+          branchKey,
+          submittedDraft,
+          submittedAttachments,
+        );
+        ui.setComposerForConversation(submittedKey, "", []);
         ui.setIsSubmitting(true, branchKey);
         ui.setIsSubmitting(false, pendingConversationKey);
         pendingConversationKey = branchKey;
@@ -124,7 +150,7 @@ export function useSessionActions() {
       // Tier-capable models get their tier stated on every turn — "fast off"
       // must reach the provider as an explicit standard-tier request, because
       // an omitted field means "keep the session's current tier".
-      const models = workspaceModels(workspace, provider ?? 'codex');
+      const models = workspaceModels(workspace, provider ?? "codex");
       const activeModel =
         models.find((model) => model.id === ui.selectedModel) ??
         models.find((model) => model.is_default) ??
@@ -133,16 +159,19 @@ export function useSessionActions() {
       // daemon echoes it under the same id, replacing this copy in place. A
       // send to a busy thread lands in the queue UI instead, so skip it there.
       const expectQueued =
-        activeThread?.status === 'running' || activeThread?.status === 'waiting_for_input';
+        activeThread?.status === "running" ||
+        activeThread?.status === "waiting_for_input";
       if (!expectQueued) {
-        useSessionStore.getState().upsertLocalThreadItem(activeThreadId, optimisticItem);
+        useSessionStore
+          .getState()
+          .upsertLocalThreadItem(activeThreadId, optimisticItem);
         ui.clearPendingNewThreadItem(userItemId);
       }
       const sendResponse = await relay._callRpc<{
         ok: boolean;
         message?: string | null;
       }>(
-        'turn.start',
+        "turn.start",
         {
           workspace_id: workspace.id,
           thread_id: activeThreadId,
@@ -152,36 +181,51 @@ export function useSessionActions() {
           provider,
           model_id: ui.selectedModel,
           reasoning_effort: ui.selectedEffort,
-          approval_policy: approvalPolicyForProvider(provider, ui.selectedPermissionMode),
+          approval_policy: approvalPolicyForProvider(
+            provider,
+            ui.selectedPermissionMode,
+          ),
           service_tier: serviceTierForTurn(ui.selectedServiceTier, activeModel),
           permission_mode: ui.selectedPermissionMode,
           sandbox_mode: ui.selectedSandboxMode,
         },
-        { requestIdPrefix: 'mobile-turn' },
+        { requestIdPrefix: "mobile-turn" },
       );
       // The thread turned busy between our status check and the daemon's:
       // the send was queued, so the optimistic transcript copy comes out.
-      if (sendResponse?.message === 'queued') {
-        useSessionStore.getState().removeLocalThreadItem(activeThreadId, userItemId);
+      if (sendResponse?.message === "queued") {
+        useSessionStore
+          .getState()
+          .removeLocalThreadItem(activeThreadId, userItemId);
       }
       // MMKV keeps the original composer until the relay/daemon has accepted
       // the turn. If iOS kills the app mid-request, the draft is still there
       // on the next launch instead of depending on this function's catch path.
-      ui.setComposerForConversation(pendingConversationKey, '', []);
+      ui.setComposerForConversation(pendingConversationKey, "", []);
       relay._setError(null);
     } catch (e) {
-      const restoreKey = activeThreadId ? draftKeyFor(workspace.id, activeThreadId) : submittedKey;
+      const restoreKey = activeThreadId
+        ? draftKeyFor(workspace.id, activeThreadId)
+        : submittedKey;
       // The message never reached the daemon; drop the optimistic copy and
       // put the text back into the composer.
       if (activeThreadId) {
-        useSessionStore.getState().removeLocalThreadItem(activeThreadId, userItemId);
+        useSessionStore
+          .getState()
+          .removeLocalThreadItem(activeThreadId, userItemId);
       }
       ui.clearPendingNewThreadItem(userItemId);
       if (restoreKey !== submittedKey) {
-        ui.setComposerForConversation(submittedKey, '', []);
+        ui.setComposerForConversation(submittedKey, "", []);
       }
-      ui.restoreFailedSubmission(restoreKey, submittedDraft, submittedAttachments);
-      relay._setError(e instanceof Error ? e.message : 'Failed to send message');
+      ui.restoreFailedSubmission(
+        restoreKey,
+        submittedDraft,
+        submittedAttachments,
+      );
+      relay._setError(
+        e instanceof Error ? e.message : "Failed to send message",
+      );
     } finally {
       ui.clearPendingNewThreadItem(userItemId);
       ui.setIsSubmitting(false, pendingConversationKey);
@@ -189,21 +233,26 @@ export function useSessionActions() {
   }, [startThread]);
 
   const respondInteractive = useCallback(
-    async (workspaceId: string, requestId: string, response: InteractiveResponsePayload) => {
+    async (
+      workspaceId: string,
+      requestId: string,
+      response: InteractiveResponsePayload,
+    ) => {
       const relay = useRelayStore.getState();
       try {
         await relay._callRpc(
-          'interactive.respond',
+          "interactive.respond",
           {
             workspace_id: workspaceId,
             request_id: requestId,
             response,
           },
-          { requestIdPrefix: 'mobile-interactive' },
+          { requestIdPrefix: "mobile-interactive" },
         );
         relay._setError(null);
       } catch (e) {
-        const error = e instanceof Error ? e : new Error('Interactive response failed');
+        const error =
+          e instanceof Error ? e : new Error("Interactive response failed");
         relay._setError(error.message);
         throw error;
       }
@@ -212,7 +261,7 @@ export function useSessionActions() {
   );
 
   const respondApproval = useCallback(
-    async (requestId: string, decision: 'allow' | 'deny') => {
+    async (requestId: string, decision: "allow" | "deny") => {
       const session = useSessionStore.getState();
       // The request names its own workspace; routing through the selected
       // workspace answered the wrong daemon whenever the user had switched
@@ -224,14 +273,14 @@ export function useSessionActions() {
       if (!workspaceId) return;
       try {
         await respondInteractive(workspaceId, requestId, {
-          kind: 'approval',
+          kind: "approval",
           decision,
         });
       } catch (e) {
         // Legacy transcript action reports through the relay error banner. The
         // pinned interactive banner calls respondInteractive directly and can
         // additionally retain the error beside the user's selected answer.
-        console.warn('[falcondeck] approval response failed', {
+        console.warn("[falcondeck] approval response failed", {
           requestId,
           decision,
           error: e,
@@ -242,11 +291,17 @@ export function useSessionActions() {
   );
 
   const loadThreadDetail = useCallback(
-    async (workspaceId: string, threadId: string, options?: { older?: boolean }) => {
+    async (
+      workspaceId: string,
+      threadId: string,
+      options?: { older?: boolean },
+    ) => {
       const relay = useRelayStore.getState();
       const session = useSessionStore.getState();
       const history = session.threadHistory[threadId];
-      const beforeItemId = options?.older ? (history?.oldestItemId ?? null) : null;
+      const beforeItemId = options?.older
+        ? (history?.oldestItemId ?? null)
+        : null;
       const requestVersion = options?.older
         ? detailRequestVersion.current
         : detailRequestVersion.current + 1;
@@ -261,32 +316,36 @@ export function useSessionActions() {
       try {
         const detail = normalizeThreadDetail(
           await relay._callRpc<ThreadDetail>(
-            'thread.detail',
+            "thread.detail",
             options?.older
               ? {
                   workspace_id: workspaceId,
                   thread_id: threadId,
-                  mode: 'before',
+                  mode: "before",
                   before_item_id: beforeItemId,
                   limit: THREAD_DETAIL_OLDER_PAGE_LIMIT,
                 }
               : {
                   workspace_id: workspaceId,
                   thread_id: threadId,
-                  mode: 'tail',
+                  mode: "tail",
                   limit: THREAD_DETAIL_TAIL_LIMIT,
                 },
             {
-              requestIdPrefix: options?.older ? 'mobile-detail-older' : 'mobile-detail',
+              requestIdPrefix: options?.older
+                ? "mobile-detail-older"
+                : "mobile-detail",
             },
           ),
         );
 
         const activeSession = useSessionStore.getState();
         const isStale =
-          (!options?.older && requestVersion !== detailRequestVersion.current) ||
+          (!options?.older &&
+            requestVersion !== detailRequestVersion.current) ||
           (options?.older &&
-            activeSession.threadHistory[threadId]?.oldestItemId !== beforeItemId) ||
+            activeSession.threadHistory[threadId]?.oldestItemId !==
+              beforeItemId) ||
           activeSession.selectedThreadId !== threadId ||
           activeSession.selectedWorkspaceId !== workspaceId;
 
@@ -295,16 +354,18 @@ export function useSessionActions() {
         }
 
         useSessionStore.getState().setThreadDetail(detail, {
-          mergeMode: options?.older ? 'prepend' : 'refresh',
+          mergeMode: options?.older ? "prepend" : "refresh",
         });
         relay._setError(null);
         return detail;
       } catch (e) {
         const activeSession = useSessionStore.getState();
         const isStale =
-          (!options?.older && requestVersion !== detailRequestVersion.current) ||
+          (!options?.older &&
+            requestVersion !== detailRequestVersion.current) ||
           (options?.older &&
-            activeSession.threadHistory[threadId]?.oldestItemId !== beforeItemId) ||
+            activeSession.threadHistory[threadId]?.oldestItemId !==
+              beforeItemId) ||
           activeSession.selectedThreadId !== threadId ||
           activeSession.selectedWorkspaceId !== workspaceId;
         if (isStale) {
@@ -314,7 +375,7 @@ export function useSessionActions() {
         if (options?.older) {
           relay._setError("Couldn't load older messages. Try again.");
         } else {
-          console.warn('Failed to refresh thread detail', e);
+          console.warn("Failed to refresh thread detail", e);
         }
         return null;
       }
@@ -323,7 +384,7 @@ export function useSessionActions() {
   );
 
   const branchFromMessage = useCallback(
-    async (item: Extract<ConversationItem, { kind: 'user_message' }>) => {
+    async (item: Extract<ConversationItem, { kind: "user_message" }>) => {
       const relay = useRelayStore.getState();
       const session = useSessionStore.getState();
       const workspace = session.snapshot?.workspaces.find(
@@ -340,16 +401,16 @@ export function useSessionActions() {
       const handle = normalizeThreadHandle(
         item.previous_turn_id
           ? await relay._callRpc<ThreadHandle>(
-              'thread.fork',
+              "thread.fork",
               {
                 workspace_id: workspace.id,
                 thread_id: thread.id,
                 last_turn_id: item.previous_turn_id,
               },
-              { requestIdPrefix: 'mobile-fork' },
+              { requestIdPrefix: "mobile-fork" },
             )
           : await relay._callRpc<ThreadHandle>(
-              'thread.start',
+              "thread.start",
               {
                 workspace_id: workspace.id,
                 provider: thread.provider,
@@ -357,9 +418,9 @@ export function useSessionActions() {
                 approval_policy: thread.agent.approval_policy,
                 permission_mode: thread.agent.permission_mode,
                 sandbox_mode: thread.agent.sandbox_mode,
-                isolation: 'project_folder',
+                isolation: "project_folder",
               },
-              { requestIdPrefix: 'mobile-branch-thread' },
+              { requestIdPrefix: "mobile-branch-thread" },
             ),
       );
       useSessionStore.getState().applyThreadHandle(handle);
@@ -381,30 +442,8 @@ export function useSessionActions() {
     [],
   );
 
-  const editResend = useCallback(
-    async (item: Extract<ConversationItem, { kind: 'user_message' }>) => {
-      const relay = useRelayStore.getState();
-      const ui = useUIStore.getState();
-      try {
-        const branch = await branchFromMessage(item);
-        if (!branch) return;
-        ui.setComposerForConversation(
-          draftKeyFor(branch.handle.workspace.id, branch.handle.thread.id),
-          item.text,
-          item.attachments,
-        );
-        relay._setError(null);
-      } catch (e) {
-        const error = e instanceof Error ? e : new Error('Failed to branch conversation');
-        relay._setError(error.message);
-        throw error;
-      }
-    },
-    [branchFromMessage],
-  );
-
   const retryResponse = useCallback(
-    async (item: Extract<ConversationItem, { kind: 'user_message' }>) => {
+    async (item: Extract<ConversationItem, { kind: "user_message" }>) => {
       const relay = useRelayStore.getState();
       const ui = useUIStore.getState();
       let branch: Awaited<ReturnType<typeof branchFromMessage>> = null;
@@ -415,20 +454,26 @@ export function useSessionActions() {
         branch = await branchFromMessage(item);
         if (!branch) return;
         const { handle, sourceThread, sourceWorkspace } = branch;
-        const branchConversationKey = draftKeyFor(handle.workspace.id, handle.thread.id);
+        const branchConversationKey = draftKeyFor(
+          handle.workspace.id,
+          handle.thread.id,
+        );
         ui.setIsSubmitting(true, branchConversationKey);
         ui.setIsSubmitting(false, pendingConversationKey);
         pendingConversationKey = branchConversationKey;
         await relay._callRpc(
-          'turn.start',
+          "turn.start",
           {
             workspace_id: handle.workspace.id,
             thread_id: handle.thread.id,
             inputs: [
-              ...(item.text.trim() ? [{ type: 'text', text: item.text }] : []),
+              ...(item.text.trim() ? [{ type: "text", text: item.text }] : []),
               ...item.attachments,
             ],
-            selected_skills: selectedSkillsFromText(item.text, sourceWorkspace.skills ?? []),
+            selected_skills: selectedSkillsFromText(
+              item.text,
+              sourceWorkspace.skills ?? [],
+            ),
             provider: sourceThread.provider,
             model_id: sourceThread.agent.model_id,
             reasoning_effort: sourceThread.agent.reasoning_effort,
@@ -437,7 +482,7 @@ export function useSessionActions() {
             permission_mode: sourceThread.agent.permission_mode,
             sandbox_mode: sourceThread.agent.sandbox_mode,
           },
-          { requestIdPrefix: 'mobile-retry-turn' },
+          { requestIdPrefix: "mobile-retry-turn" },
         );
         relay._setError(null);
       } catch (e) {
@@ -448,7 +493,8 @@ export function useSessionActions() {
             item.attachments,
           );
         }
-        const error = e instanceof Error ? e : new Error('Failed to retry response');
+        const error =
+          e instanceof Error ? e : new Error("Failed to retry response");
         relay._setError(error.message);
         throw error;
       } finally {
@@ -464,7 +510,6 @@ export function useSessionActions() {
     respondApproval,
     respondInteractive,
     loadThreadDetail,
-    editResend,
     retryResponse,
   };
 }

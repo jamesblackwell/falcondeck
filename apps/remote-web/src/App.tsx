@@ -29,7 +29,6 @@ import {
   deriveThreadTags,
   THREAD_TAGS_ACTION_ID,
   THREAD_TAGS_EXTENSION_ID,
-  editResendUnavailableReason,
   deriveIdentityKeyPair,
   encryptJson,
   filesToImageInputs,
@@ -3283,17 +3282,6 @@ function RemoteApp() {
       ),
     [activeProvider, selectedThread, selectedWorkspace],
   );
-  const editResendReason = selectedThread
-    ? editResendUnavailableReason({
-        providerLabel: workspaceProviderLabel(
-          selectedWorkspace,
-          selectedThread.provider,
-        ),
-        supportsForking: activeCapabilities.supports_forking,
-        isIsolated: Boolean(selectedThread.variant),
-        threadStatus: selectedThread.status,
-      })
-    : null;
   const attachmentSendBlockReason = imageAttachmentSendBlockReason(
     activeCapabilities,
     attachments.length,
@@ -3413,39 +3401,6 @@ function RemoteApp() {
       return { adopted, handle };
     },
     [callRpc, selectedThread, selectedWorkspace],
-  );
-
-  const handleEditResend = useCallback(
-    async (item: Extract<ConversationItem, { kind: "user_message" }>) => {
-      try {
-        const branch = await branchFromMessage(item);
-        if (!branch) return;
-        const { handle } = branch;
-        const key = draftKeyFor(handle.workspace.id, handle.thread.id);
-        setDraftForConversation(key, item.text);
-        setAttachmentsForConversation(key, () => item.attachments);
-        setError(null);
-        toast({
-          variant: "success",
-          title: branch.adopted ? "New branch ready" : "Branch created",
-          description: branch.adopted
-            ? "Edit the message in the composer, then send when ready."
-            : "Your current thread stayed open. Select the new branch to edit the saved message.",
-        });
-      } catch (error) {
-        reportError(error, "Failed to branch conversation");
-        throw error instanceof Error
-          ? error
-          : new Error("Failed to branch conversation");
-      }
-    },
-    [
-      branchFromMessage,
-      reportError,
-      setAttachmentsForConversation,
-      setDraftForConversation,
-      toast,
-    ],
   );
 
   const handleRetryResponse = useCallback(
@@ -3580,6 +3535,13 @@ function RemoteApp() {
     }
   }
 
+  // Set by "Mark as unread" so the auto-read effect does not undo it while
+  // the thread is still selected.
+  const suppressAutoReadRef = useRef<{
+    threadId: string;
+    activitySeq: number;
+  } | null>(null);
+
   async function handleMarkThreadRead(workspaceId: string, threadId: string) {
     const thread = snapshot?.threads.find(
       (entry) => entry.workspace_id === workspaceId && entry.id === threadId,
@@ -3595,6 +3557,35 @@ function RemoteApp() {
       applyThreadSummary(updated);
     } catch (e) {
       reportError(e, "Failed to mark thread as read");
+    }
+  }
+
+  async function handleMarkThreadUnread(workspaceId: string, threadId: string) {
+    const thread = snapshot?.threads.find(
+      (entry) => entry.workspace_id === workspaceId && entry.id === threadId,
+    );
+    // The auto-read effect re-reads the selected, focused thread, which would
+    // undo this immediately. Park it on the suppression ref first; the effect
+    // releases once the selection moves or new agent activity arrives.
+    suppressAutoReadRef.current = {
+      threadId,
+      activitySeq: thread?.attention.last_agent_activity_seq ?? 0,
+    };
+    try {
+      const updated = normalizeThreadSummary(
+        await callRpc<ThreadSummary>("thread.mark_unread", {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+        }),
+      );
+      suppressAutoReadRef.current = {
+        threadId,
+        activitySeq: updated.attention.last_agent_activity_seq,
+      };
+      applyThreadSummary(updated);
+    } catch (e) {
+      suppressAutoReadRef.current = null;
+      reportError(e, "Failed to mark thread as unread");
     }
   }
 
@@ -3861,6 +3852,16 @@ function RemoteApp() {
   useEffect(() => {
     if (!selectedWorkspaceId || !selectedThread || !windowFocused) return;
     const readSeq = selectedThread.attention.last_agent_activity_seq;
+    const suppressed = suppressAutoReadRef.current;
+    if (
+      suppressed &&
+      (suppressed.threadId !== selectedThread.id ||
+        suppressed.activitySeq !== readSeq)
+    ) {
+      suppressAutoReadRef.current = null;
+    } else if (suppressed) {
+      return;
+    }
     if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return;
 
     void submitQueuedAction<ThreadSummary>("thread.mark_read", {
@@ -4155,6 +4156,7 @@ function RemoteApp() {
                 onRenameThread={handleRenameThread}
                 onTogglePinThread={handleTogglePinThread}
                 onMarkThreadRead={handleMarkThreadRead}
+                onMarkThreadUnread={handleMarkThreadUnread}
                 onRemoveWorkspace={handleRemoveWorkspace}
                 threadSort={threadSort}
                 onThreadSortChange={handleThreadSortChange}
@@ -4208,6 +4210,7 @@ function RemoteApp() {
           onRenameThread={handleRenameThread}
           onTogglePinThread={handleTogglePinThread}
           onMarkThreadRead={handleMarkThreadRead}
+          onMarkThreadUnread={handleMarkThreadUnread}
           onRemoveWorkspace={handleRemoveWorkspace}
           threadSort={threadSort}
           onThreadSortChange={handleThreadSortChange}
@@ -4273,16 +4276,6 @@ function RemoteApp() {
                     `${selectedWorkspaceId}:${selectedThreadId}`
                   }
                   onLoadOlder={handleLoadOlder}
-                  onEditResend={
-                    selectedThread &&
-                    activeCapabilities.supports_forking &&
-                    !selectedThread.variant &&
-                    selectedThread.status !== "running" &&
-                    selectedThread.status !== "waiting_for_input"
-                      ? handleEditResend
-                      : undefined
-                  }
-                  editResendUnavailableReason={editResendReason}
                   onRetryResponse={
                     selectedThread &&
                     activeCapabilities.supports_forking &&

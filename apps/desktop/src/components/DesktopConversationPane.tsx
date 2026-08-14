@@ -1,9 +1,9 @@
-import { useMemo, type ComponentProps, type ReactNode } from 'react'
+import { useMemo, type ComponentProps, type ReactNode } from "react";
 
 import {
   currentTurnPlan,
   wasTurnInterruptedByShutdown,
-} from '@falcondeck/client-core'
+} from "@falcondeck/client-core";
 import type {
   ConversationItem,
   FalconDeckPreferences,
@@ -14,7 +14,7 @@ import type {
   ThreadSummary,
   TrustedDevice,
   WorkspaceSummary,
-} from '@falcondeck/client-core'
+} from "@falcondeck/client-core";
 import {
   Conversation,
   InterruptedTurnNotice,
@@ -24,70 +24,66 @@ import {
   QueuedTurns,
   type OpenFileDiff,
   type QuotedSelection,
-} from '@falcondeck/chat-ui'
-import { CollapseRegion, useLastPresent } from '@falcondeck/ui'
+} from "@falcondeck/chat-ui";
+import { CollapseRegion, useLastPresent } from "@falcondeck/ui";
 
-import { InteractiveRequestBar } from './InteractiveRequestBar'
-import { ConversationFindBar } from './ConversationFindBar'
-import { RemotePairingPopover } from './RemotePairingPopover'
-import { SessionHeader } from './SessionHeader'
+import { InteractiveRequestBar } from "./InteractiveRequestBar";
+import { ConversationFindBar } from "./ConversationFindBar";
+import { RemotePairingPopover } from "./RemotePairingPopover";
+import { SessionHeader } from "./SessionHeader";
 
 type DesktopConversationPaneProps = {
-  selectedWorkspace: WorkspaceSummary | null
-  selectedThread: ThreadSummary | null
-  selectedWorkspaceId: string | null
-  selectedThreadId: string | null
-  remoteStatus: RemoteStatusResponse | null
-  pairingLink: string | null
-  isStartingRemote: boolean
-  remoteControlsDisabled: boolean
-  remoteControlsUnavailableReason: string | null
-  conversationItems: ConversationItem[]
-  preferences: FalconDeckPreferences | null
-  conversationEmptyState: ReactNode
-  isSending: boolean
-  sendingLabel?: string | null
-  isThreadDetailPending: boolean
-  hasOlderMessages?: boolean
-  isLoadingOlderMessages?: boolean
-  onLoadOlderMessages?: () => void
-  interactiveRequests: InteractiveRequest[]
-  operationalConditions: readonly OperationalCondition[]
-  onDismissOperationalCondition: (condition: OperationalCondition) => void
-  findRequestKey?: number
-  onStartPairing: () => void
-  onRevokeDevice?: (device: TrustedDevice) => void
-  revokingDeviceId?: string | null
+  selectedWorkspace: WorkspaceSummary | null;
+  selectedThread: ThreadSummary | null;
+  selectedWorkspaceId: string | null;
+  selectedThreadId: string | null;
+  remoteStatus: RemoteStatusResponse | null;
+  pairingLink: string | null;
+  isStartingRemote: boolean;
+  remoteControlsDisabled: boolean;
+  remoteControlsUnavailableReason: string | null;
+  conversationItems: ConversationItem[];
+  preferences: FalconDeckPreferences | null;
+  conversationEmptyState: ReactNode;
+  isSending: boolean;
+  sendingLabel?: string | null;
+  isThreadDetailPending: boolean;
+  hasOlderMessages?: boolean;
+  isLoadingOlderMessages?: boolean;
+  onLoadOlderMessages?: () => void;
+  interactiveRequests: InteractiveRequest[];
+  operationalConditions: readonly OperationalCondition[];
+  onDismissOperationalCondition: (condition: OperationalCondition) => void;
+  findRequestKey?: number;
+  onStartPairing: () => void;
+  onRevokeDevice?: (device: TrustedDevice) => void;
+  revokingDeviceId?: string | null;
   onInteractiveResponse: (
     request: InteractiveRequest,
     response: InteractiveResponsePayload,
-  ) => void
-  promptInputKey?: string
-  promptInputProps: ComponentProps<typeof PromptInput>
-  onRemoveQueuedTurn?: (queuedId: string) => void
-  onSteerQueuedTurn?: (queuedId: string) => void
-  onEditQueuedTurn?: (queuedId: string, text: string) => void
-  onReorderQueuedTurns?: (queuedIds: string[]) => void
-  queuedAttachmentBaseUrl?: string | null
-  canSteerQueuedTurn?: boolean
-  onOpenFile?: OpenFileDiff | null
-  headerControls?: ReactNode
-  onNewThread?: () => void
-  onEditResend?: (
-    item: Extract<ConversationItem, { kind: 'user_message' }>,
-  ) => void
-  editResendUnavailableReason?: string | null
+  ) => void;
+  promptInputKey?: string;
+  promptInputProps: ComponentProps<typeof PromptInput>;
+  onRemoveQueuedTurn?: (queuedId: string) => void;
+  onSteerQueuedTurn?: (queuedId: string) => void;
+  onEditQueuedTurn?: (queuedId: string, text: string) => void;
+  onReorderQueuedTurns?: (queuedIds: string[]) => void;
+  queuedAttachmentBaseUrl?: string | null;
+  canSteerQueuedTurn?: boolean;
+  onOpenFile?: OpenFileDiff | null;
+  headerControls?: ReactNode;
+  onNewThread?: () => void;
   onRetryResponse?: (
-    item: Extract<ConversationItem, { kind: 'user_message' }>,
-  ) => void
-  onContinueInterruptedTurn?: () => void
-  onDismissInterruptedTurn?: () => void
-  quotedSelections?: readonly QuotedSelection[]
-  onQuoteSelection?: (text: string) => void
-  onRemoveQuotedSelection?: (selectionId: string) => void
-}
+    item: Extract<ConversationItem, { kind: "user_message" }>,
+  ) => void;
+  onContinueInterruptedTurn?: () => void;
+  onDismissInterruptedTurn?: () => void;
+  quotedSelections?: readonly QuotedSelection[];
+  onQuoteSelection?: (text: string) => void;
+  onRemoveQuotedSelection?: (selectionId: string) => void;
+};
 
-const NO_QUOTED_SELECTIONS: readonly QuotedSelection[] = []
+const NO_QUOTED_SELECTIONS: readonly QuotedSelection[] = [];
 
 export function DesktopConversationPane({
   selectedWorkspace,
@@ -127,8 +123,6 @@ export function DesktopConversationPane({
   onOpenFile,
   headerControls,
   onNewThread,
-  onEditResend,
-  editResendUnavailableReason,
   onRetryResponse,
   onContinueInterruptedTurn,
   onDismissInterruptedTurn,
@@ -141,17 +135,17 @@ export function DesktopConversationPane({
   const pinnedPlan = useMemo(
     () => currentTurnPlan(conversationItems),
     [conversationItems],
-  )
+  );
   // Notices collapse rather than vanish, so the outgoing content has to
   // survive the frame where its source data goes away.
   const lastOperationalConditions = useLastPresent(
     operationalConditions.length > 0 ? operationalConditions : null,
-  )
+  );
   const showInterruptedNotice = Boolean(
     selectedThread &&
     wasTurnInterruptedByShutdown(selectedThread) &&
     onContinueInterruptedTurn,
-  )
+  );
   return (
     <section className="flex h-full min-h-0 flex-col bg-surface-1">
       <SessionHeader
@@ -193,7 +187,7 @@ export function DesktopConversationPane({
       <Conversation
         threadKey={
           selectedThreadId
-            ? `${selectedWorkspaceId ?? 'workspace'}:${selectedThreadId}`
+            ? `${selectedWorkspaceId ?? "workspace"}:${selectedThreadId}`
             : selectedWorkspaceId
         }
         items={conversationItems}
@@ -202,15 +196,13 @@ export function DesktopConversationPane({
         emptyState={conversationEmptyState}
         isSending={isSending}
         sendingLabel={sendingLabel}
-        isThinking={selectedThread?.status === 'running'}
-        isWaitingForInput={selectedThread?.status === 'waiting_for_input'}
+        isThinking={selectedThread?.status === "running"}
+        isWaitingForInput={selectedThread?.status === "waiting_for_input"}
         isLoading={isThreadDetailPending}
         hasOlder={hasOlderMessages}
         isLoadingOlder={isLoadingOlderMessages}
         onLoadOlder={onLoadOlderMessages}
         onOpenFile={onOpenFile}
-        onEditResend={onEditResend}
-        editResendUnavailableReason={editResendUnavailableReason}
         onRetryResponse={onRetryResponse}
         pinnedPlanId={pinnedPlan?.itemId ?? null}
         onQuoteSelection={onQuoteSelection}
@@ -245,5 +237,5 @@ export function DesktopConversationPane({
         onRemoveQuotedSelection={onRemoveQuotedSelection}
       />
     </section>
-  )
+  );
 }

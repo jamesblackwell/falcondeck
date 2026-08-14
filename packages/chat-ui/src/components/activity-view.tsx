@@ -7,7 +7,15 @@ import {
   useState,
   type CSSProperties,
 } from "react";
-import { Activity, Check, CircleAlert, Plus, Play, X } from "lucide-react";
+import {
+  Activity,
+  Check,
+  CircleAlert,
+  PanelsTopLeft,
+  Plus,
+  Play,
+  X,
+} from "lucide-react";
 
 import {
   collectActivityEntries,
@@ -43,8 +51,13 @@ export type ActivityViewProps = {
     workspaceId: string,
     threadId: string,
   ) => Promise<void> | void;
-  onClose: () => void;
+  /** Omitted when Activity owns its window — the frame closes it instead. */
+  onClose?: () => void;
   onNewThread?: () => void;
+  /** Detach Activity into its own window. Absent once it is detached. */
+  onPopOut?: () => void;
+  /** Pad the header clear of macOS traffic lights in a detached window. */
+  trafficLightInset?: boolean;
 };
 
 type ResolvedEntry = {
@@ -427,6 +440,8 @@ export const ActivityView = memo(function ActivityView({
   onMarkThreadRead,
   onClose,
   onNewThread,
+  onPopOut,
+  trafficLightInset = false,
 }: ActivityViewProps) {
   const [nowMs, setNowMs] = useState(Date.now);
   const [resolvedEntries, setResolvedEntries] = useState<
@@ -455,7 +470,10 @@ export const ActivityView = memo(function ActivityView({
     [],
   );
 
+  // Escape dismisses the takeover, but must not close a window the user
+  // deliberately detached — there it is the frame's job.
   useEffect(() => {
+    if (!onClose) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -512,7 +530,10 @@ export const ActivityView = memo(function ActivityView({
     <div className="fd-grid-canvas relative flex h-full min-h-0 flex-col bg-surface-0">
       <header
         data-tauri-drag-region="deep"
-        className="relative z-[1] flex shrink-0 items-center justify-between border-b border-border-subtle bg-surface-1/70 px-6 py-3.5 backdrop-blur-sm"
+        className={cn(
+          "relative z-[1] flex shrink-0 items-center justify-between border-b border-border-subtle bg-surface-1/70 px-6 py-3.5 backdrop-blur-sm",
+          trafficLightInset && "pl-[86px]",
+        )}
       >
         <div>
           <h1 className="text-[length:var(--fd-text-lg)] font-semibold tracking-[var(--fd-tracking-tight)] text-fg-primary">
@@ -522,15 +543,32 @@ export const ActivityView = memo(function ActivityView({
             Across all projects and hosts
           </p>
         </div>
-        <Button
-          type="button"
-          size="icon"
-          variant="ghost"
-          aria-label="Close Activity"
-          onClick={onClose}
-        >
-          <X aria-hidden="true" className="h-4 w-4" />
-        </Button>
+        <div className="flex items-center gap-1">
+          {onPopOut ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="gap-2 text-fg-muted"
+              title="Keep Activity open in its own window"
+              onClick={onPopOut}
+            >
+              <PanelsTopLeft aria-hidden="true" className="h-4 w-4" />
+              Open in new window
+            </Button>
+          ) : null}
+          {onClose ? (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label="Close Activity"
+              onClick={onClose}
+            >
+              <X aria-hidden="true" className="h-4 w-4" />
+            </Button>
+          ) : null}
+        </div>
       </header>
 
       <div className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-6 py-7">

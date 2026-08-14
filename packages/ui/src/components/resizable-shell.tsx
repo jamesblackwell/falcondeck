@@ -21,8 +21,11 @@ export function ResizableShell({
   animating?: boolean
 }) {
   return (
+    // Window dragging is owned by the pane headers (`data-tauri-drag-region`
+    // on each one) rather than an overlay strip: an overlay across the top of
+    // the window paints above those headers and swallows clicks on any control
+    // sitting in the first 28px, which is most of a 48px header.
     <div className={cn('relative h-screen overflow-hidden bg-surface-0', className)}>
-      <div data-tauri-drag-region className="absolute inset-x-0 top-0 h-7" />
       <div className="h-full" data-fd-shell="" data-animating={animating ? '' : undefined}>
         <Group orientation="horizontal">
           {children}

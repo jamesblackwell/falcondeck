@@ -379,6 +379,36 @@ describe("ActivityView", () => {
     expect(screen.getAllByText("Studio Mac · Offline")).toHaveLength(2);
   });
 
+  it("offers to detach into its own window, and drops the offer once detached", () => {
+    const onPopOut = vi.fn();
+    const { rerender } = render(
+      <ActivityView {...props({ onPopOut })} />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open in new window" }),
+    );
+    expect(onPopOut).toHaveBeenCalledOnce();
+
+    // The detached window has the native frame for this, and nothing to
+    // pop out of.
+    rerender(<ActivityView {...props()} onClose={undefined} />);
+    expect(
+      screen.queryByRole("button", { name: "Open in new window" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Close Activity" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("leaves a detached window open on Escape", () => {
+    const onClose = vi.fn();
+    render(<ActivityView {...props({ onClose })} onClose={undefined} />);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it("shows the caught-up state and optional new-thread affordance", () => {
     const onNewThread = vi.fn();
     render(<ActivityView {...props({ onNewThread })} />);

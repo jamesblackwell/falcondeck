@@ -21,10 +21,13 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
   onClose,
 }: ThreadOptionsSheetProps) {
   const { theme } = useUnistyles()
-  const { archiveThread, renameThread, setThreadPinned } = useThreadActions()
+  const { archiveThread, renameThread, setThreadPinned, markThreadUnread } =
+    useThreadActions()
   const [mode, setMode] = useState<'menu' | 'rename'>('menu')
   const [renameValue, setRenameValue] = useState(thread.title)
-  const [pendingAction, setPendingAction] = useState<'archive' | 'rename' | 'pin' | null>(null)
+  const [pendingAction, setPendingAction] = useState<
+    'archive' | 'rename' | 'pin' | 'unread' | null
+  >(null)
   const [actionError, setActionError] = useState<string | null>(null)
 
   const handleTogglePin = useCallback(async () => {
@@ -40,6 +43,38 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
       setPendingAction(null)
     }
   }, [onClose, setThreadPinned, thread.id, thread.is_pinned, workspaceId])
+
+  // Unread is `last_agent_activity_seq > last_read_seq`, so a thread the agent
+  // never replied in cannot be made unread — hide the row instead of offering
+  // an action that would do nothing.
+  const canMarkUnread =
+    !thread.attention.unread && thread.attention.last_agent_activity_seq > 0
+
+  const handleMarkUnread = useCallback(async () => {
+    void Haptics.selectionAsync()
+    setPendingAction('unread')
+    setActionError(null)
+    try {
+      await markThreadUnread(
+        workspaceId,
+        thread.id,
+        thread.attention.last_agent_activity_seq,
+      )
+      onClose()
+    } catch (error) {
+      setActionError(
+        error instanceof Error ? error.message : 'Failed to mark as unread',
+      )
+    } finally {
+      setPendingAction(null)
+    }
+  }, [
+    markThreadUnread,
+    onClose,
+    thread.attention.last_agent_activity_seq,
+    thread.id,
+    workspaceId,
+  ])
 
   const handleArchive = useCallback(async () => {
     setPendingAction('archive')
@@ -151,6 +186,21 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
             </View>
             <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
           </Pressable>
+          {canMarkUnread ? (
+            <Pressable
+              style={styles.item}
+              accessibilityRole="button"
+              accessibilityLabel="Mark thread as unread"
+              onPress={() => void handleMarkUnread()}
+              disabled={pendingAction === 'unread'}
+            >
+              <View style={styles.itemLabel}>
+                <View style={styles.unreadDot} />
+                <Text variant="label" color="primary">Mark as unread</Text>
+              </View>
+              <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
+            </Pressable>
+          ) : null}
           <Pressable
             style={[styles.item, styles.dangerItem]}
             accessibilityRole="button"
@@ -201,6 +251,15 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[3],
+  },
+  // Sized into the same box the lucide icons occupy so the labels line up.
+  unreadDot: {
+    width: theme.iconSize.sm,
+    height: theme.iconSize.sm,
+    alignSelf: 'center',
+    borderRadius: theme.iconSize.sm / 2,
+    backgroundColor: theme.colors.info.default,
+    transform: [{ scale: 0.5 }],
   },
   dangerItem: {
     backgroundColor: theme.colors.danger.muted,

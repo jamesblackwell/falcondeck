@@ -1,7 +1,13 @@
 import * as React from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, FolderClosed, FolderPlus, SquarePen } from "lucide-react";
+import {
+  ChevronDown,
+  FolderClosed,
+  FolderPlus,
+  Search,
+  SquarePen,
+} from "lucide-react";
 
 import {
   compareThreads,
@@ -87,10 +93,17 @@ export type WorkspaceSidebarProps = {
     workspaceId: string,
     threadId: string,
   ) => Promise<void> | void;
+  onMarkThreadUnread?: (
+    workspaceId: string,
+    threadId: string,
+  ) => Promise<void> | void;
   onAddProject?: () => void;
+  /** Opens the host's command palette from the sidebar header. */
+  onSearch?: () => void;
   /** Rendered shortcuts ("⌘N") appended to the header tooltips, when the host binds them. */
   newThreadShortcut?: string;
   addProjectShortcut?: string;
+  searchShortcut?: string;
   onRemoveWorkspace?: (workspaceId: string) => Promise<void> | void;
   /** How chats order within each project; also applies to the pinned list. */
   threadSort?: ThreadSortMode;
@@ -98,6 +111,15 @@ export type WorkspaceSidebarProps = {
   onThreadSortChange?: (mode: ThreadSortMode) => void;
   /** Called with the new project order after a drag completes. */
   onWorkspaceOrderChange?: (workspaceIds: string[]) => Promise<void> | void;
+  /**
+   * Projects the host wants rendered collapsed. Only takes effect alongside
+   * `onWorkspaceCollapsedChange`; without it each group owns its own state.
+   */
+  collapsedWorkspaceIds?: readonly string[];
+  onWorkspaceCollapsedChange?: (
+    workspaceId: string,
+    collapsed: boolean,
+  ) => void;
   isAddingProject?: boolean;
   title?: string;
   errors?: string[];
@@ -427,13 +449,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   onRenameThread,
   onTogglePinThread,
   onMarkThreadRead,
+  onMarkThreadUnread,
   onAddProject,
+  onSearch,
   newThreadShortcut,
   addProjectShortcut,
+  searchShortcut,
   onRemoveWorkspace,
   threadSort = "last_updated",
   onThreadSortChange,
   onWorkspaceOrderChange,
+  collapsedWorkspaceIds,
+  onWorkspaceCollapsedChange,
   isAddingProject = false,
   title = "Threads",
   errors = [],
@@ -623,6 +650,12 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   const workspaceOrder = useMemo(
     () => orderedGroups.map((group) => group.workspace.id),
     [orderedGroups],
+  );
+
+  const collapsedWorkspaces = useMemo(
+    () =>
+      onWorkspaceCollapsedChange ? new Set(collapsedWorkspaceIds ?? []) : null,
+    [collapsedWorkspaceIds, onWorkspaceCollapsedChange],
   );
 
   const updateWorkspaceDropIndex = useCallback(
@@ -882,6 +915,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !onRenameThread &&
         !onTogglePinThread &&
         !onMarkThreadRead &&
+        !onMarkThreadUnread &&
         !onSetThreadColor
       ) {
         return;
@@ -892,6 +926,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       onArchiveThread,
       onDeleteThread,
       onMarkThreadRead,
+      onMarkThreadUnread,
       onRenameThread,
       onSetThreadColor,
       onTogglePinThread,
@@ -976,6 +1011,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       () => {},
     );
   }, [onMarkThreadRead, threadContextMenu]);
+
+  const handleMarkUnreadFromContextMenu = useCallback(() => {
+    if (!threadContextMenu || !onMarkThreadUnread) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
+    void Promise.resolve(onMarkThreadUnread(workspaceId, thread.id)).catch(
+      () => {},
+    );
+  }, [onMarkThreadUnread, threadContextMenu]);
 
   const handleSetColorFromContextMenu = useCallback(
     (color: ThreadTag | null) => {
@@ -1210,7 +1254,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
 
   return (
     <SidebarShell className={className}>
-      <SidebarHeader className={headerClassName}>
+      <SidebarHeader
+        className={headerClassName}
+        // Restores window dragging over the traffic-light row on desktop.
+        data-tauri-drag-region="deep"
+      >
         <div className="flex items-center justify-between">
           {visualSelectedWorkspaceId && onNewThread ? (
             <button
@@ -1231,27 +1279,17 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               {title}
             </span>
           )}
-          {onAddProject ? (
+          {onSearch ? (
             <Button
               type="button"
               variant="ghost"
               size="icon"
               className="h-7 w-7"
-              onClick={onAddProject}
-              disabled={isAddingProject}
-              title={
-                addProjectShortcut
-                  ? `Add project (${addProjectShortcut})`
-                  : "Add project"
-              }
-              aria-label="Add project"
-              aria-busy={isAddingProject}
+              onClick={onSearch}
+              title={searchShortcut ? `Search (${searchShortcut})` : "Search"}
+              aria-label="Search"
             >
-              {isAddingProject ? (
-                <ActivityDiamond size="md" />
-              ) : (
-                <FolderPlus aria-hidden="true" className="h-4 w-4" />
-              )}
+              <Search aria-hidden="true" className="h-4 w-4" />
             </Button>
           ) : null}
         </div>
@@ -1315,6 +1353,30 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                   value={threadSort}
                   onChange={onThreadSortChange}
                 />
+              ) : null}
+              {/* Adding a project belongs beside the projects it adds to. */}
+              {onAddProject ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
+                  onClick={onAddProject}
+                  disabled={isAddingProject}
+                  title={
+                    addProjectShortcut
+                      ? `Add project (${addProjectShortcut})`
+                      : "Add project"
+                  }
+                  aria-label="Add project"
+                  aria-busy={isAddingProject}
+                >
+                  {isAddingProject ? (
+                    <ActivityDiamond size="md" />
+                  ) : (
+                    <FolderPlus aria-hidden="true" className="h-3.5 w-3.5" />
+                  )}
+                </Button>
               ) : null}
             </div>
           </div>
@@ -1387,6 +1449,18 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
                           : undefined
                       }
                       dragHandleProps={dragHandleProps}
+                      open={
+                        collapsedWorkspaces
+                          ? !collapsedWorkspaces.has(workspaceId)
+                          : undefined
+                      }
+                      onOpenChange={
+                        onWorkspaceCollapsedChange
+                          ? (open) =>
+                              onWorkspaceCollapsedChange(workspaceId, !open)
+                          : undefined
+                      }
+                      collapsedThreadCount={group.threads.length}
                     >
                       <ThreadList
                         group={group}
@@ -1437,6 +1511,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         canDelete={Boolean(onDeleteThread)}
         canPin={Boolean(onTogglePinThread)}
         canMarkRead={Boolean(onMarkThreadRead)}
+        canMarkUnread={Boolean(onMarkThreadUnread)}
         colorOptions={
           onSetThreadColor &&
           threadContextMenu &&
@@ -1455,6 +1530,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         onDelete={openDeleteDialog}
         onTogglePin={handleTogglePinFromContextMenu}
         onMarkRead={handleMarkReadFromContextMenu}
+        onMarkUnread={handleMarkUnreadFromContextMenu}
         onSetColor={handleSetColorFromContextMenu}
       />
       <DeleteThreadDialog

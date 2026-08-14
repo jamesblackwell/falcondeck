@@ -41,6 +41,9 @@ export const SessionHeader = memo(function SessionHeader({
 
   return (
     <Toolbar
+      // Drags the window on desktop; Tauri exempts buttons and other clickable
+      // descendants, so the header controls keep working.
+      data-tauri-drag-region="deep"
       className={cn(
         'bg-surface-1 pt-8',
         compact && 'h-12 py-0 pt-0',

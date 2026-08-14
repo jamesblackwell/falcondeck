@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { AlertTriangle, CheckCircle2, Circle, CircleX } from 'lucide-react-native'
 
 import {
-  planStepPresentation,
+  planStepPresentations,
   planStepRenderKeys,
   type ConversationItem,
 } from '@falcondeck/client-core'
@@ -20,6 +20,7 @@ interface PlanBlockProps {
 export const PlanBlock = memo(function PlanBlock({ item }: PlanBlockProps) {
   const { theme } = useUnistyles()
   const stepKeys = useMemo(() => planStepRenderKeys(item.plan.steps), [item.plan.steps])
+  const presentations = useMemo(() => planStepPresentations(item.plan.steps), [item.plan.steps])
 
   return (
     <View style={styles.container}>
@@ -40,7 +41,7 @@ export const PlanBlock = memo(function PlanBlock({ item }: PlanBlockProps) {
       ) : null}
       <View style={styles.steps}>
         {item.plan.steps.map((step, index) => {
-          const presentation = planStepPresentation(step.status)
+          const presentation = presentations[index]
           const isDone = presentation.state === 'completed'
           const iconColor = isDone
             ? theme.colors.success.default

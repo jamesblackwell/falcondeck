@@ -18,7 +18,6 @@ import {
   composerSelectionFor,
   conversationRenderBlockType,
   defaultProvider,
-  editResendUnavailableReason,
   encryptJson,
   imageAttachmentSendBlockReason,
   operationalConditionDismissalKey,
@@ -34,7 +33,6 @@ import {
   workspaceAgentCapabilities,
   threadAgentCapabilities,
   workspaceModels,
-  workspaceProviderLabel,
   workspaceProviderOptions,
   type AgentProvider,
   type ConversationPresentation,
@@ -57,7 +55,10 @@ import {
 } from "@/store";
 import { useSessionActions } from "@/hooks/useSessionActions";
 import { useInterruptTurn } from "@/hooks/useInterruptTurn";
-import { useThreadActions } from "@/hooks/useThreadActions";
+import {
+  consumeAutoReadSuppression,
+  useThreadActions,
+} from "@/hooks/useThreadActions";
 import { useKeyboardVisible } from "@/hooks/useKeyboardVisible";
 import { useConversationPresentation } from "@/hooks/useRenderBlocks";
 import { useScrollToBottom } from "@/hooks/useScrollToBottom";
@@ -215,7 +216,6 @@ export default function HomeScreen() {
     respondApproval,
     respondInteractive,
     loadThreadDetail,
-    editResend,
     retryResponse,
   } = useSessionActions();
   const interruptTurn = useInterruptTurn();
@@ -287,30 +287,19 @@ export default function HomeScreen() {
   // A goal belongs to a thread, so there is nothing to set one on until one
   // exists — same gate as desktop.
   const showGoalControl = Boolean(workspace) && capabilities.supports_goals;
-  const canEditResend = Boolean(
+  const canRetryResponse = Boolean(
     selectedThread &&
     capabilities.supports_forking &&
     !selectedThread.variant &&
     selectedThread.status !== "running" &&
     selectedThread.status !== "waiting_for_input",
   );
-  const editResendReason = selectedThread
-    ? editResendUnavailableReason({
-        providerLabel: workspaceProviderLabel(
-          workspace,
-          selectedThread.provider,
-        ),
-        supportsForking: capabilities.supports_forking,
-        isIsolated: Boolean(selectedThread.variant),
-        threadStatus: selectedThread.status,
-      })
-    : null;
   // Render-only structural sharing keeps this lookup stable while only an
   // assistant tail streams. React has no previous-value useMemo primitive;
   // the helper validates all source identities before returning the cache.
   /* eslint-disable react-hooks/refs */
   const retrySources = useMemo(() => {
-    if (!canEditResend) {
+    if (!canRetryResponse) {
       retrySourcesRef.current = null;
       return null;
     }
@@ -320,16 +309,14 @@ export default function HomeScreen() {
     );
     retrySourcesRef.current = stable;
     return stable;
-  }, [canEditResend, conversationItems]);
+  }, [canRetryResponse, conversationItems]);
   /* eslint-enable react-hooks/refs */
   const renderBlock = useCallback(
     ({ item }: { item: ConversationRenderBlock }) => (
       <MessageRouter
         item={item}
         onApprovalDecision={respondApproval}
-        canEditResend={canEditResend}
-        editResendUnavailableReason={editResendReason}
-        onEditResend={editResend}
+        canRetryResponse={canRetryResponse}
         retrySource={
           item.kind === "item" && item.item.kind === "assistant_message"
             ? (retrySources?.get(item.item.id) ?? null)
@@ -338,14 +325,7 @@ export default function HomeScreen() {
         onRetryResponse={retryResponse}
       />
     ),
-    [
-      canEditResend,
-      editResend,
-      editResendReason,
-      respondApproval,
-      retryResponse,
-      retrySources,
-    ],
+    [canRetryResponse, respondApproval, retryResponse, retrySources],
   );
 
   // Filter models by active provider (matches desktop behavior)
@@ -1055,6 +1035,14 @@ export default function HomeScreen() {
     const readSeq = selectedThread.attention.last_agent_activity_seq;
     if (!readSeq || readSeq <= selectedThread.attention.last_read_seq) return;
 
+    // A thread the user just marked unread is skipped until they leave it or
+    // the agent posts something new. On release the dedupe below has to go too
+    // — it still holds this exact seq from when the thread was last read, and
+    // would otherwise keep the auto-read from ever firing again.
+    const suppression = consumeAutoReadSuppression(selectedThread.id, readSeq);
+    if (suppression === "suppress") return;
+    if (suppression === "released") lastSentReadSeqRef.current = null;
+
     // Streamed events refire this effect long before the summary reflects the
     // send, so suppress duplicates locally and debounce the action itself.
     const lastSent = lastSentReadSeqRef.current;
@@ -1120,11 +1108,12 @@ export default function HomeScreen() {
         <Pressable
           style={styles.headerLeft}
           onPress={handleOpenDrawer}
+          hitSlop={theme.spacing[2]}
           accessibilityRole="button"
           accessibilityLabel={`Project: ${getWorkspaceTitle(workspace?.path)}`}
           accessibilityHint="Opens the project and thread list"
         >
-          <ChevronLeft size={18} color={theme.colors.fg.muted} />
+          <ChevronLeft size={theme.iconSize.md} color={theme.colors.fg.muted} />
           <Text
             variant="label"
             color="primary"
@@ -1199,18 +1188,13 @@ export default function HomeScreen() {
 
       <View style={styles.listContainer}>
         {isSyncing ? (
+          // The sync banner above already names this wait, so the pane only
+          // shows motion — a second copy of the same sentence read as a bug.
           <View style={styles.syncState}>
             <ActivityDiamond
               size={theme.iconSize.md}
               color={theme.colors.accent.default}
             />
-            <Text variant="caption" color="muted">
-              {connectionStatus === "encrypted"
-                ? "Syncing..."
-                : connectionStatus === "connected"
-                  ? "Securing session..."
-                  : "Connecting..."}
-            </Text>
           </View>
         ) : !selectedThread && blocks.length === 0 ? (
           <View style={styles.newThreadState}>
@@ -1228,7 +1212,7 @@ export default function HomeScreen() {
               color={theme.colors.accent.default}
             />
             <Text variant="caption" color="muted">
-              Loading thread...
+              Loading thread…
             </Text>
           </View>
         ) : blocks.length === 0 &&
@@ -1329,8 +1313,10 @@ export default function HomeScreen() {
             isSubmitting || !isEncrypted || Boolean(attachmentSendBlockReason)
           }
           sendDisabledReason={
+            // Submitting is transient and self-evident; only surface a reason
+            // when the block is something the user has to act on.
             isSubmitting
-              ? "Message is being sent"
+              ? undefined
               : !isEncrypted
                 ? (sessionSendBlockReason(syncStatus) ?? "Reconnect to send")
                 : (attachmentSendBlockReason ?? undefined)
@@ -1398,6 +1384,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   headerLeft: {
     flex: 1,
+    minHeight: theme.minTouchTarget,
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[1],

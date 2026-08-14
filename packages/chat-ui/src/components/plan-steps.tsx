@@ -2,7 +2,7 @@ import { AlertTriangle, CheckCircle2, Circle, CircleX } from 'lucide-react'
 import { useMemo } from 'react'
 
 import {
-  planStepPresentation,
+  planStepPresentations,
   planStepRenderKeys,
   type PlanStepState,
   type ThreadPlanStep,
@@ -34,10 +34,11 @@ export function PlanStepList({
   className?: string
 }) {
   const stepKeys = useMemo(() => planStepRenderKeys(steps), [steps])
+  const presentations = useMemo(() => planStepPresentations(steps), [steps])
   return (
     <ol className={cn('space-y-1', className)}>
       {steps.map((step, index) => {
-        const presentation = planStepPresentation(step.status)
+        const presentation = presentations[index]
         return (
           <li
             key={stepKeys[index]}

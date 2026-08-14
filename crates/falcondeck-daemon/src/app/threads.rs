@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    process::Stdio,
     sync::{Arc, atomic::Ordering},
 };
 
@@ -13,9 +12,7 @@ use falcondeck_core::{
 };
 use serde_json::Value;
 use tokio::{
-    fs,
     io::AsyncBufReadExt,
-    process::Command,
     time::{Duration, timeout},
 };
 use uuid::Uuid;
@@ -33,13 +30,11 @@ use super::{
         ToolSettlement, build_ai_thread_title_prompt, is_placeholder_thread_title,
         is_provisional_thread_title, normalize_generated_thread_title, sanitize_conversation_item,
         settle_content_items, settle_tool_call_items, should_generate_ai_thread_title,
-        terminal_assistant_receipt, tool_display_metadata, with_renderable_attachment_previews,
+        terminal_assistant_receipt_with_error, tool_display_metadata,
+        with_renderable_attachment_previews,
     },
 };
-use crate::{
-    agent_binary::preferred_command_path, claude::ClaudeRuntime, codex::CodexSession,
-    error::DaemonError,
-};
+use crate::{claude::ClaudeRuntime, codex::CodexSession, error::DaemonError};
 
 /// How long a running Claude turn may stay silent — no stream traffic at all,
 /// not even thinking heartbeats — before the thread gets a visible warning.
@@ -51,18 +46,18 @@ const CLAUDE_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 struct AiThreadTitleInput {
     workspace_path: String,
     prompt: String,
-    prefer_claude: bool,
 }
 
 impl AppState {
     /// Closes transient content, tools, and response requests once an agent
     /// reports that its turn ended, even if an item-level terminal event was lost.
-    pub(super) async fn settle_turn_items(
+    pub(super) async fn settle_turn_items_with_error(
         &self,
         workspace_id: &str,
         thread_id: &str,
         settled_at: chrono::DateTime<Utc>,
         settlement: ToolSettlement,
+        error: Option<&str>,
     ) {
         let cancelled_request_ids = {
             let mut requests = self.inner.interactive_requests.lock().await;
@@ -107,12 +102,14 @@ impl AppState {
                     &mut thread.items,
                     content_terminal,
                     settled_at,
+                    error,
                 ));
-                let terminal_receipt = terminal_assistant_receipt(
+                let terminal_receipt = terminal_assistant_receipt_with_error(
                     &thread.items,
                     content_terminal,
                     settled_at,
                     thread.summary.latest_turn_id.as_deref(),
+                    error,
                 );
                 for item in &mut thread.items {
                     if let ConversationItem::InteractiveRequest {
@@ -271,6 +268,7 @@ impl AppState {
                     native_session_id: None,
                     provider_transport: None,
                     handoff_from: None,
+                    origin: None,
                     status: ThreadStatus::Idle,
                     updated_at: now,
                     last_message_preview: None,
@@ -386,6 +384,42 @@ impl AppState {
         summary
     }
 
+    /// Names the most recent threads a provider only gave a prompt preview to.
+    ///
+    /// Claude sessions almost never carry a title of their own, so without this
+    /// a thread keeps its opening prompt as a name until it happens to run
+    /// another turn. Bounded to the newest few threads: each title costs a
+    /// utility-model call, and a busy workspace hydrates hundreds of sessions.
+    pub(super) async fn backfill_provider_preview_titles(&self, workspace_id: &str, limit: usize) {
+        let candidates = {
+            let workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get(workspace_id) else {
+                return;
+            };
+            let mut threads = workspace
+                .threads
+                .values()
+                .filter(|thread| {
+                    thread.title_is_provider_preview
+                        && !thread.summary.is_archived
+                        && should_generate_ai_thread_title(thread)
+                })
+                .map(|thread| (thread.summary.updated_at, thread.summary.id.clone()))
+                .collect::<Vec<_>>();
+            threads.sort_by_key(|(updated_at, _)| std::cmp::Reverse(*updated_at));
+            threads
+                .into_iter()
+                .take(limit)
+                .map(|(_, thread_id)| thread_id)
+                .collect::<Vec<_>>()
+        };
+
+        for thread_id in candidates {
+            self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id)
+                .await;
+        }
+    }
+
     pub(super) async fn maybe_schedule_ai_thread_title(
         &self,
         workspace_id: String,
@@ -412,23 +446,22 @@ impl AppState {
                     .working_directory(&workspace.summary.path)
                     .to_string(),
                 prompt: build_ai_thread_title_prompt(&thread.items),
-                prefer_claude: workspace.summary.agents.iter().any(|agent| {
-                    agent.provider == AgentProvider::CLAUDE
-                        && matches!(agent.account.status, falcondeck_core::AccountStatus::Ready)
-                }),
             }
         };
 
         let app = self.clone();
         tokio::spawn(async move {
-            let generated = app.generate_ai_thread_title(&title_input).await;
+            let generated = app
+                .generate_ai_thread_title(&workspace_id, &title_input)
+                .await;
             match generated {
                 Some(title) => {
                     let _ = app
                         .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
                             if thread.manual_title
                                 || thread.ai_title_generated
-                                || (!is_placeholder_thread_title(&thread.summary.title)
+                                || (!thread.title_is_provider_preview
+                                    && !is_placeholder_thread_title(&thread.summary.title)
                                     && !is_provisional_thread_title(&thread.summary.title))
                             {
                                 thread.ai_title_in_flight = false;
@@ -438,6 +471,7 @@ impl AppState {
                             thread.summary.updated_at = Utc::now();
                             thread.ai_title_generated = true;
                             thread.ai_title_in_flight = false;
+                            thread.title_is_provider_preview = false;
                         })
                         .await;
                     if let Ok(thread) = app.thread_summary(&workspace_id, &thread_id).await {
@@ -460,88 +494,23 @@ impl AppState {
         });
     }
 
-    async fn generate_ai_thread_title(&self, input: &AiThreadTitleInput) -> Option<String> {
-        if input.prefer_claude
-            && let Some(title) = self.generate_ai_thread_title_with_claude(input).await
-        {
-            return Some(title);
-        }
-        self.generate_ai_thread_title_with_codex(input).await
-    }
-
-    async fn generate_ai_thread_title_with_claude(
+    /// Titles run on the same cheap utility chain as handoff briefs, so a
+    /// user with only Codex, `OpenCode`, or Grok installed still gets one.
+    async fn generate_ai_thread_title(
         &self,
+        workspace_id: &str,
         input: &AiThreadTitleInput,
     ) -> Option<String> {
-        let resolved = self.resolve_provider_binary(&AgentProvider::CLAUDE);
-        let mut command = Command::new(&resolved.executable);
-        command
-            .arg("-p")
-            .arg(&input.prompt)
-            .arg("--model")
-            .arg("haiku")
-            .arg("--output-format")
-            .arg("text")
-            .arg("--tools")
-            .arg("")
-            .arg("--no-session-persistence")
-            .current_dir(&input.workspace_path)
-            .stdin(Stdio::null());
-        if let Some(path) = preferred_command_path(&resolved.executable) {
-            command.env("PATH", path);
-        }
-        let output = timeout(Duration::from_secs(20), command.output())
-            .await
-            .ok()?
-            .ok()?;
-
-        if !output.status.success() {
-            return None;
-        }
-
-        normalize_generated_thread_title(String::from_utf8_lossy(&output.stdout).as_ref())
-    }
-
-    async fn generate_ai_thread_title_with_codex(
-        &self,
-        input: &AiThreadTitleInput,
-    ) -> Option<String> {
-        let resolved = self.resolve_provider_binary(&AgentProvider::CODEX);
-        let output_path = std::env::temp_dir().join(format!(
-            "falcondeck-thread-title-{}.txt",
-            Uuid::new_v4().simple()
-        ));
-        let mut command = Command::new(&resolved.executable);
-        command
-            .arg("exec")
-            .arg("--skip-git-repo-check")
-            .arg("--ephemeral")
-            .arg("--color")
-            .arg("never")
-            .arg("-s")
-            .arg("read-only")
-            .arg("-o")
-            .arg(&output_path)
-            .arg(&input.prompt)
-            .current_dir(&input.workspace_path)
-            .stdin(Stdio::null())
-            .stderr(Stdio::null());
-        if let Some(path) = preferred_command_path(&resolved.executable) {
-            command.env("PATH", path);
-        }
-        let output = timeout(Duration::from_secs(25), command.output())
-            .await
-            .ok()?
-            .ok()?;
-
-        if !output.status.success() {
-            let _ = fs::remove_file(&output_path).await;
-            return None;
-        }
-
-        let generated = fs::read_to_string(&output_path).await.ok();
-        let _ = fs::remove_file(&output_path).await;
-        normalize_generated_thread_title(generated.as_deref().unwrap_or_default())
+        let candidates = self.utility_model_candidates(workspace_id).await;
+        let run = self
+            .run_utility_prompt(
+                &candidates,
+                &input.workspace_path,
+                &input.prompt,
+                Duration::from_secs(25),
+            )
+            .await?;
+        normalize_generated_thread_title(&run.text)
     }
 
     pub(super) async fn monitor_claude_turn(
@@ -576,7 +545,6 @@ impl AppState {
         let mut turn_error: Option<String> = None;
         let mut saw_agent_output = false;
         let stderr_task = stderr.map(|stderr| {
-            let app = self.clone();
             let workspace_id = workspace_id.clone();
             let thread_id = thread_id.clone();
             tokio::spawn(async move {
@@ -872,6 +840,7 @@ impl AppState {
                                 memory_citation: None,
                                 citations: assistant_citations.clone(),
                                 lifecycle: ContentLifecycle::Streaming,
+                                error: None,
                                 created_at: Utc::now(),
                             };
                             let _ = self
@@ -1053,8 +1022,14 @@ impl AppState {
         } else {
             ToolSettlement::Completed
         };
-        self.settle_turn_items(&workspace_id, &thread_id, settled_at, tool_settlement)
-            .await;
+        self.settle_turn_items_with_error(
+            &workspace_id,
+            &thread_id,
+            settled_at,
+            tool_settlement,
+            final_error.as_deref(),
+        )
+        .await;
         let _ = self
             .with_thread_mut(&workspace_id, &thread_id, |thread| {
                 thread.status = if final_error.is_some() {
@@ -1259,6 +1234,7 @@ impl ManagedThread {
             manual_title: false,
             ai_title_generated,
             ai_title_in_flight: false,
+            title_is_provider_preview: false,
             requires_resume: false,
             queued_requests: Vec::new(),
             dispatching_request: None,

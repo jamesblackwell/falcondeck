@@ -8,6 +8,8 @@ import { isThreadSortMode, normalizePreferences } from '@falcondeck/client-core'
 
 const THINKING_DISPLAY_STORAGE_KEY = 'falcondeck.desktop.thinking-display.v1'
 const THREAD_SORT_STORAGE_KEY = 'falcondeck.desktop.thread-sort.v1'
+const COLLAPSED_WORKSPACES_STORAGE_KEY =
+  'falcondeck.desktop.collapsed-workspaces.v1'
 
 const THINKING_DISPLAY_VALUES: ThinkingDisplay[] = [
   'auto',
@@ -62,6 +64,37 @@ export function writeStoredThreadSort(value: ThreadSortMode) {
   if (typeof window === 'undefined') return
   try {
     window.localStorage.setItem(THREAD_SORT_STORAGE_KEY, value)
+  } catch {
+    // Storage can be unavailable (private mode, quota); the in-memory value
+    // stays authoritative for this session.
+  }
+}
+
+/**
+ * Which sidebar projects are folded away. Device-local like the sort mode: a
+ * tidied sidebar is about this screen, not about the workspace itself.
+ */
+export function readStoredCollapsedWorkspaces(): string[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(COLLAPSED_WORKSPACES_STORAGE_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === 'string')
+      : []
+  } catch {
+    return []
+  }
+}
+
+export function writeStoredCollapsedWorkspaces(value: readonly string[]) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(
+      COLLAPSED_WORKSPACES_STORAGE_KEY,
+      JSON.stringify([...value]),
+    )
   } catch {
     // Storage can be unavailable (private mode, quota); the in-memory value
     // stays authoritative for this session.

@@ -38,6 +38,28 @@ export function planStepPresentation(status: string): PlanStepPresentation {
   return { state: 'unknown', label }
 }
 
+/** Resolve every step's presentation for a checklist, keeping only the most
+ * recent in-progress step marked as running. Agents can start a step while
+ * leaving an earlier one still marked in-progress, which would otherwise pulse
+ * more than one activity diamond; the older one reads as completed instead. */
+export function planStepPresentations(
+  steps: readonly ThreadPlanStep[],
+): PlanStepPresentation[] {
+  let lastInProgress = -1
+  for (let index = 0; index < steps.length; index += 1) {
+    if (planStepPresentation(steps[index].status).state === 'in_progress') {
+      lastInProgress = index
+    }
+  }
+  return steps.map((step, index) => {
+    const presentation = planStepPresentation(step.status)
+    if (presentation.state === 'in_progress' && index !== lastInProgress) {
+      return { state: 'completed', label: 'Completed' }
+    }
+    return presentation
+  })
+}
+
 export type PinnedPlan = {
   /** Conversation item the plan came from, so the transcript can skip it. */
   itemId: string
@@ -84,7 +106,7 @@ export function planProgress(steps: readonly ThreadPlanStep[]): PlanProgress {
       completed += 1
       continue
     }
-    if (!running && state === 'in_progress') running = step
+    if (state === 'in_progress') running = step
     if (!nextUnfinished) nextUnfinished = step
   }
   return { completed, total: steps.length, current: running ?? nextUnfinished }

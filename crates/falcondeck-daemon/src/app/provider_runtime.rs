@@ -79,6 +79,9 @@ pub(super) struct TurnSpec<'a> {
     pub(super) requested_model_id: Option<&'a str>,
     pub(super) requested_reasoning_effort: Option<&'a str>,
     pub(super) service_tier: Option<&'a str>,
+    /// Queue dispatch keeps its request pending until the provider really
+    /// accepts the turn, so a startup failure can restore the authored entry.
+    pub(super) wait_for_startup: bool,
 }
 
 impl ProviderRuntime {
@@ -369,6 +372,7 @@ impl ProviderRuntime {
                     provider,
                     spec.inputs,
                     spec.selected_skills,
+                    spec.wait_for_startup,
                 )
                 .await
             }

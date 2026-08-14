@@ -169,12 +169,27 @@ export type NotificationPreferences = {
   suppress_when_desktop_active: boolean;
 };
 
+/** A provider-scoped model used for FalconDeck's own background work. */
+export type UtilityModelChoice = {
+  provider: string;
+  /** Empty means "use the provider's own default model". */
+  model_id: string;
+};
+
+export type UtilityModelPreferences = {
+  /** Providers tried in order; the first installed and ready one wins. */
+  provider_order: string[];
+  models: UtilityModelChoice[];
+};
+
 export type FalconDeckPreferences = {
   version: number;
   /** Older daemons omit this until project order has been saved. */
   workspace_order?: string[];
   conversation: ConversationPreferences;
   notifications: NotificationPreferences;
+  /** Older daemons omit this; `normalizePreferences` always fills it in. */
+  utility_models?: UtilityModelPreferences;
 };
 
 export type UpdateConversationAutoExpandPreferences =
@@ -190,10 +205,16 @@ export type UpdateConversationPreferences = {
 
 export type UpdateNotificationPreferences = Partial<NotificationPreferences>;
 
+export type UpdateUtilityModelPreferences = {
+  provider_order?: string[] | null;
+  models?: UtilityModelChoice[] | null;
+};
+
 export type UpdatePreferencesPayload = {
   workspace_order?: string[] | null;
   conversation?: UpdateConversationPreferences | null;
   notifications?: UpdateNotificationPreferences | null;
+  utility_models?: UpdateUtilityModelPreferences | null;
 };
 
 export type ToolArtifactKind =
@@ -422,6 +443,7 @@ export type ThreadSummary = {
   provider_transport?: string | null;
   /** Source thread when this thread is a cross-provider continuation. */
   handoff_from?: ThreadHandoffSource | null;
+  origin?: { kind: "scheduled_task"; task_id: string; title: string } | null;
   status: ThreadStatus;
   updated_at: string;
   last_message_preview: string | null;
@@ -666,6 +688,8 @@ export type ConversationItem =
       citations?: ConversationCitation[];
       /** Omitted by older daemons and hydrated as complete by clients. */
       lifecycle?: ContentLifecycle;
+      /** Provider-reported explanation when the response failed. */
+      error?: string | null;
       created_at: string;
     }
   | {
@@ -809,6 +833,9 @@ export type DaemonSnapshot = {
   daemon: {
     version: string;
     started_at: string;
+    capabilities?: {
+      scheduled_tasks?: boolean;
+    };
   };
   workspaces: WorkspaceSummary[];
   threads: ThreadSummary[];
@@ -822,6 +849,82 @@ export type DaemonSnapshot = {
   preferences: FalconDeckPreferences;
   /** Installed extensions and bounded non-secret projections. */
   extensions: ExtensionSnapshot;
+  /** Bounded summaries for automation owned by this daemon. */
+  scheduled_tasks?: ScheduledTaskSummary[];
+};
+
+export type ScheduledTaskStatus = "active" | "paused" | "completed";
+export type ScheduledTaskRunStatus =
+  | "queued"
+  | "running"
+  | "awaiting_input"
+  | "succeeded"
+  | "failed"
+  | "interrupted"
+  | "skipped";
+export type ScheduledTaskRunTrigger = "scheduled" | "late" | "manual";
+
+export type ScheduledTaskSchedule =
+  | { kind: "once"; run_at: string; timezone: string }
+  | { kind: "recurring"; rrule: string; timezone: string };
+
+export type ScheduledTaskRunSummary = {
+  id: string;
+  task_id: string;
+  status: ScheduledTaskRunStatus;
+  trigger: ScheduledTaskRunTrigger;
+  scheduled_for: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  workspace_id: string;
+  thread_id?: string | null;
+  preview?: string | null;
+};
+
+export type ScheduledTaskSummary = {
+  id: string;
+  title: string;
+  prompt_preview: string;
+  status: ScheduledTaskStatus;
+  schedule: ScheduledTaskSchedule;
+  workspace_id: string;
+  provider: AgentProvider;
+  next_run_at?: string | null;
+  last_run?: ScheduledTaskRunSummary | null;
+  updated_at: string;
+};
+
+export type ScheduledTaskDetail = ScheduledTaskSummary & {
+  prompt: string;
+  model_id?: string | null;
+  reasoning_effort?: string | null;
+  collaboration_mode_id?: string | null;
+  approval_policy?: string | null;
+  permission_mode?: string | null;
+  sandbox_mode?: string | null;
+  isolation: ThreadIsolation;
+  selected_skills: SelectedSkillReference[];
+  created_at: string;
+};
+
+export type CreateScheduledTaskPayload = {
+  title: string;
+  prompt: string;
+  workspace_id: string;
+  provider: AgentProvider;
+  schedule: ScheduledTaskSchedule;
+  model_id?: string | null;
+  reasoning_effort?: string | null;
+  collaboration_mode_id?: string | null;
+  approval_policy?: string | null;
+  permission_mode?: string | null;
+  sandbox_mode?: string | null;
+  isolation?: ThreadIsolation;
+  selected_skills?: SelectedSkillReference[];
+};
+
+export type UpdateScheduledTaskPayload = Partial<CreateScheduledTaskPayload> & {
+  status?: ScheduledTaskStatus;
 };
 
 export type ExtensionStatus = "disabled" | "active" | "error";
@@ -860,10 +963,7 @@ export type ExtensionUiTone =
   | "purple"
   | "pink";
 export type ExtensionUiButtonVariant =
-  | "secondary"
-  | "primary"
-  | "ghost"
-  | "danger";
+  "secondary" | "primary" | "ghost" | "danger";
 export type ExtensionUiStateKind = "loading" | "empty" | "error";
 
 export type ExtensionUiActionBinding = {
@@ -1122,6 +1222,19 @@ export type EventEnvelope = {
     | { type: "workspace-updated"; workspace: WorkspaceSummary }
     | { type: "preferences-updated"; preferences: FalconDeckPreferences }
     | { type: "extension-catalog-updated"; catalog: ExtensionSummary[] }
+    | { type: "scheduled-task-created"; task: ScheduledTaskSummary }
+    | { type: "scheduled-task-updated"; task: ScheduledTaskSummary }
+    | { type: "scheduled-task-deleted"; task_id: string }
+    | {
+        type: "scheduled-task-run-started";
+        task_id: string;
+        run: ScheduledTaskRunSummary;
+      }
+    | {
+        type: "scheduled-task-run-updated";
+        task_id: string;
+        run: ScheduledTaskRunSummary;
+      }
     | {
         type: "extension-view-updated";
         extension_id: string;
@@ -1197,6 +1310,12 @@ export type MarkThreadReadPayload = {
   workspace_id: string;
   thread_id: string;
   read_seq: number;
+};
+
+/** No `read_seq`: the daemon walks the thread back to unread on its own. */
+export type MarkThreadUnreadPayload = {
+  workspace_id: string;
+  thread_id: string;
 };
 
 export type GitFileStatus =

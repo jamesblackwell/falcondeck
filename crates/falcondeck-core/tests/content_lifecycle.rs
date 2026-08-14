@@ -38,6 +38,7 @@ fn content_lifecycle_serializes_as_stable_snake_case() {
         memory_citation: None,
         citations: Vec::new(),
         lifecycle: ContentLifecycle::Interrupted,
+        error: None,
         created_at: chrono::DateTime::parse_from_rfc3339("2026-08-08T20:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc),

@@ -10,6 +10,8 @@ import {
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
   normalizeInteractiveRequest,
+  normalizeScheduledTask,
+  normalizeScheduledTaskRun,
   normalizeThreadSummary,
 } from "./normalization";
 
@@ -38,8 +40,7 @@ export function threadForSelection(
   if (!workspaceId || !threadId) return null;
   return (
     threads.find(
-      (thread) =>
-        thread.id === threadId && thread.workspace_id === workspaceId,
+      (thread) => thread.id === threadId && thread.workspace_id === workspaceId,
     ) ?? null
   );
 }
@@ -335,6 +336,37 @@ export function applySnapshotEvent(
       return {
         ...snapshot,
         extensions: { ...snapshot.extensions, views },
+      };
+    }
+    case "scheduled-task-created":
+    case "scheduled-task-updated": {
+      const task = normalizeScheduledTask(daemonEvent.task);
+      if (!task) return snapshot;
+      const tasks = snapshot.scheduled_tasks ?? [];
+      return {
+        ...snapshot,
+        scheduled_tasks: [
+          task,
+          ...tasks.filter((existing) => existing.id !== task.id),
+        ],
+      };
+    }
+    case "scheduled-task-deleted":
+      return {
+        ...snapshot,
+        scheduled_tasks: (snapshot.scheduled_tasks ?? []).filter(
+          (task) => task.id !== daemonEvent.task_id,
+        ),
+      };
+    case "scheduled-task-run-started":
+    case "scheduled-task-run-updated": {
+      const run = normalizeScheduledTaskRun(daemonEvent.run);
+      if (!run || run.task_id !== daemonEvent.task_id) return snapshot;
+      return {
+        ...snapshot,
+        scheduled_tasks: (snapshot.scheduled_tasks ?? []).map((task) =>
+          task.id === daemonEvent.task_id ? { ...task, last_run: run } : task,
+        ),
       };
     }
     case "service": {

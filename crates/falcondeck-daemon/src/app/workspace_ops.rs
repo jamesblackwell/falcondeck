@@ -2,13 +2,18 @@ use std::path::{Path, PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
-    ConversationItem, ForkThreadRequest, ImageInput, InteractiveRequestResolution,
-    SetThreadGoalRequest, ThreadDetail, ThreadDetailMode, ThreadDetailRequest, ThreadGoal,
-    ThreadIsolation, TurnInputItem,
+    ConversationItem, ForkThreadRequest, ImageInput, InteractiveRequestOutcome,
+    InteractiveRequestResolution, SetThreadGoalRequest, ThreadDetail, ThreadDetailMode,
+    ThreadDetailRequest, ThreadGoal, ThreadIsolation, TurnInputItem,
 };
 use uuid::Uuid;
 
 use super::*;
+
+/// How many prompt-preview titles a workspace connect may replace with
+/// generated ones. Each costs a utility-model run, so only the threads the user
+/// is most likely to look at are worth backfilling.
+const PREVIEW_TITLE_BACKFILL_LIMIT: usize = 5;
 
 const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 3_500_000;
 const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES: u64 = 10_000_000;
@@ -208,6 +213,7 @@ pub(super) async fn connect_workspace_internal(
         crate::codex::HydratedThread {
             summary: thread.summary,
             items: thread.items,
+            title_is_provider_preview: thread.title_is_provider_preview,
         }
     }));
     threads.sort_by_key(|thread| std::cmp::Reverse(thread.summary.updated_at));
@@ -288,77 +294,99 @@ pub(super) async fn connect_workspace_internal(
         last_error: None,
     };
 
-    app.inner.workspaces.lock().await.insert(
-        workspace_id.clone(),
-        ManagedWorkspace {
-            summary: summary.clone(),
-            codex_session,
-            claude_runtime: Some(claude_runtime),
-            opencode_runtime: None,
-            acp_runtimes: HashMap::new(),
-            threads: threads
-                .into_iter()
-                .map(|mut thread| {
-                    if persisted_workspace_ref
-                        .map(|pw| pw.archived_thread_ids.contains(&thread.summary.id))
-                        .unwrap_or(false)
-                    {
-                        thread.summary.is_archived = true;
-                    }
-                    if persisted_workspace_ref
-                        .map(|pw| pw.pinned_thread_ids.contains(&thread.summary.id))
-                        .unwrap_or(false)
-                    {
-                        thread.summary.is_pinned = true;
-                    }
-                    if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
-                        if let Some(provider) = state.provider.clone() {
-                            thread.summary.provider = provider;
-                        }
-                        if state.native_session_id.is_some() {
-                            thread.summary.native_session_id = state.native_session_id.clone();
-                        }
-                        if state.handoff_from.is_some() {
-                            thread.summary.handoff_from = state.handoff_from.clone();
-                        }
-                        thread.summary.attention.last_read_seq = state.last_read_seq;
-                        thread.summary.attention.last_agent_activity_seq =
-                            state.last_agent_activity_seq;
-                        // Provider hydration reports the workspace folder; only
-                        // our own state knows the thread runs somewhere else.
-                        thread.summary.variant = state.variant.clone();
-                        // Params the provider's records didn't carry (Codex
-                        // omits the standard tier; Claude reports nothing)
-                        // come back from the last persisted selections.
-                        thread.summary.agent.merge_missing_from(&state.agent);
-                    }
-                    (thread.summary.id.clone(), {
-                        let mut managed = ManagedThread::with_items(thread.summary, thread.items);
-                        if let Some(state) = persisted_thread_states.get(&managed.summary.id) {
-                            managed.manual_title = state.manual_title;
-                            // A rename made in FalconDeck outlives whatever the
-                            // provider's session file says the title is.
-                            if state.manual_title
-                                && let Some(title) = state.title.clone()
-                            {
-                                managed.summary.title = title;
-                            }
-                            managed.ai_title_generated = state.ai_title_generated
-                                || (!is_placeholder_thread_title(&managed.summary.title)
-                                    && !is_provisional_thread_title(&managed.summary.title));
-                            managed.queued_requests = state.queued_requests.clone();
-                            managed.summary.queued_turns = state
-                                .queued_requests
-                                .iter()
-                                .map(|queued| queued.summary.clone())
-                                .collect();
-                        }
-                        managed
-                    })
-                })
-                .collect(),
-        },
-    );
+    let hydrated_threads: HashMap<String, ManagedThread> = threads
+        .into_iter()
+        .map(|mut thread| {
+            if persisted_workspace_ref
+                .map(|pw| pw.archived_thread_ids.contains(&thread.summary.id))
+                .unwrap_or(false)
+            {
+                thread.summary.is_archived = true;
+            }
+            if persisted_workspace_ref
+                .map(|pw| pw.pinned_thread_ids.contains(&thread.summary.id))
+                .unwrap_or(false)
+            {
+                thread.summary.is_pinned = true;
+            }
+            if let Some(state) = persisted_thread_states.get(&thread.summary.id) {
+                if let Some(provider) = state.provider.clone() {
+                    thread.summary.provider = provider;
+                }
+                if state.native_session_id.is_some() {
+                    thread.summary.native_session_id = state.native_session_id.clone();
+                }
+                if state.handoff_from.is_some() {
+                    thread.summary.handoff_from = state.handoff_from.clone();
+                }
+                thread.summary.attention.last_read_seq = state.last_read_seq;
+                thread.summary.attention.last_agent_activity_seq = state.last_agent_activity_seq;
+                // Provider hydration reports the workspace folder; only
+                // our own state knows the thread runs somewhere else.
+                thread.summary.variant = state.variant.clone();
+                // Params the provider's records didn't carry (Codex
+                // omits the standard tier; Claude reports nothing)
+                // come back from the last persisted selections.
+                thread.summary.agent.merge_missing_from(&state.agent);
+            }
+            (thread.summary.id.clone(), {
+                let hydrated_title = thread.summary.title.clone();
+                let title_is_provider_preview = thread.title_is_provider_preview;
+                let mut managed = ManagedThread::with_items(thread.summary, thread.items);
+                if title_is_provider_preview {
+                    managed.ai_title_generated = false;
+                    managed.title_is_provider_preview = true;
+                }
+                if let Some(state) = persisted_thread_states.get(&managed.summary.id) {
+                    restore_persisted_title_state(
+                        &mut managed,
+                        state,
+                        &hydrated_title,
+                        title_is_provider_preview,
+                    );
+                    managed.queued_requests = state.queued_requests.clone();
+                    managed.summary.queued_turns = state
+                        .queued_requests
+                        .iter()
+                        .map(|queued| queued.summary.clone())
+                        .collect();
+                }
+                managed
+            })
+        })
+        .collect();
+
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        // Reconnecting a workspace that is already live must not throw away
+        // work in flight. The rebuilt entry would drop the ACP agent handles —
+        // orphaning the approvals those processes are still waiting on — and
+        // roll running threads back to the hydrated/persisted view, which
+        // still records the last turn as interrupted by shutdown.
+        let previous = workspaces.remove(&workspace_id);
+        let (previous_acp_runtimes, previous_opencode_runtime, previous_threads) = previous
+            .map(|workspace| {
+                (
+                    workspace.acp_runtimes,
+                    workspace.opencode_runtime,
+                    workspace.threads,
+                )
+            })
+            .unwrap_or_default();
+        let mut threads = hydrated_threads;
+        carry_over_live_threads(&mut threads, previous_threads);
+        workspaces.insert(
+            workspace_id.clone(),
+            ManagedWorkspace {
+                summary: summary.clone(),
+                codex_session,
+                claude_runtime: Some(claude_runtime),
+                opencode_runtime: previous_opencode_runtime,
+                acp_runtimes: previous_acp_runtimes,
+                threads,
+            },
+        );
+    }
     let mut saved_workspace = persisted_workspace_ref
         .cloned()
         .unwrap_or(PersistedWorkspaceState {
@@ -391,6 +419,8 @@ pub(super) async fn connect_workspace_internal(
 
     app.persist_local_state().await?;
     app.schedule_acp_metadata_hydration(&workspace_id);
+    app.backfill_provider_preview_titles(&workspace_id, PREVIEW_TITLE_BACKFILL_LIMIT)
+        .await;
     for thread_id in persisted_thread_states
         .values()
         .filter(|state| !state.queued_requests.is_empty())
@@ -430,6 +460,54 @@ pub(super) async fn connect_workspace_internal(
     }
 
     Ok(summary)
+}
+
+/// Keeps threads that are mid-turn when their workspace reconnects.
+///
+/// The hydrated view is rebuilt from provider session files and the daemon's
+/// persisted state, neither of which knows about a turn that started since.
+/// Letting it win would replace a live thread with a stale copy — most
+/// visibly, one still marked as stopped by the last shutdown.
+fn carry_over_live_threads(
+    hydrated: &mut HashMap<String, ManagedThread>,
+    previous: HashMap<String, ManagedThread>,
+) {
+    for (thread_id, thread) in previous {
+        if matches!(
+            thread.summary.status,
+            ThreadStatus::Running | ThreadStatus::WaitingForInput
+        ) {
+            hydrated.insert(thread_id, thread);
+        }
+    }
+}
+
+fn restore_persisted_title_state(
+    managed: &mut ManagedThread,
+    state: &PersistedThreadState,
+    hydrated_title: &str,
+    title_is_provider_preview: bool,
+) {
+    managed.manual_title = state.manual_title;
+    // FalconDeck-owned titles outlive provider previews. Older state could
+    // incorrectly mark the preview itself as generated, so only preserve a
+    // generated title when it differs from the hydrated preview.
+    let persisted_generated_title = state.ai_title_generated
+        && (!title_is_provider_preview || state.title.as_deref() != Some(hydrated_title));
+    if (state.manual_title || persisted_generated_title)
+        && let Some(title) = state.title.clone()
+    {
+        managed.summary.title = title;
+    }
+    managed.ai_title_generated = state.manual_title
+        || persisted_generated_title
+        || (!title_is_provider_preview
+            && !is_placeholder_thread_title(&managed.summary.title)
+            && !is_provisional_thread_title(&managed.summary.title));
+    // A restored FalconDeck title is no longer a preview, so the titler must
+    // not treat it as replaceable.
+    managed.title_is_provider_preview =
+        title_is_provider_preview && !state.manual_title && !persisted_generated_title;
 }
 
 /// Reconciles provider-hydrated threads with the daemon's own persisted thread
@@ -533,6 +611,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
                 native_session_id: state.native_session_id.clone(),
                 provider_transport: state.provider_transport.clone(),
                 handoff_from: state.handoff_from.clone(),
+                origin: None,
                 status: restored_status,
                 updated_at: state
                     .updated_at
@@ -566,6 +645,7 @@ pub(super) fn merge_hydrated_threads_with_persisted_state(
             items: adopted
                 .map(|transcript| transcript.items)
                 .unwrap_or_default(),
+            title_is_provider_preview: false,
         });
     }
     threads_out
@@ -740,6 +820,7 @@ pub(super) async fn start_thread(
         native_session_id,
         provider_transport,
         handoff_from: request.handoff_from,
+        origin: None,
         status: ThreadStatus::Idle,
         updated_at: now,
         last_message_preview: None,
@@ -1404,6 +1485,7 @@ async fn try_steer_turn(
                 requested_model_id: request.model_id.as_deref(),
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
+                wait_for_startup: false,
             },
         )
         .await
@@ -1912,6 +1994,50 @@ impl AppState {
             .ok_or_else(|| DaemonError::NotFound("queued image not found".to_string()))
     }
 
+    /// Image bytes for a queued turn's first attachment, ready to render.
+    ///
+    /// Queue inputs originate at the client, so neither the declared MIME nor
+    /// an arbitrary local path is proof that the file is an image. Confirm a
+    /// raster signature before exposing daemon-readable bytes to a caller.
+    pub(crate) async fn queued_turn_attachment_preview(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        queued_id: &str,
+    ) -> Result<(&'static str, Vec<u8>), DaemonError> {
+        let attachment = self
+            .queued_turn_attachment(workspace_id, thread_id, queued_id)
+            .await?;
+        let unavailable =
+            || DaemonError::NotFound("queued image preview unavailable".to_string());
+        let path = attachment
+            .local_path
+            .as_deref()
+            .or_else(|| {
+                std::path::Path::new(&attachment.url)
+                    .is_absolute()
+                    .then_some(attachment.url.as_str())
+            })
+            .ok_or_else(unavailable)?;
+        let bytes = tokio::fs::read(path).await.map_err(|_| unavailable())?;
+        let mime = queued_attachment_preview_mime_type(&bytes).ok_or_else(unavailable)?;
+        Ok((mime, bytes))
+    }
+
+    /// The same preview as a `data:` URL, for clients that reach the daemon
+    /// over the relay instead of its loopback HTTP API (mobile, remote web).
+    pub(crate) async fn queued_turn_attachment_preview_data_url(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        queued_id: &str,
+    ) -> Result<String, DaemonError> {
+        let (mime, bytes) = self
+            .queued_turn_attachment_preview(workspace_id, thread_id, queued_id)
+            .await?;
+        Ok(format!("data:{mime};base64,{}", BASE64.encode(bytes)))
+    }
+
     /// Dispatches the next queued turn if the thread is no longer busy.
     /// Called at every turn-end transition; safe to call spuriously — it
     /// no-ops while a turn is active or when nothing is queued. Runs as its
@@ -1952,7 +2078,7 @@ impl AppState {
                 Some(thread_id.clone()),
                 UnifiedEvent::ThreadUpdated { thread: summary },
             );
-            match send_turn(&app, next.request.clone()).await {
+            match send_turn_waiting_for_provider_start(&app, next.request.clone()).await {
                 Ok(_) => {
                     let mut workspaces = app.inner.workspaces.lock().await;
                     if let Some(thread) = workspaces
@@ -2003,6 +2129,21 @@ impl AppState {
 pub(super) async fn send_turn(
     app: &AppState,
     request: SendTurnRequest,
+) -> Result<CommandResponse, DaemonError> {
+    send_turn_with_startup_mode(app, request, false).await
+}
+
+async fn send_turn_waiting_for_provider_start(
+    app: &AppState,
+    request: SendTurnRequest,
+) -> Result<CommandResponse, DaemonError> {
+    send_turn_with_startup_mode(app, request, true).await
+}
+
+async fn send_turn_with_startup_mode(
+    app: &AppState,
+    request: SendTurnRequest,
+    wait_for_startup: bool,
 ) -> Result<CommandResponse, DaemonError> {
     if app.is_shutting_down() {
         return Err(DaemonError::BadRequest(
@@ -2069,6 +2210,7 @@ pub(super) async fn send_turn(
                     native_session_id: None,
                     provider_transport: None,
                     handoff_from: None,
+                    origin: None,
                     status: ThreadStatus::Idle,
                     updated_at: now,
                     last_message_preview: None,
@@ -2195,6 +2337,7 @@ pub(super) async fn send_turn(
                 requested_model_id: request.model_id.as_deref(),
                 requested_reasoning_effort: request.reasoning_effort.as_deref(),
                 service_tier: request.service_tier.as_deref(),
+                wait_for_startup,
             },
         )
         .await;
@@ -2209,11 +2352,12 @@ pub(super) async fn send_turn(
                 thread.updated_at = failed_at;
             })
             .await;
-        app.settle_turn_items(
+        app.settle_turn_items_with_error(
             &request.workspace_id,
             &request.thread_id,
             failed_at,
             ToolSettlement::Failed,
+            Some(&error_message),
         )
         .await;
         // Keep queued messages parked after a provider start failure. Advancing
@@ -2281,6 +2425,7 @@ pub(super) async fn update_thread(
             thread.manual_title = true;
             thread.ai_title_generated = true;
             thread.ai_title_in_flight = false;
+            thread.title_is_provider_preview = false;
         }
 
         if let Some(model_id) = request.model_id.clone() {
@@ -2637,6 +2782,53 @@ async fn thread_has_pending_interactive_request(
         })
 }
 
+/// Retires an approval whose agent is gone. The card leaves the transcript as
+/// cancelled and the thread stops waiting on an answer nobody can deliver.
+async fn discard_unanswerable_interactive_request(
+    app: &AppState,
+    workspace_id: &str,
+    request_id: &str,
+    thread_id: Option<&str>,
+) {
+    app.inner
+        .interactive_requests
+        .lock()
+        .await
+        .remove(&(workspace_id.to_string(), request_id.to_string()));
+    if let Some(thread_id) = thread_id {
+        let still_waiting =
+            thread_has_pending_interactive_request(app, workspace_id, thread_id).await;
+        let _ = app
+            .with_thread_mut(workspace_id, thread_id, |thread| {
+                if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
+                    thread.status = ThreadStatus::Error;
+                    thread.last_error =
+                        Some("The agent exited before this approval was answered".to_string());
+                    thread.updated_at = Utc::now();
+                }
+            })
+            .await;
+        let _ = app
+            .resolve_interactive_request_item(
+                workspace_id,
+                thread_id,
+                request_id,
+                Some(InteractiveRequestResolution {
+                    outcome: InteractiveRequestOutcome::Cancelled,
+                    resolved_at: Utc::now(),
+                }),
+            )
+            .await;
+    }
+    app.emit(
+        Some(workspace_id.to_string()),
+        None,
+        UnifiedEvent::Snapshot {
+            snapshot: app.snapshot().await,
+        },
+    );
+}
+
 pub(super) async fn respond_to_interactive_request(
     app: &AppState,
     workspace_id: String,
@@ -2716,13 +2908,33 @@ pub(super) async fn respond_to_interactive_request(
                 "ACP permission requests require an approval response".to_string(),
             ));
         };
-        app.respond_acp_permission(
-            &workspace_id,
-            pending.request.thread_id.as_deref(),
-            &request_id,
-            decision,
-        )
-        .await?;
+        if let Err(error) = app
+            .respond_acp_permission(
+                &workspace_id,
+                pending.request.thread_id.as_deref(),
+                &request_id,
+                decision,
+            )
+            .await
+        {
+            // The agent that raised this approval is gone, so nobody can act
+            // on the decision. Leaving the card answerable would park the
+            // thread on `waiting_for_input` forever, one dead prompt at a
+            // time; retire it instead and say why.
+            if matches!(error, DaemonError::NotFound(_)) {
+                discard_unanswerable_interactive_request(
+                    app,
+                    &workspace_id,
+                    &request_id,
+                    pending.request.thread_id.as_deref(),
+                )
+                .await;
+                return Err(DaemonError::BadRequest(
+                    "This approval is no longer live — the agent exited before it was answered. Send the message again.".to_string(),
+                ));
+            }
+            return Err(error);
+        }
         app.inner
             .interactive_requests
             .lock()
@@ -3496,6 +3708,55 @@ pub(super) async fn mark_thread_read(
     Ok(thread)
 }
 
+/// Walks `last_read_seq` back far enough that the thread reads as unread
+/// again. `mark_thread_read` is deliberately monotonic-forward, so the inverse
+/// gets its own entry point rather than a "go backwards" flag on the read
+/// path, where a stale client retry could silently un-read a thread.
+pub(super) async fn mark_thread_unread(
+    app: &AppState,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<ThreadSummary, DaemonError> {
+    let mut changed = false;
+    {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get_mut(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get_mut(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        // A thread the agent has never spoken in has nothing to be unread
+        // about: `unread` is `activity_seq > read_seq`, so with no activity no
+        // `read_seq` can make it true. Leave it alone instead of erroring.
+        let target = thread
+            .summary
+            .attention
+            .last_agent_activity_seq
+            .saturating_sub(1);
+        if thread.summary.attention.last_agent_activity_seq > 0
+            && thread.summary.attention.last_read_seq > target
+        {
+            thread.summary.attention.last_read_seq = target;
+            changed = true;
+        }
+    }
+
+    let thread = app.thread_summary(workspace_id, thread_id).await?;
+    if changed {
+        app.emit(
+            Some(workspace_id.to_string()),
+            Some(thread_id.to_string()),
+            UnifiedEvent::ThreadUpdated {
+                thread: thread.clone(),
+            },
+        );
+        app.persist_local_state().await?;
+    }
+    Ok(thread)
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -3668,6 +3929,7 @@ mod tests {
             memory_citation: None,
             citations: Vec::new(),
             lifecycle: ContentLifecycle::Complete,
+            error: None,
             created_at: Utc::now(),
         }
     }
@@ -3682,6 +3944,7 @@ mod tests {
                 native_session_id: Some(session_id.to_string()),
                 provider_transport: None,
                 handoff_from: None,
+                origin: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: Some(preview.to_string()),
@@ -3699,7 +3962,56 @@ mod tests {
                 variant: None,
             },
             items: vec![assistant_message(&format!("assistant-{session_id}"))],
+            title_is_provider_preview: false,
         }
+    }
+
+    fn managed_thread(thread_id: &str, status: ThreadStatus) -> ManagedThread {
+        let mut thread = hydrated_thread(thread_id, "preview");
+        thread.summary.status = status;
+        ManagedThread::with_items(thread.summary, thread.items)
+    }
+
+    #[test]
+    fn reconnecting_a_workspace_keeps_threads_that_are_mid_turn() {
+        // The hydrated view is what a restart-time reconnect rebuilds: the
+        // last turn recorded as interrupted by shutdown.
+        let mut hydrated = HashMap::from([
+            ("running".to_string(), {
+                let mut stale = managed_thread("running", ThreadStatus::Error);
+                stale.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+                stale
+            }),
+            ("idle".to_string(), managed_thread("idle", ThreadStatus::Idle)),
+        ]);
+        let previous = HashMap::from([
+            (
+                "running".to_string(),
+                managed_thread("running", ThreadStatus::Running),
+            ),
+            (
+                "waiting".to_string(),
+                managed_thread("waiting", ThreadStatus::WaitingForInput),
+            ),
+            (
+                "finished".to_string(),
+                managed_thread("finished", ThreadStatus::Idle),
+            ),
+        ]);
+
+        carry_over_live_threads(&mut hydrated, previous);
+
+        // Live work wins over the rebuilt copy, including a thread the
+        // hydrated view does not know about at all.
+        assert_eq!(hydrated["running"].summary.status, ThreadStatus::Running);
+        assert_eq!(hydrated["running"].summary.last_error, None);
+        assert_eq!(
+            hydrated["waiting"].summary.status,
+            ThreadStatus::WaitingForInput
+        );
+        // Nothing was in flight for these, so the rebuilt view stands.
+        assert_eq!(hydrated["idle"].summary.status, ThreadStatus::Idle);
+        assert!(!hydrated.contains_key("finished"));
     }
 
     fn persisted_thread(thread_id: &str, session_id: Option<&str>) -> PersistedThreadState {
@@ -3710,6 +4022,7 @@ mod tests {
             native_session_id: session_id.map(ToOwned::to_owned),
             provider_transport: None,
             handoff_from: None,
+            origin: None,
             title: Some(format!("Persisted {thread_id}")),
             manual_title: false,
             ai_title_generated: true,
@@ -3721,6 +4034,46 @@ mod tests {
             agent: ThreadAgentParams::default(),
             queued_requests: Vec::new(),
         }
+    }
+
+    #[test]
+    fn provider_preview_does_not_count_as_generated_title_after_restore() {
+        let mut hydrated = hydrated_thread("thread-1", "answer");
+        hydrated.summary.title = "Opening prompt preview".to_string();
+        let mut managed = ManagedThread::with_items(hydrated.summary, hydrated.items);
+        let mut state = persisted_thread("thread-1", Some("thread-1"));
+        state.title = Some("Opening prompt preview".to_string());
+
+        restore_persisted_title_state(&mut managed, &state, "Opening prompt preview", true);
+
+        assert!(!managed.ai_title_generated);
+        // A prompt preview reads like a real title, so only the flag keeps the
+        // titler eligible to replace it.
+        assert!(managed.title_is_provider_preview);
+        managed.items.push(ConversationItem::UserMessage {
+            id: "user-1".to_string(),
+            text: "Opening prompt preview".to_string(),
+            attachments: Vec::new(),
+            created_at: Utc::now(),
+            turn_id: None,
+            previous_turn_id: None,
+        });
+        assert!(super::should_generate_ai_thread_title(&managed));
+    }
+
+    #[test]
+    fn generated_title_outlives_provider_preview_after_restore() {
+        let mut hydrated = hydrated_thread("thread-1", "answer");
+        hydrated.summary.title = "Opening prompt preview".to_string();
+        let mut managed = ManagedThread::with_items(hydrated.summary, hydrated.items);
+        let mut state = persisted_thread("thread-1", Some("thread-1"));
+        state.title = Some("Concise generated title".to_string());
+
+        restore_persisted_title_state(&mut managed, &state, "Opening prompt preview", true);
+
+        assert_eq!(managed.summary.title, "Concise generated title");
+        assert!(managed.ai_title_generated);
+        assert!(!managed.title_is_provider_preview);
     }
 
     #[test]
@@ -3856,6 +4209,7 @@ mod tests {
             native_session_id: None,
             provider_transport: None,
             handoff_from: None,
+            origin: None,
             status: ThreadStatus::Running,
             updated_at: now,
             last_message_preview: None,
@@ -4507,5 +4861,44 @@ mod tests {
 
         let outcome = try_codex_reconnect(&app, "workspace-1").await;
         assert!(matches!(outcome, CodexReconnectAttempt::Failed(_)));
+    }
+
+    #[test]
+    fn queued_attachment_previews_require_image_bytes() {
+        assert_eq!(
+            queued_attachment_preview_mime_type(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            queued_attachment_preview_mime_type(b"\xff\xd8\xffrest"),
+            Some("image/jpeg")
+        );
+        assert_eq!(queued_attachment_preview_mime_type(b"not an image"), None);
+    }
+}
+
+pub(crate) fn queued_attachment_preview_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("image/bmp")
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        Some("image/tiff")
+    } else if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && matches!(
+            &bytes[8..12],
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1"
+        )
+    {
+        Some("image/heic")
+    } else {
+        None
     }
 }

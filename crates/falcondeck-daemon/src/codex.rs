@@ -70,11 +70,13 @@ pub struct CodexProviderMetadata {
 struct ParsedThreadRecord {
     summary: ThreadSummary,
     session_path: Option<String>,
+    title_is_provider_preview: bool,
 }
 
 pub struct HydratedThread {
     pub summary: ThreadSummary,
     pub items: Vec<ConversationItem>,
+    pub title_is_provider_preview: bool,
 }
 
 /// Upper bound for control-plane requests (initialize, account/model/thread
@@ -319,6 +321,7 @@ impl CodexSession {
                 let ParsedThreadRecord {
                     summary,
                     session_path,
+                    title_is_provider_preview,
                 } = record;
                 let (summary, items) = match session.read_thread(&summary.id).await {
                     Ok(value) => {
@@ -351,7 +354,11 @@ impl CodexSession {
                         (summary, items)
                     }
                 };
-                threads.push(HydratedThread { summary, items });
+                threads.push(HydratedThread {
+                    summary,
+                    items,
+                    title_is_provider_preview,
+                });
             }
 
             Ok::<_, DaemonError>((account, models, collaboration_modes, threads))
@@ -665,6 +672,16 @@ impl CodexSession {
             let _ = tx.send(Err(DaemonError::Rpc(
                 "codex app-server disconnected before responding".to_string(),
             )));
+        }
+
+        if !self.expected_exit.load(Ordering::Acquire) && !self.state.is_shutting_down() {
+            self.state
+                .fail_active_provider_threads(
+                    &self.workspace_id,
+                    &falcondeck_core::AgentProvider::CODEX,
+                    "Codex app-server disconnected while this turn was running",
+                )
+                .await;
         }
 
         let _ = self.child.lock().await.wait().await;
@@ -1605,6 +1622,7 @@ mod tests {
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].summary.id, "thread-a");
         assert_eq!(threads[0].summary.title, "latest project a thread");
+        assert!(threads[0].title_is_provider_preview);
         assert_eq!(
             threads[0].summary.updated_at.to_rfc3339(),
             "2026-03-16T13:26:59+00:00"
@@ -2588,6 +2606,7 @@ mod tests {
                 native_session_id: None,
                 provider_transport: None,
                 handoff_from: None,
+                origin: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,
@@ -2639,6 +2658,7 @@ mod tests {
                     memory_citation: None,
                     citations: Vec::new(),
                     lifecycle: ContentLifecycle::Complete,
+                    error: None,
                     created_at: Utc::now(),
                 },
             ],
@@ -2664,6 +2684,7 @@ mod tests {
                 native_session_id: None,
                 provider_transport: None,
                 handoff_from: None,
+                origin: None,
                 status: ThreadStatus::Idle,
                 updated_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T09:00:00Z")
                     .unwrap()
@@ -2690,6 +2711,7 @@ mod tests {
                 memory_citation: None,
                 citations: Vec::new(),
                 lifecycle: ContentLifecycle::Complete,
+                error: None,
                 created_at: chrono::DateTime::parse_from_rfc3339("2026-03-16T10:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),
@@ -2710,6 +2732,7 @@ mod tests {
                 native_session_id: None,
                 provider_transport: None,
                 handoff_from: None,
+                origin: None,
                 status: ThreadStatus::Idle,
                 updated_at: Utc::now(),
                 last_message_preview: None,

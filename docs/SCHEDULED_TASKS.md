@@ -1,6 +1,12 @@
 # Scheduled tasks
 
-Status: implementation plan. Proposed 2026-08-12; not yet implemented.
+Status: V1 implemented 2026-08-13.
+
+The daemon-owned scheduler, local and enrolled-host RPCs, durable task/run
+storage, unified events, generated-thread provenance, and desktop Scheduled UI
+are implemented. Agent-driven creation through a bundled skill/MCP bridge and
+the opt-in macOS LaunchAgent remain the explicitly deferred follow-up work
+described below.
 
 ## 1. Product decision
 

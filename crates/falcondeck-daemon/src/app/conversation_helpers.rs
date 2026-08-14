@@ -378,6 +378,16 @@ pub(crate) fn terminal_assistant_receipt(
     created_at: DateTime<Utc>,
     turn_id_hint: Option<&str>,
 ) -> Option<ConversationItem> {
+    terminal_assistant_receipt_with_error(turn_items, terminal, created_at, turn_id_hint, None)
+}
+
+pub(crate) fn terminal_assistant_receipt_with_error(
+    turn_items: &[ConversationItem],
+    terminal: ContentLifecycle,
+    created_at: DateTime<Utc>,
+    turn_id_hint: Option<&str>,
+    error: Option<&str>,
+) -> Option<ConversationItem> {
     if !matches!(
         terminal,
         ContentLifecycle::Interrupted | ContentLifecycle::Error
@@ -430,8 +440,16 @@ pub(crate) fn terminal_assistant_receipt(
         memory_citation: None,
         citations: Vec::new(),
         lifecycle: terminal,
+        error: bounded_turn_error(error),
         created_at,
     })
+}
+
+pub(super) fn bounded_turn_error(error: Option<&str>) -> Option<String> {
+    error
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+        .map(|error| error.chars().take(2_000).collect())
 }
 
 pub(crate) fn codex_assistant_conversation_item(
@@ -459,6 +477,7 @@ pub(crate) fn codex_assistant_conversation_item(
         memory_citation,
         citations: Vec::new(),
         lifecycle,
+        error: None,
         created_at,
     })
 }
@@ -1354,6 +1373,7 @@ pub(super) fn settle_content_items(
     items: &mut [ConversationItem],
     terminal: ContentLifecycle,
     settled_at: DateTime<Utc>,
+    error: Option<&str>,
 ) -> Vec<ConversationItem> {
     debug_assert!(matches!(
         terminal,
@@ -1376,6 +1396,16 @@ pub(super) fn settle_content_items(
             ContentLifecycle::Pending | ContentLifecycle::Streaming
         ) {
             *lifecycle = terminal;
+            if let ConversationItem::AssistantMessage {
+                error: item_error, ..
+            } = item
+            {
+                *item_error = if terminal == ContentLifecycle::Error {
+                    bounded_turn_error(error)
+                } else {
+                    None
+                };
+            }
             if let ConversationItem::Reasoning {
                 duration_ms,
                 created_at,
@@ -1423,7 +1453,8 @@ pub(super) fn should_generate_ai_thread_title(thread: &ManagedThread) -> bool {
         && has_agent_output
         && !thread.manual_title
         && !thread.ai_title_generated
-        && (is_placeholder_thread_title(&thread.summary.title)
+        && (thread.title_is_provider_preview
+            || is_placeholder_thread_title(&thread.summary.title)
             || is_provisional_thread_title(&thread.summary.title))
 }
 
@@ -1439,7 +1470,8 @@ pub(super) fn is_placeholder_thread_title(title: &str) -> bool {
 }
 
 pub(super) fn is_provisional_thread_title(title: &str) -> bool {
-    title.trim().ends_with("...")
+    let trimmed = title.trim();
+    trimmed.ends_with("...") || trimmed.ends_with('…')
 }
 
 pub(super) fn build_ai_thread_title_prompt(items: &[ConversationItem]) -> String {
@@ -3319,6 +3351,7 @@ mod content_settlement_tests {
             memory_citation: None,
             citations: Vec::new(),
             lifecycle,
+            error: None,
             created_at: Utc::now(),
         }
     }
@@ -3354,7 +3387,8 @@ mod content_settlement_tests {
         ];
 
         let settled_at = Utc::now();
-        let updated = settle_content_items(&mut items, ContentLifecycle::Interrupted, settled_at);
+        let updated =
+            settle_content_items(&mut items, ContentLifecycle::Interrupted, settled_at, None);
 
         assert_eq!(updated.len(), 4);
         assert!(matches!(
@@ -3385,13 +3419,34 @@ mod content_settlement_tests {
     #[test]
     fn settles_failed_content_to_error() {
         let mut items = vec![assistant("current", ContentLifecycle::Streaming)];
-        settle_content_items(&mut items, ContentLifecycle::Error, Utc::now());
+        settle_content_items(&mut items, ContentLifecycle::Error, Utc::now(), None);
         assert!(matches!(
             &items[0],
             ConversationItem::AssistantMessage {
                 lifecycle: ContentLifecycle::Error,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn attaches_provider_error_when_settling_assistant_content() {
+        let mut items = vec![assistant("current", ContentLifecycle::Streaming)];
+
+        settle_content_items(
+            &mut items,
+            ContentLifecycle::Error,
+            Utc::now(),
+            Some("  DeepSeek rejected the request  "),
+        );
+
+        assert!(matches!(
+            &items[0],
+            ConversationItem::AssistantMessage {
+                lifecycle: ContentLifecycle::Error,
+                error: Some(error),
+                ..
+            } if error == "DeepSeek rejected the request"
         ));
     }
 
@@ -3468,6 +3523,7 @@ mod content_settlement_tests {
                 memory_citation: None,
                 citations: Vec::new(),
                 lifecycle: ContentLifecycle::Interrupted,
+                error: None,
                 created_at,
             },
         ];
@@ -3496,6 +3552,7 @@ mod content_settlement_tests {
                         memory_citation,
                         citations,
                         lifecycle,
+                        error,
                         created_at,
                         ..
                     } => ConversationItem::AssistantMessage {
@@ -3505,6 +3562,7 @@ mod content_settlement_tests {
                         memory_citation,
                         citations,
                         lifecycle,
+                        error,
                         created_at,
                     },
                     item => item,

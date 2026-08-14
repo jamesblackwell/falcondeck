@@ -8,16 +8,12 @@ import type {
   InteractiveRequestResolution,
   InteractiveResponsePayload,
   ThreadDetail,
-  ThreadStatus,
   ToolActivityKind,
   ToolDetailsMode,
   ToolLifecycle,
   TurnInputItem,
 } from "./types";
-import {
-  normalizeEventEnvelope,
-  normalizePreferences,
-} from "./normalization";
+import { normalizeEventEnvelope, normalizePreferences } from "./normalization";
 import { summarizeMcpArtifacts } from "./provider-output";
 
 /** Creates the receipt-safe outcome for a response without retaining answers. */
@@ -182,6 +178,19 @@ export function contentLifecycle(
   >,
 ): ContentLifecycle {
   return item.lifecycle ?? "complete";
+}
+
+/** Provider-reported failure detail for an assistant message, unless the
+ * message body already carries that text. A provider that cannot read an image
+ * (for example) often echoes the same error as both the response prose and the
+ * turn error; showing it again beneath "Response failed" would duplicate it. */
+export function assistantFailureDetail(
+  item: Extract<ConversationItem, { kind: "assistant_message" }>,
+): string | null {
+  const error = item.error?.trim();
+  if (!error) return null;
+  if (item.text.includes(error)) return null;
+  return error;
 }
 
 export function contentLifecycleLabel(lifecycle: ContentLifecycle) {
@@ -407,36 +416,6 @@ export type RetryableUserMessage = Extract<
   ConversationItem,
   { kind: "user_message" }
 >;
-
-export type EditResendAvailability = {
-  providerLabel: string;
-  supportsForking: boolean;
-  isIsolated: boolean;
-  threadStatus: ThreadStatus;
-};
-
-/**
- * Explains why provider-backed edit/resend is absent at the thread level.
- * A null result means the host may expose the action; individual messages
- * still need an authoritative provider turn boundary.
- */
-export function editResendUnavailableReason({
-  providerLabel,
-  supportsForking,
-  isIsolated,
-  threadStatus,
-}: EditResendAvailability): string | null {
-  if (!supportsForking) {
-    return `Edit and resend is unavailable because ${providerLabel} does not support conversation branching.`;
-  }
-  if (isIsolated) {
-    return "Edit and resend is unavailable in isolated checkouts.";
-  }
-  if (threadStatus === "running" || threadStatus === "waiting_for_input") {
-    return "Edit and resend is available after the active response finishes.";
-  }
-  return null;
-}
 
 /**
  * Associates terminal assistant answers with the user turn they can safely
@@ -1789,7 +1768,11 @@ export function deriveConversationPresentation(
         id: `${item.kind}:${item.id}`,
         item,
         default_open: defaultOpen,
-        suppress_read_only_detail: shouldSuppressReadOnlyDetail(item, mode, preferences),
+        suppress_read_only_detail: shouldSuppressReadOnlyDetail(
+          item,
+          mode,
+          preferences,
+        ),
       });
     }
     flushWork();
@@ -1886,7 +1869,11 @@ export function deriveConversationPresentation(
         !seenDiff.value && preferences.conversation.auto_expand.first_diff;
       seenDiff.value = true;
     }
-    const itemSuppressReadOnlyDetail = shouldSuppressReadOnlyDetail(item, mode, preferences);
+    const itemSuppressReadOnlyDetail = shouldSuppressReadOnlyDetail(
+      item,
+      mode,
+      preferences,
+    );
 
     historyBlocks.push({
       kind: "item",

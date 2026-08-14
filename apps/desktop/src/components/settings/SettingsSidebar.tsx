@@ -17,7 +17,10 @@ export function SettingsSidebar({
 }: SettingsSidebarProps) {
   return (
     <aside className="flex w-[280px] shrink-0 flex-col border-r border-border-subtle bg-[color-mix(in_oklab,var(--color-surface-1)_96%,black)]">
-      <div className="border-b border-border-subtle px-4 pb-4 pt-11">
+      <div
+        data-tauri-drag-region="deep"
+        className="border-b border-border-subtle px-4 pb-4 pt-11"
+      >
         <button
           type="button"
           onClick={onClose}

@@ -9,6 +9,7 @@ import { ActivityDiamond, Badge, Button, Card, CardContent, CardDescription, Car
 import { Download, FolderSync, RotateCcw } from 'lucide-react'
 
 import type { AppUpdaterState } from '../../hooks/useAppUpdater'
+import { BackgroundModelsCard } from './BackgroundModelsCard'
 import { PreferenceToggle } from './PreferenceToggle'
 import {
   formatDateTime,
@@ -228,6 +229,12 @@ export function GeneralSettingsPanel({
           />
         </CardContent>
       </Card>
+
+      <BackgroundModelsCard
+        workspace={workspace}
+        preferences={current}
+        onUpdatePreferences={onUpdatePreferences}
+      />
 
       <Card>
         <CardHeader>

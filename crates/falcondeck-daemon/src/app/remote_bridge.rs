@@ -2,11 +2,11 @@ use std::{collections::HashMap, sync::atomic::Ordering};
 
 use chrono::Utc;
 use falcondeck_core::{
-    DaemonSnapshot, EncryptedEnvelope, EventEnvelope, ForkThreadRequest, PairingPublicKeyBundle,
-    RelayClientMessage, RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse,
-    RemoteConnectionStatus, SendTurnRequest, SessionKeyMaterial, SnapshotRequest,
-    StartThreadRequest, TextDeltaTarget, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
-    UpdatePreferencesRequest, UpdateThreadRequest,
+    DaemonSnapshot, EncryptedEnvelope, EventEnvelope, ForkThreadRequest, HandoffBriefRequest,
+    PairingPublicKeyBundle, RelayClientMessage, RelayServerMessage, RelayUpdateBody,
+    RelayWebSocketTicketResponse, RemoteConnectionStatus, SendTurnRequest, SessionKeyMaterial,
+    SnapshotRequest, StartThreadRequest, TextDeltaTarget, ThreadDetailMode, ThreadDetailRequest,
+    UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
     crypto::{
         LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material,
         verify_pairing_public_key_bundle,
@@ -50,12 +50,14 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "approval.respond",
     "thread.start",
     "thread.fork",
+    "thread.handoff_brief",
     "thread.detail",
     "thread.update",
     "thread.archive",
     "thread.unarchive",
     "thread.delete",
     "thread.mark_read",
+    "thread.mark_unread",
     "thread.goal.set",
     "thread.goal.clear",
     "turn.start",
@@ -80,6 +82,13 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "extensions.update",
     "extensions.permission.update",
     "extensions.action.invoke",
+    "scheduled.list",
+    "scheduled.create",
+    "scheduled.detail",
+    "scheduled.update",
+    "scheduled.delete",
+    "scheduled.run",
+    "scheduled.runs",
 ];
 
 impl AppState {
@@ -751,6 +760,75 @@ impl AppState {
                     )
                     .map_err(|error| format!("failed to serialize extension action: {error}"))
                 }
+                "scheduled.list" => serde_json::to_value(self.scheduled_tasks().await)
+                    .map_err(|error| format!("failed to serialize scheduled tasks: {error}")),
+                "scheduled.create" => {
+                    let request = serde_json::from_value::<
+                        falcondeck_core::CreateScheduledTaskRequest,
+                    >(params.clone())
+                    .map_err(|error| format!("invalid scheduled task payload: {error}"))?;
+                    serde_json::to_value(
+                        self.create_scheduled_task(request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize scheduled task: {error}"))
+                }
+                "scheduled.detail" => {
+                    let task_id = required(&["taskId", "task_id"])?;
+                    serde_json::to_value(
+                        self.scheduled_task(&task_id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize scheduled task: {error}"))
+                }
+                "scheduled.update" => {
+                    let task_id = required(&["taskId", "task_id"])?;
+                    let request_value = params
+                        .get("patch")
+                        .cloned()
+                        .unwrap_or_else(|| params.clone());
+                    let request = serde_json::from_value::<
+                        falcondeck_core::UpdateScheduledTaskRequest,
+                    >(request_value)
+                    .map_err(|error| format!("invalid scheduled task patch: {error}"))?;
+                    serde_json::to_value(
+                        self.update_scheduled_task(&task_id, request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize scheduled task: {error}"))
+                }
+                "scheduled.delete" => {
+                    let task_id = required(&["taskId", "task_id"])?;
+                    serde_json::to_value(
+                        self.delete_scheduled_task(&task_id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| {
+                        format!("failed to serialize scheduled task response: {error}")
+                    })
+                }
+                "scheduled.run" => {
+                    let task_id = required(&["taskId", "task_id"])?;
+                    serde_json::to_value(
+                        self.run_scheduled_task(&task_id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize scheduled task run: {error}"))
+                }
+                "scheduled.runs" => {
+                    let task_id = required(&["taskId", "task_id"])?;
+                    serde_json::to_value(
+                        self.scheduled_task_runs(&task_id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize scheduled task runs: {error}"))
+                }
                 "connectors.read" => {
                     let workspace_path = self
                         .connectors_rpc_workspace_path(
@@ -836,6 +914,21 @@ impl AppState {
                     self.fork_thread(request)
                         .await
                         .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "thread.handoff_brief" => {
+                    let request = HandoffBriefRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        transcript: required(&["transcript"])?,
+                        source_provider_label: extract_string(
+                            &params,
+                            &["sourceProviderLabel", "source_provider_label"],
+                        ),
+                    };
+                    self.handoff_brief(request)
+                        .await
+                        .and_then(|brief| serde_json::to_value(brief).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
                 "thread.detail" => {
@@ -1024,6 +1117,14 @@ impl AppState {
                         .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
+                "thread.mark_unread" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    self.mark_thread_unread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
                 // `turn.steer` is `turn.start` with steering forced on, so a
                 // remote client can ask for it without the daemon having to
                 // know whether that client knows about the `steer` field.
@@ -1171,6 +1272,23 @@ impl AppState {
                             serde_json::to_value(response).map_err(DaemonError::from)
                         })
                         .map_err(|error| error.to_string())
+                }
+                // Remote clients cannot reach the loopback preview route, so
+                // the bytes travel as a data URL over the (encrypted) relay.
+                // Fetched per chip on demand — never folded into the thread
+                // summary, which is broadcast on every thread update.
+                "thread.queue.attachment_preview" => {
+                    let workspace_id = required(&["workspaceId", "workspace_id"])?;
+                    let thread_id = required(&["threadId", "thread_id"])?;
+                    let queued_id = required(&["queuedId", "queued_id"])?;
+                    self.queued_turn_attachment_preview_data_url(
+                        &workspace_id,
+                        &thread_id,
+                        &queued_id,
+                    )
+                    .await
+                    .map(|url| serde_json::json!({ "url": url }))
+                    .map_err(|error| error.to_string())
                 }
                 "thread.queue.reorder" => {
                     let workspace_id = required(&["workspaceId", "workspace_id"])?;
@@ -1348,6 +1466,20 @@ impl AppState {
                             "invalid queued action payload".to_string(),
                         ))
                     }
+                } else {
+                    Err(DaemonError::BadRequest(
+                        "invalid queued action payload".to_string(),
+                    ))
+                }
+            }
+            "thread.mark_unread" => {
+                if let (Some(workspace_id), Some(thread_id)) = (
+                    required(&["workspaceId", "workspace_id"]),
+                    required(&["threadId", "thread_id"]),
+                ) {
+                    self.mark_thread_unread(&workspace_id, &thread_id)
+                        .await
+                        .and_then(|thread| serde_json::to_value(thread).map_err(DaemonError::from))
                 } else {
                     Err(DaemonError::BadRequest(
                         "invalid queued action payload".to_string(),

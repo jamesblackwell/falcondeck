@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { applyConversationEventToItems, toolLifecycle } from './conversation'
+import { applyConversationEventToItems, assistantFailureDetail, toolLifecycle } from './conversation'
 import type { ConversationItem, EventEnvelope, ToolLifecycle } from './types'
 
 const createdAt = '2026-08-10T12:00:00Z'
@@ -257,5 +257,35 @@ describe('upsert identity beats re-stamped timestamps', () => {
     )
 
     expect(next.map((item) => item.id)).toEqual(['tool-1', 'assistant-1'])
+  })
+})
+
+describe('assistantFailureDetail', () => {
+  const item = (text: string, error?: string | null) =>
+    ({
+      kind: 'assistant_message',
+      id: 'assistant-1',
+      text,
+      error,
+      lifecycle: 'error',
+      created_at: createdAt,
+    }) as Extract<ConversationItem, { kind: 'assistant_message' }>
+
+  it('returns the provider error when the body does not already carry it', () => {
+    expect(assistantFailureDetail(item('', 'No endpoints available'))).toBe(
+      'No endpoints available',
+    )
+  })
+
+  it('suppresses the error detail when the body already contains it', () => {
+    expect(
+      assistantFailureDetail(
+        item('Cannot read "image" (this model does not support image input)', 'Cannot read "image" (this model does not support image input)'),
+      ),
+    ).toBeNull()
+  })
+
+  it('returns null when there is no error', () => {
+    expect(assistantFailureDetail(item('Failed.', null))).toBeNull()
   })
 })

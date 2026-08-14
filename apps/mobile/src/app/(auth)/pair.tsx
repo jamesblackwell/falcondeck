@@ -19,13 +19,13 @@ import { enterDemoMode } from '@/features/demo/enterDemoMode'
 import { ActivityDiamond, Text, Button, Input } from '@/components/ui'
 
 function connectionLabel(status: string, desktopOnline: boolean) {
-  if (status === 'claiming') return 'Claiming pairing...'
-  if (status === 'connecting') return 'Connecting to relay...'
+  if (status === 'claiming') return 'Claiming pairing…'
+  if (status === 'connecting') return 'Connecting to relay…'
   if (status === 'connected') {
-    return desktopOnline ? 'Securing session...' : 'Waiting for desktop...'
+    return desktopOnline ? 'Securing session…' : 'Waiting for your Mac…'
   }
-  if (status === 'disconnected') return 'Reconnecting...'
-  return 'Connecting...'
+  if (status === 'disconnected') return 'Reconnecting…'
+  return 'Connecting…'
 }
 
 export default function PairScreen() {

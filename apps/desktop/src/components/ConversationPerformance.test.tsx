@@ -7,6 +7,7 @@ const { renderedMessageIds } = vi.hoisted(() => ({
 }));
 
 vi.mock("../../../../packages/chat-ui/src/components/message", () => ({
+  AGENT_STATUS_ROW_CLASS: "agent-status-row",
   LiveActivityLane: () => null,
   MessageCard: ({ item }: { item: { id: string } }) => {
     renderedMessageIds.push(item.id);

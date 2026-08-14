@@ -32,6 +32,18 @@ export async function restartDesktopApp() {
   await invoke('restart_app')
 }
 
+/** Open, or re-focus, the detached Activity window. Desktop-only. */
+export async function openActivityWindow() {
+  if (!isTauriDesktop()) {
+    throw new Error(
+      'A separate Activity window is only available in the FalconDeck desktop app.',
+    )
+  }
+
+  const { invoke } = await import('@tauri-apps/api/core')
+  await invoke('open_activity_window')
+}
+
 function isSafeExternalUrl(url: string) {
   const lower = url.toLowerCase()
   return (

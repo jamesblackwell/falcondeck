@@ -17,6 +17,7 @@ import {
   RemoteHostClient,
   DEFAULT_REMOTE_RELAY_URL,
   type ConversationItem,
+  type CreateScheduledTaskPayload,
   type DaemonSnapshot,
   type EventEnvelope,
   type ExtensionActionResponse,
@@ -28,17 +29,24 @@ import {
   type InvokeExtensionActionPayload,
   type MachinePresence,
   type MarkThreadReadPayload,
+  type MarkThreadUnreadPayload,
   type PersistedRemoteSession,
   type RemoteHostStatus,
   type SendTurnPayload,
+  type ScheduledTaskDetail,
+  type ScheduledTaskRunSummary,
+  type ScheduledTaskSummary,
   type SetThreadGoalPayload,
   type StartThreadPayload,
   type ThreadDetail,
   type ThreadDetailRequest,
   type ThreadHandle,
   type ForkThreadPayload,
+  type HandoffBrief,
+  type HandoffBriefPayload,
   type ThreadSummary,
   type UpdateThreadPayload,
+  type UpdateScheduledTaskPayload,
   type WorkspaceSummary,
   type WorkspaceFileResponse,
   type WorkspaceFilesResponse,
@@ -117,6 +125,7 @@ export type WorkspaceScopedApi = {
   ): Promise<ExtensionActionResponse>
   startThread(payload: StartThreadPayload): Promise<ThreadHandle>
   forkThread(payload: ForkThreadPayload): Promise<ThreadHandle>
+  handoffBrief(payload: HandoffBriefPayload): Promise<HandoffBrief>
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
   interruptTurn(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
   removeQueuedTurn(
@@ -147,6 +156,7 @@ export type WorkspaceScopedApi = {
   setThreadGoal(payload: SetThreadGoalPayload): Promise<ThreadSummary>
   clearThreadGoal(workspaceId: string, threadId: string): Promise<ThreadSummary>
   markThreadRead(payload: MarkThreadReadPayload): Promise<ThreadSummary>
+  markThreadUnread(payload: MarkThreadUnreadPayload): Promise<ThreadSummary>
   respondInteractive(
     workspaceId: string,
     requestId: string,
@@ -178,6 +188,19 @@ export type WorkspaceScopedApi = {
     payload: WriteWorkspaceFilePayload,
     threadId?: string | null,
   ): Promise<WorkspaceFileResponse>
+}
+
+export type HostScopedApi = {
+  scheduledTasks(): Promise<ScheduledTaskSummary[]>
+  scheduledTask(taskId: string): Promise<ScheduledTaskDetail>
+  createScheduledTask(payload: CreateScheduledTaskPayload): Promise<ScheduledTaskDetail>
+  updateScheduledTask(
+    taskId: string,
+    payload: UpdateScheduledTaskPayload,
+  ): Promise<ScheduledTaskDetail>
+  deleteScheduledTask(taskId: string): Promise<{ ok: boolean; message?: string | null }>
+  runScheduledTask(taskId: string): Promise<ScheduledTaskRunSummary>
+  scheduledTaskRuns(taskId: string): Promise<ScheduledTaskRunSummary[]>
 }
 
 export class HostConnection {
@@ -334,6 +357,10 @@ export class HostConnection {
     return refresh
   }
 
+  refresh(): Promise<void> {
+    return this.refreshSnapshot()
+  }
+
   async threadDetail(
     workspaceId: string,
     threadId: string,
@@ -443,6 +470,7 @@ export class HostConnection {
         normalizeThreadHandle(await this.rpc('thread.start', payload)),
       forkThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.fork', payload)),
+      handoffBrief: (payload) => this.rpc<HandoffBrief>('thread.handoff_brief', payload),
       sendTurn: (payload) => this.rpc('turn.start', payload),
       interruptTurn: (workspaceId, threadId) =>
         this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),
@@ -498,6 +526,8 @@ export class HostConnection {
         ),
       markThreadRead: async (payload) =>
         normalizeThreadSummary(await this.rpc('thread.mark_read', payload)),
+      markThreadUnread: async (payload) =>
+        normalizeThreadSummary(await this.rpc('thread.mark_unread', payload)),
       respondInteractive: (workspaceId, requestId, response) =>
         this.rpc('interactive.respond', {
           workspaceId,
@@ -541,6 +571,19 @@ export class HostConnection {
           expected_version: payload.expected_version,
           thread_id: threadId,
         }),
+    }
+  }
+
+  scheduledApi(): HostScopedApi {
+    return {
+      scheduledTasks: () => this.rpc('scheduled.list', {}),
+      scheduledTask: (taskId) => this.rpc('scheduled.detail', { task_id: taskId }),
+      createScheduledTask: (payload) => this.rpc('scheduled.create', payload),
+      updateScheduledTask: (taskId, payload) =>
+        this.rpc('scheduled.update', { task_id: taskId, patch: payload }),
+      deleteScheduledTask: (taskId) => this.rpc('scheduled.delete', { task_id: taskId }),
+      runScheduledTask: (taskId) => this.rpc('scheduled.run', { task_id: taskId }),
+      scheduledTaskRuns: (taskId) => this.rpc('scheduled.runs', { task_id: taskId }),
     }
   }
 

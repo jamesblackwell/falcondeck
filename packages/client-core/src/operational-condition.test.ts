@@ -108,7 +108,7 @@ describe("operational conditions", () => {
       },
     });
 
-    expect(cleared.operational_conditions).toEqual([]);
-    expect(cleared.service_notices).toEqual([]);
+    expect(cleared?.operational_conditions).toEqual([]);
+    expect(cleared?.service_notices).toEqual([]);
   });
 });

@@ -1,6 +1,7 @@
 import type {
   AgentProvider,
   CollaborationModeSummary,
+  CreateScheduledTaskPayload,
   DaemonSnapshot,
   EventEnvelope,
   ExtensionActionResponse,
@@ -16,7 +17,11 @@ import type {
   InteractiveResponsePayload,
   InvokeExtensionActionPayload,
   MarkThreadReadPayload,
+  MarkThreadUnreadPayload,
   RemoteStatusResponse,
+  ScheduledTaskDetail,
+  ScheduledTaskRunSummary,
+  ScheduledTaskSummary,
   SnapshotRequest,
   SpeechCredentialStatus,
   SelectedSkillReference,
@@ -29,6 +34,7 @@ import type {
   ThreadSummary,
   TurnInputItem,
   UpdatePreferencesPayload,
+  UpdateScheduledTaskPayload,
   SetThreadGoalPayload,
   StartReviewPayload,
   UpdateThreadPayload,
@@ -96,6 +102,21 @@ export type ForkThreadPayload = {
   workspace_id: string;
   thread_id: string;
   last_turn_id: string;
+};
+
+export type HandoffBriefPayload = {
+  workspace_id: string;
+  thread_id: string;
+  transcript: string;
+  source_provider_label?: string | null;
+};
+
+export type HandoffBrief = {
+  brief: string;
+  provider: string;
+  model_id?: string | null;
+  segments: number;
+  truncated?: boolean;
 };
 
 export function createDaemonApiClient(baseUrl: string) {
@@ -238,6 +259,65 @@ export function createDaemonApiClient(baseUrl: string) {
         ),
       );
     },
+    async scheduledTasks() {
+      return parseJson<ScheduledTaskSummary[]>(
+        await fetch(`${baseUrl}/api/scheduled-tasks`),
+      );
+    },
+    async scheduledTask(taskId: string) {
+      return parseJson<ScheduledTaskDetail>(
+        await fetch(
+          `${baseUrl}/api/scheduled-tasks/${encodeURIComponent(taskId)}`,
+        ),
+      );
+    },
+    async createScheduledTask(payload: CreateScheduledTaskPayload) {
+      return parseJson<ScheduledTaskDetail>(
+        await fetch(`${baseUrl}/api/scheduled-tasks`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+        }),
+      );
+    },
+    async updateScheduledTask(
+      taskId: string,
+      payload: UpdateScheduledTaskPayload,
+    ) {
+      return parseJson<ScheduledTaskDetail>(
+        await fetch(
+          `${baseUrl}/api/scheduled-tasks/${encodeURIComponent(taskId)}`,
+          {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          },
+        ),
+      );
+    },
+    async deleteScheduledTask(taskId: string) {
+      return parseJson<{ ok: boolean; message?: string | null }>(
+        await fetch(
+          `${baseUrl}/api/scheduled-tasks/${encodeURIComponent(taskId)}`,
+          { method: "DELETE" },
+        ),
+      );
+    },
+    async runScheduledTask(taskId: string) {
+      return parseJson<ScheduledTaskRunSummary>(
+        await fetch(
+          `${baseUrl}/api/scheduled-tasks/${encodeURIComponent(taskId)}/run`,
+          { method: "POST" },
+        ),
+      );
+    },
+    async scheduledTaskRuns(taskId: string) {
+      return parseJson<ScheduledTaskRunSummary[]>(
+        await fetch(
+          `${baseUrl}/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs`,
+        ),
+      );
+    },
     async connectWorkspace(path: string) {
       return parseJson<WorkspaceSummary>(
         await fetch(`${baseUrl}/api/workspaces/connect`, {
@@ -282,6 +362,18 @@ export function createDaemonApiClient(baseUrl: string) {
               body: JSON.stringify(payload),
             },
           ),
+        ),
+      );
+    },
+    async handoffBrief(payload: HandoffBriefPayload) {
+      return parseJson<HandoffBrief>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/handoff-brief`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(payload),
+          },
         ),
       );
     },
@@ -475,6 +567,19 @@ export function createDaemonApiClient(baseUrl: string) {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ read_seq: payload.read_seq }),
+            },
+          ),
+        ),
+      );
+    },
+    async markThreadUnread(payload: MarkThreadUnreadPayload) {
+      return normalizeThreadSummary(
+        await parseJson<ThreadSummary>(
+          await fetch(
+            `${baseUrl}/api/workspaces/${payload.workspace_id}/threads/${payload.thread_id}/unread`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
             },
           ),
         ),

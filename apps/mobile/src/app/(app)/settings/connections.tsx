@@ -15,9 +15,9 @@ function connectionSummary(
   daemonPresenceKnown: boolean,
 ) {
   if (status === 'encrypted' && encrypted) {
-    if (!daemonPresenceKnown) return 'Checking desktop…'
-    if (!desktopOnline) return 'Daemon offline'
-    return daemonRpcReady ? 'Connected' : 'Sync service repairing'
+    if (!daemonPresenceKnown) return 'Checking your Mac…'
+    if (!desktopOnline) return 'Your Mac is offline'
+    return daemonRpcReady ? 'Connected' : 'Repairing sync…'
   }
   if (status === 'connected') return 'Securing session…'
   if (status === 'connecting') return 'Connecting…'
@@ -86,7 +86,7 @@ export default function ConnectionsSettingsScreen() {
             !daemonPresenceKnown
               ? 'Waiting for presence'
               : !desktopOnline
-                ? 'Desktop offline'
+                ? 'Your Mac is offline'
                 : daemonRpcReady
                   ? 'Ready'
                   : 'Re-registering'

@@ -1672,13 +1672,7 @@ export default function ConversationQaScreen() {
       <MessageRouter
         item={item}
         onApprovalDecision={ignoreApprovalDecision}
-        canEditResend={!actionsUnavailable}
-        editResendUnavailableReason={
-          actionsUnavailable
-            ? "Edit and resend is unavailable because Claude does not support conversation branching."
-            : null
-        }
-        onEditResend={actionsUnavailable ? undefined : simulateBranchAction}
+        canRetryResponse={!actionsUnavailable}
         retrySource={
           scenario === "mixed" &&
           item.kind === "item" &&

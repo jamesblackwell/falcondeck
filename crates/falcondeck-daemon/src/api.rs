@@ -15,11 +15,12 @@ use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
-    ApprovalResponseRequest, ClientActivityRequest, ConnectWorkspaceRequest, ForkThreadRequest,
-    InteractiveResponseRequest, InvokeExtensionActionRequest, MarkThreadReadRequest,
-    SendTurnRequest, SetThreadGoalRequest, SnapshotRequest, StartRemotePairingRequest,
-    StartReviewRequest, StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
-    UpdateExtensionRequest, UpdatePreferencesRequest, UpdateThreadRequest,
+    ApprovalResponseRequest, ClientActivityRequest, ConnectWorkspaceRequest,
+    CreateScheduledTaskRequest, ForkThreadRequest, HandoffBriefRequest, InteractiveResponseRequest,
+    InvokeExtensionActionRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
+    SnapshotRequest, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
+    ThreadDetailMode, ThreadDetailRequest, UnifiedEvent, UpdateExtensionRequest,
+    UpdatePreferencesRequest, UpdateScheduledTaskRequest, UpdateThreadRequest,
 };
 
 use crate::{
@@ -108,6 +109,24 @@ pub fn router(state: AppState) -> Router {
         .route("/api/hosts/provision/{job_id}", get(provision_host_status))
         .route("/api/hosts/command", post(host_command))
         .route("/api/events", get(events))
+        .route(
+            "/api/scheduled-tasks",
+            get(scheduled_tasks).post(create_scheduled_task),
+        )
+        .route(
+            "/api/scheduled-tasks/{task_id}",
+            get(scheduled_task)
+                .patch(update_scheduled_task)
+                .delete(delete_scheduled_task),
+        )
+        .route(
+            "/api/scheduled-tasks/{task_id}/run",
+            post(run_scheduled_task),
+        )
+        .route(
+            "/api/scheduled-tasks/{task_id}/runs",
+            get(scheduled_task_runs),
+        )
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
         .route(
@@ -142,6 +161,10 @@ pub fn router(state: AppState) -> Router {
             post(mark_thread_read),
         )
         .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/unread",
+            post(mark_thread_unread),
+        )
+        .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/goal",
             post(set_thread_goal).delete(clear_thread_goal),
         )
@@ -168,6 +191,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/review",
             post(start_review),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/handoff-brief",
+            post(handoff_brief),
         )
         .route(
             "/api/workspaces/{workspace_id}/interactive-requests/{request_id}/respond",
@@ -383,6 +410,55 @@ async fn host_command(
     Ok(Json(state.run_host_command(request).await?))
 }
 
+async fn scheduled_tasks(
+    State(state): State<AppState>,
+) -> Json<Vec<falcondeck_core::ScheduledTaskSummary>> {
+    Json(state.scheduled_tasks().await)
+}
+
+async fn create_scheduled_task(
+    State(state): State<AppState>,
+    Json(request): Json<CreateScheduledTaskRequest>,
+) -> Result<Json<falcondeck_core::ScheduledTaskDetail>, DaemonError> {
+    Ok(Json(state.create_scheduled_task(request).await?))
+}
+
+async fn scheduled_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<falcondeck_core::ScheduledTaskDetail>, DaemonError> {
+    Ok(Json(state.scheduled_task(&task_id).await?))
+}
+
+async fn update_scheduled_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+    Json(request): Json<UpdateScheduledTaskRequest>,
+) -> Result<Json<falcondeck_core::ScheduledTaskDetail>, DaemonError> {
+    Ok(Json(state.update_scheduled_task(&task_id, request).await?))
+}
+
+async fn delete_scheduled_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<falcondeck_core::CommandResponse>, DaemonError> {
+    Ok(Json(state.delete_scheduled_task(&task_id).await?))
+}
+
+async fn run_scheduled_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<falcondeck_core::ScheduledTaskRunSummary>, DaemonError> {
+    Ok(Json(state.run_scheduled_task(&task_id).await?))
+}
+
+async fn scheduled_task_runs(
+    State(state): State<AppState>,
+    Path(task_id): Path<String>,
+) -> Result<Json<Vec<falcondeck_core::ScheduledTaskRunSummary>>, DaemonError> {
+    Ok(Json(state.scheduled_task_runs(&task_id).await?))
+}
+
 async fn remove_workspace(
     State(state): State<AppState>,
     Path(workspace_id): Path<String>,
@@ -395,6 +471,16 @@ async fn connect_workspace(
     Json(request): Json<ConnectWorkspaceRequest>,
 ) -> Result<Json<falcondeck_core::WorkspaceSummary>, DaemonError> {
     Ok(Json(state.connect_workspace(request).await?))
+}
+
+async fn handoff_brief(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(mut request): Json<HandoffBriefRequest>,
+) -> Result<Json<falcondeck_core::HandoffBriefResponse>, DaemonError> {
+    request.workspace_id = workspace_id;
+    request.thread_id = thread_id;
+    Ok(Json(state.handoff_brief(request).await?))
 }
 
 async fn collaboration_modes(
@@ -503,6 +589,15 @@ async fn mark_thread_read(
         state
             .mark_thread_read(&workspace_id, &thread_id, request.read_seq)
             .await?,
+    ))
+}
+
+async fn mark_thread_unread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+) -> Result<Json<falcondeck_core::ThreadSummary>, DaemonError> {
+    Ok(Json(
+        state.mark_thread_unread(&workspace_id, &thread_id).await?,
     ))
 }
 
@@ -686,57 +781,14 @@ async fn queued_turn_attachment_preview(
     State(state): State<AppState>,
     Path((workspace_id, thread_id, queued_id)): Path<(String, String, String)>,
 ) -> Result<Response, DaemonError> {
-    let attachment = state
-        .queued_turn_attachment(&workspace_id, &thread_id, &queued_id)
+    let (mime, bytes) = state
+        .queued_turn_attachment_preview(&workspace_id, &thread_id, &queued_id)
         .await?;
-    let path = attachment
-        .local_path
-        .as_deref()
-        .or_else(|| {
-            std::path::Path::new(&attachment.url)
-                .is_absolute()
-                .then_some(attachment.url.as_str())
-        })
-        .ok_or_else(|| DaemonError::NotFound("queued image preview unavailable".to_string()))?;
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|_| DaemonError::NotFound("queued image preview unavailable".to_string()))?;
-    // Queue inputs originate at the client, so neither the declared MIME nor
-    // an arbitrary local path is proof that the file is an image. Confirm a
-    // raster signature before exposing daemon-readable bytes over HTTP.
-    let mime = queued_attachment_preview_mime_type(&bytes)
-        .ok_or_else(|| DaemonError::NotFound("queued image preview unavailable".to_string()))?;
     Response::builder()
         .header(header::CONTENT_TYPE, mime)
         .header(header::CACHE_CONTROL, "private, max-age=60")
         .body(Body::from(bytes))
         .map_err(|error| DaemonError::Process(error.to_string()))
-}
-
-fn queued_attachment_preview_mime_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if bytes.starts_with(b"BM") {
-        Some("image/bmp")
-    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
-        Some("image/tiff")
-    } else if bytes.len() >= 12
-        && &bytes[4..8] == b"ftyp"
-        && matches!(
-            &bytes[8..12],
-            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1"
-        )
-    {
-        Some("image/heic")
-    } else {
-        None
-    }
 }
 
 #[derive(serde::Deserialize)]
@@ -979,7 +1031,7 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_loopback_host, queued_attachment_preview_mime_type};
+    use super::is_loopback_host;
 
     #[test]
     fn accepts_loopback_hosts_with_and_without_ports() {
@@ -1002,16 +1054,4 @@ mod tests {
         assert!(!is_loopback_host(""));
     }
 
-    #[test]
-    fn queued_attachment_previews_require_image_bytes() {
-        assert_eq!(
-            queued_attachment_preview_mime_type(b"\x89PNG\r\n\x1a\nrest"),
-            Some("image/png")
-        );
-        assert_eq!(
-            queued_attachment_preview_mime_type(b"\xff\xd8\xffrest"),
-            Some("image/jpeg")
-        );
-        assert_eq!(queued_attachment_preview_mime_type(b"not an image"), None);
-    }
 }

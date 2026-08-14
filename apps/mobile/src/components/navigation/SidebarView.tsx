@@ -37,7 +37,7 @@ import type {
 } from "@falcondeck/client-core";
 import { filterProjectGroupsByExtensions } from "@falcondeck/client-core";
 
-import { Text, Button, EmptyState, SyncBanner } from "@/components/ui";
+import { Text, Button, EmptyState, Skeleton, SyncBanner } from "@/components/ui";
 import { SessionListItem } from "@/components/chat";
 import { useCollapsible } from "@/components/chat/useCollapsible";
 import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
@@ -472,13 +472,12 @@ export const SidebarView = memo(function SidebarView({
 
       <View style={styles.list}>
         {rows.length === 0 ? (
-          // 'offline' is a dead end rather than a wait, so it keeps the
-          // regular empty state; the banner above already explains it.
+          // The banner above is the only voice for a wait in progress, so the
+          // list shows the shape of what is coming rather than repeating its
+          // words. 'offline' is a dead end rather than a wait, so it keeps the
+          // regular empty state.
           syncStatus.isBusy && syncStatus.stage !== "offline" ? (
-            <EmptyState
-              title="Loading your projects…"
-              description={syncStatus.detail}
-            />
+            <SidebarSkeleton />
           ) : activeExtensionFilterCount > 0 ? (
             <View style={styles.filteredEmptyState}>
               <EmptyState
@@ -558,6 +557,28 @@ export const SidebarView = memo(function SidebarView({
   );
 });
 
+/** Placeholder rows for the first sync: two projects, three threads each. */
+const SidebarSkeleton = memo(function SidebarSkeleton() {
+  return (
+    <View
+      style={styles.skeleton}
+      accessible={false}
+      importantForAccessibility="no-hide-descendants"
+    >
+      {[0, 1].map((group) => (
+        <View key={group} style={styles.skeletonGroup}>
+          <Skeleton width="45%" height={14} />
+          {[0, 1, 2].map((row) => (
+            <View key={row} style={styles.skeletonRow}>
+              <Skeleton width={`${72 - row * 12}%`} height={12} />
+            </View>
+          ))}
+        </View>
+      ))}
+    </View>
+  );
+});
+
 const styles = StyleSheet.create((theme) => ({
   container: {
     flex: 1,
@@ -571,6 +592,17 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "center",
     gap: theme.spacing[2],
+  },
+  skeleton: {
+    paddingHorizontal: theme.spacing[3],
+    paddingTop: theme.spacing[4],
+    gap: theme.spacing[5],
+  },
+  skeletonGroup: {
+    gap: theme.spacing[3],
+  },
+  skeletonRow: {
+    paddingLeft: theme.spacing[3],
   },
   extensionFallback: {
     marginHorizontal: theme.spacing[3],

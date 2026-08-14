@@ -42,6 +42,10 @@ const MAX_ACP_IMAGE_BYTES: u64 = 3_500_000;
 
 const ACP_PROTOCOL_VERSION: u64 = 1;
 const ACP_SETUP_TIMEOUT: Duration = Duration::from_secs(20);
+/// Session creation can legitimately initialize plugins, MCP servers, and a
+/// large model catalog. Give the harness room to do that, while still putting
+/// a finite bound on the foreground turn-start path.
+const ACP_SESSION_START_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Total encoded-image budget per turn, mirroring the Claude path: without it
 /// many individually-legal images could produce a single stdin line in the
@@ -183,12 +187,18 @@ pub struct AcpProviderConfig {
     /// the daemon environment for keys not listed here.
     #[serde(default)]
     pub env: HashMap<String, String>,
-    /// Transport selection for OpenCode; other ACP providers ignore it.
+    /// Transport selection for OpenCode.  Other providers always use ACP;
+    /// accepting the field generically keeps `providers.json` forwards
+    /// compatible and makes a later native adapter opt-in reversible.
     #[serde(default)]
     pub transport: ProviderTransport,
 }
 
-/// OpenCode transport requested in `providers.json`.
+/// The OpenCode transport requested in `providers.json`.
+///
+/// `auto` is intentionally conservative until the native server has passed
+/// its compatibility probe; ACP remains the fallback rather than a legacy
+/// path to be removed.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderTransport {
@@ -562,6 +572,7 @@ pub enum AcpEvent {
     TurnEnded {
         session_id: String,
         stop_reason: Option<String>,
+        error: Option<String>,
     },
     /// The agent process died or the stream broke.
     Fatal { message: String },
@@ -1118,9 +1129,8 @@ impl AcpRuntime {
             tokio::spawn(Self::stderr_loop(Arc::clone(&runtime), stderr));
         }
 
-        let init = match timeout(
-            ACP_SETUP_TIMEOUT,
-            runtime.request(
+        let init = match runtime
+            .request_with_timeout(
                 "initialize",
                 json!({
                     "protocolVersion": ACP_PROTOCOL_VERSION,
@@ -1134,19 +1144,17 @@ impl AcpRuntime {
                         "version": env!("CARGO_PKG_VERSION")
                     }
                 }),
-            ),
-        )
-        .await
+                ACP_SETUP_TIMEOUT,
+            )
+            .await
         {
-            Ok(result) => result?,
-            Err(_) => {
+            Ok(result) => result,
+            Err(error @ DaemonError::AcpRequestTimeout { .. }) => {
                 runtime.closed.store(true, Ordering::Release);
                 let _ = runtime.child.lock().await.kill().await;
-                return Err(DaemonError::Process(format!(
-                    "ACP provider '{}' timed out during initialize",
-                    runtime.config.id
-                )));
+                return Err(error);
             }
+            Err(error) => return Err(error),
         };
         let negotiated_version = init.get("protocolVersion").and_then(Value::as_u64);
         if negotiated_version != Some(ACP_PROTOCOL_VERSION) {
@@ -1162,19 +1170,18 @@ impl AcpRuntime {
         }
         *runtime.initialize_result.lock().await = Some(init);
         if acp_may_support_steering(runtime.provider.as_str()) {
-            let outcome = timeout(
-                ACP_SETUP_TIMEOUT,
-                runtime.request(
+            let outcome = runtime
+                .request_with_timeout(
                     "x.ai/interject",
                     json!({
                         "sessionId": "falcondeck-capability-probe",
                         "text": "probe",
                         "content": [{ "type": "text", "text": "probe" }],
                     }),
-                ),
-            )
-            .await;
-            let supported = outcome.as_ref().is_ok_and(acp_interject_probe_supported);
+                    ACP_SETUP_TIMEOUT,
+                )
+                .await;
+            let supported = acp_interject_probe_supported(&outcome);
             runtime
                 .supports_steering
                 .store(supported, Ordering::Release);
@@ -1266,20 +1273,13 @@ impl AcpRuntime {
             &crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
             self.supports_http_mcp().await,
         );
-        let result = timeout(
-            ACP_SETUP_TIMEOUT,
-            self.request(
+        let result = self
+            .request_with_timeout(
                 "session/new",
                 json!({ "cwd": cwd, "mcpServers": mcp_servers }),
-            ),
-        )
-        .await
-        .map_err(|_| {
-            DaemonError::Process(format!(
-                "ACP provider '{}' timed out while discovering session configuration",
-                self.config.id
-            ))
-        })??;
+                ACP_SETUP_TIMEOUT,
+            )
+            .await?;
         let session_id = result
             .get("sessionId")
             .and_then(Value::as_str)
@@ -1363,6 +1363,30 @@ impl AcpRuntime {
 
     /// Sends a JSON-RPC request and awaits its response.
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, DaemonError> {
+        self.request_inner(method, params, None).await
+    }
+
+    /// Sends a JSON-RPC request with a cancellation-safe response deadline.
+    ///
+    /// Removing the pending sender on timeout matters for long-lived agent
+    /// processes: otherwise every missed response remains retained until the
+    /// process exits, and a late response can appear to resolve live work.
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout: Duration,
+    ) -> Result<Value, DaemonError> {
+        self.request_inner(method, params, Some(response_timeout))
+            .await
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout: Option<Duration>,
+    ) -> Result<Value, DaemonError> {
         if self.is_closed() {
             return Err(DaemonError::Process(format!(
                 "ACP provider '{}' is not running",
@@ -1384,7 +1408,22 @@ impl AcpRuntime {
             self.pending.lock().await.remove(&id);
             return Err(error);
         }
-        receiver.await.map_err(|_| {
+        let response = if let Some(response_timeout) = response_timeout {
+            match timeout(response_timeout, receiver).await {
+                Ok(response) => response,
+                Err(_) => {
+                    self.pending.lock().await.remove(&id);
+                    return Err(DaemonError::AcpRequestTimeout {
+                        provider: self.config.id.clone(),
+                        method: method.to_string(),
+                        timeout_seconds: response_timeout.as_secs(),
+                    });
+                }
+            }
+        } else {
+            receiver.await
+        };
+        response.map_err(|_| {
             DaemonError::Process(format!(
                 "ACP provider '{}' closed mid-request",
                 self.config.id
@@ -1465,7 +1504,9 @@ impl AcpRuntime {
                 _ => {}
             }
         }
-        let result = self.request("session/new", params).await?;
+        let result = self
+            .request_with_timeout("session/new", params, ACP_SESSION_START_TIMEOUT)
+            .await?;
         let session_id = result
             .get("sessionId")
             .and_then(Value::as_str)
@@ -1518,13 +1559,14 @@ impl AcpRuntime {
         // or the event pump drops the entire replayed history.
         self.register_session(thread_id, native_session).await;
         let loaded = self
-            .request(
+            .request_with_timeout(
                 "session/load",
                 json!({
                     "sessionId": native_session,
                     "cwd": cwd,
                     "mcpServers": mcp_servers
                 }),
+                ACP_SESSION_START_TIMEOUT,
             )
             .await;
         match loaded {
@@ -1607,20 +1649,12 @@ impl AcpRuntime {
     ) -> Result<(), DaemonError> {
         // Bounded: these run inside turn start, where an unresponsive adapter
         // would otherwise leave the thread stuck Running forever.
-        timeout(
+        self.request_with_timeout(
+            "session/set_mode",
+            json!({ "sessionId": session_id, "modeId": mode_id }),
             ACP_SETUP_TIMEOUT,
-            self.request(
-                "session/set_mode",
-                json!({ "sessionId": session_id, "modeId": mode_id }),
-            ),
         )
-        .await
-        .map_err(|_| {
-            DaemonError::Rpc(format!(
-                "ACP provider '{}' timed out during session/set_mode",
-                self.config.id
-            ))
-        })??;
+        .await?;
         if let Some(state) = self.session_modes.lock().await.get_mut(session_id) {
             state.current = Some(mode_id.to_string());
         }
@@ -1633,20 +1667,13 @@ impl AcpRuntime {
         config_id: &str,
         value: &str,
     ) -> Result<(), DaemonError> {
-        let result = timeout(
-            ACP_SETUP_TIMEOUT,
-            self.request(
+        let result = self
+            .request_with_timeout(
                 "session/set_config_option",
                 json!({ "sessionId": session_id, "configId": config_id, "value": value }),
-            ),
-        )
-        .await
-        .map_err(|_| {
-            DaemonError::Rpc(format!(
-                "ACP provider '{}' timed out during session/set_config_option",
-                self.config.id
-            ))
-        })??;
+                ACP_SETUP_TIMEOUT,
+            )
+            .await?;
         // The response is authoritative and may change dependent model or
         // reasoning options, not merely the selected value.
         self.capture_session_metadata(session_id, &result).await;
@@ -1676,9 +1703,10 @@ impl AcpRuntime {
                 self.set_config_option(session_id, config_id, model_id)
                     .await?;
             } else {
-                self.request(
+                self.request_with_timeout(
                     "session/set_model",
                     json!({ "sessionId": session_id, "modelId": model_id }),
+                    ACP_SETUP_TIMEOUT,
                 )
                 .await?;
             }
@@ -1783,9 +1811,11 @@ impl AcpRuntime {
                 .unwrap_or("end_turn")
                 .to_string()
         });
+        let error = result.as_ref().err().map(ToString::to_string);
         let _ = self.events.send(AcpEvent::TurnEnded {
             session_id: session_id.to_string(),
             stop_reason: stop_reason.clone(),
+            error,
         });
         result?;
         Ok(stop_reason.unwrap_or_else(|| "end_turn".to_string()))
@@ -2431,6 +2461,26 @@ impl AcpRuntime {
 mod tests {
     use super::*;
 
+    async fn timeout_fixture_runtime() -> Arc<AcpRuntime> {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let config = AcpProviderConfig {
+            id: "timeout-fixture".to_string(),
+            label: "Timeout fixture".to_string(),
+            command: vec![
+                "node".to_string(),
+                fixture.to_string_lossy().into_owned(),
+                "session-new-timeout".to_string(),
+            ],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events, _receiver) = mpsc::unbounded_channel();
+        AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
+            .await
+            .expect("fixture should initialize")
+    }
+
     fn command_path(command: &Command) -> Option<String> {
         command
             .as_std()
@@ -2459,6 +2509,43 @@ mod tests {
         apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &provider_env).await;
 
         assert_eq!(command_path(&command).as_deref(), Some("/custom/bin"));
+    }
+
+    #[tokio::test]
+    async fn bounded_request_returns_typed_timeout_when_adapter_never_responds() {
+        let runtime = timeout_fixture_runtime().await;
+
+        let error = runtime
+            .request_with_timeout(
+                "session/new",
+                json!({ "cwd": env!("CARGO_MANIFEST_DIR"), "mcpServers": [] }),
+                Duration::from_millis(50),
+            )
+            .await
+            .expect_err("fixture intentionally withholds the response");
+        runtime.shutdown().await;
+
+        assert!(matches!(
+            error,
+            DaemonError::AcpRequestTimeout { ref method, .. } if method == "session/new"
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_request_removes_pending_entry_after_timeout() {
+        let runtime = timeout_fixture_runtime().await;
+
+        let _ = runtime
+            .request_with_timeout(
+                "session/new",
+                json!({ "cwd": env!("CARGO_MANIFEST_DIR"), "mcpServers": [] }),
+                Duration::from_millis(50),
+            )
+            .await;
+        let pending_count = runtime.pending.lock().await.len();
+        runtime.shutdown().await;
+
+        assert_eq!(pending_count, 0);
     }
 
     #[test]
@@ -2624,6 +2711,22 @@ mod tests {
         assert_eq!(configs[0].command, vec!["echo", "agent", "stdio"]);
         assert_eq!(configs[1].id, "unlabeled");
         assert_eq!(configs[1].label, "unlabeled");
+    }
+
+    #[test]
+    fn provider_transport_defaults_to_auto_and_accepts_explicit_acp() {
+        let defaulted: AcpProviderConfig = serde_json::from_value(json!({
+            "command": ["opencode", "acp"]
+        }))
+        .unwrap();
+        assert_eq!(defaulted.transport, ProviderTransport::Auto);
+
+        let explicit: AcpProviderConfig = serde_json::from_value(json!({
+            "command": ["opencode", "acp"],
+            "transport": "acp"
+        }))
+        .unwrap();
+        assert_eq!(explicit.transport, ProviderTransport::Acp);
     }
 
     #[test]

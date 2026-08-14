@@ -32,7 +32,10 @@ export function ExtensionPanel({
       aria-label={panel.title}
       className={cn("flex h-full min-h-0 flex-col bg-surface-0", className)}
     >
-      <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-5 py-3">
+      <header
+        data-tauri-drag-region="deep"
+        className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border-subtle px-5 py-3"
+      >
         <PanelsTopLeft aria-hidden="true" className="h-4 w-4 text-fg-muted" />
         <div className="min-w-0 flex-1">
           <h1 className="truncate text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">

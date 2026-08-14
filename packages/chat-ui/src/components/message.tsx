@@ -2,7 +2,6 @@ import {
   memo,
   useCallback,
   useEffect,
-  useId,
   useMemo,
   useRef,
   useState,
@@ -23,7 +22,6 @@ import {
   ImageIcon,
   Info,
   PauseCircle,
-  PencilLine,
   Radio,
   Search,
 } from "lucide-react";
@@ -40,6 +38,7 @@ import {
   citationRenderKeys,
   citationTextPreview,
   assistantMessageCopyText,
+  assistantFailureDetail,
   codeReviewPresentation,
   contentLifecycle,
   contentLifecycleLabel,
@@ -213,14 +212,8 @@ function ImagePreviewDialog({
 
 function UserMessage({
   item,
-  onEditResend,
-  editResendUnavailableReason,
 }: {
   item: Extract<ConversationItem, { kind: "user_message" }>;
-  onEditResend?: (
-    item: Extract<ConversationItem, { kind: "user_message" }>,
-  ) => void;
-  editResendUnavailableReason?: string | null;
 }) {
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(
     null,
@@ -230,12 +223,6 @@ function UserMessage({
         (attachment) => attachment.id === previewAttachmentId,
       ) ?? null)
     : null;
-  const [isBranching, setIsBranching] = useState(false);
-  const [branchError, setBranchError] = useState<string | null>(null);
-  const [showEditUnavailableReason, setShowEditUnavailableReason] =
-    useState(false);
-  const branchErrorId = useId();
-  const editUnavailableReasonId = useId();
   const previewTriggerRef = useRef<HTMLButtonElement | null>(null);
   const handlePreview = useCallback(
     (attachment: ImageInput, trigger: HTMLButtonElement) => {
@@ -249,24 +236,6 @@ function UserMessage({
     [],
   );
   const hasText = item.text.trim().length > 0;
-  const canEditResend = Boolean(onEditResend && item.turn_id);
-  const unavailableReason = !item.turn_id
-    ? "Edit and resend is unavailable because this message has no provider turn boundary."
-    : canEditResend
-      ? null
-      : editResendUnavailableReason;
-  const handleEditResend = useCallback(async () => {
-    if (!onEditResend || isBranching) return;
-    setBranchError(null);
-    setIsBranching(true);
-    try {
-      await onEditResend(item);
-    } catch {
-      setBranchError("Could not create a branch. Select Edit to retry.");
-    } finally {
-      setIsBranching(false);
-    }
-  }, [isBranching, item, onEditResend]);
 
   useEffect(() => {
     if (previewAttachmentId && !previewAttachment) {
@@ -302,79 +271,10 @@ function UserMessage({
           ))}
         </div>
       ) : null}
-      {hasText || canEditResend || unavailableReason ? (
+      {hasText ? (
         <div className="absolute -top-3 right-2 z-10 flex justify-end rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-3 shadow-sm opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:static [@media(hover:none)]:mt-1 [@media(hover:none)]:min-h-6 [@media(hover:none)]:border-0 [@media(hover:none)]:shadow-none [@media(hover:none)]:opacity-100">
-          {canEditResend ? (
-            <button
-              type="button"
-              className="fd-focus inline-flex h-8 items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2 text-[length:var(--fd-text-xs)] text-fg-muted transition-colors hover:bg-surface-4 hover:text-fg-primary"
-              aria-label={
-                isBranching
-                  ? "Creating new branch"
-                  : "Edit and resend in a new branch"
-              }
-              title={
-                isBranching
-                  ? "Creating new branch"
-                  : "Edit and resend in a new branch"
-              }
-              aria-busy={isBranching}
-              aria-describedby={branchError ? branchErrorId : undefined}
-              disabled={isBranching}
-              onClick={() => {
-                void handleEditResend();
-              }}
-            >
-              {isBranching ? (
-                <ActivityDiamond tone="current" />
-              ) : (
-                <PencilLine aria-hidden="true" className="h-3.5 w-3.5" />
-              )}
-              {isBranching ? "Creating…" : "Edit"}
-            </button>
-          ) : null}
-          {unavailableReason ? (
-            <button
-              type="button"
-              className="fd-focus inline-flex h-8 items-center gap-1.5 rounded-[var(--fd-radius-md)] px-2 text-[length:var(--fd-text-xs)] text-fg-faint transition-colors hover:bg-surface-4 hover:text-fg-secondary"
-              aria-label="Why edit and resend is unavailable"
-              aria-expanded={showEditUnavailableReason}
-              aria-controls={editUnavailableReasonId}
-              title={unavailableReason}
-              onClick={() =>
-                setShowEditUnavailableReason((visible) => !visible)
-              }
-            >
-              <Info aria-hidden="true" className="h-3.5 w-3.5" />
-              Edit unavailable
-            </button>
-          ) : null}
-          {hasText ? (
-            <CopyButton text={item.text} label="Copy message" />
-          ) : null}
+          <CopyButton text={item.text} label="Copy message" />
         </div>
-      ) : null}
-      {showEditUnavailableReason && unavailableReason ? (
-        <p
-          id={editUnavailableReasonId}
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
-          className="mt-1 max-w-md text-right text-[length:var(--fd-text-xs)] text-fg-muted"
-        >
-          {unavailableReason}
-        </p>
-      ) : null}
-      {branchError ? (
-        <p
-          id={branchErrorId}
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
-          className="mt-1 text-right text-[length:var(--fd-text-xs)] text-danger"
-        >
-          {branchError}
-        </p>
       ) : null}
       {previewAttachment ? (
         <ImagePreviewDialog
@@ -622,6 +522,8 @@ function AssistantMessage({
       : lifecycle === "error"
         ? { label: "Response failed", icon: CircleX, className: "text-danger" }
         : null;
+  const failureDetail =
+    lifecycle === "error" ? assistantFailureDetail(item) : null;
   const TerminalStatusIcon = terminalStatus?.icon;
   return (
     <article
@@ -663,7 +565,7 @@ function AssistantMessage({
         <MemoryCitationSources citation={item.memory_citation} />
       ) : null}
       {item.text.trim() || terminalStatus ? (
-        <div className="mt-1 flex min-h-6 items-center gap-2">
+        <div className="mt-1 flex min-h-6 flex-wrap items-center gap-x-2 gap-y-1">
           {item.text.trim() ? (
             <span className="opacity-0 transition-opacity group-focus-within/message:opacity-100 group-hover/message:opacity-100 [@media(hover:none)]:opacity-100">
               <CopyButton
@@ -681,12 +583,18 @@ function AssistantMessage({
               aria-live={lifecycle === "error" ? "assertive" : "polite"}
               aria-atomic="true"
               className={cn(
-                "inline-flex items-center gap-1 text-[length:var(--fd-text-xs)]",
+                "inline-flex flex-wrap items-center gap-x-1 gap-y-1 text-[length:var(--fd-text-xs)]",
                 terminalStatus.className,
               )}
             >
               <TerminalStatusIcon aria-hidden="true" className="h-3.5 w-3.5" />
               {terminalStatus.label}
+              {failureDetail ? (
+                <span className="basis-full break-words pl-5 text-[length:var(--fd-text-sm)]">
+                  {" "}
+                  {failureDetail}
+                </span>
+              ) : null}
             </span>
           ) : null}
         </div>
@@ -3082,8 +2990,6 @@ export const MessageCard = memo(function MessageCard({
   suppressReadOnlyDetail = false,
   thinkingDisplay = "auto",
   isStreamingReasoning = false,
-  onEditResend,
-  editResendUnavailableReason,
 }: {
   item: ConversationItem;
   defaultOpen?: boolean;
@@ -3092,10 +2998,6 @@ export const MessageCard = memo(function MessageCard({
   thinkingDisplay?: ThinkingDisplay;
   /** True only for the thought currently arriving, which `auto` expands. */
   isStreamingReasoning?: boolean;
-  onEditResend?: (
-    item: Extract<ConversationItem, { kind: "user_message" }>,
-  ) => void;
-  editResendUnavailableReason?: string | null;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
@@ -3103,13 +3005,7 @@ export const MessageCard = memo(function MessageCard({
 }) {
   switch (item.kind) {
     case "user_message":
-      return (
-        <UserMessage
-          item={item}
-          onEditResend={onEditResend}
-          editResendUnavailableReason={editResendUnavailableReason}
-        />
-      );
+      return <UserMessage item={item} />;
     case "assistant_message":
       return <AssistantMessage item={item} />;
     case "image":

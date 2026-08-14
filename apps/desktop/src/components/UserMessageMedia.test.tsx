@@ -1,5 +1,5 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
 
 import { MessageCard } from "@falcondeck/chat-ui";
 import type { ConversationItem, ImageInput } from "@falcondeck/client-core";
@@ -150,28 +150,6 @@ describe("user message media", () => {
     expect(
       screen.getByRole("button", { name: "Copy message" }),
     ).toBeInTheDocument();
-  });
-
-  it("keeps edit and resend available for an image-only provider turn", async () => {
-    const onEditResend = vi.fn();
-    const item = {
-      ...userMessage(remoteImage),
-      text: "",
-      turn_id: "turn-2",
-      previous_turn_id: "turn-1",
-    };
-    render(<MessageCard item={item} onEditResend={onEditResend} />);
-
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: "Edit and resend in a new branch" }),
-      );
-    });
-
-    expect(onEditResend).toHaveBeenCalledWith(item);
-    expect(
-      screen.queryByRole("button", { name: "Copy message" }),
-    ).not.toBeInTheDocument();
   });
 
   it("derives an unnamed remote image label without exposing its query string", () => {

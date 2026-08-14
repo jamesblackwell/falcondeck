@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default FalconDeck desktop capabilities",
-  "windows": ["main"],
+  "windows": ["main", "activity"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",

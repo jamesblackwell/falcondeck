@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { upsertConversationItem } from './conversation'
-import { currentTurnPlan, planProgress, planStepPresentation, planStepRenderKeys } from './plan'
+import { currentTurnPlan, planProgress, planStepPresentation, planStepPresentations, planStepRenderKeys } from './plan'
 import type { ConversationItem, ThreadPlanStep } from './types'
 
 function userMessage(id: string): ConversationItem {
@@ -35,8 +35,7 @@ describe('plan step presentation', () => {
     expect(planStepPresentation(status)).toEqual({ state, label })
   })
 
-  it('keeps provider IDs stable through text changes and reorder', () => {
-    const before = planStepRenderKeys([
+  it('keeps provider IDs stable through text changes and reorder', () => {    const before = planStepRenderKeys([
       { id: 'one', step: 'Inspect', status: 'pending' },
       { id: 'two', step: 'Implement', status: 'pending' },
     ])
@@ -81,8 +80,28 @@ describe('plan step presentation', () => {
   })
 })
 
-describe('pinned plan selection', () => {
-  it('pins the newest plan of the current turn', () => {
+describe('plan step presentations', () => {
+  it('keeps only the most recent in-progress step running', () => {
+    const states = planStepPresentations([
+      { step: 'Inspect', status: 'in_progress' },
+      { step: 'Implement', status: 'in_progress' },
+      { step: 'Ship', status: 'pending' },
+    ]).map((p) => p.state)
+
+    expect(states).toEqual(['completed', 'in_progress', 'pending'])
+  })
+
+  it('leaves a single in-progress step untouched', () => {
+    const states = planStepPresentations([
+      { step: 'Inspect', status: 'completed' },
+      { step: 'Implement', status: 'in_progress' },
+    ]).map((p) => p.state)
+
+    expect(states).toEqual(['completed', 'in_progress'])
+  })
+})
+
+describe('pinned plan selection', () => {  it('pins the newest plan of the current turn', () => {
     const pinned = currentTurnPlan([
       userMessage('user-1'),
       planItem('plan-1', [{ step: 'Old', status: 'completed' }]),

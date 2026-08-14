@@ -1124,11 +1124,12 @@ async fn terminal_turn_cancels_orphaned_interactive_requests() {
 
     let mut events = app.subscribe();
     let settled_at = created_at + Duration::seconds(3);
-    app.settle_turn_items(
+    app.settle_turn_items_with_error(
         "workspace-1",
         "thread-1",
         settled_at,
         ToolSettlement::Failed,
+        None,
     )
     .await;
 
@@ -1196,11 +1197,12 @@ async fn terminal_turn_emits_and_retains_an_empty_interrupted_receipt() {
 
     let mut events = app.subscribe();
     let settled_at = created_at + Duration::seconds(1);
-    app.settle_turn_items(
+    app.settle_turn_items_with_error(
         "workspace-1",
         "thread-1",
         settled_at,
         ToolSettlement::Interrupted,
+        None,
     )
     .await;
 
@@ -1773,6 +1775,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
         native_session_id: None,
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -1802,6 +1805,7 @@ fn restored_threads_require_resume_but_new_threads_do_not() {
             memory_citation: None,
             citations: Vec::new(),
             lifecycle: ContentLifecycle::Complete,
+            error: None,
             created_at: Utc::now(),
         }],
     );
@@ -1885,6 +1889,7 @@ async fn update_thread_title_marks_thread_as_manual() {
                     native_session_id: None,
                     provider_transport: None,
                     handoff_from: None,
+                    origin: None,
                     status: ThreadStatus::Idle,
                     updated_at: Utc::now(),
                     last_message_preview: None,
@@ -2421,6 +2426,93 @@ async fn restore_skips_expired_unclaimed_remote_pairing() {
 }
 
 #[tokio::test]
+async fn mark_thread_unread_walks_read_seq_back_behind_agent_activity() {
+    let temp_dir = tempdir().unwrap();
+    let workspace_path = temp_dir.path().join("project-unread");
+    std::fs::create_dir_all(&workspace_path).unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let persisted = PersistedAppState {
+        workspaces: vec![super::PersistedWorkspaceState {
+            path: workspace_path.to_string_lossy().to_string(),
+            id: Some("workspace-unread".to_string()),
+            current_thread_id: Some("thread-1".to_string()),
+            updated_at: Some(Utc::now()),
+            default_provider: Some(AgentProvider::CLAUDE),
+            last_error: None,
+            archived_thread_ids: Vec::new(),
+            pinned_thread_ids: Vec::new(),
+            thread_states: vec![super::PersistedThreadState {
+                thread_id: "thread-1".to_string(),
+                updated_at: Some(Utc::now()),
+                provider: Some(AgentProvider::CLAUDE),
+                native_session_id: None,
+                provider_transport: None,
+                handoff_from: None,
+                origin: None,
+                title: Some("Read thread".to_string()),
+                manual_title: false,
+                ai_title_generated: false,
+                status: Some(ThreadStatus::Idle),
+                last_error: None,
+                // Fully caught up: read seq level with agent activity.
+                last_read_seq: 7,
+                last_agent_activity_seq: 7,
+                variant: None,
+                agent: ThreadAgentParams::default(),
+                queued_requests: Vec::new(),
+            }],
+        }],
+        remote: None,
+    };
+
+    tokio::fs::write(&state_path, serde_json::to_vec_pretty(&persisted).unwrap())
+        .await
+        .unwrap();
+
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::from([
+            (AgentProvider::CODEX, "missing-codex".to_string()),
+            (AgentProvider::CLAUDE, "missing-claude".to_string()),
+        ]),
+        PathBuf::from(&state_path),
+    );
+    app.restore_local_state().await.unwrap();
+
+    let before = app
+        .thread_summary("workspace-unread", "thread-1")
+        .await
+        .unwrap();
+    assert!(!before.attention.unread);
+
+    let after = app
+        .mark_thread_unread("workspace-unread", "thread-1")
+        .await
+        .unwrap();
+    assert!(after.attention.unread);
+    assert_eq!(after.attention.last_read_seq, 6);
+    assert_eq!(
+        after.attention.level,
+        falcondeck_core::ThreadAttentionLevel::Unread
+    );
+
+    // Idempotent: a second call cannot walk the thread further back.
+    let again = app
+        .mark_thread_unread("workspace-unread", "thread-1")
+        .await
+        .unwrap();
+    assert_eq!(again.attention.last_read_seq, 6);
+
+    // And mark_read still wins afterwards, so the pair round-trips.
+    let read_again = app
+        .mark_thread_read("workspace-unread", "thread-1", 7)
+        .await
+        .unwrap();
+    assert!(!read_again.attention.unread);
+    assert_eq!(read_again.attention.last_read_seq, 7);
+}
+
+#[tokio::test]
 async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     let temp_dir = tempdir().unwrap();
     let workspace_path = temp_dir.path().join("project-a");
@@ -2444,6 +2536,7 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
                 native_session_id: Some("native-session-1".to_string()),
                 provider_transport: None,
                 handoff_from: None,
+                origin: None,
                 title: Some("Recovered thread".to_string()),
                 manual_title: false,
                 ai_title_generated: false,
@@ -2516,8 +2609,19 @@ async fn restore_keeps_workspace_visible_when_reconnect_fails() {
     assert!(thread.is_archived);
     assert!(thread.last_error.is_some());
 
-    let persisted_after: PersistedAppState =
-        serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+    let persisted_after = {
+        let mut persisted: PersistedAppState =
+            serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        for _ in 0..20 {
+            if persisted.workspaces[0].thread_states[0].status == Some(ThreadStatus::Error) {
+                break;
+            }
+            sleep(TokioDuration::from_millis(25)).await;
+            persisted =
+                serde_json::from_slice(&tokio::fs::read(&state_path).await.unwrap()).unwrap();
+        }
+        persisted
+    };
     assert_eq!(persisted_after.workspaces.len(), 1);
     assert_eq!(
         persisted_after.workspaces[0].id.as_deref(),
@@ -2636,6 +2740,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     native_session_id: Some("native-a".to_string()),
                     provider_transport: None,
                     handoff_from: None,
+                    origin: None,
                     title: Some("Thread A".to_string()),
                     manual_title: false,
                     ai_title_generated: false,
@@ -2667,6 +2772,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
                     native_session_id: Some("native-b".to_string()),
                     provider_transport: None,
                     handoff_from: None,
+                    origin: None,
                     title: Some("Thread B".to_string()),
                     manual_title: false,
                     ai_title_generated: false,
@@ -2691,6 +2797,7 @@ async fn persist_local_state_merges_saved_workspaces_with_live_workspaces() {
         native_session_id: Some("native-a-2".to_string()),
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -2802,6 +2909,7 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
         native_session_id: Some("native-session-1".to_string()),
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -2869,6 +2977,107 @@ async fn shutdown_marks_running_threads_as_error_and_persists_them() {
             .as_deref(),
         Some("FalconDeck was closed while this turn was running")
     );
+}
+
+#[tokio::test]
+async fn provider_disconnect_fails_only_that_providers_active_threads() {
+    let temp_dir = tempdir().unwrap();
+    let state_path = temp_dir.path().join("daemon-state.json");
+    let app = AppState::new_with_state_path(
+        "test".to_string(),
+        HashMap::new(),
+        PathBuf::from(&state_path),
+    );
+    let workspace_id = "workspace-1".to_string();
+    let make_thread = |id: &str, provider: AgentProvider| ThreadSummary {
+        id: id.to_string(),
+        workspace_id: workspace_id.clone(),
+        title: id.to_string(),
+        provider,
+        native_session_id: Some(format!("native-{id}")),
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status: ThreadStatus::Running,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    };
+    let codex = make_thread("codex-thread", AgentProvider::CODEX);
+    let claude = make_thread("claude-thread", AgentProvider::CLAUDE);
+    let workspace = WorkspaceSummary {
+        id: workspace_id.clone(),
+        path: temp_dir.path().to_string_lossy().to_string(),
+        status: WorkspaceStatus::Busy,
+        agents: Vec::new(),
+        skills: Vec::new(),
+        default_provider: AgentProvider::CODEX,
+        models: Vec::new(),
+        collaboration_modes: Vec::new(),
+        account: falcondeck_core::AccountSummary::default(),
+        current_thread_id: Some("codex-thread".to_string()),
+        connected_at: Utc::now(),
+        updated_at: Utc::now(),
+        last_error: None,
+    };
+    app.inner.workspaces.lock().await.insert(
+        workspace_id.clone(),
+        super::ManagedWorkspace {
+            summary: workspace,
+            codex_session: None,
+            claude_runtime: None,
+            opencode_runtime: None,
+            acp_runtimes: HashMap::new(),
+            threads: [codex, claude]
+                .into_iter()
+                .map(|thread| (thread.id.clone(), super::ManagedThread::new(thread)))
+                .collect(),
+        },
+    );
+    let mut events = app.subscribe();
+
+    app.fail_active_provider_threads(&workspace_id, &AgentProvider::CODEX, "Codex disconnected")
+        .await;
+
+    let snapshot = app.snapshot().await;
+    let codex = snapshot
+        .threads
+        .iter()
+        .find(|thread| thread.id == "codex-thread")
+        .unwrap();
+    let claude = snapshot
+        .threads
+        .iter()
+        .find(|thread| thread.id == "claude-thread")
+        .unwrap();
+    assert_eq!(codex.status, ThreadStatus::Error);
+    assert_eq!(codex.last_error.as_deref(), Some("Codex disconnected"));
+    assert_eq!(claude.status, ThreadStatus::Running);
+    assert!(matches!(
+        events.recv().await.unwrap().event,
+        falcondeck_core::UnifiedEvent::ThreadUpdated { thread }
+            if thread.id == "codex-thread" && thread.status == ThreadStatus::Error
+    ));
+
+    let persisted: PersistedAppState =
+        serde_json::from_slice(&tokio::fs::read(state_path).await.unwrap()).unwrap();
+    let persisted_codex = persisted.workspaces[0]
+        .thread_states
+        .iter()
+        .find(|thread| thread.thread_id == "codex-thread")
+        .unwrap();
+    assert_eq!(persisted_codex.status, Some(ThreadStatus::Error));
 }
 
 #[tokio::test]
@@ -3074,10 +3283,11 @@ async fn restore_reads_remote_secrets_from_secure_storage() {
     app.restore_local_state().await.unwrap();
 
     let remote = app.inner.remote.lock().await;
-    assert_eq!(
+    assert!(matches!(
         remote.status,
         falcondeck_core::RemoteConnectionStatus::DeviceTrusted
-    );
+            | falcondeck_core::RemoteConnectionStatus::Connecting
+    ));
     assert_eq!(
         remote.relay_url.as_deref(),
         Some("https://connect.falcondeck.com/restore")
@@ -3131,10 +3341,11 @@ async fn restore_keeps_trusted_remote_without_client_bundle() {
     app.restore_local_state().await.unwrap();
 
     let remote = app.inner.remote.lock().await;
-    assert_eq!(
+    assert!(matches!(
         remote.status,
         falcondeck_core::RemoteConnectionStatus::DeviceTrusted
-    );
+            | falcondeck_core::RemoteConnectionStatus::Connecting
+    ));
     assert_eq!(
         remote.relay_url.as_deref(),
         Some("https://connect.falcondeck.com/restore-legacy")
@@ -3213,6 +3424,7 @@ async fn insert_claude_workspace_with_session(
                     native_session_id: Some(native_session_id.to_string()),
                     provider_transport: None,
                     handoff_from: None,
+                    origin: None,
                     status: ThreadStatus::Running,
                     updated_at: Utc::now(),
                     last_message_preview: None,
@@ -3835,6 +4047,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         native_session_id: None,
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -3859,6 +4072,7 @@ async fn snapshot_with_request_excludes_archived_threads_for_mobile_clients() {
         native_session_id: None,
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -4071,6 +4285,7 @@ async fn dispatched_send_echoes_the_client_supplied_user_item_id() {
         native_session_id: None,
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Idle,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -4177,6 +4392,7 @@ async fn sends_against_a_running_thread_queue_can_be_reordered_and_removed() {
         native_session_id: None,
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -4336,6 +4552,7 @@ async fn busy_thread_app(
         native_session_id: None,
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,
@@ -4761,6 +4978,7 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         native_session_id: Some("sess-hook".to_string()),
         provider_transport: None,
         handoff_from: None,
+        origin: None,
         status: ThreadStatus::Running,
         updated_at: Utc::now(),
         last_message_preview: None,

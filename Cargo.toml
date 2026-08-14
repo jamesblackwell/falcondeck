@@ -18,6 +18,7 @@ version = "0.1.0"
 [workspace.dependencies]
 axum = { version = "0.8.4", features = ["macros", "ws"] }
 chrono = { version = "0.4.42", features = ["serde"] }
+chrono-tz = "0.10.4"
 futures-util = "0.3.31"
 regex = "1.13.1"
 serde = { version = "1.0.228", features = ["derive"] }

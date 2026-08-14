@@ -1,6 +1,43 @@
 import { useCallback } from 'react'
 
+import type { ThreadSummary } from '@falcondeck/client-core'
+
 import { useRelayStore } from '@/store'
+
+/**
+ * "Mark unread" and the auto-mark-read effect on the conversation screen pull
+ * in opposite directions: the effect reads whatever thread is on screen, so
+ * without this the unread state would be undone within its debounce window.
+ * The state is module-scoped because the two live in different trees (the
+ * sheet hangs off the sidebar, the effect off the conversation screen).
+ */
+let autoReadSuppression: { threadId: string; activitySeq: number } | null = null
+
+function suppressAutoMarkRead(threadId: string, activitySeq: number) {
+  autoReadSuppression = { threadId, activitySeq }
+}
+
+export function clearAutoMarkReadSuppression() {
+  autoReadSuppression = null
+}
+
+/**
+ * `suppress` — skip the auto-read. `released` — the suppression just expired
+ * (different thread, or new agent activity the user has not seen), so the
+ * caller should also drop its own dedupe state before reading again.
+ */
+export function consumeAutoReadSuppression(
+  threadId: string,
+  activitySeq: number,
+): 'suppress' | 'released' | 'none' {
+  const current = autoReadSuppression
+  if (!current) return 'none'
+  if (current.threadId !== threadId || current.activitySeq !== activitySeq) {
+    autoReadSuppression = null
+    return 'released'
+  }
+  return 'suppress'
+}
 
 export function useThreadActions() {
   const archiveThread = useCallback(async (workspaceId: string, threadId: string) => {
@@ -45,6 +82,34 @@ export function useThreadActions() {
         relay._setError(null)
       } catch (e) {
         relay._setError(e instanceof Error ? e.message : 'Failed to update pin')
+        throw e
+      }
+    },
+    [],
+  )
+
+  const markThreadUnread = useCallback(
+    async (workspaceId: string, threadId: string, activitySeq: number) => {
+      const relay = useRelayStore.getState()
+      suppressAutoMarkRead(threadId, activitySeq)
+      try {
+        const thread = (await relay._callRpc(
+          'thread.mark_unread',
+          { workspace_id: workspaceId, thread_id: threadId },
+          { requestIdPrefix: 'mobile-thread' },
+        )) as ThreadSummary | undefined
+        // Re-pin the suppression to the seq the daemon actually settled on, so
+        // activity that arrived mid-flight still releases it.
+        suppressAutoMarkRead(
+          threadId,
+          thread?.attention?.last_agent_activity_seq ?? activitySeq,
+        )
+        relay._setError(null)
+      } catch (e) {
+        clearAutoMarkReadSuppression()
+        relay._setError(
+          e instanceof Error ? e.message : 'Failed to mark thread as unread',
+        )
         throw e
       }
     },
@@ -186,6 +251,7 @@ export function useThreadActions() {
     archiveThread,
     renameThread,
     setThreadPinned,
+    markThreadUnread,
     setThreadMode,
     setThreadGoal,
     clearThreadGoal,

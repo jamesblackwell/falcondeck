@@ -11,7 +11,11 @@ import type {
   DaemonSnapshot,
   EventEnvelope,
   FalconDeckPreferences,
+  UtilityModelChoice,
+  UtilityModelPreferences,
   ExtensionSnapshot,
+  ScheduledTaskRunSummary,
+  ScheduledTaskSummary,
   ImageInput,
   InteractiveRequest,
   InteractiveRequestOutcome,
@@ -74,6 +78,86 @@ const TOOL_LIFECYCLES = new Set<ToolLifecycle>([
 // then the same envelope flows through snapshot and conversation reducers; the
 // WeakSet makes those defensive downstream calls allocation-free.
 const normalizedEventEnvelopes = new WeakSet<object>();
+
+const TASK_STATUSES = new Set(["active", "paused", "completed"]);
+const RUN_STATUSES = new Set([
+  "queued",
+  "running",
+  "awaiting_input",
+  "succeeded",
+  "failed",
+  "interrupted",
+  "skipped",
+]);
+const RUN_TRIGGERS = new Set(["scheduled", "late", "manual"]);
+
+function isValidTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeScheduledTaskRun(
+  value: unknown,
+): ScheduledTaskRunSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const run = value as Partial<ScheduledTaskRunSummary>;
+  if (
+    typeof run.id !== "string" ||
+    typeof run.task_id !== "string" ||
+    typeof run.status !== "string" ||
+    !RUN_STATUSES.has(run.status) ||
+    typeof run.trigger !== "string" ||
+    !RUN_TRIGGERS.has(run.trigger) ||
+    typeof run.scheduled_for !== "string" ||
+    typeof run.workspace_id !== "string"
+  ) {
+    return null;
+  }
+  return run as ScheduledTaskRunSummary;
+}
+
+export function normalizeScheduledTask(
+  value: unknown,
+): ScheduledTaskSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const task = value as Partial<ScheduledTaskSummary>;
+  const schedule = task.schedule as
+    Partial<ScheduledTaskSummary["schedule"]> | undefined;
+  if (
+    typeof task.id !== "string" ||
+    typeof task.title !== "string" ||
+    typeof task.status !== "string" ||
+    !TASK_STATUSES.has(task.status) ||
+    !schedule ||
+    typeof schedule !== "object" ||
+    !["once", "recurring"].includes(schedule.kind ?? "") ||
+    typeof schedule.timezone !== "string" ||
+    !isValidTimeZone(schedule.timezone) ||
+    (schedule.kind === "once" &&
+      typeof (schedule as { run_at?: unknown }).run_at !== "string") ||
+    (schedule.kind === "recurring" &&
+      (typeof (schedule as { rrule?: unknown }).rrule !== "string" ||
+        !(schedule as { rrule: string }).rrule.trim())) ||
+    typeof task.workspace_id !== "string" ||
+    typeof task.provider !== "string" ||
+    typeof task.updated_at !== "string"
+  ) {
+    return null;
+  }
+  const lastRun = task.last_run
+    ? normalizeScheduledTaskRun(task.last_run)
+    : null;
+  return {
+    ...task,
+    prompt_preview:
+      typeof task.prompt_preview === "string" ? task.prompt_preview : "",
+    last_run: lastRun,
+  } as ScheduledTaskSummary;
+}
 
 /** Normalizes the untrusted request boundary shared by snapshots and history. */
 export function normalizeInteractiveRequest(
@@ -227,11 +311,26 @@ const DEFAULT_NOTIFICATION_PREFERENCES = {
   suppress_when_desktop_active: true,
 } as const;
 
+// Mirrors the daemon's shipped chain: most users have exactly one of these
+// CLIs installed, so background work falls down the list until one answers.
+const DEFAULT_UTILITY_PROVIDER_ORDER = [
+  "claude",
+  "codex",
+  "opencode",
+  "grok",
+] as const;
+
+const DEFAULT_UTILITY_MODEL_PREFERENCES: UtilityModelPreferences = {
+  provider_order: [...DEFAULT_UTILITY_PROVIDER_ORDER],
+  models: [{ provider: "claude", model_id: "haiku" }],
+};
+
 const DEFAULT_PREFERENCES: FalconDeckPreferences = {
   version: 1,
   workspace_order: [],
   conversation: DEFAULT_CONVERSATION_PREFERENCES,
   notifications: DEFAULT_NOTIFICATION_PREFERENCES,
+  utility_models: DEFAULT_UTILITY_MODEL_PREFERENCES,
 };
 
 const FALLBACK_PROVIDER: AgentProvider = "codex";
@@ -271,6 +370,15 @@ function normalizeStringList(value: unknown): string[] {
     (entry): entry is string =>
       typeof entry === "string" && entry.trim().length > 0,
   );
+}
+
+function normalizeOptionalString(
+  value: unknown,
+  maxLength = 2_000,
+): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, maxLength) : null;
 }
 
 function normalizeCapabilities(value: unknown): AgentCapabilitySummary {
@@ -488,6 +596,12 @@ export function normalizeThreadSummary(
             thread_id: thread.handoff_from.thread_id,
             provider: normalizeProvider(thread.handoff_from.provider),
           }
+        : null,
+    origin:
+      thread.origin?.kind === "scheduled_task" &&
+      typeof thread.origin.task_id === "string" &&
+      typeof thread.origin.title === "string"
+        ? thread.origin
         : null,
     status: thread.status ?? "idle",
     updated_at: thread.updated_at ?? new Date(0).toISOString(),
@@ -1190,6 +1304,7 @@ export function normalizeConversationItem(value: unknown): ConversationItem {
           )
         : [],
       lifecycle: normalizeContentLifecycle(item.lifecycle),
+      error: normalizeOptionalString(item.error),
     };
   }
   if (
@@ -1331,9 +1446,13 @@ export function normalizeDaemonSnapshot(
 ): DaemonSnapshot {
   const snapshot = (value ?? {}) as Partial<DaemonSnapshot>;
   return {
-    daemon: snapshot.daemon ?? {
-      version: "unknown",
-      started_at: new Date(0).toISOString(),
+    daemon: {
+      version: snapshot.daemon?.version ?? "unknown",
+      started_at: snapshot.daemon?.started_at ?? new Date(0).toISOString(),
+      capabilities: {
+        scheduled_tasks:
+          snapshot.daemon?.capabilities?.scheduled_tasks ?? false,
+      },
     },
     workspaces: Array.isArray(snapshot.workspaces)
       ? snapshot.workspaces.map((workspace) =>
@@ -1387,6 +1506,12 @@ export function normalizeDaemonSnapshot(
     ),
     preferences: normalizePreferences(snapshot.preferences),
     extensions: normalizeExtensionSnapshot(snapshot.extensions),
+    scheduled_tasks: Array.isArray(snapshot.scheduled_tasks)
+      ? snapshot.scheduled_tasks.flatMap((task) => {
+          const normalized = normalizeScheduledTask(task);
+          return normalized ? [normalized] : [];
+        })
+      : [],
   };
 }
 
@@ -1684,6 +1809,28 @@ export function normalizeEventEnvelope(
     });
   }
 
+  if (
+    event?.type === "scheduled-task-created" ||
+    event?.type === "scheduled-task-updated"
+  ) {
+    const task = normalizeScheduledTask(event.task);
+    return markNormalized({
+      ...(envelope as EventEnvelope),
+      event: { ...event, task: task ?? event.task },
+    });
+  }
+
+  if (
+    event?.type === "scheduled-task-run-started" ||
+    event?.type === "scheduled-task-run-updated"
+  ) {
+    const run = normalizeScheduledTaskRun(event.run);
+    return markNormalized({
+      ...(envelope as EventEnvelope),
+      event: { ...event, run: run ?? event.run },
+    });
+  }
+
   if (event?.type === "extension-view-updated") {
     const view = event.view
       ? (normalizeExtensionSnapshot({ catalog: [], views: [event.view] })
@@ -1858,6 +2005,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
         ...DEFAULT_CONVERSATION_PREFERENCES,
         auto_expand: { ...DEFAULT_CONVERSATION_PREFERENCES.auto_expand },
       },
+      utility_models: normalizeUtilityModelPreferences(undefined),
     };
   }
 
@@ -1923,5 +2071,46 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
       suppress_when_desktop_active:
         notifications.suppress_when_desktop_active ?? true,
     },
+    utility_models: normalizeUtilityModelPreferences(raw.utility_models),
+  };
+}
+
+/** Older daemons omit utility models entirely, so an absent or malformed
+ * section falls back to the shipped chain rather than disabling background
+ * titles and handoff briefs. */
+function normalizeUtilityModelPreferences(
+  value: unknown,
+): UtilityModelPreferences {
+  const raw = (value ?? {}) as Partial<UtilityModelPreferences>;
+  const providerOrder = Array.isArray(raw.provider_order)
+    ? raw.provider_order.reduce<string[]>((ordered, provider) => {
+        if (typeof provider !== "string") return ordered;
+        const normalized = provider.trim();
+        if (normalized && !ordered.includes(normalized))
+          ordered.push(normalized);
+        return ordered;
+      }, [])
+    : [];
+  const models = Array.isArray(raw.models)
+    ? raw.models.reduce<UtilityModelChoice[]>((choices, choice) => {
+        if (!choice || typeof choice !== "object") return choices;
+        const entry = choice as Partial<UtilityModelChoice>;
+        const provider =
+          typeof entry.provider === "string" ? entry.provider.trim() : "";
+        if (!provider || choices.some((existing) => existing.provider === provider))
+          return choices;
+        choices.push({
+          provider,
+          model_id:
+            typeof entry.model_id === "string" ? entry.model_id.trim() : "",
+        });
+        return choices;
+      }, [])
+    : [...DEFAULT_UTILITY_MODEL_PREFERENCES.models];
+  return {
+    provider_order: providerOrder.length
+      ? providerOrder
+      : [...DEFAULT_UTILITY_PROVIDER_ORDER],
+    models,
   };
 }

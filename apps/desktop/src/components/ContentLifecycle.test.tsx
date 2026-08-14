@@ -9,12 +9,17 @@ import type {
 
 const createdAt = '2026-08-08T20:00:00Z'
 
-function assistant(lifecycle: ContentLifecycle, text = 'Partial response') {
+function assistant(
+  lifecycle: ContentLifecycle,
+  text = 'Partial response',
+  error?: string,
+) {
   return {
     kind: 'assistant_message',
     id: 'assistant-1',
     text,
     lifecycle,
+    error,
     created_at: createdAt,
   } satisfies Extract<ConversationItem, { kind: 'assistant_message' }>
 }
@@ -63,6 +68,21 @@ describe('assistant content lifecycle presentation', () => {
     expect(
       screen.queryByRole('button', { name: 'Copy response' }),
     ).not.toBeInTheDocument()
+  })
+
+  it('surfaces the provider error on a failed response', () => {
+    render(
+      <MessageCard
+        item={assistant(
+          'error',
+          '',
+          'DeepSeek rejected the request: insufficient credits',
+        )}
+      />,
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Response failed DeepSeek rejected the request: insufficient credits',
+    )
   })
 
   it('renders an honest pending receipt before the first fragment', () => {

@@ -97,6 +97,7 @@ input.on('line', (line) => {
   }
 
   if (message.method === 'session/new') {
+    if (scenario === 'session-new-timeout') return
     process.stderr.write('fixture adapter diagnostic\n')
     result(message.id, {
       sessionId,

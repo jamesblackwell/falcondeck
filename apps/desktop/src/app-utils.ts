@@ -1,13 +1,42 @@
 import {
   defaultProviderLabel,
   interactiveResolutionFromResponse,
+  wasTurnInterruptedByShutdown,
   workspaceAccount,
   workspaceProviderLabel,
   type AgentProvider,
   type ConversationItem,
   type InteractiveResponsePayload,
+  type ThreadSummary,
   type WorkspaceSummary,
 } from '@falcondeck/client-core'
+
+/**
+ * Threads to offer in the launch-time "continue what the quit stopped"
+ * prompt, or null while it is too early to ask.
+ *
+ * Projects show up in the snapshot before the daemon has finished hydrating
+ * them, and a turn started mid-hydration races the rebuilt thread list — so
+ * asking is held until every project has finished connecting. Remote hosts
+ * report their threads after the local snapshot, and waiting for them keeps
+ * the prompt from appearing twice with different contents.
+ */
+export function stoppedThreadsToOffer({
+  threads,
+  workspaces,
+  remoteHosts,
+}: {
+  threads: readonly ThreadSummary[] | undefined
+  workspaces: readonly WorkspaceSummary[] | undefined
+  remoteHosts: readonly { hasSnapshot: boolean; isConnected: boolean }[]
+}): ThreadSummary[] | null {
+  if (!threads || !workspaces) return null
+  if (workspaces.some((workspace) => workspace.status === 'connecting')) return null
+  if (remoteHosts.some((host) => host.isConnected && !host.hasSnapshot)) return null
+  return threads.filter(
+    (thread) => !thread.is_archived && wasTurnInterruptedByShutdown(thread),
+  )
+}
 
 export function markInteractiveRequestResolved(
   items: ConversationItem[],

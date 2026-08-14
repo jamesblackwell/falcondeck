@@ -106,6 +106,16 @@ Status: Decided. These decisions are based on competitive research and source co
 - PolyScope (closed source) likely does the same thing
 - This is a UI feature, not an architectural requirement
 
+**Refinement (Aug 2026)**: the transcript is compacted *before* it reaches the destination, by a
+cheap background model, rather than being pasted in whole for the destination to summarize itself.
+Pasting the raw transcript spent an expensive first turn and overflowed the destination context on
+long threads. The daemon splits the exported transcript at item boundaries, summarizes each segment
+on a utility model, and merges the notes into one brief (`app/handoff.rs`). Which model runs is a
+preference, not a hardcode: `utility_models` holds a provider fallback chain (Claude → Codex →
+OpenCode → Grok by default) plus a per-provider model id, and background thread titles run on the
+same chain. If no provider is installed and signed in, the destination compacts the transcript
+itself — the old behaviour, kept as the fallback path.
+
 ## Decision 9: Mobile / Relay Authentication
 
 **Decision**: QR code pairing, no account required

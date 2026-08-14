@@ -133,6 +133,7 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                     memory_citation: None,
                     citations: Vec::new(),
                     lifecycle: ContentLifecycle::Complete,
+                    error: None,
                     created_at,
                 },
             }),
@@ -160,6 +161,7 @@ fn build_session_hydrated_item_from_entry(value: &Value) -> Option<SessionHydrat
                                 memory_citation,
                                 citations: Vec::new(),
                                 lifecycle: ContentLifecycle::Complete,
+                                error: None,
                                 created_at,
                             }
                         },

@@ -63,8 +63,6 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
   expansionMode,
   thinkingDisplay,
   isStreamingReasoning,
-  onEditResend,
-  editResendUnavailableReason,
   retrySource,
   onRetryResponse,
 }: {
@@ -75,8 +73,6 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
     typeof normalizePreferences
   >["conversation"]["thinking_display"];
   isStreamingReasoning: boolean;
-  onEditResend?: EditResendHandler;
-  editResendUnavailableReason?: string | null;
   retrySource?: Extract<ConversationItem, { kind: "user_message" }> | null;
   onRetryResponse?: EditResendHandler;
 }) {
@@ -96,8 +92,6 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
           suppressReadOnlyDetail={block.suppress_read_only_detail}
           thinkingDisplay={thinkingDisplay}
           isStreamingReasoning={isStreamingReasoning}
-          onEditResend={onEditResend}
-          editResendUnavailableReason={editResendUnavailableReason}
           retrySource={
             block.item.kind === "assistant_message" ? retrySource : null
           }
@@ -161,8 +155,6 @@ export const Conversation = memo(function Conversation({
   isLoadingOlder = false,
   onLoadOlder,
   onOpenFile = null,
-  onEditResend,
-  editResendUnavailableReason = null,
   onRetryResponse,
   exportTitle = null,
   pinnedPlanId = null,
@@ -191,9 +183,6 @@ export const Conversation = memo(function Conversation({
   onLoadOlder?: () => void;
   /** Opens a file's diff in the host's side panel; omit where there is none. */
   onOpenFile?: OpenFileDiff | null;
-  onEditResend?: EditResendHandler;
-  /** Thread-level explanation shown when provider-backed branching is unavailable. */
-  editResendUnavailableReason?: string | null;
   onRetryResponse?: EditResendHandler;
   /** Human thread title used for the Markdown export heading and filename. */
   exportTitle?: string | null;
@@ -678,9 +667,7 @@ export const Conversation = memo(function Conversation({
                     }
                     className="fd-focus inline-flex min-h-8 items-center gap-2 rounded-full border border-border-subtle bg-surface-2 px-3 text-[length:var(--fd-text-xs)] font-medium text-fg-muted transition-colors hover:border-border-default hover:bg-surface-3 hover:text-fg-primary disabled:cursor-wait disabled:opacity-70"
                   >
-                    {isLoadingOlder ? (
-                      <ActivityDiamond />
-                    ) : null}
+                    {isLoadingOlder ? <ActivityDiamond /> : null}
                     {isLoadingOlder
                       ? "Loading earlier messages…"
                       : "Load earlier messages"}
@@ -760,8 +747,6 @@ export const Conversation = memo(function Conversation({
                     block.kind === "item" &&
                     block.item.id === streamingReasoningId
                   }
-                  onEditResend={onEditResend}
-                  editResendUnavailableReason={editResendUnavailableReason}
                   retrySource={
                     block.kind === "item" &&
                     block.item.kind === "assistant_message"

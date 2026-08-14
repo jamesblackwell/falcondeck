@@ -10,21 +10,22 @@ use std::{
 use chrono::{Duration as ChronoDuration, Utc};
 use falcondeck_core::{
     AgentCapabilitySummary, AgentProvider, ApprovalDecision, CollaborationModeSummary,
-    CommandResponse, ConnectWorkspaceRequest, ContentLifecycle, ConversationItem, DaemonInfo,
-    DaemonSnapshot, EventEnvelope, ExtensionActionResponse, ExtensionSnapshot, ExtensionSummary,
-    FalconDeckPreferences, ForkThreadRequest, HealthResponse, InteractiveRequest,
-    InteractiveRequestKind, InteractiveResponsePayload, InvokeExtensionActionRequest,
-    OperationalCondition, PairingPublicKeyBundle, RemoteConnectionStatus, SendTurnRequest,
-    ServiceLevel, ServiceNotice, SkillSummary, SnapshotRequest, StartReviewRequest,
-    StartThreadRequest, TextDeltaTarget, ThreadAgentParams, ThreadAttention, ThreadDetail,
-    ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus, ThreadSummary, ThreadTokenUsage,
-    UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest, WorkspaceAgentSummary,
-    WorkspaceStatus, WorkspaceSummary, crypto::LocalBoxKeyPair,
+    CommandResponse, ConnectWorkspaceRequest, ContentLifecycle, ConversationItem,
+    DaemonCapabilities, DaemonInfo, DaemonSnapshot, EventEnvelope, ExtensionActionResponse,
+    ExtensionSnapshot, ExtensionSummary, FalconDeckPreferences, ForkThreadRequest, HealthResponse,
+    InteractiveRequest, InteractiveRequestKind, InteractiveResponsePayload,
+    InvokeExtensionActionRequest, OperationalCondition, PairingPublicKeyBundle,
+    RemoteConnectionStatus, SendTurnRequest, ServiceLevel, ServiceNotice, SkillSummary,
+    SnapshotRequest, StartReviewRequest, StartThreadRequest, TextDeltaTarget, ThreadAgentParams,
+    ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus,
+    ThreadSummary, ThreadTokenUsage, UnifiedEvent, UpdatePreferencesRequest,
+    UpdateScheduledTaskRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
+    WorkspaceSummary, crypto::LocalBoxKeyPair,
 };
 use serde_json::{Value, json};
 use tokio::{
     sync::mpsc,
-    sync::{Mutex, broadcast, oneshot},
+    sync::{Mutex, Notify, OnceCell, Semaphore, broadcast, oneshot},
     task::JoinHandle,
     time::{Duration, timeout},
 };
@@ -49,15 +50,18 @@ pub(crate) mod conversation_helpers;
 mod extension_events;
 mod extension_host;
 mod extensions;
+mod handoff;
 pub(crate) mod host_provisioning;
 mod notifications;
 mod opencode_threads;
 mod provider_runtime;
 mod remote_bridge;
 mod remote_lifecycle;
+mod scheduled_tasks;
 mod speech;
 mod storage;
 mod threads;
+mod utility_model;
 mod workspace_ops;
 
 use agent_helpers::*;
@@ -94,6 +98,7 @@ struct InnerState {
     provider_bins: HashMap<AgentProvider, String>,
     state_path: PathBuf,
     preferences_path: PathBuf,
+    scheduled_tasks_path: PathBuf,
     sequence: AtomicU64,
     broadcaster: broadcast::Sender<EventEnvelope>,
     workspaces: Mutex<HashMap<String, ManagedWorkspace>>,
@@ -126,6 +131,18 @@ struct InnerState {
     /// app crashes or is force-quit.
     desktop_active_until: StdMutex<Option<chrono::DateTime<Utc>>>,
     preferences: Mutex<FalconDeckPreferences>,
+    /// Definitions and bounded run ledgers owned by this daemon.
+    scheduled_tasks: Mutex<scheduled_tasks::ScheduledTaskRegistry>,
+    /// Makes the lightweight task-store restore a readiness prerequisite and
+    /// prevents the slower general restore from loading it over live edits.
+    scheduled_tasks_restored: OnceCell<()>,
+    scheduled_mutation: Mutex<()>,
+    /// Wakes the single scheduler loop after definition changes.
+    scheduled_notify: Notify,
+    /// Prevents duplicate scheduler loops when restore/create race.
+    scheduled_scheduler_started: AtomicBool,
+    /// Global cap for unattended scheduled executions.
+    scheduled_run_slots: Semaphore,
     /// Installed extension catalog, private state, and synchronized projections.
     extensions: Mutex<extensions::ExtensionRegistry>,
     /// Lazily started Deno sidecars, isolated and serialized per extension.
@@ -171,6 +188,10 @@ struct ManagedThread {
     manual_title: bool,
     ai_title_generated: bool,
     ai_title_in_flight: bool,
+    /// The current title is only a provider-side preview of the opening prompt
+    /// (Claude sessions without their own title, Codex previews). It reads like
+    /// a real title, so the titler needs this flag to know it may replace it.
+    title_is_provider_preview: bool,
     requires_resume: bool,
     /// Full requests behind `summary.queued_turns`, same order, matched by
     /// the summary entry's id. Persisted before an enqueue is acknowledged.
@@ -370,6 +391,8 @@ struct PersistedThreadState {
     #[serde(default)]
     handoff_from: Option<falcondeck_core::ThreadHandoffSource>,
     #[serde(default)]
+    origin: Option<falcondeck_core::ThreadOrigin>,
+    #[serde(default)]
     title: Option<String>,
     #[serde(default)]
     manual_title: bool,
@@ -478,6 +501,7 @@ impl AppState {
     ) -> Self {
         let (broadcaster, _) = broadcast::channel(2048);
         let preferences_path = default_preferences_path(&state_path);
+        let scheduled_tasks_path = scheduled_tasks::scheduled_tasks_path(&state_path);
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
         Self {
@@ -485,10 +509,14 @@ impl AppState {
                 daemon: DaemonInfo {
                     version,
                     started_at: Utc::now(),
+                    capabilities: DaemonCapabilities {
+                        scheduled_tasks: true,
+                    },
                 },
                 provider_bins,
                 state_path,
                 preferences_path,
+                scheduled_tasks_path,
                 sequence: AtomicU64::new(1),
                 broadcaster,
                 workspaces: Mutex::new(HashMap::new()),
@@ -505,6 +533,12 @@ impl AppState {
                 local_base_url: OnceLock::new(),
                 desktop_active_until: StdMutex::new(None),
                 preferences: Mutex::new(FalconDeckPreferences::default()),
+                scheduled_tasks: Mutex::new(scheduled_tasks::ScheduledTaskRegistry::default()),
+                scheduled_tasks_restored: OnceCell::new(),
+                scheduled_mutation: Mutex::new(()),
+                scheduled_notify: Notify::new(),
+                scheduled_scheduler_started: AtomicBool::new(false),
+                scheduled_run_slots: Semaphore::new(scheduled_tasks::MAX_CONCURRENT_RUNS),
                 extensions: Mutex::new(extension_registry),
                 extension_hosts: Mutex::new(extension_hosts),
                 extension_event_queues: StdMutex::new(HashMap::new()),
@@ -627,6 +661,7 @@ impl AppState {
         // Restore the remote bridge before reconnecting workspaces. Workspace
         // reconnects can persist state; starting them first could race with
         // remote restoration and overwrite a valid pairing with `remote: null`.
+        self.restore_scheduled_tasks().await?;
         if !workspaces_to_restore.is_empty() {
             let app = self.clone();
             tokio::spawn(async move {
@@ -657,10 +692,23 @@ impl AppState {
                             .await;
                     }
                 }
+                // A restored task may be immediately due. Wait until every
+                // persisted workspace has either reconnected or settled into
+                // a visible disconnected state before dispatching it.
+                scheduled_tasks::start_scheduler(&app);
             });
+        } else {
+            scheduled_tasks::start_scheduler(self);
         }
-
         Ok(())
+    }
+
+    pub(crate) async fn restore_scheduled_tasks(&self) -> Result<(), DaemonError> {
+        self.inner
+            .scheduled_tasks_restored
+            .get_or_try_init(|| async { scheduled_tasks::restore(self).await })
+            .await
+            .map(|_| ())
     }
 
     async fn restore_workspace_placeholder(
@@ -718,6 +766,7 @@ impl AppState {
                 native_session_id: state.native_session_id.clone(),
                 provider_transport: state.provider_transport.clone(),
                 handoff_from: state.handoff_from.clone(),
+                origin: state.origin.clone(),
                 status,
                 updated_at: state
                     .updated_at
@@ -750,6 +799,9 @@ impl AppState {
             thread.ai_title_generated = state.ai_title_generated
                 || (!is_placeholder_thread_title(&thread.summary.title)
                     && !is_provisional_thread_title(&thread.summary.title));
+            // Preview-vs-real can't be told apart from persisted state alone;
+            // connecting the workspace re-reads the session file and sets
+            // `title_is_provider_preview` properly.
             threads.insert(state.thread_id.clone(), thread);
         }
         let summary = WorkspaceSummary {
@@ -839,9 +891,15 @@ impl AppState {
                 .values_mut()
                 .find(|workspace| workspace.summary.path == canonical_path)
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            workspace.summary.status = status;
+            workspace.summary.status = status.clone();
             workspace.summary.last_error = last_error.clone();
             for thread in workspace.threads.values_mut() {
+                if status == WorkspaceStatus::Disconnected
+                    && thread.summary.status == ThreadStatus::Running
+                {
+                    thread.summary.status = ThreadStatus::Error;
+                    thread.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
+                }
                 if thread.summary.last_error.is_none() {
                     thread.summary.last_error = last_error.clone();
                 }
@@ -889,10 +947,65 @@ impl AppState {
             .count()
     }
 
+    pub(crate) async fn fail_active_provider_threads(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+        error: &str,
+    ) {
+        let now = Utc::now();
+        let changed = {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            workspace
+                .threads
+                .values_mut()
+                .filter_map(|thread| {
+                    (thread.summary.provider == *provider
+                        && matches!(
+                            thread.summary.status,
+                            ThreadStatus::Running | ThreadStatus::WaitingForInput
+                        ))
+                    .then(|| {
+                        thread.summary.status = ThreadStatus::Error;
+                        thread.summary.last_error = Some(error.to_string());
+                        thread.summary.updated_at = now;
+                        thread.summary.clone()
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for thread in &changed {
+            self.settle_turn_items_with_error(
+                workspace_id,
+                &thread.id,
+                now,
+                ToolSettlement::Failed,
+                Some(error),
+            )
+            .await;
+            self.emit(
+                Some(workspace_id.to_string()),
+                Some(thread.id.clone()),
+                UnifiedEvent::ThreadUpdated {
+                    thread: thread.clone(),
+                },
+            );
+        }
+        if !changed.is_empty() {
+            let _ = self.persist_local_state().await;
+        }
+    }
+
     pub async fn shutdown(&self) -> Result<(), DaemonError> {
         // Flag first: reconnect/respawn paths check this before spawning new
         // agent processes, so nothing new starts while we tear down.
         self.inner.shutting_down.store(true, Ordering::Release);
+        self.inner.scheduled_notify.notify_waiters();
+        scheduled_tasks::interrupt_active_runs(self).await?;
         let snapshots = {
             let workspaces = self.inner.workspaces.lock().await;
             workspaces
@@ -971,6 +1084,7 @@ impl AppState {
         let interactive_requests = self.inner.interactive_requests.lock().await;
         let preferences = self.inner.preferences.lock().await.clone();
         let extensions = self.inner.extensions.lock().await.snapshot();
+        let scheduled_tasks = self.inner.scheduled_tasks.lock().await.summaries();
         let service_notices = self
             .inner
             .service_notices
@@ -1061,6 +1175,7 @@ impl AppState {
             thread_token_usage,
             preferences,
             extensions,
+            scheduled_tasks,
         }
     }
 
@@ -1491,6 +1606,53 @@ impl AppState {
         workspace_ops::start_review(self, request).await
     }
 
+    pub async fn scheduled_tasks(&self) -> Vec<falcondeck_core::ScheduledTaskSummary> {
+        scheduled_tasks::list(self).await
+    }
+
+    pub async fn scheduled_task(
+        &self,
+        task_id: &str,
+    ) -> Result<falcondeck_core::ScheduledTaskDetail, DaemonError> {
+        scheduled_tasks::detail(self, task_id).await
+    }
+
+    pub async fn create_scheduled_task(
+        &self,
+        request: falcondeck_core::CreateScheduledTaskRequest,
+    ) -> Result<falcondeck_core::ScheduledTaskDetail, DaemonError> {
+        scheduled_tasks::create(self, request).await
+    }
+
+    pub async fn update_scheduled_task(
+        &self,
+        task_id: &str,
+        request: UpdateScheduledTaskRequest,
+    ) -> Result<falcondeck_core::ScheduledTaskDetail, DaemonError> {
+        scheduled_tasks::update(self, task_id, request).await
+    }
+
+    pub async fn delete_scheduled_task(
+        &self,
+        task_id: &str,
+    ) -> Result<CommandResponse, DaemonError> {
+        scheduled_tasks::delete(self, task_id).await
+    }
+
+    pub async fn run_scheduled_task(
+        &self,
+        task_id: &str,
+    ) -> Result<falcondeck_core::ScheduledTaskRunSummary, DaemonError> {
+        scheduled_tasks::run_now(self, task_id).await
+    }
+
+    pub async fn scheduled_task_runs(
+        &self,
+        task_id: &str,
+    ) -> Result<Vec<falcondeck_core::ScheduledTaskRunSummary>, DaemonError> {
+        scheduled_tasks::runs(self, task_id).await
+    }
+
     pub async fn interrupt_turn(
         &self,
         workspace_id: String,
@@ -1565,6 +1727,14 @@ impl AppState {
         workspace_ops::mark_thread_read(self, workspace_id, thread_id, read_seq).await
     }
 
+    pub async fn mark_thread_unread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<ThreadSummary, DaemonError> {
+        workspace_ops::mark_thread_unread(self, workspace_id, thread_id).await
+    }
+
     /// Persists soon, coalescing bursts into one write. Streaming a turn
     /// touches thread state on every chunk; snapshotting and fsyncing the full
     /// state file each time starves the turn monitors, so the agent's stdout
@@ -1620,11 +1790,26 @@ impl AppState {
                     native_session_id: thread.summary.native_session_id.clone(),
                     provider_transport: thread.summary.provider_transport.clone(),
                     handoff_from: thread.summary.handoff_from.clone(),
+                    origin: thread.summary.origin.clone(),
                     title: Some(thread.summary.title.clone()),
                     manual_title: thread.manual_title,
                     ai_title_generated: thread.ai_title_generated,
-                    status: Some(thread.summary.status.clone()),
-                    last_error: thread.summary.last_error.clone(),
+                    status: Some(
+                        if workspace.summary.status == WorkspaceStatus::Disconnected
+                            && thread.summary.status == ThreadStatus::Running
+                        {
+                            ThreadStatus::Error
+                        } else {
+                            thread.summary.status.clone()
+                        },
+                    ),
+                    last_error: if workspace.summary.status == WorkspaceStatus::Disconnected
+                        && thread.summary.status == ThreadStatus::Running
+                    {
+                        Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string())
+                    } else {
+                        thread.summary.last_error.clone()
+                    },
                     last_read_seq: thread.summary.attention.last_read_seq,
                     last_agent_activity_seq: thread.summary.attention.last_agent_activity_seq,
                     variant: thread.summary.variant.clone(),

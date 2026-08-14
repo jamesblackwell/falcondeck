@@ -15,6 +15,9 @@ use serde::Serialize;
 use tauri::{async_runtime::Mutex, AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+/// Kept in sync with ACTIVITY_WINDOW_LABEL in src/activity-window-bridge.ts.
+const ACTIVITY_WINDOW_LABEL: &str = "activity";
+
 struct DesktopState {
     daemon: Mutex<Option<EmbeddedDaemonHandle>>,
     exit_prompt_open: AtomicBool,
@@ -502,6 +505,49 @@ fn open_external_url(url: String) -> Result<(), String> {
     open::that_detached(url).map_err(|error| error.to_string())
 }
 
+/// Open (or re-focus) the detached Activity window.
+///
+/// Built here rather than from JS so the label, chrome, and size stay in one
+/// place with the main window's, and so the capability list — which is keyed
+/// by label — is the only thing gating it.
+#[tauri::command]
+fn open_activity_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(ACTIVITY_WINDOW_LABEL) {
+        // Already popped out, on whichever display the user left it.
+        window.unminimize().ok();
+        window.show().map_err(|error| error.to_string())?;
+        return window.set_focus().map_err(|error| error.to_string());
+    }
+
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        ACTIVITY_WINDOW_LABEL,
+        tauri::WebviewUrl::App("activity-window.html".into()),
+    )
+    .title("FalconDeck Activity")
+    .title_bar_style(tauri::TitleBarStyle::Overlay)
+    .hidden_title(true)
+    .background_color(tauri::window::Color(9, 9, 11, 255))
+    .inner_size(1080.0, 900.0)
+    .min_inner_size(560.0, 420.0)
+    .build()
+    .map(|_| ())
+    .map_err(|error| error.to_string())
+}
+
+/// Raise the main window. The Activity window hands threads off to it, so the
+/// handoff has to bring the window forward too — otherwise the thread opens
+/// behind whatever the user is looking at.
+#[tauri::command]
+fn focus_main_window(app: AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Err("FalconDeck's main window is not open.".to_string());
+    };
+    window.unminimize().ok();
+    window.show().map_err(|error| error.to_string())?;
+    window.set_focus().map_err(|error| error.to_string())
+}
+
 pub fn run() {
     // The updater enables rustls' Ring provider while the daemon enables
     // AWS-LC. With both compiled, rustls deliberately refuses to guess and
@@ -548,7 +594,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ensure_daemon_running,
             restart_app,
-            open_external_url
+            open_external_url,
+            open_activity_window,
+            focus_main_window
         ])
         .build(tauri::generate_context!())
         .expect("failed to build FalconDeck desktop");

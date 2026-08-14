@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { memo, useMemo } from 'react'
-import { Archive, CircleStop, Pin, Split } from 'lucide-react'
+import { Archive, CalendarClock, CircleStop, Pin, Split } from 'lucide-react'
 
 import {
   deriveThreadAttentionPresentation,
@@ -132,6 +132,16 @@ export const ThreadItem = memo(
           <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
             {thread.title}
           </span>
+          {thread.origin?.kind === 'scheduled_task' ? (
+            <span
+              role="img"
+              aria-label={`Scheduled task: ${thread.origin.title}`}
+              title={`Scheduled · ${thread.origin.title}`}
+              className="flex shrink-0 items-center text-fg-muted"
+            >
+              <CalendarClock aria-hidden="true" className="h-3 w-3" />
+            </span>
+          ) : null}
           {tags.length > 0 ? (
             <span className="flex shrink-0 items-center gap-1" aria-label={tags.map(tag => tag.label).join(', ')}>
               {tags.slice(0, 3).map(tag => (
@@ -220,6 +230,12 @@ function tagsEqual(a: ThreadTag[] | undefined, b: ThreadTag[] | undefined) {
   })
 }
 
+function originEqual(a: ThreadSummary['origin'], b: ThreadSummary['origin']) {
+  if (a === b) return true
+  if (!a || !b || a.kind !== b.kind) return false
+  return a.task_id === b.task_id && a.title === b.title
+}
+
 function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
   return (
     a.id === b.id &&
@@ -229,6 +245,7 @@ function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {
     a.last_error === b.last_error &&
     a.is_pinned === b.is_pinned &&
     a.variant?.slug === b.variant?.slug &&
+    originEqual(a.origin, b.origin) &&
     a.attention.unread === b.attention.unread &&
     a.attention.badge_label === b.attention.badge_label &&
     a.attention.pending_approval_count === b.attention.pending_approval_count &&

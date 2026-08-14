@@ -102,6 +102,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canDelete,
   canPin,
   canMarkRead,
+  canMarkUnread,
   colorOptions,
   selectedColor,
   onClose,
@@ -110,6 +111,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onDelete,
   onTogglePin,
   onMarkRead,
+  onMarkUnread,
   onSetColor,
   menuRef,
 }: {
@@ -120,6 +122,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canDelete: boolean
   canPin: boolean
   canMarkRead: boolean
+  canMarkUnread: boolean
   colorOptions: ThreadTag[]
   selectedColor: ThreadTag | null
   onClose: () => void
@@ -128,6 +131,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onDelete: () => void
   onTogglePin: () => void
   onMarkRead: () => void
+  onMarkUnread: () => void
   onSetColor: (color: ThreadTag | null) => void
   menuRef: React.RefObject<HTMLDivElement | null>
 }) {
@@ -155,12 +159,20 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   }
 
   const showMarkRead = canMarkRead && target.thread.attention.unread
+  // Unread is derived as `last_agent_activity_seq > last_read_seq`, so a thread
+  // the agent never replied in can't be made unread at all — hide the row
+  // rather than offer an action that would no-op.
+  const showMarkUnread =
+    canMarkUnread &&
+    !target.thread.attention.unread &&
+    target.thread.attention.last_agent_activity_seq > 0
   const sessionId = target.thread.native_session_id
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
   const rowCount =
     Number(canPin) +
     Number(canRename) +
     Number(showMarkRead) +
+    Number(showMarkUnread) +
     Number(Boolean(workspacePath)) +
     Number(Boolean(sessionId)) +
     Number(canArchive) +
@@ -273,6 +285,21 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           icon={<Check className={iconClassName} />}
           label="Mark as read"
           onClick={onMarkRead}
+        />
+      ) : null}
+      {showMarkUnread ? (
+        <ThreadMenuItem
+          icon={
+            // Mirrors the row's own unread dot, sized into the same 3.5 box
+            // the lucide icons occupy so the labels stay aligned.
+            <span
+              className={cn(iconClassName, 'flex items-center justify-center')}
+            >
+              <span className="h-2 w-2 rounded-full bg-info" />
+            </span>
+          }
+          label="Mark as unread"
+          onClick={onMarkUnread}
         />
       ) : null}
       {colorOptions.length > 0 ? (

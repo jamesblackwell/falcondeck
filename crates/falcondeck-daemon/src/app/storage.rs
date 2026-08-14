@@ -249,6 +249,58 @@ pub(super) fn merge_preferences_from_value(value: Value) -> FalconDeckPreference
         }
     }
 
+    if let Some(utility_models) = value.get("utility_models") {
+        if let Some(order) = utility_models
+            .get("provider_order")
+            .and_then(Value::as_array)
+        {
+            let parsed = order
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|provider| !provider.is_empty())
+                .fold(Vec::new(), |mut ordered, provider| {
+                    let provider = AgentProvider::new(provider.to_string());
+                    if !ordered.iter().any(|existing| existing == &provider) {
+                        ordered.push(provider);
+                    }
+                    ordered
+                });
+            if !parsed.is_empty() {
+                preferences.utility_models.provider_order = parsed;
+            }
+        }
+        if let Some(models) = utility_models.get("models").and_then(Value::as_array) {
+            preferences.utility_models.models = models
+                .iter()
+                .filter_map(|choice| {
+                    let provider = extract_string(choice, &["provider"])?;
+                    let provider = provider.trim();
+                    if provider.is_empty() {
+                        return None;
+                    }
+                    Some(falcondeck_core::UtilityModelChoice {
+                        provider: AgentProvider::new(provider.to_string()),
+                        model_id: extract_string(choice, &["model_id"])
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
+                    })
+                })
+                .fold(Vec::new(), |mut choices, choice| {
+                    if !choices
+                        .iter()
+                        .any(|existing: &falcondeck_core::UtilityModelChoice| {
+                            existing.provider == choice.provider
+                        })
+                    {
+                        choices.push(choice);
+                    }
+                    choices
+                });
+        }
+    }
+
     preferences
 }
 
@@ -299,6 +351,45 @@ pub(super) fn apply_preferences_patch(
         }
         if let Some(value) = notifications.suppress_when_desktop_active {
             preferences.notifications.suppress_when_desktop_active = value;
+        }
+    }
+
+    if let Some(utility_models) = request.utility_models {
+        if let Some(provider_order) = utility_models.provider_order {
+            // An empty order would silently disable every background job, so
+            // it falls back to the shipped chain instead.
+            let deduped = provider_order
+                .into_iter()
+                .fold(Vec::new(), |mut ordered, provider| {
+                    if !provider.as_str().trim().is_empty()
+                        && !ordered.iter().any(|existing| existing == &provider)
+                    {
+                        ordered.push(provider);
+                    }
+                    ordered
+                });
+            preferences.utility_models.provider_order = if deduped.is_empty() {
+                falcondeck_core::UtilityModelPreferences::default().provider_order
+            } else {
+                deduped
+            };
+        }
+        if let Some(models) = utility_models.models {
+            preferences.utility_models.models =
+                models.into_iter().fold(Vec::new(), |mut choices, choice| {
+                    if !choices
+                        .iter()
+                        .any(|existing: &falcondeck_core::UtilityModelChoice| {
+                            existing.provider == choice.provider
+                        })
+                    {
+                        choices.push(falcondeck_core::UtilityModelChoice {
+                            provider: choice.provider,
+                            model_id: choice.model_id.trim().to_string(),
+                        });
+                    }
+                    choices
+                });
         }
     }
 }
@@ -865,6 +956,71 @@ mod tests {
         assert!(preferences.notifications.notify_on_input_required);
         assert!(!preferences.notifications.notify_on_error);
         assert!(!preferences.notifications.suppress_when_desktop_active);
+    }
+
+    #[test]
+    fn loads_utility_models_and_falls_back_to_the_shipped_chain() {
+        let preferences = merge_preferences_from_value(json!({
+            "utility_models": {
+                "provider_order": ["codex", "claude", "codex", "  "],
+                "models": [
+                    { "provider": "codex", "model_id": " gpt-5-mini " },
+                    { "provider": "codex", "model_id": "ignored-duplicate" },
+                    { "provider": "claude", "model_id": "" }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            preferences.utility_models.provider_order,
+            vec![AgentProvider::CODEX, AgentProvider::CLAUDE]
+        );
+        assert_eq!(
+            preferences.utility_models.model_for(&AgentProvider::CODEX),
+            Some("gpt-5-mini")
+        );
+        // An empty model id means "use that CLI's own default", not "no model".
+        assert_eq!(
+            preferences.utility_models.model_for(&AgentProvider::CLAUDE),
+            None
+        );
+
+        let empty_order = merge_preferences_from_value(json!({
+            "utility_models": { "provider_order": [] }
+        }));
+        assert_eq!(
+            empty_order.utility_models.provider_order,
+            falcondeck_core::UtilityModelPreferences::default().provider_order
+        );
+    }
+
+    #[test]
+    fn utility_model_patch_never_empties_the_provider_chain() {
+        let mut preferences = FalconDeckPreferences::default();
+        apply_preferences_patch(
+            &mut preferences,
+            UpdatePreferencesRequest {
+                utility_models: Some(falcondeck_core::UtilityModelPreferencesPatch {
+                    provider_order: Some(Vec::new()),
+                    models: Some(vec![falcondeck_core::UtilityModelChoice {
+                        provider: AgentProvider::new("grok"),
+                        model_id: " grok-fast ".to_string(),
+                    }]),
+                }),
+                ..UpdatePreferencesRequest::default()
+            },
+        );
+
+        assert_eq!(
+            preferences.utility_models.provider_order,
+            falcondeck_core::UtilityModelPreferences::default().provider_order
+        );
+        assert_eq!(
+            preferences
+                .utility_models
+                .model_for(&AgentProvider::new("grok")),
+            Some("grok-fast")
+        );
     }
 
     #[test]
