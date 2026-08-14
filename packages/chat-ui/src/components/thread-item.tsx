@@ -80,9 +80,15 @@ export const ThreadItem = memo(
       <div
         className={cn(
           'group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2',
+          'transition-colors duration-[var(--fd-duration-fast)]',
+          // Pressing previews the selection fill rather than a brighter tone of
+          // its own. A hotter pressed state overshoots the colour the row is
+          // about to land on, so the click read as a white flash followed by a
+          // snap back down. Press and release now paint the same fill, and the
+          // crossfade lets the outgoing row hand the highlight over.
           isSelected
             ? 'fd-row-selected'
-            : 'hover:bg-interactive-hover active:bg-interactive-active',
+            : 'hover:bg-interactive-hover active:bg-interactive-selected',
         )}
         onClick={() => onSelect(workspaceId, thread.id)}
         onContextMenu={(event: React.MouseEvent<HTMLDivElement>) => {

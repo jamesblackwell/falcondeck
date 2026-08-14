@@ -81,7 +81,7 @@ export const WorkspaceGroup = memo(function WorkspaceGroup({
             // selected thread inside it already carries the highlight, so this
             // row only shifts text weight.
             isSelected ? 'text-fg-primary' : 'text-fg-secondary',
-            'hover:bg-interactive-hover hover:text-fg-primary active:bg-interactive-active',
+            'hover:bg-interactive-hover hover:text-fg-primary active:bg-interactive-selected',
             dragHandleProps?.className,
           )}
         >
