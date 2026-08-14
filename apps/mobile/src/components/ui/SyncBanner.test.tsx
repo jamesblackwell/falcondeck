@@ -1,5 +1,6 @@
 import React from 'react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { act } from 'react-test-renderer'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { resolveSessionSyncStatus } from '@/lib/session-status'
 import { cleanup, renderComponent, textOf } from '../../test/render'
@@ -23,18 +24,41 @@ describe('SyncBanner', () => {
     expect(r.toJSON()).toBeNull()
   })
 
-  it('names what the app is waiting for during the first sync', () => {
-    const r = renderComponent(
-      <SyncBanner status={resolveSessionSyncStatus({ ...base, hasSyncedOnce: false })} />,
-    )
-    const text = textOf(r)
-    expect(text).toContain('Syncing your projects…')
-    expect(text).toContain('out of date')
+  it('only names what the app is waiting for when the first sync takes seven seconds', () => {
+    vi.useFakeTimers()
+    try {
+      const r = renderComponent(
+        <SyncBanner status={resolveSessionSyncStatus({ ...base, hasSyncedOnce: false })} />,
+      )
+
+      expect(r.toJSON()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(6_999)
+      })
+      expect(r.toJSON()).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+      const text = textOf(r)
+      expect(text).toContain('Syncing your projects…')
+      expect(text).toContain('out of date')
+      cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('announces itself politely to VoiceOver', () => {
+    const now = Date.now()
     const r = renderComponent(
-      <SyncBanner status={resolveSessionSyncStatus({ ...base, hasSyncedOnce: false })} />,
+      <SyncBanner
+        status={resolveSessionSyncStatus({
+          ...base,
+          hasSyncedOnce: false,
+          syncStartedAt: now - 7_000,
+        })}
+      />,
     )
     const banner = r.root.findAll(
       (node) => node.props?.accessibilityRole === 'progressbar',

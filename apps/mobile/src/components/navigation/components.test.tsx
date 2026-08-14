@@ -212,7 +212,7 @@ describe("SidebarView component", () => {
       renderComponent(<SidebarView {...base} groups={groups} />).toJSON(),
     ).toBeTruthy();
   });
-  it("says the first sync once — banner only, no duplicate empty state", () => {
+  it("shows a skeleton silently during the first-sync grace period", () => {
     useRelayStore.setState({
       connectionStatus: "encrypted",
       isEncrypted: true,
@@ -228,8 +228,7 @@ describe("SidebarView component", () => {
 
     const text = textOf(renderComponent(<SidebarView {...base} />));
 
-    expect(text).toContain("Syncing your projects…");
-    expect(text.match(/Syncing your projects…/g)).toHaveLength(1);
+    expect(text).not.toContain("Syncing your projects…");
     expect(text).not.toContain("Loading your projects");
     expect(text).not.toContain("No projects");
   });

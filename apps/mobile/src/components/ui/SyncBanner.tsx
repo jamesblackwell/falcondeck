@@ -12,6 +12,8 @@ interface SyncBannerProps {
   status: SessionSyncStatus
 }
 
+const SYNC_GRACE_PERIOD_MS = 7_000
+
 /**
  * The launch/reconnect wait, made visible. Until the relay is secured and the
  * first snapshot lands, taps on "New thread" produce a screen that cannot send
@@ -19,6 +21,36 @@ interface SyncBannerProps {
  * happening and disappears the moment the session is usable.
  */
 export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) {
+  if (!status.isBusy) return null
+
+  if (status.stage === 'syncing') {
+    return <DelayedSyncBanner status={status} />
+  }
+
+  return <SyncBannerContent status={status} />
+})
+
+function DelayedSyncBanner({ status }: SyncBannerProps) {
+  const [isVisible, setIsVisible] = useState(false)
+
+  useEffect(() => {
+    const elapsed =
+      status.syncStartedAt === null ? 0 : Math.max(0, Date.now() - status.syncStartedAt)
+    const remaining = Math.max(0, SYNC_GRACE_PERIOD_MS - elapsed)
+
+    if (remaining === 0) {
+      setIsVisible(true)
+      return
+    }
+
+    const timer = setTimeout(() => setIsVisible(true), remaining)
+    return () => clearTimeout(timer)
+  }, [status.syncStartedAt])
+
+  return isVisible ? <SyncBannerContent status={status} /> : null
+}
+
+function SyncBannerContent({ status }: SyncBannerProps) {
   const { theme } = useUnistyles()
   const [now, setNow] = useState(() => Date.now())
 
@@ -28,8 +60,6 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
     const timer = setInterval(() => setNow(Date.now()), 1_000)
     return () => clearInterval(timer)
   }, [status.isBusy, status.syncStartedAt])
-
-  if (!status.isBusy) return null
 
   const elapsedSeconds =
     status.syncStartedAt === null
@@ -96,7 +126,7 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
       </View>
     </Animated.View>
   )
-})
+}
 
 const styles = StyleSheet.create((theme) => ({
   container: {
