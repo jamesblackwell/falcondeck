@@ -30,6 +30,21 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tower-http = { version = "0.7.0", features = ["cors"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 
+# macOS defaults to unpacked debug info, which leaves one `.o` file per
+# codegen unit. Across normal test/build feature combinations that grew this
+# workspace's target directory past 100 GB. Line tables retain useful
+# backtraces without the object-file explosion, and disabling incremental
+# state keeps old compiler sessions from accumulating indefinitely.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+split-debuginfo = "packed"
+
+[profile.test]
+debug = "line-tables-only"
+incremental = false
+split-debuginfo = "packed"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

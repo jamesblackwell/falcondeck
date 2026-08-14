@@ -1,15 +1,14 @@
 # Worktrees & workspace isolation — product design
 
-Status: proposed design, 2026-08-07. Not scheduled; decide scope before building.
+Status: isolation shipped; merge-back remains proposed. Updated 2026-08-14.
 
 ## Where we stand
 
-A FalconDeck workspace is a folder. Every thread runs in that folder, on
-whatever branch happens to be checked out. That is a deliberate strength —
-the README calls it out ("same-folder workflows by default instead of
-forcing a worktree model") and it matches how people actually iterate on a
-dev server: run the agent where the dev server is already running, see the
-change live, commit when happy.
+A FalconDeck workspace is a folder. Threads run in that folder by default, on
+whatever branch happens to be checked out, while the composer can start a
+thread in an isolated worktree. Keeping the project folder as the default is a
+deliberate strength: it matches how people iterate against an existing dev
+server and editor session.
 
 It breaks down in exactly two situations:
 
@@ -32,20 +31,15 @@ remote hosts) instead of growing a parallel universe.*
 | **bb** | "Environment" = workspace×host binding, shareable across threads, managed lifecycle | worktrees under the hood | env provisioning per environment | thread-level |
 | **Claude Code** | Per-agent `isolation: worktree` flag | git worktree, auto-removed if unchanged | none (worktree semantics) | left to the agent |
 
-Two philosophies: **worktree** (Conductor/ChatGPT — branch-centric, shared
-object store, but gitignored state like `node_modules`/`.env` doesn't exist
-in the new checkout) and **clone** (Polyscope — task-centric, and on APFS
-the clone is instant, costs ~0 bytes until files diverge, and *carries the
-entire working state including env files and installed deps*).
+Two philosophies recur: **worktree** (Conductor/ChatGPT — branch-centric,
+shared object store, but no gitignored state) and **clone** (Polyscope — carries
+the entire working state including dependencies). APFS cloning shares file
+contents, but it still creates and later deletes an entry for every ignored
+cache file. Real repositories with large Rust and Xcode caches made that
+metadata cost unacceptable, so FalconDeck uses worktrees and copies only its
+small environment-file allowlist.
 
-The Polyscope insight is the important one for us: **on macOS, CoW cloning
-is strictly better than a worktree for agent isolation.** No setup script
-needed for the common case, `.env`/`node_modules`/build caches all come
-along, creation is instant, and disk cost is only the diff. Worktrees are
-the fallback where CoW doesn't exist — which, notably, is most of our
-remote hosts (ext4 has no reflink; XFS/btrfs do).
-
-## Proposed model
+## Product model
 
 ### 1. The unit: an isolated thread, not a second project tree
 
@@ -68,24 +62,22 @@ Run in: ◉ Project folder   ○ Isolated copy
   "New thread in this copy" on an isolated thread — but that's a follow-up,
   not v1.
 
-### 2. The mechanism: CoW clone first, worktree fallback
+### 2. The mechanism: lean worktrees
 
-Daemon picks per filesystem, user never chooses (an "Advanced" override
-exists in project settings):
+The daemon uses `git worktree add` and copies a small allowlist of untracked
+environment files (`.env*`, `.envrc`, `*.local.*`). It deliberately does not
+carry ignored dependencies or build outputs into the isolated checkout.
 
-1. **APFS / reflink-capable** (`clonefile`/`cp --reflink`): CoW-clone the
-   working tree — instant, carries env files and dependencies, no setup
-   script needed. Then `git switch -c falcondeck/<slug>`.
-2. **Otherwise** (typical Linux server): `git worktree add` + copy a small
-   allowlist of untracked files (`.env*`, `.envrc`, `*.local.*` — visible,
-   editable list in project settings) + run the project **setup script**
-   if one is defined.
+The original APFS copy-on-write implementation avoided copying file contents,
+but still replicated every filesystem entry. Repositories with large Cargo,
+Xcode, or dependency caches could take minutes to create and could make disk
+usage difficult to understand. Worktrees keep creation proportional to tracked
+source instead of ignored build state.
 
-Setup/teardown scripts live in project settings (stored daemon-side, like
-goals): `setup` (after variant creation; `npm ci`, migrations) and
-`cleanup` (before deletion). Env var `FALCONDECK_VARIANT=<slug>` is set so
-scripts can pick ports — Conductor's `CONDUCTOR_PORT` pattern
-generalized.
+Planned setup/teardown scripts will live in project settings (stored
+daemon-side, like goals): `setup` after variant creation (`npm ci`, migrations)
+and `cleanup` before deletion. A future `FALCONDECK_VARIANT=<slug>` environment
+variable will let scripts choose ports.
 
 ### 3. Merge-back: extend the existing diff panel
 
@@ -119,21 +111,17 @@ falcondeck/fix-login-flow · 4 files · +182 −40
 - **Branch-exclusivity bookkeeping** (Conductor's "one workspace per
   branch"). Slugged branch names (`falcondeck/<thread-slug>`) sidestep it.
 
-## Implementation sketch (for sizing, not commitment)
+## Implementation status
 
-- `falcondeck-core`: `ThreadVariant { slug, path, branch, mechanism, pinned }`
-  on `ThreadSummary`; `StartThreadRequest.isolation: "shared" | "isolated"`.
-- Daemon: `variant.rs` — create (clonefile via `std::fs` + `cp -c`
-  fallback / `git worktree add`), env-file allowlist copy, setup script
-  run, delete; thread cwd override in the provider spawn paths (codex/
-  claude/ACP all take a cwd today); merge/PR/discard ops; register the new
-  RPCs (remember the RpcRegister table).
-- Desktop/remote-web: composer toggle, thread chip, diff-panel header
-  actions, project-settings section (default mode, env allowlist, setup/
-  cleanup scripts). Mobile: read-only chip first.
-- Remote hosts: nothing extra — variants are daemon-side, so quizgecko-ops-2
-  gets them the day the daemon ships them. (Server FS is ext4 → worktree
-  path; its `.env` allowlist matters most there.)
+- `falcondeck-core`: isolation choice and `ThreadVariant` metadata are shipped.
+- Daemon: worktree creation, env-file allowlist copying, provider cwd override,
+  and checkout deletion are shipped.
+- Desktop/remote-web/mobile: isolation selection and thread indicators are
+  shipped.
+- Merge, PR, setup/cleanup scripts, configurable allowlists, and pinned copies
+  remain follow-up work.
+- Remote hosts require no extra plumbing because the daemon creates their
+  worktrees locally; the `.env` allowlist matters most on those hosts.
 
-Rough order: daemon variant lifecycle → composer toggle + chip → diff-panel
-merge actions → setup scripts + allowlist UI → pinned variants.
+Remaining order: diff-panel merge actions → setup scripts + allowlist UI →
+pinned variants.

@@ -4,19 +4,11 @@
 //! under `~/.falcondeck/variants/<project>/<slug>/` on the machine that owns
 //! the workspace — so remote hosts get isolation without any extra plumbing.
 //!
-//! Two mechanisms serve it. A copy-on-write clone is preferred: on APFS (and
-//! reflink-capable Linux filesystems) it is instant, costs nothing until files
-//! diverge, and carries the *entire* working state — `.env` files, installed
-//! dependencies, build caches — so no setup script is needed. Where the
-//! filesystem cannot reflink, a `git worktree` plus a small allowlist of
-//! untracked files is the fallback: correct, but it only carries tracked
-//! content and the allowlist.
-//!
-//! Which one applies is decided by attempting the clone and falling back when
-//! it fails, never by inspecting filesystem types — `cp -c` / `--reflink=always`
-//! already answer the question authoritatively, and a filesystem probe would
-//! disagree with them at exactly the boundaries that matter (network mounts,
-//! cross-device project paths, unusual `cp` builds).
+//! Variants use `git worktree` so ignored build outputs never get replicated.
+//! Copy-on-write clones avoid copying file contents but still duplicate every
+//! filesystem entry; large Cargo, Xcode, and dependency trees made creation,
+//! deletion, and disk accounting prohibitively expensive. A small allowlist of
+//! environment files is copied into the otherwise tracked-only worktree.
 
 use std::path::{Path, PathBuf};
 
@@ -26,8 +18,7 @@ use uuid::Uuid;
 
 use crate::error::DaemonError;
 
-/// Untracked files carried into a worktree-backed variant. Copy-on-write
-/// clones carry everything and never consult this.
+/// Untracked files carried into a worktree-backed variant.
 const UNTRACKED_ALLOWLIST: &[&str] = &[".env*", ".envrc", "*.local.*"];
 
 /// Branch prefix for variant checkouts. Slugs are unique per project, so
@@ -80,55 +71,41 @@ fn project_dir_name(project_path: &str) -> String {
 /// no branch and no diff — a half-working variant is worse than none, because
 /// every downstream affordance (diff panel, merge-back) assumes a repository.
 pub async fn create(project_path: &str, slug: &str) -> Result<ThreadVariant, DaemonError> {
+    let root = variants_root()?;
+    create_in_root(project_path, slug, &root).await
+}
+
+async fn create_in_root(
+    project_path: &str,
+    slug: &str,
+    root: &Path,
+) -> Result<ThreadVariant, DaemonError> {
     if !is_git_repository(project_path).await {
         return Err(DaemonError::BadRequest(format!(
             "cannot run this thread in an isolated copy: {project_path} is not a git repository"
         )));
     }
 
-    let destination = variants_root()?
-        .join(project_dir_name(project_path))
-        .join(slug);
+    let destination = root.join(project_dir_name(project_path)).join(slug);
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).await.map_err(|error| {
             DaemonError::Rpc(format!("failed to create the variants directory: {error}"))
         })?;
     }
-    // A leftover from a crashed creation would poison both mechanisms.
+    // A leftover from a crashed creation would poison worktree creation.
     let _ = fs::remove_dir_all(&destination).await;
 
     let branch = format!("{BRANCH_PREFIX}{slug}");
     let destination_str = destination.to_string_lossy().to_string();
 
-    let kind = match clone_working_tree(project_path, &destination).await {
-        Ok(()) => ThreadVariantKind::Clone,
-        Err(clone_error) => {
-            tracing::info!(
-                project = %project_path,
-                reason = %clone_error,
-                "copy-on-write clone unavailable; falling back to a git worktree"
-            );
-            let _ = fs::remove_dir_all(&destination).await;
-            add_worktree(project_path, &destination, &branch).await?;
-            copy_untracked_allowlist(project_path, &destination).await;
-            ThreadVariantKind::Worktree
-        }
-    };
-
-    // `git worktree add -b` already created and checked out the branch; a
-    // clone is still sitting on whatever the project folder had checked out.
-    if kind == ThreadVariantKind::Clone
-        && let Err(error) = switch_to_new_branch(&destination_str, &branch).await
-    {
-        let _ = fs::remove_dir_all(&destination).await;
-        return Err(error);
-    }
+    add_worktree(project_path, &destination, &branch).await?;
+    copy_untracked_allowlist(project_path, &destination).await;
 
     Ok(ThreadVariant {
         slug: slug.to_string(),
         path: destination_str,
         branch,
-        kind,
+        kind: ThreadVariantKind::Worktree,
     })
 }
 
@@ -211,49 +188,6 @@ async fn is_git_repository(project_path: &str) -> bool {
         .is_ok()
 }
 
-/// Attempts a copy-on-write copy of the working tree, trying each platform's
-/// reflink form in turn. Every form used here *fails* rather than silently
-/// degrading to a byte-for-byte copy: falling back to a worktree is fast and
-/// correct, whereas a full recursive copy of a working tree with dependencies
-/// installed would take minutes and gigabytes without anyone asking for it.
-async fn clone_working_tree(project_path: &str, destination: &Path) -> Result<(), DaemonError> {
-    // A `.git` file (rather than directory) means the project folder is itself
-    // a worktree or submodule; copying it would produce a checkout sharing the
-    // parent's git directory, which corrupts both. Worktree mode handles it.
-    if fs::metadata(Path::new(project_path).join(".git"))
-        .await
-        .map(|metadata| !metadata.is_dir())
-        .unwrap_or(false)
-    {
-        return Err(DaemonError::Rpc(
-            "project folder is itself a worktree or submodule".to_string(),
-        ));
-    }
-
-    let destination = destination.to_string_lossy().to_string();
-    let candidates: [&[&str]; 2] = [
-        // macOS: clonefile(2).
-        &["-c", "-R", project_path, &destination],
-        // GNU coreutils: reflink, hard-failing where the filesystem lacks it.
-        &["-a", "--reflink=always", project_path, &destination],
-    ];
-
-    let mut last_error = "no copy-on-write mechanism available".to_string();
-    for args in candidates {
-        match Command::new("cp").args(args).output().await {
-            Ok(output) if output.status.success() => return Ok(()),
-            Ok(output) => {
-                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            }
-            Err(error) => last_error = error.to_string(),
-        }
-        // A failed `cp` can still have created part of the tree.
-        let _ = fs::remove_dir_all(&destination).await;
-    }
-
-    Err(DaemonError::Rpc(last_error))
-}
-
 async fn add_worktree(
     project_path: &str,
     destination: &Path,
@@ -267,13 +201,6 @@ async fn add_worktree(
     .await
     .map(|_| ())
     .map_err(|error| DaemonError::Rpc(format!("failed to create an isolated worktree: {error}")))
-}
-
-async fn switch_to_new_branch(variant_path: &str, branch: &str) -> Result<(), DaemonError> {
-    run_git(variant_path, &["switch", "-c", branch])
-        .await
-        .map(|_| ())
-        .map_err(|error| DaemonError::Rpc(format!("failed to branch the isolated copy: {error}")))
 }
 
 /// Copies untracked files matching [`UNTRACKED_ALLOWLIST`] into a worktree
@@ -433,6 +360,48 @@ mod tests {
             error.to_string().contains("not a git repository"),
             "unexpected error: {error}"
         );
+    }
+
+    #[tokio::test]
+    async fn creating_variant_uses_worktree_without_ignored_build_outputs() {
+        let project_dir = tempdir().unwrap();
+        let project = project_dir.path();
+        init_repo(project).await;
+        fs::write(project.join(".gitignore"), ".env\ntarget/\n")
+            .await
+            .unwrap();
+        run_git(project.to_str().unwrap(), &["add", ".gitignore"])
+            .await
+            .unwrap();
+        run_git(
+            project.to_str().unwrap(),
+            &["commit", "-m", "ignore build state"],
+        )
+        .await
+        .unwrap();
+        fs::write(project.join(".env"), "TOKEN=test\n")
+            .await
+            .unwrap();
+        fs::create_dir(project.join("target")).await.unwrap();
+        fs::write(project.join("target/cache.bin"), "regenerable")
+            .await
+            .unwrap();
+
+        let variants_dir = tempdir().unwrap();
+        let variant = create_in_root(project.to_str().unwrap(), "lean1234", variants_dir.path())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (
+                &variant.kind,
+                Path::new(&variant.path).join(".env").is_file(),
+                Path::new(&variant.path).join("target").exists(),
+            ),
+            (&ThreadVariantKind::Worktree, true, false),
+        );
+
+        remove(project.to_str().unwrap(), &variant).await;
     }
 
     #[tokio::test]

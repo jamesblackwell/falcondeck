@@ -1659,13 +1659,13 @@ pub enum ThreadIsolation {
     Isolated,
 }
 
-/// How an isolated checkout was materialized. Copy-on-write clones carry the
-/// whole working tree (env files, installed dependencies); worktrees carry
-/// only tracked content plus an allowlist of untracked files.
+/// How an isolated checkout was materialized. New checkouts use worktrees;
+/// clone remains in the protocol so existing clone-backed threads can be
+/// rehydrated and cleaned up safely.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadVariantKind {
-    /// Copy-on-write copy of the whole working tree.
+    /// Legacy copy-on-write copy of the whole working tree.
     Clone,
     /// `git worktree` checkout plus an allowlist of untracked files.
     Worktree,

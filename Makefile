@@ -452,4 +452,4 @@ build: desktop-prepare
 
 clean:
 	$(CARGO) clean
-	rm -rf $(DESKTOP_DIR)/dist $(REMOTE_WEB_DIR)/dist $(SITE_DIR)/dist
+	rm -rf $(DESKTOP_DIR)/dist $(REMOTE_WEB_DIR)/dist $(SITE_DIR)/dist $(MOBILE_DIR)/ios/DerivedData
