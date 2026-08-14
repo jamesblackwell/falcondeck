@@ -104,6 +104,14 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   useEffect(() => {
     sshHostsRef.current = sshHosts
   }, [sshHosts])
+  // Latest selection for write-side guards: a response for a previous host
+  // must render as nothing (keyed state) *and* must not evict the current
+  // host's entry. Synced in an effect declared before the load effect, so
+  // whenever a fetch starts for a key, the ref already holds that key.
+  const hostKeyRef = useRef(hostKey)
+  useEffect(() => {
+    hostKeyRef.current = hostKey
+  }, [hostKey])
 
   // Data for the current selection, or null while loading/stale.
   const overview =
@@ -147,14 +155,20 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
           next = normalizeHarnessesOverview(await response.json())
         }
-        setView({ hostKey: key, overview: next })
-        setError((current) => (current?.hostKey === key ? null : current))
+        // Write only if the selection still matches: a slow probe for a
+        // previous host must not evict the current host's view.
+        if (hostKeyRef.current === key) {
+          setView({ hostKey: key, overview: next })
+          setError((current) => (current?.hostKey === key ? null : current))
+        }
         return true
       } catch (cause) {
-        setError({
-          hostKey: key,
-          message: cause instanceof Error ? cause.message : String(cause),
-        })
+        if (hostKeyRef.current === key) {
+          setError({
+            hostKey: key,
+            message: cause instanceof Error ? cause.message : String(cause),
+          })
+        }
         return false
       } finally {
         if (deep) setIsRefreshing(false)

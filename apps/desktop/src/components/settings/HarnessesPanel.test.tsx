@@ -11,6 +11,8 @@ function jsonResponse(body: unknown, status = 200) {
   })
 }
 
+const LOCAL_HOST_KEY = 'local'
+
 const overview = {
   host: 'local',
   harnesses: [
@@ -110,6 +112,46 @@ describe('HarnessesPanel', () => {
 
     // Local harness rows must never linger under the remote host's name.
     await waitFor(() => expect(screen.queryByText('Codex')).toBeNull())
+  })
+
+  it('does not let a slow stale remote probe evict the local view', async () => {
+    let resolveRemote: ((response: Response) => void) | undefined
+    const fetchMock = vi
+      .fn()
+      // Initial local overview load.
+      .mockResolvedValueOnce(jsonResponse(overview))
+      // Selecting the remote host starts a deep probe we hold unresolved.
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveRemote = resolve
+          }),
+      )
+      // Switching back to This Mac loads the local view again.
+      .mockResolvedValueOnce(jsonResponse(overview))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={hosts} onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+
+    fireEvent.change(await screen.findByLabelText('Host'), {
+      target: { value: 'host-1' },
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+
+    fireEvent.change(screen.getByLabelText('Host'), {
+      target: { value: LOCAL_HOST_KEY },
+    })
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+
+    // The remote probe resolves after the switch back; it must neither
+    // evict the local view nor trigger another fetch.
+    resolveRemote?.(jsonResponse({ host: 'build@example.com', harnesses: [] }))
+    await new Promise((tick) => setTimeout(tick, 50))
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(screen.getByText('Codex')).toBeInTheDocument()
   })
 
   it('runs the local update check through the refresh endpoint', async () => {
