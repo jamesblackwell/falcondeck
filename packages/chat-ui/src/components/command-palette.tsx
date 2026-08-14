@@ -19,9 +19,13 @@ import {
   compareThreads,
   deriveThreadAttentionPresentation,
   projectLabel as getProjectLabel,
+  wasTurnInterruptedByShutdown,
   type ProjectGroup,
+  type ThreadAttentionPresentation,
+  type ThreadSummary,
 } from '@falcondeck/client-core'
 import {
+  ActivityDiamond,
   Kbd,
   PALETTE_OPTIONS,
   PaletteSwatch,
@@ -43,9 +47,64 @@ type PaletteItem = {
   search: PaletteSearchFields
   active?: boolean
   unread?: boolean
+  /** Live thread state ("Running", "Idle", …) shown right of the title. */
+  status?: PaletteThreadStatus
   /** Rendered shortcut tokens ("⌘", "U") shown right-aligned on the row. */
   shortcut?: readonly string[]
   run: () => void
+}
+
+type PaletteThreadStatus = {
+  label: string
+  tone: 'accent' | 'warning' | 'danger' | 'info' | 'muted'
+}
+
+const STATUS_TONE_CLASS: Record<PaletteThreadStatus['tone'], string> = {
+  accent: 'text-accent',
+  warning: 'text-warning',
+  danger: 'text-danger',
+  info: 'text-info',
+  muted: 'text-fg-faint',
+}
+
+/**
+ * Same state vocabulary the sidebar row shows, condensed to one word so the
+ * palette says whether a thread is mid-turn, waiting on you, or settled.
+ */
+function threadPaletteStatus(
+  thread: ThreadSummary,
+  attention: ThreadAttentionPresentation,
+): PaletteThreadStatus {
+  if (wasTurnInterruptedByShutdown(thread)) return { label: 'Stopped', tone: 'danger' }
+  switch (attention.level) {
+    case 'error':
+      return { label: 'Failed', tone: 'danger' }
+    case 'awaiting_response':
+      return { label: attention.badgeLabel ?? 'Awaiting response', tone: 'warning' }
+    case 'running':
+      return { label: 'Running', tone: 'accent' }
+    case 'unread':
+      return { label: 'Unread', tone: 'info' }
+    default:
+      return { label: 'Idle', tone: 'muted' }
+  }
+}
+
+function threadPaletteIcon(status: PaletteThreadStatus): React.ReactNode {
+  switch (status.tone) {
+    case 'accent':
+      return <ActivityDiamond />
+    case 'danger':
+      return <span className="h-2.5 w-2.5 rounded-full bg-danger" />
+    case 'warning':
+      return (
+        <span className="h-2.5 w-2.5 rounded-full bg-warning shadow-[0_0_0_3px_var(--fd-warning-muted)]" />
+      )
+    case 'info':
+      return <span className="h-2.5 w-2.5 rounded-full bg-info" />
+    default:
+      return <MessageSquare className="h-3.5 w-3.5" />
+  }
 }
 
 /**
@@ -263,16 +322,20 @@ export const CommandPalette = memo(function CommandPalette({
         const projectLabel = getProjectLabel(group.workspace.path)
         return group.threads
           .filter((thread) => !thread.is_archived)
-          .map((thread) => ({
-            group,
-            thread,
-            projectLabel,
-            unread: deriveThreadAttentionPresentation(thread).unread,
-          }))
+          .map((thread) => {
+            const attention = deriveThreadAttentionPresentation(thread)
+            return {
+              group,
+              thread,
+              projectLabel,
+              unread: attention.unread,
+              status: threadPaletteStatus(thread, attention),
+            }
+          })
       })
       .sort((a, b) => PRIORITY_THREAD_COMPARATOR(a.thread, b.thread))
 
-    for (const { group, thread, projectLabel: label, unread } of threads) {
+    for (const { group, thread, projectLabel: label, unread, status } of threads) {
       if (!unread) continue
 
       result.push({
@@ -281,18 +344,19 @@ export const CommandPalette = memo(function CommandPalette({
         section: 'Unread threads',
         label: thread.title,
         sublabel: label,
-        icon: <span className="h-2.5 w-2.5 rounded-full bg-info" />,
+        icon: threadPaletteIcon(status),
+        status,
         search: normalizeSearchFields({
           primary: thread.title,
           secondary: `${label} ${group.workspace.path}`,
-          keywords: `unread chat conversation thread ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
+          keywords: `unread chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
         }),
         unread: true,
         run: () => onSelectThread(group.workspace.id, thread.id),
       })
     }
 
-    for (const { group, thread, projectLabel: label, unread } of threads) {
+    for (const { group, thread, projectLabel: label, unread, status } of threads) {
       if (unread) continue
 
       result.push({
@@ -301,11 +365,12 @@ export const CommandPalette = memo(function CommandPalette({
         section: 'Threads',
         label: thread.title,
         sublabel: label,
-        icon: <MessageSquare className="h-3.5 w-3.5" />,
+        icon: threadPaletteIcon(status),
+        status,
         search: normalizeSearchFields({
           primary: thread.title,
           secondary: `${label} ${group.workspace.path}`,
-          keywords: `chat conversation thread ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
+          keywords: `chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
         }),
         run: () => onSelectThread(group.workspace.id, thread.id),
       })
@@ -573,6 +638,16 @@ export const CommandPalette = memo(function CommandPalette({
                   <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-primary">
                     {item.label}
                   </span>
+                  {item.status ? (
+                    <span
+                      className={cn(
+                        'shrink-0 text-[length:var(--fd-text-xs)]',
+                        STATUS_TONE_CLASS[item.status.tone],
+                      )}
+                    >
+                      {item.status.label}
+                    </span>
+                  ) : null}
                   {item.sublabel ? (
                     <span className="flex shrink-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
                       {!item.unread ? (

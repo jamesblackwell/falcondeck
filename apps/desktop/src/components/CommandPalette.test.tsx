@@ -234,6 +234,46 @@ describe("CommandPalette controlled requests", () => {
     ]);
   });
 
+  it("labels each thread with its live status", () => {
+    const groups: ProjectGroup[] = [
+      {
+        workspace: workspace(),
+        threads: [
+          thread({ id: "running", title: "Working thread", status: "running" }),
+          thread({
+            id: "blocked",
+            title: "Blocked thread",
+            attention: {
+              level: "awaiting_response",
+              badge_label: "Awaiting response",
+              unread: false,
+              pending_approval_count: 1,
+              pending_question_count: 0,
+              last_agent_activity_seq: 1,
+              last_read_seq: 1,
+            },
+          }),
+          thread({ id: "failed", title: "Failed thread", status: "error" }),
+          thread({ id: "quiet", title: "Quiet thread" }),
+        ],
+      },
+    ];
+
+    render(
+      <CommandPalette
+        groups={groups}
+        onSelectThread={vi.fn()}
+        openRequestKey={1}
+        requestMode="open"
+      />,
+    );
+
+    expect(screen.getByRole("option", { name: /Working thread\s*Running/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Blocked thread\s*Awaiting response/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Failed thread\s*Failed/ })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: /Quiet thread\s*Idle/ })).toBeInTheDocument();
+  });
+
   it("gives title and word-prefix matches priority while tolerating fuzzy input", () => {
     const titleMatch = paletteSearchScore("falcon deck", {
       primary: "FalconDeck release",
