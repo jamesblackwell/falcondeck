@@ -352,8 +352,15 @@ impl AdapterProcess {
                 match lines.next_line().await {
                     Ok(Some(line)) if line.trim().is_empty() => continue,
                     Ok(Some(line)) => {
-                        let parsed = serde_json::from_str(&line)
-                            .map_err(|error| ProbeError::InvalidJson(error.to_string()));
+                        let candidate =
+                            crate::acp::AcpRuntime::strip_terminal_control_prefix(line.trim());
+                        if candidate.is_empty() {
+                            continue;
+                        }
+                        let parsed = serde_json::from_str(candidate).map_err(|error| {
+                            let sample = candidate.chars().take(500).collect::<String>();
+                            ProbeError::InvalidJson(format!("{error}; stdout line: {sample:?}"))
+                        });
                         if sender.send(parsed).is_err() {
                             break;
                         }

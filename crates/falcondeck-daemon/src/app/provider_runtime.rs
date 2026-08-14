@@ -182,6 +182,18 @@ impl ProviderRuntime {
                             {
                                 Ok(session_id) => {
                                     let compatible = async {
+                                        // Schema check first: it is the only
+                                        // probe that catches request-shape
+                                        // drift (for example an OpenCode
+                                        // without `resume`) before a thread
+                                        // is pinned to this transport.
+                                        runtime.validate_contract().await?;
+                                        // A schema-compatible v2 server can
+                                        // still admit prompts without ever
+                                        // starting its runner. Prove the
+                                        // execution boundary with a cached,
+                                        // cost-free invalid-model turn.
+                                        runtime.validate_execution().await?;
                                         runtime.session_is_active(&session_id).await?;
                                         runtime.messages(&session_id).await?;
                                         runtime.pending_permissions(&session_id).await?;

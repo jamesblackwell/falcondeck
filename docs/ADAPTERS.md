@@ -238,8 +238,13 @@ An OpenCode entry can declare a transport:
 
 `auto` tries the native server for each new thread and falls back to ACP if
 startup, session creation, or the read/permission/question compatibility probe
-fails. `native` requires that probe to succeed. `acp` always uses the generic
-adapter. A thread is pinned to the transport that created it: FalconDeck never
+fails. The probe also runs one disposable invalid-model prompt: reaching a
+durable runner failure proves that prompt admission actually starts execution
+without spending provider tokens. This catches OpenCode builds that return a
+successful v2 admission and `session.next.prompted` event but never enter the
+agent loop. `native` requires both the schema and execution probes to succeed;
+`acp` always uses the generic adapter. A thread is pinned to the transport that
+created it: FalconDeck never
 switches an active turn, and never blindly resends an input after an ambiguous
 native admission.
 
@@ -250,13 +255,53 @@ Agents settings panel's **Use ACP** action if that tradeoff or a particular
 OpenCode release proves unreliable; the change applies to new threads and does
 not mutate existing sessions.
 
+For a repeatable live check through the same daemon HTTP path as the desktop
+app, run `make qa-opencode`. The smoke test uses an isolated FalconDeck state
+directory, inherits the user's normal OpenCode authentication, connects the
+current repository as a workspace, creates an OpenCode thread, sends one turn,
+and prints the selected transport, native session id, terminal status, error,
+and assistant output as JSON. Override the defaults with, for example,
+`make qa-opencode OPENCODE_TRANSPORT=native OPENCODE_MODEL=openrouter/google/gemini-3.7-flash`.
+The command makes one small real model request when execution reaches a working
+provider, so it is intentionally not part of the ordinary automated test suite.
+
+ACP stdout is JSONL, but OpenCode 1.18 can prepend Warp `OSC 777` terminal
+notifications to a JSON-RPC object on the same physical line. FalconDeck strips
+only complete leading OSC records before decoding the attached JSON. Arbitrary
+non-JSON output and control bytes inside a JSON payload are not rewritten. The
+shared ACP conformance probe uses the same decoder, so `cargo run -p
+falcondeck-daemon --example acp_conformance -- --live -- opencode acp` checks
+this exact wire behavior outside the desktop app.
+
 OpenCode 1.18 advertises `session.wait` but can return a 503 response saying the
 service is not available yet. FalconDeck therefore detects turn completion from
 the implemented active-session endpoint and the admitted message's terminal
 state. The native compatibility probe includes that endpoint, so `auto` falls
 back to ACP before admitting a turn when an OpenCode release lacks it. Native
-prompt admission explicitly sets `resume: true`; without it, current OpenCode
-stores the user message but does not wake the agent loop.
+prompt admission explicitly sets `resume: true`; without it, OpenCode only
+admits the input. Some 1.18 builds still project `session.next.prompted` without
+waking the agent loop even with `resume: true`, which is why schema validation
+alone is insufficient and the execution probe is required. The probe also
+validates the endpoints and prompt request fields against the server's own
+`/doc` OpenAPI document, so a build that rejects any part of the native request
+shape falls back to ACP before a thread is pinned to the native transport.
+
+Two further 1.18 quirks are handled: message pagination continues with
+`cursor.next` toward older items (`cursor.previous` points toward newer items
+and is empty at the head of a newest-first listing), and session deletion uses
+the v1 `DELETE /session/{id}` route because the v2 API has no delete. While a
+turn runs, FalconDeck also subscribes to the session's durable event stream,
+scoped with `after` to the prompt's admission sequence so prior turns' events
+cannot replay into the wait: `session.next.step.*` events prove the drain is
+executing (so a slow first model token cannot trip a timeout while the session
+is absent from the active map) and `session.next.step.failed` surfaces the
+provider's own error text. Completion itself is detected from the projected
+terminal assistant message together with the active map, with polling as the
+fallback when the stream cannot be established. A turn that fails before its
+first model call produces no assistant message and no error record anywhere in
+the session API, so after such a turn the waiter reports that case explicitly
+rather than a generic timeout; while a permission or question is pending, the
+waiter treats the session as active regardless of the active map.
 
 When a workspace attaches, the native path loads OpenCode's provider model
 catalog and its visible primary agents. The composer therefore exposes native

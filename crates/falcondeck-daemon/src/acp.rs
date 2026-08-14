@@ -2064,12 +2064,17 @@ impl AcpRuntime {
     async fn read_loop(runtime: Arc<Self>, stdout: tokio::process::ChildStdout) {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            let trimmed = line.trim();
+            let trimmed = Self::strip_terminal_control_prefix(line.trim());
             if trimmed.is_empty() {
                 continue;
             }
             let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
-                tracing::debug!(provider = %runtime.config.id, "non-JSON ACP output ignored");
+                let sample = trimmed.chars().take(500).collect::<String>();
+                tracing::debug!(
+                    provider = %runtime.config.id,
+                    stdout = %sample,
+                    "non-JSON ACP output ignored"
+                );
                 continue;
             };
             runtime.handle_message(message).await;
@@ -2091,6 +2096,34 @@ impl AcpRuntime {
         let _ = runtime.events.send(AcpEvent::Fatal {
             message: format!("{} agent process exited{detail}", runtime.config.label),
         });
+    }
+
+    /// Removes terminal-only OSC notifications that some harness integrations
+    /// prepend to their otherwise valid JSON-RPC stdout.
+    ///
+    /// OpenCode's Warp integration can emit one or more `ESC ] ... BEL`
+    /// records directly before a JSON object on the same line. ACP owns stdout
+    /// as JSONL, but dropping the whole line loses the attached response and
+    /// leaves the request pending forever. Only leading OSC records are
+    /// removed; control bytes inside JSON or arbitrary non-JSON output remain
+    /// untouched.
+    pub(crate) fn strip_terminal_control_prefix(mut line: &str) -> &str {
+        loop {
+            line = line.trim_start();
+            let Some(payload) = line.strip_prefix("\u{1b}]") else {
+                return line;
+            };
+            let bell_end = payload.find('\u{7}').map(|index| index + 1);
+            let string_end = payload
+                .find("\u{1b}\\")
+                .map(|index| index + "\u{1b}\\".len());
+            let end = match (bell_end, string_end) {
+                (Some(left), Some(right)) => left.min(right),
+                (Some(end), None) | (None, Some(end)) => end,
+                (None, None) => return line,
+            };
+            line = &payload[end..];
+        }
     }
 
     /// Retains the last few stderr lines so a dying agent's diagnostics
@@ -2460,6 +2493,30 @@ impl AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_osc_prefixes_are_removed_before_acp_json() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+        let line = format!(
+            "\u{1b}]777;notify;warp://cli-agent;session_start\u{7}\
+             \u{1b}]0;OpenCode\u{1b}\\{json}"
+        );
+        assert_eq!(AcpRuntime::strip_terminal_control_prefix(&line), json);
+    }
+
+    #[test]
+    fn malformed_or_embedded_terminal_controls_are_not_rewritten() {
+        let unterminated = "\u{1b}]777;unterminated";
+        assert_eq!(
+            AcpRuntime::strip_terminal_control_prefix(unterminated),
+            unterminated
+        );
+        let embedded = "not-json\u{1b}]777;notification\u{7}";
+        assert_eq!(
+            AcpRuntime::strip_terminal_control_prefix(embedded),
+            embedded
+        );
+    }
 
     async fn timeout_fixture_runtime() -> Arc<AcpRuntime> {
         let fixture =

@@ -208,6 +208,12 @@ struct ManagedThread {
     /// It stays in persisted state until the provider accepts it, so a daemon
     /// crash can replay the message instead of silently dropping it.
     dispatching_request: Option<QueuedTurnRequest>,
+    /// Retained idempotency key and prompt payload of the most recent native
+    /// OpenCode steer whose admission outcome is unresolved. OpenCode resolves
+    /// a reused message id to its stored admission and rejects a differing
+    /// payload with a conflict, so the key is only reusable for identical
+    /// input; it is cleared once an admission is confirmed.
+    pending_opencode_steer: Option<(String, serde_json::Value)>,
 }
 
 #[derive(Clone)]

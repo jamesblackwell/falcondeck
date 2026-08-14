@@ -1238,6 +1238,7 @@ impl ManagedThread {
             requires_resume: false,
             queued_requests: Vec::new(),
             dispatching_request: None,
+            pending_opencode_steer: None,
         }
     }
 

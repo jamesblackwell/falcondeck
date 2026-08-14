@@ -9,7 +9,7 @@ use falcondeck_core::{
     InteractiveRequest, InteractiveRequestKind, ModelSummary, ServiceLevel, ThreadStatus,
     TurnInputItem, UnifiedEvent,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -145,6 +145,8 @@ impl AppState {
         workspace_id: &str,
     ) -> Result<(), DaemonError> {
         let runtime = self.opencode_runtime_for(workspace_id).await?;
+        runtime.validate_contract().await?;
+        runtime.validate_execution().await?;
         let (catalog, agents) = tokio::try_join!(runtime.provider_catalog(), runtime.agents())?;
         let models = parse_native_models(&catalog)?;
         let collaboration_modes = parse_native_agents(&agents);
@@ -288,16 +290,21 @@ pub(super) async fn start_opencode_turn(
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     // A successful response is durable admission. No ACP retry is permitted
     // beyond this point because that could execute the same request twice.
-    runtime
+    let admission = runtime
         .prompt(&session_id, &message_id, &prompt, &files, Delivery::Queue)
         .await?;
+    // The admission's sequence number scopes the event stream to this turn;
+    // without it the stream replays prior turns' failures.
+    let after_seq = admission
+        .pointer("/data/admittedSeq")
+        .and_then(Value::as_u64);
 
     let app = app.clone();
     let workspace_id = workspace_id.to_string();
     let thread_id = thread_id.to_string();
     tokio::spawn(async move {
         let outcome = async {
-            let wait = runtime.wait_until_idle(&session_id, &message_id);
+            let wait = runtime.wait_until_idle(&session_id, &message_id, after_seq);
             tokio::pin!(wait);
             let mut permissions = tokio::time::interval(std::time::Duration::from_millis(400));
             let current_messages = loop {
@@ -463,12 +470,15 @@ fn parse_native_agents(agents: &[Value]) -> Vec<CollaborationModeSummary> {
         .filter_map(|agent| {
             let id = agent.get("id").and_then(Value::as_str)?;
             let label = humanize_id(id);
+            // `ModelRef` uses `id`; `modelID` is tolerated for older 1.18.x
+            // patch releases that spelled it differently.
             let model_id = agent.get("model").and_then(|model| {
-                Some(format!(
-                    "{}/{}",
-                    model.get("providerID")?.as_str()?,
-                    model.get("modelID")?.as_str()?
-                ))
+                let model_id = model
+                    .get("id")
+                    .or_else(|| model.get("modelID"))
+                    .and_then(Value::as_str)?;
+                let provider_id = model.get("providerID").and_then(Value::as_str)?;
+                Some(format!("{provider_id}/{model_id}"))
             });
             Some(CollaborationModeSummary {
                 id: id.to_string(),
@@ -753,6 +763,17 @@ async fn surface_questions(
     Ok(())
 }
 
+/// Takes the steer idempotency key to send: a retained unresolved key is
+/// reusable only for an identical prompt, because OpenCode resolves a reused
+/// message id to its stored admission and rejects a differing payload with a
+/// conflict. Any other input mints a fresh id.
+fn take_steer_message_id(retained: &mut Option<(String, Value)>, prompt: &Value) -> String {
+    match retained.take() {
+        Some((id, retained_prompt)) if retained_prompt == *prompt => id,
+        _ => format!("msg_{}", Uuid::new_v4().simple()),
+    }
+}
+
 pub(super) async fn steer_opencode_turn(
     app: &AppState,
     workspace_id: &str,
@@ -760,22 +781,53 @@ pub(super) async fn steer_opencode_turn(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
 ) -> Result<(), DaemonError> {
-    let thread = app.thread_summary(workspace_id, thread_id).await?;
-    let session_id = thread.native_session_id.ok_or_else(|| {
-        DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
-    })?;
-    let (prompt, files) = opencode_prompt_from_inputs(inputs, selected_skills);
-    app.opencode_runtime_for(workspace_id)
+    let session_id = app
+        .thread_summary(workspace_id, thread_id)
         .await?
+        .native_session_id
+        .ok_or_else(|| {
+            DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
+        })?;
+    let (text, files) = opencode_prompt_from_inputs(inputs, selected_skills);
+    let prompt = json!({ "text": text, "files": files });
+    // Acquire the runtime before taking the retained key: a spawn or lookup
+    // failure must not consume an unresolved idempotency key.
+    let runtime = app.opencode_runtime_for(workspace_id).await?;
+    // Reuse the retained key while the previous steer's admission outcome is
+    // unknown and the input is identical: OpenCode then re-admits the same
+    // input instead of adding a second one. A confirmed admission clears the
+    // key for the next steer.
+    let message_id = {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        let thread = workspaces
+            .get_mut(workspace_id)
+            .and_then(|workspace| workspace.threads.get_mut(thread_id))
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        take_steer_message_id(&mut thread.pending_opencode_steer, &prompt)
+    };
+    let result = runtime
         .prompt(
             &session_id,
-            &format!("msg_{}", Uuid::new_v4().simple()),
-            &prompt,
-            &files,
+            &message_id,
+            prompt.get("text").and_then(Value::as_str).unwrap_or(""),
+            prompt
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|files| files.as_slice())
+                .unwrap_or(&[]),
             Delivery::Steer,
         )
-        .await?;
-    Ok(())
+        .await;
+    if result.is_err() {
+        let mut workspaces = app.inner.workspaces.lock().await;
+        if let Some(thread) = workspaces
+            .get_mut(workspace_id)
+            .and_then(|workspace| workspace.threads.get_mut(thread_id))
+        {
+            thread.pending_opencode_steer = Some((message_id, prompt));
+        }
+    }
+    result.map(|_| ())
 }
 
 fn opencode_prompt_from_inputs(
@@ -822,6 +874,39 @@ fn opencode_prompt_from_inputs(
         })
         .collect();
     (text, files)
+}
+
+/// Extracts human-readable output from an OpenCode tool state. Completed
+/// states carry `content[]` parts (and an opaque `result`); error states
+/// carry an `error` object — none expose a plain `output` string.
+fn tool_state_output(state: &Value) -> Option<String> {
+    if let Some(error) = state.get("error").filter(|error| !error.is_null()) {
+        return Some(
+            error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| error.to_string()),
+        );
+    }
+    let text = state
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("text"))
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .filter(|text| !text.is_empty());
+    text.or_else(|| {
+        state
+            .get("result")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
 }
 
 async fn project_messages(
@@ -925,11 +1010,7 @@ async fn project_messages(
                         "pending" | "running" => "in_progress",
                         _ => "completed",
                     };
-                    let output = state
-                        .get("output")
-                        .or_else(|| state.get("error"))
-                        .and_then(Value::as_str)
-                        .map(str::to_owned);
+                    let output = tool_state_output(state);
                     let display =
                         tool_display_metadata(name, "other", status, None, output.as_deref());
                     app.push_conversation_item(
@@ -1070,5 +1151,97 @@ mod tests {
         assert!(uses_blanket_approval(Some("always-approve")));
         assert!(!uses_blanket_approval(Some("default")));
         assert!(!uses_blanket_approval(None));
+    }
+
+    #[test]
+    fn tool_states_project_output_from_content_parts_and_error_objects() {
+        // Completed tool states expose text through `content[]`, not a
+        // plain `output` string.
+        assert_eq!(
+            tool_state_output(&serde_json::json!({
+                "status": "completed",
+                "content": [
+                    { "type": "text", "text": "first" },
+                    { "type": "file", "uri": "file:///tmp/x", "mime": "text/plain" },
+                    { "type": "text", "text": "second" }
+                ]
+            }))
+            .as_deref(),
+            Some("first\nsecond")
+        );
+        // `result` is a fallback when no text parts are present.
+        assert_eq!(
+            tool_state_output(&serde_json::json!({
+                "status": "completed",
+                "content": [],
+                "result": "plain result"
+            }))
+            .as_deref(),
+            Some("plain result")
+        );
+        // Error states carry an `error` object with a message.
+        assert_eq!(
+            tool_state_output(&serde_json::json!({
+                "status": "error",
+                "error": { "type": "unknown", "message": "command not found" }
+            }))
+            .as_deref(),
+            Some("command not found")
+        );
+        assert_eq!(
+            tool_state_output(&serde_json::json!({ "status": "pending" })),
+            None
+        );
+    }
+
+    #[test]
+    fn native_agents_read_the_model_ref_id_field() {
+        let modes = parse_native_agents(&[serde_json::json!({
+            "id": "build",
+            "mode": "primary",
+            "hidden": false,
+            "model": { "providerID": "anthropic", "id": "claude-sonnet-4" }
+        })]);
+        assert_eq!(
+            modes[0].model_id.as_deref(),
+            Some("anthropic/claude-sonnet-4")
+        );
+
+        // Older patch releases spelled the model field `modelID`.
+        let legacy = parse_native_agents(&[serde_json::json!({
+            "id": "build",
+            "mode": "primary",
+            "hidden": false,
+            "model": { "providerID": "anthropic", "modelID": "claude-sonnet-4" }
+        })]);
+        assert_eq!(
+            legacy[0].model_id.as_deref(),
+            Some("anthropic/claude-sonnet-4")
+        );
+    }
+
+    #[test]
+    fn steer_reuses_a_retained_key_only_for_identical_input() {
+        let prompt = json!({ "text": "same steer", "files": [] });
+        let mut retained = Some(("msg_retry_me".to_string(), prompt.clone()));
+        // Identical retry reuses the id.
+        assert_eq!(
+            take_steer_message_id(&mut retained, &prompt),
+            "msg_retry_me"
+        );
+        assert!(retained.is_none());
+
+        // A different steer must not reuse the id: OpenCode resolves a reused
+        // id to its stored admission and conflicts on a differing payload.
+        let mut retained = Some(("msg_retry_me".to_string(), prompt.clone()));
+        let other = json!({ "text": "different steer", "files": [] });
+        let fresh = take_steer_message_id(&mut retained, &other);
+        assert!(fresh.starts_with("msg_"));
+        assert_ne!(fresh, "msg_retry_me");
+
+        // No retained key mints a fresh id.
+        let mut retained = None;
+        let fresh = take_steer_message_id(&mut retained, &other);
+        assert!(fresh.starts_with("msg_"));
     }
 }

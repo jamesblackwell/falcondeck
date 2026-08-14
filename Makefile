@@ -30,6 +30,8 @@ SITE_NPM := npm --workspace apps/site
 ROOT_NPM := npm
 CARGO := cargo
 DAEMON_PORT ?= 4123
+OPENCODE_MODEL ?= default
+OPENCODE_TRANSPORT ?= auto
 RELAY_PORT ?= 8787
 UI_PORT ?= 1420
 REMOTE_WEB_PORT ?= 4174
@@ -415,6 +417,9 @@ site-dev: site-prepare
 
 daemon:
 	$(CARGO) run -p falcondeck-daemon -- --port=$(DAEMON_PORT) --codex-bin=$(CODEX_BIN)
+
+qa-opencode:
+	OPENCODE_TRANSPORT=$(OPENCODE_TRANSPORT) OPENCODE_MODEL=$(OPENCODE_MODEL) ./scripts/qa-opencode.sh
 
 relay:
 	FALCONDECK_RELAY_BIND=$(RELAY_BIND_HOST):$(RELAY_PORT) $(CARGO) run -p falcondeck-relay
