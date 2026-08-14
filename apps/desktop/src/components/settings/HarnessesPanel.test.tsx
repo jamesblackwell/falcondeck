@@ -87,10 +87,6 @@ describe('HarnessesPanel', () => {
       .mockResolvedValueOnce(
         jsonResponse({ host: 'build@example.com', harnesses: [] }),
       )
-      // "Check for updates" re-probes the selected host.
-      .mockResolvedValueOnce(
-        jsonResponse({ host: 'build@example.com', harnesses: [] }),
-      )
     vi.stubGlobal('fetch', fetchMock)
 
     render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={hosts} onToast={vi.fn()} />)
@@ -114,6 +110,27 @@ describe('HarnessesPanel', () => {
 
     // Local harness rows must never linger under the remote host's name.
     await waitFor(() => expect(screen.queryByText('Codex')).toBeNull())
+  })
+
+  it('runs the local update check through the refresh endpoint', async () => {
+    const fetchMock = vi
+      .fn()
+      // Initial shallow load.
+      .mockResolvedValueOnce(jsonResponse(overview))
+      // "Check for updates" on This Mac deep-refreshes the local machine.
+      .mockResolvedValueOnce(jsonResponse(overview))
+    vi.stubGlobal('fetch', fetchMock)
+
+    render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={[]} onToast={vi.fn()} />)
+
+    expect(await screen.findByText('Codex')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const [url, request] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(url).toBe('http://127.0.0.1:4317/api/harnesses/refresh')
+    expect(request.method).toBe('POST')
+    expect(JSON.parse(request.body as string)).toEqual({})
   })
 
   it('starts an upgrade and polls the job until it completes', async () => {

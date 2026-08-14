@@ -122,15 +122,20 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
       if (deep) setIsRefreshing(true)
       try {
         const endpoint = hostEndpoint(key, sshHostsRef.current)
-        if (deep && endpoint) {
-          // Remote hosts have no shallow path: GET /api/harnesses serves
-          // the local machine only, so any remote view is a deep probe.
+        if (deep) {
+          // Deep always re-probes: on-demand version checks and remote
+          // hosts have no shallow path (GET /api/harnesses serves the
+          // local machine only).
           const response = await fetch(`${baseUrl}/api/harnesses/refresh`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              ssh_target: endpoint.sshTarget,
-              ...(endpoint.port != null ? { port: endpoint.port } : {}),
+              ...(endpoint
+                ? {
+                    ssh_target: endpoint.sshTarget,
+                    ...(endpoint.port != null ? { port: endpoint.port } : {}),
+                  }
+                : {}),
             }),
           })
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
@@ -147,7 +152,11 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         if (requestedHostRef.current === key) setLoadError(null)
         return true
       } catch (error) {
-        setLoadError(error instanceof Error ? error.message : String(error))
+        // A stale host's failure must not clobber the current selection's
+        // successfully loaded view.
+        if (requestedHostRef.current === key) {
+          setLoadError(error instanceof Error ? error.message : String(error))
+        }
         return false
       } finally {
         if (deep) setIsRefreshing(false)
