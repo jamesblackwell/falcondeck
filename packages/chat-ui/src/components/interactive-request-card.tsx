@@ -142,7 +142,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   }
 
   return (
-    <div className="rounded-[var(--fd-radius-lg)] border border-warning/20 bg-warning-muted px-4 py-3">
+    <div className="rounded-[var(--fd-radius-md)] border border-warning/20 bg-warning-muted px-4 py-3">
       <div className="flex items-start gap-2.5">
         {request.kind === 'approval' ? (
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />

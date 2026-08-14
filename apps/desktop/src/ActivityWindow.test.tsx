@@ -40,12 +40,15 @@ vi.mock("@tauri-apps/api/core", () => ({
   },
 }));
 
+const setAlwaysOnTop = vi.fn(() => Promise.resolve());
+
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
     onCloseRequested: (handler: () => void) => {
       onCloseRequested(handler);
       return Promise.resolve(() => {});
     },
+    setAlwaysOnTop: (value: boolean) => setAlwaysOnTop(value),
   }),
 }));
 
@@ -219,6 +222,27 @@ describe("ActivityWindow", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Host rejected the response",
     );
+  });
+
+  it("pins the window above other apps and remembers the choice", async () => {
+    window.localStorage.removeItem("falcondeck.activity.always-on-top");
+    const first = render(<ActivityWindow />);
+    deliver(ACTIVITY_WINDOW_EVENTS.state, state());
+
+    await waitFor(() => expect(setAlwaysOnTop).toHaveBeenCalledWith(false));
+    fireEvent.click(await screen.findByRole("button", { name: /Stay on top/ }));
+
+    await waitFor(() => expect(setAlwaysOnTop).toHaveBeenCalledWith(true));
+    expect(screen.getByRole("button", { name: /On top/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    // Re-opening the window should come back pinned.
+    first.unmount();
+    setAlwaysOnTop.mockClear();
+    render(<ActivityWindow />);
+    await waitFor(() => expect(setAlwaysOnTop).toHaveBeenCalledWith(true));
   });
 
   it("tells the main window to stop pushing when it closes", async () => {

@@ -2,13 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Pin, PinOff } from "lucide-react";
 
 import { ActivityView } from "@falcondeck/chat-ui/activity-view";
 import type {
   InteractiveRequest,
   InteractiveResponsePayload,
 } from "@falcondeck/client-core";
-import { EmptyState } from "@falcondeck/ui";
+import { Button, EmptyState, cn } from "@falcondeck/ui";
 
 import {
   ACTIVITY_WINDOW_EVENTS,
@@ -27,9 +28,66 @@ import {
 /** Long enough to cover a busy main window, short enough to not hang a card. */
 const RESPOND_TIMEOUT_MS = 20_000;
 
+/** Survives closing and re-opening the window — it is a workspace habit. */
+const ALWAYS_ON_TOP_KEY = "falcondeck.activity.always-on-top";
+
+function readAlwaysOnTop() {
+  try {
+    return window.localStorage.getItem(ALWAYS_ON_TOP_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Pin the queue above other apps — the reason to have it on a second screen. */
+function AlwaysOnTopToggle({
+  pinned,
+  onToggle,
+}: {
+  pinned: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="ghost"
+      aria-pressed={pinned}
+      title={
+        pinned
+          ? "Activity stays above other windows"
+          : "Keep Activity above other windows"
+      }
+      className={cn("gap-2", pinned ? "text-accent" : "text-fg-muted")}
+      onClick={onToggle}
+    >
+      {pinned ? (
+        <Pin aria-hidden="true" className="h-4 w-4" />
+      ) : (
+        <PinOff aria-hidden="true" className="h-4 w-4" />
+      )}
+      {pinned ? "On top" : "Stay on top"}
+    </Button>
+  );
+}
+
 export function ActivityWindow() {
   const [state, setState] = useState<ActivityWindowState | null>(null);
+  const [pinned, setPinned] = useState(readAlwaysOnTop);
   const callSeqRef = useRef(0);
+
+  // Applied from the window, not the button: the choice has to survive a
+  // reload, and it holds while the queue is still waiting for its first push.
+  useEffect(() => {
+    void getCurrentWindow()
+      .setAlwaysOnTop(pinned)
+      .catch(() => {});
+    try {
+      window.localStorage.setItem(ALWAYS_ON_TOP_KEY, String(pinned));
+    } catch {
+      // A locked-down store is no reason to lose the toggle this session.
+    }
+  }, [pinned]);
 
   useEffect(() => {
     const unlisten = listen<ActivityWindowState>(
@@ -132,6 +190,12 @@ export function ActivityWindow() {
       onMarkThreadRead={handleMarkThreadRead}
       onNewThread={state.canStartThread ? handleNewThread : undefined}
       trafficLightInset
+      headerActions={
+        <AlwaysOnTopToggle
+          pinned={pinned}
+          onToggle={() => setPinned((current) => !current)}
+        />
+      }
     />
   );
 }
