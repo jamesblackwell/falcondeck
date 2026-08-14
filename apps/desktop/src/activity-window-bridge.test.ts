@@ -121,7 +121,9 @@ describe("projectActivityWindowState", () => {
 
     expect(state.groups).toHaveLength(1);
     expect(state.groups[0]!.workspace.id).toBe("ws-a");
-    expect(state.groups[0]!.threads.map((entry) => entry.id)).toEqual(["ready"]);
+    expect(state.groups[0]!.threads.map((entry) => entry.id)).toEqual([
+      "ready",
+    ]);
     // ws-b dropped out entirely, so shipping its host badge would be dead weight.
     expect(state.workspaceHosts).toEqual({ "ws-a": hosts["ws-a"] });
     expect(state.canStartThread).toBe(true);
@@ -163,6 +165,8 @@ describe("projectActivityWindowState", () => {
       interactiveRequests: [],
       workspaceHosts: {},
       canStartThread: true,
+      composerWorkspaces: [quiet[0]!.workspace],
+      selectedWorkspaceId: null,
     });
   });
 });

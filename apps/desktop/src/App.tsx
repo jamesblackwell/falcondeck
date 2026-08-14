@@ -116,6 +116,7 @@ import {
   activityStateChanged,
   projectActivityWindowState,
   type ActivityRespondMessage,
+  type ActivityStartTaskMessage,
   type ActivityThreadRef,
   type ActivityWindowState,
 } from "./activity-window-bridge";
@@ -3948,6 +3949,7 @@ function AppInner() {
         workspaceHostBadges,
         Boolean(selectedWorkspaceId),
         activityClockMs,
+        selectedWorkspaceId,
       ),
     [
       activityClockMs,
@@ -3956,6 +3958,124 @@ function AppInner() {
       viewSnapshot?.interactive_requests,
       workspaceHostBadges,
     ],
+  );
+
+  const handleActivityStartTask = useCallback(
+    async ({
+      workspaceId,
+      prompt,
+    }: Omit<ActivityStartTaskMessage, "callId">) => {
+      const workspace = groups.find(
+        (group) => group.workspace.id === workspaceId,
+      )?.workspace;
+      const client = apiFor(workspaceId);
+      if (!workspace || !client)
+        throw new Error("That project is unavailable.");
+      const blockReason = workspaceSendBlockReason(
+        workspace,
+        providerForThread(null, workspace),
+      );
+      if (blockReason) throw new Error(blockReason);
+
+      const stickyProvider = composerProviderFor(
+        persistedComposerSelections,
+        workspace.path,
+      );
+      const provider =
+        stickyProvider &&
+        workspaceProviderOptions(workspace).some(
+          (option) => option.provider === stickyProvider,
+        )
+          ? stickyProvider
+          : providerForThread(null, workspace);
+      const preferred = composerSelectionFor(
+        persistedComposerSelections,
+        workspace.path,
+        provider,
+      );
+      const modelId = resolveThreadModelId(
+        null,
+        workspace,
+        preferred?.modelId,
+        provider,
+      );
+      const capabilities = workspaceAgentCapabilities(workspace, provider);
+      const permissionMode = resolvePermissionMode(
+        preferred?.permissionMode,
+        capabilities.permission_modes,
+      );
+      const sandboxMode = resolvePersistedMode(
+        preferred?.sandboxMode,
+        capabilities.sandbox_modes,
+      );
+      const collaborationModes = workspaceCollaborationModes(
+        workspace,
+        provider,
+      );
+      const collaborationModeId =
+        collaborationModes.find((mode) => mode.mode === "default")?.id ??
+        collaborationModes[0]?.id ??
+        null;
+      const effort =
+        resolveReasoningEffort(
+          null,
+          workspace,
+          modelId,
+          preferred?.effort,
+          provider,
+        ) ?? "medium";
+      const model =
+        workspaceModels(workspace, provider).find(
+          (entry) => entry.id === modelId,
+        ) ?? null;
+      const serviceTier = resolveServiceTier(
+        preferred?.serviceTier ?? model?.default_service_tier,
+        model,
+      );
+
+      const handle = await client.startThread({
+        workspace_id: workspaceId,
+        provider,
+        model_id: modelId,
+        collaboration_mode_id: collaborationModeId,
+        approval_policy: approvalPolicyForProvider(provider, permissionMode),
+        permission_mode: permissionMode,
+        sandbox_mode: sandboxMode,
+        isolation: "project_folder",
+      });
+      setSnapshot((current) =>
+        current
+          ? {
+              ...current,
+              workspaces: current.workspaces.map((entry) =>
+                entry.id === handle.workspace.id ? handle.workspace : entry,
+              ),
+              threads: [
+                handle.thread,
+                ...current.threads.filter(
+                  (entry) => entry.id !== handle.thread.id,
+                ),
+              ],
+            }
+          : current,
+      );
+      await client.sendTurn({
+        workspace_id: workspaceId,
+        thread_id: handle.thread.id,
+        inputs: [{ type: "text", text: prompt.trim() }],
+        selected_skills: selectedSkillsFromText(prompt, workspace.skills ?? []),
+        provider,
+        model_id: modelId,
+        reasoning_effort: effort,
+        approval_policy: approvalPolicyForProvider(provider, permissionMode),
+        service_tier: serviceTierForTurn(serviceTier, model),
+        permission_mode: permissionMode,
+        sandbox_mode: sandboxMode,
+        steer: false,
+        user_item_id: generateUserItemId(),
+      });
+    },
+    [apiFor, groups, persistedComposerSelections, setSnapshot],
   );
 
   useEffect(() => {
@@ -3986,13 +4106,8 @@ function AppInner() {
         ),
       );
       track(
-        listen<ActivityThreadRef>(
-          ACTIVITY_WINDOW_EVENTS.openThread,
-          (event) =>
-            handleSelectThread(
-              event.payload.workspaceId,
-              event.payload.threadId,
-            ),
+        listen<ActivityThreadRef>(ACTIVITY_WINDOW_EVENTS.openThread, (event) =>
+          handleSelectThread(event.payload.workspaceId, event.payload.threadId),
         ),
       );
       track(
@@ -4007,6 +4122,27 @@ function AppInner() {
         listen(ACTIVITY_WINDOW_EVENTS.newThread, () => {
           if (selectedWorkspaceId) handleNewThread(selectedWorkspaceId);
         }),
+      );
+      track(
+        listen<ActivityStartTaskMessage>(
+          ACTIVITY_WINDOW_EVENTS.startTask,
+          (event) => {
+            const { callId, workspaceId, prompt } = event.payload;
+            void handleActivityStartTask({ workspaceId, prompt })
+              .then(() =>
+                emit(ACTIVITY_WINDOW_EVENTS.startTaskResult, { callId }),
+              )
+              .catch((error: unknown) =>
+                emit(ACTIVITY_WINDOW_EVENTS.startTaskResult, {
+                  callId,
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : "Failed to start task",
+                }),
+              );
+          },
+        ),
       );
       track(
         listen<ActivityRespondMessage>(
@@ -4037,6 +4173,7 @@ function AppInner() {
     };
   }, [
     handleInteractiveResponseCallback,
+    handleActivityStartTask,
     handleMarkThreadRead,
     handleNewThread,
     handleSelectThread,
@@ -4064,7 +4201,9 @@ function AppInner() {
 
   useEffect(() => {
     if (!activityWindowOpen || !isTauriDesktop()) return;
-    if (!activityStateChanged(lastActivityStateRef.current, activityWindowState))
+    if (
+      !activityStateChanged(lastActivityStateRef.current, activityWindowState)
+    )
       return;
     lastActivityStateRef.current = activityWindowState;
     void import("@tauri-apps/api/event").then(({ emit }) =>

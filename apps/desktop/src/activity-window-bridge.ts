@@ -30,6 +30,10 @@ export const ACTIVITY_WINDOW_EVENTS = {
   openThread: "falcondeck://activity-open-thread",
   /** Window → main: start a thread in the selected workspace. */
   newThread: "falcondeck://activity-new-thread",
+  /** Window → main: create a thread and start its first turn in place. */
+  startTask: "falcondeck://activity-start-task",
+  /** Main → window: outcome of a quick task launch. */
+  startTaskResult: "falcondeck://activity-start-task-result",
   /** Window → main: clear a thread's unread state. */
   markRead: "falcondeck://activity-mark-read",
   /** Window → main: answer an approval or question. */
@@ -43,6 +47,19 @@ export type ActivityWindowState = {
   interactiveRequests: InteractiveRequest[];
   workspaceHosts: Record<string, { name: string; connected: boolean }>;
   canStartThread: boolean;
+  composerWorkspaces: ProjectGroup["workspace"][];
+  selectedWorkspaceId: string | null;
+};
+
+export type ActivityStartTaskMessage = {
+  callId: string;
+  workspaceId: string;
+  prompt: string;
+};
+
+export type ActivityStartTaskResult = {
+  callId: string;
+  error?: string;
 };
 
 export type ActivityThreadRef = { workspaceId: string; threadId: string };
@@ -73,6 +90,7 @@ export function projectActivityWindowState(
   workspaceHosts: Record<string, { name: string; connected: boolean }>,
   canStartThread: boolean,
   nowMs: number,
+  selectedWorkspaceId: string | null = null,
 ): ActivityWindowState {
   // The queue plus the trail behind it — the window derives both from the
   // threads it is given, so it has to receive the threads for both.
@@ -111,6 +129,8 @@ export function projectActivityWindowState(
     ),
     workspaceHosts: hosts,
     canStartThread,
+    composerWorkspaces: groups.map((group) => group.workspace),
+    selectedWorkspaceId,
   };
 }
 

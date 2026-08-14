@@ -1,4 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
@@ -115,6 +121,8 @@ function state(): ActivityWindowState {
     interactiveRequests: [],
     workspaceHosts: {},
     canStartThread: true,
+    composerWorkspaces: [workspace],
+    selectedWorkspaceId: "ws-1",
   };
 }
 
@@ -162,6 +170,41 @@ describe("ActivityWindow", () => {
     await waitFor(() => expect(invoked).toContain("focus_main_window"));
     // The whole point of detaching: the queue is still on screen.
     expect(screen.getByText("Migrate billing webhooks")).toBeInTheDocument();
+  });
+
+  it("opens the quick composer with Command-N and starts a task in place", async () => {
+    render(<ActivityWindow />);
+    await waitFor(() => expect(listeners.size).toBeGreaterThan(0));
+    deliver(ACTIVITY_WINDOW_EVENTS.state, state());
+
+    fireEvent.keyDown(window, { key: "n", metaKey: true });
+    const input = await screen.findByRole("textbox");
+    fireEvent.change(input, { target: { value: "Triage the flaky tests" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+
+    const sent = await waitFor(() => {
+      const entry = emitted.find(
+        (item) => item.event === ACTIVITY_WINDOW_EVENTS.startTask,
+      );
+      expect(entry).toBeDefined();
+      return entry!.payload as {
+        callId: string;
+        workspaceId: string;
+        prompt: string;
+      };
+    });
+    expect(sent).toMatchObject({
+      workspaceId: "ws-1",
+      prompt: "Triage the flaky tests",
+    });
+    expect(invoked).not.toContain("focus_main_window");
+
+    deliver(ACTIVITY_WINDOW_EVENTS.startTaskResult, { callId: sent.callId });
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Start a task without leaving Activity"),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("marks a thread read through the main window", async () => {
