@@ -466,6 +466,7 @@ pub(crate) fn codex_assistant_conversation_item(
         return None;
     }
     let (phase, memory_citation) = codex_assistant_message_metadata(item);
+    let lifecycle = settled_assistant_lifecycle(phase.as_ref(), lifecycle);
     Some(ConversationItem::AssistantMessage {
         id,
         text: item
@@ -480,6 +481,19 @@ pub(crate) fn codex_assistant_conversation_item(
         error: None,
         created_at,
     })
+}
+
+fn settled_assistant_lifecycle(
+    phase: Option<&AssistantMessagePhase>,
+    lifecycle: ContentLifecycle,
+) -> ContentLifecycle {
+    if matches!(phase, Some(AssistantMessagePhase::Commentary))
+        && lifecycle == ContentLifecycle::Interrupted
+    {
+        ContentLifecycle::Complete
+    } else {
+        lifecycle
+    }
 }
 
 pub(crate) fn codex_context_compaction_conversation_item(
@@ -1382,8 +1396,28 @@ pub(super) fn settle_content_items(
     let mut updated = Vec::new();
     for item in items {
         let lifecycle = match item {
-            ConversationItem::AssistantMessage { lifecycle, .. }
-            | ConversationItem::Reasoning { lifecycle, .. }
+            ConversationItem::AssistantMessage {
+                phase, lifecycle, ..
+            } => {
+                let settled = settled_assistant_lifecycle(phase.as_ref(), terminal);
+                if matches!(
+                    lifecycle,
+                    ContentLifecycle::Pending | ContentLifecycle::Streaming
+                ) {
+                    *lifecycle = settled;
+                    if terminal == ContentLifecycle::Error
+                        && settled == ContentLifecycle::Error
+                        && let ConversationItem::AssistantMessage {
+                            error: item_error, ..
+                        } = item
+                    {
+                        *item_error = bounded_turn_error(error);
+                    }
+                    updated.push(item.clone());
+                }
+                continue;
+            }
+            ConversationItem::Reasoning { lifecycle, .. }
             | ConversationItem::CodeReview { lifecycle, .. }
             | ConversationItem::Artifact { lifecycle, .. }
             | ConversationItem::Unsupported { lifecycle, .. }
@@ -1396,16 +1430,6 @@ pub(super) fn settle_content_items(
             ContentLifecycle::Pending | ContentLifecycle::Streaming
         ) {
             *lifecycle = terminal;
-            if let ConversationItem::AssistantMessage {
-                error: item_error, ..
-            } = item
-            {
-                *item_error = if terminal == ContentLifecycle::Error {
-                    bounded_turn_error(error)
-                } else {
-                    None
-                };
-            }
             if let ConversationItem::Reasoning {
                 duration_ms,
                 created_at,
@@ -3426,6 +3450,62 @@ mod content_settlement_tests {
                 lifecycle: ContentLifecycle::Error,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn interrupted_turn_completes_commentary_without_repeating_the_interrupt() {
+        let mut items = vec![ConversationItem::AssistantMessage {
+            id: "progress".to_string(),
+            text: "Still working".to_string(),
+            phase: Some(AssistantMessagePhase::Commentary),
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Streaming,
+            error: None,
+            created_at: Utc::now(),
+        }];
+
+        settle_content_items(&mut items, ContentLifecycle::Interrupted, Utc::now(), None);
+
+        assert!(matches!(
+            &items[0],
+            ConversationItem::AssistantMessage {
+                phase: Some(AssistantMessagePhase::Commentary),
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn failed_commentary_keeps_the_provider_error_visible() {
+        let mut items = vec![ConversationItem::AssistantMessage {
+            id: "progress".to_string(),
+            text: "Still working".to_string(),
+            phase: Some(AssistantMessagePhase::Commentary),
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Streaming,
+            error: None,
+            created_at: Utc::now(),
+        }];
+
+        settle_content_items(
+            &mut items,
+            ContentLifecycle::Error,
+            Utc::now(),
+            Some("Provider unavailable"),
+        );
+
+        assert!(matches!(
+            &items[0],
+            ConversationItem::AssistantMessage {
+                phase: Some(AssistantMessagePhase::Commentary),
+                lifecycle: ContentLifecycle::Error,
+                error: Some(error),
+                ..
+            } if error == "Provider unavailable"
         ));
     }
 

@@ -2547,6 +2547,51 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_turn_hydrates_commentary_as_complete_and_one_terminal_receipt() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-stopped",
+                    "status": "canceled",
+                    "completedAt": "2026-08-09T12:00:02Z",
+                    "items": [
+                        {
+                            "id": "user-stopped",
+                            "type": "userMessage",
+                            "createdAt": "2026-08-09T12:00:00Z",
+                            "content": [{"type": "text", "text": "Start this"}]
+                        },
+                        {
+                            "id": "commentary-stopped",
+                            "type": "agentMessage",
+                            "phase": "commentary",
+                            "createdAt": "2026-08-09T12:00:01Z",
+                            "text": "Still working"
+                        }
+                    ]
+                }]
+            }
+        }));
+
+        assert!(matches!(
+            items.as_slice(),
+            [
+                ConversationItem::UserMessage { .. },
+                ConversationItem::AssistantMessage {
+                    phase: Some(falcondeck_core::AssistantMessagePhase::Commentary),
+                    lifecycle: ContentLifecycle::Complete,
+                    ..
+                },
+                ConversationItem::AssistantMessage {
+                    phase: None,
+                    lifecycle: ContentLifecycle::Interrupted,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
     fn does_not_invent_a_receipt_for_an_empty_successful_turn() {
         let items = hydrate_thread_items(&json!({
             "thread": {
