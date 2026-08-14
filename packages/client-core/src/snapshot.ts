@@ -224,6 +224,11 @@ function upsertThread(
   );
 }
 
+const TERMINAL_THREAD_STATUSES = new Set<ThreadSummary["status"]>([
+  "idle",
+  "error",
+]);
+
 function isStaleThreadSummary(
   current: DaemonSnapshot["threads"][number] | undefined,
   next: DaemonSnapshot["threads"][number],
@@ -232,7 +237,19 @@ function isStaleThreadSummary(
   const currentAt = Date.parse(current.updated_at);
   const nextAt = Date.parse(next.updated_at);
   if (Number.isNaN(currentAt) || Number.isNaN(nextAt)) return false;
-  return nextAt < currentAt;
+  if (nextAt < currentAt) return true;
+  // Reviving a settled thread is the one transition a stale summary can make
+  // that never self-corrects, so it has to clear a stricter bar than the rest.
+  // The daemon stamps every real mutation with a fresh `updated_at`, so a
+  // genuine new turn always reads strictly newer; a background task rebroadcast
+  // of the pre-terminal summary reads equal. Only `waiting_for_input` is
+  // exempt: answering an approval flips it back to Running while deliberately
+  // preserving the thread's recency.
+  return (
+    nextAt === currentAt &&
+    next.status === "running" &&
+    TERMINAL_THREAD_STATUSES.has(current.status)
+  );
 }
 
 /**

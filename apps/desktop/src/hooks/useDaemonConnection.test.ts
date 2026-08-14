@@ -127,6 +127,68 @@ describe('useDaemonConnection thread restoration', () => {
     })
   })
 
+  it('corrects a thread left spinning after its terminal update went missing', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { result } = renderHook(() => useDaemonConnection())
+      await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+
+      const live = daemonSnapshot('ready')
+      live.threads[0] = { ...live.threads[0], status: 'running' }
+      act(() => result.current.setSnapshot(live))
+
+      const settled = daemonSnapshot('ready')
+      settled.threads[0] = { ...settled.threads[0], status: 'idle', last_error: null }
+      mocks.snapshot.mockClear().mockResolvedValue(settled)
+
+      // The first tick only starts the thread's quiet clock; the correction
+      // waits until it has been silent for the full recheck window.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(15_000)
+      })
+      expect(mocks.snapshot).not.toHaveBeenCalled()
+      expect(result.current.snapshot?.threads[0]?.status).toBe('running')
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000)
+      })
+      expect(mocks.snapshot).toHaveBeenCalled()
+      expect(result.current.snapshot?.threads[0]?.status).toBe('idle')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('leaves a thread alone while its events keep arriving', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const { result } = renderHook(() => useDaemonConnection())
+      await waitFor(() => expect(result.current.connectionState).toBe('ready'))
+
+      const live = daemonSnapshot('ready')
+      live.threads[0] = { ...live.threads[0], status: 'running' }
+      act(() => result.current.setSnapshot(live))
+      mocks.snapshot.mockClear()
+
+      for (let tick = 0; tick < 8; tick += 1) {
+        await act(async () => {
+          mocks.eventHandler?.({
+            seq: 100 + tick,
+            emitted_at: '2026-08-08T12:00:01Z',
+            workspace_id: 'workspace-1',
+            thread_id: 'thread-1',
+            event: { type: 'turn-start', turn_id: `turn-${tick}` },
+          } as unknown as EventEnvelope)
+          await vi.advanceTimersByTimeAsync(15_000)
+        })
+      }
+      expect(mocks.snapshot).not.toHaveBeenCalled()
+      expect(result.current.snapshot?.threads[0]?.status).toBe('running')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('discards a dead socket frame before adopting the reconnect snapshot', async () => {
     const { result } = renderHook(() => useDaemonConnection())
     await waitFor(() => expect(result.current.connectionState).toBe('ready'))

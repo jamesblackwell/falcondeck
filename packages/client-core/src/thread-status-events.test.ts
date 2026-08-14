@@ -98,6 +98,28 @@ describe("thread status events", () => {
     expect(snapshot.threads[0]?.title).toBe("Renamed");
   });
 
+  it("keeps a settled thread settled when a stale running update ties on time", () => {
+    let snapshot = snapshotWith(running);
+    snapshot = apply(snapshot, settled);
+    // Attention-only rebroadcasts (mark-read, streamed-item updates) preserve
+    // the thread's recency, so a stale one carries the same timestamp as the
+    // terminal update rather than an older one.
+    snapshot = apply(snapshot, thread({ ...running, updated_at: settled.updated_at }));
+
+    expect(snapshot.threads[0]?.status).toBe("idle");
+  });
+
+  it("lets an answered approval resume a waiting thread without a new timestamp", () => {
+    const waiting = thread({
+      status: "waiting_for_input",
+      updated_at: "2026-08-13T18:28:15Z",
+    });
+    let snapshot = snapshotWith(waiting);
+    snapshot = apply(snapshot, thread({ ...waiting, status: "running" }));
+
+    expect(snapshot.threads[0]?.status).toBe("running");
+  });
+
   it("applies a newer running update to an idle thread", () => {
     let snapshot = snapshotWith(settled);
     snapshot = apply(

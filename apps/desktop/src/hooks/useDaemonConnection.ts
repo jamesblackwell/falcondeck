@@ -28,6 +28,12 @@ const DAEMON_RECONNECT_MAX_DELAY_MS = 10_000
 const DAEMON_BACKOFF_RESET_MS = 10_000
 const THREAD_PREFETCH_LIMIT = 3
 const THREAD_PREFETCH_FALLBACK_DELAY_MS = 250
+// A thread the client believes is live but that has gone this long without a
+// single event is a candidate for a stuck spinner: re-check it against the
+// daemon. Long tool calls do go quiet for minutes, so this must be generous
+// enough that the check is rare and cheap rather than a status poll.
+const THREAD_STATUS_RECHECK_AFTER_MS = 45_000
+const THREAD_STATUS_RECHECK_INTERVAL_MS = 15_000
 
 type IdleWindow = Window & {
   requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
@@ -89,6 +95,11 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
   const threadDetailCacheRef = useRef(new Map<string, ThreadDetail>())
   const threadDetailPrefetchRef = useRef(new Set<string>())
   const pendingEventsRef = useRef<EventEnvelope[]>([])
+  // When each thread last produced any event, used to spot threads that are
+  // still painted as live long after the daemon stopped talking about them.
+  const threadEventSeenAtRef = useRef(new Map<string, number>())
+  const reconcilingStatusRef = useRef(false)
+  const snapshotRef = useRef<DaemonSnapshot | null>(null)
   const eventFrameRef = useRef<number | null>(null)
   const eventTimerRef = useRef<number | null>(null)
   const reconnectAttemptRef = useRef(0)
@@ -178,6 +189,9 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
 
   const handleEvent = useCallback((event: EventEnvelope) => {
     realtimeAudioPlayer.handleEvent(event)
+    if (event.thread_id) {
+      threadEventSeenAtRef.current.set(event.thread_id, Date.now())
+    }
     pendingEventsRef.current.push(event)
     if (eventFrameRef.current !== null || eventTimerRef.current !== null) return
     // requestAnimationFrame can be suspended for a hidden webview. Continue
@@ -596,6 +610,7 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     if (!snapshot) {
       threadDetailCacheRef.current.clear()
       threadDetailPrefetchRef.current.clear()
+      threadEventSeenAtRef.current.clear()
       return
     }
 
@@ -614,7 +629,86 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
         threadDetailPrefetchRef.current.delete(key)
       }
     }
+
+    const validThreadIds = new Set(snapshot.threads.map((thread) => thread.id))
+    for (const threadId of threadEventSeenAtRef.current.keys()) {
+      if (!validThreadIds.has(threadId)) {
+        threadEventSeenAtRef.current.delete(threadId)
+      }
+    }
   }, [snapshot])
+
+  useEffect(() => {
+    snapshotRef.current = snapshot
+  }, [snapshot])
+
+  // Thread status is push-only: `running` is set by one event and cleared by
+  // one event, and nothing downstream re-derives it. A terminal `thread-updated`
+  // that is dropped, reordered behind a stale rebroadcast, or discarded by the
+  // staleness guard therefore strands the thread as a permanently pulsing
+  // sidebar entry with a "Thinking…" row and a Stop button, until the socket
+  // happens to drop and the reconnect snapshot corrects it. Re-check quiet live
+  // threads against the daemon so that state cannot outlive the turn.
+  useEffect(() => {
+    if (!api) return
+    const interval = window.setInterval(() => {
+      if (reconcilingStatusRef.current) return
+      const threads = snapshotRef.current?.threads ?? []
+      const now = Date.now()
+      const suspect: string[] = []
+      for (const thread of threads) {
+        if (thread.status !== 'running' && thread.status !== 'waiting_for_input') continue
+        const seenAt = threadEventSeenAtRef.current.get(thread.id)
+        if (seenAt === undefined) {
+          // First sighting (a bootstrap snapshot, or a thread that went live
+          // before this hook mounted). Start its clock rather than treating an
+          // absent entry as infinitely stale.
+          threadEventSeenAtRef.current.set(thread.id, now)
+          continue
+        }
+        if (now - seenAt >= THREAD_STATUS_RECHECK_AFTER_MS) suspect.push(thread.id)
+      }
+      if (suspect.length === 0) return
+
+      reconcilingStatusRef.current = true
+      void api
+        .snapshot()
+        .then((authoritative) => {
+          const corrections = new Map(
+            authoritative.threads
+              .filter((thread) => suspect.includes(thread.id))
+              .map((thread) => [thread.id, thread] as const),
+          )
+          if (corrections.size === 0) return
+          setSnapshot((current) => {
+            if (!current) return current
+            let changed = false
+            const nextThreads = current.threads.map((thread) => {
+              const correction = corrections.get(thread.id)
+              // Only status is corrected here. The rest of this summary may
+              // legitimately be newer than the fetch (events kept flowing while
+              // it was in flight), and a wholesale replace would roll that back.
+              if (!correction || correction.status === thread.status) return thread
+              changed = true
+              return { ...thread, status: correction.status, last_error: correction.last_error }
+            })
+            return changed ? { ...current, threads: nextThreads } : current
+          })
+          // Whatever the daemon just told us is the fresh word on these threads;
+          // don't re-fetch them again on the very next tick.
+          const settledAt = Date.now()
+          for (const id of suspect) threadEventSeenAtRef.current.set(id, settledAt)
+        })
+        .catch(() => {
+          // A failed re-check is not worth surfacing: the next tick retries, and
+          // a genuinely dead daemon is already reported by the socket.
+        })
+        .finally(() => {
+          reconcilingStatusRef.current = false
+        })
+    }, THREAD_STATUS_RECHECK_INTERVAL_MS)
+    return () => window.clearInterval(interval)
+  }, [api])
 
   // Poll remote status
   useEffect(() => {
