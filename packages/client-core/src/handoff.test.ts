@@ -18,7 +18,7 @@ describe("handoff context", () => {
     expect(bounded.length).toBeLessThanOrEqual(180);
   });
 
-  it("asks the destination harness to compact without touching the source", () => {
+  it("asks the destination harness to compact and continue without touching the source", () => {
     const prompt = buildHandoffPrompt({
       items: [
         {
@@ -37,7 +37,9 @@ describe("handoff context", () => {
     });
 
     expect(prompt).toContain("original thread remains unchanged");
-    expect(prompt).toContain("Do not invoke tools or modify files");
+    expect(prompt).toContain("continue the user's objective in this same turn");
+    expect(prompt).toContain("Use tools and modify files when appropriate");
+    expect(prompt).not.toContain("stop and wait for the user");
     expect(prompt).toContain("Keep the old thread unchanged");
   });
 
@@ -50,10 +52,12 @@ describe("handoff context", () => {
 
     expect(prompt).toContain("Ship the handoff brief.");
     expect(prompt).toContain("<handoff-brief>");
-    // The brief is machine-written context, not a user instruction, and the
-    // destination must not act on it before the user speaks.
+    // The brief is machine-written context rather than a fresh user message,
+    // but the destination should resume the original objective immediately.
     expect(prompt).toContain("not by the user");
-    expect(prompt).toContain("Do not start editing files");
+    expect(prompt).toContain("continue working on the user's objective now");
+    expect(prompt).toContain("using tools or editing files when appropriate");
+    expect(prompt).not.toContain("until the user replies");
     expect(prompt).not.toContain("Some middle history was dropped");
   });
 
