@@ -143,13 +143,16 @@ const LOCAL_HOST: &str = "local";
 
 impl AppState {
     /// Serves the local overview from cache when fresh; otherwise probes.
+    /// Never touches the network: a probe without `include_latest` is
+    /// shell-outs only, and any latest-version knowledge from a previous
+    /// explicit refresh is carried over so badges don't flicker off.
     pub async fn harnesses_overview(&self) -> HarnessesOverview {
         if let Some((probed_at, overview)) = self.inner.harness_cache.lock().unwrap().get(LOCAL_HOST)
             && probed_at.elapsed() < CACHE_TTL
         {
             return overview.clone();
         }
-        match self.probe_harnesses(LOCAL_HOST, None, true).await {
+        match self.probe_harnesses(LOCAL_HOST, None, false).await {
             Ok(overview) => overview,
             Err(error) => {
                 tracing::warn!("local harness probe failed: {error}");
@@ -360,6 +363,39 @@ impl AppState {
 
         if include_latest {
             self.apply_latest_versions(&mut summaries).await;
+        } else {
+            // Keep the latest-version knowledge from a previous explicit
+            // refresh: without this, a cheap TTL re-probe would clear the
+            // "Update available" badge until the user checks again.
+            let previous = self
+                .inner
+                .harness_cache
+                .lock()
+                .unwrap()
+                .get(host)
+                .map(|(_, overview)| {
+                    overview
+                        .harnesses
+                        .iter()
+                        .map(|summary| {
+                            (
+                                summary.id.clone(),
+                                (
+                                    summary.latest_version.clone(),
+                                    summary.update_available,
+                                ),
+                            )
+                        })
+                        .collect::<HashMap<_, _>>()
+                });
+            if let Some(previous) = previous {
+                for summary in &mut summaries {
+                    if let Some((latest, update)) = previous.get(&summary.id) {
+                        summary.latest_version = latest.clone();
+                        summary.update_available = *update;
+                    }
+                }
+            }
         }
 
         summaries.sort_by(|left, right| left.label.cmp(&right.label));
@@ -367,11 +403,17 @@ impl AppState {
             host: host.to_string(),
             harnesses: summaries,
         };
-        self.inner
-            .harness_cache
-            .lock()
-            .unwrap()
-            .insert(host.to_string(), (Instant::now(), overview.clone()));
+        if host == LOCAL_HOST {
+            // Remote results are write-only in a local-keyed cache: GET
+            // serves the local machine only and remote refreshes always
+            // re-probe, so caching them would leak entries that nothing
+            // ever reads or evicts.
+            self.inner
+                .harness_cache
+                .lock()
+                .unwrap()
+                .insert(host.to_string(), (Instant::now(), overview.clone()));
+        }
         Ok(overview)
     }
 
@@ -599,8 +641,9 @@ fn parse_version(output: &str) -> Option<String> {
 }
 
 /// Lenient numeric comparison over dot-separated version strings. Returns
-/// `None` when either side is not dot-numeric (never claim "update
-/// available" from a string we did not understand).
+/// an upgrade only when the published latest is strictly newer — a local
+/// build newer than the registry tag (nightly channel, re-tag) must not be
+/// "updated" into a downgrade. Unparseable sides never claim an update.
 fn is_update_available(current: &str, latest: &str) -> bool {
     let parse = |value: &str| -> Option<Vec<u64>> {
         value
@@ -610,7 +653,7 @@ fn is_update_available(current: &str, latest: &str) -> bool {
             .collect::<Option<Vec<_>>>()
     };
     match (parse(current), parse(latest)) {
-        (Some(current), Some(latest)) => current != latest,
+        (Some(current), Some(latest)) => latest > current,
         _ => false,
     }
 }
@@ -711,21 +754,23 @@ async fn probe_remote_harnesses(
 /// Builds the single remote script probing every known harness. Bin names
 /// come from the curated registry (shell-safe by construction); ACP entries
 /// are not probed remotely because their commands are arbitrary argv.
+/// Auth probes run once per harness outside the bin loop — node-based CLIs
+/// can take seconds to start, and repeating them per loop iteration would
+/// blow the PROBE_TIMEOUT budget on hosts with several harnesses installed.
 fn remote_probe_script() -> String {
     let mut script = String::from("set -- ");
     for harness in KNOWN_HARNESSES {
         script.push_str(harness.bin);
         script.push(' ');
     }
-    script.push_str("\nfor bin do\n  p=$(command -v \"$bin\" 2>/dev/null) || { echo \"FD_MISSING:$bin\"; continue; }\n  echo \"FD_BIN:$bin:$p\"\n  v=$(\"$bin\" --version 2>&1 | head -n 1)\n  echo \"FD_VER:$bin:$v\"\n");
+    script.push_str("\nfor bin do\n  p=$(command -v \"$bin\" 2>/dev/null) || { echo \"FD_MISSING:$bin\"; continue; }\n  echo \"FD_BIN:$bin:$p\"\n  v=$(\"$bin\" --version 2>&1 | head -n 1)\n  echo \"FD_VER:$bin:$v\"\ndone\n");
     for harness in KNOWN_HARNESSES.iter().filter(|h| h.auth_probe.is_some()) {
         let args = harness.auth_probe.unwrap_or_default().join(" ");
         script.push_str(&format!(
-            "  a=$(\"{bin}\" {args} 2>&1 | head -n 2 | tr '\\n' ' ')\n  echo \"FD_AUTH:{bin}:$a\"\n",
+            "if command -v {bin} >/dev/null 2>&1; then\n  a=$(\"{bin}\" {args} 2>&1 | head -n 2 | tr '\\n' ' ')\n  echo \"FD_AUTH:{bin}:$a\"\nfi\n",
             bin = harness.bin
         ));
     }
-    script.push_str("done\n");
     script
 }
 
@@ -775,6 +820,8 @@ mod tests {
     fn update_comparison_is_conservative() {
         assert!(is_update_available("0.12.0", "0.13.0"));
         assert!(!is_update_available("0.13.0", "0.13.0"));
+        // A local build newer than the registry tag is not an update.
+        assert!(!is_update_available("0.14.0", "0.13.0"));
         // Unparseable sides must never claim an update.
         assert!(!is_update_available("unknown", "0.13.0"));
     }

@@ -45,8 +45,8 @@ Local (axum, loopback-only like the rest of the daemon API):
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/harnesses` | Cached overview for the local machine (60s TTL) |
-| `POST /api/harnesses/refresh` | Re-probe; body `{ ssh_target?, port?, include_latest? }`. With `ssh_target`, probes that host instead |
+| `GET /api/harnesses` | Cached overview for the local machine (60s TTL). Network-free: re-probes run without registry lookups and carry over latest-version knowledge from the last explicit refresh |
+| `POST /api/harnesses/refresh` | Re-probe; body `{ ssh_target?, port?, include_latest? }`. With `ssh_target`, probes that host instead (remote results are not cached — every remote view is a fresh probe) |
 | `POST /api/harnesses/upgrade` | Start install/upgrade job; body `{ harness_id, ssh_target?, port? }` → `{ job_id }` |
 | `GET /api/harnesses/jobs/{job_id}` | Poll job status (`running` / `completed` / `failed`, with log lines) |
 
@@ -67,13 +67,17 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 - **SSH hosts:** one BatchMode `ssh` invocation batches every bin probe
   (`command -v`, `--version`, auth) using `FD_BIN:` / `FD_VER:` /
   `FD_AUTH:` / `FD_MISSING:` markers parsed with `splitn(3, ':')` so paths
-  containing colons survive. The ssh exec helpers are shared with host
+  containing colons survive. Auth probes run once per harness outside the
+  bin loop — node CLIs are slow to start and repeating them per iteration
+  would blow the probe timeout. The ssh exec helpers are shared with host
   provisioning (`host_provisioning.rs`), including target validation that
   rejects anything ssh could read as flags.
 - **Latest versions:** `include_latest` (default true on refresh) fetches
   `registry.npmjs.org/<package>/latest` per managed harness, concurrently,
   15s cap. This is the only network call in the module and it never runs
-  during snapshots or on a timer — on-demand only, per product decision.
+  during snapshots, on a timer, or from the plain `GET` path — on-demand
+  only, per product decision. A newer-than-registry local build is never
+  offered as an "update" (the comparison is strictly latest > current).
 
 ## Upgrades
 
@@ -94,10 +98,12 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 
 ## Client notes
 
-- The desktop panel keys hosts as `"<sshTarget>:<port>"` ( `"local"` for
-  this Mac) and re-probes on host switch. Job polling mirrors the
-  provisioning panel (1.5s interval, stops on terminal status, re-probe
-  after completion).
+- The desktop panel keys hosts by `HostView.id` (`"local"` for this Mac)
+  and derives `ssh_target`/`port` from the structured host record — never
+  by parsing a joined string. Switching to a remote host clears the view
+  and deep-probes (remote hosts have no shallow GET path). Job polling
+  mirrors the provisioning panel (1.5s interval, stops on terminal status,
+  re-probe after completion).
 - Use the `normalizeHarnessesOverview` / `normalizeHarnessUpgradeJob`
   helpers from `@falcondeck/client-core`; they tolerate partial daemon
   responses and older daemons (missing fields become null).

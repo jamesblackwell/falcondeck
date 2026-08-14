@@ -78,31 +78,42 @@ describe('HarnessesPanel', () => {
     expect(screen.getByRole('button', { name: 'Upgrade' })).toBeInTheDocument()
   })
 
-  it('deep-refresh posts to the refresh endpoint for the selected host', async () => {
+  it('deep-refreshes through the refresh endpoint when a remote host is selected', async () => {
     const fetchMock = vi
       .fn()
-      .mockResolvedValue(jsonResponse(overview))
-      .mockResolvedValue(jsonResponse({ host: 'build@example.com', harnesses: [] }))
+      // Initial local overview load.
+      .mockResolvedValueOnce(jsonResponse(overview))
+      // Selecting a remote host immediately deep-probes it.
+      .mockResolvedValueOnce(
+        jsonResponse({ host: 'build@example.com', harnesses: [] }),
+      )
+      // "Check for updates" re-probes the selected host.
+      .mockResolvedValueOnce(
+        jsonResponse({ host: 'build@example.com', harnesses: [] }),
+      )
     vi.stubGlobal('fetch', fetchMock)
 
     render(<HarnessesPanel baseUrl="http://127.0.0.1:4317" hosts={hosts} onToast={vi.fn()} />)
 
-    fireEvent.change(await screen.findByLabelText('Host'), {
-      target: { value: 'build@example.com:2222' },
-    })
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:4317/api/harnesses'),
-    )
-    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }))
+    expect(
+      await screen.findByText('Logged in using ChatGPT'),
+    ).toBeInTheDocument()
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
-    const [url, request] = fetchMock.mock.calls[2] as [string, RequestInit]
+    fireEvent.change(await screen.findByLabelText('Host'), {
+      target: { value: 'host-1' },
+    })
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const [url, request] = fetchMock.mock.calls[1] as [string, RequestInit]
     expect(url).toBe('http://127.0.0.1:4317/api/harnesses/refresh')
     expect(request.method).toBe('POST')
     expect(JSON.parse(request.body as string)).toEqual({
       ssh_target: 'build@example.com',
       port: 2222,
     })
+
+    // Local harness rows must never linger under the remote host's name.
+    await waitFor(() => expect(screen.queryByText('Codex')).toBeNull())
   })
 
   it('starts an upgrade and polls the job until it completes', async () => {

@@ -38,6 +38,16 @@ type ActiveJob = {
 
 const LOCAL_HOST_KEY = 'local'
 
+/** Resolves the selected host key to (ssh_target, port); null for local. */
+function hostEndpoint(
+  hostKey: string,
+  sshHosts: HostView[],
+): { sshTarget: string; port: number | null } | null {
+  const host = sshHosts.find((candidate) => candidate.id === hostKey)
+  if (!host?.sshTarget) return null
+  return { sshTarget: host.sshTarget, port: host.sshPort }
+}
+
 function harnessStatusLabel(harness: HarnessSummary): {
   label: string
   variant: 'success' | 'warning' | 'danger' | 'default'
@@ -83,10 +93,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   const hostLabel = useCallback(
     (key: string) => {
       if (key === LOCAL_HOST_KEY) return 'This Mac'
-      const host = sshHosts.find(
-        (candidate) => `${candidate.sshTarget}:${candidate.sshPort ?? ''}` === key,
-      )
-      return host?.name ?? key
+      return sshHosts.find((candidate) => candidate.id === key)?.name ?? key
     },
     [sshHosts],
   )
@@ -96,16 +103,16 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
       if (!baseUrl) return null
       if (deep) setIsRefreshing(true)
       try {
-        if (deep) {
-          const target = key === LOCAL_HOST_KEY ? null : key.split(':')[0]
-          const portRaw = key === LOCAL_HOST_KEY ? null : key.split(':')[1]
-          const port = portRaw && portRaw !== '' ? Number(portRaw) : null
+        const endpoint = hostEndpoint(key, sshHosts)
+        if (deep && endpoint) {
+          // Remote hosts have no shallow path: GET /api/harnesses serves
+          // the local machine only, so any remote view is a deep probe.
           const response = await fetch(`${baseUrl}/api/harnesses/refresh`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              ...(target ? { ssh_target: target } : {}),
-              ...(port != null && Number.isFinite(port) ? { port } : {}),
+              ssh_target: endpoint.sshTarget,
+              ...(endpoint.port != null ? { port: endpoint.port } : {}),
             }),
           })
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
@@ -113,7 +120,10 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         } else {
           const response = await fetch(`${baseUrl}/api/harnesses`)
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
-          setOverview(normalizeHarnessesOverview(await response.json()))
+          const next = normalizeHarnessesOverview(await response.json())
+          // Never render local data under a remote host's name.
+          if (endpoint) return false
+          setOverview(next)
         }
         setLoadError(null)
         return true
@@ -125,12 +135,18 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         setIsLoading(false)
       }
     },
-    [baseUrl],
+    [baseUrl, sshHosts],
   )
 
+  // Switching hosts must never show the previous host's data: clear first,
+  // then deep-probe remote hosts (they have no shallow local GET path).
   useEffect(() => {
-    void fetchOverview(hostKey, false)
-  }, [fetchOverview, hostKey])
+    setOverview(null)
+    setLoadError(null)
+    setIsLoading(true)
+    const isRemote = hostEndpoint(hostKey, sshHosts) != null
+    void fetchOverview(hostKey, isRemote)
+  }, [fetchOverview, hostKey, sshHosts])
 
   // Poll an upgrade job until it leaves `running`, mirroring the
   // provisioning panel's job loop.
@@ -178,17 +194,19 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   const startUpgrade = useCallback(
     async (harness: HarnessSummary) => {
       if (!baseUrl) return
-      const target = hostKey === LOCAL_HOST_KEY ? null : hostKey.split(':')[0]
-      const portRaw = hostKey === LOCAL_HOST_KEY ? null : hostKey.split(':')[1]
-      const port = portRaw && portRaw !== '' ? Number(portRaw) : null
+      const endpoint = hostEndpoint(hostKey, sshHosts)
       try {
         const response = await fetch(`${baseUrl}/api/harnesses/upgrade`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             harness_id: harness.id,
-            ...(target ? { ssh_target: target } : {}),
-            ...(port != null && Number.isFinite(port) ? { port } : {}),
+            ...(endpoint
+              ? {
+                  ssh_target: endpoint.sshTarget,
+                  ...(endpoint.port != null ? { port: endpoint.port } : {}),
+                }
+              : {}),
           }),
         })
         if (!response.ok) {
@@ -207,7 +225,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         })
       }
     },
-    [baseUrl, hostKey, onToast],
+    [baseUrl, hostKey, onToast, sshHosts],
   )
 
   const harnesses = overview?.harnesses ?? []
@@ -240,10 +258,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
             >
               <option value={LOCAL_HOST_KEY}>This Mac</option>
               {sshHosts.map((host) => (
-                <option
-                  key={host.id}
-                  value={`${host.sshTarget}:${host.sshPort ?? ''}`}
-                >
+                <option key={host.id} value={host.id}>
                   {host.name}
                 </option>
               ))}
@@ -267,7 +282,13 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
           {loadError ? (
             <div className="flex items-center gap-3 px-2 py-4">
               <p className="text-[length:var(--fd-text-sm)] text-danger">{loadError}</p>
-              <Button size="sm" variant="secondary" onClick={() => void fetchOverview(hostKey, false)}>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() =>
+                  void fetchOverview(hostKey, hostEndpoint(hostKey, sshHosts) != null)
+                }
+              >
                 Retry
               </Button>
             </div>
