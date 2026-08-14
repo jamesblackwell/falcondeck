@@ -37,8 +37,9 @@ describe("handoff context", () => {
     });
 
     expect(prompt).toContain("original thread remains unchanged");
-    expect(prompt).toContain("continue the user's objective in this same turn");
-    expect(prompt).toContain("Use tools and modify files when appropriate");
+    expect(prompt).toContain("a clear objective and a clear, safe next action");
+    expect(prompt).toContain("continue working in this same turn");
+    expect(prompt).toContain("ask the user one clear, focused question");
     expect(prompt).not.toContain("stop and wait for the user");
     expect(prompt).toContain("Keep the old thread unchanged");
   });
@@ -55,8 +56,9 @@ describe("handoff context", () => {
     // The brief is machine-written context rather than a fresh user message,
     // but the destination should resume the original objective immediately.
     expect(prompt).toContain("not by the user");
-    expect(prompt).toContain("continue working on the user's objective now");
+    expect(prompt).toContain("a clear objective and a clear, safe next action");
     expect(prompt).toContain("using tools or editing files when appropriate");
+    expect(prompt).toContain("ask the user one clear, focused question");
     expect(prompt).not.toContain("until the user replies");
     expect(prompt).not.toContain("Some middle history was dropped");
   });
