@@ -74,6 +74,7 @@ function AlwaysOnTopToggle({
 export function ActivityWindow() {
   const [state, setState] = useState<ActivityWindowState | null>(null);
   const [pinned, setPinned] = useState(readAlwaysOnTop);
+  const [focused, setFocused] = useState(true);
   const callSeqRef = useRef(0);
 
   // Applied from the window, not the button: the choice has to survive a
@@ -103,9 +104,16 @@ export function ActivityWindow() {
       void emit(ACTIVITY_WINDOW_EVENTS.closed);
     });
 
+    // Which window the keyboard is talking to is invisible across two
+    // screens, so the view says so — it needs the frame to tell it.
+    const focus = getCurrentWindow().onFocusChanged(({ payload }) =>
+      setFocused(payload),
+    );
+
     return () => {
       void unlisten.then((off) => off());
       void closing.then((off) => off());
+      void focus.then((off) => off());
     };
   }, []);
 
@@ -128,6 +136,10 @@ export function ActivityWindow() {
 
   const handleNewThread = useCallback(() => {
     void emit(ACTIVITY_WINDOW_EVENTS.newThread);
+    void invoke("focus_main_window").catch(() => {});
+  }, []);
+
+  const handleReturnFocus = useCallback(() => {
     void invoke("focus_main_window").catch(() => {});
   }, []);
 
@@ -190,6 +202,8 @@ export function ActivityWindow() {
       onMarkThreadRead={handleMarkThreadRead}
       onNewThread={state.canStartThread ? handleNewThread : undefined}
       trafficLightInset
+      onReturnFocus={handleReturnFocus}
+      windowFocused={focused}
       headerActions={
         <AlwaysOnTopToggle
           pinned={pinned}

@@ -1,5 +1,6 @@
 import {
   collectActivityEntries,
+  collectRecentEntries,
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type ProjectGroup,
@@ -62,21 +63,27 @@ export type ActivityRespondResult = {
  * Narrow the snapshot to what Activity actually renders.
  *
  * A full snapshot is every thread in every project; Activity shows only the
- * handful in an actionable state. Filtering by the same collector the view
- * uses keeps the projection identical to rendering from the whole snapshot,
- * rather than merely close to it.
+ * handful in an actionable state, plus the few that just finished. Filtering
+ * by the same collectors the view uses keeps the projection identical to
+ * rendering from the whole snapshot, rather than merely close to it.
  */
 export function projectActivityWindowState(
   groups: ProjectGroup[],
   interactiveRequests: InteractiveRequest[],
   workspaceHosts: Record<string, { name: string; connected: boolean }>,
   canStartThread: boolean,
+  nowMs: number,
 ): ActivityWindowState {
-  const visible = new Set(
-    collectActivityEntries(groups, interactiveRequests).map(
+  // The queue plus the trail behind it — the window derives both from the
+  // threads it is given, so it has to receive the threads for both.
+  const visible = new Set([
+    ...collectActivityEntries(groups, interactiveRequests).map(
       (entry) => `${entry.workspaceId}:${entry.thread.id}`,
     ),
-  );
+    ...collectRecentEntries(groups, interactiveRequests, { nowMs }).map(
+      (entry) => `${entry.workspaceId}:${entry.thread.id}`,
+    ),
+  ]);
 
   const projectedGroups: ProjectGroup[] = [];
   const workspaceIds = new Set<string>();

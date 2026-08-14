@@ -11,6 +11,7 @@ import {
 import {
   Activity,
   Check,
+  ChevronRight,
   CircleAlert,
   PanelsTopLeft,
   Plus,
@@ -20,11 +21,13 @@ import {
 
 import {
   collectActivityEntries,
+  collectRecentEntries,
   type ActivityEntry,
   type ActivitySection,
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type ProjectGroup,
+  type RecentEntry,
 } from "@falcondeck/client-core";
 import { Badge, Button, EmptyState, cn } from "@falcondeck/ui";
 
@@ -61,6 +64,17 @@ export type ActivityViewProps = {
   trafficLightInset?: boolean;
   /** Window-level controls (pin, and anything else the frame owns). */
   headerActions?: ReactNode;
+  /**
+   * Hand keyboard focus back to the main app. Present only when Activity owns
+   * a window, where Escape means "go back to what I was doing", not "close".
+   */
+  onReturnFocus?: () => void;
+  /**
+   * Whether this window has OS focus. Undefined in the takeover, which is
+   * focused whenever the app is. Drives the keyboard-ready indicator: across
+   * two screens you cannot otherwise tell which window is listening.
+   */
+  windowFocused?: boolean;
 };
 
 type ResolvedEntry = {
@@ -126,6 +140,19 @@ const SUMMARY_STATS: readonly {
   { section: "running", label: "Running", tone: "text-success" },
 ];
 
+const KEY_HINTS: readonly {
+  key: string;
+  label: string;
+  description: string;
+}[] = [
+  { key: "j / k", label: "move", description: "Move through the queue" },
+  { key: "↵", label: "open", description: "Open in the main window" },
+  { key: "r", label: "read", description: "Mark the selected thread read" },
+  { key: "e", label: "recent", description: "Show what finished recently" },
+  { key: "?", label: "keys", description: "Show this list" },
+  { key: "esc", label: "clear", description: "Clear the selection" },
+];
+
 /** Counters read as instrument digits: fixed width, never a bare "0". */
 function padCount(count: number) {
   return count < 10 ? `0${count}` : String(count);
@@ -133,6 +160,19 @@ function padCount(count: number) {
 
 function entryKey(entry: ActivityEntry) {
   return `${entry.workspaceId}:${entry.thread.id}`;
+}
+
+function recentKey(entry: RecentEntry) {
+  return `recent:${entry.workspaceId}:${entry.thread.id}`;
+}
+
+/** Typing in a card's answer box must not steal j/k/Enter. */
+function isTypingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.isContentEditable ||
+    ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
+  );
 }
 
 function timeAgo(dateStr: string, nowMs: number) {
@@ -265,6 +305,7 @@ type ActivityRowProps = {
   entry: ActivityEntry;
   host?: { name: string; connected: boolean };
   nowMs: number;
+  selected: boolean;
   resolvedRequest?: InteractiveRequest;
   onOpenThread: ActivityViewProps["onOpenThread"];
   onMarkThreadRead: ActivityViewProps["onMarkThreadRead"];
@@ -280,6 +321,7 @@ const ActivityRow = memo(
     entry,
     host,
     nowMs,
+    selected,
     resolvedRequest,
     onOpenThread,
     onMarkThreadRead,
@@ -309,8 +351,12 @@ const ActivityRow = memo(
           // rather than empty card.
           entry.section !== "blocked" && "h-36 overflow-hidden xl:h-40",
           offline && "opacity-60",
+          selected &&
+            "border-[color:color-mix(in_srgb,var(--fd-tone)_55%,transparent)]",
         )}
         data-activity-thread={entry.thread.id}
+        data-activity-key={entryKey(entry)}
+        data-selected={selected ? "true" : undefined}
       >
         {/* Terminal chrome: origin, host, and age — never the payload. */}
         <div className="fd-chrome-fill flex shrink-0 items-center gap-2.5 rounded-t-[var(--fd-radius-md)] border-b border-border-subtle px-3.5 py-1.5">
@@ -428,11 +474,123 @@ const ActivityRow = memo(
     previous.host?.name === next.host?.name &&
     previous.host?.connected === next.host?.connected &&
     previous.nowMs === next.nowMs &&
+    previous.selected === next.selected &&
     previous.resolvedRequest?.request_id === next.resolvedRequest?.request_id &&
     previous.onOpenThread === next.onOpenThread &&
     previous.onMarkThreadRead === next.onMarkThreadRead &&
     previous.onRespond === next.onRespond,
 );
+
+
+type RecentTrailProps = {
+  entries: RecentEntry[];
+  open: boolean;
+  nowMs: number;
+  selectedKey: string | null;
+  onToggle: () => void;
+  onOpenThread: ActivityViewProps["onOpenThread"];
+};
+
+/**
+ * The trail behind the queue. Collapsed by default — it is reference, not
+ * work — and a dense list rather than cards, because the question it answers
+ * is "what did I just finish?", not "what does it say?".
+ */
+const RecentTrail = memo(function RecentTrail({
+  entries,
+  open,
+  nowMs,
+  selectedKey,
+  onToggle,
+  onOpenThread,
+}: RecentTrailProps) {
+  if (entries.length === 0) return null;
+
+  return (
+    <section
+      aria-labelledby="activity-recent"
+      style={{ "--fd-tone": "var(--fd-fg-3)" } as CSSProperties}
+    >
+      <div className="mb-2.5 flex items-center gap-2.5">
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-expanded={open}
+          aria-controls="activity-recent-list"
+          className="fd-focus flex min-w-0 items-center gap-2 rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:text-fg-primary"
+        >
+          <ChevronRight
+            aria-hidden="true"
+            className={cn(
+              "h-3.5 w-3.5 shrink-0 transition-transform duration-[var(--fd-duration-fast)]",
+              open && "rotate-90",
+            )}
+          />
+          <h2
+            id="activity-recent"
+            className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
+          >
+            Recent
+          </h2>
+          <span className="hidden truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block">
+            Finished in the last few hours
+          </span>
+        </button>
+        <span
+          aria-hidden="true"
+          className="h-px min-w-6 flex-1 bg-[linear-gradient(90deg,color-mix(in_srgb,var(--fd-tone)_28%,transparent),transparent)]"
+        />
+        <span className="fd-microlabel shrink-0 tabular-nums text-fg-muted">
+          {padCount(entries.length)}
+        </span>
+      </div>
+
+      {open ? (
+        <ul
+          id="activity-recent-list"
+          className="overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1"
+        >
+          {entries.map((entry) => {
+            const key = recentKey(entry);
+            return (
+              <li
+                key={key}
+                data-activity-key={key}
+                data-selected={selectedKey === key ? "true" : undefined}
+                className={cn(
+                  "border-b border-border-subtle last:border-b-0",
+                  selectedKey === key && "bg-[color:var(--fd-interactive-hover)]",
+                )}
+              >
+                <button
+                  type="button"
+                  onClick={() =>
+                    onOpenThread(entry.workspaceId, entry.thread.id)
+                  }
+                  className="fd-focus-inset flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors hover:bg-[color:var(--fd-interactive-hover)]"
+                >
+                  <Check
+                    aria-hidden="true"
+                    className="h-3 w-3 shrink-0 text-fg-faint"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
+                    {entry.thread.title}
+                  </span>
+                  <span className="fd-readout shrink-0 truncate text-fg-faint">
+                    {entry.projectLabel}
+                  </span>
+                  <span className="fd-readout w-8 shrink-0 text-right tabular-nums text-fg-faint">
+                    {timeAgo(entry.thread.updated_at, nowMs)}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+    </section>
+  );
+});
 
 export const ActivityView = memo(function ActivityView({
   groups,
@@ -446,8 +604,14 @@ export const ActivityView = memo(function ActivityView({
   onPopOut,
   trafficLightInset = false,
   headerActions,
+  onReturnFocus,
+  windowFocused,
 }: ActivityViewProps) {
   const [nowMs, setNowMs] = useState(Date.now);
+  const [recentOpen, setRecentOpen] = useState(false);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [showKeys, setShowKeys] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [resolvedEntries, setResolvedEntries] = useState<
     Record<string, ResolvedEntry>
   >({});
@@ -473,19 +637,6 @@ export const ActivityView = memo(function ActivityView({
     },
     [],
   );
-
-  // Escape dismisses the takeover, but must not close a window the user
-  // deliberately detached — there it is the frame's job.
-  useEffect(() => {
-    if (!onClose) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
 
   const handleRespond = useCallback(
     async (
@@ -529,6 +680,132 @@ export const ActivityView = memo(function ActivityView({
       sections.get(section)?.length ?? 0,
     ]),
   );
+
+  const recentEntries = useMemo(
+    () => collectRecentEntries(groups, interactiveRequests, { nowMs }),
+    [groups, interactiveRequests, nowMs],
+  );
+
+  /* ================================================================
+     Keyboard model.
+
+     The queue is a list, so it navigates like one: j/k or arrows to
+     move, Enter to open, R to clear, E for the trail. Handled on the
+     window rather than per-card so the keys work the moment Activity
+     has focus, without the user first clicking a card.
+     ================================================================ */
+  const selectable = useMemo(() => {
+    const rows: { key: string; entry?: ActivityEntry; recent?: RecentEntry }[] =
+      [];
+    for (const section of SECTION_ORDER) {
+      for (const entry of sections.get(section) ?? []) {
+        rows.push({ key: entryKey(entry), entry });
+      }
+    }
+    if (recentOpen) {
+      for (const recent of recentEntries) {
+        rows.push({ key: recentKey(recent), recent });
+      }
+    }
+    return rows;
+  }, [recentEntries, recentOpen, sections]);
+
+  // A selection that scrolled out of the queue (answered, marked read) must
+  // not linger as a highlight on nothing.
+  useEffect(() => {
+    if (selectedKey && !selectable.some((row) => row.key === selectedKey)) {
+      setSelectedKey(null);
+    }
+  }, [selectable, selectedKey]);
+
+  useEffect(() => {
+    if (!selectedKey) return;
+    const row = scrollRef.current?.querySelector(
+      `[data-activity-key="${CSS.escape(selectedKey)}"]`,
+    );
+    // Guarded: jsdom has no layout, and neither do headless webviews.
+    if (row instanceof HTMLElement && typeof row.scrollIntoView === "function") {
+      row.scrollIntoView({ block: "nearest" });
+    }
+  }, [selectedKey]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || isTypingTarget(event.target)) return;
+      // Leave every system and app shortcut (⌘R, ⌘W, ⌘1…) alone.
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      const step = (delta: number) => {
+        event.preventDefault();
+        if (selectable.length === 0) return;
+        const index = selectable.findIndex((row) => row.key === selectedKey);
+        const next =
+          index === -1
+            ? delta > 0
+              ? 0
+              : selectable.length - 1
+            : Math.min(Math.max(index + delta, 0), selectable.length - 1);
+        setSelectedKey(selectable[next]?.key ?? null);
+      };
+
+      switch (event.key) {
+        case "ArrowDown":
+        case "j":
+          return step(1);
+        case "ArrowUp":
+        case "k":
+          return step(-1);
+        case "Enter": {
+          const row = selectable.find((entry) => entry.key === selectedKey);
+          const target = row?.entry ?? row?.recent;
+          if (!target) return;
+          event.preventDefault();
+          onOpenThread(target.workspaceId, target.thread.id);
+          return;
+        }
+        case "r":
+        case "R": {
+          const row = selectable.find((entry) => entry.key === selectedKey);
+          if (!row?.entry) return;
+          if (row.entry.section !== "failed" && row.entry.section !== "ready") {
+            return;
+          }
+          event.preventDefault();
+          void Promise.resolve(
+            onMarkThreadRead(row.entry.workspaceId, row.entry.thread.id),
+          ).catch(() => {});
+          return;
+        }
+        case "e":
+        case "E":
+          event.preventDefault();
+          return setRecentOpen((current) => !current);
+        case "?":
+          event.preventDefault();
+          return setShowKeys((current) => !current);
+        case "Escape":
+          event.preventDefault();
+          if (showKeys) return setShowKeys(false);
+          if (selectedKey) return setSelectedKey(null);
+          // In a detached window Escape hands the keyboard back to the app
+          // rather than closing what the user deliberately pulled out.
+          return (onReturnFocus ?? onClose)?.();
+        default:
+          return;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    onClose,
+    onMarkThreadRead,
+    onOpenThread,
+    onReturnFocus,
+    selectable,
+    selectedKey,
+    showKeys,
+  ]);
 
   return (
     <div className="fd-grid-canvas relative flex h-full min-h-0 flex-col bg-surface-0">
@@ -578,7 +855,10 @@ export const ActivityView = memo(function ActivityView({
         </div>
       </header>
 
-      <div className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-5 py-5">
+      <div
+        ref={scrollRef}
+        className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-5 py-5"
+      >
         <div className="mx-auto w-full max-w-[1440px] space-y-6">
           <section
             aria-label="Activity summary"
@@ -715,6 +995,7 @@ export const ActivityView = memo(function ActivityView({
                         entry={entry}
                         host={workspaceHosts[entry.workspaceId]}
                         nowMs={nowMs}
+                        selected={selectedKey === entryKey(entry)}
                         resolvedRequest={resolvedRequestForEntry(
                           entry,
                           resolvedEntries[entryKey(entry)],
@@ -729,8 +1010,95 @@ export const ActivityView = memo(function ActivityView({
               );
             },
           )}
+
+          <RecentTrail
+            entries={recentEntries}
+            open={recentOpen}
+            nowMs={nowMs}
+            selectedKey={selectedKey}
+            onToggle={() => setRecentOpen((current) => !current)}
+            onOpenThread={onOpenThread}
+          />
         </div>
       </div>
+
+      {/* Status bar. Doubles as the focus tell: across two screens the only
+          reliable way to know which window the keyboard is talking to. */}
+      <footer
+        className={cn(
+          "relative z-[1] flex shrink-0 items-center gap-3 border-t border-border-subtle bg-surface-1/70 px-5 py-1.5 backdrop-blur-sm transition-opacity",
+          windowFocused === false && "opacity-45",
+        )}
+      >
+        <span
+          aria-hidden="true"
+          style={
+            {
+              "--fd-tone":
+                windowFocused === false ? "var(--fd-fg-4)" : "var(--fd-accent)",
+            } as CSSProperties
+          }
+          className="fd-led shrink-0"
+        />
+        <span className="fd-microlabel shrink-0 text-fg-muted">
+          {windowFocused === false ? "Click to focus" : "Keyboard ready"}
+        </span>
+        <span
+          aria-hidden="true"
+          className="h-px min-w-4 flex-1 bg-border-subtle"
+        />
+        <ul className="flex shrink-0 items-center gap-3">
+          {KEY_HINTS.filter(
+            (hint) => hint.key !== "esc" || onReturnFocus || onClose,
+          ).map((hint) => (
+            <li
+              key={hint.key}
+              className="hidden items-center gap-1.5 md:flex"
+            >
+              <kbd className="fd-readout rounded-[var(--fd-radius-sm)] border border-border-default px-1.5 py-0.5 text-fg-secondary">
+                {hint.key}
+              </kbd>
+              <span className="fd-microlabel text-fg-faint">
+                {hint.key === "esc" && onReturnFocus ? "main app" : hint.label}
+              </span>
+            </li>
+          ))}
+        </ul>
+      </footer>
+
+      {showKeys ? (
+        <div
+          role="dialog"
+          aria-label="Keyboard shortcuts"
+          className="absolute inset-0 z-[2] flex items-center justify-center bg-[color:var(--fd-overlay)] p-8"
+          onClick={() => setShowKeys(false)}
+        >
+          <div className="w-full max-w-sm rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 p-4 shadow-[var(--fd-shadow-lg)]">
+            <p className="fd-microlabel fd-microlabel--md mb-3 font-semibold text-fg-primary">
+              Keyboard
+            </p>
+            <dl className="space-y-2">
+              {KEY_HINTS.map((hint) => (
+                <div
+                  key={hint.key}
+                  className="flex items-center justify-between gap-4"
+                >
+                  <dt className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+                    {hint.key === "esc" && onReturnFocus
+                      ? "Back to the main app"
+                      : hint.description}
+                  </dt>
+                  <dd>
+                    <kbd className="fd-readout rounded-[var(--fd-radius-sm)] border border-border-default px-1.5 py-0.5 text-fg-secondary">
+                      {hint.key}
+                    </kbd>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 });

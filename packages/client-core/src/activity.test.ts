@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { collectActivityEntries, countActivityEntries } from './activity'
+import {
+  collectActivityEntries,
+  collectRecentEntries,
+  countActivityEntries,
+} from './activity'
 import type { ProjectGroup } from './grouping'
 import type { InteractiveRequest, ThreadSummary, WorkspaceSummary } from './types'
 
@@ -181,5 +185,88 @@ describe('collectActivityEntries', () => {
       failed: 1,
       ready: 1,
     })
+  })
+})
+
+describe('collectRecentEntries', () => {
+  const nowMs = Date.parse('2026-08-13T12:00:00Z')
+  const done = (id: string, minutesAgo: number) =>
+    thread({
+      id,
+      updated_at: new Date(nowMs - minutesAgo * 60_000).toISOString(),
+      attention: {
+        ...thread({ id: 'base' }).attention,
+        last_agent_activity_seq: 4,
+        last_read_seq: 4,
+      },
+    })
+
+  it('lists finished threads newest first', () => {
+    const entries = collectRecentEntries(
+      [group([done('older', 90), done('newer', 5)])],
+      [],
+      { nowMs },
+    )
+
+    expect(entries.map((entry) => entry.thread.id)).toEqual(['newer', 'older'])
+    expect(entries[0]?.projectLabel).toBe('falcon')
+    expect(entries[0]?.workspaceId).toBe(workspace.id)
+  })
+
+  it('never repeats a thread that is still in the queue', () => {
+    const unread = thread({
+      id: 'ready',
+      updated_at: new Date(nowMs - 60_000).toISOString(),
+      attention: {
+        ...thread({ id: 'base' }).attention,
+        level: 'unread',
+        unread: true,
+        last_agent_activity_seq: 4,
+      },
+    })
+    const blocked = thread({
+      id: 'blocked',
+      updated_at: new Date(nowMs - 60_000).toISOString(),
+      attention: { ...thread({ id: 'base' }).attention, last_agent_activity_seq: 4 },
+    })
+    const groups = [group([unread, blocked, done('finished', 2)])]
+
+    const live = collectActivityEntries(groups, [request('blocked')]).map(
+      (entry) => entry.thread.id,
+    )
+    const recent = collectRecentEntries(groups, [request('blocked')], { nowMs }).map(
+      (entry) => entry.thread.id,
+    )
+
+    expect(live).toEqual(expect.arrayContaining(['ready', 'blocked']))
+    expect(recent).toEqual(['finished'])
+  })
+
+  it('drops threads that never ran, are archived, or fell out of the window', () => {
+    const entries = collectRecentEntries(
+      [
+        group([
+          thread({ id: 'never-ran', updated_at: new Date(nowMs - 60_000).toISOString() }),
+          { ...done('archived', 5), is_archived: true } as ThreadSummary,
+          done('stale', 60 * 24),
+          done('kept', 10),
+        ]),
+      ],
+      [],
+      { nowMs },
+    )
+
+    expect(entries.map((entry) => entry.thread.id)).toEqual(['kept'])
+  })
+
+  it('caps the trail so it stays a glance, not a history', () => {
+    const many = Array.from({ length: 20 }, (_, index) =>
+      done(`thread-${index}`, index + 1),
+    )
+
+    expect(collectRecentEntries([group(many)], [], { nowMs })).toHaveLength(12)
+    expect(
+      collectRecentEntries([group(many)], [], { nowMs, limit: 3 }),
+    ).toHaveLength(3)
   })
 })

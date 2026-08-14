@@ -133,6 +133,71 @@ export function collectActivityEntries(
   return entries.sort(compareEntries)
 }
 
+export type RecentEntry = {
+  thread: ThreadSummary
+  workspaceId: string
+  projectLabel: string
+}
+
+/** Six hours covers "earlier today" without turning into thread history. */
+const RECENT_WINDOW_MS = 6 * 60 * 60 * 1000
+const RECENT_LIMIT = 12
+
+/**
+ * Threads that finished and left the queue — the trail behind the work.
+ *
+ * Deliberately the complement of {@link collectActivityEntries}: anything with
+ * a section is still live and belongs above, so a thread can never appear in
+ * both. Threads that never ran are excluded; an empty thread you opened once
+ * is not something you recently completed.
+ */
+export function collectRecentEntries(
+  groups: ProjectGroup[],
+  interactiveRequests: InteractiveRequest[],
+  options: { nowMs: number; windowMs?: number; limit?: number },
+): RecentEntry[] {
+  const { nowMs, windowMs = RECENT_WINDOW_MS, limit = RECENT_LIMIT } = options
+  const requestThreadKeys = new Set<string>()
+  for (const request of interactiveRequests) {
+    if (request.thread_id) {
+      requestThreadKeys.add(`${request.workspace_id}:${request.thread_id}`)
+    }
+  }
+
+  const entries: RecentEntry[] = []
+  for (const group of groups) {
+    for (const thread of group.threads) {
+      if (thread.is_archived) continue
+      if (thread.attention.last_agent_activity_seq <= 0) continue
+      if (
+        activitySectionForThread(
+          thread,
+          requestThreadKeys.has(`${group.workspace.id}:${thread.id}`),
+        )
+      ) {
+        continue
+      }
+
+      const age = nowMs - new Date(thread.updated_at).getTime()
+      if (!Number.isFinite(age) || age > windowMs) continue
+
+      entries.push({
+        thread,
+        workspaceId: group.workspace.id,
+        projectLabel: projectLabel(group.workspace.path),
+      })
+    }
+  }
+
+  return entries
+    .sort(
+      (left, right) =>
+        compareIsoDescending(left.thread.updated_at, right.thread.updated_at) ||
+        left.thread.id.localeCompare(right.thread.id),
+    )
+    .slice(0, limit)
+}
+
 export function countActivityEntries(
   groups: ProjectGroup[],
   interactiveRequests: InteractiveRequest[],

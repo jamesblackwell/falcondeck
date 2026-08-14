@@ -41,6 +41,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 }));
 
 const setAlwaysOnTop = vi.fn(() => Promise.resolve());
+const onFocusChanged = vi.fn();
 
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({
@@ -49,6 +50,10 @@ vi.mock("@tauri-apps/api/window", () => ({
       return Promise.resolve(() => {});
     },
     setAlwaysOnTop: (value: boolean) => setAlwaysOnTop(value),
+    onFocusChanged: (handler: (event: { payload: boolean }) => void) => {
+      onFocusChanged(handler);
+      return Promise.resolve(() => {});
+    },
   }),
 }));
 

@@ -3913,7 +3913,19 @@ function AppInner() {
      until the window announces itself.
      ================================================================ */
   const [activityWindowOpen, setActivityWindowOpen] = useState(false);
+  const [activityClockMs, setActivityClockMs] = useState(() => Date.now());
   const lastActivityStateRef = useRef<ActivityWindowState | null>(null);
+
+  // The recently-finished trail ages out, so the projection needs a clock —
+  // but a coarse one, or every tick would re-push an identical queue.
+  useEffect(() => {
+    if (!activityWindowOpen) return;
+    const timer = window.setInterval(
+      () => setActivityClockMs(Date.now()),
+      60_000,
+    );
+    return () => window.clearInterval(timer);
+  }, [activityWindowOpen]);
 
   const activityWindowState = useMemo(
     () =>
@@ -3922,8 +3934,10 @@ function AppInner() {
         viewSnapshot?.interactive_requests ?? [],
         workspaceHostBadges,
         Boolean(selectedWorkspaceId),
+        activityClockMs,
       ),
     [
+      activityClockMs,
       groups,
       selectedWorkspaceId,
       viewSnapshot?.interactive_requests,
