@@ -187,24 +187,52 @@ impl AppState {
         thread_id: &str,
     ) -> Result<Arc<CodexSession>, DaemonError> {
         let session = self.session_for(workspace_id).await?;
-        let requires_resume = {
+        let (requires_resume, cwd, summary) = {
             let workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
                 .get(workspace_id)
                 .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
-            workspace
+            let thread = workspace
                 .threads
                 .get(thread_id)
-                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?
-                .requires_resume
+                .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+            let cwd = thread.summary.variant.as_ref().map_or_else(
+                || workspace.summary.path.clone(),
+                |variant| variant.path.clone(),
+            );
+            (thread.requires_resume, cwd, thread.summary.clone())
         };
         if requires_resume {
-            session.resume_thread(thread_id).await?;
+            let response = session.resume_thread(thread_id, &cwd).await?;
+            let hydration_cwd = cwd.clone();
+            let hydrated = tokio::task::spawn_blocking(move || {
+                crate::codex::hydrate_thread_response(summary, &response, &hydration_cwd)
+            })
+            .await
+            .map_err(|error| {
+                DaemonError::Process(format!(
+                    "failed to hydrate resumed Codex thread {thread_id}: {error}"
+                ))
+            })?;
             let mut workspaces = self.inner.workspaces.lock().await;
-            if let Some(workspace) = workspaces.get_mut(workspace_id)
+            let hydrated = if let Some(workspace) = workspaces.get_mut(workspace_id)
                 && let Some(thread) = workspace.threads.get_mut(thread_id)
             {
-                thread.requires_resume = false;
+                apply_resumed_codex_thread_hydration(thread, hydrated);
+                true
+            } else {
+                false
+            };
+            drop(workspaces);
+            if hydrated {
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.to_string()),
+                    UnifiedEvent::Snapshot {
+                        snapshot: self.snapshot().await,
+                    },
+                );
+                self.schedule_persist();
             }
         }
         Ok(session)
@@ -1244,28 +1272,101 @@ impl ManagedThread {
 
     pub(super) fn with_items(summary: ThreadSummary, items: Vec<ConversationItem>) -> Self {
         let mut thread = Self::new(summary);
+        thread.replace_items(items);
+        thread.requires_resume = true;
+        thread
+    }
+
+    fn replace_items(&mut self, items: Vec<ConversationItem>) {
+        self.items.clear();
+        self.assistant_items.clear();
+        self.reasoning_items.clear();
+        self.plan_items.clear();
+        self.tool_items.clear();
         for (index, item) in items.into_iter().enumerate() {
             let id = conversation_item_identity(&item).to_string();
             match &item {
                 ConversationItem::AssistantMessage { .. } => {
-                    thread.assistant_items.insert(id, index);
+                    self.assistant_items.insert(id, index);
                 }
                 ConversationItem::Reasoning { .. } => {
-                    thread.reasoning_items.insert(id, index);
+                    self.reasoning_items.insert(id, index);
                 }
                 ConversationItem::Plan { .. } => {
-                    thread.plan_items.insert(id, index);
+                    self.plan_items.insert(id, index);
                 }
                 ConversationItem::ToolCall { .. } | ConversationItem::FileChange { .. } => {
-                    thread.tool_items.insert(id, index);
+                    self.tool_items.insert(id, index);
                 }
                 _ => {}
             }
-            thread.items.push(item);
+            self.items.push(item);
         }
-        thread.requires_resume = true;
-        thread
     }
+}
+
+fn apply_resumed_codex_thread_hydration(
+    thread: &mut ManagedThread,
+    hydrated: crate::codex::HydratedThread,
+) {
+    if thread.summary.native_session_id.is_none() {
+        thread.summary.native_session_id = hydrated.summary.native_session_id;
+    }
+    if thread.summary.last_message_preview.is_none() {
+        thread.summary.last_message_preview = hydrated.summary.last_message_preview;
+    }
+    if thread.summary.latest_turn_id.is_none() {
+        thread.summary.latest_turn_id = hydrated.summary.latest_turn_id;
+    }
+    if thread.summary.last_tool.is_none() {
+        thread.summary.last_tool = hydrated.summary.last_tool;
+    }
+    thread.summary.updated_at = thread.summary.updated_at.max(hydrated.summary.updated_at);
+    let merged_items = merge_resumed_codex_items(&thread.items, hydrated.items);
+    thread.replace_items(merged_items);
+    thread.requires_resume = false;
+}
+
+fn merge_resumed_codex_items(
+    current: &[ConversationItem],
+    hydrated: Vec<ConversationItem>,
+) -> Vec<ConversationItem> {
+    let current_has_native_history = current.iter().any(|item| match item {
+        ConversationItem::UserMessage { turn_id, .. } => turn_id.is_some(),
+        ConversationItem::Service { .. } | ConversationItem::InteractiveRequest { .. } => false,
+        _ => true,
+    });
+    let (mut primary, secondary) = if current_has_native_history {
+        (current.to_vec(), hydrated)
+    } else {
+        (hydrated, current.to_vec())
+    };
+    let primary_ids = primary
+        .iter()
+        .map(|item| conversation_item_identity(item).to_string())
+        .collect::<HashSet<_>>();
+    let primary_user_turns = primary
+        .iter()
+        .filter_map(user_message_turn_key)
+        .collect::<HashSet<_>>();
+    primary.extend(secondary.into_iter().filter(|item| {
+        !primary_ids.contains(conversation_item_identity(item))
+            && user_message_turn_key(item).is_none_or(|key| !primary_user_turns.contains(&key))
+    }));
+    primary.sort_by_key(crate::codex::conversation_item_created_at);
+    primary
+}
+
+fn user_message_turn_key(item: &ConversationItem) -> Option<(String, String)> {
+    let ConversationItem::UserMessage {
+        text,
+        turn_id: Some(turn_id),
+        ..
+    } = item
+    else {
+        return None;
+    };
+    Some((turn_id.clone(), text.clone()))
 }
 
 impl ManagedWorkspace {
@@ -1445,6 +1546,216 @@ fn claude_init_session_id(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn isolated_codex_thread() -> ManagedThread {
+        ManagedThread::new(ThreadSummary {
+            id: "thread-isolated".to_string(),
+            workspace_id: "workspace-1".to_string(),
+            title: "Persisted title".to_string(),
+            provider: AgentProvider::CODEX,
+            native_session_id: Some("thread-isolated".to_string()),
+            provider_transport: None,
+            handoff_from: None,
+            origin: None,
+            status: ThreadStatus::Idle,
+            updated_at: Utc::now(),
+            last_message_preview: None,
+            latest_turn_id: None,
+            latest_plan: None,
+            latest_diff: None,
+            last_tool: None,
+            last_error: None,
+            agent: ThreadAgentParams::default(),
+            attention: ThreadAttention::default(),
+            is_archived: false,
+            is_pinned: false,
+            goal: None,
+            queued_turns: Vec::new(),
+            variant: Some(falcondeck_core::ThreadVariant {
+                slug: "copy-1".to_string(),
+                path: "/tmp/project-copy".to_string(),
+                branch: "falcondeck/copy-1".to_string(),
+                kind: falcondeck_core::ThreadVariantKind::Clone,
+            }),
+        })
+    }
+
+    #[test]
+    fn resumed_isolated_codex_thread_rehydrates_its_conversation() {
+        let mut thread = isolated_codex_thread();
+        thread.requires_resume = true;
+        thread.replace_items(vec![ConversationItem::UserMessage {
+            id: "pending-user".to_string(),
+            text: "Sent while resuming".to_string(),
+            attachments: Vec::new(),
+            turn_id: None,
+            previous_turn_id: None,
+            created_at: Utc::now(),
+        }]);
+        let hydrated = crate::codex::hydrate_thread_response(
+            thread.summary.clone(),
+            &json!({
+                "thread": {
+                    "id": "thread-isolated",
+                    "turns": [{
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [
+                            {
+                                "id": "user-1",
+                                "type": "userMessage",
+                                "createdAt": "2026-08-14T15:00:00Z",
+                                "content": [{"type": "text", "text": "Keep my history"}]
+                            },
+                            {
+                                "id": "assistant-1",
+                                "type": "agentMessage",
+                                "createdAt": "2026-08-14T15:00:01Z",
+                                "text": "History restored"
+                            }
+                        ]
+                    }]
+                }
+            }),
+            "/tmp/project-copy",
+        );
+        thread.summary.title = "Renamed while hydrating".to_string();
+        thread.summary.attention.last_read_seq = 42;
+        thread.summary.is_pinned = true;
+        apply_resumed_codex_thread_hydration(&mut thread, hydrated);
+
+        assert!(!thread.requires_resume);
+        assert_eq!(thread.summary.title, "Renamed while hydrating");
+        assert_eq!(thread.summary.attention.last_read_seq, 42);
+        assert!(thread.summary.is_pinned);
+        assert_eq!(
+            thread
+                .summary
+                .variant
+                .as_ref()
+                .map(|variant| variant.path.as_str()),
+            Some("/tmp/project-copy")
+        );
+        assert_eq!(thread.items.len(), 3);
+        assert!(matches!(
+            &thread.items[0],
+            ConversationItem::UserMessage { text, .. } if text == "Keep my history"
+        ));
+        assert!(matches!(
+            &thread.items[1],
+            ConversationItem::AssistantMessage { text, .. } if text == "History restored"
+        ));
+        assert!(matches!(
+            &thread.items[2],
+            ConversationItem::UserMessage { text, .. } if text == "Sent while resuming"
+        ));
+    }
+
+    #[test]
+    fn resumed_codex_thread_keeps_daemon_error_when_native_turn_is_still_in_progress() {
+        let mut thread = isolated_codex_thread();
+        thread.summary.status = ThreadStatus::Error;
+        thread.summary.last_error = Some("Codex app-server disconnected".to_string());
+        let hydrated = crate::codex::hydrate_thread_response(
+            thread.summary.clone(),
+            &json!({
+                "thread": {
+                    "id": "thread-isolated",
+                    "turns": [{
+                        "id": "turn-1",
+                        "status": "inProgress",
+                        "items": []
+                    }]
+                }
+            }),
+            "/tmp/project-copy",
+        );
+
+        apply_resumed_codex_thread_hydration(&mut thread, hydrated);
+
+        assert_eq!(thread.summary.status, ThreadStatus::Error);
+        assert_eq!(
+            thread.summary.last_error.as_deref(),
+            Some("Codex app-server disconnected")
+        );
+    }
+
+    #[test]
+    fn resumed_codex_thread_deduplicates_local_and_provider_user_message_ids() {
+        let mut thread = isolated_codex_thread();
+        let hydrated = crate::codex::hydrate_thread_response(
+            thread.summary.clone(),
+            &json!({
+                "thread": {
+                    "id": "thread-isolated",
+                    "turns": [{
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [
+                            {
+                                "id": "provider-user",
+                                "type": "userMessage",
+                                "createdAt": "2026-08-14T15:00:00Z",
+                                "content": [{"type": "text", "text": "Same message"}]
+                            },
+                            {
+                                "id": "provider-assistant",
+                                "type": "agentMessage",
+                                "createdAt": "2026-08-14T15:00:01Z",
+                                "text": "Done"
+                            }
+                        ]
+                    }]
+                }
+            }),
+            "/tmp/project-copy",
+        );
+        let mut current = hydrated.items.clone();
+        if let ConversationItem::UserMessage { id, .. } = &mut current[0] {
+            *id = "local-user".to_string();
+        }
+        thread.replace_items(current);
+
+        apply_resumed_codex_thread_hydration(&mut thread, hydrated);
+
+        assert_eq!(thread.items.len(), 2);
+        assert!(matches!(
+            &thread.items[0],
+            ConversationItem::UserMessage { id, .. } if id == "local-user"
+        ));
+    }
+
+    #[test]
+    fn resumed_codex_thread_orders_provider_only_history_by_creation_time() {
+        let now = Utc::now();
+        let current = vec![ConversationItem::AssistantMessage {
+            id: "current".to_string(),
+            text: "Current".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: now,
+        }];
+        let hydrated = vec![ConversationItem::AssistantMessage {
+            id: "older-provider-item".to_string(),
+            text: "Older".to_string(),
+            phase: None,
+            memory_citation: None,
+            citations: Vec::new(),
+            lifecycle: ContentLifecycle::Complete,
+            error: None,
+            created_at: now - chrono::Duration::minutes(1),
+        }];
+
+        let merged = merge_resumed_codex_items(&current, hydrated);
+
+        assert!(matches!(
+            &merged[0],
+            ConversationItem::AssistantMessage { id, .. } if id == "older-provider-item"
+        ));
+    }
 
     #[test]
     fn init_event_yields_the_cli_reported_session_id() {

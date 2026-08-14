@@ -79,6 +79,33 @@ pub struct HydratedThread {
     pub title_is_provider_preview: bool,
 }
 
+/// Rebuild a thread from a `thread/read` or `thread/resume` response.
+///
+/// App-server's structured turns are intentionally lossy for tool activity,
+/// so supplement them from the rollout file when its path is available. The
+/// caller supplies the effective thread cwd because isolated FalconDeck
+/// threads belong to their variant rather than the parent workspace folder.
+pub(crate) fn hydrate_thread_response(
+    summary: ThreadSummary,
+    value: &Value,
+    workspace_path: &str,
+) -> HydratedThread {
+    let mut items = hydrate_thread_items(value);
+    if let Some(path) = extract_thread_session_path(value) {
+        if items.is_empty() {
+            items = hydrate_thread_items_from_session_file(&path, workspace_path);
+        } else {
+            supplement_thread_items_with_session_tool_calls(&mut items, &path, workspace_path);
+        }
+    }
+    let summary = hydrate_thread_summary(summary, value, &items);
+    HydratedThread {
+        summary,
+        items,
+        title_is_provider_preview: false,
+    }
+}
+
 /// Upper bound for control-plane requests (initialize, account/model/thread
 /// listing, resume). These are bounded operations; a missing response means the
 /// app-server is wedged and callers must not hang forever. Turn-scoped
@@ -527,9 +554,12 @@ impl CodexSession {
             .await
     }
 
-    pub async fn resume_thread(&self, thread_id: &str) -> Result<Value, DaemonError> {
-        self.send_control_request("thread/resume", json!({ "threadId": thread_id }))
-            .await
+    pub async fn resume_thread(&self, thread_id: &str, cwd: &str) -> Result<Value, DaemonError> {
+        self.send_control_request(
+            "thread/resume",
+            json!({ "threadId": thread_id, "cwd": cwd }),
+        )
+        .await
     }
 
     pub async fn respond_to_request(
@@ -1319,7 +1349,9 @@ fn truncate_preview(text: &str) -> String {
     format!("{preview}...")
 }
 
-fn conversation_item_created_at(item: &ConversationItem) -> Option<chrono::DateTime<Utc>> {
+pub(crate) fn conversation_item_created_at(
+    item: &ConversationItem,
+) -> Option<chrono::DateTime<Utc>> {
     Some(match item {
         ConversationItem::UserMessage { created_at, .. }
         | ConversationItem::AssistantMessage { created_at, .. }
