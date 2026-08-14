@@ -209,6 +209,13 @@ pub fn router(state: AppState) -> Router {
             get(read_connectors).put(update_connectors),
         )
         .route("/api/providers", get(read_providers).put(update_providers))
+        .route("/api/harnesses", get(read_harnesses))
+        .route("/api/harnesses/refresh", post(refresh_harnesses))
+        .route("/api/harnesses/upgrade", post(upgrade_harness))
+        .route(
+            "/api/harnesses/jobs/{job_id}",
+            get(harness_upgrade_job_status),
+        )
         .route(
             "/api/speech/openrouter-key",
             get(speech_openrouter_status)
@@ -846,6 +853,36 @@ async fn update_providers(
     crate::acp::write_providers_file(&providers_state_dir(&state)?, &request.providers)
         .map_err(DaemonError::BadRequest)?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+async fn read_harnesses(
+    State(state): State<AppState>,
+) -> Result<Json<falcondeck_core::HarnessesOverview>, DaemonError> {
+    Ok(Json(state.harnesses_overview().await))
+}
+
+async fn refresh_harnesses(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::HarnessRefreshRequest>,
+) -> Result<Json<falcondeck_core::HarnessesOverview>, DaemonError> {
+    Ok(Json(state.refresh_harnesses(request).await?))
+}
+
+async fn upgrade_harness(
+    State(state): State<AppState>,
+    Json(request): Json<falcondeck_core::HarnessUpgradeRequest>,
+) -> Result<
+    Json<crate::app::harness_manager::StartHarnessUpgradeResponse>,
+    DaemonError,
+> {
+    Ok(Json(state.start_harness_upgrade(request).await?))
+}
+
+async fn harness_upgrade_job_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<falcondeck_core::HarnessUpgradeJob>, DaemonError> {
+    Ok(Json(state.harness_upgrade_job(&job_id).await?))
 }
 
 async fn read_connectors(

@@ -13,6 +13,7 @@ import {
   Plug,
   Server,
   Settings,
+  Terminal,
   Wifi,
 } from "lucide-react";
 
@@ -24,6 +25,7 @@ export type SettingsSectionId =
   | "keyboard"
   | "servers"
   | "agents"
+  | "harnesses"
   | "connectors"
   | "extensions"
   | "speech"
@@ -66,6 +68,12 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: "Agents",
     description: "Built-in and custom ACP agents",
     icon: Bot,
+  },
+  {
+    id: "harnesses",
+    label: "Harnesses",
+    description: "CLI installs, versions, and upgrades",
+    icon: Terminal,
   },
   {
     id: "connectors",

@@ -703,18 +703,19 @@ fn pairing_script(relay_url: &str) -> String {
     )
 }
 
-/// Result of one remote command.
+/// Result of one remote command. Shared with the harness manager, which runs
+/// the same BatchMode ssh pattern for its remote probes and upgrades.
 #[derive(Debug, Clone)]
-struct SshOutput {
-    success: bool,
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
+pub(super) struct SshOutput {
+    pub(super) success: bool,
+    pub(super) exit_code: Option<i32>,
+    pub(super) stdout: String,
+    pub(super) stderr: String,
 }
 
 impl SshOutput {
     /// Exit status plus stderr, for error messages and the job log.
-    fn failure_detail(&self) -> String {
+    pub(super) fn failure_detail(&self) -> String {
         let code = self
             .exit_code
             .map(|code| format!("exit code {code}"))
@@ -727,7 +728,7 @@ impl SshOutput {
         }
     }
 
-    fn combined_output(&self) -> String {
+    pub(super) fn combined_output(&self) -> String {
         let mut output = self.stdout.trim().to_string();
         let stderr = self.stderr.trim();
         if !stderr.is_empty() {
@@ -758,7 +759,11 @@ impl SshOutput {
 ///
 /// The target and script are separate argv entries, so nothing here is
 /// interpreted by a local shell.
-async fn ssh_exec(target: &str, port: Option<u16>, script: &str) -> Result<SshOutput, DaemonError> {
+pub(super) async fn ssh_exec(
+    target: &str,
+    port: Option<u16>,
+    script: &str,
+) -> Result<SshOutput, DaemonError> {
     ssh_exec_with_timeout(target, port, script, SSH_COMMAND_TIMEOUT).await
 }
 
@@ -768,7 +773,7 @@ async fn ssh_exec(target: &str, port: Option<u16>, script: &str) -> Result<SshOu
 /// `ConnectTimeout` only bounds the TCP handshake. Without a ceiling on the
 /// command itself, one wedged remote process would leave the job stuck on
 /// `running` forever with no way for the user to tell what happened.
-async fn ssh_exec_with_timeout(
+pub(super) async fn ssh_exec_with_timeout(
     target: &str,
     port: Option<u16>,
     script: &str,
@@ -783,7 +788,11 @@ async fn ssh_exec_with_timeout(
     }
 }
 
-async fn run_ssh(target: &str, port: Option<u16>, script: &str) -> Result<SshOutput, DaemonError> {
+pub(super) async fn run_ssh(
+    target: &str,
+    port: Option<u16>,
+    script: &str,
+) -> Result<SshOutput, DaemonError> {
     let mut command = Command::new("ssh");
     command
         .arg("-o")
@@ -815,7 +824,7 @@ async fn run_ssh(target: &str, port: Option<u16>, script: &str) -> Result<SshOut
 
 /// Rejects targets that `ssh` could read as flags or that carry characters no
 /// legitimate host alias needs.
-fn validate_ssh_target(target: &str) -> Result<String, DaemonError> {
+pub(super) fn validate_ssh_target(target: &str) -> Result<String, DaemonError> {
     let target = target.trim();
     if target.is_empty() {
         return Err(DaemonError::BadRequest(

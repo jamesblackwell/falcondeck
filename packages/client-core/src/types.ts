@@ -116,6 +116,69 @@ export type WorkspaceAgentSummary = {
   capabilities?: AgentCapabilitySummary;
 };
 
+/** How FalconDeck knows about a coding harness (agent CLI). */
+export type HarnessKind = "builtin" | "acp" | "detected";
+
+/**
+ * Install status of one coding harness on one host (local machine or an SSH
+ * target). Latest-version fields are only populated after an explicit
+ * refresh with update checks enabled.
+ */
+export type HarnessSummary = {
+  id: string;
+  label: string;
+  kind: HarnessKind;
+  /** Binary name the daemon resolves and launches. */
+  bin: string;
+  resolved_path?: string | null;
+  installed?: boolean;
+  version?: string | null;
+  latest_version?: string | null;
+  update_available?: boolean | null;
+  /** Best-effort install classification (npm/homebrew/cargo/local/unknown). */
+  install_source?: string | null;
+  /** Command FalconDeck can run to install/upgrade, when managed. */
+  upgrade_command?: string | null;
+  /** Auth/subscription state line reported by the harness, when probed. */
+  account_status?: string | null;
+};
+
+/** Response for the harness overview endpoints. */
+export type HarnessesOverview = {
+  /** Host the statuses describe: "local" or the SSH target. */
+  host: string;
+  harnesses: HarnessSummary[];
+};
+
+/** Request body for `POST /api/harnesses/refresh`. */
+export type HarnessRefreshRequest = {
+  ssh_target?: string | null;
+  port?: number | null;
+  /** Also look up latest published versions (network). Defaults to true. */
+  include_latest?: boolean;
+};
+
+/** Request body for `POST /api/harnesses/upgrade`. */
+export type HarnessUpgradeRequest = {
+  harness_id: string;
+  ssh_target?: string | null;
+  port?: number | null;
+};
+
+export type HarnessUpgradeStatus = "running" | "completed" | "failed";
+
+/** Install/upgrade job state, polled by the settings panel. */
+export type HarnessUpgradeJob = {
+  job_id: string;
+  harness_id: string;
+  label: string;
+  /** Host the job runs on: "local" or the SSH target. */
+  host: string;
+  status: HarnessUpgradeStatus;
+  log: string[];
+  error?: string | null;
+};
+
 export type ThreadAgentParams = {
   model_id: string | null;
   reasoning_effort: string | null;

@@ -5,6 +5,9 @@ import {
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
   normalizeExtensionSnapshot,
+  normalizeHarnessesOverview,
+  normalizeHarnessSummary,
+  normalizeHarnessUpgradeJob,
   normalizeInteractiveRequest,
   normalizeThreadDetail,
   normalizeToolCallDisplay,
@@ -808,5 +811,79 @@ describe("provider output summary normalization", () => {
         provider_output_summary: { images: 1 },
       }).provider_output_summary,
     ).toBeNull();
+  });
+});
+
+describe("harness normalization", () => {
+  it("normalizes a full harness overview response", () => {
+    const normalized = normalizeHarnessesOverview({
+      host: "local",
+      harnesses: [
+        {
+          id: "codex",
+          label: "Codex",
+          kind: "builtin",
+          bin: "codex",
+          resolved_path: "/usr/local/lib/node_modules/@openai/codex/bin/codex",
+          installed: true,
+          version: "0.12.0",
+          latest_version: "0.13.0",
+          update_available: true,
+          install_source: "npm",
+          upgrade_command: "npm install -g @openai/codex",
+          account_status: "Logged in using ChatGPT",
+        },
+        {
+          id: "zcode",
+          label: "Zcode (GLM)",
+          kind: "detected",
+          bin: "zcode",
+          installed: false,
+        },
+      ],
+    });
+    expect(normalized.host).toBe("local");
+    expect(normalized.harnesses).toHaveLength(2);
+    const codex = normalized.harnesses[0];
+    expect(codex?.update_available).toBe(true);
+    expect(codex?.install_source).toBe("npm");
+    const zcode = normalized.harnesses[1];
+    expect(zcode?.kind).toBe("detected");
+    expect(zcode?.resolved_path).toBeNull();
+    expect(zcode?.installed).toBe(false);
+  });
+
+  it("drops malformed harness entries and falls back to defaults", () => {
+    const normalized = normalizeHarnessesOverview({
+      host: "  ",
+      harnesses: [{ label: "no ids here" }, { id: "x", bin: "" }, null],
+    });
+    expect(normalized.host).toBe("local");
+    expect(normalized.harnesses).toHaveLength(0);
+  });
+
+  it("treats an unknown kind as detected rather than rejecting the entry", () => {
+    const normalized = normalizeHarnessSummary({
+      id: "grok",
+      bin: "grok",
+      kind: "mystery",
+    });
+    expect(normalized?.kind).toBe("detected");
+    expect(normalized?.label).toBe("grok");
+  });
+
+  it("normalizes upgrade jobs and rejects ones without identity", () => {
+    const job = normalizeHarnessUpgradeJob({
+      job_id: "job-1",
+      harness_id: "codex",
+      label: "Codex",
+      host: "local",
+      status: "failed",
+      log: ["Running: npm install -g @openai/codex", 42],
+      error: "exit code 1",
+    });
+    expect(job?.status).toBe("failed");
+    expect(job?.log).toEqual(["Running: npm install -g @openai/codex"]);
+    expect(normalizeHarnessUpgradeJob({ status: "running" })).toBeNull();
   });
 });

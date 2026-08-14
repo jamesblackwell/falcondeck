@@ -11,6 +11,9 @@ import type {
   DaemonSnapshot,
   EventEnvelope,
   FalconDeckPreferences,
+  HarnessesOverview,
+  HarnessSummary,
+  HarnessUpgradeJob,
   UtilityModelChoice,
   UtilityModelPreferences,
   ExtensionSnapshot,
@@ -2112,5 +2115,86 @@ function normalizeUtilityModelPreferences(
       ? providerOrder
       : [...DEFAULT_UTILITY_PROVIDER_ORDER],
     models,
+  };
+}
+
+const HARNESS_KINDS = new Set(["builtin", "acp", "detected"]);
+const HARNESS_UPGRADE_STATUSES = new Set([
+  "running",
+  "completed",
+  "failed",
+]);
+
+function optionalTrimmedString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+/** Normalizes one harness entry, tolerating partial daemon responses. */
+export function normalizeHarnessSummary(value: unknown): HarnessSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const id = typeof raw.id === "string" ? raw.id.trim() : "";
+  const bin = typeof raw.bin === "string" ? raw.bin.trim() : "";
+  if (!id || !bin) return null;
+  const kind = HARNESS_KINDS.has(String(raw.kind))
+    ? (raw.kind as HarnessSummary["kind"])
+    : "detected";
+  return {
+    id,
+    label: typeof raw.label === "string" && raw.label.trim() ? raw.label : id,
+    kind,
+    bin,
+    resolved_path: optionalTrimmedString(raw.resolved_path),
+    installed: raw.installed === true,
+    version: optionalTrimmedString(raw.version),
+    latest_version: optionalTrimmedString(raw.latest_version),
+    update_available:
+      typeof raw.update_available === "boolean" ? raw.update_available : null,
+    install_source: optionalTrimmedString(raw.install_source),
+    upgrade_command: optionalTrimmedString(raw.upgrade_command),
+    account_status: optionalTrimmedString(raw.account_status),
+  };
+}
+
+/** Normalizes the `GET/POST /api/harnesses(…/refresh)` response body. */
+export function normalizeHarnessesOverview(value: unknown): HarnessesOverview {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { host: "local", harnesses: [] };
+  }
+  const raw = value as Record<string, unknown>;
+  const host =
+    typeof raw.host === "string" && raw.host.trim() ? raw.host.trim() : "local";
+  const harnesses = Array.isArray(raw.harnesses)
+    ? raw.harnesses.flatMap((entry) => {
+        const normalized = normalizeHarnessSummary(entry);
+        return normalized ? [normalized] : [];
+      })
+    : [];
+  return { host, harnesses };
+}
+
+/** Normalizes a harness upgrade job status body. */
+export function normalizeHarnessUpgradeJob(value: unknown): HarnessUpgradeJob | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  const jobId = typeof raw.job_id === "string" ? raw.job_id.trim() : "";
+  const harnessId =
+    typeof raw.harness_id === "string" ? raw.harness_id.trim() : "";
+  if (!jobId || !harnessId) return null;
+  return {
+    job_id: jobId,
+    harness_id: harnessId,
+    label: typeof raw.label === "string" && raw.label.trim() ? raw.label : harnessId,
+    host:
+      typeof raw.host === "string" && raw.host.trim() ? raw.host.trim() : "local",
+    status: HARNESS_UPGRADE_STATUSES.has(String(raw.status))
+      ? (raw.status as HarnessUpgradeJob["status"])
+      : "running",
+    log: Array.isArray(raw.log)
+      ? raw.log.filter((line): line is string => typeof line === "string")
+      : [],
+    error: optionalTrimmedString(raw.error),
   };
 }

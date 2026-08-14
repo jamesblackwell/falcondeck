@@ -2660,6 +2660,130 @@ pub struct WorkspaceAgentSummary {
     pub capabilities: AgentCapabilitySummary,
 }
 
+/// How FalconDeck knows about a coding harness (agent CLI).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessKind {
+    /// Native daemon backend (Codex app-server, Claude CLI subprocess).
+    Builtin,
+    /// Entry declared in `providers.json` speaking ACP.
+    Acp,
+    /// Known harness detected on the machine but not configured in
+    /// FalconDeck yet. Shown so the panel can offer to set it up.
+    Detected,
+}
+
+/// Install status of one coding harness on one host (local or SSH).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HarnessSummary {
+    /// Harness id (`codex`, `claude`, `opencode`, …; ACP entries use their
+    /// providers.json id).
+    pub id: String,
+    /// Human-readable label for the settings panel.
+    pub label: String,
+    /// How FalconDeck knows about this harness.
+    pub kind: HarnessKind,
+    /// Binary name the daemon resolves and launches.
+    pub bin: String,
+    /// Absolute path when the binary was found, else `None`.
+    #[serde(default)]
+    pub resolved_path: Option<String>,
+    /// Whether the binary currently exists on the host.
+    #[serde(default)]
+    pub installed: bool,
+    /// Version reported by the binary (`<bin> --version`), when probed.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Latest published version, when a registry check ran. On-demand only:
+    /// this is `None` until the user asks for an update check.
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    /// True when `version` and `latest_version` are both known and differ.
+    #[serde(default)]
+    pub update_available: Option<bool>,
+    /// Best-effort classification of how the binary was installed
+    /// (npm, homebrew, cargo, local, unknown) based on its resolved path.
+    #[serde(default)]
+    pub install_source: Option<String>,
+    /// Command FalconDeck can run to install/upgrade the harness, when
+    /// managed. `None` for custom ACP entries and unknown harnesses.
+    #[serde(default)]
+    pub upgrade_command: Option<String>,
+    /// Auth/subscription state line reported by the harness, when probed
+    /// (e.g. Codex `codex login status`, Claude `claude auth status`).
+    #[serde(default)]
+    pub account_status: Option<String>,
+}
+
+/// Response for `GET /api/harnesses` and `POST /api/harnesses/refresh`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HarnessesOverview {
+    /// Host the statuses describe: `"local"` or the SSH target.
+    pub host: String,
+    /// One entry per known + configured harness, sorted by label.
+    pub harnesses: Vec<HarnessSummary>,
+}
+
+/// Request body for `POST /api/harnesses/refresh`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct HarnessRefreshRequest {
+    /// SSH alias or `user@host` to probe instead of this machine.
+    #[serde(default)]
+    pub ssh_target: Option<String>,
+    /// Optional SSH port override.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Also look up latest published versions (network). Defaults to true;
+    /// pass false for a cheap local re-probe.
+    #[serde(default = "default_true")]
+    pub include_latest: bool,
+}
+
+/// Request body for `POST /api/harnesses/upgrade`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct HarnessUpgradeRequest {
+    /// Harness id from the overview to install/upgrade.
+    pub harness_id: String,
+    /// SSH alias or `user@host` to upgrade on instead of this machine.
+    #[serde(default)]
+    pub ssh_target: Option<String>,
+    /// Optional SSH port override.
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// Lifecycle state of a harness install/upgrade job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessUpgradeStatus {
+    /// Work is still in flight.
+    Running,
+    /// The install/upgrade command completed successfully.
+    Completed,
+    /// The command failed or timed out; `error` explains what.
+    Failed,
+}
+
+/// Install/upgrade job state, also used verbatim as the status response
+/// body. Progress lives only in memory, like provisioning jobs.
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessUpgradeJob {
+    /// Job identifier.
+    pub job_id: String,
+    /// Harness id being installed/upgraded.
+    pub harness_id: String,
+    /// Harness label at the time the job started.
+    pub label: String,
+    /// Host the job runs on: `"local"` or the SSH target.
+    pub host: String,
+    /// Current lifecycle state.
+    pub status: HarnessUpgradeStatus,
+    /// Human-readable progress lines, including command output.
+    pub log: Vec<String>,
+    /// Failure reason when `status` is `failed`.
+    pub error: Option<String>,
+}
+
 /// Description of a supported reasoning effort.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReasoningEffortSummary {

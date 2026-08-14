@@ -78,6 +78,10 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "connectors.update",
     "providers.read",
     "providers.update",
+    "harnesses.read",
+    "harnesses.refresh",
+    "harnesses.upgrade",
+    "harnesses.job",
     "extensions.read",
     "extensions.update",
     "extensions.permission.update",
@@ -710,6 +714,41 @@ impl AppState {
                         tracing::info!("agent providers updated by a paired device");
                     }
                     result
+                }
+                "harnesses.read" => serde_json::to_value(self.harnesses_overview().await)
+                    .map_err(|error| format!("failed to serialize harnesses: {error}")),
+                "harnesses.refresh" => {
+                    let request = serde_json::from_value::<falcondeck_core::HarnessRefreshRequest>(
+                        params.clone(),
+                    )
+                    .map_err(|error| format!("invalid harness refresh payload: {error}"))?;
+                    serde_json::to_value(
+                        self.refresh_harnesses(request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize harnesses: {error}"))
+                }
+                "harnesses.upgrade" => {
+                    let request = serde_json::from_value::<falcondeck_core::HarnessUpgradeRequest>(
+                        params.clone(),
+                    )
+                    .map_err(|error| format!("invalid harness upgrade payload: {error}"))?;
+                    serde_json::to_value(
+                        self.start_harness_upgrade(request)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize harness job: {error}"))
+                }
+                "harnesses.job" => {
+                    let job_id = required(&["jobId", "job_id"])?;
+                    serde_json::to_value(
+                        self.harness_upgrade_job(&job_id)
+                            .await
+                            .map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| format!("failed to serialize harness job: {error}"))
                 }
                 "extensions.read" => serde_json::to_value(self.extension_snapshot().await)
                     .map_err(|error| format!("failed to serialize extensions: {error}")),

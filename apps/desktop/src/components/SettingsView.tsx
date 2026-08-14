@@ -15,6 +15,7 @@ import { AgentsPanel } from "./settings/AgentsPanel";
 import { AppearanceSettingsPanel } from "./settings/AppearanceSettingsPanel";
 import { ConnectorsPanel } from "./settings/ConnectorsPanel";
 import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
+import { HarnessesPanel } from "./settings/HarnessesPanel";
 import { ExtensionsPanel } from "./settings/ExtensionsPanel";
 import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
 import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
@@ -97,6 +98,12 @@ export function SettingsView(props: SettingsViewProps) {
             />
           ) : activeSection === "agents" ? (
             <AgentsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
+          ) : activeSection === "harnesses" ? (
+            <HarnessesPanel
+              baseUrl={props.baseUrl}
+              hosts={props.hosts}
+              onToast={props.onToast}
+            />
           ) : activeSection === "connectors" ? (
             <ConnectorsPanel
               baseUrl={props.baseUrl}

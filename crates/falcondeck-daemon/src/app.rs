@@ -51,6 +51,7 @@ mod extension_events;
 mod extension_host;
 mod extensions;
 mod handoff;
+pub(crate) mod harness_manager;
 pub(crate) mod host_provisioning;
 mod notifications;
 mod opencode_threads;
@@ -154,6 +155,13 @@ struct InnerState {
     /// a job is meaningless across a daemon restart, since the background task
     /// driving it is gone.
     provision_jobs: Mutex<HashMap<String, host_provisioning::ProvisionJob>>,
+    /// Harness (agent CLI) probe results keyed by host (`"local"` or an SSH
+    /// target), with the probe time for TTL checks.
+    harness_cache:
+        StdMutex<HashMap<String, (std::time::Instant, falcondeck_core::HarnessesOverview)>>,
+    /// Harness install/upgrade jobs keyed by job id. In-memory only, like
+    /// provisioning jobs.
+    harness_jobs: Mutex<HashMap<String, falcondeck_core::HarnessUpgradeJob>>,
     /// Set at the start of `shutdown` so respawn/reconnect paths cannot race
     /// the teardown with fresh agent processes.
     shutting_down: AtomicBool,
@@ -556,6 +564,8 @@ impl AppState {
                     unresumed_remote: None,
                 }),
                 provision_jobs: Mutex::new(HashMap::new()),
+                harness_cache: StdMutex::new(HashMap::new()),
+                harness_jobs: Mutex::new(HashMap::new()),
                 shutting_down: AtomicBool::new(false),
                 persist_pending: AtomicBool::new(false),
                 acp_hydrations_started: StdMutex::new(HashSet::new()),
