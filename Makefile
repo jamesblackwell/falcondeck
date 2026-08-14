@@ -75,7 +75,11 @@ FREE_UI_PORT = pids=$$(lsof -ti tcp:$(UI_PORT) -sTCP:LISTEN 2>/dev/null || true)
 	fi
 # Local installs use release+incremental so small Rust edits rebuild in a few
 # seconds instead of re-optimizing the whole crate (~20s → ~3s typical).
-DESKTOP_INSTALL_CARGO_ENV = CARGO_PROFILE_RELEASE_INCREMENTAL=true
+# The workspace release profile forces lto="thin" + codegen-units=1, which makes
+# the final link of the desktop binary sit on "607/608" for minutes and defeats
+# incremental reuse. Local installs override both (parallel codegen, no LTO);
+# distribution builds keep the fully-optimized release profile.
+DESKTOP_INSTALL_CARGO_ENV = CARGO_PROFILE_RELEASE_INCREMENTAL=true CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
 ifeq ($(strip $(DESKTOP_TAURI_TARGET)),)
 TAURI_BUILD = cd "$(DESKTOP_DIR)" && node "$(TAURI_CLI)" build
 TAURI_BUILD_INSTALL = cd "$(DESKTOP_DIR)" && $(DESKTOP_INSTALL_CARGO_ENV) node "$(TAURI_CLI)" build --bundles app --config src-tauri/tauri.local.conf.json
