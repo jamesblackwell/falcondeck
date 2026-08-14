@@ -39,7 +39,7 @@ export function RemotePairingScreen({
   const canSubmit = Boolean(relayUrl.trim() && pairingCode.trim()) && !isConnecting
 
   return (
-    <div className="fd-safe-area-padded flex min-h-[100dvh] flex-col items-center justify-center bg-surface-0">
+    <div className="fd-safe-area-padded flex h-full min-h-0 flex-col items-center justify-center overflow-y-auto bg-surface-0">
       <div className="w-full max-w-md space-y-6">
         <div className="text-center">
           <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-surface-2">

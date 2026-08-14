@@ -253,7 +253,20 @@ function lastAgentItemId(items: ConversationItem[]) {
 export default function App() {
   return (
     <ToastProvider>
-      <RemoteApp />
+      <div className="flex h-[100dvh] flex-col overflow-hidden bg-surface-0">
+        <aside
+          aria-label="Alpha notice"
+          className="shrink-0 border-b border-warning/25 bg-warning-muted px-3 py-1 text-center text-[length:var(--fd-text-xs)] text-warning"
+        >
+          <span className="font-semibold uppercase tracking-[0.12em]">Alpha</span>
+          <span aria-hidden="true"> · </span>
+          FalconDeck Remote is largely untested. We recommend the iOS or Mac app
+          for primary use.
+        </aside>
+        <div className="min-h-0 flex-1">
+          <RemoteApp />
+        </div>
+      </div>
     </ToastProvider>
   );
 }
@@ -4039,7 +4052,7 @@ function RemoteApp() {
   );
 
   return (
-    <div className="fd-safe-area flex h-[100dvh] flex-col overflow-x-hidden bg-surface-0">
+    <div className="fd-safe-area flex h-full flex-col overflow-x-hidden bg-surface-0">
       <SessionHeader
         workspace={selectedWorkspace}
         thread={selectedThread}

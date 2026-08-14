@@ -19,6 +19,9 @@ afterEach(() => {
 describe("App", () => {
   it("mounts on the pairing screen when nothing is stored", () => {
     render(<App />);
+    expect(screen.getByLabelText("Alpha notice")).toHaveTextContent(
+      "FalconDeck Remote is largely untested. We recommend the iOS or Mac app for primary use.",
+    );
     expect(
       screen.getByRole("heading", { name: "FalconDeck Remote" }),
     ).toBeInTheDocument();
