@@ -181,6 +181,18 @@ describe('live thread indicators', () => {
     expect(screen.getByRole('button', { name: /Thinking…/ })).toBeInTheDocument()
   })
 
+  it('keeps the work session alive between fast tool calls', () => {
+    const { rerender } = render(
+      <Conversation items={[toolCall({ id: 'tool-1' })]} isThinking />,
+    )
+
+    expect(screen.queryByRole('button', { name: /Worked for/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Working…/ })).toBeInTheDocument()
+
+    rerender(<Conversation items={[toolCall({ id: 'tool-1' })]} isThinking={false} />)
+    expect(screen.getByRole('button', { name: /Worked for/ })).toBeInTheDocument()
+  })
+
   it('settles the session back to "Worked for" once the turn ends', () => {
     const { rerender } = render(
       <Conversation

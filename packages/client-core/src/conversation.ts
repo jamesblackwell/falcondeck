@@ -1136,8 +1136,9 @@ export type ConversationPresentation = {
 };
 
 export type ConversationPresentationOptions = {
-  /** True while the agent's turn is still streaming. A trailing thought keeps
-      its work session alive so a running thread can never render as settled. */
+  /** True while the agent's turn is still streaming. The trailing work
+      session stays alive until the turn settles, including short gaps between
+      tool calls, so a running thread can never render as finished. */
   is_streaming?: boolean;
 };
 
@@ -1777,18 +1778,14 @@ export function deriveConversationPresentation(
     }
     flushWork();
 
-    // A turn that is mid-thought after its tools settled must keep its work
-    // session live. Without this the session collapses to "Worked for 43s"
-    // with the streaming thought buried inside it, and the conversation's
-    // standalone "Thinking…" line is suppressed because a reasoning item is
-    // the newest item — a running thread rendering zero indicators.
+    // Keep the trailing work session live for the whole turn, including the
+    // short gaps between fast tool calls. Settling it as soon as each tool
+    // completes makes the row flash "Worked" before returning to "Working".
+    // A trailing thought needs the same treatment: it is buried in this fold,
+    // so the standalone "Thinking…" line is intentionally suppressed.
     if (options.is_streaming) {
       const tail = historyBlocks[historyBlocks.length - 1];
-      if (
-        tail?.kind === "work_session" &&
-        !tail.running &&
-        tail.items[tail.items.length - 1]?.kind === "reasoning"
-      ) {
+      if (tail?.kind === "work_session" && !tail.running) {
         tail.running = true;
         tail.completed_at = null;
       }

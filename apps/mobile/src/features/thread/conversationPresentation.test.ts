@@ -236,7 +236,7 @@ describe('collapsed mode grouping', () => {
     expect(settledTail.running).toBe(false)
   })
 
-  it('leaves sessions that end in tool calls alone when streaming', () => {
+  it('keeps a settled tool session live between calls while streaming', () => {
     const presentation = deriveConversationPresentation(
       [toolCall({ id: 'tool-1' })],
       collapsed,
@@ -245,6 +245,7 @@ describe('collapsed mode grouping', () => {
 
     const tail = presentation.history_blocks.at(-1)
     if (tail?.kind !== 'work_session') throw new Error('expected a work session tail')
-    expect(tail.running).toBe(false)
+    expect(tail.running).toBe(true)
+    expect(tail.completed_at).toBeNull()
   })
 })
