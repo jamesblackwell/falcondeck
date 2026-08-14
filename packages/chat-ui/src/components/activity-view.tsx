@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { Activity, Check, CircleAlert, Plus, Play, X } from "lucide-react";
 
 import {
@@ -44,33 +52,50 @@ type ResolvedEntry = {
   request: InteractiveRequest;
 };
 
+/** Per-section tone. Everything visual keys off `toneVar` through --fd-tone,
+ *  so palettes and light mode carry through without a hard-coded color. */
 const SECTION_META: Record<
   ActivitySection,
-  { title: string; description: string; icon: typeof Activity; tone: string }
+  {
+    title: string;
+    description: string;
+    icon: typeof Activity;
+    tone: string;
+    toneVar: string;
+    glyph: string;
+  }
 > = {
   blocked: {
     title: "Blocked",
     description: "Waiting for your approval or answer",
     icon: CircleAlert,
     tone: "text-warning",
+    toneVar: "var(--fd-warning)",
+    glyph: "?",
   },
   failed: {
     title: "Failed",
     description: "Runs that need acknowledging",
     icon: X,
     tone: "text-danger",
+    toneVar: "var(--fd-danger)",
+    glyph: "✗",
   },
   ready: {
     title: "Ready for you",
     description: "Finished turns you have not read",
     icon: Check,
     tone: "text-info",
+    toneVar: "var(--fd-info)",
+    glyph: "✓",
   },
   running: {
     title: "Running",
     description: "Work in progress",
     icon: Play,
     tone: "text-success",
+    toneVar: "var(--fd-success)",
+    glyph: "›",
   },
 };
 
@@ -84,6 +109,11 @@ const SUMMARY_STATS: readonly {
   { section: "ready", label: "Ready", tone: "text-info" },
   { section: "running", label: "Running", tone: "text-success" },
 ];
+
+/** Counters read as instrument digits: fixed width, never a bare "0". */
+function padCount(count: number) {
+  return count < 10 ? `0${count}` : String(count);
+}
 
 function entryKey(entry: ActivityEntry) {
   return `${entry.workspaceId}:${entry.thread.id}`;
@@ -252,59 +282,53 @@ const ActivityRow = memo(
               "Working…")
             : null;
 
+    const meta = SECTION_META[entry.section];
+    const running = entry.section === "running";
+
     return (
       <article
+        style={{ "--fd-tone": meta.toneVar } as CSSProperties}
         className={cn(
-          "rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 p-4 shadow-[var(--fd-shadow-sm)]",
+          "fd-tone-edge fd-terminal-card group flex flex-col rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 shadow-[var(--fd-shadow-sm)]",
           entry.section !== "blocked" && "h-36 overflow-hidden",
           offline && "opacity-60",
         )}
         data-activity-thread={entry.thread.id}
       >
-        <div
-          className={cn(
-            "flex items-start gap-3",
-            entry.section !== "blocked" && "h-full",
-          )}
-        >
-          <button
-            type="button"
-            onClick={() => onOpenThread(entry.workspaceId, entry.thread.id)}
-            className="fd-focus min-w-0 flex-1 rounded-[var(--fd-radius-sm)] text-left"
-          >
-            <span className="flex flex-wrap items-center gap-2">
-              <span className="truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
-                {entry.thread.title}
-              </span>
-              {host ? (
-                <Badge variant={offline ? "danger" : "default"}>
-                  {host.name}
-                  {offline ? " · Offline" : ""}
-                </Badge>
-              ) : null}
-            </span>
-            <span className="mt-1 block text-[length:var(--fd-text-xs)] text-fg-muted">
-              {entry.projectLabel} · {timeAgo(entry.thread.updated_at, nowMs)}
-            </span>
-            {reason ? (
-              <span
-                className={cn(
-                  "mt-2 line-clamp-3 break-words whitespace-pre-wrap text-[length:var(--fd-text-sm)] text-fg-secondary",
-                  entry.section === "running" &&
-                    "font-mono text-[length:var(--fd-text-xs)] leading-relaxed",
-                )}
-              >
-                {reason}
-              </span>
-            ) : null}
-          </button>
+        {/* Terminal chrome: origin, host, and age — never the payload. The
+            interaction fill separates from the card body in both light and
+            dark, where a fixed surface step only works in one. */}
+        <div className="flex shrink-0 items-center gap-2 rounded-t-[var(--fd-radius-lg)] border-b border-border-subtle bg-[color:var(--fd-interactive-hover)] px-3 py-1.5">
+          <span
+            aria-hidden="true"
+            className={cn("fd-led shrink-0", running && "fd-led--pulse")}
+          />
+          <span className="fd-microlabel min-w-0 flex-1 truncate text-fg-muted">
+            {entry.projectLabel}
+          </span>
+          {host ? (
+            <Badge
+              variant={offline ? "danger" : "default"}
+              className="fd-microlabel max-w-[45%] shrink truncate rounded-[var(--fd-radius-sm)] px-1.5"
+            >
+              {host.name}
+              {offline ? " · Offline" : ""}
+            </Badge>
+          ) : null}
+          <span className="fd-microlabel shrink-0 tabular-nums text-fg-faint">
+            {timeAgo(entry.thread.updated_at, nowMs)}
+          </span>
           {entry.section === "failed" || entry.section === "ready" ? (
-            <span title={offline ? "Host offline" : undefined}>
+            <span
+              className="-mr-1.5 shrink-0"
+              title={offline ? "Host offline" : undefined}
+            >
               <Button
                 type="button"
                 size="sm"
                 variant="ghost"
                 disabled={offline}
+                className="fd-microlabel h-6 px-1.5 opacity-70 transition-opacity group-hover:opacity-100"
                 onClick={() => {
                   void Promise.resolve(
                     onMarkThreadRead(entry.workspaceId, entry.thread.id),
@@ -317,8 +341,42 @@ const ActivityRow = memo(
           ) : null}
         </div>
 
+        <button
+          type="button"
+          onClick={() => onOpenThread(entry.workspaceId, entry.thread.id)}
+          className={cn(
+            "fd-focus-inset flex min-h-0 flex-col items-start gap-1.5 px-3.5 py-2.5 text-left",
+            entry.section !== "blocked" && "flex-1",
+          )}
+        >
+          <span className="w-full truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
+            {entry.thread.title}
+          </span>
+          {reason ? (
+            /* Recessed screen: the fixed card height reads as terminal void
+               rather than dead space, however short the last line was. */
+            <span className="flex min-h-0 w-full flex-1 items-start gap-1.5 overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-0 px-2 py-1.5">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "shrink-0 font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-[color:var(--fd-tone)]",
+                  running && "fd-prompt--live",
+                )}
+              >
+                {meta.glyph}
+              </span>
+              <span className="line-clamp-3 min-w-0 break-words whitespace-pre-wrap font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
+                {reason}
+              </span>
+            </span>
+          ) : null}
+        </button>
+
         {entry.section === "blocked" ? (
-          <div className="mt-4" title={offline ? "Host offline" : undefined}>
+          <div
+            className="px-3.5 pb-3.5"
+            title={offline ? "Host offline" : undefined}
+          >
             {request ? (
               <fieldset
                 disabled={offline}
@@ -343,6 +401,8 @@ const ActivityRow = memo(
             )}
           </div>
         ) : null}
+
+        {running ? <span aria-hidden="true" className="fd-scan" /> : null}
       </article>
     );
   },
@@ -458,15 +518,25 @@ export const ActivityView = memo(function ActivityView({
   );
 
   return (
-    <div className="flex h-full min-h-0 flex-col bg-surface-1">
-      <header className="flex shrink-0 items-center justify-between border-b border-border-subtle px-5 py-3">
-        <div>
-          <h1 className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
-            Activity
-          </h1>
-          <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-            Across all projects and hosts
-          </p>
+    <div className="fd-grid-canvas relative flex h-full min-h-0 flex-col bg-surface-0">
+      <header
+        data-tauri-drag-region="deep"
+        className="relative z-[1] flex shrink-0 items-center justify-between border-b border-border-subtle bg-surface-1/70 px-5 py-3 backdrop-blur-sm"
+      >
+        <div className="flex items-center gap-3">
+          <span
+            aria-hidden="true"
+            style={{ "--fd-tone": "var(--fd-accent)" } as CSSProperties}
+            className="fd-led fd-led--pulse"
+          />
+          <div>
+            <h1 className="text-[length:var(--fd-text-lg)] font-semibold tracking-[var(--fd-tracking-tight)] text-fg-primary">
+              Activity
+            </h1>
+            <p className="fd-microlabel text-fg-muted">
+              Across all projects and hosts
+            </p>
+          </div>
         </div>
         <Button
           type="button"
@@ -479,14 +549,21 @@ export const ActivityView = memo(function ActivityView({
         </Button>
       </header>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
-        <div className="mx-auto w-full max-w-[1440px] space-y-6">
+      <div className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-5 py-6">
+        <div className="mx-auto w-full max-w-[1440px] space-y-7">
           <section
             aria-label="Activity summary"
-            className="flex flex-col gap-4 rounded-[var(--fd-radius-xl)] border border-border-subtle bg-surface-2 px-4 py-3 shadow-[var(--fd-shadow-sm)] md:flex-row md:items-center"
+            style={
+              {
+                "--fd-tone": attentionCount
+                  ? "var(--fd-warning)"
+                  : "var(--fd-accent)",
+              } as CSSProperties
+            }
+            className="fd-tone-edge flex flex-col gap-4 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 px-4 py-3 shadow-[var(--fd-shadow-sm)] md:flex-row md:items-center"
           >
-            <div className="flex min-w-0 items-center gap-3 md:w-52 md:shrink-0">
-              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 text-fg-muted">
+            <div className="flex min-w-0 items-center gap-3 md:w-56 md:shrink-0">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] border border-[color:color-mix(in_srgb,var(--fd-tone)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--fd-tone)_10%,transparent)] text-[color:var(--fd-tone)]">
                 <Activity aria-hidden="true" className="h-4 w-4" />
               </span>
               <div className="min-w-0">
@@ -495,7 +572,7 @@ export const ActivityView = memo(function ActivityView({
                     ? "All caught up"
                     : `${attentionCount} need${attentionCount === 1 ? "s" : ""} attention`}
                 </p>
-                <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                <p className="fd-microlabel truncate text-fg-muted">
                   {runningCount > 0
                     ? `${runningCount} running quietly`
                     : "No active runs"}
@@ -503,25 +580,42 @@ export const ActivityView = memo(function ActivityView({
               </div>
             </div>
 
+            {/* Instrument row. A zeroed counter drops to a flat, faint digit so
+                the only things that glow are the ones with work behind them. */}
             <dl className="grid min-w-0 flex-1 grid-cols-2 gap-px overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-border-subtle sm:grid-cols-4">
-              {SUMMARY_STATS.map((stat) => (
-                <div
-                  key={stat.section}
-                  className="flex min-w-0 items-baseline justify-between gap-2 bg-surface-1 px-3 py-2 sm:block"
-                >
-                  <dt className="truncate text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em] text-fg-muted">
-                    {stat.label}
-                  </dt>
-                  <dd
-                    className={cn(
-                      "mt-0.5 text-[length:var(--fd-text-sm)] font-semibold tabular-nums",
-                      stat.tone,
-                    )}
+              {SUMMARY_STATS.map((stat) => {
+                const count = summaryCounts.get(stat.section) ?? 0;
+                return (
+                  <div
+                    key={stat.section}
+                    style={
+                      {
+                        "--fd-tone": SECTION_META[stat.section].toneVar,
+                      } as CSSProperties
+                    }
+                    className="relative flex min-w-0 items-baseline justify-between gap-2 bg-surface-0 px-3 py-2 sm:block"
                   >
-                    {summaryCounts.get(stat.section) ?? 0}
-                  </dd>
-                </div>
-              ))}
+                    <dt className="fd-microlabel truncate text-fg-muted">
+                      {stat.label}
+                    </dt>
+                    <dd
+                      className={cn(
+                        "mt-1 font-mono text-[length:var(--fd-text-xl)] font-semibold leading-none tabular-nums",
+                        count > 0
+                          ? cn(stat.tone, "fd-stat-live")
+                          : "text-fg-faint",
+                      )}
+                    >
+                      {padCount(count)}
+                    </dd>
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-[color:var(--fd-tone)]"
+                      style={{ opacity: count > 0 ? 0.55 : 0.1 }}
+                    />
+                  </div>
+                );
+              })}
             </dl>
 
             {onNewThread ? (
@@ -553,24 +647,35 @@ export const ActivityView = memo(function ActivityView({
               const meta = SECTION_META[section];
               const Icon = meta.icon;
               return (
-                <section key={section} aria-labelledby={`activity-${section}`}>
-                  <div className="mb-3 flex items-center gap-2">
-                    <Icon
+                <section
+                  key={section}
+                  aria-labelledby={`activity-${section}`}
+                  style={{ "--fd-tone": meta.toneVar } as CSSProperties}
+                >
+                  {/* Channel divider: label, hairline run-out, count. */}
+                  <div className="mb-3 flex items-center gap-2.5">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] border border-[color:color-mix(in_srgb,var(--fd-tone)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--fd-tone)_10%,transparent)]">
+                      <Icon
+                        aria-hidden="true"
+                        className={cn("h-3 w-3", meta.tone)}
+                      />
+                    </span>
+                    <h2
+                      id={`activity-${section}`}
+                      className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
+                    >
+                      {meta.title}
+                    </h2>
+                    <p className="hidden min-w-0 truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block">
+                      {meta.description}
+                    </p>
+                    <span
                       aria-hidden="true"
-                      className={cn("h-4 w-4", meta.tone)}
+                      className="h-px min-w-6 flex-1 bg-[linear-gradient(90deg,color-mix(in_srgb,var(--fd-tone)_32%,transparent),transparent)]"
                     />
-                    <div className="min-w-0 flex-1">
-                      <h2
-                        id={`activity-${section}`}
-                        className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary"
-                      >
-                        {meta.title}
-                      </h2>
-                      <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                        {meta.description}
-                      </p>
-                    </div>
-                    <Badge variant="default">{sectionEntries.length}</Badge>
+                    <span className="fd-microlabel shrink-0 tabular-nums text-fg-muted">
+                      {padCount(sectionEntries.length)}
+                    </span>
                   </div>
                   <div
                     data-activity-grid={section}
