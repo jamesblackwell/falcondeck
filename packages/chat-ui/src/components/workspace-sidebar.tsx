@@ -1284,7 +1284,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
           onSelectThread={handleSelectThread}
         />
         <section aria-labelledby="fd-projects-heading">
-          <div className="flex items-center justify-between px-2.5 pb-1.5">
+          {/* The action icons are optically aligned with the per-project new
+              thread button below: that glyph sits 10px from the sidebar edge
+              (px-2 row + p-0.5 button), while these 24px icon buttons inset
+              their 14px glyph by 5px — so the trailing padding drops to match. */}
+          <div className="flex items-center justify-between pb-1.5 pl-2.5 pr-[5px]">
             <h2
               id="fd-projects-heading"
               className="text-[length:var(--fd-text-xs)] font-medium uppercase tracking-[0.08em] text-fg-muted"
