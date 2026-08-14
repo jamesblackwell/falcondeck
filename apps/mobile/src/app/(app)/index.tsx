@@ -222,6 +222,7 @@ export default function HomeScreen() {
   const {
     clearThreadGoal,
     editQueuedTurn,
+    queuedTurnAttachmentPreview,
     removeQueuedTurn,
     setThreadGoal,
     setThreadMode,
@@ -747,6 +748,18 @@ export default function HomeScreen() {
       );
     },
     [editQueuedTurn, selectedThreadId, selectedWorkspaceId],
+  );
+
+  const handleQueuedTurnAttachmentPreview = useCallback(
+    (queuedId: string) => {
+      if (!selectedWorkspaceId || !selectedThreadId) return Promise.resolve(null);
+      return queuedTurnAttachmentPreview(
+        selectedWorkspaceId,
+        selectedThreadId,
+        queuedId,
+      );
+    },
+    [queuedTurnAttachmentPreview, selectedThreadId, selectedWorkspaceId],
   );
 
   const handleSetGoal = useCallback(
@@ -1289,6 +1302,7 @@ export default function HomeScreen() {
         onRemove={handleRemoveQueuedTurn}
         onSteer={handleSteerQueuedTurn}
         onEdit={handleEditQueuedTurn}
+        getAttachmentPreview={handleQueuedTurnAttachmentPreview}
       />
 
       {/* The keyboard already covers the home indicator, so keeping the inset

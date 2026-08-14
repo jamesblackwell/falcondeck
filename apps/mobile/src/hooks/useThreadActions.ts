@@ -247,6 +247,22 @@ export function useThreadActions() {
     [],
   )
 
+  // Read-only, so a failure stays silent: the chip just shows no thumbnail
+  // rather than raising a relay banner over a cosmetic miss.
+  const queuedTurnAttachmentPreview = useCallback(
+    async (workspaceId: string, threadId: string, queuedId: string) => {
+      const relay = useRelayStore.getState()
+      const result = (await relay._callRpc(
+        'thread.queue.attachment_preview',
+        { workspace_id: workspaceId, thread_id: threadId, queued_id: queuedId },
+        { requestIdPrefix: 'mobile-queue' },
+      )) as { url?: unknown } | null
+      const url = result?.url
+      return typeof url === 'string' && url.startsWith('data:image/') ? url : null
+    },
+    [],
+  )
+
   return {
     archiveThread,
     renameThread,
@@ -258,5 +274,6 @@ export function useThreadActions() {
     removeQueuedTurn,
     steerQueuedTurn,
     editQueuedTurn,
+    queuedTurnAttachmentPreview,
   }
 }

@@ -1053,5 +1053,4 @@ mod tests {
         assert!(!is_loopback_host("[::1]evil"));
         assert!(!is_loopback_host(""));
     }
-
 }

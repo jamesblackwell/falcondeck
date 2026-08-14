@@ -26,6 +26,18 @@ function chipsOf(renderer: ReturnType<typeof renderComponent>) {
     .filter((node) => String(node.props.accessibilityLabel ?? '').startsWith('Queued message:'))
 }
 
+function findButton(renderer: ReturnType<typeof renderComponent>, label: string) {
+  const button = renderer.root
+    .findAllByType('Pressable' as never)
+    .find((node) => node.props.accessibilityLabel === label)
+  if (!button) throw new Error(`no button labelled "${label}"`)
+  return button
+}
+
+function pressButton(renderer: ReturnType<typeof renderComponent>, label: string) {
+  findButton(renderer, label).props.onPress()
+}
+
 /** Presses a row in the open sheet by the label the user reads. */
 function pressSheetAction(renderer: ReturnType<typeof renderComponent>, label: string) {
   const row = renderer.root
@@ -181,6 +193,102 @@ describe('QueuedTurns', () => {
       buttons.find((button) => button.text === 'Save')!.onPress!('   ')
     })
     expect(onEdit).toHaveBeenCalledTimes(1)
+  })
+
+  it('steers and removes straight from the row buttons', async () => {
+    const onSteer = vi.fn(async () => {})
+    const onRemove = vi.fn(async () => {})
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued(), queued({ id: 'queued-2' })]}
+        canSteer
+        onRemove={onRemove}
+        onSteer={onSteer}
+        onEdit={noop}
+      />,
+    )
+
+    await act(async () => {
+      pressButton(r, 'Steer queued message: Also update the changelog')
+    })
+    expect(onSteer).toHaveBeenCalledWith('queued-1')
+
+    await act(async () => {
+      pressButton(r, 'Remove queued message: Also update the changelog')
+    })
+    expect(onRemove).toHaveBeenCalledWith('queued-1')
+  })
+
+  it('disables the row steer button rather than hiding it', () => {
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued()]}
+        canSteer={false}
+        onRemove={noop}
+        onSteer={noop}
+        onEdit={noop}
+      />,
+    )
+
+    const steer = findButton(r, 'Steer queued message: Also update the changelog')
+    expect(steer.props.disabled).toBe(true)
+    expect(steer.props.accessibilityHint).toBe(STEER_UNAVAILABLE_REASON)
+  })
+
+  it('shows the attachment thumbnail once the daemon returns one', async () => {
+    const getAttachmentPreview = vi.fn(async () => 'data:image/png;base64,AAAA')
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued({ attachment_count: 1 })]}
+        canSteer
+        onRemove={noop}
+        onSteer={noop}
+        onEdit={noop}
+        getAttachmentPreview={getAttachmentPreview}
+      />,
+    )
+    await act(async () => {})
+
+    expect(getAttachmentPreview).toHaveBeenCalledWith('queued-1')
+    const image = r.root.findAllByType('ExpoImage' as never)[0]
+    expect(image?.props.source).toEqual({ uri: 'data:image/png;base64,AAAA' })
+  })
+
+  it('renders no thumbnail when the message has no attachment', async () => {
+    const getAttachmentPreview = vi.fn(async () => 'data:image/png;base64,AAAA')
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued()]}
+        canSteer
+        onRemove={noop}
+        onSteer={noop}
+        onEdit={noop}
+        getAttachmentPreview={getAttachmentPreview}
+      />,
+    )
+    await act(async () => {})
+
+    expect(getAttachmentPreview).not.toHaveBeenCalled()
+    expect(r.root.findAllByType('ExpoImage' as never)).toHaveLength(0)
+  })
+
+  it('keeps the row image-free when the preview cannot be loaded', async () => {
+    const r = renderComponent(
+      <QueuedTurns
+        queuedTurns={[queued({ attachment_count: 1 })]}
+        canSteer
+        onRemove={noop}
+        onSteer={noop}
+        onEdit={noop}
+        getAttachmentPreview={async () => {
+          throw new Error('preview unavailable')
+        }}
+      />,
+    )
+    await act(async () => {})
+
+    expect(r.root.findAllByType('ExpoImage' as never)).toHaveLength(0)
+    expect(textOf(r)).toContain('Also update the changelog')
   })
 
   it('keeps the chip after a failed action instead of dropping it', async () => {

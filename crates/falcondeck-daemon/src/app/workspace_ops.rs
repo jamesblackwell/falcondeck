@@ -2008,8 +2008,7 @@ impl AppState {
         let attachment = self
             .queued_turn_attachment(workspace_id, thread_id, queued_id)
             .await?;
-        let unavailable =
-            || DaemonError::NotFound("queued image preview unavailable".to_string());
+        let unavailable = || DaemonError::NotFound("queued image preview unavailable".to_string());
         let path = attachment
             .local_path
             .as_deref()
