@@ -33,6 +33,7 @@ import { FileDiffProvider, type OpenFileDiff } from "../lib/file-diff-context";
 import { normalizeQuotedSelection } from "../lib/quoted-selection";
 import { ConversationExportButton } from "./conversation-export-button";
 import {
+  AGENT_STATUS_ROW_CLASS,
   LiveActivityLane,
   MessageCard,
   ToolSummaryCard,
@@ -706,10 +707,12 @@ export const Conversation = memo(function Conversation({
                   ) : isBusy && liveActivityGroups.length === 0 ? (
                     <div
                       role="status"
-                      className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted"
+                      className={AGENT_STATUS_ROW_CLASS}
                     >
-                      <ActivityDiamond size="md" />
-                      {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
+                      <ActivityDiamond />
+                      <span className="font-medium">
+                        {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
+                      </span>
                     </div>
                   ) : null}
                 </div>
@@ -788,10 +791,12 @@ export const Conversation = memo(function Conversation({
                   !streamingReasoningId)) ? (
                 <div
                   role="status"
-                  className="flex items-center gap-2 py-2 text-[length:var(--fd-text-sm)] text-fg-muted"
+                  className={AGENT_STATUS_ROW_CLASS}
                 >
-                  <ActivityDiamond size="md" />
-                  {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
+                  <ActivityDiamond />
+                  <span className="font-medium">
+                    {isSending ? (sendingLabel ?? "Sending…") : "Thinking…"}
+                  </span>
                 </div>
               ) : null}
 

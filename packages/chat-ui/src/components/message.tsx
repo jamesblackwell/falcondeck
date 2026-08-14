@@ -1992,6 +1992,14 @@ function StructuredJsonDisclosure({
 /** Height of the `preview` excerpt before the fade takes over. */
 const REASONING_PREVIEW_MAX_HEIGHT_PX = 88;
 
+/** Shared geometry for the transcript's live status rows: the standalone
+    "Thinking…"/"Sending…" indicator, a streaming thought's header, and a
+    running work session's header. All three say the same thing about the same
+    turn and trade places as the turn moves, so any drift in gap, diamond size,
+    or padding reads as the row twitching. Keep them on one class. */
+export const AGENT_STATUS_ROW_CLASS =
+  "flex max-w-full items-center gap-1.5 py-1 text-[length:var(--fd-text-sm)] text-fg-muted";
+
 function ReasoningMessage({
   item,
   thinkingDisplay = "auto",
@@ -2071,8 +2079,10 @@ function ReasoningMessage({
       ) : null}
     </>
   );
-  const headerClassName =
-    "flex max-w-full items-center gap-1.5 rounded-[var(--fd-radius-sm)] py-0.5 text-left text-[length:var(--fd-text-sm)] text-fg-muted";
+  const headerClassName = cn(
+    AGENT_STATUS_ROW_CLASS,
+    "rounded-[var(--fd-radius-sm)] text-left",
+  );
   const ariaLive =
     lifecycle === "error"
       ? "assertive"
@@ -2082,7 +2092,7 @@ function ReasoningMessage({
   const ariaLabel = durationLabel ? `${label}, ${durationLabel}` : label;
 
   return (
-    <div className="min-w-0 border-l-2 border-border-subtle pl-3">
+    <div className="min-w-0">
       {hasBody ? (
         <button
           type="button"
@@ -2109,7 +2119,14 @@ function ReasoningMessage({
       )}
       {hasBody && (open || showPreview) ? (
         <div
-          className={cn("relative mt-1", showPreview && "overflow-hidden")}
+          // The rule hangs from the thought's text rather than the whole
+          // block: a header-only row (the live "Thinking…" state) then sits on
+          // the same column as the standalone indicator it hands off to,
+          // instead of jumping right and growing a rule for a beat.
+          className={cn(
+            "relative mt-1 border-l-2 border-border-subtle pl-3",
+            showPreview && "overflow-hidden",
+          )}
           style={
             showPreview
               ? { maxHeight: REASONING_PREVIEW_MAX_HEIGHT_PX }
@@ -3251,7 +3268,10 @@ export const WorkSessionCard = memo(
           <button
             type="button"
             aria-expanded={open}
-            className="fd-focus group flex max-w-full items-center gap-1.5 rounded-[var(--fd-radius-sm)] py-1 text-[length:var(--fd-text-sm)] text-fg-muted transition-colors hover:text-fg-secondary"
+            className={cn(
+              AGENT_STATUS_ROW_CLASS,
+              "fd-focus group rounded-[var(--fd-radius-sm)] transition-colors hover:text-fg-secondary",
+            )}
           >
             {running ? (
               <>
