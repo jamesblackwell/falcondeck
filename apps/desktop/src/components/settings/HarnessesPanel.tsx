@@ -89,21 +89,39 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
     () => hosts.filter((host) => host.enabled && host.sshTarget),
     [hosts],
   )
+  // HostView identities churn on every HostManager notification (presence,
+  // relay events, snapshots); probing must only react to actual endpoint
+  // changes, so effects key off this signature instead of array identity.
+  const hostSignature = sshHosts
+    .map((host) => `${host.id}|${host.sshTarget}|${host.sshPort ?? ''}`)
+    .join(';')
+  // Latest read for endpoint resolution inside callbacks/effects without
+  // depending on the unstable `sshHosts` identity. Synced in an effect
+  // (declared before its consumers) rather than during render.
+  const sshHostsRef = useRef(sshHosts)
+  useEffect(() => {
+    sshHostsRef.current = sshHosts
+  }, [sshHosts])
+  // Host key of the most recent fetch request. Responses arriving after a
+  // host switch (or a job-completion re-probe for a previously selected
+  // host) must never render under the current selection.
+  const requestedHostRef = useRef(LOCAL_HOST_KEY)
 
   const hostLabel = useCallback(
     (key: string) => {
       if (key === LOCAL_HOST_KEY) return 'This Mac'
-      return sshHosts.find((candidate) => candidate.id === key)?.name ?? key
+      return sshHostsRef.current.find((candidate) => candidate.id === key)?.name ?? key
     },
-    [sshHosts],
+    [],
   )
 
   const fetchOverview = useCallback(
     async (key: string, deep: boolean) => {
       if (!baseUrl) return null
+      requestedHostRef.current = key
       if (deep) setIsRefreshing(true)
       try {
-        const endpoint = hostEndpoint(key, sshHosts)
+        const endpoint = hostEndpoint(key, sshHostsRef.current)
         if (deep && endpoint) {
           // Remote hosts have no shallow path: GET /api/harnesses serves
           // the local machine only, so any remote view is a deep probe.
@@ -116,16 +134,17 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
             }),
           })
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
-          setOverview(normalizeHarnessesOverview(await response.json()))
+          const next = normalizeHarnessesOverview(await response.json())
+          if (requestedHostRef.current === key) setOverview(next)
         } else {
           const response = await fetch(`${baseUrl}/api/harnesses`)
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
           const next = normalizeHarnessesOverview(await response.json())
           // Never render local data under a remote host's name.
           if (endpoint) return false
-          setOverview(next)
+          if (requestedHostRef.current === key) setOverview(next)
         }
-        setLoadError(null)
+        if (requestedHostRef.current === key) setLoadError(null)
         return true
       } catch (error) {
         setLoadError(error instanceof Error ? error.message : String(error))
@@ -135,7 +154,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         setIsLoading(false)
       }
     },
-    [baseUrl, sshHosts],
+    [baseUrl],
   )
 
   // Switching hosts must never show the previous host's data: clear first,
@@ -144,9 +163,9 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
     setOverview(null)
     setLoadError(null)
     setIsLoading(true)
-    const isRemote = hostEndpoint(hostKey, sshHosts) != null
+    const isRemote = hostEndpoint(hostKey, sshHostsRef.current) != null
     void fetchOverview(hostKey, isRemote)
-  }, [fetchOverview, hostKey, sshHosts])
+  }, [fetchOverview, hostKey, hostSignature])
 
   // Poll an upgrade job until it leaves `running`, mirroring the
   // provisioning panel's job loop.
@@ -194,7 +213,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   const startUpgrade = useCallback(
     async (harness: HarnessSummary) => {
       if (!baseUrl) return
-      const endpoint = hostEndpoint(hostKey, sshHosts)
+      const endpoint = hostEndpoint(hostKey, sshHostsRef.current)
       try {
         const response = await fetch(`${baseUrl}/api/harnesses/upgrade`, {
           method: 'POST',
@@ -225,7 +244,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         })
       }
     },
-    [baseUrl, hostKey, onToast, sshHosts],
+    [baseUrl, hostKey, onToast],
   )
 
   const harnesses = overview?.harnesses ?? []
@@ -286,7 +305,10 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                 size="sm"
                 variant="secondary"
                 onClick={() =>
-                  void fetchOverview(hostKey, hostEndpoint(hostKey, sshHosts) != null)
+                  void fetchOverview(
+                    hostKey,
+                    hostEndpoint(hostKey, sshHostsRef.current) != null,
+                  )
                 }
               >
                 Retry
