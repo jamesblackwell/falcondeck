@@ -109,7 +109,11 @@ describe('VoiceInputSheet', () => {
       await Promise.resolve()
     })
 
-    expect(callRpc).toHaveBeenCalledWith('speech.status', {})
+    expect(callRpc).toHaveBeenCalledWith(
+      'speech.status',
+      {},
+      { timeoutMs: 8_000 },
+    )
     expect(callRpc).not.toHaveBeenCalledWith(
       'speech.transcribe',
       expect.anything(),

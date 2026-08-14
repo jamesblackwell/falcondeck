@@ -1,0 +1,63 @@
+import { act } from 'react-test-renderer'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { renderComponent } from '@/test/render'
+import {
+  resetSpeechSettings,
+  updateSpeechSettings,
+} from '@/features/speech/speechSettings'
+import { useRelayStore } from '@/store/relay-store'
+
+import SpeechSettingsScreen from './speech'
+
+describe('SpeechSettingsScreen', () => {
+  const originalCallRpc = useRelayStore.getState()._callRpc
+
+  beforeEach(() => {
+    resetSpeechSettings()
+    updateSpeechSettings({ provider: 'openrouter' })
+  })
+
+  afterEach(() => {
+    useRelayStore.getState()._callRpc = originalCallRpc
+  })
+
+  it('shows a retry action when the desktop check fails and recovers on press', async () => {
+    const rpc = vi.fn().mockRejectedValue(new Error('desktop unavailable'))
+    useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
+    const rendered = renderComponent(<SpeechSettingsScreen />)
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const failedRow = rendered.root.findByProps({
+      label: 'Desktop credential',
+    })
+    expect(failedRow.props.detail).toBe(
+      'Paired desktop did not respond. Tap to retry.',
+    )
+
+    rpc.mockImplementation((method: string) =>
+      Promise.resolve(
+        method === 'speech.status'
+          ? { configured: true, storage: 'os_credential_store' }
+          : [{ id: 'openai/gpt-transcribe', name: 'GPT Transcribe' }],
+      ),
+    )
+    await act(async () => {
+      failedRow.props.onPress()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(
+      rendered.root.findByProps({ label: 'Desktop credential' }).props.value,
+    ).toBe('Ready')
+    expect(rendered.root.findByProps({ label: 'Model' }).props.detail).toBe(
+      '1 transcription models available',
+    )
+  })
+})

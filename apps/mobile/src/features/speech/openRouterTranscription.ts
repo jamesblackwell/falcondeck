@@ -3,6 +3,8 @@ import { File } from 'expo-file-system'
 import { useRelayStore } from '@/store/relay-store'
 
 const TRANSCRIPTION_TIMEOUT_MS = 80_000
+const SPEECH_STATUS_TIMEOUT_MS = 8_000
+const SPEECH_MODELS_TIMEOUT_MS = 25_000
 const MAX_AUDIO_BYTES = 8 * 1024 * 1024
 
 export type SpeechModel = {
@@ -11,7 +13,13 @@ export type SpeechModel = {
 }
 
 export async function fetchOpenRouterSpeechModels(): Promise<SpeechModel[]> {
-  return useRelayStore.getState()._callRpc<SpeechModel[]>('speech.models', {})
+  return useRelayStore.getState()._callRpc<SpeechModel[]>(
+    'speech.models',
+    {},
+    {
+      timeoutMs: SPEECH_MODELS_TIMEOUT_MS,
+    },
+  )
 }
 
 function formatFromUri(uri: string): string {
@@ -28,10 +36,13 @@ export type DesktopSpeechStatus = {
 }
 
 export async function getDesktopSpeechStatus(): Promise<DesktopSpeechStatus> {
-  return useRelayStore.getState()._callRpc<DesktopSpeechStatus>(
-    'speech.status',
-    {},
-  )
+  return useRelayStore
+    .getState()
+    ._callRpc<DesktopSpeechStatus>(
+      'speech.status',
+      {},
+      { timeoutMs: SPEECH_STATUS_TIMEOUT_MS },
+    )
 }
 
 export async function transcribeWithDesktopOpenRouter({

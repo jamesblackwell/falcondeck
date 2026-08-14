@@ -26,11 +26,13 @@ describe('OpenRouter transcription', () => {
       { id: 'a/model', name: 'Alpha' },
       { id: 'z/model', name: 'Zulu' },
     ])
-    expect(rpc).toHaveBeenCalledWith('speech.models', {})
+    expect(rpc).toHaveBeenCalledWith('speech.models', {}, { timeoutMs: 25_000 })
   })
 
   it('sends audio to the daemon over encrypted RPC', async () => {
-    const rpc = vi.fn().mockResolvedValue({ text: 'Ship it', model: 'custom/model' })
+    const rpc = vi
+      .fn()
+      .mockResolvedValue({ text: 'Ship it', model: 'custom/model' })
     useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
 
     await expect(
@@ -47,11 +49,14 @@ describe('OpenRouter transcription', () => {
   })
 
   it('reads credential presence without receiving the key', async () => {
-    const rpc = vi.fn().mockResolvedValue({ configured: true, storage: 'os_credential_store' })
+    const rpc = vi
+      .fn()
+      .mockResolvedValue({ configured: true, storage: 'os_credential_store' })
     useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
     await expect(getDesktopSpeechStatus()).resolves.toEqual({
       configured: true,
       storage: 'os_credential_store',
     })
+    expect(rpc).toHaveBeenCalledWith('speech.status', {}, { timeoutMs: 8_000 })
   })
 })

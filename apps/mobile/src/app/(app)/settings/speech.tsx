@@ -27,24 +27,36 @@ export default function SpeechSettingsScreen() {
   const [models, setModels] = useState<SpeechModel[]>([])
   const [modelsError, setModelsError] = useState<string | null>(null)
   const [showModels, setShowModels] = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
     if (settings.provider !== 'openrouter') return
+    let active = true
     setDesktopStatus('checking')
     setModelsError(null)
-    void getDesktopSpeechStatus()
-      .then((status) =>
-        setDesktopStatus(status.configured ? 'configured' : 'missing'),
-      )
-      .catch(() => setDesktopStatus('offline'))
-    void fetchOpenRouterSpeechModels()
-      .then(setModels)
-      .catch(() =>
+    void (async () => {
+      try {
+        const status = await getDesktopSpeechStatus()
+        if (!active) return
+        setDesktopStatus(status.configured ? 'configured' : 'missing')
+      } catch {
+        if (active) setDesktopStatus('offline')
+        return
+      }
+      try {
+        const availableModels = await fetchOpenRouterSpeechModels()
+        if (active) setModels(availableModels)
+      } catch {
+        if (!active) return
         setModelsError(
-          'Could not refresh the model list. Your saved model will still work.',
-        ),
-      )
-  }, [settings.provider])
+          'Could not refresh models. Tap to retry; your saved model still works.',
+        )
+      }
+    })()
+    return () => {
+      active = false
+    }
+  }, [refreshKey, settings.provider])
 
   const modelItems = useMemo<OptionSheetItem[]>(() => {
     const available = models.map((model) => ({
@@ -99,10 +111,18 @@ export default function SpeechSettingsScreen() {
                 : desktopStatus === 'missing'
                   ? 'Not configured — open FalconDeck settings on your desktop'
                   : desktopStatus === 'offline'
-                    ? 'Paired desktop is currently unavailable'
+                    ? 'Paired desktop did not respond. Tap to retry.'
                     : 'Checking paired desktop…'
             }
-            value={desktopStatus === 'configured' ? 'Ready' : undefined}
+            value={
+              desktopStatus === 'configured'
+                ? 'Ready'
+                : desktopStatus === 'offline'
+                  ? 'Retry'
+                  : undefined
+            }
+            onPress={() => setRefreshKey((current) => current + 1)}
+            accessibilityHint="Check the paired desktop again"
           />
           <SettingsRow
             label="Model"

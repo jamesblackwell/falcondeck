@@ -104,7 +104,7 @@ impl AppState {
     }
 
     pub async fn speech_credential_status(&self) -> Result<SpeechCredentialStatus, DaemonError> {
-        let configured = run_secure_storage(load_openrouter_key).await?.is_some();
+        let configured = run_secure_storage(openrouter_key_exists).await?;
         Ok(SpeechCredentialStatus {
             configured,
             storage: "os_credential_store",
@@ -304,6 +304,31 @@ fn load_openrouter_key() -> Result<Option<String>, DaemonError> {
     }
 }
 
+#[cfg(all(not(test), target_os = "macos"))]
+fn openrouter_key_exists() -> Result<bool, DaemonError> {
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+
+    let mut options = ItemSearchOptions::new();
+    options
+        .class(ItemClass::generic_password())
+        .service(KEYRING_SERVICE)
+        .account(KEYRING_ACCOUNT)
+        .limit(Limit::Max(1))
+        .load_attributes(true);
+    match options.search() {
+        Ok(items) => Ok(!items.is_empty()),
+        Err(error) if error.code() == -25300 => Ok(false),
+        Err(error) => Err(DaemonError::Process(format!(
+            "failed to inspect OS credential store: {error}"
+        ))),
+    }
+}
+
+#[cfg(all(not(test), not(target_os = "macos")))]
+fn openrouter_key_exists() -> Result<bool, DaemonError> {
+    Ok(load_openrouter_key()?.is_some())
+}
+
 #[cfg(not(test))]
 fn save_openrouter_key(api_key: &str) -> Result<(), DaemonError> {
     credential_entry()?.set_password(api_key).map_err(|error| {
@@ -332,6 +357,11 @@ fn test_credential() -> &'static Mutex<Option<String>> {
 #[cfg(test)]
 fn load_openrouter_key() -> Result<Option<String>, DaemonError> {
     Ok(test_credential().lock().unwrap().clone())
+}
+
+#[cfg(test)]
+fn openrouter_key_exists() -> Result<bool, DaemonError> {
+    Ok(load_openrouter_key()?.is_some())
 }
 
 #[cfg(test)]
