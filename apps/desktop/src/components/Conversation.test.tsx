@@ -99,6 +99,23 @@ describe("Conversation empty state", () => {
     expect(transcript).toHaveAttribute("aria-live", "off");
   });
 
+  it("shows a specific preparation status in an otherwise empty conversation", () => {
+    render(
+      <Conversation
+        items={[]}
+        isSending
+        sendingLabel="Summarizing previous conversation…"
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Summarizing previous conversation…",
+    );
+    expect(
+      screen.queryByText("Ready for instructions"),
+    ).not.toBeInTheDocument();
+  });
+
   it("announces completion once without exposing streamed tokens as live text", () => {
     const streaming = {
       kind: "assistant_message" as const,

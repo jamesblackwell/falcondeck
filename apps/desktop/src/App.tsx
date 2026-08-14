@@ -361,6 +361,13 @@ function AppInner() {
   const [isSending, setIsSending] = useState(false);
   const [handoffPendingProvider, setHandoffPendingProvider] =
     useState<AgentProvider | null>(null);
+  // Once the destination exists, keep the otherwise-empty transcript visibly
+  // busy while FalconDeck compacts the source conversation into its handoff.
+  // Keying this to the destination avoids showing the indicator if the user
+  // navigates back to another thread while summarization is still running.
+  const [handoffPendingThreadKey, setHandoffPendingThreadKey] = useState<
+    string | null
+  >(null);
   // The first message in a new conversation has no daemon thread id yet, so
   // keep its optimistic transcript item keyed to the temporary composer
   // conversation until thread.start returns.
@@ -1980,6 +1987,10 @@ function AppInner() {
       let handoffPrompt: string | null = null;
       let targetLabel = provider;
       const showHandoffThread = (handle: ThreadHandle) => {
+        const destinationKey = draftKeyFor(
+          handle.workspace.id,
+          handle.thread.id,
+        );
         setSnapshot((current) =>
           current
             ? {
@@ -1998,10 +2009,8 @@ function AppInner() {
               }
             : current,
         );
-        conversationKeyRef.current = draftKeyFor(
-          handle.workspace.id,
-          handle.thread.id,
-        );
+        conversationKeyRef.current = destinationKey;
+        setHandoffPendingThreadKey(destinationKey);
         setSelectedWorkspaceId(handle.workspace.id);
         setSelectedThreadId(handle.thread.id);
         setThreadDetail({
@@ -2177,6 +2186,7 @@ function AppInner() {
         });
       } finally {
         setHandoffPendingProvider(null);
+        setHandoffPendingThreadKey(null);
       }
     },
     [
@@ -4154,6 +4164,8 @@ function AppInner() {
       threadDetail.workspace.id !== selectedWorkspaceId ||
       threadDetail.thread.id !== selectedThreadId),
   );
+  const isPreparingSelectedHandoff =
+    handoffPendingThreadKey === conversationKey;
   const operationalConditions = useMemo(
     () =>
       workspaceOperationalConditions(
@@ -4784,9 +4796,13 @@ function AppInner() {
               conversationItems={conversationItems}
               preferences={effectivePreferences}
               conversationEmptyState={conversationEmptyState}
-              isSending={isSending}
+              isSending={isSending || isPreparingSelectedHandoff}
               sendingLabel={
-                isPreparingIsolation ? "Setting up isolated copy…" : null
+                isPreparingSelectedHandoff
+                  ? "Summarizing previous conversation…"
+                  : isPreparingIsolation
+                    ? "Setting up isolated copy…"
+                    : null
               }
               isThreadDetailPending={isThreadDetailPending}
               hasOlderMessages={Boolean(
@@ -4921,8 +4937,13 @@ function AppInner() {
                   Boolean(sendBlockReason) ||
                   Boolean(attachmentSendBlockReason) ||
                   isSending ||
+                  isPreparingSelectedHandoff ||
                   preparingAttachmentCount > 0,
-                sendDisabledReason: attachmentSendBlockReason ?? undefined,
+                sendDisabledReason:
+                  attachmentSendBlockReason ??
+                  (isPreparingSelectedHandoff
+                    ? "Wait for the handoff summary to finish"
+                    : undefined),
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone
                 // stale or was never noticed.
