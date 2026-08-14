@@ -461,6 +461,41 @@ describe("ActivityView", () => {
       expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "first");
     });
 
+    it("follows the rendered card grid with the arrow keys", () => {
+      const running = ["a", "b", "c", "d"].map((id) =>
+        thread({
+          id,
+          status: "running",
+          attention: {
+            ...thread({ id: "base" }).attention,
+            level: "running",
+          },
+        }),
+      );
+      render(<ActivityView {...props({ groups: groups(running) })} />);
+
+      const positions = [[0, 0], [100, 0], [200, 0], [0, 100]];
+      for (const [index, element] of Array.from(
+        document.querySelectorAll<HTMLElement>("[data-activity-key]"),
+      ).entries()) {
+        const [left, top] = positions[index]!;
+        element.getBoundingClientRect = vi.fn(() => ({
+          left, top, width: 80, height: 60,
+          right: left + 80, bottom: top + 60, x: left, y: top,
+          toJSON: () => ({}),
+        }));
+      }
+
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(selectedThreadId()).toBe("a");
+      fireEvent.keyDown(window, { key: "ArrowRight" });
+      expect(selectedThreadId()).toBe("b");
+      fireEvent.keyDown(window, { key: "ArrowLeft" });
+      expect(selectedThreadId()).toBe("a");
+      fireEvent.keyDown(window, { key: "ArrowDown" });
+      expect(selectedThreadId()).toBe("d");
+    });
+
     it("clears the selected thread with R", () => {
       const onMarkThreadRead = vi.fn();
       render(
@@ -567,6 +602,17 @@ describe("ActivityView", () => {
       expect(toggle).toHaveAttribute("aria-expanded", "true");
       fireEvent.click(screen.getByRole("button", { name: /finished/ }));
       expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "finished");
+    });
+
+    it("shows a truncated last-agent preview with the full text on hover", () => {
+      const preview = "Implemented the fix and verified the complete desktop suite.";
+      const recent = finished();
+      recent[0]!.threads[0]!.last_message_preview = preview;
+      render(<ActivityView {...props({ groups: recent })} />);
+
+      fireEvent.click(screen.getByRole("button", { name: /Recent/ }));
+      expect(screen.getByText(preview)).toHaveClass("truncate");
+      expect(screen.getByText(preview)).toHaveAttribute("title", preview);
     });
 
     it("toggles the trail from the keyboard and takes selection into it", () => {

@@ -145,7 +145,8 @@ const KEY_HINTS: readonly {
   label: string;
   description: string;
 }[] = [
-  { key: "j / k", label: "move", description: "Move through the queue" },
+  { key: "← ↑ ↓ →", label: "move", description: "Move through the visual grid" },
+  { key: "j / k", label: "scan", description: "Scan the queue in order" },
   { key: "↵", label: "open", description: "Open in the main window" },
   { key: "r", label: "read", description: "Mark the selected thread read" },
   { key: "e", label: "recent", description: "Show what finished recently" },
@@ -164,6 +165,49 @@ function entryKey(entry: ActivityEntry) {
 
 function recentKey(entry: RecentEntry) {
   return `recent:${entry.workspaceId}:${entry.thread.id}`;
+}
+
+type NavigationDirection = "left" | "right" | "up" | "down";
+
+/** Follow the cards as rendered, including responsive two/three-column grids. */
+function spatialNeighbor(
+  root: HTMLElement | null,
+  selectedKey: string,
+  direction: NavigationDirection,
+) {
+  if (!root) return null;
+  const current = root.querySelector<HTMLElement>(
+    `[data-activity-key="${CSS.escape(selectedKey)}"]`,
+  );
+  if (!current) return null;
+  const origin = current.getBoundingClientRect();
+  const originX = origin.left + origin.width / 2;
+  const originY = origin.top + origin.height / 2;
+  let best: { key: string; score: number } | null = null;
+
+  for (const candidate of root.querySelectorAll<HTMLElement>(
+    "[data-activity-key]",
+  )) {
+    if (candidate === current) continue;
+    const rect = candidate.getBoundingClientRect();
+    const dx = rect.left + rect.width / 2 - originX;
+    const dy = rect.top + rect.height / 2 - originY;
+    const horizontal = direction === "left" || direction === "right";
+    const forward = direction === "left"
+      ? dx < -1
+      : direction === "right"
+        ? dx > 1
+        : direction === "up"
+          ? dy < -1
+          : dy > 1;
+    if (!forward) continue;
+    const primary = horizontal ? Math.abs(dx) : Math.abs(dy);
+    const crossAxis = horizontal ? Math.abs(dy) : Math.abs(dx);
+    const score = primary + crossAxis * 4;
+    const key = candidate.dataset.activityKey;
+    if (key && (!best || score < best.score)) best = { key, score };
+  }
+  return best?.key ?? null;
 }
 
 /** Typing in a card's answer box must not steal j/k/Enter. */
@@ -573,9 +617,19 @@ const RecentTrail = memo(function RecentTrail({
                     aria-hidden="true"
                     className="h-3 w-3 shrink-0 text-fg-faint"
                   />
-                  <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
+                  <span className="min-w-0 max-w-[42%] truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
                     {entry.thread.title}
                   </span>
+                  {entry.thread.last_message_preview ? (
+                    <span
+                      className="hidden min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block"
+                      title={entry.thread.last_message_preview}
+                    >
+                      {entry.thread.last_message_preview}
+                    </span>
+                  ) : (
+                    <span className="min-w-0 flex-1" />
+                  )}
                   <span className="fd-readout shrink-0 truncate text-fg-muted">
                     {entry.projectLabel}
                   </span>
@@ -748,13 +802,30 @@ export const ActivityView = memo(function ActivityView({
         setSelectedKey(selectable[next]?.key ?? null);
       };
 
+      const moveSpatially = (direction: NavigationDirection) => {
+        event.preventDefault();
+        if (selectable.length === 0) return;
+        if (!selectedKey) {
+          setSelectedKey(selectable[0]?.key ?? null);
+          return;
+        }
+        const next = spatialNeighbor(scrollRef.current, selectedKey, direction);
+        if (next) setSelectedKey(next);
+      };
+
       switch (event.key) {
         case "ArrowDown":
+          return moveSpatially("down");
         case "j":
           return step(1);
         case "ArrowUp":
+          return moveSpatially("up");
         case "k":
           return step(-1);
+        case "ArrowLeft":
+          return moveSpatially("left");
+        case "ArrowRight":
+          return moveSpatially("right");
         case "Enter": {
           const row = selectable.find((entry) => entry.key === selectedKey);
           const target = row?.entry ?? row?.recent;
