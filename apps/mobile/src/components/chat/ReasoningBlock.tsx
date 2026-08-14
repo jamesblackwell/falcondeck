@@ -136,7 +136,7 @@ export const ReasoningBlock = memo(function ReasoningBlock({
       </Pressable>
 
       {isOpen && hasBody ? (
-        <View style={styles.body}>
+        <View style={[styles.body, nested ? styles.bodyNested : null]}>
           <MarkdownRenderer
             text={item.content}
             streaming={activelyStreaming}
@@ -147,7 +147,7 @@ export const ReasoningBlock = memo(function ReasoningBlock({
 
       {showPreview ? (
         <Pressable
-          style={styles.body}
+          style={[styles.body, nested ? styles.bodyNested : null]}
           onPress={() => setOpenOverride(true)}
           accessibilityRole="button"
         >
@@ -181,20 +181,15 @@ export const ConnectedReasoningBlock = memo(function ConnectedReasoningBlock({
 const styles = StyleSheet.create((theme) => ({
   container: {
     marginHorizontal: theme.spacing[4],
-    marginVertical: theme.spacing[1],
-    borderLeftWidth: 2,
-    borderLeftColor: theme.colors.border.emphasis,
-    paddingLeft: theme.spacing[3],
   },
   containerNested: {
     marginHorizontal: 0,
-    borderLeftWidth: 0,
-    paddingLeft: 0,
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
     gap: theme.spacing[2],
+    paddingVertical: theme.spacing[1],
     // The painted row is short; keep the tap target at the HIG minimum.
     minHeight: theme.minTouchTarget,
   },
@@ -205,6 +200,18 @@ const styles = StyleSheet.create((theme) => ({
     transform: [{ rotate: "90deg" }],
   },
   body: {
+    // The rule hangs from the thought's text, not its header: a header-only
+    // row (the live "Thinking…" state) then matches ThinkingIndicator and the
+    // work-session row exactly, so the three can trade places without the
+    // rule blinking in and the label shifting right.
+    borderLeftWidth: 2,
+    borderLeftColor: theme.colors.border.emphasis,
+    paddingLeft: theme.spacing[3],
     paddingBottom: theme.spacing[2],
+  },
+  bodyNested: {
+    // Inside a work session the parent already draws the rail.
+    borderLeftWidth: 0,
+    paddingLeft: 0,
   },
 }));
