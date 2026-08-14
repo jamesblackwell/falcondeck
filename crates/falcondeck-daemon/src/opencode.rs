@@ -22,6 +22,7 @@ use crate::error::DaemonError;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(12);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const LISTENING_PREFIX: &str = "opencode server listening on http://127.0.0.1:";
+const MAX_MESSAGE_PAGE_SIZE: usize = 200;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -254,11 +255,7 @@ impl OpenCodeRuntime {
 
     pub async fn messages(&self, session_id: &str) -> Result<Vec<Value>, DaemonError> {
         let value = self
-            .request(
-                reqwest::Method::GET,
-                &format!("/api/session/{session_id}/message?order=asc&limit=1000"),
-                None,
-            )
+            .request(reqwest::Method::GET, &messages_path(session_id), None)
             .await?;
         response_data_array(value, "messages")
     }
@@ -397,6 +394,10 @@ fn response_data_array(value: Value, endpoint: &str) -> Result<Vec<Value>, Daemo
         })
 }
 
+fn messages_path(session_id: &str) -> String {
+    format!("/api/session/{session_id}/message?order=asc&limit={MAX_MESSAGE_PAGE_SIZE}")
+}
+
 fn model_ref(model: &str) -> Option<Value> {
     let (provider_id, id) = model.split_once('/')?;
     (!provider_id.is_empty() && !id.is_empty())
@@ -440,6 +441,14 @@ mod tests {
     fn compatibility_arrays_reject_changed_response_shapes() {
         let error = response_data_array(json!({ "messages": [] }), "messages").unwrap_err();
         assert!(error.to_string().contains("did not contain a data array"));
+    }
+
+    #[test]
+    fn message_query_respects_opencode_page_limit() {
+        assert_eq!(
+            messages_path("ses_test"),
+            "/api/session/ses_test/message?order=asc&limit=200"
+        );
     }
 
     #[test]
