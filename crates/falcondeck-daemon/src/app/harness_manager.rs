@@ -24,8 +24,8 @@ use std::{
 };
 
 use falcondeck_core::{
-    HarnessesOverview, HarnessKind, HarnessRefreshRequest, HarnessSummary, HarnessUpgradeJob,
-    HarnessUpgradeRequest, HarnessUpgradeStatus,
+    HarnessKind, HarnessRefreshRequest, HarnessSummary, HarnessUpgradeJob, HarnessUpgradeRequest,
+    HarnessUpgradeStatus, HarnessesOverview,
 };
 use futures_util::future::join_all;
 use tokio::{process::Command as TokioCommand, time::timeout};
@@ -131,6 +131,30 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
     },
 ];
 
+impl KnownHarness {
+    /// Base summary before any probing.
+    fn summary(&self) -> HarnessSummary {
+        HarnessSummary {
+            id: self.id.to_string(),
+            label: self.label.to_string(),
+            kind: if self.builtin {
+                HarnessKind::Builtin
+            } else {
+                HarnessKind::Detected
+            },
+            bin: self.bin.to_string(),
+            resolved_path: None,
+            installed: false,
+            version: None,
+            latest_version: None,
+            update_available: None,
+            install_source: None,
+            upgrade_command: self.upgrade_command.map(str::to_string),
+            account_status: None,
+        }
+    }
+}
+
 /// Response body for `POST /api/harnesses/upgrade`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct StartHarnessUpgradeResponse {
@@ -141,13 +165,22 @@ pub struct StartHarnessUpgradeResponse {
 /// Cache key for the local machine.
 const LOCAL_HOST: &str = "local";
 
+/// Maps an optional ssh target to a host key, validating remote targets.
+fn host_key_for(ssh_target: Option<&str>) -> Result<String, DaemonError> {
+    match ssh_target {
+        Some(target) => host_provisioning::validate_ssh_target(target),
+        None => Ok(LOCAL_HOST.to_string()),
+    }
+}
+
 impl AppState {
     /// Serves the local overview from cache when fresh; otherwise probes.
     /// Never touches the network: a probe without `include_latest` is
     /// shell-outs only, and any latest-version knowledge from a previous
     /// explicit refresh is carried over so badges don't flicker off.
     pub async fn harnesses_overview(&self) -> HarnessesOverview {
-        if let Some((probed_at, overview)) = self.inner.harness_cache.lock().unwrap().get(LOCAL_HOST)
+        if let Some((probed_at, overview)) =
+            self.inner.harness_cache.lock().unwrap().get(LOCAL_HOST)
             && probed_at.elapsed() < CACHE_TTL
         {
             return overview.clone();
@@ -170,10 +203,7 @@ impl AppState {
         &self,
         request: HarnessRefreshRequest,
     ) -> Result<HarnessesOverview, DaemonError> {
-        let host = match request.ssh_target.as_deref() {
-            Some(target) => host_provisioning::validate_ssh_target(target)?,
-            None => LOCAL_HOST.to_string(),
-        };
+        let host = host_key_for(request.ssh_target.as_deref())?;
         let overview = self
             .probe_harnesses(&host, request.port, request.include_latest)
             .await?;
@@ -185,10 +215,7 @@ impl AppState {
         &self,
         request: HarnessUpgradeRequest,
     ) -> Result<StartHarnessUpgradeResponse, DaemonError> {
-        let host = match request.ssh_target.as_deref() {
-            Some(target) => host_provisioning::validate_ssh_target(target)?,
-            None => LOCAL_HOST.to_string(),
-        };
+        let host = host_key_for(request.ssh_target.as_deref())?;
 
         let harness = KNOWN_HARNESSES
             .iter()
@@ -250,7 +277,8 @@ impl AppState {
                 }
                 Err(error) => {
                     tracing::warn!("harness upgrade on {host} failed: {error}");
-                    app.finish_harness_job(&background_job_id, Some(error)).await;
+                    app.finish_harness_job(&background_job_id, Some(error))
+                        .await;
                 }
             }
             // The install may have changed binaries or versions; never serve
@@ -262,7 +290,10 @@ impl AppState {
     }
 
     /// Returns the current state of an upgrade job.
-    pub async fn harness_upgrade_job(&self, job_id: &str) -> Result<HarnessUpgradeJob, DaemonError> {
+    pub async fn harness_upgrade_job(
+        &self,
+        job_id: &str,
+    ) -> Result<HarnessUpgradeJob, DaemonError> {
         self.inner
             .harness_jobs
             .lock()
@@ -320,9 +351,11 @@ impl AppState {
         }
 
         let mut summaries: Vec<HarnessSummary> = if host == LOCAL_HOST {
-            join_all(KNOWN_HARNESSES.iter().map(|harness| {
-                async move { probe_local_harness(harness).await }
-            }))
+            join_all(
+                KNOWN_HARNESSES
+                    .iter()
+                    .map(|harness| async move { probe_local_harness(harness).await }),
+            )
             .await
         } else {
             probe_remote_harnesses(host, port).await?
@@ -334,12 +367,7 @@ impl AppState {
                 // managed metadata but probe the configured binary.
                 if existing.bin != bin {
                     existing.bin = bin.clone();
-                    if host == LOCAL_HOST {
-                        let resolution =
-                            crate::agent_binary::resolve_agent_binary(&bin, &bin);
-                        apply_resolution(existing, &resolution.executable);
-                        existing.version = probe_binary_version(&resolution.executable).await;
-                    }
+                    probe_configured_bin(existing, &bin).await;
                 }
                 existing.kind = HarnessKind::Acp;
                 existing.label = label;
@@ -358,11 +386,7 @@ impl AppState {
                     upgrade_command: None,
                     account_status: None,
                 };
-                if host == LOCAL_HOST {
-                    let resolution = crate::agent_binary::resolve_agent_binary(&bin, &bin);
-                    apply_resolution(&mut summary, &resolution.executable);
-                    summary.version = probe_binary_version(&resolution.executable).await;
-                }
+                probe_configured_bin(&mut summary, &bin).await;
                 summaries.push(summary);
             }
         }
@@ -373,27 +397,24 @@ impl AppState {
             // Keep the latest-version knowledge from a previous explicit
             // refresh: without this, a cheap TTL re-probe would clear the
             // "Update available" badge until the user checks again.
-            let previous = self
-                .inner
-                .harness_cache
-                .lock()
-                .unwrap()
-                .get(host)
-                .map(|(_, overview)| {
-                    overview
-                        .harnesses
-                        .iter()
-                        .map(|summary| {
-                            (
-                                summary.id.clone(),
+            let previous =
+                self.inner
+                    .harness_cache
+                    .lock()
+                    .unwrap()
+                    .get(host)
+                    .map(|(_, overview)| {
+                        overview
+                            .harnesses
+                            .iter()
+                            .map(|summary| {
                                 (
-                                    summary.latest_version.clone(),
-                                    summary.update_available,
-                                ),
-                            )
-                        })
-                        .collect::<HashMap<_, _>>()
-                });
+                                    summary.id.clone(),
+                                    (summary.latest_version.clone(), summary.update_available),
+                                )
+                            })
+                            .collect::<HashMap<_, _>>()
+                    });
             if let Some(previous) = previous {
                 for summary in &mut summaries {
                     if let Some((latest, update)) = previous.get(&summary.id) {
@@ -462,40 +483,27 @@ impl AppState {
     /// Fetches published latest versions for managed harnesses. Purely
     /// on-demand: nothing here runs during regular snapshots.
     async fn apply_latest_versions(&self, summaries: &mut [HarnessSummary]) {
-        let client = reqwest::Client::builder()
-            .timeout(REGISTRY_TIMEOUT)
-            .build();
-        let Ok(client) = client else {
+        let Ok(client) = reqwest::Client::builder().timeout(REGISTRY_TIMEOUT).build() else {
             return;
         };
-        let fetches: Vec<(usize, &KnownHarness)> = summaries
+        let packages: Vec<(&str, &str)> = KNOWN_HARNESSES
             .iter()
-            .enumerate()
-            .filter_map(|(index, summary)| {
-                KNOWN_HARNESSES
-                    .iter()
-                    .find(|harness| harness.id == summary.id)
-                    .and_then(|harness| harness.npm_package.map(|_| (index, harness)))
-            })
+            .filter_map(|harness| Some((harness.id, harness.npm_package?)))
             .collect();
-        let results = join_all(fetches.iter().map(|(_, harness)| {
-            let client = &client;
-            let package = harness.npm_package.unwrap_or_default();
-            async move {
-                fetch_latest_version(client, package).await
-            }
+        let results = join_all(packages.iter().map(|(_, package)| {
+            fetch_latest_version(&client, package)
         }))
         .await;
-        for ((index, _), latest) in fetches.iter().zip(results) {
-            if let Some(latest) = latest
-                && let Some(summary) = summaries.get_mut(*index)
-            {
-                summary.latest_version = Some(latest.clone());
-                summary.update_available = summary
-                    .version
-                    .as_deref()
-                    .map(|version| is_update_available(version, &latest));
-            }
+        for ((id, _), latest) in packages.iter().zip(results) {
+            let Some(latest) = latest else { continue };
+            let Some(summary) = summaries.iter_mut().find(|summary| summary.id == *id) else {
+                continue;
+            };
+            summary.latest_version = Some(latest.clone());
+            summary.update_available = summary
+                .version
+                .as_deref()
+                .map(|version| is_update_available(version, &latest));
         }
     }
 }
@@ -512,7 +520,12 @@ async fn run_local_upgrade(upgrade_command: &str) -> Result<String, String> {
         .kill_on_drop(true);
     let output = timeout(UPGRADE_TIMEOUT, command.output())
         .await
-        .map_err(|_| format!("upgrade timed out after {} seconds", UPGRADE_TIMEOUT.as_secs()))?
+        .map_err(|_| {
+            format!(
+                "upgrade timed out after {} seconds",
+                UPGRADE_TIMEOUT.as_secs()
+            )
+        })?
         .map_err(|error| format!("failed to run upgrade: {error}"))?;
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -535,47 +548,32 @@ async fn run_local_upgrade(upgrade_command: &str) -> Result<String, String> {
 
 async fn probe_local_harness(harness: &KnownHarness) -> HarnessSummary {
     let resolution = crate::agent_binary::resolve_agent_binary(harness.bin, harness.bin);
-    let mut summary = HarnessSummary {
-        id: harness.id.to_string(),
-        label: harness.label.to_string(),
-        kind: if harness.builtin {
-            HarnessKind::Builtin
-        } else {
-            HarnessKind::Detected
-        },
-        bin: harness.bin.to_string(),
-        resolved_path: None,
-        installed: false,
-        version: None,
-        latest_version: None,
-        update_available: None,
-        install_source: None,
-        upgrade_command: harness.upgrade_command.map(str::to_string),
-        account_status: None,
-    };
+    let mut summary = harness.summary();
     apply_resolution(&mut summary, &resolution.executable);
     if !summary.installed {
         // Auth probes read harness config; keep them lazy so a missing
         // binary never spawns a shell.
         return summary;
     }
-    let auth_argv: Option<Vec<String>> = harness.auth_probe.map(|args| {
-        let mut argv = vec![resolution.executable.clone()];
-        argv.extend(args.iter().map(|arg| arg.to_string()));
-        argv
-    });
     // Version and auth probes are independent; run them concurrently.
-    let version_future = probe_binary_version(&resolution.executable);
-    let auth_future = async {
-        match auth_argv.as_deref() {
-            Some(argv) => probe_binary_argv(argv).await,
+    let version = probe_binary_version(&resolution.executable);
+    let account = async {
+        match harness.auth_probe {
+            Some(args) => probe_auth_status(&resolution.executable, args).await,
             None => None,
         }
     };
-    let (version, account) = tokio::join!(version_future, auth_future);
+    let (version, account) = tokio::join!(version, account);
     summary.version = version;
     summary.account_status = account;
     summary
+}
+
+/// Re-probes a summary whose bin was replaced by a providers.json command.
+async fn probe_configured_bin(summary: &mut HarnessSummary, bin: &str) {
+    let resolution = crate::agent_binary::resolve_agent_binary(bin, bin);
+    apply_resolution(summary, &resolution.executable);
+    summary.version = probe_binary_version(&resolution.executable).await;
 }
 
 /// Applies a resolved executable path to a summary, classifying the install
@@ -605,21 +603,23 @@ fn classify_install_source(path: &str) -> &'static str {
 }
 
 async fn probe_binary_version(executable: &str) -> Option<String> {
-    let output = run_with_timeout(&[executable, "--version"]).await?;
+    let output = run_with_timeout(executable, &["--version"]).await?;
     parse_version(&output)
 }
 
-async fn probe_binary_argv(argv: &[String]) -> Option<String> {
-    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    let output = run_with_timeout(&refs).await?;
-    let flat = output.lines().map(str::trim).collect::<Vec<_>>().join(" ");
-    let flat = truncate(&flat, 300);
-    Some(flat)
+/// Flattens an auth probe's output into one status line.
+async fn probe_auth_status(executable: &str, args: &[&str]) -> Option<String> {
+    let output = run_with_timeout(executable, args).await?;
+    let flat = truncate(
+        &output.lines().map(str::trim).collect::<Vec<_>>().join(" "),
+        300,
+    );
+    (!flat.is_empty()).then_some(flat)
 }
 
-async fn run_with_timeout(argv: &[&str]) -> Option<String> {
-    let mut command = TokioCommand::new(argv.first()?);
-    command.args(&argv[1..]).kill_on_drop(true);
+async fn run_with_timeout(executable: &str, args: &[&str]) -> Option<String> {
+    let mut command = TokioCommand::new(executable);
+    command.args(args).kill_on_drop(true);
     let output = timeout(PROBE_TIMEOUT, command.output()).await.ok()?.ok()?;
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -680,8 +680,7 @@ async fn fetch_latest_version(client: &reqwest::Client, package: &str) -> Option
 }
 
 /// Markers used by the batched remote probe script. Parsed from stdout with
-/// `splitn(3, ':')` so paths containing colons survive.
-const REMOTE_MISSING: &str = "FD_MISSING:";
+/// a single `split_once(':')` so paths containing colons survive.
 const REMOTE_BIN: &str = "FD_BIN:";
 const REMOTE_VERSION: &str = "FD_VER:";
 const REMOTE_AUTH: &str = "FD_AUTH:";
@@ -696,7 +695,9 @@ async fn probe_remote_harnesses(
     let script = remote_probe_script();
     let output = host_provisioning::ssh_exec_with_timeout(target, port, &script, PROBE_TIMEOUT)
         .await
-        .map_err(|error| DaemonError::Process(format!("harness probe on {target} failed: {error}")))?;
+        .map_err(|error| {
+            DaemonError::Process(format!("harness probe on {target} failed: {error}"))
+        })?;
     if !output.success {
         return Err(DaemonError::Process(format!(
             "harness probe on {target} failed: {}",
@@ -704,29 +705,27 @@ async fn probe_remote_harnesses(
         )));
     }
 
+    // Per-bin facts keyed by bin name; a harness is installed iff it has a
+    // resolved path entry.
     let mut paths: HashMap<String, String> = HashMap::new();
     let mut versions: HashMap<String, String> = HashMap::new();
     let mut auths: HashMap<String, String> = HashMap::new();
     for line in output.stdout.lines() {
-        if let Some(rest) = line.strip_prefix(REMOTE_MISSING) {
-            // Presence is implied by absence of FD_BIN below; nothing to do.
-            let _ = rest;
-        } else if let Some(rest) = line.strip_prefix(REMOTE_BIN) {
+        if let Some(rest) = line.strip_prefix(REMOTE_BIN) {
             if let Some((bin, path)) = rest.split_once(':') {
                 paths.insert(bin.to_string(), path.to_string());
             }
         } else if let Some(rest) = line.strip_prefix(REMOTE_VERSION) {
-            if let Some((bin, version)) = rest.split_once(':') {
-                if let Some(version) = parse_version(version) {
-                    versions.insert(bin.to_string(), version);
-                }
+            if let Some((bin, version)) = rest.split_once(':')
+                && let Some(version) = parse_version(version)
+            {
+                versions.insert(bin.to_string(), version);
             }
         } else if let Some(rest) = line.strip_prefix(REMOTE_AUTH) {
-            if let Some((bin, status)) = rest.split_once(':') {
-                let status = truncate(status.trim(), 300);
-                if !status.is_empty() {
-                    auths.insert(bin.to_string(), status);
-                }
+            if let Some((bin, status)) = rest.split_once(':')
+                && !status.trim().is_empty()
+            {
+                auths.insert(bin.to_string(), truncate(status.trim(), 300));
             }
         }
     }
@@ -734,25 +733,15 @@ async fn probe_remote_harnesses(
     Ok(KNOWN_HARNESSES
         .iter()
         .map(|harness| {
-            let path = paths.get(harness.bin);
-            HarnessSummary {
-                id: harness.id.to_string(),
-                label: harness.label.to_string(),
-                kind: if harness.builtin {
-                    HarnessKind::Builtin
-                } else {
-                    HarnessKind::Detected
-                },
-                bin: harness.bin.to_string(),
-                resolved_path: path.cloned(),
-                installed: path.is_some(),
-                version: versions.get(harness.bin).cloned(),
-                latest_version: None,
-                update_available: None,
-                install_source: path.map(|path| classify_install_source(path).to_string()),
-                upgrade_command: harness.upgrade_command.map(str::to_string),
-                account_status: auths.get(harness.bin).cloned(),
+            let mut summary = harness.summary();
+            if let Some(path) = paths.get(harness.bin) {
+                summary.resolved_path = Some(path.clone());
+                summary.installed = true;
+                summary.install_source = Some(classify_install_source(path).to_string());
             }
+            summary.version = versions.get(harness.bin).cloned();
+            summary.account_status = auths.get(harness.bin).cloned();
+            summary
         })
         .collect())
 }
@@ -769,7 +758,7 @@ fn remote_probe_script() -> String {
         script.push_str(harness.bin);
         script.push(' ');
     }
-    script.push_str("\nfor bin do\n  p=$(command -v \"$bin\" 2>/dev/null) || { echo \"FD_MISSING:$bin\"; continue; }\n  echo \"FD_BIN:$bin:$p\"\n  v=$(\"$bin\" --version 2>&1 | head -n 1)\n  echo \"FD_VER:$bin:$v\"\ndone\n");
+    script.push_str("\nfor bin do\n  p=$(command -v \"$bin\" 2>/dev/null) || continue\n  echo \"FD_BIN:$bin:$p\"\n  v=$(\"$bin\" --version 2>&1 | head -n 1)\n  echo \"FD_VER:$bin:$v\"\ndone\n");
     for harness in KNOWN_HARNESSES.iter().filter(|h| h.auth_probe.is_some()) {
         let args = harness.auth_probe.unwrap_or_default().join(" ");
         script.push_str(&format!(
@@ -789,18 +778,19 @@ fn truncate(value: &str, max_chars: usize) -> String {
 }
 
 fn prune_finished_jobs(jobs: &mut HashMap<String, HarnessUpgradeJob>) {
-    if jobs.len() <= MAX_JOBS {
-        return;
-    }
-    let mut finished: Vec<String> = jobs
-        .iter()
-        .filter(|(_, job)| job.status != HarnessUpgradeStatus::Running)
-        .map(|(job_id, _)| job_id.clone())
-        .collect();
-    finished.sort();
-    let excess = jobs.len().saturating_sub(MAX_JOBS);
-    for job_id in finished.into_iter().take(excess) {
-        jobs.remove(&job_id);
+    while jobs.len() > MAX_JOBS {
+        // Evict any finished job; the order among them doesn't matter and
+        // running jobs are never dropped.
+        let victim = jobs
+            .iter()
+            .find(|(_, job)| job.status != HarnessUpgradeStatus::Running)
+            .map(|(job_id, _)| job_id.clone());
+        match victim {
+            Some(job_id) => {
+                jobs.remove(&job_id);
+            }
+            None => break,
+        }
     }
 }
 
@@ -835,12 +825,13 @@ mod tests {
     #[test]
     fn install_source_classification() {
         assert_eq!(
-            classify_install_source(
-                "/usr/local/lib/node_modules/@openai/codex/bin/codex.js"
-            ),
+            classify_install_source("/usr/local/lib/node_modules/@openai/codex/bin/codex.js"),
             "npm"
         );
-        assert_eq!(classify_install_source("/opt/homebrew/bin/codex"), "homebrew");
+        assert_eq!(
+            classify_install_source("/opt/homebrew/bin/codex"),
+            "homebrew"
+        );
         assert_eq!(
             classify_install_source("/Users/x/.cargo/bin/codex"),
             "cargo"
@@ -873,6 +864,9 @@ mod tests {
         {
             paths.insert(bin.to_string(), path.to_string());
         }
-        assert_eq!(paths.get("codex").map(String::as_str), Some("/opt/homebrew/bin/codex"));
+        assert_eq!(
+            paths.get("codex").map(String::as_str),
+            Some("/opt/homebrew/bin/codex")
+        );
     }
 }

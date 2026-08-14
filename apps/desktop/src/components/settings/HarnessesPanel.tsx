@@ -77,9 +77,11 @@ function kindLabel(kind: HarnessSummary['kind']): string {
 
 export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps) {
   const [hostKey, setHostKey] = useState<string>(LOCAL_HOST_KEY)
-  const [overview, setOverview] = useState<HarnessesOverview | null>(null)
-  const [loadError, setLoadError] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  // Overview and errors are keyed by the host they describe, so a response
+  // landing after a host switch simply stops rendering — no manual
+  // stale-response guards.
+  const [view, setView] = useState<{ hostKey: string; overview: HarnessesOverview } | null>(null)
+  const [error, setError] = useState<{ hostKey: string; message: string } | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [activeJob, setActiveJob] = useState<ActiveJob | null>(null)
   const [jobLog, setJobLog] = useState<string[]>([])
@@ -102,26 +104,26 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
   useEffect(() => {
     sshHostsRef.current = sshHosts
   }, [sshHosts])
-  // Host key of the most recent fetch request. Responses arriving after a
-  // host switch (or a job-completion re-probe for a previously selected
-  // host) must never render under the current selection.
-  const requestedHostRef = useRef(LOCAL_HOST_KEY)
 
-  const hostLabel = useCallback(
-    (key: string) => {
-      if (key === LOCAL_HOST_KEY) return 'This Mac'
-      return sshHostsRef.current.find((candidate) => candidate.id === key)?.name ?? key
-    },
-    [],
-  )
+  // Data for the current selection, or null while loading/stale.
+  const overview =
+    view?.hostKey === hostKey ? view.overview : null
+  const loadError = error?.hostKey === hostKey ? error.message : null
+  const isRemote = hostEndpoint(hostKey, sshHosts) != null
+
+  // Job hosts come back from the daemon as "local" or an ssh target.
+  const hostLabel = useCallback((host: string) => {
+    if (host === LOCAL_HOST_KEY) return 'This Mac'
+    return sshHostsRef.current.find((candidate) => candidate.sshTarget === host)?.name ?? host
+  }, [])
 
   const fetchOverview = useCallback(
     async (key: string, deep: boolean) => {
       if (!baseUrl) return null
-      requestedHostRef.current = key
       if (deep) setIsRefreshing(true)
       try {
         const endpoint = hostEndpoint(key, sshHostsRef.current)
+        let next: HarnessesOverview
         if (deep) {
           // Deep always re-probes: on-demand version checks and remote
           // hosts have no shallow path (GET /api/harnesses serves the
@@ -139,42 +141,33 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
             }),
           })
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
-          const next = normalizeHarnessesOverview(await response.json())
-          if (requestedHostRef.current === key) setOverview(next)
+          next = normalizeHarnessesOverview(await response.json())
         } else {
           const response = await fetch(`${baseUrl}/api/harnesses`)
           if (!response.ok) throw new Error(`daemon returned ${response.status}`)
-          const next = normalizeHarnessesOverview(await response.json())
-          // Never render local data under a remote host's name.
-          if (endpoint) return false
-          if (requestedHostRef.current === key) setOverview(next)
+          next = normalizeHarnessesOverview(await response.json())
         }
-        if (requestedHostRef.current === key) setLoadError(null)
+        setView({ hostKey: key, overview: next })
+        setError((current) => (current?.hostKey === key ? null : current))
         return true
-      } catch (error) {
-        // A stale host's failure must not clobber the current selection's
-        // successfully loaded view.
-        if (requestedHostRef.current === key) {
-          setLoadError(error instanceof Error ? error.message : String(error))
-        }
+      } catch (cause) {
+        setError({
+          hostKey: key,
+          message: cause instanceof Error ? cause.message : String(cause),
+        })
         return false
       } finally {
         if (deep) setIsRefreshing(false)
-        setIsLoading(false)
       }
     },
     [baseUrl],
   )
 
-  // Switching hosts must never show the previous host's data: clear first,
-  // then deep-probe remote hosts (they have no shallow local GET path).
+  // Load on mount, host switch, and endpoint changes. Clearing is implicit:
+  // keyed state for another host renders as null (spinner) for this one.
   useEffect(() => {
-    setOverview(null)
-    setLoadError(null)
-    setIsLoading(true)
-    const isRemote = hostEndpoint(hostKey, sshHostsRef.current) != null
     void fetchOverview(hostKey, isRemote)
-  }, [fetchOverview, hostKey, hostSignature])
+  }, [fetchOverview, hostKey, hostSignature, isRemote])
 
   // Poll an upgrade job until it leaves `running`, mirroring the
   // provisioning panel's job loop.
@@ -330,17 +323,12 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
               <Button
                 size="sm"
                 variant="secondary"
-                onClick={() =>
-                  void fetchOverview(
-                    hostKey,
-                    hostEndpoint(hostKey, sshHostsRef.current) != null,
-                  )
-                }
+                onClick={() => void fetchOverview(hostKey, isRemote)}
               >
                 Retry
               </Button>
             </div>
-          ) : isLoading && !overview ? (
+          ) : !overview ? (
             <div className="flex items-center justify-center gap-2 px-2 py-10 text-[length:var(--fd-text-sm)] text-fg-muted">
               <ActivityDiamond size="md" />
               Probing harnesses…
@@ -406,10 +394,8 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                         disabled={!baseUrl || isRefreshing || activeJob != null}
                         onClick={() => void startUpgrade(harness)}
                       >
-                        {activeJob && !jobForThisHarness ? null : harness.installed ? (
-                          harness.update_available === true ? (
-                            <Download className="h-4 w-4" />
-                          ) : null
+                        {harness.installed && harness.update_available === true ? (
+                          <Download className="h-4 w-4" />
                         ) : null}
                         {harness.installed ? 'Upgrade' : 'Install'}
                       </Button>
