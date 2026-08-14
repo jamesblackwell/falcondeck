@@ -283,44 +283,40 @@ const ActivityRow = memo(
             : null;
 
     const meta = SECTION_META[entry.section];
-    const running = entry.section === "running";
 
     return (
       <article
         style={{ "--fd-tone": meta.toneVar } as CSSProperties}
         className={cn(
-          "fd-tone-edge fd-terminal-card group flex flex-col rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 shadow-[var(--fd-shadow-sm)]",
-          entry.section !== "blocked" && "h-36 overflow-hidden",
+          "fd-tone-edge fd-terminal-card group flex flex-col rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1",
+          // Taller on wide screens, where the extra room buys readout lines
+          // rather than empty card.
+          entry.section !== "blocked" && "h-36 overflow-hidden xl:h-40 2xl:h-44",
           offline && "opacity-60",
         )}
         data-activity-thread={entry.thread.id}
       >
-        {/* Terminal chrome: origin, host, and age — never the payload. The
-            interaction fill separates from the card body in both light and
-            dark, where a fixed surface step only works in one. */}
-        <div className="flex shrink-0 items-center gap-2 rounded-t-[var(--fd-radius-lg)] border-b border-border-subtle bg-[color:var(--fd-interactive-hover)] px-3 py-1.5">
-          <span
-            aria-hidden="true"
-            className={cn("fd-led shrink-0", running && "fd-led--pulse")}
-          />
-          <span className="fd-microlabel min-w-0 flex-1 truncate text-fg-muted">
+        {/* Terminal chrome: origin, host, and age — never the payload. */}
+        <div className="fd-chrome-fill flex shrink-0 items-center gap-2.5 rounded-t-[var(--fd-radius-lg)] border-b border-border-subtle px-4 py-2">
+          <span aria-hidden="true" className="fd-led shrink-0" />
+          <span className="fd-readout min-w-0 flex-1 truncate text-fg-muted">
             {entry.projectLabel}
           </span>
           {host ? (
             <Badge
               variant={offline ? "danger" : "default"}
-              className="fd-microlabel max-w-[45%] shrink truncate rounded-[var(--fd-radius-sm)] px-1.5"
+              className="fd-readout max-w-[45%] shrink truncate rounded-[var(--fd-radius-sm)] px-1.5"
             >
               {host.name}
               {offline ? " · Offline" : ""}
             </Badge>
           ) : null}
-          <span className="fd-microlabel shrink-0 tabular-nums text-fg-faint">
+          <span className="fd-readout shrink-0 tabular-nums text-fg-faint">
             {timeAgo(entry.thread.updated_at, nowMs)}
           </span>
           {entry.section === "failed" || entry.section === "ready" ? (
             <span
-              className="-mr-1.5 shrink-0"
+              className="-mr-2 shrink-0"
               title={offline ? "Host offline" : undefined}
             >
               <Button
@@ -328,7 +324,7 @@ const ActivityRow = memo(
                 size="sm"
                 variant="ghost"
                 disabled={offline}
-                className="fd-microlabel h-6 px-1.5 opacity-70 transition-opacity group-hover:opacity-100"
+                className="h-6 px-2 text-fg-muted"
                 onClick={() => {
                   void Promise.resolve(
                     onMarkThreadRead(entry.workspaceId, entry.thread.id),
@@ -345,7 +341,7 @@ const ActivityRow = memo(
           type="button"
           onClick={() => onOpenThread(entry.workspaceId, entry.thread.id)}
           className={cn(
-            "fd-focus-inset flex min-h-0 flex-col items-start gap-1.5 px-3.5 py-2.5 text-left",
+            "fd-focus-inset flex min-h-0 flex-col items-start gap-2.5 px-4 py-3 text-left",
             entry.section !== "blocked" && "flex-1",
           )}
         >
@@ -355,17 +351,14 @@ const ActivityRow = memo(
           {reason ? (
             /* Recessed screen: the fixed card height reads as terminal void
                rather than dead space, however short the last line was. */
-            <span className="flex min-h-0 w-full flex-1 items-start gap-1.5 overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-0 px-2 py-1.5">
+            <span className="flex min-h-0 w-full flex-1 items-start gap-2 overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-0 px-2.5 py-2">
               <span
                 aria-hidden="true"
-                className={cn(
-                  "shrink-0 font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-[color:var(--fd-tone)]",
-                  running && "fd-prompt--live",
-                )}
+                className="shrink-0 font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-[color:var(--fd-tone)]"
               >
                 {meta.glyph}
               </span>
-              <span className="line-clamp-3 min-w-0 break-words whitespace-pre-wrap font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary">
+              <span className="line-clamp-3 min-w-0 break-words whitespace-pre-wrap font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary xl:line-clamp-4">
                 {reason}
               </span>
             </span>
@@ -374,7 +367,7 @@ const ActivityRow = memo(
 
         {entry.section === "blocked" ? (
           <div
-            className="px-3.5 pb-3.5"
+            className="px-4 pb-4"
             title={offline ? "Host offline" : undefined}
           >
             {request ? (
@@ -401,8 +394,6 @@ const ActivityRow = memo(
             )}
           </div>
         ) : null}
-
-        {running ? <span aria-hidden="true" className="fd-scan" /> : null}
       </article>
     );
   },
@@ -521,22 +512,15 @@ export const ActivityView = memo(function ActivityView({
     <div className="fd-grid-canvas relative flex h-full min-h-0 flex-col bg-surface-0">
       <header
         data-tauri-drag-region="deep"
-        className="relative z-[1] flex shrink-0 items-center justify-between border-b border-border-subtle bg-surface-1/70 px-5 py-3 backdrop-blur-sm"
+        className="relative z-[1] flex shrink-0 items-center justify-between border-b border-border-subtle bg-surface-1/70 px-6 py-3.5 backdrop-blur-sm"
       >
-        <div className="flex items-center gap-3">
-          <span
-            aria-hidden="true"
-            style={{ "--fd-tone": "var(--fd-accent)" } as CSSProperties}
-            className="fd-led fd-led--pulse"
-          />
-          <div>
-            <h1 className="text-[length:var(--fd-text-lg)] font-semibold tracking-[var(--fd-tracking-tight)] text-fg-primary">
-              Activity
-            </h1>
-            <p className="fd-microlabel text-fg-muted">
-              Across all projects and hosts
-            </p>
-          </div>
+        <div>
+          <h1 className="text-[length:var(--fd-text-lg)] font-semibold tracking-[var(--fd-tracking-tight)] text-fg-primary">
+            Activity
+          </h1>
+          <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+            Across all projects and hosts
+          </p>
         </div>
         <Button
           type="button"
@@ -549,8 +533,8 @@ export const ActivityView = memo(function ActivityView({
         </Button>
       </header>
 
-      <div className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-5 py-6">
-        <div className="mx-auto w-full max-w-[1440px] space-y-7">
+      <div className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-6 py-7">
+        <div className="mx-auto w-full max-w-[1440px] space-y-8">
           <section
             aria-label="Activity summary"
             style={
@@ -560,10 +544,10 @@ export const ActivityView = memo(function ActivityView({
                   : "var(--fd-accent)",
               } as CSSProperties
             }
-            className="fd-tone-edge flex flex-col gap-4 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 px-4 py-3 shadow-[var(--fd-shadow-sm)] md:flex-row md:items-center"
+            className="fd-tone-edge flex flex-col gap-5 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 px-5 py-4 md:flex-row md:items-center"
           >
             <div className="flex min-w-0 items-center gap-3 md:w-56 md:shrink-0">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] border border-[color:color-mix(in_srgb,var(--fd-tone)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--fd-tone)_10%,transparent)] text-[color:var(--fd-tone)]">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-[var(--fd-radius-md)] border border-[color:color-mix(in_srgb,var(--fd-tone)_28%,transparent)] text-[color:var(--fd-tone)]">
                 <Activity aria-hidden="true" className="h-4 w-4" />
               </span>
               <div className="min-w-0">
@@ -572,7 +556,7 @@ export const ActivityView = memo(function ActivityView({
                     ? "All caught up"
                     : `${attentionCount} need${attentionCount === 1 ? "s" : ""} attention`}
                 </p>
-                <p className="fd-microlabel truncate text-fg-muted">
+                <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
                   {runningCount > 0
                     ? `${runningCount} running quietly`
                     : "No active runs"}
@@ -581,7 +565,7 @@ export const ActivityView = memo(function ActivityView({
             </div>
 
             {/* Instrument row. A zeroed counter drops to a flat, faint digit so
-                the only things that glow are the ones with work behind them. */}
+                the only lit ones are those with work behind them. */}
             <dl className="grid min-w-0 flex-1 grid-cols-2 gap-px overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-border-subtle sm:grid-cols-4">
               {SUMMARY_STATS.map((stat) => {
                 const count = summaryCounts.get(stat.section) ?? 0;
@@ -593,17 +577,15 @@ export const ActivityView = memo(function ActivityView({
                         "--fd-tone": SECTION_META[stat.section].toneVar,
                       } as CSSProperties
                     }
-                    className="relative flex min-w-0 items-baseline justify-between gap-2 bg-surface-0 px-3 py-2 sm:block"
+                    className="relative flex min-w-0 items-baseline justify-between gap-2 bg-surface-0 px-3.5 py-2.5 sm:block"
                   >
                     <dt className="fd-microlabel truncate text-fg-muted">
                       {stat.label}
                     </dt>
                     <dd
                       className={cn(
-                        "mt-1 font-mono text-[length:var(--fd-text-xl)] font-semibold leading-none tabular-nums",
-                        count > 0
-                          ? cn(stat.tone, "fd-stat-live")
-                          : "text-fg-faint",
+                        "mt-1.5 font-mono text-[length:var(--fd-text-xl)] font-semibold leading-none tabular-nums",
+                        count > 0 ? stat.tone : "text-fg-faint",
                       )}
                     >
                       {padCount(count)}
@@ -611,7 +593,7 @@ export const ActivityView = memo(function ActivityView({
                     <span
                       aria-hidden="true"
                       className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-[color:var(--fd-tone)]"
-                      style={{ opacity: count > 0 ? 0.55 : 0.1 }}
+                      style={{ opacity: count > 0 ? 0.45 : 0.08 }}
                     />
                   </div>
                 );
@@ -653,13 +635,11 @@ export const ActivityView = memo(function ActivityView({
                   style={{ "--fd-tone": meta.toneVar } as CSSProperties}
                 >
                   {/* Channel divider: label, hairline run-out, count. */}
-                  <div className="mb-3 flex items-center gap-2.5">
-                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] border border-[color:color-mix(in_srgb,var(--fd-tone)_30%,transparent)] bg-[color:color-mix(in_srgb,var(--fd-tone)_10%,transparent)]">
-                      <Icon
-                        aria-hidden="true"
-                        className={cn("h-3 w-3", meta.tone)}
-                      />
-                    </span>
+                  <div className="mb-4 flex items-center gap-3">
+                    <Icon
+                      aria-hidden="true"
+                      className={cn("h-3.5 w-3.5 shrink-0", meta.tone)}
+                    />
                     <h2
                       id={`activity-${section}`}
                       className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
@@ -680,7 +660,7 @@ export const ActivityView = memo(function ActivityView({
                   <div
                     data-activity-grid={section}
                     className={cn(
-                      "grid items-start gap-3 lg:grid-cols-2",
+                      "grid items-start gap-4 lg:grid-cols-2",
                       section !== "blocked" && "2xl:grid-cols-3",
                     )}
                   >

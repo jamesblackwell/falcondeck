@@ -1068,8 +1068,15 @@ body {
   mask-image: radial-gradient(ellipse 65% 55% at 50% 0%, #000, transparent 78%);
 }
 
-/* Mono micro-label: the readout typography shared by section headings, stat
-   labels, chrome metadata, and host chips. */
+/* Two mono treatments, applied by role and never mixed:
+   `fd-microlabel` is chrome the app authored (section headings, stat labels);
+   `fd-readout` is data the system reported (project, host, age, payload),
+   left in its own case because upcasing a hostname distorts it. */
+.fd-readout {
+  font-family: var(--fd-font-mono);
+  font-size: var(--fd-text-2xs);
+  letter-spacing: var(--fd-tracking-normal);
+}
 .fd-microlabel {
   font-family: var(--fd-font-mono);
   font-size: var(--fd-text-2xs);
@@ -1084,7 +1091,8 @@ body {
   letter-spacing: var(--fd-tracking-wide);
 }
 
-/* Powered-on strip along the top edge of a toned panel. */
+/* Hairline of tone along the top edge of a toned panel — the one piece of
+   color a card carries at rest. */
 .fd-tone-edge {
   --fd-tone: var(--fd-fg-3);
   position: relative;
@@ -1096,98 +1104,37 @@ body {
   height: 1px;
   pointer-events: none;
   background: linear-gradient(90deg, var(--fd-tone), transparent 60%);
-  opacity: 0.4;
+  opacity: 0.35;
   transition: opacity var(--fd-duration-normal) var(--fd-ease-default);
 }
 
+/* Hover is a border and an edge, no shadow and no lift: the grid of cards
+   should stay flat, so the only thing that moves is the pointer. */
 .fd-terminal-card {
-  transition:
-    border-color var(--fd-duration-normal) var(--fd-ease-default),
-    box-shadow var(--fd-duration-normal) var(--fd-ease-default),
-    transform var(--fd-duration-normal) var(--fd-ease-default);
+  transition: border-color var(--fd-duration-normal) var(--fd-ease-default);
 }
 .fd-terminal-card:hover {
-  border-color: color-mix(in srgb, var(--fd-tone) 34%, var(--fd-border-1));
-  box-shadow:
-    var(--fd-shadow-md),
-    0 0 24px -8px color-mix(in srgb, var(--fd-tone) 55%, transparent);
-  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--fd-tone) 30%, var(--fd-border-1));
 }
 .fd-terminal-card:hover::after {
-  opacity: 0.9;
+  opacity: 0.8;
 }
 
-/* Status LED. The pulse marks a live run without animating anything the eye
-   has to read. */
+/* Card chrome fill. Derived from the foreground so it steps away from the
+   card body in both light and dark — a fixed surface step only separates in
+   one — and kept shallow so a grid of cards reads as one field, not stripes. */
+.fd-chrome-fill {
+  background-color: color-mix(in srgb, var(--fd-fg-0) 6%, var(--fd-bg-1));
+}
+
+/* Status dot. Static — the section already says whether a run is live, and a
+   wall of pulsing dots is noise, not information. */
 .fd-led {
   display: block;
-  height: 6px;
-  width: 6px;
+  height: 5px;
+  width: 5px;
   border-radius: var(--fd-radius-full);
   background: var(--fd-tone);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--fd-tone) 16%, transparent);
-}
-.fd-led--pulse {
-  animation: fd-led-pulse 2s var(--fd-ease-default) infinite;
-}
-@keyframes fd-led-pulse {
-  0%,
-  100% {
-    opacity: 0.5;
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--fd-tone) 10%, transparent);
-  }
-  50% {
-    opacity: 1;
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--fd-tone) 20%, transparent);
-  }
-}
-
-/* Prompt glyph in front of a readout; blinks while the run is live. */
-.fd-prompt--live {
-  animation: fd-prompt-blink 1.4s steps(1, end) infinite;
-}
-@keyframes fd-prompt-blink {
-  0%,
-  55% {
-    opacity: 1;
-  }
-  56%,
-  100% {
-    opacity: 0.25;
-  }
-}
-
-/* Single hairline sweeping the top edge of a running card. */
-.fd-scan {
-  position: absolute;
-  inset: 0;
-  overflow: hidden;
-  border-radius: inherit;
-  pointer-events: none;
-}
-.fd-scan::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  height: 1px;
-  width: 32%;
-  background: linear-gradient(90deg, transparent, var(--fd-tone), transparent);
-  opacity: 0.75;
-  animation: fd-scan-sweep 3.2s var(--fd-ease-default) infinite;
-}
-@keyframes fd-scan-sweep {
-  0% {
-    transform: translateX(-120%);
-  }
-  100% {
-    transform: translateX(420%);
-  }
-}
-
-/* Live counters glow in their own tone; zeroed ones stay flat and recede. */
-.fd-stat-live {
-  text-shadow: 0 0 20px color-mix(in srgb, currentColor 50%, transparent);
 }
 
 /* Older blocks in long transcripts should not pay layout and paint costs while
