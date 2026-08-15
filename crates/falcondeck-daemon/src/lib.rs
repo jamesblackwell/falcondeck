@@ -15,6 +15,7 @@ mod codex;
 mod connectors;
 mod error;
 mod git;
+pub mod harness_conformance;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
 mod skills;

@@ -892,6 +892,29 @@ fn default_capabilities() -> AgentCapabilitySummary {
     AgentCapabilitySummary::claude()
 }
 
+/// Command-line flags a turn depends on, mirroring the `Command` built in
+/// `start_turn`.
+///
+/// Keep this in step with that spawn. A CLI that drops or renames one of these
+/// does not necessarily fail: an ignored `--effort` simply stops applying the
+/// user's reasoning choice, and an ignored `--include-partial-messages` stops
+/// streaming without erroring. `harness_conformance` checks the installed
+/// binary still advertises every one.
+pub const REQUIRED_CLI_FLAGS: &[&str] = &[
+    "--input-format",
+    "--output-format",
+    "--include-partial-messages",
+    "--include-hook-events",
+    "--verbose",
+    "--resume",
+    "--session-id",
+    "--model",
+    "--effort",
+    "--permission-mode",
+    "--settings",
+    "--mcp-config",
+];
+
 pub fn curated_models() -> Vec<ModelSummary> {
     fn effort(reasoning_effort: &str, description: &str) -> ReasoningEffortSummary {
         ReasoningEffortSummary {

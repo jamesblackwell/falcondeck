@@ -5,8 +5,10 @@ generic ACP runtime depends on. The pilot is intentionally separate from the
 daemon: it is an engineering diagnostic, not yet a release gate or user-facing
 health check.
 
-OpenCode's *native* HTTP transport is a separate surface with its own probe —
-see `cargo run -p falcondeck-daemon --example opencode_conformance`.
+This is one of three probes. OpenCode's *native* HTTP transport and the
+first-party Claude and Codex harnesses have their own; see
+[HARNESS-CONFORMANCE.md](HARNESS-CONFORMANCE.md) for the full set and the
+reasoning behind what each one checks.
 
 ## Running it
 
