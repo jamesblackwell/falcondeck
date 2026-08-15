@@ -188,12 +188,12 @@ impl ProviderRuntime {
                                         // without `resume`) before a thread
                                         // is pinned to this transport.
                                         runtime.validate_contract().await?;
-                                        // A schema-compatible v2 server can
-                                        // still admit prompts without ever
-                                        // starting its runner. Prove the
-                                        // execution boundary with a cached,
-                                        // cost-free invalid-model turn.
-                                        runtime.validate_execution().await?;
+                                        // Execution itself is deliberately not
+                                        // probed here. A turn only fails this
+                                        // way when its *model* cannot resolve,
+                                        // which no build-level probe can
+                                        // predict; the waiter reports that
+                                        // case with the server's own cause.
                                         runtime.session_is_active(&session_id).await?;
                                         runtime.messages(&session_id).await?;
                                         runtime.pending_permissions(&session_id).await?;

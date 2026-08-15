@@ -17,7 +17,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, BufReader},
     process::{Child, Command},
-    sync::{Mutex, OnceCell, mpsc},
+    sync::{Mutex, mpsc},
     time::{Duration, timeout},
 };
 use uuid::Uuid;
@@ -29,7 +29,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const INACTIVE_TERMINAL_GRACE: Duration = Duration::from_secs(5);
 const POLL_ERROR_GRACE: Duration = Duration::from_secs(5);
-const EXECUTION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How many recent server error lines to retain for diagnosing a turn that
+/// dies without emitting anything on its session event stream.
+const MAX_RETAINED_SERVER_ERRORS: usize = 16;
 /// How long an observed-active turn may go without events or message
 /// progress before FalconDeck declares it stalled. Generous on purpose:
 /// model calls and tool executions routinely run quiet for tens of seconds.
@@ -113,10 +115,17 @@ impl Delivery {
 pub struct OpenCodeRuntime {
     base_url: String,
     password: String,
-    workspace_path: String,
     client: reqwest::Client,
     child: Mutex<Child>,
-    execution_compatibility: OnceCell<Result<(), String>>,
+    /// Recent `level=ERROR` lines from the server's own log.
+    ///
+    /// OpenCode reports a turn that dies before its first step — an
+    /// unresolvable or unsupported model, most commonly — only here: nothing
+    /// reaches the session event stream and no assistant record is written.
+    /// Retained purely to explain such a turn to the user; never used to make
+    /// a control-flow decision, so a change to OpenCode's log format costs a
+    /// diagnostic detail rather than correctness.
+    server_errors: Mutex<Vec<String>>,
 }
 
 impl OpenCodeRuntime {
@@ -138,6 +147,13 @@ impl OpenCodeRuntime {
         command
             .args(configured_args)
             .args(["serve", "--port", "0", "--hostname", "127.0.0.1"])
+            // A turn that cannot resolve its model fails inside the runner
+            // without emitting a session event or an assistant record. The
+            // server's own error log is the only channel that carries the
+            // cause, and it is silent unless logs are printed. ERROR keeps the
+            // stream quiet enough to retain in memory; the port banner stays on
+            // stdout, so startup detection is unaffected.
+            .args(["--print-logs", "--log-level", "ERROR"])
             .current_dir(cwd)
             .envs(env)
             // These must follow the user-supplied environment: allowing a
@@ -174,20 +190,10 @@ impl OpenCodeRuntime {
                 ));
             }
         };
-        // Keep draining stderr so a noisy server cannot block.  Diagnostics
-        // remain in the daemon log rather than being silently discarded.
-        if let Some(stderr) = child.stderr.take() {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::debug!(%line, "OpenCode server stderr");
-                }
-            });
-        }
+        let stderr = child.stderr.take();
         let runtime = Arc::new(Self {
             base_url: format!("http://127.0.0.1:{port}"),
             password,
-            workspace_path: cwd.to_string(),
             client: reqwest::Client::builder()
                 .connect_timeout(REQUEST_TIMEOUT)
                 .build()
@@ -195,8 +201,31 @@ impl OpenCodeRuntime {
                     DaemonError::Process(format!("could not build OpenCode HTTP client: {error}"))
                 })?,
             child: Mutex::new(child),
-            execution_compatibility: OnceCell::new(),
+            server_errors: Mutex::new(Vec::new()),
         });
+        // Keep draining stderr so a noisy server cannot block.  Diagnostics
+        // remain in the daemon log rather than being silently discarded, and
+        // error lines are retained for `recent_server_errors`.
+        if let Some(stderr) = stderr {
+            let errors = Arc::downgrade(&runtime);
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tracing::debug!(%line, "OpenCode server stderr");
+                    if !line.contains("level=ERROR") {
+                        continue;
+                    }
+                    let Some(runtime) = errors.upgrade() else {
+                        return;
+                    };
+                    let mut retained = runtime.server_errors.lock().await;
+                    if retained.len() == MAX_RETAINED_SERVER_ERRORS {
+                        retained.remove(0);
+                    }
+                    retained.push(summarize_server_error(&line));
+                }
+            });
+        }
         if let Err(error) = runtime.health().await {
             runtime.shutdown().await;
             return Err(error);
@@ -217,83 +246,12 @@ impl OpenCodeRuntime {
         contract_supported(&doc)
     }
 
-    /// Proves that this OpenCode build does more than accept a v2 prompt.
+    /// Recent `level=ERROR` lines from the server's own log, newest last.
     ///
-    /// The v2 API is experimental and some builds return a successful
-    /// admission receipt, project the user message, and then never enter the
-    /// runner. A disposable invalid-model turn is a cost-free semantic probe:
-    /// a working runner reaches a durable step failure, while the broken path
-    /// remains idle after `session.next.prompted`. The result is cached for the
-    /// lifetime of this private server.
-    pub async fn validate_execution(&self) -> Result<(), DaemonError> {
-        let result = self
-            .execution_compatibility
-            .get_or_init(|| async {
-                self.probe_execution()
-                    .await
-                    .map_err(|error| error.to_string())
-            })
-            .await;
-        result.clone().map_err(DaemonError::Rpc)
-    }
-
-    async fn probe_execution(&self) -> Result<(), DaemonError> {
-        // A randomized provider id cannot collide with a user's configured
-        // provider and accidentally turn this cost-free probe into a model
-        // request.
-        let probe_model = format!(
-            "falcondeck-probe-{}/no-such-model",
-            Uuid::new_v4().simple()
-        );
-        let session_id = self
-            .create_session(
-                &self.workspace_path,
-                Some(&probe_model),
-                Some("build"),
-            )
-            .await?;
-        let outcome = async {
-            let message_id = format!("msg_{}", Uuid::new_v4().simple());
-            let admission = self
-                .prompt(
-                    &session_id,
-                    &message_id,
-                    "FalconDeck native execution compatibility probe",
-                    &[],
-                    Delivery::Queue,
-                )
-                .await?;
-            let after_seq = admission
-                .pointer("/data/admittedSeq")
-                .and_then(Value::as_u64);
-            let wait = timeout(
-                EXECUTION_PROBE_TIMEOUT,
-                self.wait_until_idle(&session_id, &message_id, after_seq),
-            )
-            .await
-            .map_err(|_| {
-                DaemonError::Rpc(
-                    "OpenCode native execution probe timed out before its runner produced an event"
-                        .to_string(),
-                )
-            })?;
-            match wait {
-                Ok(messages) if messages_are_settled(&messages) => Ok(()),
-                Err(DaemonError::Rpc(message)) if message.starts_with("OpenCode turn failed:") => {
-                    Ok(())
-                }
-                Ok(_) => Err(DaemonError::Rpc(
-                    "OpenCode native execution probe ended without a terminal assistant record"
-                        .to_string(),
-                )),
-                Err(error) => Err(DaemonError::Rpc(format!(
-                    "OpenCode accepted a native prompt but did not start its v2 runner: {error}"
-                ))),
-            }
-        }
-        .await;
-        self.delete_session(&session_id).await;
-        outcome
+    /// A turn whose model cannot be resolved fails inside the runner and
+    /// reports nothing over HTTP; these lines are the only account of why.
+    pub async fn recent_server_errors(&self) -> Vec<String> {
+        self.server_errors.lock().await.clone()
     }
 
     pub async fn create_session(
@@ -589,9 +547,18 @@ impl OpenCodeRuntime {
             .and_then(|session| session.pointer("/data/model/id"))
             .and_then(Value::as_str)
             .unwrap_or("unknown");
+        // A turn that cannot resolve its model reports nothing over HTTP, so
+        // without this the user sees only "no assistant response" for what is
+        // really "this model is not usable on this OpenCode install".
+        let reported = self
+            .recent_server_errors()
+            .await
+            .last()
+            .map(|cause| format!("; OpenCode reported: {cause}"))
+            .unwrap_or_default();
         DaemonError::Rpc(format!(
-            "{error}; diagnostics: session={session_id}, message={message_id}, admitted_seq={}, \
-             active={}, agent={agent}, model={provider}/{model}",
+            "{error}{reported}; diagnostics: session={session_id}, message={message_id}, \
+             admitted_seq={}, active={}, agent={agent}, model={provider}/{model}",
             admitted_seq
                 .map(|sequence| sequence.to_string())
                 .unwrap_or_else(|| "unknown".to_string()),
@@ -1035,6 +1002,56 @@ const CONTRACT_PATHS: &[&str] = &[
 /// the native transport.
 const CONTRACT_PROMPT_FIELDS: &[&str] = &["id", "prompt", "delivery", "resume"];
 
+/// Request-body properties the native transport sends, per `(path, method)`.
+///
+/// Every entry is an assumption OpenCode could drop without breaking any of
+/// its own clients, and whose loss would otherwise show up as a 400 on a real
+/// user's turn rather than at attach.
+const CONTRACT_BODY_FIELDS: &[(&str, &[&str])] = &[
+    ("/api/session", &["agent", "model", "location"]),
+    ("/api/session/{sessionID}/model", &["model"]),
+    ("/api/session/{sessionID}/agent", &["agent"]),
+    (
+        "/api/session/{sessionID}/permission/{requestID}/reply",
+        &["reply"],
+    ),
+    (
+        "/api/session/{sessionID}/question/{requestID}/reply",
+        &["answers"],
+    ),
+];
+
+/// Named schemas whose properties FalconDeck populates by hand.
+const CONTRACT_SCHEMA_FIELDS: &[(&str, &[&str])] = &[
+    ("ModelRef", &["id", "providerID"]),
+    ("PromptInput", &["text", "files"]),
+];
+
+/// String values FalconDeck sends verbatim. A renamed variant would be
+/// accepted by the schema check above and rejected at runtime.
+const CONTRACT_ENUM_VALUES: &[(&str, &[&str])] =
+    &[("PermissionV2Reply", &["once", "always", "reject"])];
+
+/// Resolves a possibly-`$ref`'d schema against the document's components.
+fn resolve_schema<'a>(doc: &'a Value, schema: &'a Value) -> Option<&'a Value> {
+    let Some(reference) = schema.get("$ref").and_then(Value::as_str) else {
+        return Some(schema);
+    };
+    let name = reference.strip_prefix("#/components/schemas/")?;
+    doc.pointer(&format!("/components/schemas/{name}"))
+}
+
+fn request_body_schema<'a>(doc: &'a Value, paths: &'a Value, path: &str) -> Option<&'a Value> {
+    let schema = paths
+        .get(path)?
+        .get("post")?
+        .get("requestBody")?
+        .get("content")?
+        .get("application/json")?
+        .get("schema")?;
+    resolve_schema(doc, schema)
+}
+
 fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
     let paths = doc
         .get("paths")
@@ -1086,7 +1103,78 @@ fn contract_supported(doc: &Value) -> Result<(), DaemonError> {
             )));
         }
     }
+    for (path, fields) in CONTRACT_BODY_FIELDS {
+        let properties = request_body_schema(doc, paths, path)
+            .and_then(|schema| schema.get("properties"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                DaemonError::Rpc(format!("OpenCode /doc did not describe the {path} body"))
+            })?;
+        for field in *fields {
+            if !properties.contains_key(*field) {
+                return Err(DaemonError::Rpc(format!(
+                    "OpenCode {path} does not accept the {field} field"
+                )));
+            }
+        }
+    }
+    for (name, fields) in CONTRACT_SCHEMA_FIELDS {
+        let properties = doc
+            .pointer(&format!("/components/schemas/{name}/properties"))
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                DaemonError::Rpc(format!("OpenCode /doc no longer defines the {name} schema"))
+            })?;
+        for field in *fields {
+            if !properties.contains_key(*field) {
+                return Err(DaemonError::Rpc(format!(
+                    "OpenCode {name} no longer carries the {field} field"
+                )));
+            }
+        }
+    }
+    for (name, values) in CONTRACT_ENUM_VALUES {
+        let declared = doc
+            .pointer(&format!("/components/schemas/{name}/enum"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| {
+                DaemonError::Rpc(format!("OpenCode /doc no longer defines the {name} enum"))
+            })?;
+        for value in *values {
+            if !declared.iter().any(|entry| entry.as_str() == Some(value)) {
+                return Err(DaemonError::Rpc(format!(
+                    "OpenCode {name} no longer accepts the '{value}' value"
+                )));
+            }
+        }
+    }
+    let delivery = prompt_properties
+        .get("delivery")
+        .and_then(|delivery| delivery.get("enum"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            DaemonError::Rpc("OpenCode /doc did not declare the prompt delivery values".to_string())
+        })?;
+    for value in [Delivery::Queue.as_str(), Delivery::Steer.as_str()] {
+        if !delivery.iter().any(|entry| entry.as_str() == Some(value)) {
+            return Err(DaemonError::Rpc(format!(
+                "OpenCode prompt delivery no longer accepts '{value}'"
+            )));
+        }
+    }
     Ok(())
+}
+
+/// Reduces one `level=ERROR` server log line to its cause, dropping the
+/// stack trace that follows the first escaped newline.
+fn summarize_server_error(line: &str) -> String {
+    let cause = line
+        .split_once("cause=\"")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split_once("\\n").map(|(head, _)| head))
+        .or_else(|| line.split_once("cause=\"").map(|(_, rest)| rest))
+        .unwrap_or(line);
+    cause.trim_end_matches(['"', ' ']).trim().to_string()
 }
 
 fn session_create_body(cwd: &str, model: Option<&str>, agent: Option<&str>) -> Value {
@@ -1170,12 +1258,17 @@ mod tests {
 
     /// Live end-to-end exercise of the native waiter against a real
     /// `opencode serve`: admits a prompt against a session whose model cannot
-    /// resolve, so the drain fails locally before any provider call. Verifies
-    /// the event-stream waiter path and the outputless-turn error without
-    /// incurring model usage. Run explicitly with `--ignored`.
+    /// resolve, so the drain fails locally before any provider call.
+    ///
+    /// OpenCode reports this failure *only* in its own error log — no session
+    /// event, no assistant record — so the waiter must both terminate and
+    /// carry the server's stated cause. An earlier revision read the same
+    /// silence as proof that the whole native runner was broken, and this
+    /// assertion exists to keep that misreading from returning. Costs no model
+    /// usage. Run explicitly with `--ignored`.
     #[test]
     #[ignore = "live OpenCode server e2e; requires the opencode binary"]
-    fn live_waiter_reports_outputless_turn_failure() {
+    fn live_unresolvable_model_reports_the_servers_own_cause() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1220,11 +1313,14 @@ mod tests {
             runtime.delete_session(&session_id).await;
             runtime.shutdown().await;
             let error = outcome.expect_err("invalid model must fail the turn");
+            let error = error.to_string();
             assert!(
-                error
-                    .to_string()
-                    .contains("never reached observable runner activity"),
-                "unexpected error: {error}"
+                error.contains("OpenCode reported:"),
+                "the turn error must carry the server's own cause: {error}"
+            );
+            assert!(
+                error.contains("no-such-model"),
+                "the reported cause must name the unresolvable model: {error}"
             );
         });
     }
@@ -1232,8 +1328,8 @@ mod tests {
     /// Live proof that observed drain activity suppresses the short
     /// outputless-turn grace: with `Activity` events arriving, the waiter must
     /// still be waiting well past the 5-second grace that a stalled session
-    /// would otherwise trip. See `live_waiter_reports_outputless_turn_failure`
-    /// for the cost-free failure setup.
+    /// would otherwise trip. See the unresolvable-model test above
+    /// for the cost-free failure setup (see `live_unresolvable_model_reports_the_servers_own_cause`).
     #[test]
     #[ignore = "live OpenCode server e2e; requires the opencode binary"]
     fn live_activity_events_suppress_the_short_grace() {
@@ -1484,27 +1580,45 @@ mod tests {
         assert!(contract_supported(&json!({ "openapi": "3.1.0" })).is_err());
     }
 
+    /// A minimal `/doc` that satisfies every contract rule.
+    ///
+    /// Built from the same constant tables the validator reads, so it proves
+    /// only that `contract_supported` accepts a document of the shape we
+    /// believe OpenCode publishes, and rejects one missing a field we send.
+    /// Whether OpenCode *actually* publishes that shape is not knowable from a
+    /// fixture — `examples/opencode_conformance` answers that against a real
+    /// server, and is the check that catches an upstream change.
     fn contract_doc_fixture() -> Value {
+        fn body(fields: &[&str], extra: Option<Value>) -> Value {
+            let mut properties = fields
+                .iter()
+                .map(|field| (field.to_string(), json!({ "type": "string" })))
+                .collect::<serde_json::Map<_, _>>();
+            if let Some(Value::Object(extra)) = extra {
+                properties.extend(extra);
+            }
+            json!({
+                "post": {
+                    "requestBody": {
+                        "content": { "application/json": { "schema": { "properties": properties } } }
+                    }
+                }
+            })
+        }
+
         let mut paths = json!({});
         for path in CONTRACT_PATHS {
             paths[path] = json!({ "get": { "responses": {} } });
         }
-        paths["/api/session/{sessionID}/prompt"] = json!({
-            "post": {
-                "requestBody": {
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "properties": CONTRACT_PROMPT_FIELDS
-                                    .iter()
-                                    .map(|field| (field.to_string(), json!({ "type": "string" })))
-                                    .collect::<serde_json::Map<_, _>>()
-                            }
-                        }
-                    }
-                }
-            }
-        });
+        for (path, fields) in CONTRACT_BODY_FIELDS {
+            paths[path] = body(fields, None);
+        }
+        paths["/api/session/{sessionID}/prompt"] = body(
+            CONTRACT_PROMPT_FIELDS,
+            Some(json!({
+                "delivery": { "enum": [Delivery::Queue.as_str(), Delivery::Steer.as_str()] }
+            })),
+        );
         paths["/api/session/{sessionID}/message"] = json!({
             "get": {
                 "parameters": [
@@ -1514,7 +1628,78 @@ mod tests {
                 ]
             }
         });
-        json!({ "openapi": "3.1.0", "paths": paths })
+        let mut schemas = CONTRACT_SCHEMA_FIELDS
+            .iter()
+            .map(|(name, fields)| {
+                let properties = fields
+                    .iter()
+                    .map(|field| (field.to_string(), json!({ "type": "string" })))
+                    .collect::<serde_json::Map<_, _>>();
+                (name.to_string(), json!({ "properties": properties }))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        for (name, values) in CONTRACT_ENUM_VALUES {
+            schemas.insert(name.to_string(), json!({ "enum": values }));
+        }
+        json!({
+            "openapi": "3.1.0",
+            "paths": paths,
+            "components": { "schemas": schemas }
+        })
+    }
+
+    /// Each contract rule must actually reject a document that breaks it;
+    /// a validator that passes everything is the failure mode being guarded.
+    #[test]
+    fn contract_validation_rejects_each_dropped_assumption() {
+        let strip = |mutate: &dyn Fn(&mut Value)| {
+            let mut doc = contract_doc_fixture();
+            mutate(&mut doc);
+            contract_supported(&doc).expect_err("a dropped assumption must fail the contract")
+        };
+
+        let error = strip(&|doc| {
+            doc["paths"]["/api/session"]["post"]["requestBody"]["content"]["application/json"]
+                ["schema"]["properties"]
+                .as_object_mut()
+                .expect("fixture body is an object")
+                .remove("model");
+        });
+        assert!(error.to_string().contains("model"), "{error}");
+
+        let error = strip(&|doc| {
+            doc["components"]["schemas"]["ModelRef"]["properties"]
+                .as_object_mut()
+                .expect("fixture schema is an object")
+                .remove("providerID");
+        });
+        assert!(error.to_string().contains("providerID"), "{error}");
+
+        let error = strip(&|doc| {
+            doc["components"]["schemas"]["PermissionV2Reply"]["enum"] = json!(["once", "always"]);
+        });
+        assert!(error.to_string().contains("reject"), "{error}");
+
+        let error = strip(&|doc| {
+            doc["paths"]["/api/session/{sessionID}/prompt"]["post"]["requestBody"]["content"]["application/json"]
+                ["schema"]["properties"]["delivery"]["enum"] = json!(["queue"]);
+        });
+        assert!(error.to_string().contains("steer"), "{error}");
+    }
+
+    #[test]
+    fn server_error_summary_keeps_the_cause_and_drops_the_stack() {
+        let line = r#"timestamp=2026-08-15T05:44:47.527Z level=ERROR message="Failed to drain Session" cause="SessionRunnerModel.ModelUnavailableError: Model unavailable: google/gemini-3.5-flash\n    at <anonymous> (/$bunfs/root/chunk.js:6:22145)" sessionID=ses_abc"#;
+        assert_eq!(
+            summarize_server_error(line),
+            "SessionRunnerModel.ModelUnavailableError: Model unavailable: google/gemini-3.5-flash"
+        );
+        // A line in an unexpected shape must degrade to something readable
+        // rather than being dropped: it is the only account of the failure.
+        assert_eq!(
+            summarize_server_error("level=ERROR boom"),
+            "level=ERROR boom"
+        );
     }
 
     #[test]
