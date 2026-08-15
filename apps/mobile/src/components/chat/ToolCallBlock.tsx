@@ -168,6 +168,12 @@ export const ToolCallBlock = memo(function ToolCallBlock({
   const hasContent =
     (Boolean(item.output) || hasStructuredDetail) && !suppressDetail;
   const testBadgeLabel = testSummary ? testSummaryHeadline(testSummary) : null;
+  const label = useMemo(
+    () => toolCallLabel(item),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the title, detail
+    // and head of the output are all toolCallLabel reads.
+    [item.title, item.output, item.detail],
+  );
 
   if (variant === "row") {
     return (
@@ -175,7 +181,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         style={styles.rowHeader}
         accessible
         accessibilityLiveRegion="polite"
-        accessibilityLabel={`${toolCallLabel(item)}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
+        accessibilityLabel={`${label}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
       >
         {statusIcon}
         <Text
@@ -185,7 +191,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
           style={styles.title}
           numberOfLines={1}
         >
-          {toolCallLabel(item)}
+          {label}
         </Text>
       </View>
     );
@@ -199,7 +205,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         disabled={awaitingApproval}
         accessibilityRole={hasContent ? "button" : undefined}
         accessibilityLiveRegion="polite"
-        accessibilityLabel={`${toolCallLabel(item)}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
+        accessibilityLabel={`${label}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
         accessibilityHint={
           hasContent
             ? awaitingApproval
@@ -226,7 +232,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
           style={styles.title}
           numberOfLines={1}
         >
-          {toolCallLabel(item)}
+          {label}
         </Text>
         {awaitingApproval ? (
           <Text variant="caption" color="warning" size="2xs" weight="semibold">

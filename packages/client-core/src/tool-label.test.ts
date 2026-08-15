@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { compactFilePath, toolCallFilePath, toolCallLabel } from './tool-label'
+import { compactFilePath, describeToolCall, toolCallFilePath, toolCallLabel } from './tool-label'
 
 describe('tool call labels', () => {
   it('shrinks an absolute path to the file being edited', () => {
@@ -85,5 +85,28 @@ describe('tool call labels', () => {
   it('compacts a bare path to its file name', () => {
     expect(compactFilePath('/repo/src/app.tsx')).toBe('app.tsx')
     expect(compactFilePath('app.tsx')).toBe('app.tsx')
+  })
+
+  it('shortens every verb the daemon emits, not just editing ones', () => {
+    expect(toolCallLabel({ title: 'List /repo/packages/chat-ui/src' })).toBe('List src')
+    expect(toolCallLabel({ title: 'Inspect /repo/src/app.tsx' })).toBe('Inspect app.tsx')
+  })
+
+  it('reports whether the label already names the file, so links need not repeat it', () => {
+    expect(describeToolCall({ title: 'Edit /repo/src/app.tsx' })).toEqual({
+      label: 'Edit app.tsx',
+      path: '/repo/src/app.tsx',
+      namesPath: true,
+    })
+    expect(describeToolCall({ title: 'npm test' })).toEqual({
+      label: 'npm test',
+      path: null,
+      namesPath: false,
+    })
+  })
+
+  it('reads only the head of a result, not a whole file of output', () => {
+    const decoy = `${'x'.repeat(2000)}\nThe file /repo/src/decoy.ts has been updated.`
+    expect(toolCallLabel({ title: 'Edit', output: decoy })).toBe('Edit')
   })
 })

@@ -15,7 +15,7 @@ import type {
 } from "./types";
 import { normalizeEventEnvelope, normalizePreferences } from "./normalization";
 import { summarizeMcpArtifacts } from "./provider-output";
-import { toolCallLabel } from "./tool-label";
+import { describeToolCall } from "./tool-label";
 
 /** Creates the receipt-safe outcome for a response without retaining answers. */
 export function interactiveResolutionFromResponse(
@@ -1590,7 +1590,12 @@ function buildToolActivitySummary(
   const counts: Partial<Record<ToolActivityKind, number>> = {};
   for (const item of items) {
     incrementCount(counts, item.display.activity_kind);
-    const label = item.display.summary_hint ?? toolCallLabel(item);
+    // The daemon's hint is a category ("Read file"), so it only wins when the
+    // call itself names nothing more specific than that.
+    const described = describeToolCall(item);
+    const label = described.namesPath
+      ? described.label
+      : (item.display.summary_hint ?? described.label);
     if (!labels.includes(label)) labels.push(label);
     if (labels.length >= 2) break;
   }

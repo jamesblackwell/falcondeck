@@ -21,7 +21,7 @@ use super::{
     bound_extension_thread_summaries, claude_prompt_from_inputs, codex_inputs,
     conversation_helpers::{
         ToolSettlement, codex_artifact_conversation_item, is_known_tool_item,
-        tool_display_metadata, unsupported_conversation_item,
+        synthesize_tool_title, tool_display_metadata, unsupported_conversation_item,
     },
     encode_base64, notification_timestamp,
     notifications::{
@@ -1521,6 +1521,47 @@ fn extracts_nested_claude_tool_use_and_result_events() {
             images: Vec::new()
         })
     );
+}
+
+#[test]
+fn every_harness_titles_the_same_tool_the_same_way() {
+    // Claude spells the key `file_path`, OpenCode `filePath` — one title.
+    assert_eq!(
+        synthesize_tool_title("Edit", Some(&json!({ "file_path": "/repo/a.php" })), None).as_deref(),
+        Some("Edit /repo/a.php")
+    );
+    assert_eq!(
+        synthesize_tool_title("edit", Some(&json!({ "filePath": "/repo/a.php" })), None).as_deref(),
+        Some("Edit /repo/a.php")
+    );
+    // An edit streams its title before its input, so the result is a second
+    // place to find the file.
+    assert_eq!(
+        synthesize_tool_title("Edit", None, Some(&json!({ "filePath": "/repo/a.php" }))).as_deref(),
+        Some("Edit /repo/a.php")
+    );
+    // A command already reads as a sentence, so it keeps its own words.
+    assert_eq!(
+        synthesize_tool_title("bash", Some(&json!({ "command": "git status" })), None).as_deref(),
+        Some("git status")
+    );
+    // A blank argument falls through to the next key, then to the bare verb.
+    assert_eq!(
+        synthesize_tool_title("grep", Some(&json!({ "pattern": "", "query": "todo" })), None)
+            .as_deref(),
+        Some("Search todo")
+    );
+    assert_eq!(
+        synthesize_tool_title("read", Some(&json!({})), None).as_deref(),
+        Some("Read")
+    );
+    // A long command is cut to one line's worth.
+    let long = synthesize_tool_title("bash", Some(&json!({ "command": "x".repeat(400) })), None)
+        .expect("title");
+    assert_eq!(long.chars().count(), 120);
+    assert!(long.ends_with('…'));
+    // An unknown tool keeps its own name, whatever the harness calls it.
+    assert_eq!(synthesize_tool_title("todowrite", Some(&json!({})), None), None);
 }
 
 #[test]

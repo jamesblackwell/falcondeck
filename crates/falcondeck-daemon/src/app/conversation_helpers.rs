@@ -1776,6 +1776,66 @@ pub(super) fn parse_interactive_response_params(
     }
 }
 
+/// Longest title worth keeping: a shell command can run to a paragraph, and
+/// the header that shows it is one line.
+const TOOL_TITLE_MAX_CHARS: usize = 120;
+
+/// Where a tool's subject lives in its own input, whatever the harness calls
+/// the key. Claude sends `file_path`, OpenCode `filePath`, ACP agents
+/// `target_file`.
+const TOOL_FILE_KEYS: &[&str] = &[
+    "file_path",
+    "filePath",
+    "path",
+    "target_file",
+    "notebook_path",
+    "notebookPath",
+];
+
+/// Names a tool call after what it acted on: `Edit app/Console/Kernel.php`
+/// rather than a bare `Edit`. Harness-independent on purpose — a transcript
+/// mixes Claude, OpenCode and ACP calls, and they should read alike. Returns
+/// `None` for tools this does not know, leaving the caller its own name.
+pub(super) fn synthesize_tool_title(
+    name: &str,
+    input: Option<&Value>,
+    result: Option<&Value>,
+) -> Option<String> {
+    // (label, where the subject lives, what to say when it is missing)
+    let (label, keys, bare): (&str, &[&str], &str) = match name.to_ascii_lowercase().as_str() {
+        "read" => ("Read", TOOL_FILE_KEYS, "Read"),
+        "edit" | "multiedit" | "patch" | "search_replace" => ("Edit", TOOL_FILE_KEYS, "Edit"),
+        "write" => ("Write", TOOL_FILE_KEYS, "Write"),
+        "notebookedit" => ("Edit notebook", TOOL_FILE_KEYS, "Edit notebook"),
+        "list" => ("List", &["path", "directory"], "List files"),
+        "glob" => ("Find", &["pattern", "path"], "Find files"),
+        "grep" => ("Search", &["pattern", "query"], "Search workspace"),
+        "webfetch" => ("Web fetch", &["url"], "Web fetch"),
+        // A command already reads as a sentence; a verb in front of it only
+        // costs width.
+        "bash" => ("", &["command", "description"], "Bash"),
+        _ => return None,
+    };
+
+    let subject = tool_argument(input, keys).or_else(|| tool_argument(result, keys));
+    Some(match subject {
+        Some(subject) if label.is_empty() => truncate_preview(&subject, TOOL_TITLE_MAX_CHARS),
+        Some(subject) => truncate_preview(&format!("{label} {subject}"), TOOL_TITLE_MAX_CHARS),
+        None => bare.to_string(),
+    })
+}
+
+/// First key that carries a non-empty string, so a tool that sends `path: ""`
+/// falls through to the next candidate rather than titling itself with blank.
+fn tool_argument(value: Option<&Value>, keys: &[&str]) -> Option<String> {
+    let value = value?;
+    keys.iter().find_map(|key| {
+        extract_string(value, &[key])
+            .map(|found| found.trim().to_string())
+            .filter(|found| !found.is_empty())
+    })
+}
+
 pub(super) fn truncate_preview(input: &str, limit: usize) -> String {
     let trimmed = input.trim();
     if trimmed.chars().count() <= limit {

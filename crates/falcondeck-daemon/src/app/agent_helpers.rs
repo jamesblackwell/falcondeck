@@ -6,7 +6,8 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::{
-    app::conversation_helpers::should_suppress_tool_output, codex::extract_string,
+    app::conversation_helpers::{should_suppress_tool_output, synthesize_tool_title},
+    codex::extract_string,
     skills::canonical_skill_alias,
 };
 
@@ -1095,52 +1096,6 @@ fn synthesize_claude_tool_title(
     };
 
     match name.to_ascii_lowercase().as_str() {
-        "read" => input
-            .and_then(|input| extract_string(input, &["file_path", "filePath", "path"]))
-            .map(|path| format!("Read {path}"))
-            .unwrap_or_else(|| "Read".to_string()),
-        // Naming the file is the whole point of an edit card: a bare "Edit"
-        // tells a reader nothing about which of a turn's ten edits this is.
-        "edit" | "write" | "multiedit" | "notebookedit" => {
-            let label = match name.to_ascii_lowercase().as_str() {
-                "write" => "Write",
-                "multiedit" => "Edit",
-                "notebookedit" => "Edit notebook",
-                _ => "Edit",
-            };
-            input
-                .and_then(|input| {
-                    extract_string(
-                        input,
-                        &["file_path", "filePath", "path", "notebook_path", "notebookPath"],
-                    )
-                })
-                .map(|path| format!("{label} {path}"))
-                .unwrap_or_else(|| label.to_string())
-        }
-        "glob" => input
-            .and_then(|input| {
-                extract_string(input, &["pattern"]).or_else(|| extract_string(input, &["path"]))
-            })
-            .map(|pattern| format!("Find {pattern}"))
-            .unwrap_or_else(|| "Find files".to_string()),
-        "grep" => input
-            .and_then(|input| {
-                extract_string(input, &["pattern"]).or_else(|| extract_string(input, &["query"]))
-            })
-            .map(|pattern| format!("Search {pattern}"))
-            .unwrap_or_else(|| "Search workspace".to_string()),
-        "bash" => input
-            .and_then(|input| {
-                extract_string(input, &["command"])
-                    .or_else(|| extract_string(input, &["description"]))
-            })
-            .map(|command| truncate_claude_tool_label(&command, 120))
-            .unwrap_or_else(|| "Bash".to_string()),
-        "webfetch" => input
-            .and_then(|input| extract_string(input, &["url"]))
-            .map(|url| format!("Web fetch {url}"))
-            .unwrap_or_else(|| "Web fetch".to_string()),
         "toolsearch" => input
             .and_then(|input| extract_string(input, &["query"]))
             .or_else(|| result.and_then(|result| extract_string(result, &["query"])))
@@ -1151,7 +1106,11 @@ fn synthesize_claude_tool_title(
             .or_else(|| result.and_then(|result| extract_string(result, &["commandName"])))
             .map(|skill| format!("Load skill: {skill}"))
             .unwrap_or_else(|| "Load skill".to_string()),
-        _ => name.to_string(),
+        // Everything a harness could plausibly share — reads, edits, searches,
+        // commands — is titled the same way for every provider. Claude's own
+        // result is a second place to find the file, since an edit streams its
+        // title before its input arrives.
+        _ => synthesize_tool_title(name, input, result).unwrap_or_else(|| name.to_string()),
     }
 }
 
@@ -1233,20 +1192,6 @@ fn stringify_claude_value(value: Option<&Value>) -> Option<String> {
         }
         other => Some(other.to_string()),
     }
-}
-
-fn truncate_claude_tool_label(value: &str, limit: usize) -> String {
-    let trimmed = value.trim();
-    if trimmed.chars().count() <= limit {
-        return trimmed.to_string();
-    }
-
-    let mut result = trimmed
-        .chars()
-        .take(limit.saturating_sub(1))
-        .collect::<String>();
-    result.push('…');
-    result
 }
 
 fn longest_suffix_prefix_overlap(current: &str, next: &str) -> Option<usize> {

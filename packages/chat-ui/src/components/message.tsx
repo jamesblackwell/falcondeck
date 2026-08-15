@@ -62,8 +62,7 @@ import {
   safeArtifactFilename,
   safeArtifactMimeType,
   summarizeParsedMcpArtifacts,
-  compactFilePath,
-  toolCallFilePath,
+  describeToolCall,
   toolCallLabel,
   toolLifecycle,
   toolLifecycleLabel,
@@ -977,22 +976,26 @@ function ToolCallMessage({
   );
   const detailAvailable =
     (hasOutput || hasStructuredDetail) && !suppressReadOnlyDetail;
-  const label = toolCallLabel(item);
   const lifecycle = toolLifecycle(item);
   const lifecycleLabel = toolLifecycleLabel(lifecycle);
   const testBadgeLabel = testSummary ? testSummaryHeadline(testSummary) : null;
 
   const activityKind = item.display.activity_kind;
   const touchesFile = activityKind === "edit" || activityKind === "diff";
-  // The header shows the file's name, so links and highlighting have to work
-  // from the full path the label shortened away.
-  const filePath = useMemo(
-    () =>
-      touchesFile || activityKind === "read"
-        ? (toolCallFilePath(item) ?? extractFilePath(item.title))
-        : null,
-    [activityKind, item, touchesFile],
-  );
+  // The header shows the file's name, so links and highlighting work from the
+  // full path the label shortened away. Both come from one pass over the
+  // title, keyed on it so a streaming tool's output deltas cost nothing.
+  const { label, filePath, labelNamesFile } = useMemo(() => {
+    const described = describeToolCall(item);
+    const wantsPath = touchesFile || activityKind === "read";
+    return {
+      label: described.label,
+      filePath: wantsPath ? (described.path ?? extractFilePath(item.title)) : null,
+      labelNamesFile: described.namesPath,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the title, detail
+    // and head of the output are all describeToolCall reads.
+  }, [activityKind, item.title, item.output, item.detail, touchesFile]);
   // Output highlighting is only safe when the file names the language: a shell
   // command's output has nothing to do with the path that appears in it.
   const outputFilePath =
@@ -1323,11 +1326,7 @@ function ToolCallMessage({
           filePath={filePath}
           // The header already names the file, so repeating it here would spend
           // the row on the same word twice.
-          label={
-            label.endsWith(compactFilePath(filePath))
-              ? "Diff"
-              : fileBaseName(filePath)
-          }
+          label={labelNamesFile ? "Diff" : fileBaseName(filePath)}
           className="max-w-40 truncate font-mono text-[length:var(--fd-text-2xs)] text-fg-tertiary"
         />
       </span>
