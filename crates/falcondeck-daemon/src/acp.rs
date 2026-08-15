@@ -31,10 +31,10 @@ use falcondeck_core::{
 };
 
 use crate::acp_protocol::AcpSessionUpdateKind;
-use crate::app::conversation_helpers::synthesize_tool_title;
 use crate::agent_binary::{
     desktop_login_shell_environment, preferred_command_path_with_environment, resolve_agent_binary,
 };
+use crate::app::conversation_helpers::synthesize_tool_title;
 use crate::error::DaemonError;
 
 /// Largest raw image file embedded inline for an ACP prompt, mirroring the
@@ -714,12 +714,12 @@ impl AcpSessionConfiguration {
 }
 
 #[derive(Debug, Default)]
-struct ParsedSessionMetadata {
-    models: Vec<ModelSummary>,
-    reasoning_efforts: Vec<ReasoningEffortSummary>,
+pub(crate) struct ParsedSessionMetadata {
+    pub(crate) models: Vec<ModelSummary>,
+    pub(crate) reasoning_efforts: Vec<ReasoningEffortSummary>,
     default_reasoning_effort: Option<String>,
-    permission_modes: Vec<String>,
-    collaboration_modes: Vec<CollaborationModeSummary>,
+    pub(crate) permission_modes: Vec<String>,
+    pub(crate) collaboration_modes: Vec<CollaborationModeSummary>,
     configuration: AcpSessionConfiguration,
 }
 
@@ -845,7 +845,7 @@ fn capability_enabled(value: Option<&Value>) -> bool {
     }
 }
 
-fn parse_session_metadata(result: &Value) -> ParsedSessionMetadata {
+pub(crate) fn parse_session_metadata(result: &Value) -> ParsedSessionMetadata {
     let mut parsed = ParsedSessionMetadata::default();
     let mut current_model_id = None;
 
@@ -2305,8 +2305,7 @@ impl AcpRuntime {
                 Some(AcpEvent::ToolCall {
                     session_id: session_id.to_string(),
                     call_id,
-                    title: acp_tool_title(update)
-                        .unwrap_or_else(|| "Tool call".to_string()),
+                    title: acp_tool_title(update).unwrap_or_else(|| "Tool call".to_string()),
                     kind: update
                         .get("kind")
                         .and_then(Value::as_str)

@@ -5,7 +5,7 @@
 //! Add `--live` to exercise prompts, tools, cancellation, and session loading.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env,
     path::{Path, PathBuf},
     process::Stdio,
@@ -57,6 +57,11 @@ enum ProbeError {
 pub struct ProbeOptions {
     /// Executable followed by its arguments.
     pub command: Vec<String>,
+    /// Provider-specific environment from `providers.json`. A matrix run that
+    /// dropped these would fail adapters whose credentials live there, for a
+    /// reason FalconDeck itself never hits — a false alarm is worse than no
+    /// alarm, because it teaches everyone to ignore the suite.
+    pub env: HashMap<String, String>,
     /// Working directory presented to the adapter.
     pub cwd: PathBuf,
     json: bool,
@@ -73,6 +78,7 @@ impl ProbeOptions {
     pub fn new(command: Vec<String>, cwd: PathBuf) -> Self {
         Self {
             command,
+            env: HashMap::new(),
             cwd,
             json: false,
             live: false,
@@ -142,6 +148,7 @@ impl ProbeOptions {
                     command.extend(args);
                     return Ok(Self {
                         command,
+                        env: HashMap::new(),
                         cwd,
                         json,
                         live,
@@ -155,12 +162,13 @@ impl ProbeOptions {
         let command = args.collect::<Vec<_>>();
         if command.is_empty() {
             return Err(ProbeError::Usage(
-                "acp_conformance [--json] [--live] [--restart] [--cwd PATH] [--timeout-seconds N] -- COMMAND [ARGS...]"
+                "acp_conformance [--json] [--live] [--restart] [--all] [--cwd PATH] [--timeout-seconds N] -- COMMAND [ARGS...]"
                     .to_string(),
             ));
         }
         Ok(Self {
             command,
+            env: HashMap::new(),
             cwd,
             json,
             live,
@@ -329,6 +337,7 @@ impl AdapterProcess {
             .ok_or_else(|| ProbeError::Usage("adapter command is empty".to_string()))?;
         let mut child = Command::new(executable)
             .args(&options.command[1..])
+            .envs(&options.env)
             .current_dir(&options.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -680,25 +689,11 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
         },
     );
 
-    if !options.live {
-        for name in [
-            "Session creation",
-            "Text streaming",
-            "Tool lifecycle",
-            "Cancellation",
-            "Session resume",
-        ] {
-            report.push(name, CheckStatus::Skipped, "run with --live");
-        }
-        report.push(
-            "Process restart",
-            CheckStatus::Skipped,
-            "not exercised by pilot",
-        );
-        report.stderr_tail = adapter.stderr_tail().await;
-        return report;
-    }
-
+    // `session/new` spends nothing — it is the same discovery call FalconDeck
+    // makes at workspace attach — so session creation and catalog discovery
+    // run in every mode. Only prompting costs tokens, and that stays behind
+    // `--live`, which keeps the check that catches a silently empty picker
+    // cheap enough to run on every harness upgrade.
     let session = match adapter
         .request(
             "session/new",
@@ -735,6 +730,48 @@ pub async fn run_probe(options: &ProbeOptions) -> Report {
         CheckStatus::Pass,
         format!("session opened; {mode_count} mode(s)"),
     );
+
+    // Run FalconDeck's own parser over the live response rather than reading
+    // the fields this probe expects. An agent that moves its catalog — to
+    // `configOptions`, to `models`, to something new — still answers
+    // `session/new` successfully, and the composer silently shows a
+    // placeholder picker. That is a discovery failure no other check here
+    // would notice, so assert on the parser's output, not the wire shape.
+    let parsed = crate::acp::parse_session_metadata(&session);
+    let catalog = format!(
+        "{} model(s), {} mode(s), {} permission mode(s), {} reasoning level(s)",
+        parsed.models.len(),
+        parsed.collaboration_modes.len(),
+        parsed.permission_modes.len(),
+        parsed.reasoning_efforts.len(),
+    );
+    if parsed.models.is_empty() {
+        report.push(
+            "Catalog discovery",
+            CheckStatus::Warning,
+            format!("no models parsed from session/new ({catalog})"),
+        );
+    } else {
+        report.push("Catalog discovery", CheckStatus::Pass, catalog);
+    }
+
+    if !options.live {
+        for name in [
+            "Text streaming",
+            "Tool lifecycle",
+            "Cancellation",
+            "Session resume",
+        ] {
+            report.push(name, CheckStatus::Skipped, "run with --live");
+        }
+        report.push(
+            "Process restart",
+            CheckStatus::Skipped,
+            "not exercised by pilot",
+        );
+        report.stderr_tail = adapter.stderr_tail().await;
+        return report;
+    }
 
     let text_start = adapter.updates.len();
     let text_result = adapter
@@ -1023,9 +1060,94 @@ fn update_kinds(updates: &[Value]) -> BTreeSet<String> {
         .collect()
 }
 
+/// Every ACP provider configured in `providers.json`, so a matrix run covers
+/// what FalconDeck will actually launch rather than a hand-maintained list
+/// that drifts from the user's configuration.
+pub fn configured_provider_commands(
+    state_dir: &Path,
+) -> Vec<(String, Vec<String>, HashMap<String, String>)> {
+    crate::acp::load_acp_provider_configs(state_dir)
+        .into_iter()
+        .map(|config| (config.id, config.command, config.env))
+        .collect()
+}
+
+fn default_state_dir() -> PathBuf {
+    env::var("FALCONDECK_STATE_PATH")
+        .ok()
+        .map(PathBuf::from)
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .or_else(|| {
+            env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".falcondeck"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".falcondeck"))
+}
+
+/// Runs the probe once per configured provider and renders one table.
+async fn run_matrix(options: &ProbeOptions) -> Vec<Report> {
+    let providers = configured_provider_commands(&default_state_dir());
+    let mut reports = Vec::new();
+    for (id, command, env) in providers {
+        if command.is_empty() {
+            continue;
+        }
+        eprintln!("probing {id}: {}", command.join(" "));
+        let options = ProbeOptions {
+            command,
+            env,
+            cwd: options.cwd.clone(),
+            json: options.json,
+            live: options.live,
+            restart: options.restart,
+            timeout: options.timeout,
+        };
+        reports.push(run_probe(&options).await);
+    }
+    reports
+}
+
 /// Parses CLI arguments, runs the probe, prints its report, and returns an exit
 /// code (`0` compatible, `1` failed checks, `2` invalid invocation/output).
 pub async fn run_cli(args: impl IntoIterator<Item = String>) -> i32 {
+    let args = args.into_iter().collect::<Vec<_>>();
+    // `--all` replaces the required COMMAND, so it is handled before parsing
+    // rather than as another option on a command line that has none.
+    if args.iter().any(|arg| arg == "--all") {
+        let options = match ProbeOptions::parse(
+            args.iter()
+                .filter(|arg| *arg != "--all")
+                .cloned()
+                .chain(["--".to_string(), "placeholder".to_string()]),
+        ) {
+            Ok(options) => options,
+            Err(error) => {
+                eprintln!("{error}");
+                return 2;
+            }
+        };
+        let reports = run_matrix(&options).await;
+        if reports.is_empty() {
+            eprintln!("no ACP providers configured in providers.json");
+            return 2;
+        }
+        let failed = reports.iter().any(Report::has_failures);
+        if options.json {
+            match serde_json::to_string_pretty(&reports) {
+                Ok(encoded) => println!("{encoded}"),
+                Err(error) => {
+                    eprintln!("failed to encode report: {error}");
+                    return 2;
+                }
+            }
+        } else {
+            for report in &reports {
+                print!("{}", report.render());
+            }
+        }
+        return i32::from(failed);
+    }
     let options = match ProbeOptions::parse(args) {
         Ok(options) => options,
         Err(error) => {
@@ -1074,6 +1196,38 @@ mod tests {
         assert!(options.restart);
         assert!(options.json);
         assert_eq!(options.command, ["opencode", "acp"]);
+    }
+
+    /// A matrix run must carry each provider's configured environment. Without
+    /// it, adapters whose credentials live in `providers.json` fail the probe
+    /// for a reason FalconDeck itself never encounters.
+    #[test]
+    fn configured_providers_carry_their_command_and_environment() {
+        let dir =
+            std::env::temp_dir().join(format!("falcondeck-probe-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        std::fs::write(
+            dir.join("providers.json"),
+            r#"{ "providers": {
+                   "pi": { "command": ["pi-acp"], "env": { "OPENROUTER_API_KEY": "secret" } },
+                   "grok": { "command": ["grok", "agent", "stdio"] }
+                 } }"#,
+        )
+        .expect("write providers.json");
+
+        let mut providers = configured_provider_commands(&dir);
+        providers.sort_by(|left, right| left.0.cmp(&right.0));
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].0, "grok");
+        assert_eq!(providers[0].1, ["grok", "agent", "stdio"]);
+        assert!(providers[0].2.is_empty());
+        assert_eq!(providers[1].0, "pi");
+        assert_eq!(
+            providers[1].2.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("secret")
+        );
     }
 
     #[test]

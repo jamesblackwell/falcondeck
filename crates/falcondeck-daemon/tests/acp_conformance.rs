@@ -61,14 +61,22 @@ async fn live_probe_exercises_permission_cancel_resume_and_unknown_events() {
     assert!(!report.has_failures());
 }
 
+/// The default mode opens a discovery session but never prompts.
+///
+/// `session/new` is the same free call FalconDeck makes at workspace attach,
+/// and it is the only place the model catalog appears — gating it behind
+/// `--live` would put the check that catches a silently empty picker behind a
+/// token cost, which is what stops such a check from being run.
 #[tokio::test]
-async fn handshake_probe_does_not_make_live_requests() {
+async fn handshake_probe_discovers_the_catalog_without_prompting() {
     let cwd = tempfile::tempdir().expect("temporary workspace should be created");
     let report = run_probe(&options("normal", cwd.path().to_path_buf())).await;
 
     assert_eq!(status(&report, "Initialize"), CheckStatus::Pass);
-    assert_eq!(status(&report, "Session creation"), CheckStatus::Skipped);
-    assert!(report.observed_update_kinds.is_empty());
+    assert_eq!(status(&report, "Session creation"), CheckStatus::Pass);
+    assert_ne!(status(&report, "Catalog discovery"), CheckStatus::Skipped);
+    assert_eq!(status(&report, "Text streaming"), CheckStatus::Skipped);
+    assert_eq!(status(&report, "Tool lifecycle"), CheckStatus::Skipped);
 }
 
 #[tokio::test]

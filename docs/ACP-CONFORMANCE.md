@@ -5,15 +5,32 @@ generic ACP runtime depends on. The pilot is intentionally separate from the
 daemon: it is an engineering diagnostic, not yet a release gate or user-facing
 health check.
 
+OpenCode's *native* HTTP transport is a separate surface with its own probe —
+see `cargo run -p falcondeck-daemon --example opencode_conformance`.
+
 ## Running it
 
-Handshake only (no model call):
+Every configured provider at once, reading commands and environment straight
+from `providers.json` so the run covers what the daemon will actually launch:
+
+```sh
+cargo run -p falcondeck-daemon --example acp_conformance -- --all
+```
+
+One adapter, no model call:
 
 ```sh
 cargo run -p falcondeck-daemon --example acp_conformance -- -- pi-acp
 cargo run -p falcondeck-daemon --example acp_conformance -- -- opencode acp
 cargo run -p falcondeck-daemon --example acp_conformance -- -- grok agent stdio
 ```
+
+The default mode opens a discovery session and reports **Catalog discovery**:
+the model, mode, permission and reasoning counts that FalconDeck's own
+`parse_session_metadata` extracts from `session/new`. An adapter that moves its
+catalog still answers `session/new` successfully and leaves the composer with a
+placeholder picker, so this check reads the parser's output rather than the wire
+shape. `session/new` spends nothing, which is why it is not behind `--live`.
 
 Live conformance checks:
 
@@ -156,3 +173,25 @@ shape of the emitted event kinds.
 The pilot is useful precisely because it separates three questions: whether an
 adapter speaks ACP, whether its live behavior matches FalconDeck's assumptions,
 and which useful provider events FalconDeck currently leaves on the floor.
+
+## What the checks are chosen for
+
+The probe does not try to cover every ACP method. It concentrates on the
+assumptions that fail *quietly* when an adapter changes them.
+
+A dropped route or a renamed field announces itself: the next request returns an
+error and someone sees a stack trace. What survives review is the opposite —
+an adapter that answers successfully while telling us less than before. A
+`session/new` that no longer carries models still succeeds; the composer just
+shows a placeholder. Nothing errors, nothing logs, and the picker looks like a
+loading state forever.
+
+FalconDeck shipped exactly that failure twice: an ACP discovery result whose
+empty catalog was left in place as though it were data, and a native OpenCode
+probe that read an absent event as proof the runner was broken. Both passed
+their unit tests, because fixtures encode what we already believe. Only a live
+run against the real binary can contradict us.
+
+So: assert on counts, not on parses; assert with FalconDeck's own parser, not
+the probe's reading of the wire; and treat "it returned nothing" as a result
+that needs explaining rather than a verdict.
