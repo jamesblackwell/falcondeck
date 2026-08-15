@@ -1193,6 +1193,14 @@ impl AcpRuntime {
         self.closed.load(Ordering::Acquire)
     }
 
+    /// Whether `session/new` discovery has already answered for this process.
+    /// A live runtime whose first attempt failed keeps its placeholder catalog
+    /// until something retries, so callers reusing a cached runtime check this
+    /// instead of assuming the catalog was published.
+    pub fn metadata_discovered(&self) -> bool {
+        self.metadata_discovered.load(Ordering::Acquire)
+    }
+
     /// Whether the agent negotiated `loadSession` support.
     pub async fn supports_load_session(&self) -> bool {
         self.initialize_result

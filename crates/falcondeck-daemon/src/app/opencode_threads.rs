@@ -146,10 +146,17 @@ impl AppState {
     ) -> Result<(), DaemonError> {
         let runtime = self.opencode_runtime_for(workspace_id).await?;
         runtime.validate_contract().await?;
-        runtime.validate_execution().await?;
         let (catalog, agents) = tokio::try_join!(runtime.provider_catalog(), runtime.agents())?;
         let models = parse_native_models(&catalog)?;
         let collaboration_modes = parse_native_agents(&agents);
+        // The catalog describes OpenCode's own configuration, which backs the
+        // ACP adapter just as much as the native API, so publish it before
+        // proving the native runner. A build that admits prompts without ever
+        // starting its v2 runner still falls back to ACP for turns, but its
+        // composer gets a real model list instead of the synthetic default
+        // entry seeded at attach.
+        let execution = runtime.validate_execution().await;
+        let native = execution.is_ok();
         let workspace = {
             let mut workspaces = self.inner.workspaces.lock().await;
             let workspace = workspaces
@@ -164,8 +171,14 @@ impl AppState {
                     DaemonError::NotFound("OpenCode workspace agent not found".to_string())
                 })?;
             agent.account.status = AccountStatus::Ready;
-            agent.account.label = "OpenCode native connected".to_string();
-            agent.capabilities = native_capabilities();
+            agent.account.label = if native {
+                "OpenCode native connected".to_string()
+            } else {
+                "OpenCode using ACP fallback".to_string()
+            };
+            if native {
+                agent.capabilities = native_capabilities();
+            }
             agent.models = models;
             agent.collaboration_modes = collaboration_modes;
             workspace.summary.clone()
@@ -175,7 +188,7 @@ impl AppState {
             None,
             UnifiedEvent::WorkspaceUpdated { workspace },
         );
-        Ok(())
+        execution
     }
 
     pub(super) async fn respond_opencode_permission(

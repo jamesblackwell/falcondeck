@@ -205,15 +205,20 @@ impl AppState {
         workspace_id: &str,
         provider: &AgentProvider,
     ) -> Result<Arc<AcpRuntime>, DaemonError> {
-        {
+        let cached = {
             let workspaces = self.inner.workspaces.lock().await;
-            if let Some(runtime) = workspaces
+            workspaces
                 .get(workspace_id)
                 .and_then(|workspace| workspace.acp_runtimes.get(provider))
-                && !runtime.is_closed()
-            {
-                return Ok(Arc::clone(runtime));
+                .filter(|runtime| !runtime.is_closed())
+                .map(Arc::clone)
+        };
+        if let Some(runtime) = cached {
+            if !runtime.metadata_discovered() {
+                self.retry_acp_metadata_discovery(workspace_id, provider, &runtime)
+                    .await;
             }
+            return Ok(runtime);
         }
 
         let gate = {
@@ -229,15 +234,20 @@ impl AppState {
         // Metadata hydration and first-turn startup can arrive together. The
         // second caller must reuse the process created by the first one after
         // waiting on the keyed gate.
-        {
+        let cached = {
             let workspaces = self.inner.workspaces.lock().await;
-            if let Some(runtime) = workspaces
+            workspaces
                 .get(workspace_id)
                 .and_then(|workspace| workspace.acp_runtimes.get(provider))
-                && !runtime.is_closed()
-            {
-                return Ok(Arc::clone(runtime));
+                .filter(|runtime| !runtime.is_closed())
+                .map(Arc::clone)
+        };
+        if let Some(runtime) = cached {
+            if !runtime.metadata_discovered() {
+                self.retry_acp_metadata_discovery(workspace_id, provider, &runtime)
+                    .await;
             }
+            return Ok(runtime);
         }
 
         let config = self
@@ -278,59 +288,118 @@ impl AppState {
                 workspace
                     .acp_runtimes
                     .insert(provider.clone(), Arc::clone(&runtime));
-                // First successful handshake proves the binary works; reflect
-                // that on the workspace agent entry, along with the
-                // capabilities and any model catalog the agent negotiated —
-                // replacing the pre-connection acp_minimal() placeholder.
-                // Providers hot-added after the workspace connected have no
-                // stored entry yet (the snapshot's placeholder lives in a
-                // clone), so seed one here or the refinement has nothing to
-                // land on and the picker reports "not started" forever.
-                let agent = match workspace
-                    .summary
-                    .agents
-                    .iter_mut()
-                    .position(|agent| &agent.provider == provider)
-                {
-                    Some(index) => &mut workspace.summary.agents[index],
-                    None => {
-                        let mut capabilities =
-                            falcondeck_core::AgentCapabilitySummary::acp_minimal();
-                        capabilities.supports_images = crate::acp::acp_supports_images(
-                            provider.as_str(),
-                            capabilities.supports_images,
-                        );
-                        workspace
-                            .summary
-                            .agents
-                            .push(falcondeck_core::WorkspaceAgentSummary {
-                                provider: provider.clone(),
-                                label: runtime.config.label.clone(),
-                                account: falcondeck_core::AccountSummary {
-                                    status: falcondeck_core::AccountStatus::Unknown,
-                                    label: format!("{} not started", runtime.config.label),
-                                },
-                                models: Vec::new(),
-                                collaboration_modes: Vec::new(),
-                                skills: Vec::new(),
-                                capabilities,
-                            });
-                        workspace.summary.agents.last_mut().expect("just pushed")
-                    }
-                };
-                agent.account = falcondeck_core::AccountSummary {
-                    status: falcondeck_core::AccountStatus::Ready,
-                    label: format!("{} connected", runtime.config.label),
-                };
-                agent.capabilities = runtime.capability_summary().await;
-                let models = runtime.advertised_models().await;
-                if !models.is_empty() {
-                    agent.models = models;
+            }
+        }
+        self.publish_acp_agent_metadata(workspace_id, provider, &runtime)
+            .await;
+
+        let app = self.clone();
+        let workspace = workspace_id.to_string();
+        let pump_runtime = Arc::clone(&runtime);
+        tokio::spawn(async move {
+            app.pump_acp_events(workspace, pump_runtime, events_rx)
+                .await;
+        });
+
+        Ok(runtime)
+    }
+
+    /// Retries `session/new` discovery against a runtime that is already
+    /// running. The first attempt can fail while the CLI is still
+    /// authenticating, or time out when several workspaces start their agents
+    /// at once; without this the cached-runtime fast path above returns before
+    /// discovery is ever tried again and the composer keeps its placeholder
+    /// catalog for the life of the process.
+    async fn retry_acp_metadata_discovery(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+        runtime: &Arc<AcpRuntime>,
+    ) {
+        let workspace_path = {
+            let workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get(workspace_id) else {
+                return;
+            };
+            workspace.summary.path.clone()
+        };
+        if let Err(error) = runtime.ensure_workspace_metadata(&workspace_path).await {
+            tracing::info!(
+                provider = %runtime.config.id,
+                %error,
+                "ACP metadata discovery retry unavailable"
+            );
+            return;
+        }
+        self.publish_acp_agent_metadata(workspace_id, provider, runtime)
+            .await;
+    }
+
+    /// Lands a connected runtime's negotiated catalog on the workspace agent
+    /// entry and republishes the snapshot.
+    async fn publish_acp_agent_metadata(
+        &self,
+        workspace_id: &str,
+        provider: &AgentProvider,
+        runtime: &Arc<AcpRuntime>,
+    ) {
+        let capabilities = runtime.capability_summary().await;
+        let models = runtime.advertised_models().await;
+        let collaboration_modes = runtime.advertised_collaboration_modes().await;
+        {
+            let mut workspaces = self.inner.workspaces.lock().await;
+            let Some(workspace) = workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            // A successful handshake proves the binary works; reflect that on
+            // the workspace agent entry, along with the capabilities and any
+            // model catalog the agent negotiated — replacing the pre-connection
+            // acp_minimal() placeholder. Providers hot-added after the
+            // workspace connected have no stored entry yet (the snapshot's
+            // placeholder lives in a clone), so seed one here or the refinement
+            // has nothing to land on and the picker reports "not started"
+            // forever.
+            let agent = match workspace
+                .summary
+                .agents
+                .iter_mut()
+                .position(|agent| &agent.provider == provider)
+            {
+                Some(index) => &mut workspace.summary.agents[index],
+                None => {
+                    let mut placeholder = falcondeck_core::AgentCapabilitySummary::acp_minimal();
+                    placeholder.supports_images = crate::acp::acp_supports_images(
+                        provider.as_str(),
+                        placeholder.supports_images,
+                    );
+                    workspace
+                        .summary
+                        .agents
+                        .push(falcondeck_core::WorkspaceAgentSummary {
+                            provider: provider.clone(),
+                            label: runtime.config.label.clone(),
+                            account: falcondeck_core::AccountSummary {
+                                status: falcondeck_core::AccountStatus::Unknown,
+                                label: format!("{} not started", runtime.config.label),
+                            },
+                            models: Vec::new(),
+                            collaboration_modes: Vec::new(),
+                            skills: Vec::new(),
+                            capabilities: placeholder,
+                        });
+                    workspace.summary.agents.last_mut().expect("just pushed")
                 }
-                let collaboration_modes = runtime.advertised_collaboration_modes().await;
-                if !collaboration_modes.is_empty() {
-                    agent.collaboration_modes = collaboration_modes;
-                }
+            };
+            agent.account = falcondeck_core::AccountSummary {
+                status: falcondeck_core::AccountStatus::Ready,
+                label: format!("{} connected", runtime.config.label),
+            };
+            agent.capabilities = capabilities;
+            if !models.is_empty() {
+                agent.models = models;
+            }
+            if !collaboration_modes.is_empty() {
+                agent.collaboration_modes = collaboration_modes;
             }
         }
         // Clients only refresh workspace agent entries on a full snapshot
@@ -343,16 +412,6 @@ impl AppState {
                 snapshot: self.snapshot().await,
             },
         );
-
-        let app = self.clone();
-        let workspace = workspace_id.to_string();
-        let pump_runtime = Arc::clone(&runtime);
-        tokio::spawn(async move {
-            app.pump_acp_events(workspace, pump_runtime, events_rx)
-                .await;
-        });
-
-        Ok(runtime)
     }
 
     /// Replaces an unresponsive ACP process before retrying turn startup.
