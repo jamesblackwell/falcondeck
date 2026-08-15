@@ -77,7 +77,10 @@ describe('transcript diff rendering', () => {
     const onOpenFile = vi.fn()
     renderTranscript([toolCall()], onOpenFile)
 
-    fireEvent.click(screen.getByText('greet.ts'))
+    // The header already reads "Edit greet.ts", so the link beside it opens the
+    // diff rather than repeating the file's name.
+    expect(screen.getByText('Edit greet.ts')).toBeTruthy()
+    fireEvent.click(screen.getByText('Diff'))
     expect(onOpenFile).toHaveBeenCalledWith('src/greet.ts')
 
     // The diff's own header names the file too, and opens the same panel.

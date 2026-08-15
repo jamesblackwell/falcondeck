@@ -15,6 +15,7 @@ export * from "./normalization";
 export * from "./remote-events";
 export * from "./skills";
 export * from "./provider-output";
+export * from "./tool-label";
 export * from "./realtime-audio";
 export * from "./service-message";
 export * from "./plan";

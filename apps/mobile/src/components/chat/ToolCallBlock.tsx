@@ -33,6 +33,7 @@ import {
   parseMcpResult,
   summarizeMcpArtifacts,
   summarizeParsedMcpArtifacts,
+  toolCallLabel,
   toolLifecycle,
   toolLifecycleLabel,
   type ConversationItem,
@@ -49,15 +50,6 @@ import { useCollapsible } from "./useCollapsible";
 import { useExternalUrl } from "./useExternalUrl";
 
 type ToolCall = Extract<ConversationItem, { kind: "tool_call" }>;
-
-function toolCallLabel(title: string) {
-  const shellMatch =
-    /^(?:\/[^\s]+\/)?(?:zsh|bash|sh)\s+-lc\s+(['"])([\s\S]*)\1$/.exec(
-      title.trim(),
-    );
-  if (shellMatch) return shellMatch[2];
-  return title;
-}
 
 interface ToolCallBlockProps {
   item: ToolCall;
@@ -183,7 +175,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         style={styles.rowHeader}
         accessible
         accessibilityLiveRegion="polite"
-        accessibilityLabel={`${toolCallLabel(item.title)}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
+        accessibilityLabel={`${toolCallLabel(item)}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
       >
         {statusIcon}
         <Text
@@ -193,7 +185,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
           style={styles.title}
           numberOfLines={1}
         >
-          {toolCallLabel(item.title)}
+          {toolCallLabel(item)}
         </Text>
       </View>
     );
@@ -207,7 +199,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
         disabled={awaitingApproval}
         accessibilityRole={hasContent ? "button" : undefined}
         accessibilityLiveRegion="polite"
-        accessibilityLabel={`${toolCallLabel(item.title)}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
+        accessibilityLabel={`${toolCallLabel(item)}, ${lifecycleLabel}${testBadgeLabel ? `, ${testBadgeLabel}` : ""}`}
         accessibilityHint={
           hasContent
             ? awaitingApproval
@@ -234,7 +226,7 @@ export const ToolCallBlock = memo(function ToolCallBlock({
           style={styles.title}
           numberOfLines={1}
         >
-          {toolCallLabel(item.title)}
+          {toolCallLabel(item)}
         </Text>
         {awaitingApproval ? (
           <Text variant="caption" color="warning" size="2xs" weight="semibold">

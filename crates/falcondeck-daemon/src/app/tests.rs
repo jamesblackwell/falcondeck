@@ -1524,6 +1524,44 @@ fn extracts_nested_claude_tool_use_and_result_events() {
 }
 
 #[test]
+fn file_editing_tools_name_the_file_they_touch() {
+    let title = |name: &str, input: serde_json::Value| {
+        super::extract_claude_tool_event(&json!({
+            "type": "stream_event",
+            "event": {
+                "type": "content_block_start",
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "toolu_edit",
+                    "name": name,
+                    "input": input
+                }
+            }
+        }))
+        .and_then(|event| event.title)
+    };
+
+    assert_eq!(
+        title("Edit", json!({ "file_path": "/repo/app/Console/Kernel.php" })),
+        Some("Edit /repo/app/Console/Kernel.php".to_string())
+    );
+    assert_eq!(
+        title("Write", json!({ "file_path": "/repo/src/new.ts" })),
+        Some("Write /repo/src/new.ts".to_string())
+    );
+    assert_eq!(
+        title("MultiEdit", json!({ "file_path": "/repo/src/app.tsx" })),
+        Some("Edit /repo/src/app.tsx".to_string())
+    );
+    assert_eq!(
+        title("NotebookEdit", json!({ "notebook_path": "/repo/analysis.ipynb" })),
+        Some("Edit notebook /repo/analysis.ipynb".to_string())
+    );
+    // An edit whose input has not streamed yet still labels the action.
+    assert_eq!(title("Edit", json!({})), Some("Edit".to_string()));
+}
+
+#[test]
 fn tool_result_base64_images_become_renderable_items() {
     let event = super::extract_claude_tool_event(&json!({
         "type": "user",

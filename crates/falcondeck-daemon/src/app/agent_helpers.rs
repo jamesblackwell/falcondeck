@@ -1099,6 +1099,25 @@ fn synthesize_claude_tool_title(
             .and_then(|input| extract_string(input, &["file_path", "filePath", "path"]))
             .map(|path| format!("Read {path}"))
             .unwrap_or_else(|| "Read".to_string()),
+        // Naming the file is the whole point of an edit card: a bare "Edit"
+        // tells a reader nothing about which of a turn's ten edits this is.
+        "edit" | "write" | "multiedit" | "notebookedit" => {
+            let label = match name.to_ascii_lowercase().as_str() {
+                "write" => "Write",
+                "multiedit" => "Edit",
+                "notebookedit" => "Edit notebook",
+                _ => "Edit",
+            };
+            input
+                .and_then(|input| {
+                    extract_string(
+                        input,
+                        &["file_path", "filePath", "path", "notebook_path", "notebookPath"],
+                    )
+                })
+                .map(|path| format!("{label} {path}"))
+                .unwrap_or_else(|| label.to_string())
+        }
         "glob" => input
             .and_then(|input| {
                 extract_string(input, &["pattern"]).or_else(|| extract_string(input, &["path"]))

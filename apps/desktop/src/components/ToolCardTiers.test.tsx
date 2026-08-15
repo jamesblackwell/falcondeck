@@ -91,6 +91,21 @@ describe('tool card tiers', () => {
     expect(toggle).toBeEnabled()
   })
 
+  it('names the edited file instead of showing a bare verb or a full path', () => {
+    const { unmount } = renderTool(toolCall({ activity_kind: 'edit' }, {
+      title: 'Edit',
+      output: 'The file /Users/j/www/sites/app/Console/Kernel.php has been updated.',
+    }))
+    expect(screen.getByText('Edit Kernel.php')).toBeVisible()
+    unmount()
+
+    renderTool(toolCall({ activity_kind: 'read' }, {
+      title: 'Read `/Users/j/www/sites/app/AGENTS.md`',
+      output: 'file contents',
+    }))
+    expect(screen.getByText('Read AGENTS.md')).toBeVisible()
+  })
+
   it('summarizes test counts without replacing authoritative output', () => {
     renderTool(toolCall({
       artifact_kind: 'test',

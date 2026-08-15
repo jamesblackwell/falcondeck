@@ -62,6 +62,9 @@ import {
   safeArtifactFilename,
   safeArtifactMimeType,
   summarizeParsedMcpArtifacts,
+  compactFilePath,
+  toolCallFilePath,
+  toolCallLabel,
   toolLifecycle,
   toolLifecycleLabel,
   webSearchActionLabel,
@@ -812,16 +815,6 @@ function WebSearchMessage({
   );
 }
 
-function toolCallLabel(title: string) {
-  // Simplify verbose shell commands: "/bin/zsh -lc 'git diff --stat'" → "git diff --stat"
-  const shellMatch =
-    /^(?:\/[^\s]+\/)?(?:zsh|bash|sh)\s+-lc\s+(['"])([\s\S]*)\1$/.exec(
-      title.trim(),
-    );
-  if (shellMatch) return shellMatch[2];
-  return title;
-}
-
 type ExpansionMode = "default" | "expanded" | "collapsed";
 
 function ToolStatusIcon({
@@ -878,15 +871,19 @@ function ToolCallCompactRow({
   item: Extract<ConversationItem, { kind: "tool_call" }>;
 }) {
   const lifecycleLabel = toolLifecycleLabel(toolLifecycle(item));
+  const label = toolCallLabel(item);
   return (
     <div
       className="flex items-center gap-2 rounded-[var(--fd-radius-md)] px-2 py-1 text-fg-muted"
-      aria-label={`${toolCallLabel(item.title)}, ${lifecycleLabel}`}
+      aria-label={`${label}, ${lifecycleLabel}`}
       aria-live="polite"
     >
       <ToolStatusIcon item={item} className="h-3.5 w-3.5 shrink-0" />
-      <span className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]">
-        {toolCallLabel(item.title)}
+      <span
+        className="flex-1 truncate font-mono text-[length:var(--fd-text-xs)]"
+        title={item.title}
+      >
+        {label}
       </span>
     </div>
   );
@@ -980,17 +977,21 @@ function ToolCallMessage({
   );
   const detailAvailable =
     (hasOutput || hasStructuredDetail) && !suppressReadOnlyDetail;
-  const label = toolCallLabel(item.title);
+  const label = toolCallLabel(item);
   const lifecycle = toolLifecycle(item);
   const lifecycleLabel = toolLifecycleLabel(lifecycle);
   const testBadgeLabel = testSummary ? testSummaryHeadline(testSummary) : null;
 
   const activityKind = item.display.activity_kind;
   const touchesFile = activityKind === "edit" || activityKind === "diff";
+  // The header shows the file's name, so links and highlighting have to work
+  // from the full path the label shortened away.
   const filePath = useMemo(
     () =>
-      touchesFile || activityKind === "read" ? extractFilePath(label) : null,
-    [activityKind, label, touchesFile],
+      touchesFile || activityKind === "read"
+        ? (toolCallFilePath(item) ?? extractFilePath(item.title))
+        : null,
+    [activityKind, item, touchesFile],
   );
   // Output highlighting is only safe when the file names the language: a shell
   // command's output has nothing to do with the path that appears in it.
@@ -1320,7 +1321,13 @@ function ToolCallMessage({
         <FileDiff aria-hidden="true" className="h-3 w-3" />
         <FileDiffLink
           filePath={filePath}
-          label={fileBaseName(filePath)}
+          // The header already names the file, so repeating it here would spend
+          // the row on the same word twice.
+          label={
+            label.endsWith(compactFilePath(filePath))
+              ? "Diff"
+              : fileBaseName(filePath)
+          }
           className="max-w-40 truncate font-mono text-[length:var(--fd-text-2xs)] text-fg-tertiary"
         />
       </span>
@@ -1334,6 +1341,9 @@ function ToolCallMessage({
           "flex-1 truncate font-mono text-[length:var(--fd-text-xs)]",
           (lifecycle === "failed" || lifecycle === "denied") && "text-danger",
         )}
+        // The shortened label keeps the row readable; the hover keeps the
+        // whole path recoverable.
+        title={item.title}
       >
         {label}
       </span>
@@ -3143,7 +3153,7 @@ export const WorkSessionCard = memo(
       running &&
       items[items.length - 1]?.kind === "reasoning" &&
       !activeTool;
-    const currentLabel = activeTool ? toolCallLabel(activeTool.title) : null;
+    const currentLabel = activeTool ? toolCallLabel(activeTool) : null;
 
     return (
       <Collapsible.Root open={open} onOpenChange={setOpen}>

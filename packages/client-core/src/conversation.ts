@@ -15,6 +15,7 @@ import type {
 } from "./types";
 import { normalizeEventEnvelope, normalizePreferences } from "./normalization";
 import { summarizeMcpArtifacts } from "./provider-output";
+import { toolCallLabel } from "./tool-label";
 
 /** Creates the receipt-safe outcome for a response without retaining answers. */
 export function interactiveResolutionFromResponse(
@@ -1589,7 +1590,7 @@ function buildToolActivitySummary(
   const counts: Partial<Record<ToolActivityKind, number>> = {};
   for (const item of items) {
     incrementCount(counts, item.display.activity_kind);
-    const label = item.display.summary_hint ?? item.title;
+    const label = item.display.summary_hint ?? toolCallLabel(item);
     if (!labels.includes(label)) labels.push(label);
     if (labels.length >= 2) break;
   }

@@ -889,6 +889,51 @@ fn opencode_prompt_from_inputs(
     (text, files)
 }
 
+/// Names what an OpenCode tool call acted on. OpenCode reports only the tool's
+/// name, so a turn of file work renders as a stack of identical `edit` rows
+/// until the target is read out of the call's own input.
+fn opencode_tool_title(name: &str, state: &Value) -> String {
+    const MAX_TITLE_CHARS: usize = 120;
+    let input = state.get("input");
+    let argument = |keys: &[&str]| {
+        input.and_then(|input| {
+            keys.iter()
+                .find_map(|key| input.get(*key).and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        })
+    };
+    let labelled = |label: &str, value: Option<String>| {
+        value.map(|value| format!("{label} {value}"))
+    };
+
+    let title = match name.to_ascii_lowercase().as_str() {
+        "bash" => argument(&["command", "description"]),
+        "edit" | "patch" | "multiedit" => {
+            labelled("Edit", argument(&["filePath", "file_path", "path"]))
+        }
+        "write" => labelled("Write", argument(&["filePath", "file_path", "path"])),
+        "read" => labelled("Read", argument(&["filePath", "file_path", "path"])),
+        "list" => labelled("List", argument(&["path", "directory"])),
+        "glob" => labelled("Find", argument(&["pattern", "path"])),
+        "grep" => labelled("Search", argument(&["pattern", "query"])),
+        "webfetch" => labelled("Web fetch", argument(&["url"])),
+        _ => None,
+    };
+
+    let title = title.unwrap_or_else(|| name.to_string());
+    if title.chars().count() <= MAX_TITLE_CHARS {
+        return title;
+    }
+    let mut truncated = title
+        .chars()
+        .take(MAX_TITLE_CHARS.saturating_sub(1))
+        .collect::<String>();
+    truncated.push('…');
+    truncated
+}
+
 /// Extracts human-readable output from an OpenCode tool state. Completed
 /// states carry `content[]` parts (and an opaque `result`); error states
 /// carry an `error` object — none expose a plain `output` string.
@@ -1024,15 +1069,18 @@ async fn project_messages(
                         _ => "completed",
                     };
                     let output = tool_state_output(state);
+                    let title = opencode_tool_title(name, state);
                     let display =
-                        tool_display_metadata(name, "other", status, None, output.as_deref());
+                        tool_display_metadata(&title, name, status, None, output.as_deref());
                     app.push_conversation_item(
                         workspace_id,
                         thread_id,
                         ConversationItem::ToolCall {
                             id: format!("opencode-{content_id}"),
-                            title: name.to_string(),
-                            tool_kind: "other".to_string(),
+                            title,
+                            // OpenCode's own tool name is the truthful kind, and
+                            // it is what groups reads and edits in the transcript.
+                            tool_kind: name.to_string(),
                             status: status.to_string(),
                             output,
                             exit_code: None,
@@ -1205,6 +1253,30 @@ mod tests {
             tool_state_output(&serde_json::json!({ "status": "pending" })),
             None
         );
+    }
+
+    #[test]
+    fn tool_titles_name_the_file_or_command_behind_the_tool() {
+        let state = |input: serde_json::Value| serde_json::json!({ "input": input });
+        assert_eq!(
+            opencode_tool_title("edit", &state(serde_json::json!({ "filePath": "/repo/a.php" }))),
+            "Edit /repo/a.php"
+        );
+        assert_eq!(
+            opencode_tool_title("read", &state(serde_json::json!({ "filePath": "/repo/a.php" }))),
+            "Read /repo/a.php"
+        );
+        assert_eq!(
+            opencode_tool_title("bash", &state(serde_json::json!({ "command": "git status" }))),
+            "git status"
+        );
+        // A tool with no recognised input keeps its own name rather than
+        // inventing a target.
+        assert_eq!(
+            opencode_tool_title("todowrite", &state(serde_json::json!({ "todos": [] }))),
+            "todowrite"
+        );
+        assert_eq!(opencode_tool_title("edit", &serde_json::Value::Null), "edit");
     }
 
     #[test]
