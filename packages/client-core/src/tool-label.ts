@@ -68,6 +68,22 @@ const OUTPUT_PATH_RE =
   /^(?:The file (.+?) has been (?:updated|created|written)|File created successfully at:[ \t]*(.+?)[ \t]*$|Applied \d+ edits? to (.+?):)/m
 const OUTPUT_HEAD_CHARS = 400
 
+/** A title that ends in the one URL it is about, e.g. `Web fetch https://…`. */
+const URL_TITLE_RE = /^(.*?\s)?(https?:\/\/[^\s]+)$/
+
+/**
+ * A URL as much of it as a header can afford: the host that identifies it and
+ * the last segment that says which page. Query strings and tracking ids are
+ * exactly the part nobody reads.
+ */
+export function compactUrl(url: string) {
+  const [hostAndPath] = url.replace(/^https?:\/\//, '').split(/[?#]/)
+  const segments = hostAndPath.split('/').filter(Boolean)
+  const host = (segments.shift() ?? hostAndPath).replace(/^www\./, '')
+  const last = segments[segments.length - 1]
+  return last ? `${host}/${last}` : host
+}
+
 /** Trailing path segment, for labelling a link without spending the whole row. */
 export function fileBaseName(path: string) {
   return path.split('/').filter(Boolean).pop() ?? path
@@ -99,6 +115,11 @@ export function stripFileLocation(token: string) {
  */
 export function describeToolCall(item: ToolCallLabelSource): ToolCallDescription {
   const title = unwrapShellCommand(item.title.trim())
+  const url = URL_TITLE_RE.exec(title)
+  if (url) {
+    return { label: `${url[1] ?? ''}${compactUrl(url[2])}`, path: null, namesPath: false }
+  }
+
   const titlePath = filePathInTitle(title)
   if (titlePath) {
     const verb = title.slice(0, title.length - titlePath.raw.length).trim()

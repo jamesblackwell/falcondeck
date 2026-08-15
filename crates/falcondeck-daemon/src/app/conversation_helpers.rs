@@ -1796,7 +1796,7 @@ const TOOL_FILE_KEYS: &[&str] = &[
 /// rather than a bare `Edit`. Harness-independent on purpose — a transcript
 /// mixes Claude, OpenCode and ACP calls, and they should read alike. Returns
 /// `None` for tools this does not know, leaving the caller its own name.
-pub(super) fn synthesize_tool_title(
+pub(crate) fn synthesize_tool_title(
     name: &str,
     input: Option<&Value>,
     result: Option<&Value>,
@@ -1805,30 +1805,45 @@ pub(super) fn synthesize_tool_title(
         return Some(title);
     }
 
-    // (label, where the subject lives, what to say when it is missing)
+    // (label, where the subject lives, what to say when it is missing).
+    // Aliases sit together on purpose: every harness invents its own wire name
+    // for the same six or seven jobs, and ACP agents put that raw name in the
+    // title until their first update lands.
     let (label, keys, bare): (&str, &[&str], &str) = match name.to_ascii_lowercase().as_str() {
-        "read" => ("Read", TOOL_FILE_KEYS, "Read"),
-        "edit" | "multiedit" | "patch" | "search_replace" => ("Edit", TOOL_FILE_KEYS, "Edit"),
-        "write" => ("Write", TOOL_FILE_KEYS, "Write"),
+        "read" | "read_file" | "readfile" | "view_file" => ("Read", TOOL_FILE_KEYS, "Read"),
+        "edit" | "multiedit" | "patch" | "search_replace" | "str_replace" | "edit_file"
+        | "apply_patch" => ("Edit", TOOL_FILE_KEYS, "Edit"),
+        "write" | "write_file" | "create_file" => ("Write", TOOL_FILE_KEYS, "Write"),
         "notebookedit" => ("Edit notebook", TOOL_FILE_KEYS, "Edit notebook"),
         "notebookread" => ("Read notebook", TOOL_FILE_KEYS, "Read notebook"),
-        "list" | "ls" => ("List", &["path", "directory"], "List files"),
-        "glob" => ("Find", &["pattern", "path"], "Find files"),
-        "grep" => ("Search", &["pattern", "query"], "Search workspace"),
-        "webfetch" => ("Web fetch", &["url"], "Web fetch"),
-        "websearch" => ("Search web:", &["query"], "Search web"),
+        "list" | "ls" | "list_dir" | "list_directory" => (
+            "List",
+            &["path", "directory", "target_directory"],
+            "List files",
+        ),
+        "glob" | "file_search" | "glob_file_search" => ("Find", &["pattern", "path"], "Find files"),
+        "grep" | "grep_search" | "ripgrep" => {
+            ("Search", &["pattern", "query"], "Search workspace")
+        }
+        "webfetch" | "web_fetch" => ("Web fetch", &["url"], "Web fetch"),
+        "websearch" | "web_search" => ("Search web:", &["query"], "Search web"),
         // A sub-agent's own summary of its errand beats the word "Agent".
-        "agent" | "task" => ("Agent:", &["description", "subagent_type"], "Agent"),
+        "agent" | "task" | "spawn_agent" => {
+            ("Agent:", &["description", "subagent_type"], "Agent")
+        }
+        "search_tool" => ("Search tools:", &["query"], "Search tools"),
         "slashcommand" => ("Run", &["command"], "Run command"),
-        "todowrite" => ("Update plan", &[], "Update plan"),
-        "todoread" => ("Read plan", &[], "Read plan"),
+        "todowrite" | "todo_write" => ("Update plan", &[], "Update plan"),
+        "todoread" | "todo_read" => ("Read plan", &[], "Read plan"),
         "exitplanmode" => ("Present plan", &[], "Present plan"),
-        "bashoutput" => ("Read shell output", &[], "Read shell output"),
-        "killshell" => ("Stop shell", &[], "Stop shell"),
+        "bashoutput" | "get_command_or_subagent_output" => {
+            ("Read command output", &[], "Read command output")
+        }
+        "killshell" | "kill_command_or_subagent" => ("Stop command", &[], "Stop command"),
         // A command already reads as a sentence; a verb in front of it only
         // costs width. Scripts are pasted in whole, so only the first line can
         // fit — the card's detail still carries all of it.
-        "bash" => {
+        "bash" | "run_terminal_command" | "run_terminal_cmd" | "shell" => {
             let Some(command) = tool_argument(input, &["command", "description"]) else {
                 return Some("Bash".to_string());
             };

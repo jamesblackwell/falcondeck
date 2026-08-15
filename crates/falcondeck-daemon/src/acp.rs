@@ -31,6 +31,7 @@ use falcondeck_core::{
 };
 
 use crate::acp_protocol::AcpSessionUpdateKind;
+use crate::app::conversation_helpers::synthesize_tool_title;
 use crate::agent_binary::{
     desktop_login_shell_environment, preferred_command_path_with_environment, resolve_agent_binary,
 };
@@ -445,6 +446,29 @@ fn acp_content_block_text(block: &Value) -> Option<String> {
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
     }
+}
+
+/// An ACP tool call's title, made readable. Agents send their own wire name
+/// (`read_file`, `search_replace`, `run_terminal_command`) on the opening
+/// update and only replace it with prose once the call resolves — which never
+/// happens if the turn is interrupted. A one-word title is that raw name, so
+/// it goes through the same table every other harness uses, fed by the call's
+/// `rawInput` or, failing that, the file ACP says it touched.
+fn acp_tool_title(update: &Value) -> Option<String> {
+    let title = update.get("title").and_then(Value::as_str)?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    if title.split_whitespace().count() > 1 {
+        return Some(title.to_string());
+    }
+
+    let located = update
+        .pointer("/locations/0/path")
+        .and_then(Value::as_str)
+        .map(|path| json!({ "path": path }));
+    let input = update.get("rawInput").or(located.as_ref());
+    Some(synthesize_tool_title(title, input, None).unwrap_or_else(|| title.to_string()))
 }
 
 /// Splits an ACP tool-call `content` array into displayable output text and
@@ -2281,11 +2305,8 @@ impl AcpRuntime {
                 Some(AcpEvent::ToolCall {
                     session_id: session_id.to_string(),
                     call_id,
-                    title: update
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Tool call")
-                        .to_string(),
+                    title: acp_tool_title(update)
+                        .unwrap_or_else(|| "Tool call".to_string()),
                     kind: update
                         .get("kind")
                         .and_then(Value::as_str)
@@ -2310,10 +2331,7 @@ impl AcpRuntime {
                 Some(AcpEvent::ToolCallUpdate {
                     session_id: session_id.to_string(),
                     call_id,
-                    title: update
-                        .get("title")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned),
+                    title: acp_tool_title(update),
                     status: update
                         .get("status")
                         .and_then(Value::as_str)
@@ -2501,6 +2519,61 @@ impl AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_agent_tool_names_are_read_back_as_the_work_they_describe() {
+        // Grok opens every call with its own wire name and only sends prose
+        // once the call resolves.
+        assert_eq!(
+            acp_tool_title(&json!({
+                "title": "read_file",
+                "rawInput": { "target_file": "/repo/AGENTS.md" }
+            }))
+            .as_deref(),
+            Some("Read /repo/AGENTS.md")
+        );
+        assert_eq!(
+            acp_tool_title(&json!({
+                "title": "run_terminal_command",
+                "rawInput": { "command": "git status --short" }
+            }))
+            .as_deref(),
+            Some("git status --short")
+        );
+        assert_eq!(
+            acp_tool_title(&json!({
+                "title": "list_dir",
+                "rawInput": { "target_directory": "/repo/frontend" }
+            }))
+            .as_deref(),
+            Some("List /repo/frontend")
+        );
+        // Input has not streamed yet: ACP's own `locations` still names the file.
+        assert_eq!(
+            acp_tool_title(&json!({
+                "title": "search_replace",
+                "locations": [{ "path": "/repo/src/app.tsx" }]
+            }))
+            .as_deref(),
+            Some("Edit /repo/src/app.tsx")
+        );
+        // Nothing to go on yet — the verb alone still beats the wire name.
+        assert_eq!(
+            acp_tool_title(&json!({ "title": "todo_write" })).as_deref(),
+            Some("Update plan")
+        );
+        // A title the agent already wrote as prose is left exactly as sent.
+        assert_eq!(
+            acp_tool_title(&json!({ "title": "Edit `/repo/src/app.tsx`" })).as_deref(),
+            Some("Edit `/repo/src/app.tsx`")
+        );
+        // An unknown tool keeps its own name rather than being guessed at.
+        assert_eq!(
+            acp_tool_title(&json!({ "title": "summon_kraken" })).as_deref(),
+            Some("summon_kraken")
+        );
+        assert_eq!(acp_tool_title(&json!({})), None);
+    }
 
     #[test]
     fn terminal_osc_prefixes_are_removed_before_acp_json() {

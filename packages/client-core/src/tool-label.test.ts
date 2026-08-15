@@ -68,10 +68,17 @@ describe('tool call labels', () => {
     )
   })
 
-  it('leaves a URL alone', () => {
-    expect(toolCallLabel({ title: 'Web fetch https://example.com/docs/page.html' })).toBe(
-      'Web fetch https://example.com/docs/page.html',
+  it('shortens a fetched URL to the host and the page', () => {
+    expect(toolCallLabel({ title: 'Web fetch https://www.example.com/docs/page.html' })).toBe(
+      'Web fetch example.com/page.html',
     )
+    expect(toolCallLabel({ title: 'Web fetch https://example.com' })).toBe(
+      'Web fetch example.com',
+    )
+    // A query string is the part of a URL nobody reads in a header.
+    expect(
+      toolCallLabel({ title: 'Web fetch https://example.com/search?q=a&utm_source=b' }),
+    ).toBe('Web fetch example.com/search')
   })
 
   it('reports the full path so file links still resolve', () => {
