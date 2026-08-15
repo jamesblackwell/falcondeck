@@ -1801,19 +1801,48 @@ pub(super) fn synthesize_tool_title(
     input: Option<&Value>,
     result: Option<&Value>,
 ) -> Option<String> {
+    if let Some(title) = mcp_tool_title(name) {
+        return Some(title);
+    }
+
     // (label, where the subject lives, what to say when it is missing)
     let (label, keys, bare): (&str, &[&str], &str) = match name.to_ascii_lowercase().as_str() {
         "read" => ("Read", TOOL_FILE_KEYS, "Read"),
         "edit" | "multiedit" | "patch" | "search_replace" => ("Edit", TOOL_FILE_KEYS, "Edit"),
         "write" => ("Write", TOOL_FILE_KEYS, "Write"),
         "notebookedit" => ("Edit notebook", TOOL_FILE_KEYS, "Edit notebook"),
-        "list" => ("List", &["path", "directory"], "List files"),
+        "notebookread" => ("Read notebook", TOOL_FILE_KEYS, "Read notebook"),
+        "list" | "ls" => ("List", &["path", "directory"], "List files"),
         "glob" => ("Find", &["pattern", "path"], "Find files"),
         "grep" => ("Search", &["pattern", "query"], "Search workspace"),
         "webfetch" => ("Web fetch", &["url"], "Web fetch"),
+        "websearch" => ("Search web:", &["query"], "Search web"),
+        // A sub-agent's own summary of its errand beats the word "Agent".
+        "agent" | "task" => ("Agent:", &["description", "subagent_type"], "Agent"),
+        "slashcommand" => ("Run", &["command"], "Run command"),
+        "todowrite" => ("Update plan", &[], "Update plan"),
+        "todoread" => ("Read plan", &[], "Read plan"),
+        "exitplanmode" => ("Present plan", &[], "Present plan"),
+        "bashoutput" => ("Read shell output", &[], "Read shell output"),
+        "killshell" => ("Stop shell", &[], "Stop shell"),
         // A command already reads as a sentence; a verb in front of it only
-        // costs width.
-        "bash" => ("", &["command", "description"], "Bash"),
+        // costs width. Scripts are pasted in whole, so only the first line can
+        // fit — the card's detail still carries all of it.
+        "bash" => {
+            let Some(command) = tool_argument(input, &["command", "description"]) else {
+                return Some("Bash".to_string());
+            };
+            let (first, rest) = command.split_once('\n').unwrap_or((command.as_str(), ""));
+            let first = first.trim_end();
+            return Some(truncate_preview(
+                &if rest.trim().is_empty() {
+                    first.to_string()
+                } else {
+                    format!("{first} …")
+                },
+                TOOL_TITLE_MAX_CHARS,
+            ));
+        }
         _ => return None,
     };
 
@@ -1822,6 +1851,24 @@ pub(super) fn synthesize_tool_title(
         Some(subject) if label.is_empty() => truncate_preview(&subject, TOOL_TITLE_MAX_CHARS),
         Some(subject) => truncate_preview(&format!("{label} {subject}"), TOOL_TITLE_MAX_CHARS),
         None => bare.to_string(),
+    })
+}
+
+/// Reads an MCP tool's wire name as the server and action it really is:
+/// `mcp__claude_ai_Gmail__search_threads` is `Gmail · search threads`. Codex
+/// already ships this shape through its `Mcp` detail; Claude only sends the
+/// mangled name, and a transcript should not have to spell it out.
+fn mcp_tool_title(name: &str) -> Option<String> {
+    let rest = name.strip_prefix("mcp__")?;
+    let (server, tool) = rest.rsplit_once("__")?;
+    // Connector servers carry a `claude_ai_` namespace that names the host,
+    // not the app the user is thinking about.
+    let server = server.strip_prefix("claude_ai_").unwrap_or(server);
+    let humanize = |value: &str| value.replace('_', " ");
+    Some(match (humanize(server).trim(), humanize(tool).trim()) {
+        ("", tool) => tool.to_string(),
+        (server, "") => server.to_string(),
+        (server, tool) => format!("{server} · {tool}"),
     })
 }
 
@@ -2504,6 +2551,11 @@ fn classify_tool_activity_kind(
         || normalized_kind.contains("approval")
     {
         ToolActivityKind::Approval
+    } else if normalized_kind.contains("todo") {
+        // Plan bookkeeping, not file work — without this the "write" in
+        // `TodoWrite` earns it a bordered edit card claiming a change nobody
+        // made.
+        ToolActivityKind::Context
     } else if normalized_kind.contains("filechange")
         || normalized_kind.contains("file_change")
         || normalized_kind.contains("diff")
