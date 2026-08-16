@@ -28,9 +28,15 @@ import {
 
 import { OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
 
+import {
+  getPendingVoiceRecording,
+  getSpeechSettings,
+  type SpeechProvider,
+} from '@/features/speech/speechSettings'
+
 import { AttachmentPreviewList } from './AttachmentPreviewList'
 import { InputToolbar } from './InputToolbar'
-import { VoiceInputSheet } from './VoiceInputSheet'
+import { InlineVoiceRecorder } from './InlineVoiceRecorder'
 import {
   SANDBOX_DEFAULT_VALUE,
   permissionChipLabel,
@@ -139,9 +145,11 @@ export const ChatInput = memo(function ChatInput({
     end: number
   } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
-  const [voiceInputOpen, setVoiceInputOpen] = useState(false)
+  const [voiceProvider, setVoiceProvider] = useState<SpeechProvider | null>(
+    null,
+  )
   const [openSheet, setOpenSheet] = useState<
-    'more' | 'provider' | 'permission' | 'sandbox' | null
+    'more' | 'provider' | 'permission' | 'sandbox' | 'voice-provider' | null
   >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
   const hasContent = value.trim().length > 0 || attachments.length > 0
@@ -253,6 +261,19 @@ export const ChatInput = memo(function ChatInput({
     },
     [onChangeText, value.length],
   )
+
+  const handleMicPress = useCallback(() => {
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+    // A saved recording knows its provider; otherwise reuse the configured
+    // one and only ask on true first use.
+    const provider =
+      getSpeechSettings().provider ?? getPendingVoiceRecording()?.provider
+    if (provider) {
+      setVoiceProvider(provider)
+    } else {
+      setOpenSheet('voice-provider')
+    }
+  }, [])
 
   const handleVoiceTranscript = useCallback(
     (transcript: string) => {
@@ -395,9 +416,16 @@ export const ChatInput = memo(function ChatInput({
             />
           </View>
         ) : null}
+        {voiceProvider ? (
+          <InlineVoiceRecorder
+            provider={voiceProvider}
+            onTranscript={handleVoiceTranscript}
+            onClose={() => setVoiceProvider(null)}
+          />
+        ) : null}
         <TextInput
           ref={textInputRef}
-          style={styles.input}
+          style={[styles.input, voiceProvider ? styles.inputHidden : null]}
           value={value}
           onChangeText={handleChangeText}
           onSelectionChange={(event) => {
@@ -517,6 +545,7 @@ export const ChatInput = memo(function ChatInput({
             {sendDisabledReason}
           </Text>
         ) : null}
+        {voiceProvider ? null : (
         <View style={styles.footer}>
           <View style={styles.footerControls}>
             {moreItems.length > 0 ? (
@@ -578,11 +607,7 @@ export const ChatInput = memo(function ChatInput({
                   : styles.sendInactive,
             ]}
             onPress={
-              showStop
-                ? handleStop
-                : showMic
-                  ? () => setVoiceInputOpen(true)
-                  : handleSubmit
+              showStop ? handleStop : showMic ? handleMicPress : handleSubmit
             }
             disabled={showStop ? !canStop : showMic ? Boolean(disabled) : !canSend}
             accessibilityRole="button"
@@ -596,7 +621,7 @@ export const ChatInput = memo(function ChatInput({
                   : 'Send message'
             }
             accessibilityHint={
-              showMic ? 'Opens speech-to-text recording' : sendDisabled ? sendDisabledReason : undefined
+              showMic ? 'Starts voice recording in the composer' : sendDisabled ? sendDisabledReason : undefined
             }
             accessibilityState={{
               disabled: showStop ? !canStop : showMic ? Boolean(disabled) : !canSend,
@@ -626,6 +651,7 @@ export const ChatInput = memo(function ChatInput({
             )}
           </Pressable>
         </View>
+        )}
       </View>
       {openSheet === 'more' ? (
         <OptionSheet
@@ -679,10 +705,28 @@ export const ChatInput = memo(function ChatInput({
           onClose={() => setOpenSheet(null)}
         />
       ) : null}
-      {voiceInputOpen ? (
-        <VoiceInputSheet
-          onTranscript={handleVoiceTranscript}
-          onClose={() => setVoiceInputOpen(false)}
+      {openSheet === 'voice-provider' ? (
+        <OptionSheet
+          title="Voice input"
+          items={[
+            {
+              value: 'on-device',
+              label: 'On-device',
+              description:
+                'Private and offline when your phone has a downloaded speech model.',
+            },
+            {
+              value: 'openrouter',
+              label: 'OpenRouter',
+              description:
+                'Audio is encrypted to your desktop, which sends it to OpenRouter.',
+            },
+          ]}
+          onSelect={(value) => {
+            setOpenSheet(null)
+            setVoiceProvider(value as SpeechProvider)
+          }}
+          onClose={() => setOpenSheet(null)}
         />
       ) : null}
     </View>
@@ -721,6 +765,9 @@ const styles = StyleSheet.create((theme) => ({
     paddingHorizontal: theme.spacing[4],
     paddingVertical: 0,
     textAlignVertical: 'top',
+  },
+  inputHidden: {
+    display: 'none',
   },
   attachmentSection: {
     paddingHorizontal: theme.spacing[4],

@@ -4,6 +4,10 @@ import { AccessibilityInfo } from 'react-native'
 import { act } from 'react-test-renderer'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { renderComponent, cleanup, textOf } from '../../test/render'
+import {
+  resetSpeechSettings,
+  updateSpeechSettings,
+} from '../../features/speech/speechSettings'
 import { ApprovalBanner, approvalDetail } from './ApprovalBanner'
 import { ChatInput } from './ChatInput'
 import { CodeBlock } from './CodeBlock'
@@ -201,15 +205,37 @@ describe('ChatInput component', () => {
     expect(r.root.findByProps({ accessibilityLabel: 'Send message' })).toBeDefined()
   })
 
-  it('opens speech setup from an empty composer', () => {
+  it('asks for a speech provider on first mic use', () => {
     const r = renderComponent(<ChatInput value="" {...chatInputDefaults} />)
     act(() => {
       r.root.findByProps({ accessibilityLabel: 'Record voice message' }).props.onPress()
     })
 
-    expect(textOf(r)).toContain('Choose how FalconDeck should turn speech into text.')
+    expect(textOf(r)).toContain('Voice input')
     expect(textOf(r)).toContain('On-device')
     expect(textOf(r)).toContain('OpenRouter')
+  })
+
+  it('records inline without a chooser once a provider is configured', () => {
+    updateSpeechSettings({ provider: 'on-device' })
+    try {
+      const r = renderComponent(<ChatInput value="" {...chatInputDefaults} />)
+      act(() => {
+        r.root
+          .findByProps({ accessibilityLabel: 'Record voice message' })
+          .props.onPress()
+      })
+
+      expect(
+        r.root.findByProps({ accessibilityLabel: 'Cancel voice input' }),
+      ).toBeDefined()
+      // The composer footer (including the mic button) yields to the session.
+      expect(
+        r.root.findAllByProps({ accessibilityLabel: 'Record voice message' }),
+      ).toHaveLength(0)
+    } finally {
+      resetSpeechSettings()
+    }
   })
 
   it('renders disabled', () => {

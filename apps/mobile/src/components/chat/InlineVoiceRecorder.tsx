@@ -13,10 +13,10 @@ import {
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition'
 import { useRouter, type Href } from 'expo-router'
-import { Mic, RotateCcw, Square, Trash2 } from 'lucide-react-native'
+import { ArrowUp, RotateCcw, Settings, Trash2, X } from 'lucide-react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
-import { Button, NativeSheet, Text } from '@/components/ui'
+import { ActivityDiamond, Text } from '@/components/ui'
 import {
   clearPendingVoiceRecording,
   getPendingVoiceRecording,
@@ -30,8 +30,14 @@ import {
   transcribeWithDesktopOpenRouter,
 } from '@/features/speech/openRouterTranscription'
 
-type VoiceState =
-  'choosing' | 'starting' | 'recording' | 'transcribing' | 'failed'
+import { VoiceWaveform } from './VoiceWaveform'
+
+type VoiceState = 'starting' | 'recording' | 'transcribing' | 'failed'
+
+// Painted size of the round controls; hitSlop lifts them to 44pt.
+const CONTROL_SIZE = 40
+const MIN_ROW_HEIGHT = 48
+const LEVEL_HISTORY_LIMIT = 120
 
 function recordingDirectory(): Directory {
   const directory = new Directory(Paths.document, 'voice-drafts')
@@ -57,50 +63,89 @@ function removeRecording(uri: string | null): void {
   if (file.exists) file.delete()
 }
 
-function durationLabel(durationMillis: number): string {
-  const seconds = Math.max(0, Math.floor(durationMillis / 1000))
+function durationLabel(totalSeconds: number): string {
+  const seconds = Math.max(0, totalSeconds)
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
-export function VoiceInputSheet({
+/** Recorder metering is dBFS; treat -50 dB and below as silence. */
+function meteringToLevel(db: number): number {
+  return Math.min(1, Math.max(0, 1 + db / 50))
+}
+
+/** Speech-recognition volume is -2..10; below 0 is inaudible. */
+function volumeToLevel(value: number): number {
+  return Math.min(1, Math.max(0, value / 10))
+}
+
+/**
+ * In-composer voice recording session: cancel, live waveform and duration,
+ * one confirm action that stops and transcribes into the draft. Replaces the
+ * composer's input and footer rows while active; failures stay inline with
+ * retry/discard so the recording is never silently lost.
+ */
+export function InlineVoiceRecorder({
+  provider: initialProvider,
   onTranscript,
   onClose,
 }: {
+  provider: SpeechProvider
   onTranscript: (text: string) => void
   onClose: () => void
 }) {
   const { theme } = useUnistyles()
   const router = useRouter()
-  const [initial] = useState(() => ({
-    settings: getSpeechSettings(),
-    pending: getPendingVoiceRecording(),
-  }))
-  const settingsRef = useRef(initial.settings)
-  const initialProvider = initial.settings.provider
-  const initialPendingProvider = initial.pending?.provider ?? null
-  const [provider, setProvider] = useState<SpeechProvider | null>(
-    initialPendingProvider ?? initialProvider,
+  const [initialPending] = useState(() => getPendingVoiceRecording())
+  const settingsRef = useRef(getSpeechSettings())
+  const [provider, setProvider] = useState<SpeechProvider>(
+    initialPending?.provider ?? initialProvider,
   )
   const [recordingProvider, setRecordingProvider] =
-    useState<SpeechProvider | null>(initialPendingProvider)
+    useState<SpeechProvider | null>(initialPending?.provider ?? null)
   const [state, setState] = useState<VoiceState>(
-    initial.pending ? 'failed' : initialProvider ? 'starting' : 'choosing',
+    initialPending ? 'failed' : 'starting',
   )
   const [error, setError] = useState<string | null>(
-    initial.pending
-      ? 'A previous recording is waiting to be transcribed.'
-      : null,
+    initialPending ? 'A previous recording is waiting to be transcribed.' : null,
   )
   const [recordingUri, setRecordingUri] = useState<string | null>(
-    initial.pending?.uri ?? null,
+    initialPending?.uri ?? null,
   )
+  const [levels, setLevels] = useState<number[]>([])
+  const [localSeconds, setLocalSeconds] = useState(0)
   const transcriptRef = useRef('')
   const finalizedTranscriptRef = useRef('')
   const cancelledRef = useRef(false)
   const localErrorRef = useRef(false)
   const startedRef = useRef(false)
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY)
-  const recorderState = useAudioRecorderState(recorder, 250)
+  const recorder = useAudioRecorder({
+    ...RecordingPresets.HIGH_QUALITY,
+    isMeteringEnabled: true,
+  })
+  const recorderState = useAudioRecorderState(recorder, 150)
+
+  const pushLevel = useCallback((level: number) => {
+    setLevels((previous) => [...previous.slice(-(LEVEL_HISTORY_LIMIT - 1)), level])
+  }, [])
+
+  useEffect(() => {
+    if (state !== 'recording' || provider !== 'openrouter') return
+    if (typeof recorderState.metering === 'number') {
+      pushLevel(meteringToLevel(recorderState.metering))
+    }
+  }, [provider, pushLevel, recorderState, state])
+
+  // The speech-recognition module reports no elapsed time, so count it here.
+  useEffect(() => {
+    if (state !== 'recording' || provider === 'openrouter') return
+    const startedAt = Date.now()
+    setLocalSeconds(0)
+    const timer = setInterval(
+      () => setLocalSeconds(Math.floor((Date.now() - startedAt) / 1000)),
+      250,
+    )
+    return () => clearInterval(timer)
+  }, [provider, state])
 
   const finishWithTranscript = useCallback(
     (text: string, completedRecordingUri?: string) => {
@@ -218,6 +263,7 @@ export function VoiceInputSheet({
       continuous: true,
       requiresOnDeviceRecognition: true,
       addsPunctuation: true,
+      volumeChangeEventOptions: { enabled: true, intervalMillis: 150 },
       audioSource: audioUri
         ? {
             uri: audioUri,
@@ -271,10 +317,10 @@ export function VoiceInputSheet({
   )
 
   useEffect(() => {
-    if (startedRef.current || initial.pending || !initialProvider) return
+    if (startedRef.current || initialPending) return
     startedRef.current = true
     void begin(initialProvider)
-  }, [begin, initial.pending, initialProvider])
+  }, [begin, initialPending, initialProvider])
 
   useSpeechRecognitionEvent('start', () => setState('recording'))
   useSpeechRecognitionEvent('result', (event) => {
@@ -290,6 +336,9 @@ export function VoiceInputSheet({
         .filter(Boolean)
         .join(' ')
     }
+  })
+  useSpeechRecognitionEvent('volumechange', (event) => {
+    pushLevel(volumeToLevel(event.value))
   })
   useSpeechRecognitionEvent('audioend', (event) => {
     if (!event.uri) return
@@ -354,12 +403,6 @@ export function VoiceInputSheet({
     onClose()
   }, [onClose, provider, recorder, state])
 
-  const discard = useCallback(() => {
-    removeRecording(recordingUri)
-    clearPendingVoiceRecording()
-    onClose()
-  }, [onClose, recordingUri])
-
   const retry = useCallback(async () => {
     if (recordingUri) {
       if (recordingProvider === 'on-device') {
@@ -390,7 +433,7 @@ export function VoiceInputSheet({
       }
       return
     }
-    if (provider) await begin(provider)
+    await begin(provider)
   }, [
     begin,
     provider,
@@ -400,186 +443,185 @@ export function VoiceInputSheet({
     transcribeCloud,
   ])
 
-  const discardAndRecordOnDevice = useCallback(() => {
+  const discardAndRecord = useCallback(() => {
     removeRecording(recordingUri)
     clearPendingVoiceRecording()
     setRecordingUri(null)
     setRecordingProvider(null)
-    settingsRef.current = updateSpeechSettings({ provider: 'on-device' })
-    setProvider('on-device')
-    void startOnDevice()
-  }, [recordingUri, startOnDevice])
+    setLevels([])
+    void begin(settingsRef.current.provider ?? initialProvider)
+  }, [begin, initialProvider, recordingUri])
+
+  const openSpeechSettings = useCallback(() => {
+    onClose()
+    router.push('/(app)/settings/speech' as Href)
+  }, [onClose, router])
+
+  const displaySeconds =
+    provider === 'openrouter'
+      ? Math.floor(recorderState.durationMillis / 1000)
+      : localSeconds
 
   return (
-    <NativeSheet
-      onClose={cancel}
-      accessibilityLabel="Close voice input"
-      contentStyle={styles.content}
-    >
-      <View style={styles.header}>
-        <Text size="lg" weight="semibold">
-          Voice input
-        </Text>
-        <Text variant="caption" color="muted">
-          {state === 'choosing'
-            ? 'Choose how FalconDeck should turn speech into text.'
-            : provider === 'on-device'
-              ? 'Speech stays on this device.'
-              : 'Audio is encrypted to your desktop, which sends it to OpenRouter.'}
-        </Text>
-      </View>
+    <View style={styles.row}>
+      <Pressable
+        style={styles.dismissButton}
+        onPress={cancel}
+        accessibilityRole="button"
+        accessibilityLabel="Cancel voice input"
+        hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+      >
+        <X size={theme.iconSize.md} color={theme.colors.fg.muted} />
+      </Pressable>
 
-      {state === 'choosing' ? (
-        <View style={styles.choices}>
-          <Pressable
-            style={styles.choice}
-            onPress={() => void begin('on-device')}
-            accessibilityRole="button"
-            accessibilityLabel="Use on-device speech recognition"
+      {state === 'failed' ? (
+        <>
+          <Text
+            variant="caption"
+            color="danger"
+            size="xs"
+            style={styles.error}
+            numberOfLines={3}
+            accessibilityLiveRegion="polite"
           >
-            <Text variant="label">On-device</Text>
-            <Text variant="caption" color="muted">
-              Private and offline when your phone has a downloaded speech model.
-            </Text>
-          </Pressable>
-          <Pressable
-            style={styles.choice}
-            onPress={() => void begin('openrouter')}
-            accessibilityRole="button"
-            accessibilityLabel="Set up OpenRouter speech recognition"
-          >
-            <Text variant="label">OpenRouter</Text>
-            <Text variant="caption" color="muted">
-              Use the API key held securely by your paired desktop.
-            </Text>
-          </Pressable>
-        </View>
-      ) : (
-        <View style={styles.recorder}>
-          <View
-            style={[
-              styles.micCircle,
-              state === 'recording' ? styles.micCircleActive : null,
-            ]}
-          >
-            {state === 'recording' ? (
-              <Square
-                size={theme.iconSize.xl}
-                color={theme.colors.surface[0]}
-                fill={theme.colors.surface[0]}
-              />
-            ) : (
-              <Mic size={theme.iconSize.xl} color={theme.colors.fg.primary} />
-            )}
-          </View>
-          <Text variant="label" accessibilityLiveRegion="polite">
-            {state === 'starting'
-              ? 'Starting…'
-              : state === 'recording'
-                ? `Recording ${provider === 'openrouter' ? durationLabel(recorderState.durationMillis) : ''}`
-                : state === 'transcribing'
-                  ? 'Transcribing…'
-                  : 'Recording saved'}
+            {error ?? 'Voice input failed.'}
           </Text>
-          {error ? (
-            <Text variant="caption" color="danger" style={styles.error}>
-              {error}
-            </Text>
-          ) : null}
-          {state === 'recording' ? (
-            <Button
-              label="Stop and transcribe"
-              onPress={() => void stopRecording()}
-            />
-          ) : null}
-          {state === 'failed' ? (
-            <View style={styles.actions}>
-              {recordingUri &&
-              recordingProvider === 'openrouter' &&
-              initialProvider === 'on-device' ? (
-                <Button
-                  label="Discard and record on-device"
-                  icon={
-                    <Mic
-                      size={theme.iconSize.sm}
-                      color={theme.colors.surface[0]}
-                    />
-                  }
-                  onPress={discardAndRecordOnDevice}
-                />
-              ) : (
-                <Button
-                  label={recordingUri ? 'Retry transcription' : 'Try again'}
-                  icon={
-                    <RotateCcw
-                      size={theme.iconSize.sm}
-                      color={theme.colors.surface[0]}
-                    />
-                  }
-                  onPress={() => void retry()}
-                />
-              )}
-              {recordingUri ? (
-                <Button
-                  variant="ghost"
-                  label="Discard recording"
-                  icon={
-                    <Trash2
-                      size={theme.iconSize.sm}
-                      color={theme.colors.danger.default}
-                    />
-                  }
-                  onPress={discard}
-                />
-              ) : null}
-              <Button
-                variant="ghost"
-                label="Speech settings"
-                onPress={() => {
-                  onClose()
-                  router.push('/(app)/settings/speech' as Href)
-                }}
+          <Pressable
+            style={styles.ghostButton}
+            onPress={openSpeechSettings}
+            accessibilityRole="button"
+            accessibilityLabel="Speech settings"
+            hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+          >
+            <Settings size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+          </Pressable>
+          {recordingUri ? (
+            <Pressable
+              style={styles.ghostButton}
+              onPress={discardAndRecord}
+              accessibilityRole="button"
+              accessibilityLabel="Discard recording and record again"
+              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+            >
+              <Trash2
+                size={theme.iconSize.sm}
+                color={theme.colors.danger.default}
               />
-            </View>
+            </Pressable>
           ) : null}
-        </View>
+          <Pressable
+            style={styles.confirmButton}
+            onPress={() => void retry()}
+            accessibilityRole="button"
+            accessibilityLabel={
+              recordingUri ? 'Retry transcription' : 'Try recording again'
+            }
+            hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+          >
+            <RotateCcw
+              size={theme.iconSize.md}
+              color={theme.colors.surface[0]}
+            />
+          </Pressable>
+        </>
+      ) : (
+        <>
+          <VoiceWaveform levels={levels} muted={state === 'transcribing'} />
+          {state === 'transcribing' ? (
+            <Text
+              variant="caption"
+              color="secondary"
+              size="xs"
+              accessibilityLiveRegion="polite"
+            >
+              Transcribing…
+            </Text>
+          ) : (
+            <Text
+              variant="caption"
+              color="secondary"
+              size="xs"
+              style={styles.duration}
+              accessibilityLabel={`Recording, ${durationLabel(displaySeconds)}`}
+            >
+              {durationLabel(displaySeconds)}
+            </Text>
+          )}
+          {state === 'transcribing' ? (
+            <View style={styles.busyButton}>
+              <ActivityDiamond color={theme.colors.fg.muted} />
+            </View>
+          ) : (
+            <Pressable
+              style={[
+                styles.confirmButton,
+                state !== 'recording' && styles.confirmIdle,
+              ]}
+              onPress={() => void stopRecording()}
+              disabled={state !== 'recording'}
+              accessibilityRole="button"
+              accessibilityLabel="Stop and transcribe"
+              accessibilityState={{ disabled: state !== 'recording' }}
+              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+            >
+              <ArrowUp
+                size={theme.iconSize.md}
+                color={theme.colors.surface[0]}
+              />
+            </Pressable>
+          )}
+        </>
       )}
-    </NativeSheet>
+    </View>
   )
 }
 
 const styles = StyleSheet.create((theme) => ({
-  content: {
-    paddingHorizontal: theme.spacing[5],
-    paddingBottom: theme.spacing[2],
-    gap: theme.spacing[4],
-  },
-  header: { gap: theme.spacing[1] },
-  choices: { gap: theme.spacing[3] },
-  choice: {
-    minHeight: theme.minTouchTarget,
-    padding: theme.spacing[4],
-    gap: theme.spacing[1],
-    borderRadius: theme.radius.xl,
-    borderCurve: 'continuous',
-    backgroundColor: theme.colors.surface[2],
-    borderWidth: 1,
-    borderColor: theme.colors.border.default,
-  },
-  recorder: {
+  row: {
+    minHeight: MIN_ROW_HEIGHT,
+    flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[4],
-    paddingVertical: theme.spacing[3],
+    gap: theme.spacing[3],
+    paddingHorizontal: theme.spacing[2],
+    paddingTop: theme.spacing[1],
+    paddingBottom: theme.spacing[2],
   },
-  micCircle: {
-    width: 88,
-    height: 88,
-    borderRadius: 44,
+  dismissButton: {
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
+    borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: theme.colors.surface[3],
   },
-  micCircleActive: { backgroundColor: theme.colors.danger.default },
-  error: { textAlign: 'center' },
-  actions: { alignSelf: 'stretch', gap: theme.spacing[2] },
+  ghostButton: {
+    width: CONTROL_SIZE - 8,
+    height: CONTROL_SIZE - 8,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  confirmButton: {
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.accent.default,
+  },
+  confirmIdle: {
+    opacity: 0.5,
+  },
+  busyButton: {
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  duration: {
+    fontVariant: ['tabular-nums'],
+  },
+  error: {
+    flex: 1,
+  },
 }))

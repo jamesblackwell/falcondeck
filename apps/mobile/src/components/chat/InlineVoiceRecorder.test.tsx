@@ -13,9 +13,9 @@ import {
 } from '@/features/speech/speechSettings'
 import { useRelayStore } from '@/store/relay-store'
 
-import { VoiceInputSheet } from './VoiceInputSheet'
+import { InlineVoiceRecorder } from './InlineVoiceRecorder'
 
-describe('VoiceInputSheet', () => {
+describe('InlineVoiceRecorder', () => {
   const originalCallRpc = useRelayStore.getState()._callRpc
 
   beforeEach(async () => {
@@ -28,7 +28,7 @@ describe('VoiceInputSheet', () => {
     }) as typeof originalCallRpc
   })
 
-  it('does not start cloud recording after the sheet is dismissed during permission startup', async () => {
+  it('does not start cloud recording after cancelling during permission startup', async () => {
     let resolvePermission!: (value: { granted: boolean }) => void
     const permission = new Promise<{ granted: boolean }>((resolve) => {
       resolvePermission = resolve
@@ -38,24 +38,20 @@ describe('VoiceInputSheet', () => {
     )
     const onClose = vi.fn()
     const r = renderComponent(
-      <VoiceInputSheet onTranscript={vi.fn()} onClose={onClose} />,
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={vi.fn()}
+        onClose={onClose}
+      />,
     )
 
-    act(() => {
-      r.root
-        .findByProps({
-          accessibilityLabel: 'Set up OpenRouter speech recognition',
-        })
-        .props.onPress()
-    })
     await act(async () => {
       await Promise.resolve()
     })
     act(() => {
       r.root
-        .findAllByProps({ accessibilityLabel: 'Close voice input' })
-        .find((node) => typeof node.props.onPress === 'function')
-        ?.props.onPress()
+        .findByProps({ accessibilityLabel: 'Cancel voice input' })
+        .props.onPress()
     })
     await act(async () => {
       resolvePermission({ granted: true })
@@ -70,11 +66,17 @@ describe('VoiceInputSheet', () => {
     updateSpeechSettings({ provider: 'on-device' })
     setPendingVoiceRecording('file:///saved-voice.wav', 'on-device')
     const r = renderComponent(
-      <VoiceInputSheet onTranscript={vi.fn()} onClose={vi.fn()} />,
+      <InlineVoiceRecorder
+        provider="on-device"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
     )
 
     await act(async () => {
-      r.root.findByProps({ label: 'Retry transcription' }).props.onPress()
+      r.root
+        .findByProps({ accessibilityLabel: 'Retry transcription' })
+        .props.onPress()
       await Promise.resolve()
     })
 
@@ -101,11 +103,17 @@ describe('VoiceInputSheet', () => {
     })
     useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
     const r = renderComponent(
-      <VoiceInputSheet onTranscript={vi.fn()} onClose={vi.fn()} />,
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
     )
 
     await act(async () => {
-      r.root.findByProps({ label: 'Retry transcription' }).props.onPress()
+      r.root
+        .findByProps({ accessibilityLabel: 'Retry transcription' })
+        .props.onPress()
       await Promise.resolve()
     })
 
@@ -125,16 +133,22 @@ describe('VoiceInputSheet', () => {
     })
   })
 
-  it('offers a clean on-device recording when an older cloud draft is blocking it', async () => {
+  it('discards a blocking cloud draft and records fresh on-device', async () => {
     updateSpeechSettings({ provider: 'on-device' })
     setPendingVoiceRecording('file:///saved-voice.m4a', 'openrouter')
     const r = renderComponent(
-      <VoiceInputSheet onTranscript={vi.fn()} onClose={vi.fn()} />,
+      <InlineVoiceRecorder
+        provider="on-device"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
     )
 
     await act(async () => {
       r.root
-        .findByProps({ label: 'Discard and record on-device' })
+        .findByProps({
+          accessibilityLabel: 'Discard recording and record again',
+        })
         .props.onPress()
       await Promise.resolve()
     })
