@@ -152,6 +152,8 @@ struct InnerState {
     extension_hosts: Mutex<extension_host::ExtensionHostPool>,
     /// Bounded, independent lifecycle-event queue for each enabled extension.
     extension_event_queues: extension_events::ExtensionEventQueues,
+    /// Cached OpenRouter speech credential plus keychain wedge tracking.
+    speech_credentials: speech::SpeechCredentialCache,
     remote: Mutex<RemoteBridgeState>,
     /// SSH provisioning jobs keyed by job id. Progress lives only in memory:
     /// a job is meaningless across a daemon restart, since the background task
@@ -561,6 +563,7 @@ impl AppState {
                 extensions: Mutex::new(extension_registry),
                 extension_hosts: Mutex::new(extension_hosts),
                 extension_event_queues: StdMutex::new(HashMap::new()),
+                speech_credentials: speech::SpeechCredentialCache::default(),
                 remote: Mutex::new(RemoteBridgeState {
                     status: RemoteConnectionStatus::Inactive,
                     relay_url: None,

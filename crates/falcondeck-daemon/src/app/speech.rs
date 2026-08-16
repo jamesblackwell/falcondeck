@@ -1,10 +1,15 @@
 #[cfg(test)]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+use std::sync::{
+    Mutex as StdMutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
+    sync::Mutex,
     task::spawn_blocking,
     time::{Duration, timeout},
 };
@@ -12,7 +17,9 @@ use tokio::{
 use super::AppState;
 use crate::error::DaemonError;
 
+#[cfg(not(test))]
 const KEYRING_SERVICE: &str = "com.falcondeck.daemon.speech";
+#[cfg(not(test))]
 const KEYRING_ACCOUNT: &str = "openrouter-api-key";
 const OPENROUTER_TRANSCRIPTIONS_URL: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
 const OPENROUTER_MODELS_URL: &str =
@@ -20,7 +27,11 @@ const OPENROUTER_MODELS_URL: &str =
 // Base64 audio is encrypted and base64-encoded again by the relay protocol.
 // Eight MiB keeps the outer WebSocket message below the relay's 16 MiB cap.
 const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
-const SECURE_STORAGE_TIMEOUT: Duration = Duration::from_secs(30);
+// Keychain calls normally return in milliseconds; the only slow path is
+// securityd holding the call for a user-authorization decision. Stay under
+// the phone's 8-second speech.status deadline so the caller sees the
+// actionable wedge error instead of a generic relay timeout.
+const KEYCHAIN_OP_TIMEOUT: Duration = Duration::from_secs(5);
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(70);
 const FALLBACK_MODELS: [&str; 4] = [
     "openai/gpt-transcribe",
@@ -59,6 +70,36 @@ pub struct SpeechTranscriptionResponse {
 pub struct SpeechModel {
     pub id: String,
     pub name: String,
+}
+
+/// In-process cache and wedge tracking for the OpenRouter credential.
+///
+/// macOS parks a keychain read inside securityd while it waits for the user
+/// to approve access — which it wants whenever the running binary no longer
+/// matches the item's ACL (every ad-hoc rebuild changes the code hash). That
+/// parked call never returns on its own, and every later keychain call in
+/// this process queues behind it on an item mutex, so each retry would wedge
+/// another blocking-pool thread forever. Cache the key after any successful
+/// read or save, run at most one keychain operation at a time, and fail fast
+/// with an actionable message while an abandoned operation is still parked.
+#[derive(Default)]
+pub(super) struct SpeechCredentialCache {
+    key: StdMutex<Option<String>>,
+    /// Serializes keychain operations so concurrent callers wait for the
+    /// in-flight result (normally milliseconds) instead of stacking threads.
+    flight: Mutex<()>,
+    /// True while an operation abandoned by its timeout is still parked in
+    /// securityd; cleared by the watcher task when it finally resolves.
+    wedged: AtomicBool,
+}
+
+fn keychain_authorization_pending() -> DaemonError {
+    DaemonError::Process(
+        "The Mac is waiting for keychain permission before it can read the OpenRouter key. \
+         Approve the keychain prompt on the desktop (choose \"Always Allow\"), or restart \
+         FalconDeck and re-save the key in Settings, then retry."
+            .to_string(),
+    )
 }
 
 impl AppState {
@@ -104,7 +145,10 @@ impl AppState {
     }
 
     pub async fn speech_credential_status(&self) -> Result<SpeechCredentialStatus, DaemonError> {
-        let configured = run_secure_storage(openrouter_key_exists).await?;
+        // Reading the key (not just its attributes) deliberately surfaces the
+        // keychain authorization prompt at status time — before a recording
+        // exists that would otherwise be transcribed into a wedged daemon.
+        let configured = self.openrouter_key_cached().await?.is_some();
         Ok(SpeechCredentialStatus {
             configured,
             storage: "os_credential_store",
@@ -121,7 +165,18 @@ impl AppState {
                 "invalid OpenRouter API key".to_string(),
             ));
         }
-        run_secure_storage(move || save_openrouter_key(&api_key)).await?;
+        let cached = api_key.clone();
+        let written = api_key.clone();
+        self.run_keychain_op(
+            move || save_openrouter_key(&api_key),
+            // A save that outlives its timeout still wrote the key once the
+            // parked call resolves, so it may seed the cache late.
+            move |state, ()| {
+                *state.inner.speech_credentials.key.lock().unwrap() = Some(written);
+            },
+        )
+        .await?;
+        *self.inner.speech_credentials.key.lock().unwrap() = Some(cached);
         Ok(SpeechCredentialStatus {
             configured: true,
             storage: "os_credential_store",
@@ -129,11 +184,79 @@ impl AppState {
     }
 
     pub async fn delete_speech_credential(&self) -> Result<SpeechCredentialStatus, DaemonError> {
-        run_secure_storage(delete_openrouter_key).await?;
+        // Drop the cache first so a failed delete can only under-report, never
+        // serve a key the user asked to remove.
+        *self.inner.speech_credentials.key.lock().unwrap() = None;
+        self.run_keychain_op(delete_openrouter_key, |_, ()| {}).await?;
         Ok(SpeechCredentialStatus {
             configured: false,
             storage: "os_credential_store",
         })
+    }
+
+    /// The OpenRouter key, from cache when possible, from the OS credential
+    /// store otherwise. See [`SpeechCredentialCache`] for why the keychain is
+    /// treated as hostile.
+    async fn openrouter_key_cached(&self) -> Result<Option<String>, DaemonError> {
+        if let Some(key) = self.inner.speech_credentials.key.lock().unwrap().clone() {
+            return Ok(Some(key));
+        }
+        let key = self
+            .run_keychain_op(load_openrouter_key, |state, key| {
+                // The user approved the prompt after the caller had already
+                // given up: seed the cache so their retry succeeds instantly.
+                if let Some(key) = key {
+                    *state.inner.speech_credentials.key.lock().unwrap() = Some(key);
+                }
+            })
+            .await?;
+        if let Some(key) = &key {
+            *self.inner.speech_credentials.key.lock().unwrap() = Some(key.clone());
+        }
+        Ok(key)
+    }
+
+    /// Runs one keychain operation on the blocking pool, failing fast while a
+    /// previously abandoned operation is still parked in securityd. On
+    /// timeout the task is not lost: a watcher awaits its eventual result,
+    /// clears the wedge, and hands a late success to `on_late_completion`.
+    async fn run_keychain_op<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce() -> Result<T, DaemonError> + Send + 'static,
+        on_late_completion: impl FnOnce(&AppState, T) + Send + 'static,
+    ) -> Result<T, DaemonError> {
+        let _flight = self.inner.speech_credentials.flight.lock().await;
+        if self.inner.speech_credentials.wedged.load(Ordering::Acquire) {
+            return Err(keychain_authorization_pending());
+        }
+        let mut task = spawn_blocking(operation);
+        match timeout(KEYCHAIN_OP_TIMEOUT, &mut task).await {
+            Ok(joined) => joined.map_err(|error| {
+                DaemonError::Process(format!("credential store task failed: {error}"))
+            })?,
+            Err(_) => {
+                tracing::warn!(
+                    "keychain access is blocked, likely awaiting user authorization on the desktop"
+                );
+                self.inner
+                    .speech_credentials
+                    .wedged
+                    .store(true, Ordering::Release);
+                let state = self.clone();
+                tokio::spawn(async move {
+                    let outcome = task.await;
+                    state
+                        .inner
+                        .speech_credentials
+                        .wedged
+                        .store(false, Ordering::Release);
+                    if let Ok(Ok(value)) = outcome {
+                        on_late_completion(&state, value);
+                    }
+                });
+                Err(keychain_authorization_pending())
+            }
+        }
     }
 
     pub async fn transcribe_speech(
@@ -147,13 +270,11 @@ impl AppState {
                 "audio recording must be between 1 byte and {MAX_AUDIO_BYTES} bytes"
             )));
         }
-        let api_key = run_secure_storage(load_openrouter_key)
-            .await?
-            .ok_or_else(|| {
-                DaemonError::BadRequest(
-                    "OpenRouter is not configured on the connected desktop".to_string(),
-                )
-            })?;
+        let api_key = self.openrouter_key_cached().await?.ok_or_else(|| {
+            DaemonError::BadRequest(
+                "OpenRouter is not configured on the connected desktop".to_string(),
+            )
+        })?;
         let models = fallback_models(&request.model);
         let client = reqwest::Client::builder()
             .timeout(TRANSCRIPTION_TIMEOUT)
@@ -215,19 +336,6 @@ impl AppState {
 
         Err(DaemonError::Process(last_error))
     }
-}
-
-async fn run_secure_storage<T, F>(operation: F) -> Result<T, DaemonError>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, DaemonError> + Send + 'static,
-{
-    timeout(SECURE_STORAGE_TIMEOUT, spawn_blocking(operation))
-        .await
-        .map_err(|_| {
-            DaemonError::Process("timed out accessing the OS credential store".to_string())
-        })?
-        .map_err(|error| DaemonError::Process(format!("credential store task failed: {error}")))?
 }
 
 fn validate_audio_format(format: &str) -> Result<(), DaemonError> {
@@ -304,31 +412,6 @@ fn load_openrouter_key() -> Result<Option<String>, DaemonError> {
     }
 }
 
-#[cfg(all(not(test), target_os = "macos"))]
-fn openrouter_key_exists() -> Result<bool, DaemonError> {
-    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
-
-    let mut options = ItemSearchOptions::new();
-    options
-        .class(ItemClass::generic_password())
-        .service(KEYRING_SERVICE)
-        .account(KEYRING_ACCOUNT)
-        .limit(Limit::Max(1))
-        .load_attributes(true);
-    match options.search() {
-        Ok(items) => Ok(!items.is_empty()),
-        Err(error) if error.code() == -25300 => Ok(false),
-        Err(error) => Err(DaemonError::Process(format!(
-            "failed to inspect OS credential store: {error}"
-        ))),
-    }
-}
-
-#[cfg(all(not(test), not(target_os = "macos")))]
-fn openrouter_key_exists() -> Result<bool, DaemonError> {
-    Ok(load_openrouter_key()?.is_some())
-}
-
 #[cfg(not(test))]
 fn save_openrouter_key(api_key: &str) -> Result<(), DaemonError> {
     credential_entry()?.set_password(api_key).map_err(|error| {
@@ -347,21 +430,16 @@ fn delete_openrouter_key() -> Result<(), DaemonError> {
 }
 
 #[cfg(test)]
-static TEST_CREDENTIAL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+static TEST_CREDENTIAL: OnceLock<StdMutex<Option<String>>> = OnceLock::new();
 
 #[cfg(test)]
-fn test_credential() -> &'static Mutex<Option<String>> {
-    TEST_CREDENTIAL.get_or_init(|| Mutex::new(None))
+fn test_credential() -> &'static StdMutex<Option<String>> {
+    TEST_CREDENTIAL.get_or_init(|| StdMutex::new(None))
 }
 
 #[cfg(test)]
 fn load_openrouter_key() -> Result<Option<String>, DaemonError> {
     Ok(test_credential().lock().unwrap().clone())
-}
-
-#[cfg(test)]
-fn openrouter_key_exists() -> Result<bool, DaemonError> {
-    Ok(load_openrouter_key()?.is_some())
 }
 
 #[cfg(test)]
@@ -380,6 +458,12 @@ fn delete_openrouter_key() -> Result<(), DaemonError> {
 mod tests {
     use super::*;
 
+    /// Serializes the tests that mutate the process-global test credential.
+    async fn credential_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+        GUARD.get_or_init(|| Mutex::new(())).lock().await
+    }
+
     #[test]
     fn fallback_models_deduplicates_the_preferred_model() {
         assert_eq!(fallback_models("openai/gpt-transcribe").len(), 4);
@@ -391,7 +475,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn credential_reads_come_from_the_cache_after_the_first_load() {
+        let _guard = credential_test_guard().await;
+        let app = AppState::new("test".to_string(), std::collections::HashMap::new());
+        app.save_speech_credential("cached-key".to_string())
+            .await
+            .unwrap();
+        // Wipe the backing store directly: a status probe must now succeed
+        // from the cache without touching the credential store again.
+        *test_credential().lock().unwrap() = None;
+        assert!(app.speech_credential_status().await.unwrap().configured);
+        // Deleting drops the cache too, so status stops reporting configured.
+        app.delete_speech_credential().await.unwrap();
+        assert!(!app.speech_credential_status().await.unwrap().configured);
+    }
+
+    #[tokio::test]
     async fn credential_status_never_returns_the_secret() {
+        let _guard = credential_test_guard().await;
         let app = AppState::new("test".to_string(), std::collections::HashMap::new());
         app.save_speech_credential("secret-value".to_string())
             .await
