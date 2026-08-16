@@ -1,12 +1,11 @@
+use falcondeck_core::AgentProvider;
 use falcondeck_core::control::{
     AgentControlSettings, Automation, AutomationConcurrencyPolicy, AutomationMisfirePolicy,
-    AutomationRun, AutomationRunStatus, AutomationState, AutomationTask,
-    AutomationThreadTarget, AutomationTrigger, ControlAuditEntry, ControlDomain,
-    ControlErrorDetail, ControlExecuteRequest, ControlExecuteResponse, ControlGetRequest,
-    ControlOrigin, ControlRequestContext, ControlSearchRequest, ControlStateChanged, FieldError,
-    SearchDetail,
+    AutomationRun, AutomationRunStatus, AutomationState, AutomationTask, AutomationThreadTarget,
+    AutomationTrigger, ControlAuditEntry, ControlDomain, ControlErrorDetail, ControlExecuteRequest,
+    ControlExecuteResponse, ControlGetRequest, ControlOrigin, ControlRequestContext,
+    ControlSearchRequest, ControlStateChanged, FieldError, SearchDetail,
 };
-use falcondeck_core::AgentProvider;
 use serde_json::json;
 
 fn automation_payload() -> serde_json::Value {
@@ -91,10 +90,7 @@ fn automation_round_trips_every_trigger_and_task_kind() {
         "next_run_at": "2026-08-17T09:00:00Z",
     }))
     .expect("once automation parses");
-    assert!(matches!(
-        once.trigger,
-        AutomationTrigger::Once { .. }
-    ));
+    assert!(matches!(once.trigger, AutomationTrigger::Once { .. }));
     // Offsets are normalised to UTC on the wire.
     assert_eq!(
         serde_json::to_value(&once).unwrap()["trigger"]["run_at"],
@@ -126,7 +122,10 @@ fn automation_round_trips_every_trigger_and_task_kind() {
     .expect("interval automation parses");
     assert!(matches!(
         interval.trigger,
-        AutomationTrigger::Interval { every_seconds: 1800, .. }
+        AutomationTrigger::Interval {
+            every_seconds: 1800,
+            ..
+        }
     ));
     assert_eq!(interval.state, AutomationState::Paused);
     assert_eq!(
@@ -243,19 +242,24 @@ fn request_envelopes_round_trip_and_default_limits() {
             .expect("search parses");
     assert_eq!(search.limit, 8);
     assert_eq!(search.detail, SearchDetail::Summary);
-    assert!(serde_json::from_value::<ControlSearchRequest>(json!({
-        "query": "x", "unknown": true
-    }))
-    .is_err());
+    assert!(
+        serde_json::from_value::<ControlSearchRequest>(json!({
+            "query": "x", "unknown": true
+        }))
+        .is_err()
+    );
 
     let get: ControlGetRequest =
         serde_json::from_value(json!({ "resource": "automations" })).expect("get parses");
     assert_eq!(get.limit, 20);
     assert!(get.filters.is_empty());
-    assert!(serde_json::from_value::<ControlGetRequest>(json!({
-        "resource": "automations", "limit": 101
-    }))
-    .is_ok(), "limit ceiling is enforced by the service, not serde");
+    assert!(
+        serde_json::from_value::<ControlGetRequest>(json!({
+            "resource": "automations", "limit": 101
+        }))
+        .is_ok(),
+        "limit ceiling is enforced by the service, not serde"
+    );
 
     let execute: ControlExecuteRequest = serde_json::from_value(json!({
         "operation": "automation.create",

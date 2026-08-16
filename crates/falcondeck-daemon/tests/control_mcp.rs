@@ -145,7 +145,7 @@ async fn spawn_mcp(daemon_url: &str) -> McpChild {
 #[tokio::test]
 async fn modern_flow_discover_list_and_call() {
     let dir = tempfile::tempdir().unwrap();
-    let mut daemon = spawn_daemon(&dir).await;
+    let daemon = spawn_daemon(&dir).await;
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
 
     let discover = mcp.request(1, "server/discover", json!({})).await;
@@ -229,7 +229,7 @@ async fn modern_flow_discover_list_and_call() {
 #[tokio::test]
 async fn legacy_initialize_flow_works() {
     let dir = tempfile::tempdir().unwrap();
-    let mut daemon = spawn_daemon(&dir).await;
+    let daemon = spawn_daemon(&dir).await;
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
 
     let initialize = mcp
@@ -262,7 +262,7 @@ async fn legacy_initialize_flow_works() {
 #[tokio::test]
 async fn protocol_errors_are_transport_level_and_deterministic() {
     let dir = tempfile::tempdir().unwrap();
-    let mut daemon = spawn_daemon(&dir).await;
+    let daemon = spawn_daemon(&dir).await;
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
 
     // Malformed JSON-RPC.
@@ -310,7 +310,7 @@ async fn protocol_errors_are_transport_level_and_deterministic() {
 #[tokio::test]
 async fn disabled_interface_surfaces_as_a_tool_error() {
     let dir = tempfile::tempdir().unwrap();
-    let mut daemon = spawn_daemon(&dir).await;
+    let daemon = spawn_daemon(&dir).await;
     let client = reqwest::Client::new();
     let disable: Value = client
         .post(format!("{}/api/control/execute", daemon.base_url()))
@@ -347,7 +347,7 @@ async fn daemon_unreachable_at_startup_exits_with_a_message() {
     let addr = listener.local_addr().unwrap();
     drop(listener);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_falcondeck-daemon"))
+    let child = Command::new(env!("CARGO_BIN_EXE_falcondeck-daemon"))
         .arg("mcp")
         .env("FALCONDECK_DAEMON_URL", format!("http://{addr}"))
         .stdout(std::process::Stdio::piped())
@@ -370,7 +370,7 @@ async fn daemon_unreachable_at_startup_exits_with_a_message() {
 #[tokio::test]
 async fn daemon_unreachable_during_a_call_is_a_tool_error() {
     let dir = tempfile::tempdir().unwrap();
-    let mut daemon = spawn_daemon(&dir).await;
+    let daemon = spawn_daemon(&dir).await;
     let base_url = daemon.base_url();
     let mut mcp = spawn_mcp(&base_url).await;
 
@@ -398,7 +398,7 @@ async fn full_conversation_creates_an_automation_through_the_tools() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = dir.path().join("quizgecko");
     std::fs::create_dir_all(&workspace).unwrap();
-    let mut daemon = spawn_daemon(&dir).await;
+    let daemon = spawn_daemon(&dir).await;
     let mut mcp = spawn_mcp(&daemon.base_url()).await;
 
     // The intended agent flow: search for the capability, read the schema,
@@ -415,7 +415,7 @@ async fn full_conversation_creates_an_automation_through_the_tools() {
         .unwrap()
         .clone();
     assert!(results[0]["input_schema"].is_object());
-    assert!(results[0]["examples"].as_array().unwrap().len() >= 1);
+    assert!(!results[0]["examples"].as_array().unwrap().is_empty());
 
     let execute = mcp
         .call_tool(
