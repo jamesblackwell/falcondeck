@@ -1010,7 +1010,10 @@ async fn instructions_never_appear_in_list_projections() {
         .unwrap();
     let encoded = serde_json::to_string(&list.data).unwrap();
     assert!(!encoded.contains("Review my inbox"));
-    assert!(!encoded.contains("task"), "task projection is dropped entirely");
+    assert!(
+        !encoded.contains("task"),
+        "task projection is dropped entirely"
+    );
 }
 
 #[tokio::test]
