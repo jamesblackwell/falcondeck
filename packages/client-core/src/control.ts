@@ -91,6 +91,8 @@ export type Automation = {
   next_run_at?: string | null;
   last_run_at?: string | null;
   latest_outcome?: AutomationOutcomeSummary | null;
+  /** Human-readable schedule summary added by list and read responses. */
+  resolved_schedule?: string;
 };
 
 export type AutomationRun = {

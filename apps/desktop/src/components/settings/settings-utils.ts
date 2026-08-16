@@ -7,12 +7,14 @@ import type {
 import {
   Blocks,
   Bot,
+  CalendarClock,
   Keyboard,
   Mic,
   Palette,
   Plug,
   Server,
   Settings,
+  ShieldCheck,
   Terminal,
   Wifi,
 } from "lucide-react";
@@ -25,6 +27,8 @@ export type SettingsSectionId =
   | "keyboard"
   | "servers"
   | "agents"
+  | "agent-control"
+  | "automations"
   | "harnesses"
   | "connectors"
   | "extensions"
@@ -68,6 +72,18 @@ export const SETTINGS_NAV: SettingsNavItem[] = [
     label: "Agents",
     description: "Built-in and custom ACP agents",
     icon: Bot,
+  },
+  {
+    id: "agent-control",
+    label: "Agent control",
+    description: "Conversational control and automations access",
+    icon: ShieldCheck,
+  },
+  {
+    id: "automations",
+    label: "Automations",
+    description: "Scheduled agent instructions and run history",
+    icon: CalendarClock,
   },
   {
     id: "harnesses",

@@ -12,6 +12,7 @@ import type {
 import type { AppUpdaterState } from "../hooks/useAppUpdater";
 import type { HostManager, HostView } from "../hosts";
 import { AgentsPanel } from "./settings/AgentsPanel";
+import { AgentControlPanel } from "./settings/AgentControlPanel";
 import { AppearanceSettingsPanel } from "./settings/AppearanceSettingsPanel";
 import { ConnectorsPanel } from "./settings/ConnectorsPanel";
 import { GeneralSettingsPanel } from "./settings/GeneralSettingsPanel";
@@ -21,6 +22,7 @@ import { KeyboardShortcutsPanel } from "./settings/KeyboardShortcutsPanel";
 import { RemoteAccessPanel } from "./settings/RemoteAccessPanel";
 import { ServersPanel, type ServersPanelProps } from "./settings/ServersPanel";
 import { SettingsSidebar } from "./settings/SettingsSidebar";
+import { AutomationsView } from "./AutomationsView";
 import { SpeechSettingsPanel } from "./settings/SpeechSettingsPanel";
 import type { SettingsSectionId } from "./settings/settings-utils";
 
@@ -98,6 +100,10 @@ export function SettingsView(props: SettingsViewProps) {
             />
           ) : activeSection === "agents" ? (
             <AgentsPanel baseUrl={props.baseUrl} onToast={props.onToast} />
+          ) : activeSection === "agent-control" ? (
+            <AgentControlPanel baseUrl={props.baseUrl} onToast={props.onToast} />
+          ) : activeSection === "automations" ? (
+            <AutomationsView baseUrl={props.baseUrl} onToast={props.onToast} />
           ) : activeSection === "harnesses" ? (
             <HarnessesPanel
               baseUrl={props.baseUrl}
