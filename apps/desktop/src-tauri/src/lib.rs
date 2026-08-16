@@ -554,7 +554,7 @@ pub fn run() {
     // The embedded daemon injects its built-in MCP connector with this very
     // executable as the command, so the desktop binary must serve `mcp`
     // exactly like `falcondeck-daemon mcp` does instead of opening a window.
-    if std::env::args().skip(1).any(|arg| arg == "mcp") {
+    if std::env::args().len() == 2 && std::env::args().nth(1).as_deref() == Some("mcp") {
         tauri::async_runtime::block_on(async {
             std::process::exit(falcondeck_daemon::control::mcp::run_mcp_server().await);
         });

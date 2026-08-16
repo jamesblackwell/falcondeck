@@ -624,8 +624,13 @@ impl ControlService {
             }
         }
 
-        // Record idempotency for any outcome after validation began.
-        if let Some(key) = request.idempotency_key.as_deref() {
+        // Record idempotency only for successful executions. Failed
+        // mutations had no side effects, and replaying a failure would
+        // block the documented retry path (same key, corrected arguments)
+        // with a stale result or an idempotency conflict.
+        if let Some(key) = request.idempotency_key.as_deref()
+            && response.ok
+        {
             let record = store::IdempotencyRecord {
                 key: key.to_string(),
                 scope: idempotency_scope(context, &request.operation),

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import type { AgentControlSettings, Automation } from "@falcondeck/client-core";
 
@@ -215,30 +215,45 @@ describe("AutomationsView list", () => {
     });
   });
 
-  it("refetches when the control-state event fires", async () => {
+  it("refetches when a control-state event arrives", async () => {
+    const sockets: FakeWebSocket[] = [];
+    class FakeWebSocket {
+      onmessage: ((message: { data: string }) => void) | null = null;
+      constructor(public url: string) {
+        sockets.push(this);
+      }
+      close() {}
+    }
+    vi.stubGlobal("WebSocket", FakeWebSocket);
     const { fetchMock } = stubControl();
-    const onEventRefetch = vi.fn();
-    const { rerender } = render(
-      <AutomationsView
-        baseUrl="http://daemon.test"
-        onToast={onToast}
-        onEventRefetch={onEventRefetch}
-      />,
-    );
+    render(<AutomationsView baseUrl="http://daemon.test" onToast={onToast} />);
     await screen.findByText("Weekday inbox review");
-    // A new event callback identity (as the app emits per event) refetches.
-    rerender(
-      <AutomationsView
-        baseUrl="http://daemon.test"
-        onToast={onToast}
-        onEventRefetch={vi.fn()}
-      />,
-    );
+    await waitFor(() => expect(sockets).toHaveLength(1));
+    const listReadsBefore = fetchMock.mock.calls.filter(([input]) =>
+      String(input).includes("/api/control/get"),
+    ).length;
+
+    // An MCP-originated change emits control-state-changed on the daemon's
+    // event stream; the open panel must refetch without any interaction.
+    act(() => {
+      sockets[0].onmessage?.({
+        data: JSON.stringify({
+          seq: 1,
+          emitted_at: "2026-08-16T14:22:10Z",
+          workspace_id: null,
+          thread_id: null,
+          event: {
+            type: "control-state-changed",
+            change: { store_revision: 43, domains: ["automations"] },
+          },
+        }),
+      });
+    });
     await waitFor(() => {
       const listReads = fetchMock.mock.calls.filter(([input]) =>
         String(input).includes("/api/control/get"),
       );
-      expect(listReads.length).toBeGreaterThan(1);
+      expect(listReads.length).toBeGreaterThan(listReadsBefore);
     });
   });
 });
