@@ -551,6 +551,12 @@ fn focus_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
+    // The updater enables rustls' Ring provider while the daemon enables
+    // AWS-LC. With both compiled, rustls deliberately refuses to guess and
+    // otherwise panics on the first TLS use — including the MCP server's
+    // HTTP client, so this must precede the early-exit branch below.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // The embedded daemon injects its built-in MCP connector with this very
     // executable as the command, so the desktop binary must serve `mcp`
     // exactly like `falcondeck-daemon mcp` does instead of opening a window.
@@ -559,11 +565,6 @@ pub fn run() {
             std::process::exit(falcondeck_daemon::control::mcp::run_mcp_server().await);
         });
     }
-
-    // The updater enables rustls' Ring provider while the daemon enables
-    // AWS-LC. With both compiled, rustls deliberately refuses to guess and
-    // otherwise panics on the first relay/updater TLS connection.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())

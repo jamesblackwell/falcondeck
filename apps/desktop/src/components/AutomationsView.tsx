@@ -177,7 +177,9 @@ function draftArguments(draft: AutomationDraft): Record<string, unknown> {
     : { kind: "prompt", instruction: draft.instruction };
   return {
     name: draft.name.trim(),
-    ...(draft.description.trim() ? { description: draft.description.trim() } : {}),
+    // Always send the description so edits can clear it; the daemon treats
+    // an absent field as keep-current.
+    description: draft.description.trim(),
     trigger,
     task,
     target: {

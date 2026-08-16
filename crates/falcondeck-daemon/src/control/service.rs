@@ -774,7 +774,9 @@ impl ControlService {
             id: format!("automation-{}", Uuid::new_v4().simple()),
             revision: 1,
             name: args.name.trim().to_string(),
-            description: args.description,
+            description: args
+                .description
+                .filter(|description| !description.trim().is_empty()),
             trigger: args.trigger,
             task: args.task,
             target: args.target,

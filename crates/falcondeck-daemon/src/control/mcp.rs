@@ -99,6 +99,10 @@ struct CompatibilityState {
 /// code: `0` for a clean end of input, `1` when the daemon cannot be
 /// reached at startup.
 pub async fn run_mcp_server() -> i32 {
+    // Binaries that compile multiple rustls crypto backends panic on the
+    // first TLS use without a process-level provider; install ours before
+    // the HTTP client is built, whatever the entry point.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let context = McpContext::from_env();
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
