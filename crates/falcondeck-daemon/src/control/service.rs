@@ -1237,6 +1237,16 @@ impl ControlService {
             .min()
     }
 
+    /// Whether the automation currently has a run in the Running state.
+    /// The queue_one concurrency policy holds queued occurrences until this
+    /// is false.
+    pub async fn automation_has_running_run(&self, automation_id: &str) -> bool {
+        let state = self.state.lock().await;
+        state.runs.iter().any(|run| {
+            run.automation_id == automation_id && run.status == AutomationRunStatus::Running
+        })
+    }
+
     /// Queued run ids for the scheduler to dispatch, oldest first.
     pub async fn queued_runs(&self) -> Vec<String> {
         let state = self.state.lock().await;

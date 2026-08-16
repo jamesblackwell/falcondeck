@@ -40,7 +40,7 @@ import type {
   UpdateThreadPayload,
   WorkspaceSummary,
 } from "./types";
-import {
+import type {
   ControlExecuteRequest,
   ControlExecuteResponse,
   ControlGetRequest,

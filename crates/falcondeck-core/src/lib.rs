@@ -2314,7 +2314,7 @@ impl schemars::JsonSchema for AgentProvider {
     }
 
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        String::json_schema(generator)
+        <String as schemars::JsonSchema>::json_schema(generator)
     }
 }
 

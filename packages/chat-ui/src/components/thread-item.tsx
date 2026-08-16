@@ -147,6 +147,15 @@ export const ThreadItem = memo(
             >
               <CalendarClock aria-hidden="true" className="h-3 w-3" />
             </span>
+          ) : thread.origin?.kind === 'automation' ? (
+            <span
+              role="img"
+              aria-label={`Automation: ${thread.origin.name}`}
+              title={`Automation · ${thread.origin.name}`}
+              className="flex shrink-0 items-center text-fg-muted"
+            >
+              <CalendarClock aria-hidden="true" className="h-3 w-3" />
+            </span>
           ) : null}
           {tags.length > 0 ? (
             <span className="flex shrink-0 items-center gap-1" aria-label={tags.map(tag => tag.label).join(', ')}>
@@ -239,7 +248,13 @@ function tagsEqual(a: ThreadTag[] | undefined, b: ThreadTag[] | undefined) {
 function originEqual(a: ThreadSummary['origin'], b: ThreadSummary['origin']) {
   if (a === b) return true
   if (!a || !b || a.kind !== b.kind) return false
-  return a.task_id === b.task_id && a.title === b.title
+  if (a.kind === 'scheduled_task' && b.kind === 'scheduled_task') {
+    return a.task_id === b.task_id && a.title === b.title
+  }
+  if (a.kind === 'automation' && b.kind === 'automation') {
+    return a.automation_id === b.automation_id && a.name === b.name
+  }
+  return true
 }
 
 function threadRenderEqual(a: ThreadSummary, b: ThreadSummary) {

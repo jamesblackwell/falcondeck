@@ -91,6 +91,33 @@ async fn dispatch_due(
     Ok(())
 }
 
+/// Dispatches one queued run unless its automation already has a running
+/// occurrence, which is the queue_one concurrency policy. Returns whether an
+/// executor was spawned.
+pub async fn try_execute_queued(app: &AppState, run_id: &str) -> bool {
+    let Some(run) = app.control().run(run_id).await else {
+        return false;
+    };
+    if run.status != AutomationRunStatus::Queued {
+        return false;
+    }
+    // queue_one occurrences stay queued until the active run finishes; the
+    // finish notification re-wakes the scheduler to dispatch them.
+    if app
+        .control()
+        .automation_has_running_run(&run.automation_id)
+        .await
+    {
+        return false;
+    }
+    let app = app.clone();
+    let run_id = run_id.to_string();
+    tokio::spawn(async move {
+        execute_run(&app, &run_id).await;
+    });
+    true
+}
+
 /// Spawns executors for queued runs that do not have one yet (manual
 /// `run_now` and `queue_one` backlog).
 async fn spawn_queued_runs(app: &AppState, in_flight: &Arc<StdMutex<HashSet<String>>>) {
@@ -103,7 +130,7 @@ async fn spawn_queued_runs(app: &AppState, in_flight: &Arc<StdMutex<HashSet<Stri
             .collect::<Vec<_>>()
     };
     for run_id in spawnable {
-        spawn_execute(app.clone(), run_id, Arc::clone(in_flight));
+        let _ = try_execute_queued(app, &run_id).await;
     }
 }
 
@@ -152,6 +179,15 @@ async fn execute_run(app: &AppState, run_id: &str) {
         return;
     };
     if run.status != AutomationRunStatus::Queued {
+        return;
+    }
+    // queue_one occurrences stay queued until the active run finishes; the
+    // finish notification re-wakes the scheduler to dispatch them.
+    if app
+        .control()
+        .automation_has_running_run(&run.automation_id)
+        .await
+    {
         return;
     }
     if app.is_shutting_down() {

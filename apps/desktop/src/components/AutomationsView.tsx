@@ -60,13 +60,18 @@ type AutomationDraft = {
   noActionMarker: string;
   workspacePath: string;
   provider: string;
-  threadKind: "managed" | "new_each_run";
+  threadKind: "managed" | "existing" | "new_each_run";
+  /** Preserved managed/existing thread id so edits never reset the thread. */
+  threadId: string;
   modelId: string;
   permissionMode: string;
   sandboxMode: string;
   requiredConnectors: string;
+  selectedSkills: string;
   concurrencyPolicy: "skip" | "queue_one" | "allow";
   misfirePolicy: "skip" | "run_once";
+  /** Preserved interval anchor so edits never shift the schedule grid. */
+  anchorAt: string;
 };
 
 const STATE_BADGE: Record<Automation["state"], "success" | "warning" | "default" | "danger"> = {
@@ -102,16 +107,20 @@ function emptyDraft(settings: AgentControlSettings | null, workspacePath = ""): 
     workspacePath,
     provider: "codex",
     threadKind: "managed",
+    threadId: "",
     modelId: "",
     permissionMode: "",
     sandboxMode: "",
     requiredConnectors: "",
+    selectedSkills: "",
     concurrencyPolicy: "skip",
     misfirePolicy: "skip",
+    anchorAt: "",
   };
 }
 
 function draftFromAutomation(automation: Automation): AutomationDraft {
+  const thread = automation.target.thread;
   return {
     name: automation.name,
     description: automation.description ?? "",
@@ -122,21 +131,24 @@ function draftFromAutomation(automation: Automation): AutomationDraft {
       automation.trigger.kind === "interval"
         ? String(automation.trigger.every_seconds)
         : "3600",
-    runAt: "",
+    runAt: automation.trigger.kind === "once" ? automation.trigger.run_at : "",
     instruction: automation.task.instruction,
     conditional: automation.task.kind === "conditional_prompt",
     noActionMarker:
       automation.task.kind === "conditional_prompt" ? automation.task.no_action_marker : "",
     workspacePath: automation.target.workspace_path,
     provider: automation.target.provider,
-    threadKind:
-      automation.target.thread.kind === "new_each_run" ? "new_each_run" : "managed",
+    threadKind: thread.kind,
+    threadId: thread.kind === "managed" || thread.kind === "existing" ? thread.thread_id ?? "" : "",
     modelId: automation.target.model_id ?? "",
     permissionMode: automation.target.permission_mode ?? "",
     sandboxMode: automation.target.sandbox_mode ?? "",
     requiredConnectors: automation.required_connectors.join(", "),
+    selectedSkills: (automation.target.selected_skills ?? []).join(", "),
     concurrencyPolicy: automation.concurrency_policy,
     misfirePolicy: automation.misfire_policy,
+    anchorAt:
+      automation.trigger.kind === "interval" ? automation.trigger.anchor_at : "",
   };
 }
 
@@ -148,7 +160,9 @@ function draftArguments(draft: AutomationDraft): Record<string, unknown> {
         ? {
             kind: "interval",
             every_seconds: Number(draft.everySeconds) || 0,
-            anchor_at: new Date().toISOString(),
+            // Editing must never shift the schedule grid: keep the stored
+            // anchor and only fall back to now for brand-new automations.
+            anchor_at: draft.anchorAt.trim() || new Date().toISOString(),
           }
         : { kind: "once", run_at: draft.runAt.trim() };
   const task = draft.conditional
@@ -166,12 +180,24 @@ function draftArguments(draft: AutomationDraft): Record<string, unknown> {
     target: {
       workspace_path: draft.workspacePath.trim(),
       provider: draft.provider,
-      thread: { kind: draft.threadKind },
+      thread:
+        draft.threadKind === "managed"
+          ? {
+              kind: "managed",
+              ...(draft.threadId.trim() ? { thread_id: draft.threadId.trim() } : {}),
+            }
+          : draft.threadKind === "existing"
+            ? { kind: "existing", thread_id: draft.threadId.trim() }
+            : { kind: "new_each_run" },
       ...(draft.modelId.trim() ? { model_id: draft.modelId.trim() } : {}),
       ...(draft.permissionMode.trim()
         ? { permission_mode: draft.permissionMode.trim() }
         : {}),
       ...(draft.sandboxMode.trim() ? { sandbox_mode: draft.sandboxMode.trim() } : {}),
+      selected_skills: draft.selectedSkills
+        .split(",")
+        .map((skill) => skill.trim())
+        .filter(Boolean),
     },
     required_connectors: draft.requiredConnectors
       .split(",")
@@ -411,6 +437,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
                       variant="secondary"
                       disabled={busyId === automation.id}
                       onClick={async () => {
+                        if (!baseUrl) return;
                         const detail = await readAutomation(baseUrl, automation.id);
                         if (!detail) return;
                         setEditor({
@@ -742,9 +769,24 @@ function AutomationEditor({
               className="h-9 w-full rounded-[var(--fd-radius-md)] border border-border bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
             >
               <option value="managed">Managed thread</option>
+              <option value="existing">Existing thread</option>
               <option value="new_each_run">New thread each run</option>
             </select>
           </label>
+          {draft.threadKind !== "new_each_run" ? (
+            <label className="space-y-1">
+              <span className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                Thread id (kept between edits)
+              </span>
+              <Input
+                aria-label="Thread id"
+                value={draft.threadId}
+                onChange={(event) => set("threadId", event.target.value)}
+                placeholder="Assigned on first run"
+                className="font-mono"
+              />
+            </label>
+          ) : null}
           <label className="space-y-1">
             <span className="text-[length:var(--fd-text-xs)] text-fg-muted">Permission mode</span>
             <Input

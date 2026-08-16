@@ -116,6 +116,12 @@ impl EmbeddedDaemonHandle {
         self.state.control()
     }
 
+    /// The daemon state, for embedders that drive scheduler and control
+    /// entry points directly.
+    pub fn app_state(&self) -> &AppState {
+        &self.state
+    }
+
     /// Waits until persisted daemon state has finished restoring.
     ///
     /// The local HTTP listener intentionally becomes available before this

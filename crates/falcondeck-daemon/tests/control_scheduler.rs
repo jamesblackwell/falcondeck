@@ -100,6 +100,112 @@ async fn wait_for_runs(
     runs_for(client, base_url, automation_id).await
 }
 
+#[tokio::test]
+async fn queue_one_holds_the_occurrence_until_the_active_run_finishes() {
+    // A bare AppState (no spawned scheduler loop) keeps the run states
+    // deterministic while the dispatch gate is exercised directly.
+    let dir = tempfile::tempdir().unwrap();
+    let app = falcondeck_daemon::AppState::new_with_state_path(
+        "test".to_string(),
+        [
+            (
+                falcondeck_core::AgentProvider::CODEX,
+                "/nonexistent/codex".to_string(),
+            ),
+            (
+                falcondeck_core::AgentProvider::CLAUDE,
+                "/nonexistent/claude".to_string(),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        dir.path().join("daemon-state.json"),
+    );
+    app.restore_control_state().await.unwrap();
+    let context = falcondeck_core::control::ControlRequestContext::default();
+    let deps = falcondeck_daemon::control::ControlDeps::none();
+
+    let create = falcondeck_core::control::ControlExecuteRequest {
+        operation: "automation.create".to_string(),
+        arguments: serde_json::from_value(json!({
+            "name": "Queue probe",
+            "trigger": { "kind": "interval", "every_seconds": 3600, "anchor_at": "2026-08-16T00:00:00Z" },
+            "task": { "kind": "prompt", "instruction": "Probe." },
+            "target": {
+                "workspace_path": "/tmp",
+                "provider": "codex",
+                "thread": { "kind": "managed" },
+            },
+            "concurrency_policy": "queue_one",
+        }))
+        .unwrap(),
+        expected_revision: None,
+        idempotency_key: None,
+    };
+    let (created, _) = app.control().execute(create, &context, &deps).await;
+    assert!(created.ok, "{:?}", created.error);
+    let id = created.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    let manual = || falcondeck_daemon::control::RunSource::Manual {
+        origin: falcondeck_core::control::ControlOrigin::DesktopUi,
+    };
+    let first = app
+        .control()
+        .enqueue_run(&id, None, manual())
+        .await
+        .unwrap();
+    app.control()
+        .mark_run_running(&first.id, "workspace-probe", "thread-probe")
+        .await
+        .unwrap();
+
+    // The second occurrence is queued by policy, and the dispatch gate holds
+    // it while the first is running.
+    let queued = app
+        .control()
+        .enqueue_run(&id, None, manual())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&queued).unwrap()["status"],
+        json!("queued")
+    );
+    let dispatched =
+        falcondeck_daemon::control::scheduler::try_execute_queued(&app, &queued.id).await;
+    assert!(!dispatched, "queue_one holds the occurrence");
+    let still_queued = app.control().run(&queued.id).await.unwrap();
+    assert_eq!(
+        still_queued.status,
+        falcondeck_core::control::AutomationRunStatus::Queued
+    );
+
+    // Finishing the active run releases the occurrence.
+    app.control()
+        .finish_run(
+            &first.id,
+            falcondeck_core::control::AutomationRunStatus::Succeeded,
+            Some("done".into()),
+            None,
+        )
+        .await
+        .unwrap();
+    let released =
+        falcondeck_daemon::control::scheduler::try_execute_queued(&app, &queued.id).await;
+    assert!(released, "the occurrence dispatches once free");
+    for _ in 0..50 {
+        let run = app.control().run(&queued.id).await.unwrap();
+        if run.status.is_terminal() {
+            assert_ne!(
+                run.status,
+                falcondeck_core::control::AutomationRunStatus::Queued
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("queued occurrence never reached a terminal state");
+}
+
 /// An interval anchored so the next occurrence is `seconds` away.
 fn due_in(seconds: i64) -> Value {
     let anchor = chrono::Utc::now() - chrono::Duration::seconds(3600 - seconds);

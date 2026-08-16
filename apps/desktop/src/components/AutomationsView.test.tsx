@@ -28,7 +28,8 @@ const automation: Automation = {
   target: {
     workspace_path: "/Users/james/Code/quizgecko",
     provider: "codex",
-    thread: { kind: "managed", thread_id: null },
+    thread: { kind: "managed", thread_id: "thread-9" },
+    selected_skills: ["inbox-triage"],
   },
   state: "enabled",
   concurrency_policy: "skip",
@@ -285,6 +286,31 @@ describe("AutomationsView editor", () => {
           kind: "cron",
           expression: "0 8 * * 1-5",
           timezone: "Europe/London",
+        },
+      });
+    });
+  });
+
+  it("edits preserve the stored thread, skills and schedule anchor", async () => {
+    const { executeCalls } = stubControl();
+    await renderView();
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    await screen.findByText("Edit automation");
+    const name = screen.getByLabelText("Automation name");
+    await waitFor(() => expect((name as HTMLInputElement).value).toBe("Weekday inbox review"));
+    fireEvent.change(name, { target: { value: "Renamed" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => {
+      const update = executeCalls.find(
+        (call) => call.operation === "automation.update",
+      );
+      expect(update?.expected_revision).toBe(4);
+      expect(update?.arguments).toMatchObject({
+        automation_id: "automation-1",
+        name: "Renamed",
+        target: {
+          thread: { kind: "managed", thread_id: "thread-9" },
+          selected_skills: ["inbox-triage"],
         },
       });
     });
