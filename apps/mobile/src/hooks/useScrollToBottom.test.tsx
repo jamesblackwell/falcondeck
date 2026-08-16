@@ -63,21 +63,42 @@ describe('useScrollToBottom', () => {
       hook.value.resetScrollState()
     })
 
-    // Pinning to the bottom while content streams is FlashList's
-    // maintainVisibleContentPosition job now; the hook must never scroll on
-    // its own except for the explicit jump button.
     expect(hook.value.showJumpButton).toBe(false)
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
-  it('drops the autoscroll threshold the moment a drag starts', () => {
+  it('leaves FlashList autoscroll disabled so its sticky near-bottom flag never fires', () => {
     const hook = renderHook()
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0.2)
+    expect(hook.value.autoscrollToBottomThreshold).toBeLessThan(0)
 
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(500))
     })
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0)
+    expect(hook.value.autoscrollToBottomThreshold).toBeLessThan(0)
+  })
+
+  it('pins to the tail as content grows while following', () => {
+    const hook = renderHook()
+
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+
+    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
+  })
+
+  it('stops pinning the moment a drag starts, however much content arrives', () => {
+    const hook = renderHook()
+
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+    })
+    act(() => {
+      hook.value.onContentSizeChange()
+      hook.value.onContentSizeChange()
+    })
+
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
   it('does not resume following when a drag ends after a net upward pull, even near the bottom', () => {
@@ -88,7 +109,9 @@ describe('useScrollToBottom', () => {
       hook.value.onScrollEndDrag(scrollEvent(480))
     })
 
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0)
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
@@ -100,7 +123,6 @@ describe('useScrollToBottom', () => {
       hook.value.onScrollEndDrag(scrollEvent(490))
     })
 
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0.2)
     expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
   })
 
@@ -112,7 +134,6 @@ describe('useScrollToBottom', () => {
       hook.value.onScrollEndDrag(scrollEvent(200))
     })
 
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0)
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
@@ -125,7 +146,6 @@ describe('useScrollToBottom', () => {
       hook.value.onMomentumScrollEnd(scrollEvent(495))
     })
 
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0.2)
     expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
   })
 
@@ -138,7 +158,6 @@ describe('useScrollToBottom', () => {
       hook.value.onMomentumScrollEnd(scrollEvent(150))
     })
 
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0)
     expect(hook.scrollToEnd).not.toHaveBeenCalled()
   })
 
@@ -148,19 +167,43 @@ describe('useScrollToBottom', () => {
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(500))
     })
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0)
-
     act(() => {
       hook.value.scrollToBottom()
     })
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0.2)
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.scrollToEnd).toHaveBeenCalledTimes(2)
 
     act(() => {
       hook.value.onScrollBeginDrag(scrollEvent(500))
     })
     act(() => {
       hook.value.resetScrollState()
+      hook.value.onContentSizeChange()
     })
-    expect(hook.value.autoscrollToBottomThreshold).toBe(0.2)
+    expect(hook.scrollToEnd).toHaveBeenCalledTimes(3)
+  })
+
+  it('snaps a refreshed thread to the tail only for a reader who has not scrolled away', () => {
+    const hook = renderHook()
+
+    // Still at the tail: a detail refresh should land the reader on the newest
+    // items it just merged in.
+    act(() => {
+      hook.value.scrollToBottomIfFollowing(false)
+    })
+    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: false })
+
+    // Scrolled back through the history: the same refresh — a reconnect, a
+    // workspace reselect — must not drag them to the bottom.
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onScrollEndDrag(scrollEvent(200))
+    })
+    act(() => {
+      hook.value.scrollToBottomIfFollowing(false)
+    })
+    expect(hook.scrollToEnd).toHaveBeenCalledTimes(1)
   })
 })

@@ -232,12 +232,14 @@ export default function HomeScreen() {
     listRef,
     showJumpButton,
     autoscrollToBottomThreshold,
+    onContentSizeChange,
     onScroll,
     onScrollBeginDrag,
     onScrollEndDrag,
     onMomentumScrollEnd,
     resetScrollState,
     scrollToBottom,
+    scrollToBottomIfFollowing,
   } = useScrollToBottom<ConversationRenderBlock>();
   const isKeyboardVisible = useKeyboardVisible();
   const [appState, setAppState] = useState(AppState.currentState);
@@ -1003,12 +1005,15 @@ export default function HomeScreen() {
       );
       // Snap to the true bottom once the fresh page lands. Opening from cache
       // renders at the *cached* bottom, and anything the agent produced while
-      // the app was closed appends below the anchored viewport — outside
-      // maintainVisibleContentPosition's autoscroll threshold, so nothing else
+      // the app was closed appends below the anchored viewport, so nothing else
       // brings the reader down. The delay lets the merged items commit and lay
       // out before the scroll measures content height.
+      //
+      // Only for a reader who is still following the tail: this effect re-runs
+      // for a reconnect or a workspace reselect too, and an unconditional snap
+      // there yanks someone mid-way through the history back to the bottom.
       snapTimer = setTimeout(() => {
-        if (!cancelled) scrollToBottom(false);
+        if (!cancelled) scrollToBottomIfFollowing(false);
       }, 80);
     });
 
@@ -1019,7 +1024,7 @@ export default function HomeScreen() {
   }, [
     isEncrypted,
     loadThreadDetail,
-    scrollToBottom,
+    scrollToBottomIfFollowing,
     selectedThreadId,
     selectedWorkspaceId,
   ]);
@@ -1245,16 +1250,14 @@ export default function HomeScreen() {
             getItemType={conversationRenderBlockType}
             accessibilityLabel="Conversation"
             showsVerticalScrollIndicator={false}
-            // Native bottom-pinning: chat opens at the bottom and follows
-            // streaming output, but only while the user hasn't scrolled away —
-            // the threshold is stateful (see useScrollToBottom) because a
-            // fixed one lets each streamed chunk's autoscroll cancel an
-            // in-progress upward drag, making the list unscrollable while
-            // streaming.
+            // Anchoring and open-at-the-bottom stay with FlashList; the pin to
+            // the tail does not (see useScrollToBottom — its sticky near-bottom
+            // flag drags readers back down while content streams).
             maintainVisibleContentPosition={{
               autoscrollToBottomThreshold,
               startRenderingFromBottom: true,
             }}
+            onContentSizeChange={onContentSizeChange}
             onScroll={onScroll}
             onScrollBeginDrag={onScrollBeginDrag}
             onScrollEndDrag={onScrollEndDrag}

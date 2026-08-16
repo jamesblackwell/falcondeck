@@ -4,7 +4,9 @@ import type { NativeScrollEvent, NativeSyntheticEvent } from 'react-native'
 
 const SHOW_JUMP_OFFSET = 200
 const RESUME_FOLLOW_OFFSET = 44
-const FOLLOW_THRESHOLD = 0.2
+// FlashList's own bottom-pinning, permanently off: a negative threshold makes
+// its bound detection skip the near-bottom bookkeeping entirely.
+const AUTOSCROLL_DISABLED = -1
 
 function distanceFromBottom(event: NativeSyntheticEvent<NativeScrollEvent>) {
   const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent
@@ -14,28 +16,29 @@ function distanceFromBottom(event: NativeSyntheticEvent<NativeScrollEvent>) {
 /**
  * Jump-to-bottom affordance + stream-following state for the transcript list.
  *
- * FlashList v2's `maintainVisibleContentPosition.autoscrollToBottomThreshold`
- * owns pinning to the bottom while content streams in, but its "near bottom"
- * flag is sticky: every streamed chunk fires an animated `scrollToEnd` while
- * the flag is set, which cancels an in-progress upward drag before the user
- * can escape the threshold — making the transcript unscrollable during fast
- * streaming. So following is an explicit state here: the moment a drag starts
- * the threshold drops to 0 (the flag clears on the first drag frame and the
- * pin disengages), and it re-arms only when the user deliberately returns to
- * the bottom — ends a drag or momentum there — or taps the jump button.
+ * Following is owned here rather than by FlashList's
+ * `maintainVisibleContentPosition.autoscrollToBottomThreshold`. That threshold
+ * sets a *sticky* near-bottom flag which only clears when FlashList processes a
+ * scroll event — and it ignores scroll events for 100ms after every content
+ * position correction, which is exactly what streaming into a re-measuring
+ * transcript produces. A flag armed at the bottom therefore survives the drag
+ * that should have cleared it, and each new chunk fires `scrollToEnd` over the
+ * reader: scroll up a screen or two, get dragged back down.
+ *
+ * So the pin is explicit: this hook follows the tail until a drag starts, and
+ * re-arms only when the user deliberately returns to the bottom — ends a drag
+ * or momentum there — or taps the jump button. While following, `onContentSizeChange`
+ * pins the viewport as content grows; while not following, nothing scrolls at all.
  */
 export function useScrollToBottom<T>() {
   const listRef = useRef<FlashListRef<T>>(null)
   const [showJumpButton, setShowJumpButton] = useState(false)
   const showJumpButtonRef = useRef(false)
-  const [isFollowing, setIsFollowing] = useState(true)
   const isFollowingRef = useRef(true)
   const dragStartOffsetRef = useRef<number | null>(null)
 
   const setFollowing = useCallback((next: boolean) => {
-    if (isFollowingRef.current === next) return
     isFollowingRef.current = next
-    setIsFollowing(next)
   }, [])
 
   const onScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -56,8 +59,6 @@ export function useScrollToBottom<T>() {
 
   const resumeFollowing = useCallback(() => {
     setFollowing(true)
-    // Land exactly on the bottom: the final scroll event re-arms FlashList's
-    // internal near-bottom flag so the native pin takes over again.
     listRef.current?.scrollToEnd({ animated: true })
   }, [setFollowing])
 
@@ -90,6 +91,16 @@ export function useScrollToBottom<T>() {
     [resumeFollowing],
   )
 
+  /**
+   * The pin itself. Content grows from streamed output, from rows that finish
+   * measuring, and from the composer resizing the viewport — every one of those
+   * lands here, and none of them move the list unless the reader is following.
+   */
+  const onContentSizeChange = useCallback(() => {
+    if (!isFollowingRef.current) return
+    listRef.current?.scrollToEnd({ animated: true })
+  }, [])
+
   const scrollToBottom = useCallback(
     (animated = true) => {
       showJumpButtonRef.current = false
@@ -98,6 +109,19 @@ export function useScrollToBottom<T>() {
       listRef.current?.scrollToEnd({ animated })
     },
     [setFollowing],
+  )
+
+  /**
+   * For callers that want the tail in view after data lands — opening a thread,
+   * a reconnect refresh — without stealing the position of a reader who has
+   * scrolled back through the transcript.
+   */
+  const scrollToBottomIfFollowing = useCallback(
+    (animated = true) => {
+      if (!isFollowingRef.current) return
+      scrollToBottom(animated)
+    },
+    [scrollToBottom],
   )
 
   const resetScrollState = useCallback(() => {
@@ -109,17 +133,14 @@ export function useScrollToBottom<T>() {
   return {
     listRef,
     showJumpButton,
-    // While following, FlashList pins the viewport to the bottom as chunks
-    // stream in. While not following, a threshold of 0 (instead of disabling
-    // with a negative value) keeps FlashList's checkBounds running so its
-    // sticky near-bottom flag is cleared on the first drag frame — a disabled
-    // threshold would leave the stale flag armed for one more yank.
-    autoscrollToBottomThreshold: isFollowing ? FOLLOW_THRESHOLD : 0,
+    autoscrollToBottomThreshold: AUTOSCROLL_DISABLED,
+    onContentSizeChange,
     onScroll,
     onScrollBeginDrag,
     onScrollEndDrag,
     onMomentumScrollEnd,
     resetScrollState,
     scrollToBottom,
+    scrollToBottomIfFollowing,
   }
 }
