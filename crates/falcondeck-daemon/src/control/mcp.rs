@@ -67,13 +67,13 @@ impl McpContext {
     fn headers(&self) -> reqwest::header::HeaderMap {
         let mut headers = reqwest::header::HeaderMap::new();
         let insert = |headers: &mut reqwest::header::HeaderMap, name: &str, value: Option<&str>| {
-            if let Some(value) = value.filter(|value| !value.is_empty()) {
-                if let (Ok(name), Ok(value)) = (
+            if let Some(value) = value.filter(|value| !value.is_empty())
+                && let (Ok(name), Ok(value)) = (
                     reqwest::header::HeaderName::try_from(name),
                     reqwest::header::HeaderValue::from_str(value),
-                ) {
-                    headers.insert(name, value);
-                }
+                )
+            {
+                headers.insert(name, value);
             }
         };
         insert(&mut headers, HEADER_ORIGIN, Some("mcp"));
