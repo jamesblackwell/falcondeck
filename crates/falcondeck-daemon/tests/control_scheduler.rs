@@ -247,6 +247,112 @@ async fn due_automation_dispatches_exactly_once() {
 }
 
 #[tokio::test]
+async fn allow_policy_overlaps_occurrences() {
+    // A bare AppState keeps run states deterministic while the claim gate
+    // is exercised directly.
+    let dir = tempfile::tempdir().unwrap();
+    let app = falcondeck_daemon::AppState::new_with_state_path(
+        "test".to_string(),
+        Default::default(),
+        dir.path().join("daemon-state.json"),
+    );
+    app.restore_control_state().await.unwrap();
+    let context = falcondeck_core::control::ControlRequestContext::default();
+    let deps = falcondeck_daemon::control::ControlDeps::none();
+
+    let create = falcondeck_core::control::ControlExecuteRequest {
+        operation: "automation.create".to_string(),
+        arguments: serde_json::from_value(json!({
+            "name": "Allow probe",
+            "trigger": { "kind": "interval", "every_seconds": 3600, "anchor_at": "2026-08-16T00:00:00Z" },
+            "task": { "kind": "prompt", "instruction": "Probe." },
+            "target": {
+                "workspace_path": "/tmp",
+                "provider": "codex",
+                "thread": { "kind": "managed" },
+            },
+            "concurrency_policy": "allow",
+        }))
+        .unwrap(),
+        expected_revision: None,
+        idempotency_key: None,
+    };
+    let (created, _) = app.control().execute(create, &context, &deps).await;
+    assert!(created.ok, "{:?}", created.error);
+    let id = created.data.unwrap()["id"].as_str().unwrap().to_string();
+
+    let manual = || falcondeck_daemon::control::RunSource::Manual {
+        origin: falcondeck_core::control::ControlOrigin::DesktopUi,
+    };
+    let first = app
+        .control()
+        .enqueue_run(&id, None, manual())
+        .await
+        .unwrap();
+    app.control().claim_run_if_automation_free(&first.id).await;
+
+    // An allow-policy occurrence is claimed even while the first runs.
+    let second = app
+        .control()
+        .enqueue_run(&id, None, manual())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&second).unwrap()["status"],
+        json!("queued")
+    );
+    let claimed = app.control().claim_run_if_automation_free(&second.id).await;
+    assert!(claimed, "allow overlaps occurrences");
+    let second_run = app.control().run(&second.id).await.unwrap();
+    assert_eq!(
+        second_run.status,
+        falcondeck_core::control::AutomationRunStatus::Running
+    );
+
+    // A skip-policy sibling still holds, proving the policy distinction.
+    let skip_create = falcondeck_core::control::ControlExecuteRequest {
+        operation: "automation.create".to_string(),
+        arguments: serde_json::from_value(json!({
+            "name": "Skip probe",
+            "trigger": { "kind": "interval", "every_seconds": 3600, "anchor_at": "2026-08-16T00:00:00Z" },
+            "task": { "kind": "prompt", "instruction": "Probe." },
+            "target": {
+                "workspace_path": "/tmp",
+                "provider": "codex",
+                "thread": { "kind": "managed" },
+            },
+        }))
+        .unwrap(),
+        expected_revision: None,
+        idempotency_key: None,
+    };
+    let (skip_created, _) = app.control().execute(skip_create, &context, &deps).await;
+    assert!(skip_created.ok);
+    let skip_id = skip_created.data.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let skip_first = app
+        .control()
+        .enqueue_run(&skip_id, None, manual())
+        .await
+        .unwrap();
+    app.control()
+        .claim_run_if_automation_free(&skip_first.id)
+        .await;
+    let skip_second = app
+        .control()
+        .enqueue_run(&skip_id, None, manual())
+        .await
+        .unwrap();
+    // Default skip policy already recorded skipped_overlap.
+    assert_eq!(
+        serde_json::to_value(&skip_second).unwrap()["status"],
+        json!("skipped_overlap")
+    );
+}
+
+#[tokio::test]
 async fn scheduler_does_not_dispatch_paused_automations() {
     let (daemon, dir) = spawn().await;
     let client = Client::new();

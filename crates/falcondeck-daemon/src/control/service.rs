@@ -1251,11 +1251,22 @@ impl ControlService {
                 return Ok((false, vec![]));
             }
             let automation_id = run.automation_id.clone();
-            let busy = state.runs.iter().any(|other| {
-                other.automation_id == automation_id
-                    && other.id != run_id
-                    && other.status == AutomationRunStatus::Running
-            });
+            // The `allow` policy intentionally overlaps occurrences; the
+            // daemon-wide semaphore is its only bound.
+            let allows_overlap = state
+                .automations
+                .iter()
+                .find(|automation| automation.id == automation_id)
+                .is_some_and(|automation| {
+                    automation.concurrency_policy
+                        == falcondeck_core::control::AutomationConcurrencyPolicy::Allow
+                });
+            let busy = !allows_overlap
+                && state.runs.iter().any(|other| {
+                    other.automation_id == automation_id
+                        && other.id != run_id
+                        && other.status == AutomationRunStatus::Running
+                });
             if busy {
                 return Ok((false, vec![]));
             }
