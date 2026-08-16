@@ -130,7 +130,14 @@ async fn spawn_queued_runs(app: &AppState, in_flight: &Arc<StdMutex<HashSet<Stri
             .collect::<Vec<_>>()
     };
     for run_id in spawnable {
-        let _ = try_execute_queued(app, &run_id).await;
+        if !try_execute_queued(app, &run_id).await {
+            // The occurrence stays queued (queue_one hold, or already
+            // settled); deregister it so later wakes can retry it.
+            in_flight
+                .lock()
+                .expect("control scheduler lock")
+                .remove(&run_id);
+        }
     }
 }
 

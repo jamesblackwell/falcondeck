@@ -438,7 +438,23 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
                       disabled={busyId === automation.id}
                       onClick={async () => {
                         if (!baseUrl) return;
-                        const detail = await readAutomation(baseUrl, automation.id);
+                        let detail: Automation | null;
+                        try {
+                          detail = await readAutomation(baseUrl, automation.id);
+                        } catch (error) {
+                          onToast({
+                            variant: "danger",
+                            title: "Could not open the automation",
+                            description:
+                              error instanceof ControlRequestError
+                                ? error.detail?.suggested_action ?? error.message
+                                : error instanceof Error
+                                  ? error.message
+                                  : String(error),
+                          });
+                          await load();
+                          return;
+                        }
                         if (!detail) return;
                         setEditor({
                           kind: "edit",

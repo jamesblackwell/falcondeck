@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { applySnapshotEvent } from "./snapshot";
-import { normalizeEventEnvelope } from "./normalization";
+import { normalizeEventEnvelope, normalizeThreadSummary } from "./normalization";
 import { parseDaemonEvents } from "./remote-events";
 import type { DaemonSnapshot } from "./types";
 
@@ -15,6 +15,34 @@ const envelope = {
     change: { store_revision: 42, domains: ["automations", "audit"] },
   },
 };
+
+describe("automation thread origins", () => {
+  it("survives thread summary normalization", () => {
+    const normalized = normalizeThreadSummary({
+      id: "thread-1",
+      title: "Inbox review",
+      status: "idle",
+      updated_at: "2026-08-16T14:22:10Z",
+      origin: { kind: "automation", automation_id: "automation-1", name: "Weekday inbox review" },
+    });
+    expect(normalized?.origin).toEqual({
+      kind: "automation",
+      automation_id: "automation-1",
+      name: "Weekday inbox review",
+    });
+  });
+
+  it("still drops malformed origins", () => {
+    const normalized = normalizeThreadSummary({
+      id: "thread-1",
+      title: "Broken",
+      status: "idle",
+      updated_at: "2026-08-16T14:22:10Z",
+      origin: { kind: "automation", automation_id: 7 },
+    } as never);
+    expect(normalized?.origin).toBeNull();
+  });
+});
 
 describe("control-state-changed events", () => {
   it("normalizes like every other envelope variant", () => {
