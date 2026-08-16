@@ -13,6 +13,7 @@
 //! - [`redaction`] — structured secret redaction for model-facing output
 
 pub mod automations;
+pub mod mcp;
 pub mod redaction;
 pub mod registry;
 pub mod scheduler;

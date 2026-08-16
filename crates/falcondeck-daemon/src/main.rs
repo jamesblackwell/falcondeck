@@ -28,6 +28,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // The built-in MCP stdio server for agent control: proxies the running
+    // daemon's control API over newline-delimited JSON-RPC.
+    if std::env::args().skip(1).any(|arg| arg == "mcp") {
+        std::process::exit(falcondeck_daemon::control::mcp::run_mcp_server().await);
+    }
+
     let port = std::env::args()
         .skip(1)
         .find_map(|arg| arg.strip_prefix("--port=").map(str::to_string))
