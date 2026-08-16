@@ -268,6 +268,69 @@ export function AgentControlPanel({ baseUrl, onToast }: AgentControlPanelProps) 
 
           <Card>
             <CardHeader>
+              <CardTitle>Confirmation preferences</CardTitle>
+              <CardDescription>
+                What clients should confirm before executing control operations. Applies to
+                agents that surface FalconDeck confirmation prompts.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {(
+                [
+                  {
+                    field: "destructive_operations" as const,
+                    label: "Confirm destructive operations",
+                    detail: "Ask before deleting automations or other destructive operations.",
+                  },
+                  {
+                    field: "sensitive_operations" as const,
+                    label: "Confirm sensitive operations",
+                    detail: "Ask before settings changes and other sensitive mutations.",
+                  },
+                ]
+              ).map((entry) => {
+                const enabled = settings.confirmation_policy[entry.field];
+                return (
+                  <div
+                    key={entry.field}
+                    className="flex items-center gap-3 rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                        {entry.label}
+                      </span>
+                      <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                        {entry.detail}
+                      </p>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={enabled ? "secondary" : "default"}
+                      aria-pressed={enabled}
+                      aria-label={entry.label}
+                      disabled={busyField === entry.field}
+                      onClick={() =>
+                        void save(entry.field, {
+                          confirmation_policy: {
+                            ...settings.confirmation_policy,
+                            [entry.field]: !enabled,
+                          },
+                        })
+                      }
+                    >
+                      {busyField === entry.field ? (
+                        <ActivityDiamond size="md" tone="current" />
+                      ) : null}
+                      {enabled ? "Asking" : "Skipped"}
+                    </Button>
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
               <CardTitle>Recent control changes</CardTitle>
               <CardDescription>
                 Mutations from agents, this interface and the scheduler, most recent first.

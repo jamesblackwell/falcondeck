@@ -134,6 +134,28 @@ describe("AgentControlPanel", () => {
     });
   });
 
+  it("renders and sends confirmation preferences", async () => {
+    const { calls } = stubControlFetch();
+    render(<AgentControlPanel baseUrl="http://daemon.test" onToast={onToast} />);
+    const destructive = await screen.findByRole("button", {
+      name: "Confirm destructive operations",
+    });
+    expect(destructive.textContent).toContain("Asking");
+    fireEvent.click(destructive);
+    await waitFor(() => {
+      const execute = calls.find((call) => call.url === "/api/control/execute");
+      expect(execute?.body).toMatchObject({
+        operation: "agent_control.settings.update",
+        arguments: {
+          confirmation_policy: {
+            destructive_operations: false,
+            sensitive_operations: true,
+          },
+        },
+      });
+    });
+  });
+
   it("shows structured errors from the daemon", async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input: RequestInfo | URL) => {
       const url = String(input).replace("http://daemon.test", "");
