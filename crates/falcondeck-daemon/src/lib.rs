@@ -13,6 +13,7 @@ mod app;
 mod claude;
 mod codex;
 mod connectors;
+pub mod control;
 mod error;
 mod git;
 pub mod harness_conformance;

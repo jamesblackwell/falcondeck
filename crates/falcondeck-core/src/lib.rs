@@ -5,10 +5,10 @@
 //! It also exports the cryptography helpers used by the pairing protocol.
 #![deny(missing_docs)]
 
-/// Cryptography helpers for pairing, key exchange, and encrypted payloads.
-pub mod crypto;
 /// Shared wire types for the agent control interface.
 pub mod control;
+/// Cryptography helpers for pairing, key exchange, and encrypted payloads.
+pub mod crypto;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -2501,7 +2501,7 @@ impl InteractiveRequestResolution {
 }
 
 /// Generic command result returned by mutating endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct CommandResponse {
     /// Whether the command succeeded.
     pub ok: bool,

@@ -609,8 +609,33 @@ fn default_search_limit() -> usize {
     8
 }
 
+impl Default for ControlSearchRequest {
+    fn default() -> Self {
+        Self {
+            query: None,
+            domain: None,
+            operation: None,
+            detail: SearchDetail::default(),
+            limit: default_search_limit(),
+        }
+    }
+}
+
 fn default_page_limit() -> usize {
     CONTROL_PAGE_LIMIT
+}
+
+impl Default for ControlGetRequest {
+    fn default() -> Self {
+        Self {
+            resource: String::new(),
+            id: None,
+            filters: serde_json::Map::new(),
+            fields: Vec::new(),
+            cursor: None,
+            limit: default_page_limit(),
+        }
+    }
 }
 
 /// Response body for capability discovery.

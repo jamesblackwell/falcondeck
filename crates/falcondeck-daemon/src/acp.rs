@@ -215,6 +215,27 @@ struct ProvidersFile {
     providers: HashMap<String, AcpProviderConfig>,
 }
 
+/// Provider ids configured in `providers.json`. Reserved ids are excluded;
+/// Codex and Claude are never ACP-file providers.
+pub fn known_provider_ids(state_path: &Path) -> Vec<String> {
+    let state_dir = state_path.parent().unwrap_or_else(|| Path::new("."));
+    let path = state_dir.join("providers.json");
+    let raw: Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|body| serde_json::from_str(&body).ok())
+        .unwrap_or_else(|| json!({ "providers": {} }));
+    raw.get("providers")
+        .and_then(Value::as_object)
+        .map(|entries| {
+            entries
+                .keys()
+                .filter(|id| id.as_str() != "codex" && id.as_str() != "claude")
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Raw + resolved view of `providers.json` for the settings UI. Entries whose
 /// binary is missing are included with `binary_found: false` so the panel can
 /// explain why a configured provider is hidden from pickers.

@@ -168,6 +168,8 @@ struct InnerState {
     /// True while a deferred `persist_local_state` is scheduled; lets bursts of
     /// small changes coalesce into one write. See `schedule_persist`.
     persist_pending: AtomicBool,
+    /// Agent control service: settings, automations, runs and audit.
+    control: crate::control::ControlService,
     /// Threads whose ACP transcript rehydration has been kicked off this
     /// daemon run, keyed by (workspace_id, thread_id). One attempt per run:
     /// a session the agent can no longer load would otherwise respawn a
@@ -516,6 +518,7 @@ impl AppState {
         let (broadcaster, _) = broadcast::channel(2048);
         let preferences_path = default_preferences_path(&state_path);
         let scheduled_tasks_path = scheduled_tasks::scheduled_tasks_path(&state_path);
+        let control_store = crate::control::store::control_store_path(&state_path);
         let extension_registry = extensions::ExtensionRegistry::new(&state_path);
         let extension_hosts = extension_host::ExtensionHostPool::new(state_path.clone(), deno_bin);
         Self {
@@ -572,6 +575,7 @@ impl AppState {
                 provision_jobs: Mutex::new(HashMap::new()),
                 harness_cache: StdMutex::new(HashMap::new()),
                 harness_jobs: Mutex::new(HashMap::new()),
+                control: crate::control::ControlService::new(control_store),
                 shutting_down: AtomicBool::new(false),
                 persist_pending: AtomicBool::new(false),
                 acp_hydrations_started: StdMutex::new(HashSet::new()),
@@ -589,6 +593,20 @@ impl AppState {
 
     pub fn local_base_url(&self) -> Option<String> {
         self.inner.local_base_url.get().cloned()
+    }
+
+    /// The daemon-owned agent control service.
+    pub fn control(&self) -> &crate::control::ControlService {
+        &self.inner.control
+    }
+
+    /// Whether a provider id can run on this daemon: a configured binary or
+    /// a discovered ACP provider.
+    pub async fn is_known_provider(&self, provider: &AgentProvider) -> bool {
+        if self.inner.provider_bins.contains_key(provider) {
+            return true;
+        }
+        crate::acp::known_provider_ids(&self.inner.state_path).contains(&provider.to_string())
     }
 
     pub async fn restore_local_state(&self) -> Result<(), DaemonError> {

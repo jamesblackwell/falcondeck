@@ -78,6 +78,11 @@ struct ConnectorEntry {
     extra: BTreeMap<String, Value>,
 }
 
+/// Reserved connector name for the built-in FalconDeck control server. A
+/// user-authored connector with this name is ignored with a warning rather
+/// than overriding the built-in server.
+pub const BUILTIN_CONNECTOR_NAME: &str = "falcondeck";
+
 fn default_enabled() -> bool {
     true
 }
