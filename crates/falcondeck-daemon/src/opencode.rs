@@ -1059,6 +1059,11 @@ fn runner_provider_ids(value: &Value) -> Result<Vec<String>, DaemonError> {
 /// Why the v2 runner cannot execute the session's model, or `None` when it
 /// can. A session without an explicit model passes: the runner resolves its
 /// default from its own registry.
+///
+/// This gate is deliberately dynamic rather than a hardcoded provider list:
+/// if a future OpenCode release teaches its v2 runner to execute OAuth or
+/// coding-plan credentials, `/api/provider` will list them and these models
+/// start running natively without a FalconDeck change.
 pub fn native_model_block_reason(
     session_provider: Option<&str>,
     runner_providers: &[String],
@@ -1083,6 +1088,13 @@ pub fn native_model_block_reason(
 
 /// Paths the native transport calls. `DELETE /session/{sessionID}` is the v1
 /// route: the v2 API has no session delete.
+///
+/// The `CONTRACT_*` tables below are the transport's complete list of
+/// assumptions about OpenCode's experimental v2 API, checked against the
+/// server's own `/doc` at attach so upstream drift demotes new threads to ACP
+/// instead of failing user turns. Anything the transport starts sending must
+/// be added here in the same change; see "Keeping up with OpenCode releases"
+/// in docs/ADAPTERS.md for the per-release checklist.
 const CONTRACT_PATHS: &[&str] = &[
     "/api/provider",
     "/api/session",
@@ -1821,7 +1833,10 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(ids, vec!["deepinfra", "openrouter", "opencode"]);
-        assert_eq!(runner_provider_ids(&json!({ "data": [] })).unwrap(), Vec::<String>::new());
+        assert_eq!(
+            runner_provider_ids(&json!({ "data": [] })).unwrap(),
+            Vec::<String>::new()
+        );
         assert!(runner_provider_ids(&json!({ "providers": [] })).is_err());
     }
 

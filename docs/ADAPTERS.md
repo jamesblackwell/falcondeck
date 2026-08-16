@@ -330,3 +330,35 @@ The native server is started on `127.0.0.1` with a unique generated password,
 rather than exposing an unauthenticated listener. If native mode proves
 unstable in practice, select `acp`; that route remains supported and covered by
 the ACP conformance suite.
+
+### Keeping up with OpenCode releases
+
+The v2 API is experimental and moves quickly. FalconDeck's posture is that an
+upstream change should cost native features, never correctness: every request
+shape the native transport sends is declared in the `CONTRACT_*` tables in
+`crates/falcondeck-daemon/src/opencode.rs`, validated at attach against the
+server's own `/doc`, and any mismatch routes new threads to ACP. The
+provider-registry gate is likewise dynamic — it reads `/api/provider` live, so
+the day OpenCode's v2 runner learns to execute OAuth or coding-plan
+credentials, those models start running natively with no FalconDeck change.
+
+When a new OpenCode version lands, run this checklist before trusting it:
+
+1. `cargo run -p falcondeck-daemon --example opencode_conformance` from a real
+   project directory (agents are project-scoped; add `--live` for the one
+   check that spends tokens).
+2. The `make qa-opencode` matrix: default `auto`, then
+   `OPENCODE_TRANSPORT=native` and `OPENCODE_MODEL=<a coding-plan model>` to
+   confirm both the native path and the gate's refusal still behave.
+3. Diff the API surface against the previous release:
+   `curl -su opencode:$PW http://127.0.0.1:$PORT/doc | jq -S .` piped to a
+   file, compared with the same capture from the prior version. Changes that
+   touch the `CONTRACT_*` tables are breakage; new surface is opportunity.
+
+Opportunities to watch for in that diff, each currently worked around:
+`session.wait` returning something other than 503 (replaces active-map
+polling), a v2 session delete (replaces the v1 route), and OAuth providers
+appearing in `/api/provider` (retires the ACP-only restriction for those
+models). When adding a new request field or endpoint to the transport, add it
+to the `CONTRACT_*` tables in the same change — an assumption that is not in
+those tables is one the attach-time check cannot defend.
