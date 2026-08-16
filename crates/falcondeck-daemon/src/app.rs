@@ -626,6 +626,16 @@ impl AppState {
         }
     }
 
+    /// Emits one event on the unified stream from outside the app module.
+    pub(crate) fn emit_event(
+        &self,
+        workspace_id: Option<String>,
+        thread_id: Option<String>,
+        event: UnifiedEvent,
+    ) {
+        self.emit(workspace_id, thread_id, event);
+    }
+
     /// Emits the lightweight control state-change event after a mutation.
     pub fn emit_control_state_change(&self, change: ControlStateChanged) {
         self.emit(None, None, UnifiedEvent::ControlStateChanged { change });
@@ -647,6 +657,33 @@ impl AppState {
         context: &falcondeck_core::control::ControlRequestContext,
     ) -> Result<falcondeck_core::control::ControlGetResponse, crate::control::ControlError> {
         self.inner.control.get(request, context).await
+    }
+
+    /// Resolves the connected workspace whose canonical path matches, or
+    /// connects the path through the normal flow. Automation definitions
+    /// store canonical paths, never runtime workspace ids.
+    pub async fn resolve_or_connect_workspace_path(
+        &self,
+        workspace_path: &str,
+    ) -> Result<WorkspaceSummary, DaemonError> {
+        let canonical = std::path::PathBuf::from(workspace_path)
+            .canonicalize()
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|_| workspace_path.to_string());
+        let existing = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .values()
+                .find(|workspace| workspace.summary.path == canonical)
+                .map(|workspace| workspace.summary.clone())
+        };
+        if let Some(summary) = existing {
+            return Ok(summary);
+        }
+        self.connect_workspace(ConnectWorkspaceRequest {
+            path: workspace_path.to_string(),
+        })
+        .await
     }
 
     /// Executes one control operation and broadcasts the resulting

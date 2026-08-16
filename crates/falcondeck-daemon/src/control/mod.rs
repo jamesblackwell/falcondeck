@@ -15,6 +15,7 @@
 pub mod automations;
 pub mod redaction;
 pub mod registry;
+pub mod scheduler;
 pub mod store;
 
 mod service;

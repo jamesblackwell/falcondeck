@@ -506,7 +506,10 @@ export type ThreadSummary = {
   provider_transport?: string | null;
   /** Source thread when this thread is a cross-provider continuation. */
   handoff_from?: ThreadHandoffSource | null;
-  origin?: { kind: "scheduled_task"; task_id: string; title: string } | null;
+  origin?:
+    | { kind: "scheduled_task"; task_id: string; title: string }
+    | { kind: "automation"; automation_id: string; name: string }
+    | null;
   status: ThreadStatus;
   updated_at: string;
   last_message_preview: string | null;

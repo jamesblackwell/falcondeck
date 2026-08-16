@@ -2978,6 +2978,13 @@ pub enum ThreadOrigin {
         /// Task title captured when the invocation started.
         title: String,
     },
+    /// A daemon-owned automation created the thread for one invocation.
+    Automation {
+        /// Owning automation identifier.
+        automation_id: String,
+        /// Automation name captured when the invocation started.
+        name: String,
+    },
 }
 
 impl ThreadSummary {

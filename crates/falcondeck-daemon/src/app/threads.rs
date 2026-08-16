@@ -329,7 +329,7 @@ impl AppState {
         Ok(thread.summary.clone())
     }
 
-    pub(super) async fn with_thread_mut<F>(
+    pub(crate) async fn with_thread_mut<F>(
         &self,
         workspace_id: &str,
         thread_id: &str,
@@ -383,7 +383,7 @@ impl AppState {
         Ok(())
     }
 
-    pub(super) async fn thread_summary(
+    pub(crate) async fn thread_summary(
         &self,
         workspace_id: &str,
         thread_id: &str,

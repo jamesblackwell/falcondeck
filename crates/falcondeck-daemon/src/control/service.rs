@@ -1289,6 +1289,47 @@ impl ControlService {
             .cloned()
     }
 
+    /// Current store revision, for event payloads.
+    pub async fn store_revision(&self) -> u64 {
+        self.state.lock().await.store_revision
+    }
+
+    /// Persists a managed automation's native thread id. The definition
+    /// revision increments because this is a durable change, but the store
+    /// change is internal: it never rewrites the schedule.
+    pub async fn set_managed_thread(
+        &self,
+        automation_id: &str,
+        thread_id: &str,
+    ) -> Result<(), ControlError> {
+        let automation_id = automation_id.to_string();
+        let thread_id = thread_id.to_string();
+        self.mutate(move |state, now| {
+            let automation = state
+                .automations
+                .iter_mut()
+                .find(|automation| automation.id == automation_id)
+                .ok_or_else(|| ControlError::resource_not_found("automation", &automation_id))?;
+            let already = matches!(
+                &automation.target.thread,
+                falcondeck_core::control::AutomationThreadTarget::Managed {
+                    thread_id: Some(existing),
+                } if *existing == thread_id
+            );
+            if already {
+                return Ok(((), vec![]));
+            }
+            automation.target.thread = falcondeck_core::control::AutomationThreadTarget::Managed {
+                thread_id: Some(thread_id),
+            };
+            automation.updated_at = now;
+            automation.revision += 1;
+            Ok(((), vec![ControlDomain::Automations]))
+        })
+        .await
+        .map(|((), _)| ())
+    }
+
     /// Wakes the scheduler after definition or run changes.
     pub fn notify_scheduler(&self) {
         self.scheduler_notify.notify_one();

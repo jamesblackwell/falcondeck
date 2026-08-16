@@ -111,6 +111,11 @@ impl EmbeddedDaemonHandle {
         self.state.active_thread_count().await
     }
 
+    /// The daemon-owned agent control service, for embedders and tests.
+    pub fn control(&self) -> &control::ControlService {
+        self.state.control()
+    }
+
     /// Waits until persisted daemon state has finished restoring.
     ///
     /// The local HTTP listener intentionally becomes available before this
@@ -171,6 +176,7 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     if let Err(error) = state.restore_control_state().await {
         tracing::warn!("failed to restore agent control state: {error}");
     }
+    control::scheduler::start(&state);
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
     // The Claude PreToolUse hook posts back to this URL; record the actual
