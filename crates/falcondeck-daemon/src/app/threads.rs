@@ -42,6 +42,9 @@ use crate::{claude::ClaudeRuntime, codex::CodexSession, error::DaemonError};
 /// rather than intervenes, and names the tool when one is mid-flight.
 const CLAUDE_STALL_WARN_AFTER: Duration = Duration::from_secs(300);
 const CLAUDE_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// Stderr lines kept for the failure message when the CLI dies without a
+/// `result` event. `bounded_turn_error` clamps the final string anyway.
+const CLAUDE_STDERR_TAIL_LINES: usize = 6;
 
 struct AiThreadTitleInput {
     workspace_path: String,
@@ -576,6 +579,10 @@ impl AppState {
             let workspace_id = workspace_id.clone();
             let thread_id = thread_id.clone();
             tokio::spawn(async move {
+                // A CLI that dies without a `result` event usually says why
+                // only on stderr; keep a short tail so the failure the user
+                // sees can carry that reason instead of just an exit code.
+                let mut tail = std::collections::VecDeque::with_capacity(CLAUDE_STDERR_TAIL_LINES);
                 let mut lines = tokio::io::BufReader::new(stderr).lines();
                 loop {
                     // A read error (e.g. invalid UTF-8) must not end the loop:
@@ -593,7 +600,12 @@ impl AppState {
                         continue;
                     }
                     tracing::debug!(%workspace_id, %thread_id, "claude stderr: {message}");
+                    if tail.len() == CLAUDE_STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(message.to_string());
                 }
+                tail.into_iter().collect::<Vec<_>>()
             })
         });
 
@@ -973,10 +985,11 @@ impl AppState {
 
         // Only the backstop path can await stderr: it ends at process exit,
         // which on the result path happens after the turn is already finished.
+        let mut stderr_tail = Vec::new();
         if let Some(stderr_task) = stderr_task
             && !saw_result
         {
-            let _ = stderr_task.await;
+            stderr_tail = stderr_task.await.unwrap_or_default();
         }
 
         let mut was_interrupted = false;
@@ -999,9 +1012,14 @@ impl AppState {
                 }
                 Ok(finish) => match finish.status {
                     Some(status) if !status.success() && turn_error.is_none() => {
-                        turn_error = Some(match status.code() {
+                        let headline = match status.code() {
                             Some(code) => format!("Claude turn failed with exit code {code}"),
                             None => "Claude turn failed".to_string(),
+                        };
+                        turn_error = Some(if stderr_tail.is_empty() {
+                            headline
+                        } else {
+                            format!("{headline}: {}", stderr_tail.join("\n"))
                         });
                     }
                     Some(status)

@@ -5183,3 +5183,76 @@ async fn pre_tool_use_honours_live_permission_mode_and_read_only_tools() {
         "read-only tools must not prompt: {decision}"
     );
 }
+
+#[test]
+fn claude_error_events_keep_structured_causes() {
+    use super::agent_helpers::extract_claude_error;
+
+    // SSE-style API error: the message hides one level down in an object,
+    // which the string-only extraction used to drop entirely.
+    assert_eq!(
+        extract_claude_error(&json!({
+            "type": "error",
+            "error": { "type": "overloaded_error", "message": "Overloaded" }
+        }))
+        .as_deref(),
+        Some("Overloaded")
+    );
+    // Unfamiliar structured error: verbatim JSON beats reporting nothing.
+    assert_eq!(
+        extract_claude_error(&json!({
+            "type": "error",
+            "error": { "code": 529 }
+        }))
+        .as_deref(),
+        Some(r#"{"code":529}"#)
+    );
+    // The result event's text still wins.
+    assert_eq!(
+        extract_claude_error(&json!({
+            "type": "result",
+            "is_error": true,
+            "result": "Credit balance is too low"
+        }))
+        .as_deref(),
+        Some("Credit balance is too low")
+    );
+    // Ordinary events stay silent.
+    assert_eq!(
+        extract_claude_error(&json!({ "type": "assistant", "message": { "id": "m1" } })),
+        None
+    );
+    assert_eq!(
+        extract_claude_error(&json!({ "type": "error", "error": null })),
+        None
+    );
+}
+
+#[test]
+fn codex_turn_failures_keep_provider_detail() {
+    use super::notifications::codex_turn_error_text;
+
+    // message + data both survive.
+    assert_eq!(
+        codex_turn_error_text(&json!({
+            "error": { "message": "stream error", "data": "insufficient credits" }
+        }))
+        .as_deref(),
+        Some("stream error: insufficient credits")
+    );
+    // A structured error without a message is shown verbatim, not replaced
+    // with the generic "Turn failed".
+    assert_eq!(
+        codex_turn_error_text(&json!({
+            "error": { "code": -32000 }
+        }))
+        .as_deref(),
+        Some(r#"{"code":-32000}"#)
+    );
+    assert_eq!(
+        codex_turn_error_text(&json!({ "error": "rate limited" })).as_deref(),
+        Some("rate limited")
+    );
+    assert_eq!(codex_turn_error_text(&json!({ "error": null })), None);
+    assert_eq!(codex_turn_error_text(&json!({ "status": "failed" })), None);
+}

@@ -863,14 +863,26 @@ pub(super) fn extract_claude_error(value: &Value) -> Option<String> {
     }
 
     let event = claude_event_value(value);
+    let error_field = event
+        .get("error")
+        .or_else(|| value.get("error"))
+        .filter(|error| !error.is_null());
+    let named_error_event = extract_string(event, &["type", "event"])
+        .or_else(|| extract_string(value, &["type"]))
+        .map(|kind| kind.contains("error"))
+        .unwrap_or(false);
+    if !named_error_event && error_field.is_none() {
+        return None;
+    }
     extract_string(event, &["error", "message"])
         .or_else(|| extract_string(value, &["error", "message"]))
-        .filter(|_| {
-            extract_string(event, &["type", "event"])
-                .or_else(|| extract_string(value, &["type"]))
-                .map(|event| event.contains("error"))
-                .unwrap_or(false)
-                || value.get("error").is_some()
+        // A structured error (`{ "type": ..., "message": ... }` nested in an
+        // object, or any unfamiliar shape) is still the cause of the failure;
+        // verbatim JSON beats reporting nothing.
+        .or_else(|| {
+            error_field.map(|error| {
+                extract_string(error, &["message"]).unwrap_or_else(|| error.to_string())
+            })
         })
 }
 

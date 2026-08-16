@@ -420,9 +420,7 @@ pub(super) async fn ingest_notification(
                 let status =
                     extract_string(&params, &["status"]).unwrap_or_else(|| "completed".to_string());
                 let turn_was_interrupted = is_interrupt_turn_status(&status);
-                let mut error = extract_string(&params, &["error"]).or_else(|| {
-                    extract_string(params.get("error").unwrap_or(&Value::Null), &["message"])
-                });
+                let mut error = codex_turn_error_text(&params);
                 if error.is_none() && is_failed_turn_status(&status) {
                     error = Some("Turn failed".to_string());
                 }
@@ -2412,6 +2410,30 @@ pub(super) fn is_failed_turn_status(status: &str) -> bool {
         status.trim().to_ascii_lowercase().as_str(),
         "failed" | "failure" | "error" | "errored"
     )
+}
+
+/// The error a `turn/completed` notification carries, keeping whatever detail
+/// the payload holds. Codex's `message` alone is often just a category
+/// ("stream error"); the cause lives in `data`, and unfamiliar shapes are
+/// still better shown verbatim than replaced with "Turn failed".
+pub(super) fn codex_turn_error_text(params: &Value) -> Option<String> {
+    let error = params.get("error").filter(|error| !error.is_null())?;
+    if let Some(text) = error.as_str() {
+        let text = text.trim();
+        return (!text.is_empty()).then(|| text.to_string());
+    }
+    let message = extract_string(error, &["message"])
+        .map(|message| message.trim().to_string())
+        .filter(|message| !message.is_empty());
+    let detail = error.get("data").and_then(crate::acp::rpc_error_data_text);
+    match (message, detail) {
+        (Some(message), Some(detail)) if !message.contains(&detail) => {
+            Some(format!("{message}: {detail}"))
+        }
+        (Some(message), _) => Some(message),
+        (None, Some(detail)) => Some(detail),
+        (None, None) => Some(error.to_string()),
+    }
 }
 
 fn claude_hook_decision(decision: &str, reason: &str) -> Value {

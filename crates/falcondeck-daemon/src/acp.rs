@@ -469,6 +469,33 @@ fn acp_content_block_text(block: &Value) -> Option<String> {
     }
 }
 
+/// Displayable text for a JSON-RPC error's `data` field. Providers disagree
+/// on its shape (bare string, `{ "details": ... }`, arbitrary object), so this
+/// accepts all of them; structured payloads are bounded because they were
+/// never meant for display.
+pub(crate) fn rpc_error_data_text(data: &Value) -> Option<String> {
+    const MAX_LEN: usize = 500;
+    let text = match data {
+        Value::String(text) => text.clone(),
+        Value::Null => return None,
+        other => other
+            .get("details")
+            .or_else(|| other.get("message"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| other.to_string()),
+    };
+    let text = text.trim();
+    if text.is_empty() || text == "{}" {
+        return None;
+    }
+    Some(if text.chars().count() > MAX_LEN {
+        format!("{}…", text.chars().take(MAX_LEN).collect::<String>())
+    } else {
+        text.to_string()
+    })
+}
+
 /// An ACP tool call's title, made readable. Agents send their own wire name
 /// (`read_file`, `search_replace`, `run_terminal_command`) on the opening
 /// update and only replace it with prose once the call resolves — which never
@@ -703,6 +730,11 @@ pub struct AcpRuntime {
     /// Session-update kinds already diagnosed for this process. Adapters can
     /// emit thousands of chunks, so protocol drift is logged once per kind.
     reported_update_kinds: Mutex<HashSet<String>>,
+    /// Most recent provider-reported turn failure per session, from vendor
+    /// notifications (Grok's `_x.ai/session/update`). The JSON-RPC error on
+    /// `session/prompt` is often the generic "Internal error"; this holds the
+    /// real cause (for example an API 402) to surface instead.
+    turn_failure_details: Mutex<HashMap<String, String>>,
     initialize_result: Mutex<Option<Value>>,
     supports_steering: AtomicBool,
     closed: AtomicBool,
@@ -1163,6 +1195,7 @@ impl AcpRuntime {
             discovery_gate: Mutex::new(()),
             metadata_discovered: AtomicBool::new(false),
             reported_update_kinds: Mutex::new(HashSet::new()),
+            turn_failure_details: Mutex::new(HashMap::new()),
             initialize_result: Mutex::new(None),
             supports_steering: AtomicBool::new(false),
             closed: AtomicBool::new(false),
@@ -1860,6 +1893,9 @@ impl AcpRuntime {
         } else {
             content
         };
+        // A detail left over from an earlier turn must not masquerade as this
+        // turn's cause.
+        self.turn_failure_details.lock().await.remove(session_id);
         let result = self
             .request(
                 "session/prompt",
@@ -1873,6 +1909,20 @@ impl AcpRuntime {
         // can never be acted on, so resolve it as cancelled rather than
         // leaving the agent (and our map) holding a dead request.
         self.cancel_pending_permissions(session_id).await;
+        // The read loop delivers messages in order, so a vendor failure
+        // notice written before the error response is already recorded here.
+        let result = match result {
+            Err(error) => {
+                let detail = self.turn_failure_details.lock().await.remove(session_id);
+                Err(match detail {
+                    Some(detail) if !error.to_string().contains(&detail) => {
+                        DaemonError::Rpc(format!("{} ({})", detail, self.config.id))
+                    }
+                    _ => error,
+                })
+            }
+            ok => ok,
+        };
         let stop_reason = result.as_ref().ok().map(|result| {
             result
                 .get("stopReason")
@@ -2246,6 +2296,16 @@ impl AcpRuntime {
                     .get("message")
                     .and_then(Value::as_str)
                     .unwrap_or("ACP request failed");
+                // Adapters that answer with a bare JSON-RPC "Internal error"
+                // often put the actual cause in `data`; without it the user
+                // sees a message that explains nothing.
+                let detail = error.get("data").and_then(rpc_error_data_text);
+                let text = match detail {
+                    Some(detail) if !text.contains(detail.as_str()) => {
+                        format!("{text}: {detail}")
+                    }
+                    _ => text.to_string(),
+                };
                 let _ = sender.send(Err(DaemonError::Rpc(format!(
                     "{} ({})",
                     text, self.config.id
@@ -2264,6 +2324,10 @@ impl AcpRuntime {
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         match method.as_str() {
             "session/update" => self.handle_session_update(&params).await,
+            // Grok's vendor stream duplicates session/update with turn-level
+            // metadata; the only part we need is the real failure text, which
+            // never appears on the standard surface.
+            "_x.ai/session/update" => self.capture_vendor_turn_failure(&params).await,
             "session/request_permission" => {
                 let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
                 self.handle_permission_request(raw_id, &params).await;
@@ -2455,6 +2519,36 @@ impl AcpRuntime {
         }
     }
 
+    /// Records the failure text Grok reports through `_x.ai/session/update`
+    /// (`turn_completed` with `stop_reason: "error"`, or a failed
+    /// `retry_state`). The matching JSON-RPC prompt error says only
+    /// "Internal error"; `prompt` swaps in this detail when the turn fails.
+    async fn capture_vendor_turn_failure(&self, params: &Value) {
+        let Some(session_id) = params.get("sessionId").and_then(Value::as_str) else {
+            return;
+        };
+        let Some(update) = params.get("update") else {
+            return;
+        };
+        let detail = match update.get("sessionUpdate").and_then(Value::as_str) {
+            Some("turn_completed") if update.get("stop_reason").and_then(Value::as_str)
+                == Some("error") =>
+            {
+                update.get("agent_result").and_then(Value::as_str)
+            }
+            Some("retry_state") if update.get("type").and_then(Value::as_str) == Some("failed") => {
+                update.get("message").and_then(Value::as_str)
+            }
+            _ => None,
+        };
+        if let Some(detail) = detail.map(str::trim).filter(|detail| !detail.is_empty()) {
+            self.turn_failure_details
+                .lock()
+                .await
+                .insert(session_id.to_string(), detail.to_string());
+        }
+    }
+
     async fn report_unprojected_update(&self, kind: AcpSessionUpdateKind<'_>, is_unknown: bool) {
         let kind = kind.as_str();
         if !self
@@ -2555,6 +2649,34 @@ impl AcpRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn error_data_text_accepts_the_shapes_adapters_actually_send() {
+        assert_eq!(
+            rpc_error_data_text(&json!("balance exhausted")).as_deref(),
+            Some("balance exhausted")
+        );
+        assert_eq!(
+            rpc_error_data_text(&json!({ "details": "API error (status 402)" })).as_deref(),
+            Some("API error (status 402)")
+        );
+        assert_eq!(
+            rpc_error_data_text(&json!({ "message": "quota hit" })).as_deref(),
+            Some("quota hit")
+        );
+        // Arbitrary objects still surface, as bounded JSON.
+        assert_eq!(
+            rpc_error_data_text(&json!({ "code": 402 })).as_deref(),
+            Some(r#"{"code":402}"#)
+        );
+        assert_eq!(rpc_error_data_text(&Value::Null), None);
+        assert_eq!(rpc_error_data_text(&json!("  ")), None);
+        assert_eq!(rpc_error_data_text(&json!({})), None);
+        let long = "x".repeat(600);
+        let bounded = rpc_error_data_text(&json!(long)).unwrap();
+        assert_eq!(bounded.chars().count(), 501);
+        assert!(bounded.ends_with('…'));
+    }
 
     #[test]
     fn raw_agent_tool_names_are_read_back_as_the_work_they_describe() {
