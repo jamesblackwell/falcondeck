@@ -659,6 +659,29 @@ impl AppState {
         self.inner.control.get(request, context).await
     }
 
+    /// Computes the built-in FalconDeck control connector for one provider
+    /// spawn, or `None` when agent control is disabled globally or for the
+    /// provider. Evaluated at every spawn boundary so setting changes apply
+    /// on the next turn (Claude) or next process start (Codex, ACP).
+    pub async fn builtin_control_spec(
+        &self,
+        provider: &AgentProvider,
+        workspace_path: &str,
+        thread_id: Option<&str>,
+    ) -> Option<crate::connectors::BuiltinControlSpec> {
+        let settings = self.inner.control.settings_snapshot().await;
+        self.inner
+            .control
+            .ensure_mcp_enabled(&settings, Some(provider))
+            .ok()?;
+        Some(crate::connectors::BuiltinControlSpec {
+            daemon_url: self.local_base_url()?,
+            provider: provider.to_string(),
+            workspace_path: workspace_path.to_string(),
+            thread_id: thread_id.map(str::to_string),
+        })
+    }
+
     /// Resolves the connected workspace whose canonical path matches, or
     /// connects the path through the normal flow. Automation definitions
     /// store canonical paths, never runtime workspace ids.

@@ -207,7 +207,13 @@ impl CodexSession {
         let resolved = resolve_agent_binary("codex", &codex_bin);
         let mut command = Command::new(&resolved.executable);
         command.arg("app-server");
-        let mcp_servers = crate::connectors::load_mcp_servers(&workspace_path, "codex");
+        let mcp_servers = crate::connectors::with_builtin_control(
+            crate::connectors::load_mcp_servers(&workspace_path, "codex"),
+            state
+                .builtin_control_spec(&AgentProvider::CODEX, &workspace_path, None)
+                .await
+                .as_ref(),
+        );
         for override_arg in crate::connectors::codex_config_overrides(&mcp_servers) {
             command.arg("-c").arg(override_arg);
         }

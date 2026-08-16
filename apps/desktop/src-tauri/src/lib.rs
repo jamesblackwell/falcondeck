@@ -15,6 +15,8 @@ use serde::Serialize;
 use tauri::{async_runtime::Mutex, AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+mod desktop_notifications;
+
 /// Kept in sync with ACTIVITY_WINDOW_LABEL in src/activity-window-bridge.ts.
 const ACTIVITY_WINDOW_LABEL: &str = "activity";
 
@@ -549,6 +551,15 @@ fn focus_main_window(app: AppHandle) -> Result<(), String> {
 }
 
 pub fn run() {
+    // The embedded daemon injects its built-in MCP connector with this very
+    // executable as the command, so the desktop binary must serve `mcp`
+    // exactly like `falcondeck-daemon mcp` does instead of opening a window.
+    if std::env::args().skip(1).any(|arg| arg == "mcp") {
+        tauri::async_runtime::block_on(async {
+            std::process::exit(falcondeck_daemon::control::mcp::run_mcp_server().await);
+        });
+    }
+
     // The updater enables rustls' Ring provider while the daemon enables
     // AWS-LC. With both compiled, rustls deliberately refuses to guess and
     // otherwise panics on the first relay/updater TLS connection.
@@ -596,7 +607,10 @@ pub fn run() {
             restart_app,
             open_external_url,
             open_activity_window,
-            focus_main_window
+            focus_main_window,
+            desktop_notifications::macos_notification_permission_state,
+            desktop_notifications::request_macos_notification_permission,
+            desktop_notifications::send_macos_notification
         ])
         .build(tauri::generate_context!())
         .expect("failed to build FalconDeck desktop");

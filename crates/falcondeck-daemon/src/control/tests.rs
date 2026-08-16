@@ -1217,6 +1217,78 @@ async fn connector_dependency_skips_at_execution_time() {
     );
 }
 
+#[tokio::test]
+async fn builtin_connector_spec_follows_enablement() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_path = dir.path().join("daemon-state.json");
+    let app = crate::app::AppState::new_with_state_path(
+        "test".to_string(),
+        Default::default(),
+        state_path,
+    );
+    app.set_local_base_url("http://127.0.0.1:4123".to_string());
+    app.restore_control_state().await.unwrap();
+
+    // Enabled by default: the spec exists for both providers.
+    let spec = app
+        .builtin_control_spec(&falcondeck_core::AgentProvider::CODEX, "/repo", None)
+        .await;
+    assert!(spec.is_some());
+    assert_eq!(spec.unwrap().provider, "codex");
+
+    // Disabled globally: no spec, so connectors are simply omitted.
+    let (response, _) = app
+        .control()
+        .execute(
+            execute_request(
+                registry::ops::SETTINGS_UPDATE,
+                json!({ "enabled": false }),
+                None,
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    assert!(
+        app.builtin_control_spec(&falcondeck_core::AgentProvider::CODEX, "/repo", None)
+            .await
+            .is_none()
+    );
+
+    // Re-enable, then disable one provider only.
+    let (response, _) = app
+        .control()
+        .execute(
+            execute_request(
+                registry::ops::SETTINGS_UPDATE,
+                json!({
+                    "enabled": true,
+                    "providers": { "codex": { "enabled": false } },
+                }),
+                None,
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    assert!(
+        app.builtin_control_spec(&falcondeck_core::AgentProvider::CODEX, "/repo", None)
+            .await
+            .is_none()
+    );
+    assert!(
+        app.builtin_control_spec(
+            &falcondeck_core::AgentProvider::CLAUDE,
+            "/repo",
+            Some("thread-1")
+        )
+        .await
+        .is_some()
+    );
+}
+
 #[test]
 fn control_error_constructors_carry_codes_and_actions() {
     assert_eq!(

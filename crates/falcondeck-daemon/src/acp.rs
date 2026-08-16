@@ -1314,7 +1314,11 @@ impl AcpRuntime {
     /// permission configuration. ACP clients cannot populate a model picker
     /// from initialize alone because many agents only publish these options
     /// in the session/new result.
-    pub async fn ensure_workspace_metadata(&self, cwd: &str) -> Result<(), DaemonError> {
+    pub async fn ensure_workspace_metadata(
+        &self,
+        cwd: &str,
+        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+    ) -> Result<(), DaemonError> {
         if self.metadata_discovered.load(Ordering::Acquire) {
             return Ok(());
         }
@@ -1323,7 +1327,10 @@ impl AcpRuntime {
             return Ok(());
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
-            &crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+            &crate::connectors::with_builtin_control(
+                crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+                builtin_control,
+            ),
             self.supports_http_mcp().await,
         );
         let result = self
@@ -1514,6 +1521,7 @@ impl AcpRuntime {
         known_native_session: Option<&str>,
         cwd: &str,
         permission_mode: Option<&str>,
+        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
     ) -> Result<String, DaemonError> {
         let gate = self.session_gate(thread_id).await;
         let _guard = gate.lock().await;
@@ -1521,7 +1529,10 @@ impl AcpRuntime {
             return Ok(existing.clone());
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
-            &crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+            &crate::connectors::with_builtin_control(
+                crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+                builtin_control,
+            ),
             self.supports_http_mcp().await,
         );
 
@@ -1531,7 +1542,7 @@ impl AcpRuntime {
             && self.supports_load_session().await
         {
             match self
-                .load_session_locked(thread_id, native_session, cwd)
+                .load_session_locked(thread_id, native_session, cwd, builtin_control)
                 .await
             {
                 Ok(()) => return Ok(native_session.to_string()),
@@ -1580,13 +1591,14 @@ impl AcpRuntime {
         thread_id: &str,
         native_session: &str,
         cwd: &str,
+        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
     ) -> Result<(), DaemonError> {
         let gate = self.session_gate(thread_id).await;
         let _guard = gate.lock().await;
         if self.sessions.lock().await.contains_key(thread_id) {
             return Ok(());
         }
-        self.load_session_locked(thread_id, native_session, cwd)
+        self.load_session_locked(thread_id, native_session, cwd, builtin_control)
             .await
     }
 
@@ -1595,6 +1607,7 @@ impl AcpRuntime {
         thread_id: &str,
         native_session: &str,
         cwd: &str,
+        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
     ) -> Result<(), DaemonError> {
         if !self.supports_load_session().await {
             return Err(DaemonError::Process(format!(
@@ -1603,7 +1616,10 @@ impl AcpRuntime {
             )));
         }
         let mcp_servers = crate::connectors::acp_mcp_servers(
-            &crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+            &crate::connectors::with_builtin_control(
+                crate::connectors::load_mcp_servers(&self.workspace_path, &self.config.id),
+                builtin_control,
+            ),
             self.supports_http_mcp().await,
         );
         // The agent replays the conversation as session/update

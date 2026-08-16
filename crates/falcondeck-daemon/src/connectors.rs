@@ -83,6 +83,84 @@ struct ConnectorEntry {
 /// than overriding the built-in server.
 pub const BUILTIN_CONNECTOR_NAME: &str = "falcondeck";
 
+/// Everything the built-in FalconDeck control connector needs to point an
+/// agent at this daemon. Computed at each provider spawn boundary from
+/// current agent-control settings; never persisted to `connectors.json`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinControlSpec {
+    /// Base HTTP URL of the daemon's control API.
+    pub daemon_url: String,
+    /// Provider the agent subprocess speaks for.
+    pub provider: String,
+    /// Workspace the agent is running in.
+    pub workspace_path: String,
+    /// Thread the agent turn runs in, when known.
+    pub thread_id: Option<String>,
+}
+
+/// Builds the in-memory FalconDeck control MCP server for one provider
+/// spawn. The command is the daemon's own executable; the subprocess talks
+/// to the running daemon and owns no state itself.
+pub fn builtin_control_server(
+    daemon_executable: &std::path::Path,
+    spec: &BuiltinControlSpec,
+) -> McpServerConfig {
+    let mut env = BTreeMap::from([
+        ("FALCONDECK_DAEMON_URL".to_string(), spec.daemon_url.clone()),
+        (
+            "FALCONDECK_CONTROL_PROVIDER".to_string(),
+            spec.provider.clone(),
+        ),
+        (
+            "FALCONDECK_CONTROL_WORKSPACE".to_string(),
+            spec.workspace_path.clone(),
+        ),
+    ]);
+    if let Some(thread_id) = &spec.thread_id {
+        env.insert("FALCONDECK_CONTROL_THREAD".to_string(), thread_id.clone());
+    }
+    McpServerConfig {
+        name: BUILTIN_CONNECTOR_NAME.to_string(),
+        transport: McpTransport::Stdio {
+            command: daemon_executable.display().to_string(),
+            args: vec!["mcp".to_string()],
+            env,
+        },
+    }
+}
+
+/// Appends the built-in FalconDeck control connector to a merged user
+/// connector list. User entries using the reserved name are dropped with a
+/// warning instead of overriding the built-in server; other entries keep
+/// their order and contents untouched.
+pub fn with_builtin_control(
+    servers: Vec<McpServerConfig>,
+    spec: Option<&BuiltinControlSpec>,
+) -> Vec<McpServerConfig> {
+    let Some(spec) = spec else {
+        return servers;
+    };
+    let mut servers: Vec<McpServerConfig> = servers
+        .into_iter()
+        .filter(|server| {
+            if server.name == BUILTIN_CONNECTOR_NAME {
+                tracing::warn!(
+                    "ignoring user connector named {BUILTIN_CONNECTOR_NAME:?}: the name is reserved for the built-in FalconDeck control server"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    let executable = std::env::current_exe().unwrap_or_else(|error| {
+        tracing::warn!(%error, "failed to resolve the daemon executable for the builtin connector");
+        std::path::PathBuf::from("falcondeck-daemon")
+    });
+    servers.push(builtin_control_server(&executable, spec));
+    servers
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -564,6 +642,145 @@ mod tests {
                 .unwrap_err()
                 .contains("workspace")
         );
+    }
+
+    fn spec(thread_id: Option<&str>) -> BuiltinControlSpec {
+        BuiltinControlSpec {
+            daemon_url: "http://127.0.0.1:4123".to_string(),
+            provider: "codex".to_string(),
+            workspace_path: "/Users/james/Code/quizgecko".to_string(),
+            thread_id: thread_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn builtin_control_server_is_a_stdio_daemon_invocation() {
+        let server = builtin_control_server(
+            std::path::Path::new("/opt/falcondeck-daemon"),
+            &spec(Some("thread-7")),
+        );
+        assert_eq!(server.name, BUILTIN_CONNECTOR_NAME);
+        let McpTransport::Stdio { command, args, env } = server.transport else {
+            panic!("builtin connector is stdio");
+        };
+        assert_eq!(command, "/opt/falcondeck-daemon");
+        assert_eq!(args, vec!["mcp".to_string()]);
+        assert_eq!(
+            env.get("FALCONDECK_DAEMON_URL").unwrap(),
+            "http://127.0.0.1:4123"
+        );
+        assert_eq!(env.get("FALCONDECK_CONTROL_PROVIDER").unwrap(), "codex");
+        assert_eq!(
+            env.get("FALCONDECK_CONTROL_WORKSPACE").unwrap(),
+            "/Users/james/Code/quizgecko"
+        );
+        assert_eq!(env.get("FALCONDECK_CONTROL_THREAD").unwrap(), "thread-7");
+    }
+
+    #[test]
+    fn builtin_connector_is_injected_for_every_provider_materialisation() {
+        let user = vec![McpServerConfig {
+            name: "linear".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "mcp-linear".into()],
+                env: BTreeMap::new(),
+            },
+        }];
+        let servers = with_builtin_control(user.clone(), Some(&spec(None)));
+
+        // Claude --mcp-config JSON carries the falcondeck entry.
+        let claude: Value =
+            serde_json::from_str(&claude_mcp_config_json(&servers).expect("claude config"))
+                .unwrap();
+        assert_eq!(
+            claude["mcpServers"][BUILTIN_CONNECTOR_NAME]["command"],
+            json!(std::env::current_exe().unwrap().display().to_string())
+        );
+        assert_eq!(
+            claude["mcpServers"][BUILTIN_CONNECTOR_NAME]["args"],
+            json!(["mcp"])
+        );
+        assert!(
+            claude["mcpServers"][BUILTIN_CONNECTOR_NAME]["env"]
+                .get("FALCONDECK_CONTROL_PROVIDER")
+                .is_some()
+        );
+        assert!(
+            claude["mcpServers"].get("linear").is_some(),
+            "user connectors remain"
+        );
+
+        // Codex -c overrides include the equivalent mcp_servers.falcondeck keys.
+        let overrides = codex_config_overrides(&servers);
+        assert!(
+            overrides
+                .iter()
+                .any(|arg| arg.starts_with("mcp_servers.falcondeck.command="))
+        );
+        assert!(
+            overrides
+                .iter()
+                .any(|arg| arg.starts_with("mcp_servers.falcondeck.env="))
+        );
+
+        // ACP session configuration includes the equivalent stdio entry.
+        let acp = acp_mcp_servers(&servers, false);
+        let entry = acp
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["name"] == json!(BUILTIN_CONNECTOR_NAME))
+            .expect("builtin entry in ACP session config");
+        assert_eq!(
+            entry["command"],
+            json!(std::env::current_exe().unwrap().display().to_string())
+        );
+        assert!(
+            entry["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|pair| pair["name"] == json!("FALCONDECK_DAEMON_URL"))
+        );
+    }
+
+    #[test]
+    fn disabled_setting_omits_the_builtin_connector() {
+        // A `None` spec (control disabled) leaves the user list untouched.
+        let user = vec![McpServerConfig {
+            name: "linear".into(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+            },
+        }];
+        let servers = with_builtin_control(user.clone(), None);
+        assert_eq!(servers, user);
+        assert!(
+            !servers
+                .iter()
+                .any(|server| server.name == BUILTIN_CONNECTOR_NAME)
+        );
+    }
+
+    #[test]
+    fn user_connector_cannot_override_the_reserved_name() {
+        let attacker = vec![McpServerConfig {
+            name: BUILTIN_CONNECTOR_NAME.into(),
+            transport: McpTransport::Stdio {
+                command: "evil-server".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+            },
+        }];
+        let servers = with_builtin_control(attacker, Some(&spec(None)));
+        assert_eq!(servers.len(), 1, "the user entry is replaced, not merged");
+        let McpTransport::Stdio { command, .. } = &servers[0].transport else {
+            panic!("stdio");
+        };
+        assert_ne!(command, "evil-server");
     }
 
     #[test]

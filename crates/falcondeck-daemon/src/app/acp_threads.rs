@@ -154,8 +154,11 @@ impl AppState {
                 if runtime.session_for_thread(&thread_id).await.is_some() {
                     return;
                 }
+                let builtin_control = app
+                    .builtin_control_spec(&provider, &cwd, Some(&thread_id))
+                    .await;
                 if let Err(error) = runtime
-                    .load_session(&thread_id, &native_session, &cwd)
+                    .load_session(&thread_id, &native_session, &cwd, builtin_control.as_ref())
                     .await
                 {
                     tracing::info!(
@@ -271,7 +274,13 @@ impl AppState {
 
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let runtime = AcpRuntime::connect(config, &workspace_path, events_tx).await?;
-        if let Err(error) = runtime.ensure_workspace_metadata(&workspace_path).await {
+        let builtin_control = self
+            .builtin_control_spec(provider, &workspace_path, None)
+            .await;
+        if let Err(error) = runtime
+            .ensure_workspace_metadata(&workspace_path, builtin_control.as_ref())
+            .await
+        {
             // Some ACP agents require auth or do not implement session/new
             // configuration. Keep the provider selectable and let its first
             // real turn retry discovery instead of failing workspace attach.
@@ -323,7 +332,13 @@ impl AppState {
             };
             workspace.summary.path.clone()
         };
-        if let Err(error) = runtime.ensure_workspace_metadata(&workspace_path).await {
+        let builtin_control = self
+            .builtin_control_spec(&runtime.provider, &workspace_path, None)
+            .await;
+        if let Err(error) = runtime
+            .ensure_workspace_metadata(&workspace_path, builtin_control.as_ref())
+            .await
+        {
             tracing::info!(
                 provider = %runtime.config.id,
                 %error,
@@ -1462,12 +1477,16 @@ async fn run_acp_turn_startup(
             },
         )
     };
+    let builtin_control = app
+        .builtin_control_spec(provider, &cwd, Some(thread_id))
+        .await;
     let first_start = runtime
         .ensure_session(
             thread_id,
             known_native_session.as_deref(),
             &cwd,
             requested_permission_mode.as_deref(),
+            builtin_control.as_ref(),
         )
         .await;
     let session_id = match first_start {
@@ -1512,6 +1531,7 @@ async fn run_acp_turn_startup(
                     known_native_session.as_deref(),
                     &cwd,
                     requested_permission_mode.as_deref(),
+                    builtin_control.as_ref(),
                 )
                 .await
             {

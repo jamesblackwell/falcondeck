@@ -199,9 +199,8 @@ impl ProviderRuntime {
                                         // so the thread must not pin to the
                                         // native transport at all.
                                         let providers = runtime.runner_providers().await?;
-                                        let session_provider = runtime
-                                            .session_model_provider(&session_id)
-                                            .await?;
+                                        let session_provider =
+                                            runtime.session_model_provider(&session_id).await?;
                                         if let Some(reason) =
                                             crate::opencode::native_model_block_reason(
                                                 session_provider.as_deref(),
@@ -350,6 +349,16 @@ impl ProviderRuntime {
                     .parent()
                     .unwrap_or_else(|| Path::new("."))
                     .join("claude-hooks");
+                // The built-in FalconDeck connector is re-evaluated at each
+                // Claude turn spawn, so agent-control setting changes apply
+                // on the next turn.
+                let builtin_control = app
+                    .builtin_control_spec(
+                        &AgentProvider::CLAUDE,
+                        runtime.workspace_path(),
+                        Some(spec.thread_id),
+                    )
+                    .await;
                 let spawn = runtime
                     .spawn_turn(
                         spec.thread_id,
@@ -362,6 +371,7 @@ impl ProviderRuntime {
                         app.local_base_url().as_deref(),
                         &settings_dir,
                         spec.thread.working_directory(runtime.workspace_path()),
+                        builtin_control.as_ref(),
                     )
                     .await?;
                 app.with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {

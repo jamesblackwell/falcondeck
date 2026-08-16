@@ -1294,6 +1294,11 @@ impl ControlService {
         self.state.lock().await.store_revision
     }
 
+    /// Snapshot of the current agent-control settings.
+    pub async fn settings_snapshot(&self) -> AgentControlSettings {
+        self.state.lock().await.settings.clone()
+    }
+
     /// Persists a managed automation's native thread id. The definition
     /// revision increments because this is a durable change, but the store
     /// change is internal: it never rewrites the schedule.

@@ -217,6 +217,7 @@ impl ClaudeRuntime {
         daemon_base_url: Option<&str>,
         settings_dir: &Path,
         cwd: &str,
+        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
         // Serialize the whole remove-kill-spawn-insert sequence per thread so
         // concurrent spawns cannot run two CLI processes on one session.
@@ -296,7 +297,7 @@ impl ClaudeRuntime {
         {
             command.arg("--settings").arg(settings_path);
         }
-        if let Some(mcp_config_path) = self.write_mcp_config_file(settings_dir) {
+        if let Some(mcp_config_path) = self.write_mcp_config_file(settings_dir, builtin_control) {
             command.arg("--mcp-config").arg(mcp_config_path);
         }
 
@@ -654,8 +655,15 @@ impl ClaudeRuntime {
     /// Materialize a `--mcp-config` file from the merged connector config.
     /// Same private-dir/0600 handling as the hook settings file — connector
     /// env blocks routinely hold API keys.
-    fn write_mcp_config_file(&self, settings_dir: &Path) -> Option<PathBuf> {
-        let servers = crate::connectors::load_mcp_servers(&self.workspace_path, "claude");
+    fn write_mcp_config_file(
+        &self,
+        settings_dir: &Path,
+        builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+    ) -> Option<PathBuf> {
+        let servers = crate::connectors::with_builtin_control(
+            crate::connectors::load_mcp_servers(&self.workspace_path, "claude"),
+            builtin_control,
+        );
         let body = crate::connectors::claude_mcp_config_json(&servers)?;
         if let Err(error) = fs::create_dir_all(settings_dir) {
             tracing::warn!("failed to create claude mcp config dir: {error}");
