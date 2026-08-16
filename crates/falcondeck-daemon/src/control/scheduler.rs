@@ -386,8 +386,13 @@ async fn execute_run(app: &AppState, run_id: &str) {
                     UnifiedEvent::ThreadUpdated { thread } => {
                         // Codex normally supplies the richer TurnEnd event,
                         // but a runtime crash can only produce an Error
-                        // thread update. Settle that failure immediately.
-                        let terminal = (!expects_turn_end || thread.status == ThreadStatus::Error)
+                        // thread update. Settle that failure immediately. An
+                        // Idle thread is only trusted once the automation's
+                        // own turn has started: on a shared thread, a user
+                        // turn finishing first would otherwise settle the
+                        // run with the wrong outcome.
+                        let terminal = ((!expects_turn_end && dispatched_turn_id.is_some())
+                            || thread.status == ThreadStatus::Error)
                             .then(|| {
                                 (thread.updated_at >= dispatch_started_at)
                                     .then(|| terminal_state_from_summary(&thread))

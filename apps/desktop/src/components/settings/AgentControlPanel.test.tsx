@@ -118,7 +118,24 @@ describe("AgentControlPanel", () => {
     );
   });
 
-  it("sends provider overrides including existing entries", async () => {
+  it("pins the current state when creating a provider override", async () => {
+    const { calls } = stubControlFetch();
+    render(<AgentControlPanel baseUrl="http://daemon.test" onToast={onToast} />);
+    // claude has no stored override; Override must pin control ON, not flip it.
+    const claudeToggle = await screen.findByLabelText("Toggle agent control for claude");
+    fireEvent.click(claudeToggle);
+    await waitFor(() => {
+      const execute = calls.find((call) => call.url === "/api/control/execute");
+      expect(execute?.body).toMatchObject({
+        operation: "agent_control.settings.update",
+        arguments: {
+          providers: { claude: { enabled: true } },
+        },
+      });
+    });
+  });
+
+  it("flips existing provider overrides", async () => {
     const { calls } = stubControlFetch();
     render(<AgentControlPanel baseUrl="http://daemon.test" onToast={onToast} />);
     const codexToggle = await screen.findByLabelText("Toggle agent control for codex");

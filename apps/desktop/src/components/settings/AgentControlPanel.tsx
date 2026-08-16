@@ -185,7 +185,11 @@ export function AgentControlPanel({ baseUrl, onToast }: AgentControlPanelProps) 
                         void save(`provider-${provider}`, {
                           providers: {
                             ...settings.providers,
-                            [provider]: { enabled: !enabled },
+                            // Without a stored override, pin the effective
+                            // state instead of flipping it, so creating an
+                            // override never surprises the user by turning
+                            // control off.
+                            [provider]: { enabled: override ? !enabled : enabled },
                           },
                         })
                       }
