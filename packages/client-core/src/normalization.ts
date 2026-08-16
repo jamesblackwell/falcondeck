@@ -1,3 +1,4 @@
+import { normalizeControlStateChanged } from "./control";
 import type {
   AccountSummary,
   AgentCapabilitySummary,
@@ -1785,6 +1786,16 @@ export function normalizeEventEnvelope(
       event: {
         ...event,
         item: normalizeConversationItem(event.item),
+      },
+    });
+  }
+
+  if (event?.type === "control-state-changed") {
+    return markNormalized({
+      ...(envelope as EventEnvelope),
+      event: {
+        ...event,
+        change: normalizeControlStateChanged(event.change) ?? event.change,
       },
     });
   }

@@ -20,6 +20,7 @@ import {
 } from "@falcondeck/ui";
 import { CalendarClock, Pause, Play, Plus, Trash2, X } from "lucide-react";
 
+import { useControlStateEvents } from "../hooks/useControlStateEvents";
 import {
   ControlRequestError,
   executeControl,
@@ -237,11 +238,12 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
     void load();
   }, [load]);
 
-  // Conversational (MCP-originated) changes surface immediately.
-  useEffect(() => {
-    if (!onEventRefetch) return;
-    onEventRefetch();
-  }, [onEventRefetch]);
+  // Conversational (MCP-originated) changes surface immediately through the
+  // daemon's control-state events while this panel is open.
+  useControlStateEvents(baseUrl, () => {
+    void load();
+    onEventRefetch?.();
+  });
 
   const openHistory = useCallback(
     async (automation: Automation) => {

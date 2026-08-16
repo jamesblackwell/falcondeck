@@ -1309,7 +1309,11 @@ export type EventEnvelope = {
         view?: ExtensionView | null;
       }
     | { type: "conversation-item-added"; item: ConversationItem }
-    | { type: "conversation-item-updated"; item: ConversationItem };
+    | { type: "conversation-item-updated"; item: ConversationItem }
+    | {
+        type: "control-state-changed";
+        change: import("./control").ControlStateChanged;
+      };
 };
 
 export type RealtimeAudioChunk = {
