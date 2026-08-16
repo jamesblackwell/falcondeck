@@ -1,4 +1,5 @@
 export * from "./types";
+export * from "./control";
 export * from "./grouping";
 export * from "./activity";
 export * from "./conversation";

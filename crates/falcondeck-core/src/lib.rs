@@ -7,6 +7,8 @@
 
 /// Cryptography helpers for pairing, key exchange, and encrypted payloads.
 pub mod crypto;
+/// Shared wire types for the agent control interface.
+pub mod control;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -2304,6 +2306,18 @@ impl AgentProvider {
 // Deriving Default on the newtype would produce an empty string and silently
 // strip providers from persisted state where the field is absent; the
 // long-standing default is Codex.
+// Capability schemas describe the provider as an open string identifier,
+// exactly like the wire format.
+impl schemars::JsonSchema for AgentProvider {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AgentProvider".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        String::json_schema(generator)
+    }
+}
+
 impl Default for AgentProvider {
     fn default() -> Self {
         Self::CODEX
