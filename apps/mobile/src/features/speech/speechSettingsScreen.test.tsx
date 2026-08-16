@@ -8,7 +8,10 @@ import {
 } from '@/features/speech/speechSettings'
 import { useRelayStore } from '@/store/relay-store'
 
-import SpeechSettingsScreen from './speech'
+// Lives here rather than beside the route: every file under src/app is a
+// route to expo-router's require.context, so a test module there gets bundled
+// into the app and its vitest import crashes the dev client at startup.
+import SpeechSettingsScreen from '@/app/(app)/settings/speech'
 
 describe('SpeechSettingsScreen', () => {
   const originalCallRpc = useRelayStore.getState()._callRpc
