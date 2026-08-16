@@ -524,8 +524,10 @@ describe("submitTurn guards", () => {
     const harness = mountSessionActions();
     try {
       const submission = harness.getActions().submitTurn();
-      expect(useUIStore.getState().draft).toBe("Failed message");
-      expect(useUIStore.getState().attachments).toEqual([failedImage]);
+      // The composer empties on the tap, not on the daemon's reply: the
+      // transcript is already showing this message.
+      expect(useUIStore.getState().draft).toBe("");
+      expect(useUIStore.getState().attachments).toEqual([]);
 
       useUIStore.getState().setDraft("New draft");
       useUIStore.getState().setAttachments([newerImage]);
@@ -612,6 +614,47 @@ describe("submitTurn guards", () => {
         }),
         { requestIdPrefix: "mobile-turn" },
       );
+    } finally {
+      harness.unmount();
+    }
+  });
+
+  it("empties the composer on send and keeps a recovery copy until the turn is accepted", async () => {
+    useSessionStore.getState().applyDaemonEvent(
+      snapshotEvent(
+        snapshot({
+          workspaces: [workspace({ id: "w1", current_thread_id: "t1" })],
+          threads: [thread({ id: "t1", workspace_id: "w1" })],
+        }),
+      ),
+    );
+    useSessionStore.getState().selectThread("w1", "t1");
+    useUIStore.getState().setDraft("Ship it");
+
+    const pendingRpc = createDeferred<unknown>();
+    useRelayStore.setState({
+      _callRpc: vi
+        .fn()
+        .mockReturnValue(pendingRpc.promise) as RelayStoreState["_callRpc"],
+      _setError: vi.fn() as RelayStoreState["_setError"],
+    } as Partial<RelayStoreState>);
+
+    const harness = mountSessionActions();
+    try {
+      const submission = harness.getActions().submitTurn();
+
+      // Cleared for the reader, but not yet forgotten: a process death here
+      // has to give the message back on the next launch.
+      expect(useUIStore.getState().draft).toBe("");
+      expect(useUIStore.getState().inFlightSubmissions["w1:t1"]?.text).toBe(
+        "Ship it",
+      );
+
+      pendingRpc.resolve({ ok: true });
+      await act(async () => submission);
+
+      expect(useUIStore.getState().draft).toBe("");
+      expect(useUIStore.getState().inFlightSubmissions["w1:t1"]).toBeUndefined();
     } finally {
       harness.unmount();
     }

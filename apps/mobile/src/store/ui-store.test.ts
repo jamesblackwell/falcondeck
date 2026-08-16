@@ -20,6 +20,7 @@ describe('ui-store', () => {
       selectedEffort: 'medium',
       persistedComposerSelections: {},
       pendingSubmissions: {},
+      inFlightSubmissions: {},
       isSubmitting: false,
     })
   })
@@ -269,5 +270,47 @@ describe('ui-store', () => {
     expect(
       useUIStore.getState().persistedComposerSelections['/repo'].selections.codex?.effort,
     ).toBe('high')
+  })
+  it('empties a composer into the in-flight record and hands it back on failure', () => {
+    const key = draftKeyFor('w1', 't1')
+    const { beginSubmission, endSubmission, restoreFailedSubmission, setComposerForConversation } =
+      useUIStore.getState()
+
+    setComposerForConversation(key, 'Ship it', [])
+    useUIStore.setState({ conversationKey: key, draft: 'Ship it' })
+
+    beginSubmission(key, 'Ship it')
+    expect(useUIStore.getState().draft).toBe('')
+    expect(useUIStore.getState().drafts[key]).toBeUndefined()
+    expect(useUIStore.getState().inFlightSubmissions[key]?.text).toBe('Ship it')
+    // Persisted, so a process death mid-request still recovers the message.
+    expect(storage.getString('falcondeck.mobile.composer-in-flight.v1')).toContain('Ship it')
+
+    restoreFailedSubmission(key, 'Ship it', [])
+    endSubmission(key)
+    expect(useUIStore.getState().draft).toBe('Ship it')
+    expect(useUIStore.getState().inFlightSubmissions[key]).toBeUndefined()
+  })
+
+  it('follows a send onto the thread the daemon created for it', () => {
+    const newKey = draftKeyFor('w1', null)
+    const threadKey = draftKeyFor('w1', 't-new')
+    const { beginSubmission, moveSubmission } = useUIStore.getState()
+
+    beginSubmission(newKey, 'Start this in a new thread')
+    moveSubmission(newKey, threadKey)
+
+    expect(useUIStore.getState().inFlightSubmissions[newKey]).toBeUndefined()
+    expect(useUIStore.getState().inFlightSubmissions[threadKey]?.text).toBe(
+      'Start this in a new thread',
+    )
+  })
+
+  it('tolerates in-flight write failures', () => {
+    vi.spyOn(storage, 'set').mockImplementation(() => {
+      throw new Error('disk full')
+    })
+    useUIStore.getState().beginSubmission(draftKeyFor('w1', 't1'), 'Ship it')
+    expect(useUIStore.getState().inFlightSubmissions[draftKeyFor('w1', 't1')]?.text).toBe('Ship it')
   })
 })

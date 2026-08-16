@@ -23,12 +23,25 @@ import { storage } from '@/storage/mmkv';
 // input keyed per conversation, picker choices remembered per workspace.
 const DRAFTS_STORAGE_KEY = 'falcondeck.mobile.composer-drafts.v1';
 const COMPOSER_STATE_STORAGE_KEY = 'falcondeck.mobile.composer-selections.v1';
+// Text of sends that have left the composer but whose turn has not settled.
+// The composer is emptied the instant the user hits send — the transcript
+// already shows the message, so holding the text there reads as a duplicate —
+// and this is what stands in for it if the process dies mid-request.
+const IN_FLIGHT_STORAGE_KEY = 'falcondeck.mobile.composer-in-flight.v1';
 
 function writeStoredDrafts(drafts: ComposerDrafts) {
   try {
     storage.set(DRAFTS_STORAGE_KEY, JSON.stringify(drafts));
   } catch {
     // Ignore storage failures and keep the in-memory drafts authoritative.
+  }
+}
+
+function writeStoredInFlight(inFlight: ComposerDrafts) {
+  try {
+    storage.set(IN_FLIGHT_STORAGE_KEY, JSON.stringify(inFlight))
+  } catch {
+    // Ignore storage failures and keep the in-memory record authoritative.
   }
 }
 
@@ -66,6 +79,8 @@ interface UIState {
   persistedComposerSelections: PersistedComposerState;
   /** In-flight sends keyed by their owning conversation. */
   pendingSubmissions: Record<string, true>;
+  /** Text of each in-flight send, held until its turn is accepted or fails. */
+  inFlightSubmissions: ComposerDrafts;
   /** First user message while a new thread is still being created. */
   pendingNewThreadItem: {
     conversationKey: string;
@@ -102,6 +117,12 @@ interface UIActions {
     patch: Partial<PersistedComposerSelection>,
   ) => void;
   rememberWorkspaceProvider: (workspacePath: string, provider: AgentProvider) => void;
+  /** Empties the composer into the in-flight record as a send starts. */
+  beginSubmission: (conversationKey: string, submittedDraft: string) => void;
+  /** Follows a send onto the thread the daemon just created for it. */
+  moveSubmission: (fromConversationKey: string, toConversationKey: string) => void;
+  /** Drops the in-flight copy once its turn is accepted, queued, or restored. */
+  endSubmission: (conversationKey: string) => void;
   setIsSubmitting: (submitting: boolean, conversationKey?: string) => void;
   setPendingNewThreadItem: (pending: UIState['pendingNewThreadItem']) => void;
   clearPendingNewThreadItem: (itemId: string) => void;
@@ -111,7 +132,23 @@ interface UIActions {
 
 type UIStore = UIState & UIActions;
 
-const initialDrafts = parseComposerDrafts(storage.getString(DRAFTS_STORAGE_KEY) ?? null);
+// Anything still recorded as in flight belongs to a send this process never
+// saw settle — iOS killed the app mid-request — so it goes back to the
+// composer it was taken from before anything reads the drafts.
+const storedInFlight = parseComposerDrafts(storage.getString(IN_FLIGHT_STORAGE_KEY) ?? null);
+const initialDrafts = Object.entries(storedInFlight).reduce(
+  (drafts, [conversationKey, { text }]) =>
+    upsertComposerDraft(
+      drafts,
+      conversationKey,
+      mergeFailedComposerDraft(text, drafts[conversationKey]?.text ?? ''),
+    ),
+  parseComposerDrafts(storage.getString(DRAFTS_STORAGE_KEY) ?? null),
+);
+if (Object.keys(storedInFlight).length > 0) {
+  writeStoredDrafts(initialDrafts);
+  writeStoredInFlight({});
+}
 const initialConversationKey = draftKeyFor(null, null);
 
 export const useUIStore = create<UIStore>((set, get) => ({
@@ -130,6 +167,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
     storage.getString(COMPOSER_STATE_STORAGE_KEY) ?? null,
   ),
   pendingSubmissions: {},
+  inFlightSubmissions: {},
   pendingNewThreadItem: null,
   isSubmitting: false,
 
@@ -228,6 +266,43 @@ export const useUIStore = create<UIStore>((set, get) => ({
       if (persistedComposerSelections === state.persistedComposerSelections) return state;
       writePersistedComposerState(persistedComposerSelections);
       return { persistedComposerSelections };
+    }),
+  beginSubmission: (conversationKey, submittedDraft) => {
+    set((state) => {
+      const inFlightSubmissions = upsertComposerDraft(
+        state.inFlightSubmissions,
+        conversationKey,
+        submittedDraft,
+      );
+      if (inFlightSubmissions !== state.inFlightSubmissions) {
+        writeStoredInFlight(inFlightSubmissions);
+      }
+      return { inFlightSubmissions };
+    });
+    get().setComposerForConversation(conversationKey, '', []);
+  },
+  moveSubmission: (fromConversationKey, toConversationKey) =>
+    set((state) => {
+      const moved = state.inFlightSubmissions[fromConversationKey];
+      if (!moved) return state;
+      const inFlightSubmissions = upsertComposerDraft(
+        upsertComposerDraft(state.inFlightSubmissions, fromConversationKey, ''),
+        toConversationKey,
+        moved.text,
+      );
+      writeStoredInFlight(inFlightSubmissions);
+      return { inFlightSubmissions };
+    }),
+  endSubmission: (conversationKey) =>
+    set((state) => {
+      const inFlightSubmissions = upsertComposerDraft(
+        state.inFlightSubmissions,
+        conversationKey,
+        '',
+      );
+      if (inFlightSubmissions === state.inFlightSubmissions) return state;
+      writeStoredInFlight(inFlightSubmissions);
+      return { inFlightSubmissions };
     }),
   setIsSubmitting: (submitting, requestedConversationKey) =>
     set((state) => {

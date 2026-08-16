@@ -105,6 +105,12 @@ export function useSessionActions() {
     );
 
     ui.setIsSubmitting(true, submittedKey);
+    // Empty the composer in the same tick as the tap. The optimistic copy goes
+    // into the transcript below, so text left in the input for the length of a
+    // relay round trip reads as the message having been typed twice. The
+    // submitted text lives in the in-flight record until the turn settles, so a
+    // failure — or a process death mid-request — still gives it back.
+    ui.beginSubmission(submittedKey, submittedDraft);
 
     // Fresh per attempt: a retried send must not reuse an id the daemon may
     // already have committed a user item under.
@@ -133,15 +139,10 @@ export function useSessionActions() {
         const handle = await startThread();
         activeThreadId = handle.thread.id;
         const branchKey = draftKeyFor(handle.workspace.id, handle.thread.id);
-        // Copy before deleting the temporary new-thread composer. A process
-        // death between MMKV writes can duplicate the recoverable draft, but
-        // cannot erase it from both keys.
-        ui.setComposerForConversation(
-          branchKey,
-          submittedDraft,
-          submittedAttachments,
-        );
-        ui.setComposerForConversation(submittedKey, "", []);
+        // The send now belongs to the thread the daemon created, so recovery
+        // has to hand it back there rather than to the workspace's new-thread
+        // composer, which the user may already be typing in again.
+        ui.moveSubmission(submittedKey, branchKey);
         ui.setIsSubmitting(true, branchKey);
         ui.setIsSubmitting(false, pendingConversationKey);
         pendingConversationKey = branchKey;
@@ -198,10 +199,9 @@ export function useSessionActions() {
           .getState()
           .removeLocalThreadItem(activeThreadId, userItemId);
       }
-      // MMKV keeps the original composer until the relay/daemon has accepted
-      // the turn. If iOS kills the app mid-request, the draft is still there
-      // on the next launch instead of depending on this function's catch path.
-      ui.setComposerForConversation(pendingConversationKey, "", []);
+      // Accepted (or queued): the composer is already empty, and the recovery
+      // copy is no longer needed.
+      ui.endSubmission(pendingConversationKey);
       relay._setError(null);
     } catch (e) {
       const restoreKey = activeThreadId
@@ -215,9 +215,6 @@ export function useSessionActions() {
           .removeLocalThreadItem(activeThreadId, userItemId);
       }
       ui.clearPendingNewThreadItem(userItemId);
-      if (restoreKey !== submittedKey) {
-        ui.setComposerForConversation(submittedKey, "", []);
-      }
       ui.restoreFailedSubmission(
         restoreKey,
         submittedDraft,
@@ -228,6 +225,8 @@ export function useSessionActions() {
       );
     } finally {
       ui.clearPendingNewThreadItem(userItemId);
+      ui.endSubmission(submittedKey);
+      ui.endSubmission(pendingConversationKey);
       ui.setIsSubmitting(false, pendingConversationKey);
     }
   }, [startThread]);
