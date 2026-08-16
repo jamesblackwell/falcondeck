@@ -127,6 +127,9 @@ pub fn router(state: AppState) -> Router {
             "/api/scheduled-tasks/{task_id}/runs",
             get(scheduled_task_runs),
         )
+        .route("/api/control/search", post(control_search))
+        .route("/api/control/get", post(control_get))
+        .route("/api/control/execute", post(control_execute))
         .route("/api/workspaces/connect", post(connect_workspace))
         .route("/api/workspaces/{workspace_id}", delete(remove_workspace))
         .route(
@@ -871,10 +874,7 @@ async fn refresh_harnesses(
 async fn upgrade_harness(
     State(state): State<AppState>,
     Json(request): Json<falcondeck_core::HarnessUpgradeRequest>,
-) -> Result<
-    Json<crate::app::harness_manager::StartHarnessUpgradeResponse>,
-    DaemonError,
-> {
+) -> Result<Json<crate::app::harness_manager::StartHarnessUpgradeResponse>, DaemonError> {
     Ok(Json(state.start_harness_upgrade(request).await?))
 }
 
@@ -1064,6 +1064,116 @@ async fn event_socket(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+}
+
+/// Builds the control request context from internal headers. Local callers
+/// default to the desktop UI origin; the MCP subprocess adds origin,
+/// provider, workspace and thread headers. The model never supplies this
+/// context inside tool arguments.
+fn control_context_from_headers(
+    headers: &axum::http::HeaderMap,
+    default_origin: falcondeck_core::control::ControlOrigin,
+) -> Result<falcondeck_core::control::ControlRequestContext, DaemonError> {
+    use falcondeck_core::control::{ControlOrigin, ControlRequestContext};
+
+    let origin = match headers
+        .get("X-FalconDeck-Control-Origin")
+        .and_then(|value| value.to_str().ok())
+    {
+        None => default_origin,
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "desktop_ui" => ControlOrigin::DesktopUi,
+            "mcp" => ControlOrigin::Mcp,
+            "remote_rpc" => ControlOrigin::RemoteRpc,
+            "scheduler" => ControlOrigin::Scheduler,
+            "system" => ControlOrigin::System,
+            other => {
+                return Err(DaemonError::BadRequest(format!(
+                    "unknown X-FalconDeck-Control-Origin {other:?}"
+                )));
+            }
+        },
+    };
+    let header_value = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    Ok(ControlRequestContext {
+        origin,
+        provider: header_value("X-FalconDeck-Control-Provider")
+            .map(falcondeck_core::AgentProvider::new),
+        workspace_path: header_value("X-FalconDeck-Control-Workspace"),
+        thread_id: header_value("X-FalconDeck-Control-Thread"),
+        device_id: header_value("X-FalconDeck-Control-Device"),
+    })
+}
+
+/// Maps a control error onto an HTTP status for read endpoints. Mutations
+/// report control failures through the 200 response envelope instead.
+fn control_error_status(code: &str) -> StatusCode {
+    match code {
+        "interface_disabled" | "provider_disabled" => StatusCode::FORBIDDEN,
+        "unknown_operation"
+        | "unknown_resource"
+        | "invalid_arguments"
+        | "invalid_schedule"
+        | "invalid_timezone"
+        | "revision_required"
+        | "idempotency_conflict" => StatusCode::BAD_REQUEST,
+        "revision_conflict" => StatusCode::CONFLICT,
+        "resource_not_found" => StatusCode::NOT_FOUND,
+        "storage_unavailable" => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+fn control_error_response(error: crate::control::ControlError) -> Response {
+    let status = control_error_status(&error.0.code);
+    let body = serde_json::json!({ "error": error.0 });
+    (status, Json(body)).into_response()
+}
+
+async fn control_search(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<falcondeck_core::control::ControlSearchRequest>,
+) -> Result<Json<falcondeck_core::control::ControlSearchResponse>, Response> {
+    let context =
+        control_context_from_headers(&headers, falcondeck_core::control::ControlOrigin::DesktopUi)
+            .map_err(|error| error.into_response())?;
+    state
+        .control_search(request, &context)
+        .await
+        .map(Json)
+        .map_err(control_error_response)
+}
+
+async fn control_get(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<falcondeck_core::control::ControlGetRequest>,
+) -> Result<Json<falcondeck_core::control::ControlGetResponse>, Response> {
+    let context =
+        control_context_from_headers(&headers, falcondeck_core::control::ControlOrigin::DesktopUi)
+            .map_err(|error| error.into_response())?;
+    state
+        .control_get(request, &context)
+        .await
+        .map(Json)
+        .map_err(control_error_response)
+}
+
+async fn control_execute(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<falcondeck_core::control::ControlExecuteRequest>,
+) -> Result<Json<falcondeck_core::control::ControlExecuteResponse>, Response> {
+    let context =
+        control_context_from_headers(&headers, falcondeck_core::control::ControlOrigin::DesktopUi)
+            .map_err(|error| error.into_response())?;
+    Ok(Json(state.control_execute(request, &context).await))
 }
 
 #[cfg(test)]

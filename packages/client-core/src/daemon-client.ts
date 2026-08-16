@@ -41,6 +41,14 @@ import type {
   WorkspaceSummary,
 } from "./types";
 import {
+  ControlExecuteRequest,
+  ControlExecuteResponse,
+  ControlGetRequest,
+  ControlGetResponse,
+  ControlSearchRequest,
+  ControlSearchResponse,
+} from "./control";
+import {
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
   normalizePreferences,
@@ -317,6 +325,39 @@ export function createDaemonApiClient(baseUrl: string) {
           `${baseUrl}/api/scheduled-tasks/${encodeURIComponent(taskId)}/runs`,
         ),
       );
+    },
+    /**
+     * Agent control: capability discovery, reads and mutations. The daemon
+     * owns the behaviour; these mirror the three generic control routes the
+     * MCP server also calls.
+     */
+    async controlSearch(request: ControlSearchRequest = {}) {
+      return parseJson<ControlSearchResponse>(
+        await fetch(`${baseUrl}/api/control/search`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        }),
+      );
+    },
+    async controlGet(request: ControlGetRequest) {
+      return parseJson<ControlGetResponse>(
+        await fetch(`${baseUrl}/api/control/get`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        }),
+      );
+    },
+    async controlExecute(request: ControlExecuteRequest) {
+      const response = parseJson<ControlExecuteResponse>(
+        await fetch(`${baseUrl}/api/control/execute`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(request),
+        }),
+      );
+      return response;
     },
     async connectWorkspace(path: string) {
       return parseJson<WorkspaceSummary>(

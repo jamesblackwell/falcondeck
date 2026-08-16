@@ -3761,6 +3761,13 @@ pub enum UnifiedEvent {
         /// Updated conversation item.
         item: ConversationItem,
     },
+    /// Agent control state (settings, automations, runs or audit) changed.
+    /// Clients refetch the affected resources; the store itself is never
+    /// broadcast.
+    ControlStateChanged {
+        /// Which store revision and domains changed.
+        change: control::ControlStateChanged,
+    },
 }
 
 /// Severity level for service messages.

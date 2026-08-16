@@ -20,7 +20,9 @@ use falcondeck_core::{
     ThreadAttention, ThreadDetail, ThreadDetailRequest, ThreadHandle, ThreadPlan, ThreadStatus,
     ThreadSummary, ThreadTokenUsage, UnifiedEvent, UpdatePreferencesRequest,
     UpdateScheduledTaskRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
-    WorkspaceSummary, crypto::LocalBoxKeyPair,
+    WorkspaceSummary,
+    control::{ControlGetRequest, ControlSearchRequest, ControlStateChanged},
+    crypto::LocalBoxKeyPair,
 };
 use serde_json::{Value, json};
 use tokio::{
@@ -598,6 +600,68 @@ impl AppState {
     /// The daemon-owned agent control service.
     pub fn control(&self) -> &crate::control::ControlService {
         &self.inner.control
+    }
+
+    /// Loads the agent control store. A degraded store (malformed or
+    /// unsupported) surfaces as an operational condition instead of failing
+    /// daemon startup; scheduling stays off until the file is repaired.
+    pub async fn restore_control_state(&self) -> Result<(), DaemonError> {
+        match self.inner.control.restore().await {
+            Ok(None) => {
+                self.clear_operational_condition("", "agent-control-store");
+                Ok(())
+            }
+            Ok(Some(warning)) => {
+                tracing::warn!(%warning, "agent control store degraded");
+                self.upsert_operational_condition(
+                    "".to_string(),
+                    "agent-control-store",
+                    ServiceLevel::Warning,
+                    warning,
+                    Some("agent-control".to_string()),
+                )?;
+                Ok(())
+            }
+            Err(error) => Err(DaemonError::BadRequest(error)),
+        }
+    }
+
+    /// Emits the lightweight control state-change event after a mutation.
+    pub fn emit_control_state_change(&self, change: ControlStateChanged) {
+        self.emit(None, None, UnifiedEvent::ControlStateChanged { change });
+    }
+
+    /// Capability discovery through the control service.
+    pub async fn control_search(
+        &self,
+        request: ControlSearchRequest,
+        context: &falcondeck_core::control::ControlRequestContext,
+    ) -> Result<falcondeck_core::control::ControlSearchResponse, crate::control::ControlError> {
+        self.inner.control.search(request, context).await
+    }
+
+    /// Control reads through the control service.
+    pub async fn control_get(
+        &self,
+        request: ControlGetRequest,
+        context: &falcondeck_core::control::ControlRequestContext,
+    ) -> Result<falcondeck_core::control::ControlGetResponse, crate::control::ControlError> {
+        self.inner.control.get(request, context).await
+    }
+
+    /// Executes one control operation and broadcasts the resulting
+    /// state-change event.
+    pub async fn control_execute(
+        &self,
+        request: falcondeck_core::control::ControlExecuteRequest,
+        context: &falcondeck_core::control::ControlRequestContext,
+    ) -> falcondeck_core::control::ControlExecuteResponse {
+        let deps = crate::control::ControlDeps { app: Some(self) };
+        let (response, event) = self.inner.control.execute(request, context, &deps).await;
+        if let Some(change) = event {
+            self.emit_control_state_change(change);
+        }
+        response
     }
 
     /// Whether a provider id can run on this daemon: a configured binary or

@@ -165,6 +165,12 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // can observe an empty registry and the background restore can overwrite
     // a newly-created task.
     state.restore_scheduled_tasks().await?;
+    // Control state is small and must be loaded before the listener
+    // advertises readiness: a degraded store disables scheduling and is
+    // surfaced as an operational condition rather than a startup failure.
+    if let Err(error) = state.restore_control_state().await {
+        tracing::warn!("failed to restore agent control state: {error}");
+    }
     let listener = TcpListener::bind(config.bind_addr).await?;
     let local_addr = listener.local_addr()?;
     // The Claude PreToolUse hook posts back to this URL; record the actual
