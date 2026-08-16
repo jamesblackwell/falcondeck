@@ -238,13 +238,23 @@ An OpenCode entry can declare a transport:
 
 `auto` tries the native server for each new thread and falls back to ACP if
 startup, session creation, or the read/permission/question compatibility probe
-fails. The probe also runs one disposable invalid-model prompt: reaching a
-durable runner failure proves that prompt admission actually starts execution
-without spending provider tokens. This catches OpenCode builds that return a
-successful v2 admission and `session.next.prompted` event but never enter the
-agent loop. `native` requires both the schema and execution probes to succeed;
-`acp` always uses the generic adapter. A thread is pinned to the transport that
-created it: FalconDeck never
+fails — or if the thread's model cannot execute natively. OpenCode 1.18's v2
+runner resolves models only against its own provider registry
+(`GET /api/provider`), which is a strict subset of the configured providers:
+API-key providers (deepinfra, openrouter, OpenCode Zen) appear there, while
+OAuth and coding-plan credentials (`zai-coding-plan`, ChatGPT, the Gemini
+plugin) are v1-only. A model from an unlisted provider is admitted by
+`/api/session/{id}/prompt` and then dies in `SessionRunnerModel.resolve` with
+no session event and no assistant record — only a server log line — so
+FalconDeck checks the session's effective model provider against the registry
+before pinning a thread to the native transport, and again before every native
+prompt admission (the model can change mid-thread). The registry loads
+asynchronously for roughly a second after server startup and reads as empty
+until then, so an empty answer is retried before it is believed. A session
+without an explicit model always passes the gate: the v2 runner resolves its
+default inside its own registry. `native` surfaces the gate's reason as the
+thread-creation error instead of falling back; `acp` always uses the generic
+adapter. A thread is pinned to the transport that created it: FalconDeck never
 switches an active turn, and never blindly resends an input after an ambiguous
 native admission.
 
@@ -279,12 +289,16 @@ the implemented active-session endpoint and the admitted message's terminal
 state. The native compatibility probe includes that endpoint, so `auto` falls
 back to ACP before admitting a turn when an OpenCode release lacks it. Native
 prompt admission explicitly sets `resume: true`; without it, OpenCode only
-admits the input. Some 1.18 builds still project `session.next.prompted` without
-waking the agent loop even with `resume: true`, which is why schema validation
-alone is insufficient and the execution probe is required. The probe also
+admits the input. Prompt message ids are globally unique across OpenCode's
+durable store — reusing one returns a `ConflictError` even in a different
+session — which the daemon's per-turn UUIDs already satisfy. The probe also
 validates the endpoints and prompt request fields against the server's own
 `/doc` OpenAPI document, so a build that rejects any part of the native request
 shape falls back to ACP before a thread is pinned to the native transport.
+A turn that reaches the runner with a model the registry cannot resolve is the
+one failure mode neither check can catch after admission; the provider-registry
+gate above exists to make that state unreachable, and the turn error still
+carries the server's own logged cause if it ever occurs.
 
 Two further 1.18 quirks are handled: message pagination continues with
 `cursor.next` toward older items (`cursor.previous` points toward newer items

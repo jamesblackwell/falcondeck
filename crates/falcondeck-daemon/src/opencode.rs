@@ -38,6 +38,13 @@ const MAX_RETAINED_SERVER_ERRORS: usize = 16;
 const ACTIVITY_STALL: Duration = Duration::from_secs(120);
 const LISTENING_PREFIX: &str = "opencode server listening on http://127.0.0.1:";
 const MAX_MESSAGE_PAGE_SIZE: usize = 200;
+/// The v2 provider registry loads asynchronously after the server reports its
+/// port: `/api/provider` returns an empty list for roughly the first second
+/// even when providers are connected. Retried long enough to outlast a slow
+/// registry load without stalling thread creation when the list is genuinely
+/// empty.
+const RUNNER_PROVIDERS_ATTEMPTS: u32 = 10;
+const RUNNER_PROVIDERS_RETRY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -126,6 +133,12 @@ pub struct OpenCodeRuntime {
     /// a control-flow decision, so a change to OpenCode's log format costs a
     /// diagnostic detail rather than correctness.
     server_errors: Mutex<Vec<String>>,
+    /// Settled `/api/provider` result. The v2 runner resolves models only
+    /// against this registry — a strict subset of `/config/providers`, since
+    /// OAuth and coding-plan credentials are v1-only in OpenCode 1.18 — so the
+    /// answer gates which models may run natively. Cached because the registry
+    /// only changes with a credential change, which restarts this runtime.
+    runner_providers: Mutex<Option<Vec<String>>>,
 }
 
 impl OpenCodeRuntime {
@@ -202,6 +215,7 @@ impl OpenCodeRuntime {
                 })?,
             child: Mutex::new(child),
             server_errors: Mutex::new(Vec::new()),
+            runner_providers: Mutex::new(None),
         });
         // Keep draining stderr so a noisy server cannot block.  Diagnostics
         // remain in the daemon log rather than being silently discarded, and
@@ -279,6 +293,57 @@ impl OpenCodeRuntime {
     pub async fn provider_catalog(&self) -> Result<Value, DaemonError> {
         self.request(reqwest::Method::GET, "/config/providers", None)
             .await
+    }
+
+    /// Provider ids the v2 runner can actually execute.
+    ///
+    /// `/config/providers` answers "which providers is this user connected
+    /// to", but the v2 runner resolves models against its own registry, which
+    /// omits OAuth and coding-plan credentials entirely: a model from an
+    /// unlisted provider is admitted, then dies in `SessionRunnerModel.resolve`
+    /// with no session event and no assistant record. An empty registry read
+    /// is retried because the registry loads asynchronously for roughly a
+    /// second after startup; the settled answer is cached for the runtime's
+    /// life since credential changes restart the runtime.
+    pub async fn runner_providers(&self) -> Result<Vec<String>, DaemonError> {
+        if let Some(cached) = self.runner_providers.lock().await.clone() {
+            return Ok(cached);
+        }
+        let mut providers = Vec::new();
+        for attempt in 0..RUNNER_PROVIDERS_ATTEMPTS {
+            if attempt > 0 {
+                tokio::time::sleep(RUNNER_PROVIDERS_RETRY).await;
+            }
+            let value = self
+                .request(reqwest::Method::GET, "/api/provider", None)
+                .await?;
+            providers = runner_provider_ids(&value)?;
+            if !providers.is_empty() {
+                break;
+            }
+        }
+        *self.runner_providers.lock().await = Some(providers.clone());
+        Ok(providers)
+    }
+
+    /// The session's effective model provider, or `None` when the session
+    /// defers to OpenCode's own default — which the v2 runner resolves inside
+    /// its own registry, so an absent model never needs gating.
+    pub async fn session_model_provider(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, DaemonError> {
+        let session = self
+            .request(
+                reqwest::Method::GET,
+                &format!("/api/session/{session_id}"),
+                None,
+            )
+            .await?;
+        Ok(session
+            .pointer("/data/model/providerID")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
     }
 
     pub async fn agents(&self) -> Result<Vec<Value>, DaemonError> {
@@ -978,9 +1043,48 @@ fn model_ref(model: &str) -> Option<Value> {
         .then(|| json!({ "providerID": provider_id, "id": id }))
 }
 
+fn runner_provider_ids(value: &Value) -> Result<Vec<String>, DaemonError> {
+    let providers = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+        DaemonError::Rpc(
+            "OpenCode native provider registry response did not contain a data array".to_string(),
+        )
+    })?;
+    Ok(providers
+        .iter()
+        .filter_map(|provider| provider.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Why the v2 runner cannot execute the session's model, or `None` when it
+/// can. A session without an explicit model passes: the runner resolves its
+/// default from its own registry.
+pub fn native_model_block_reason(
+    session_provider: Option<&str>,
+    runner_providers: &[String],
+) -> Option<String> {
+    if runner_providers.is_empty() {
+        return Some(
+            "OpenCode's native runner has no connected providers, so no model can execute \
+             natively"
+                .to_string(),
+        );
+    }
+    let provider = session_provider?;
+    if runner_providers.iter().any(|id| id == provider) {
+        return None;
+    }
+    Some(format!(
+        "OpenCode's native runner cannot execute models from the '{provider}' provider \
+         (natively available: {}); OAuth and coding-plan providers only run over ACP",
+        runner_providers.join(", ")
+    ))
+}
+
 /// Paths the native transport calls. `DELETE /session/{sessionID}` is the v1
 /// route: the v2 API has no session delete.
 const CONTRACT_PATHS: &[&str] = &[
+    "/api/provider",
     "/api/session",
     "/api/session/active",
     "/api/session/{sessionID}",
@@ -1700,6 +1804,45 @@ mod tests {
             summarize_server_error("level=ERROR boom"),
             "level=ERROR boom"
         );
+    }
+
+    #[test]
+    fn runner_registry_parses_provider_ids_and_rejects_changed_shapes() {
+        // Shape observed live on OpenCode 1.18.18: only API-key providers
+        // appear; OAuth and coding-plan providers are absent even when
+        // `/config/providers` lists them as connected.
+        let ids = runner_provider_ids(&json!({
+            "location": { "directory": "/work" },
+            "data": [
+                { "id": "deepinfra", "name": "Deep Infra" },
+                { "id": "openrouter", "name": "OpenRouter" },
+                { "id": "opencode", "name": "OpenCode Zen" }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(ids, vec!["deepinfra", "openrouter", "opencode"]);
+        assert_eq!(runner_provider_ids(&json!({ "data": [] })).unwrap(), Vec::<String>::new());
+        assert!(runner_provider_ids(&json!({ "providers": [] })).is_err());
+    }
+
+    #[test]
+    fn native_gate_blocks_only_models_the_runner_cannot_resolve() {
+        let runner = vec!["openrouter".to_string(), "opencode".to_string()];
+        // Runner-registry providers execute natively.
+        assert_eq!(native_model_block_reason(Some("openrouter"), &runner), None);
+        // No explicit model: the runner resolves its default from its own
+        // registry, so there is nothing to gate.
+        assert_eq!(native_model_block_reason(None, &runner), None);
+        // A provider connected only over v1 (OAuth or a coding plan) would be
+        // admitted and then die in SessionRunnerModel.resolve; it must be
+        // blocked before admission with a reason that names both sides.
+        let reason = native_model_block_reason(Some("zai-coding-plan"), &runner)
+            .expect("v1-only provider must be blocked");
+        assert!(reason.contains("zai-coding-plan"), "{reason}");
+        assert!(reason.contains("openrouter, opencode"), "{reason}");
+        // An empty registry means nothing can resolve, explicit model or not.
+        assert!(native_model_block_reason(None, &[]).is_some());
+        assert!(native_model_block_reason(Some("openrouter"), &[]).is_some());
     }
 
     #[test]

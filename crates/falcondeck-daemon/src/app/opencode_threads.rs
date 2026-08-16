@@ -286,6 +286,22 @@ pub(super) async fn start_opencode_turn(
         // last so changing Build/Plan does not silently replace that choice.
         runtime.set_model(&session_id, model_id).await?;
     }
+    // A thread stays pinned to the native transport, but its model can change
+    // mid-thread to one the v2 runner cannot resolve (the picker lists every
+    // configured provider; the runner executes only its own registry). Such a
+    // turn would be admitted and then die with no session event and no
+    // assistant record, so refuse it before admission with the actual reason.
+    let runner_providers = runtime.runner_providers().await?;
+    let session_provider = runtime.session_model_provider(&session_id).await?;
+    if let Some(reason) = crate::opencode::native_model_block_reason(
+        session_provider.as_deref(),
+        &runner_providers,
+    ) {
+        return Err(DaemonError::BadRequest(format!(
+            "{reason}; switch this thread to a natively available model, or start a new \
+             thread to use this model over ACP"
+        )));
+    }
     let message_id = format!("msg_{}", Uuid::new_v4().simple());
     // A successful response is durable admission. No ACP retry is permitted
     // beyond this point because that could execute the same request twice.

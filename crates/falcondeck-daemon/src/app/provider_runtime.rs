@@ -188,12 +188,28 @@ impl ProviderRuntime {
                                         // without `resume`) before a thread
                                         // is pinned to this transport.
                                         runtime.validate_contract().await?;
-                                        // Execution itself is deliberately not
-                                        // probed here. A turn only fails this
-                                        // way when its *model* cannot resolve,
-                                        // which no build-level probe can
-                                        // predict; the waiter reports that
-                                        // case with the server's own cause.
+                                        // The v2 runner resolves models only
+                                        // against its own provider registry, a
+                                        // strict subset of the configured
+                                        // providers (OAuth and coding-plan
+                                        // credentials are v1-only). A model
+                                        // from an unlisted provider would be
+                                        // admitted and then die without a
+                                        // session event or assistant record,
+                                        // so the thread must not pin to the
+                                        // native transport at all.
+                                        let providers = runtime.runner_providers().await?;
+                                        let session_provider = runtime
+                                            .session_model_provider(&session_id)
+                                            .await?;
+                                        if let Some(reason) =
+                                            crate::opencode::native_model_block_reason(
+                                                session_provider.as_deref(),
+                                                &providers,
+                                            )
+                                        {
+                                            return Err(DaemonError::BadRequest(reason));
+                                        }
                                         runtime.session_is_active(&session_id).await?;
                                         runtime.messages(&session_id).await?;
                                         runtime.pending_permissions(&session_id).await?;
