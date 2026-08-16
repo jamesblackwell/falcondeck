@@ -152,19 +152,22 @@ function draftFromAutomation(automation: Automation): AutomationDraft {
   };
 }
 
+function draftTrigger(draft: AutomationDraft): Record<string, unknown> {
+  return draft.scheduleKind === "cron"
+    ? { kind: "cron", expression: draft.expression.trim(), timezone: draft.timezone.trim() }
+    : draft.scheduleKind === "interval"
+      ? {
+          kind: "interval",
+          every_seconds: Number(draft.everySeconds) || 0,
+          // Editing must never shift the schedule grid: keep the stored
+          // anchor and only fall back to now for brand-new automations.
+          anchor_at: draft.anchorAt.trim() || new Date().toISOString(),
+        }
+      : { kind: "once", run_at: draft.runAt.trim() };
+}
+
 function draftArguments(draft: AutomationDraft): Record<string, unknown> {
-  const trigger =
-    draft.scheduleKind === "cron"
-      ? { kind: "cron", expression: draft.expression.trim(), timezone: draft.timezone.trim() }
-      : draft.scheduleKind === "interval"
-        ? {
-            kind: "interval",
-            every_seconds: Number(draft.everySeconds) || 0,
-            // Editing must never shift the schedule grid: keep the stored
-            // anchor and only fall back to now for brand-new automations.
-            anchor_at: draft.anchorAt.trim() || new Date().toISOString(),
-          }
-        : { kind: "once", run_at: draft.runAt.trim() };
+  const trigger = draftTrigger(draft);
   const task = draft.conditional
     ? {
         kind: "conditional_prompt",
@@ -571,15 +574,19 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
           state={editor}
           allowElevated={settings?.allow_elevated_automations ?? false}
           onCancel={() => setEditor({ kind: "closed" })}
-          onSubmit={async (draft) => {
+          onSubmit={async (draft, includeTrigger) => {
+            const payload = draftArguments(draft);
+            if (!includeTrigger) {
+              delete payload.trigger;
+            }
             const ok =
               editor.kind === "create"
-                ? await runOperation("automation.create", draftArguments(draft))
+                ? await runOperation("automation.create", payload)
                 : await runOperation(
                     "automation.update",
                     {
                       automation_id: editor.id,
-                      ...draftArguments(draft),
+                      ...payload,
                     },
                     { expectedRevision: editor.revision },
                   );
@@ -604,7 +611,7 @@ function AutomationEditor({
   state: Extract<EditorState, { kind: "create" | "edit" }>;
   allowElevated: boolean;
   onCancel: () => void;
-  onSubmit: (draft: AutomationDraft) => Promise<void>;
+  onSubmit: (draft: AutomationDraft, includeTrigger: boolean) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<AutomationDraft>(state.draft);
   const [validation, setValidation] = useState<string | null>(null);
@@ -614,8 +621,15 @@ function AutomationEditor({
   const error = useMemo(() => draftIsSubmittable(draft), [draft]);
   const disabled = Boolean(error) || isBusy || (elevated && !allowElevated);
 
+  const [scheduleDirty, setScheduleDirty] = useState(false);
   const set = <K extends keyof AutomationDraft>(field: K, value: AutomationDraft[K]) =>
     setDraft((current) => ({ ...current, [field]: value }));
+  // Only schedule inputs mark the schedule dirty; an unchanged trigger is
+  // omitted from updates so completed one-time automations stay editable.
+  const setSchedule = <K extends keyof AutomationDraft>(field: K, value: AutomationDraft[K]) => {
+    set(field, value);
+    setScheduleDirty(true);
+  };
 
   return (
     <Card>
@@ -674,7 +688,7 @@ function AutomationEditor({
                 <Input
                   aria-label="Cron expression"
                   value={draft.expression}
-                  onChange={(event) => set("expression", event.target.value)}
+                  onChange={(event) => setSchedule("expression", event.target.value)}
                   placeholder="0 8 * * 1-5"
                   className="font-mono"
                 />
@@ -684,7 +698,7 @@ function AutomationEditor({
                 <Input
                   aria-label="Cron timezone"
                   value={draft.timezone}
-                  onChange={(event) => set("timezone", event.target.value)}
+                  onChange={(event) => setSchedule("timezone", event.target.value)}
                   placeholder="Europe/London"
                   className="font-mono"
                 />
@@ -698,7 +712,7 @@ function AutomationEditor({
               <Input
                 aria-label="Interval seconds"
                 value={draft.everySeconds}
-                onChange={(event) => set("everySeconds", event.target.value)}
+                onChange={(event) => setSchedule("everySeconds", event.target.value)}
                 inputMode="numeric"
                 className="font-mono"
               />
@@ -711,7 +725,7 @@ function AutomationEditor({
               <Input
                 aria-label="One-time run-at"
                 value={draft.runAt}
-                onChange={(event) => set("runAt", event.target.value)}
+                onChange={(event) => setSchedule("runAt", event.target.value)}
                 placeholder="2026-08-17T10:00:00+01:00"
                 className="font-mono"
               />
@@ -915,7 +929,10 @@ function AutomationEditor({
               setValidation(null);
               setIsBusy(true);
               try {
-                await onSubmit(draft);
+                // An unchanged trigger is not resent: the server keeps the
+                // stored schedule, so completed one-time automations remain
+                // editable without moving their run-at into the future.
+                await onSubmit(draft, state.kind === "create" || scheduleDirty);
               } finally {
                 setIsBusy(false);
               }

@@ -988,6 +988,32 @@ async fn list_pagination_cursors_and_filters() {
 }
 
 #[tokio::test]
+async fn instructions_never_appear_in_list_projections() {
+    let (_dir, service) = service().await;
+    create_valid_automation(&service).await;
+    // Even an explicit field projection cannot pull instructions into list
+    // rows; only a single-automation read exposes them.
+    let list = service
+        .get(
+            ControlGetRequest {
+                resource: "automations".into(),
+                fields: vec![
+                    "id".to_string(),
+                    "task.instruction".to_string(),
+                    "task.no_action_marker".to_string(),
+                ],
+                ..Default::default()
+            },
+            &desktop(),
+        )
+        .await
+        .unwrap();
+    let encoded = serde_json::to_string(&list.data).unwrap();
+    assert!(!encoded.contains("Review my inbox"));
+    assert!(!encoded.contains("task"), "task projection is dropped entirely");
+}
+
+#[tokio::test]
 async fn single_automation_read_returns_the_full_instruction() {
     let (_dir, service) = service().await;
     let data = create_valid_automation(&service).await;

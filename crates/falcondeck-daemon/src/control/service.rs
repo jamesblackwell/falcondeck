@@ -390,10 +390,16 @@ impl ControlService {
         }
         store::compact(&mut next, now);
         if let Err(error) = store::persist(&self.path, &next).await {
-            return Err(format!(
-                "failed to persist restored control state: {}",
+            // The loaded file is fine; the daemon just cannot write right
+            // now. Degrade instead of leaving an empty, writable in-memory
+            // store that the next mutation would persist over the file.
+            let message = format!(
+                "loaded agent-control.json but could not re-persist it ({}); the store is read-only until the daemon can write again",
                 error.0.message
-            ));
+            );
+            tracing::warn!(%message);
+            self.degrade(message.clone());
+            return Ok(Some(message));
         }
         *self.state.lock().await = next;
         *self.storage_error.lock().expect("control storage lock") = None;
@@ -804,10 +810,23 @@ impl ControlService {
             ));
         }
         require_revision(request)?;
-        // Deep validation runs against the proposed target before mutating.
-        if let Some(target) = &args.target {
+        // Deep validation runs against the proposed target — or the stored
+        // one when only the connectors change — before mutating.
+        if args.target.is_some() || args.required_connectors.is_some() {
+            let target = match &args.target {
+                Some(target) => target.clone(),
+                None => match self.automation(&args.automation_id).await {
+                    Some(existing) => existing.target,
+                    None => {
+                        return Err(ControlError::resource_not_found(
+                            "automation",
+                            &args.automation_id,
+                        ));
+                    }
+                },
+            };
             let connectors = args.required_connectors.clone().unwrap_or_default();
-            self.validate_against_daemon(deps, target, &connectors)
+            self.validate_against_daemon(deps, &target, &connectors)
                 .await?;
         }
         let automation_id = args.automation_id.clone();
@@ -1661,10 +1680,20 @@ fn list_automations(
         .rows
         .iter()
         .map(|(automation, row)| {
-            let mut projected = if request.fields.is_empty() {
+            // Instructions never appear in list results, even when a caller
+            // explicitly projects them: lists are the high-cardinality
+            // surface, and a single explicit automation read is the
+            // sanctioned way to read an instruction.
+            let fields: Vec<String> = request
+                .fields
+                .iter()
+                .filter(|field| !field.starts_with("task."))
+                .cloned()
+                .collect();
+            let mut projected = if fields.is_empty() {
                 store::project_automation_list_row(row)
             } else {
-                store::project_fields(row, &request.fields)
+                store::project_fields(row, &fields)
             };
             if let Some(map) = projected.as_object_mut() {
                 map.insert(
