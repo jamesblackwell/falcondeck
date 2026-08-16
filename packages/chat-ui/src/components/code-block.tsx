@@ -83,7 +83,7 @@ export const CodeBlock = memo(function CodeBlock({
           data-syntax-highlighting={
             resolvedLanguage ? (highlight ? 'enabled' : 'deferred') : 'unavailable'
           }
-          className="overflow-x-auto p-3 text-[length:var(--fd-text-sm)] leading-relaxed text-fg-secondary"
+          className="overflow-x-auto p-3 text-[length:var(--fd-text-sm)] leading-code text-fg-secondary"
         >
           <code>
             {tokens

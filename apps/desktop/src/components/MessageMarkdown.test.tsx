@@ -195,14 +195,44 @@ describe("streaming code highlighting", () => {
       "text-[1em]",
       "text-fg-primary",
     );
+    // Below h4 the size ramp is exhausted, so the last two levels change voice
+    // instead: a mono microlabel, one step apart in size and foreground.
     expect(screen.getByRole("heading", { level: 5 })).toHaveClass(
-      "text-[0.95em]",
-      "text-fg-secondary",
+      "fd-type-microlabel",
+      "fd-type-microlabel--md",
+      "text-fg-tertiary",
     );
     expect(screen.getByRole("heading", { level: 6 })).toHaveClass(
-      "text-[0.9em]",
-      "text-fg-secondary",
+      "fd-type-microlabel",
+      "text-fg-muted",
     );
+    expect(screen.getByRole("heading", { level: 6 })).not.toHaveClass(
+      "fd-type-microlabel--md",
+    );
+  });
+
+  it("gives headings more space above than below so sections read as breaks", () => {
+    render(
+      <MessageMarkdown
+        text={"Intro.\n\n## Section\n\nBody."}
+        defer={false}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { level: 2 })).toHaveClass(
+      "mt-8",
+      "mb-3",
+    );
+  });
+
+  it("scopes rendered markdown so the prose measure and checkbox styling apply", () => {
+    const { container } = render(
+      <MessageMarkdown text={"- [x] Done\n- [ ] Pending"} defer={false} />,
+    );
+
+    const scope = container.querySelector(".fd-markdown");
+    expect(scope).not.toBeNull();
+    expect(scope?.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);
   });
 
   it("keeps fenced code plain while streaming and enables highlighting when settled", () => {

@@ -255,11 +255,31 @@ describe("MarkdownRenderer", () => {
       );
 
     expect(headingStyles).toHaveLength(6);
+    // h1–h4 walk down the size ramp; h5/h6 change voice to a mono microlabel
+    // because below h4 the ramp has nowhere left to go.
     expect(headingStyles.map((style) => style.fontSize)).toEqual([
-      26, 22, 19, 17, 16, 14,
+      26, 22, 19, 17, 12, 10,
     ]);
     expect(headingStyles.map((style) => style.lineHeight)).toEqual([
-      32.5, 27.5, 23.75, 21.25, 20, 17.5,
+      32.5, 27.5, 23.75, 21.25, 18, 15,
+    ]);
+    expect(headingStyles.slice(4).map((style) => style.textTransform)).toEqual([
+      "uppercase",
+      "uppercase",
+    ]);
+    expect(headingStyles.slice(4).map((style) => style.fontFamily)).toEqual([
+      "Geist Mono",
+      "Geist Mono",
+    ]);
+    // Every heading after the first opens with more space above than the 12px
+    // block gap that closes it, so the break reads as a new section.
+    expect(headingStyles.map((style) => style.marginTop)).toEqual([
+      undefined,
+      20,
+      12,
+      8,
+      8,
+      8,
     ]);
   });
 

@@ -1,6 +1,6 @@
 import { memo, useDeferredValue, useMemo, type ReactNode } from "react";
 import { ScrollView, View } from "react-native";
-import { GitCommitHorizontal, Terminal, Upload } from "lucide-react-native";
+import { Check, GitCommitHorizontal, Terminal, Upload } from "lucide-react-native";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 import remarkGfm from "remark-gfm";
 import remarkParse from "remark-parse";
@@ -261,20 +261,54 @@ function headingStyle(depth: number | undefined) {
   }
 }
 
-function listMarker(node: MarkdownNode, index: number) {
-  if (node.checked === true) {
-    return "☑";
+/**
+ * Space above a heading, which reads as the section break. Roughly double the
+ * 12px block gap below it, so a heading binds to the prose it introduces
+ * instead of floating evenly between two paragraphs.
+ */
+function headingLeadStyle(depth: number | undefined) {
+  switch (depth) {
+    case 1:
+      return styles.headingLead1;
+    case 2:
+      return styles.headingLead2;
+    case 3:
+      return styles.headingLead3;
+    default:
+      return styles.headingLead4;
+  }
+}
+
+function ListMarker({ node, index }: { node: MarkdownNode; index: number }) {
+  const { theme } = useUnistyles();
+
+  if (node.checked != null) {
+    return (
+      <View
+        style={[styles.checkbox, node.checked ? styles.checkboxChecked : undefined]}
+      >
+        {node.checked ? (
+          <Check
+            size={12}
+            strokeWidth={3}
+            color={theme.colors.surface[0]}
+            accessible={false}
+          />
+        ) : null}
+      </View>
+    );
   }
 
-  if (node.checked === false) {
-    return "☐";
-  }
-
-  if (node.ordered) {
-    return `${(node.start ?? 1) + index}.`;
-  }
-
-  return "•";
+  // Markers sit a step back from the text they introduce: a bullet or number
+  // at body weight and colour competes with the sentence beside it.
+  return (
+    <Text
+      color="muted"
+      style={[styles.listMarker, node.ordered ? styles.listMarkerOrdered : undefined]}
+    >
+      {node.ordered ? `${(node.start ?? 1) + index}.` : "•"}
+    </Text>
+  );
 }
 
 function renderMarkdownInlineNodes(
@@ -630,7 +664,11 @@ function renderMarkdownBlock(
           key={key}
           selectable
           weight="semibold"
-          style={[styles.paragraph, headingStyle(node.depth)]}
+          style={[
+            styles.paragraph,
+            headingStyle(node.depth),
+            position.isFirst ? undefined : headingLeadStyle(node.depth),
+          ]}
         >
           {renderMarkdownInlineNodes(node.children, definitions, key)}
         </Text>
@@ -646,12 +684,10 @@ function renderMarkdownBlock(
         <View key={key} style={styles.list}>
           {node.children.map((child, index) => (
             <View key={`${key}-item-${index}`} style={styles.listItem}>
-              <Text weight="semibold" style={styles.listMarker}>
-                {listMarker(
-                  { ...child, ordered: node.ordered, start: node.start },
-                  index,
-                )}
-              </Text>
+              <ListMarker
+                node={{ ...child, ordered: node.ordered, start: node.start }}
+                index={index}
+              />
               <View style={styles.listItemBody}>
                 {renderMarkdownBlocks(
                   child.children,
@@ -776,33 +812,57 @@ const styles = StyleSheet.create((theme) => ({
     flex: 1,
   },
   paragraph: {
-    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
+    lineHeight: theme.fontSize.base * theme.lineHeight.relaxed,
   },
   heading1: {
     fontSize: theme.fontSize["2xl"],
+    letterSpacing: -0.4,
     lineHeight: theme.fontSize["2xl"] * theme.lineHeight.tight,
   },
   heading2: {
     fontSize: theme.fontSize.xl,
+    letterSpacing: -0.3,
     lineHeight: theme.fontSize.xl * theme.lineHeight.tight,
   },
   heading3: {
     fontSize: theme.fontSize.lg,
+    letterSpacing: -0.2,
     lineHeight: theme.fontSize.lg * theme.lineHeight.tight,
   },
   heading4: {
     fontSize: theme.fontSize.md,
     lineHeight: theme.fontSize.md * theme.lineHeight.tight,
   },
+  // h5/h6 change voice rather than shrinking further: below h4 the size ramp
+  // has nowhere left to go, and a mono microlabel reads as a distinct tier
+  // instead of "slightly smaller bold text".
   heading5: {
-    color: theme.colors.fg.secondary,
-    fontSize: theme.fontSize.base,
-    lineHeight: theme.fontSize.base * theme.lineHeight.tight,
+    color: theme.colors.fg.tertiary,
+    fontFamily: theme.fontFamily.mono,
+    fontSize: theme.fontSize.xs,
+    letterSpacing: 1.2,
+    lineHeight: theme.fontSize.xs * theme.lineHeight.normal,
+    textTransform: "uppercase",
   },
   heading6: {
-    color: theme.colors.fg.secondary,
-    fontSize: theme.fontSize.sm,
-    lineHeight: theme.fontSize.sm * theme.lineHeight.tight,
+    color: theme.colors.fg.muted,
+    fontFamily: theme.fontFamily.mono,
+    fontSize: theme.fontSize["2xs"],
+    letterSpacing: 1.2,
+    lineHeight: theme.fontSize["2xs"] * theme.lineHeight.normal,
+    textTransform: "uppercase",
+  },
+  headingLead1: {
+    marginTop: theme.spacing[6],
+  },
+  headingLead2: {
+    marginTop: theme.spacing[5],
+  },
+  headingLead3: {
+    marginTop: theme.spacing[3],
+  },
+  headingLead4: {
+    marginTop: theme.spacing[2],
   },
   inlineCode: {
     backgroundColor: theme.colors.surface[3],
@@ -825,7 +885,7 @@ const styles = StyleSheet.create((theme) => ({
   },
   blockquote: {
     borderLeftWidth: 2,
-    borderLeftColor: theme.colors.border.emphasis,
+    borderLeftColor: theme.colors.accent.default,
     paddingLeft: theme.spacing[3],
   },
   blockquoteContent: {
@@ -844,12 +904,39 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
   },
   listMarker: {
-    lineHeight: theme.fontSize.base * theme.lineHeight.normal,
+    lineHeight: theme.fontSize.base * theme.lineHeight.relaxed,
     minWidth: 24,
   },
+  listMarkerOrdered: {
+    // Right-aligned so 9. and 10. share a baseline edge and the item text
+    // starts at the same x regardless of the number's width.
+    fontVariant: ["tabular-nums"],
+    textAlign: "right",
+  },
+  checkbox: {
+    alignItems: "center",
+    borderColor: theme.colors.border.strong,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1.5,
+    height: 18,
+    justifyContent: "center",
+    // Nudged down to sit optically centred on the first line of item text.
+    marginTop: 3,
+    width: 18,
+  },
+  checkboxChecked: {
+    backgroundColor: theme.colors.accent.default,
+    borderColor: theme.colors.accent.default,
+  },
   rule: {
-    backgroundColor: theme.colors.border.default,
-    height: 1,
+    // A short centred rule reads as a deliberate pause; a full-width hairline
+    // reads as a table border that lost its table.
+    alignSelf: "center",
+    backgroundColor: theme.colors.border.strong,
+    borderRadius: theme.radius.full,
+    height: 2,
+    marginVertical: theme.spacing[2],
+    width: 48,
   },
   table: {
     borderColor: theme.colors.border.default,
@@ -869,6 +956,9 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: 10,
   },
   tableCellText: {
+    // Tabular figures keep numeric columns aligned down the column even though
+    // each cell lays out independently.
+    fontVariant: ["tabular-nums"],
     lineHeight: theme.fontSize.base * theme.lineHeight.normal,
   },
   tableHeaderCell: {
@@ -881,7 +971,9 @@ const styles = StyleSheet.create((theme) => ({
     borderBottomWidth: 0,
   },
   tableHeaderText: {
+    color: theme.colors.fg.secondary,
     fontWeight: "600",
+    letterSpacing: 0.2,
   },
   footnote: {
     borderTopColor: theme.colors.border.default,

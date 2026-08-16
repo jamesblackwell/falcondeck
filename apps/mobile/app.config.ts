@@ -43,7 +43,60 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       },
     ],
     'expo-secure-store',
-    'expo-font',
+    // Geist ships with the app so chat typography matches desktop exactly.
+    // Without this the theme's family names resolve to nothing: iOS silently
+    // falls back to San Francisco — and, critically, third-party apps cannot
+    // use SF Mono, so code would render in a *proportional* face.
+    //
+    // Only Regular/Bold/Italic/BoldItalic are bundled: Geist's Medium and
+    // SemiBold files declare their own compatible family names ("Geist
+    // SemiBold"), so iOS treats them as separate families and would never
+    // match them from `fontFamily: 'Geist'`. Restricting both platforms to the
+    // four faces that do share the family keeps weight resolution real and
+    // identical everywhere — 500/600 snap to the nearest bundled face rather
+    // than rendering as a synthesized weight on one platform only.
+    [
+      'expo-font',
+      {
+        ios: {
+          fonts: [
+            './assets/fonts/Geist-Regular.ttf',
+            './assets/fonts/Geist-Bold.ttf',
+            './assets/fonts/Geist-Italic.ttf',
+            './assets/fonts/Geist-BoldItalic.ttf',
+            './assets/fonts/GeistMono-Regular.ttf',
+            './assets/fonts/GeistMono-Bold.ttf',
+          ],
+        },
+        // Android has no family-wide weight matching of its own; the plugin
+        // generates an XML font family from these definitions and RN's
+        // fontWeight/fontStyle select between them.
+        android: {
+          fonts: [
+            {
+              fontFamily: 'Geist',
+              fontDefinitions: [
+                { path: './assets/fonts/Geist-Regular.ttf', weight: 400 },
+                { path: './assets/fonts/Geist-Bold.ttf', weight: 700 },
+                { path: './assets/fonts/Geist-Italic.ttf', weight: 400, style: 'italic' },
+                {
+                  path: './assets/fonts/Geist-BoldItalic.ttf',
+                  weight: 700,
+                  style: 'italic',
+                },
+              ],
+            },
+            {
+              fontFamily: 'Geist Mono',
+              fontDefinitions: [
+                { path: './assets/fonts/GeistMono-Regular.ttf', weight: 400 },
+                { path: './assets/fonts/GeistMono-Bold.ttf', weight: 700 },
+              ],
+            },
+          ],
+        },
+      },
+    ],
     'expo-notifications',
     [
       'expo-audio',

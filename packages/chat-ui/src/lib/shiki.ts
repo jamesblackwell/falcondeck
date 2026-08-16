@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { HighlighterCore, LanguageInput, ThemedToken } from 'shiki/core'
+import type {
+  HighlighterCore,
+  LanguageInput,
+  ThemeRegistrationAny,
+  ThemedToken,
+} from 'shiki/core'
 
-import { useAppearance } from '@falcondeck/ui'
+import { useAppearance, type PaletteSetting } from '@falcondeck/ui'
 
 /* ================================================================
    Syntax highlighting for transcripts and the diff sidebar.
@@ -15,6 +20,9 @@ import { useAppearance } from '@falcondeck/ui'
    looked at is ever fetched.
    ================================================================ */
 
+/* Loaded with the highlighter, so they are always available: the neutral
+   default palette uses them, and every other palette falls back to them for
+   the mode its theme family does not draw. */
 const DARK_THEME = 'github-dark-default'
 const LIGHT_THEME = 'github-light-default'
 
@@ -22,6 +30,42 @@ const LIGHT_THEME = 'github-light-default'
 const MAX_HIGHLIGHT_CHARS = 200_000
 
 type LanguageModule = { default: LanguageInput }
+type ThemeModule = { default: ThemeRegistrationAny }
+
+/* Code inherits the palette the user chose for the app. Every palette
+   FalconDeck ships is an editor theme with a first-party Shiki port, so a
+   Gruvbox transcript highlights in Gruvbox rather than in GitHub's blues.
+   Where a family draws no light theme, the neutral GitHub light stands in —
+   preferable to tinting a light surface with a dark theme's token colors. */
+const PALETTE_THEMES: Record<PaletteSetting, { dark: string; light: string }> = {
+  falcon: { dark: DARK_THEME, light: LIGHT_THEME },
+  catppuccin: { dark: 'catppuccin-mocha', light: 'catppuccin-latte' },
+  dracula: { dark: 'dracula', light: LIGHT_THEME },
+  gruvbox: { dark: 'gruvbox-dark-medium', light: 'gruvbox-light-medium' },
+  nord: { dark: 'nord', light: LIGHT_THEME },
+  one: { dark: 'one-dark-pro', light: 'one-light' },
+  'rose-pine': { dark: 'rose-pine', light: 'rose-pine-dawn' },
+  solarized: { dark: 'solarized-dark', light: 'solarized-light' },
+  'tokyo-night': { dark: 'tokyo-night', light: LIGHT_THEME },
+}
+
+// Statically analyzable for the same reason as LANGUAGE_LOADERS: each theme
+// becomes its own chunk, fetched only if the user actually picks that palette.
+const THEME_LOADERS: Record<string, () => Promise<ThemeModule>> = {
+  'catppuccin-latte': () => import('shiki/themes/catppuccin-latte.mjs'),
+  'catppuccin-mocha': () => import('shiki/themes/catppuccin-mocha.mjs'),
+  dracula: () => import('shiki/themes/dracula.mjs'),
+  'gruvbox-dark-medium': () => import('shiki/themes/gruvbox-dark-medium.mjs'),
+  'gruvbox-light-medium': () => import('shiki/themes/gruvbox-light-medium.mjs'),
+  nord: () => import('shiki/themes/nord.mjs'),
+  'one-dark-pro': () => import('shiki/themes/one-dark-pro.mjs'),
+  'one-light': () => import('shiki/themes/one-light.mjs'),
+  'rose-pine': () => import('shiki/themes/rose-pine.mjs'),
+  'rose-pine-dawn': () => import('shiki/themes/rose-pine-dawn.mjs'),
+  'solarized-dark': () => import('shiki/themes/solarized-dark.mjs'),
+  'solarized-light': () => import('shiki/themes/solarized-light.mjs'),
+  'tokyo-night': () => import('shiki/themes/tokyo-night.mjs'),
+}
 
 // Keep this map deliberately finite and statically analyzable. Importing the
 // full `shiki` bundle makes Vite emit every bundled grammar and theme (roughly
@@ -92,6 +136,31 @@ function getHighlighter() {
       })
   }
   return highlighterPromise
+}
+
+const themeLoads = new Map<string, Promise<boolean>>()
+
+/** Resolves true once `theme` can be passed to `codeToTokens`. */
+function ensureTheme(highlighter: HighlighterCore, theme: string) {
+  if (theme === DARK_THEME || theme === LIGHT_THEME) return Promise.resolve(true)
+
+  const pending = themeLoads.get(theme)
+  if (pending) return pending
+
+  const loader = THEME_LOADERS[theme]
+  if (!loader) return Promise.resolve(false)
+
+  const load = loader()
+    .then((module) => highlighter.loadTheme(module.default))
+    .then(() => true)
+    .catch(() => {
+      // Same reasoning as the grammar loads: one flaky chunk fetch must not
+      // pin the session to the fallback theme forever.
+      themeLoads.delete(theme)
+      return false
+    })
+  themeLoads.set(theme, load)
+  return load
 }
 
 const languageLoads = new Map<string, Promise<boolean>>()
@@ -194,17 +263,18 @@ export function languageFromPath(
   return normalizeLanguage(ext)
 }
 
-function useResolvedTheme(): typeof DARK_THEME | typeof LIGHT_THEME {
+function useResolvedTheme(): string {
   const appearance = useAppearance()
-  if (appearance.theme === 'light') return LIGHT_THEME
-  if (appearance.theme === 'dark') return DARK_THEME
+  const themes = PALETTE_THEMES[appearance.palette] ?? PALETTE_THEMES.falcon
+  if (appearance.theme === 'light') return themes.light
+  if (appearance.theme === 'dark') return themes.dark
   // `initAppearance` mirrors the resolved system theme onto <html data-theme>,
   // so reading it back avoids a matchMedia call in test environments that lack
   // one, and re-renders here whenever the appearance store notifies.
   return typeof document !== 'undefined' &&
     document.documentElement.dataset.theme === 'light'
-    ? LIGHT_THEME
-    : DARK_THEME
+    ? themes.light
+    : themes.dark
 }
 
 /**
@@ -221,7 +291,7 @@ export function useShikiTokens(
   const [highlighted, setHighlighted] = useState<{
     code: string
     language: string
-    theme: typeof DARK_THEME | typeof LIGHT_THEME
+    theme: string
     tokens: ThemedToken[][]
   } | null>(null)
 
@@ -236,7 +306,10 @@ export function useShikiTokens(
     void getHighlighter()
       .then(async (highlighter) => {
         if (cancelled) return
-        const loaded = await ensureLanguage(highlighter, language)
+        const [loaded, themeLoaded] = await Promise.all([
+          ensureLanguage(highlighter, language),
+          ensureTheme(highlighter, theme),
+        ])
         if (cancelled) return
         if (!loaded) {
           setHighlighted(null)
@@ -246,7 +319,14 @@ export function useShikiTokens(
         try {
           const result = highlighter.codeToTokens(code, {
             lang: language,
-            theme,
+            // A palette theme that failed to load falls back to the neutral
+            // GitHub pair rather than dropping highlighting altogether.
+            theme: themeLoaded
+              ? theme
+              : typeof document !== 'undefined' &&
+                  document.documentElement.dataset.theme === 'light'
+                ? LIGHT_THEME
+                : DARK_THEME,
           })
           if (!cancelled) {
             setHighlighted({ code, language, theme, tokens: result.tokens })

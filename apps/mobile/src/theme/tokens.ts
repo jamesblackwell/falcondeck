@@ -6,8 +6,6 @@
  * Font sizes are scaled up slightly for mobile readability (native text
  * renders smaller than web at the same px value).
  */
-import { Platform } from 'react-native'
-
 export const darkColors = {
   // Background depth scale
   surface: {
@@ -719,14 +717,19 @@ export const lineHeight = {
   tight: 1.25,
   normal: 1.5,
   relaxed: 1.65,
+  // Code sets tighter than prose: monospace lines are short and scanned
+  // vertically, so prose leading leaves a block looking loose and unstructured.
+  code: 1.55,
 } as const
 
+// Bundled with the app via the expo-font config plugin in app.config.ts, so
+// both families resolve on device and match the desktop client. These names
+// are the fonts' own family names on iOS and the generated XML family names on
+// Android; changing either side without the other silently falls back to the
+// system face — which for `mono` means losing monospacing entirely.
 export const fontFamily = {
-  sans: 'Inter',
-  mono: Platform.select({
-    ios: 'SF Mono',
-    default: 'JetBrains Mono',
-  }) as string,
+  sans: 'Geist',
+  mono: 'Geist Mono',
 } as const
 
 export const shadow = {

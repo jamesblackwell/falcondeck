@@ -162,14 +162,14 @@ const styles = StyleSheet.create((theme) => ({
   },
   code: {
     padding: theme.spacing[3],
-    lineHeight: theme.fontSize.sm * theme.lineHeight.relaxed,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.code,
     textAlign: 'left',
   },
   diffContainer: {
     padding: theme.spacing[3],
   },
   codeLine: {
-    lineHeight: theme.fontSize.sm * theme.lineHeight.relaxed,
+    lineHeight: theme.fontSize.sm * theme.lineHeight.code,
     paddingHorizontal: theme.spacing[1],
     textAlign: 'left',
   },

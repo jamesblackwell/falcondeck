@@ -35,6 +35,7 @@
   --leading-tight: var(--fd-leading-tight);
   --leading-normal: var(--fd-leading-normal);
   --leading-relaxed: var(--fd-leading-relaxed);
+  --leading-code: var(--fd-leading-code);
 
   --tracking-tight: var(--fd-tracking-tight);
   --tracking-normal: var(--fd-tracking-normal);
@@ -212,6 +213,19 @@
   --fd-leading-tight: 1.25;
   --fd-leading-normal: 1.5;
   --fd-leading-relaxed: 1.65;
+  /* Code sets tighter than prose: monospace lines are short and scanned
+     vertically, so prose leading leaves a block looking loose. */
+  --fd-leading-code: 1.55;
+
+  /* Comfortable reading measure for prose: ~70 characters, the length books
+     settle on. Derived from the body step rather than expressed in `ch` so it
+     is one absolute width for every prose element — `ch` resolves against each
+     element's own font size, which would hand headings a wider measure than
+     the paragraphs beneath them. Average character width in running text is
+     about half the font size, so 35 body-steps ≈ 70 characters.
+     The transcript column stays wider than this on purpose: code, diffs, and
+     tables use its full width while sentences stay inside the measure. */
+  --fd-measure: calc(35 * var(--fd-text-md));
 
   --fd-tracking-tight: -0.01em;
   --fd-tracking-normal: 0;
@@ -972,6 +986,84 @@ body {
 
 .fd-type-mono {
   font-family: var(--fd-font-mono);
+}
+
+/* === Rendered Markdown ===
+   Element sizing, weight, and spacing live with the renderer in
+   packages/chat-ui/src/components/message-markdown.tsx. What lives here is the
+   typographic behaviour Tailwind utilities cannot express: reading measure,
+   wrap quality, and the two elements the browser insists on styling itself.
+   See docs/MARKDOWN_STYLE.md for the cross-platform contract. */
+.fd-markdown {
+  /* Sentences stay inside a book measure while code blocks, diffs, and tables
+     keep the full transcript column. The mixed measure is deliberate. */
+  --fd-prose-measure: var(--fd-measure);
+}
+
+.fd-markdown :is(p, ul, ol, blockquote, h1, h2, h3, h4, h5, h6) {
+  max-width: var(--fd-prose-measure);
+}
+
+/* Nested blocks already sit inside a constrained parent; constraining them
+   again compounds the indent into an ever-narrowing column. */
+.fd-markdown :is(li, blockquote) :is(p, ul, ol, blockquote) {
+  max-width: none;
+}
+
+.fd-markdown :is(h1, h2, h3, h4, h5, h6) {
+  text-wrap: balance;
+}
+
+.fd-markdown :is(p, li) {
+  text-wrap: pretty;
+}
+
+/* Inline code that wraps gets its rounded ends and padding on every fragment
+   rather than only the first and last. */
+.fd-markdown code {
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* GFM task lists render a native checkbox that ignores the theme entirely.
+   Draw it from the tokens instead: an accent-filled box with a drawn tick. */
+.fd-markdown input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1em;
+  height: 1em;
+  margin: 0 0.15em 0 0;
+  vertical-align: -0.125em;
+  border: 1.5px solid var(--fd-border-3);
+  border-radius: var(--fd-radius-sm);
+  background: transparent;
+  flex-shrink: 0;
+}
+
+/* Drawn rather than a glyph so the tick keeps its weight at every text size
+   and stays crisp against the accent fill. A data URI cannot read a custom
+   property, so the tick is cut to the canvas colour per mode — dark on the
+   bright accent of a dark theme, light on the deeper accent of a light one. */
+.fd-markdown input[type="checkbox"]:checked {
+  border-color: var(--fd-accent);
+  background-color: var(--fd-accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-6'/%3E%3C/svg%3E");
+  background-size: 100% 100%;
+}
+
+:root[data-theme="light"] .fd-markdown input[type="checkbox"]:checked {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-6'/%3E%3C/svg%3E");
+}
+
+/* A short centred rule reads as a deliberate pause. A full-width hairline
+   reads as a table border that lost its table. */
+.fd-markdown hr {
+  width: 48px;
+  height: 2px;
+  margin-inline: auto;
+  border: 0;
+  border-radius: var(--fd-radius-full);
+  background: var(--fd-border-3);
 }
 
 /* === Focus Ring ===

@@ -179,7 +179,10 @@ function markdownCodeComponent(highlight: boolean) {
       );
     }
     return (
-      <code className="break-all rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-0.5 font-mono text-[0.9em]">
+      // [overflow-wrap:anywhere] breaks a long identifier only when it cannot
+      // fit; break-all shattered every one of them mid-token. The 1px block
+      // padding keeps inline code from inflating the line box in dense prose.
+      <code className="[overflow-wrap:anywhere] rounded-[var(--fd-radius-sm)] bg-surface-4 px-1.5 py-px font-mono text-[0.9em]">
         {children}
       </code>
     );
@@ -200,62 +203,74 @@ const markdownComponents = {
   },
   ul({ children }: { children?: React.ReactNode }) {
     return (
-      <ul className="mb-3 list-disc space-y-1 pl-5 last:mb-0">{children}</ul>
+      <ul className="mb-3 list-disc space-y-1.5 pl-5 marker:text-fg-muted last:mb-0">
+        {children}
+      </ul>
     );
   },
   ol({ children }: { children?: React.ReactNode }) {
     return (
-      <ol className="mb-3 list-decimal space-y-1 pl-5 last:mb-0">{children}</ol>
+      <ol className="mb-3 list-decimal space-y-1.5 pl-5 marker:text-fg-muted marker:tabular-nums last:mb-0">
+        {children}
+      </ol>
     );
   },
   li({ children }: { children?: React.ReactNode }) {
     return <li className="leading-relaxed">{children}</li>;
   },
+  /* Headings carry roughly twice as much space above as below, so a heading
+     binds to the prose it introduces and the gap reads as a section break
+     rather than another paragraph break. */
   h1({ children }: { children?: React.ReactNode }) {
     return (
-      <h1 className="mb-3 mt-5 first:mt-0 text-[1.4em] font-semibold text-fg-primary">
+      <h1 className="mb-3 mt-8 first:mt-0 text-[1.45em] font-semibold tracking-tight text-fg-primary">
         {children}
       </h1>
     );
   },
   h2({ children }: { children?: React.ReactNode }) {
     return (
-      <h2 className="mb-2 mt-4 first:mt-0 text-[1.2em] font-semibold text-fg-primary">
+      <h2 className="mb-3 mt-8 first:mt-0 text-[1.25em] font-semibold tracking-tight text-fg-primary">
         {children}
       </h2>
     );
   },
   h3({ children }: { children?: React.ReactNode }) {
     return (
-      <h3 className="mb-2 mt-3 first:mt-0 text-[1.1em] font-semibold text-fg-primary">
+      <h3 className="mb-2 mt-6 first:mt-0 text-[1.1em] font-semibold tracking-tight text-fg-primary">
         {children}
       </h3>
     );
   },
   h4({ children }: { children?: React.ReactNode }) {
     return (
-      <h4 className="mb-2 mt-3 first:mt-0 text-[1em] font-semibold text-fg-primary">
+      <h4 className="mb-2 mt-5 first:mt-0 text-[1em] font-semibold text-fg-primary">
         {children}
       </h4>
     );
   },
+  /* Below h4 the size ramp has nowhere left to go, so h5/h6 change voice
+     instead: a mono microlabel reads as its own tier rather than as slightly
+     smaller bold text. */
   h5({ children }: { children?: React.ReactNode }) {
     return (
-      <h5 className="mb-2 mt-3 first:mt-0 text-[0.95em] font-semibold text-fg-secondary">
+      <h5 className="fd-type-microlabel fd-type-microlabel--md mb-2 mt-5 first:mt-0 text-fg-tertiary">
         {children}
       </h5>
     );
   },
   h6({ children }: { children?: React.ReactNode }) {
     return (
-      <h6 className="mb-2 mt-3 first:mt-0 text-[0.9em] font-semibold text-fg-secondary">
+      <h6 className="fd-type-microlabel mb-2 mt-5 first:mt-0 text-fg-muted">
         {children}
       </h6>
     );
   },
   blockquote({ children }: { children?: React.ReactNode }) {
+    // Not italicised: a whole block set in italic is harder to read than the
+    // prose it interrupts, and the accent bar already marks it as quoted.
     return (
-      <blockquote className="mb-3 border-l-2 border-border-emphasis pl-4 text-fg-secondary italic last:mb-0">
+      <blockquote className="mb-3 border-l-2 border-accent pl-4 last:mb-0">
         {children}
       </blockquote>
     );
@@ -307,9 +322,11 @@ const markdownComponents = {
       </a>
     );
   },
+  /* Bordered card with a filled header, matching the mobile renderer: a table
+     is a distinct object in the transcript, not four naked rows of prose. */
   table({ children }: { children?: React.ReactNode }) {
     return (
-      <div className="mb-3 max-w-full overflow-x-auto last:mb-0">
+      <div className="mb-3 max-w-full overflow-x-auto rounded-[var(--fd-radius-lg)] border border-border-default last:mb-0">
         <table className="w-full min-w-48 border-collapse text-[length:var(--fd-text-sm)]">
           {children}
         </table>
@@ -318,21 +335,22 @@ const markdownComponents = {
   },
   thead({ children }: { children?: React.ReactNode }) {
     return (
-      <thead className="border-b border-border-subtle text-left text-fg-secondary">
+      <thead className="border-b border-border-default bg-surface-1 text-left text-fg-secondary">
         {children}
       </thead>
     );
   },
   th({ children }: { children?: React.ReactNode }) {
     return (
-      <th className="px-2 py-1.5 text-left font-medium align-top">
+      <th className="px-3 py-2 text-left align-top font-semibold tracking-[0.01em]">
         {children}
       </th>
     );
   },
   td({ children }: { children?: React.ReactNode }) {
     return (
-      <td className="border-t border-border-subtle px-2 py-1.5 align-top text-fg-primary">
+      // Tabular figures keep numeric columns aligned down the column.
+      <td className="border-t border-border-subtle px-3 py-2 align-top tabular-nums text-fg-primary">
         {children}
       </td>
     );
@@ -641,16 +659,20 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   const deferredText = useDeferredValue(text);
   const visibleText = defer ? deferredText : text;
   return useMemo(() => {
-    if (streaming) {
-      return (
-        <StreamingMessageContent
-          text={visibleText}
-          interpretDirectives={interpretDirectives}
-        />
-      );
-    }
-    return interpretDirectives
-      ? renderMessageContent(visibleText, true, false)
-      : renderMarkdown(visibleText, true);
+    const content = streaming ? (
+      <StreamingMessageContent
+        text={visibleText}
+        interpretDirectives={interpretDirectives}
+      />
+    ) : interpretDirectives ? (
+      renderMessageContent(visibleText, true, false)
+    ) : (
+      renderMarkdown(visibleText, true)
+    );
+    // The `fd-markdown` scope carries the prose rules that Tailwind utilities
+    // cannot express — reading measure, wrap quality, task-list checkboxes.
+    // Blocks stay direct children of this element, so the `first:`/`last:`
+    // margin resets on them are unaffected.
+    return <div className="fd-markdown">{content}</div>;
   }, [interpretDirectives, streaming, visibleText]);
 });
