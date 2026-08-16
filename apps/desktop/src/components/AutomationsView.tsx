@@ -290,8 +290,8 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
       operation: string,
       arguments_: Record<string, unknown>,
       options?: { expectedRevision?: number; id?: string },
-    ) => {
-      if (!baseUrl) return;
+    ): Promise<boolean> => {
+      if (!baseUrl) return false;
       if (options?.id) setBusyId(options.id);
       try {
         await executeControl(baseUrl, {
@@ -301,6 +301,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
         });
         await load();
         onToast({ variant: "success", title: "Automation updated" });
+        return true;
       } catch (error) {
         const detail: ControlErrorDetail | null =
           error instanceof ControlRequestError ? error.detail : null;
@@ -318,6 +319,7 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
         if (detail?.code === "revision_conflict") {
           await load();
         }
+        return false;
       } finally {
         setBusyId(null);
       }
@@ -459,7 +461,10 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
                         setEditor({
                           kind: "edit",
                           id: automation.id,
-                          revision: automation.revision,
+                          // Internal bumps (managed-thread assignment, one-time
+                          // completion) can outdate the list row; the fetched
+                          // record carries the authoritative revision.
+                          revision: detail.revision,
                           draft: draftFromAutomation(detail),
                         });
                       }}
@@ -567,15 +572,22 @@ export function AutomationsView({ baseUrl, onToast, onEventRefetch }: Automation
           allowElevated={settings?.allow_elevated_automations ?? false}
           onCancel={() => setEditor({ kind: "closed" })}
           onSubmit={async (draft) => {
-            if (editor.kind === "create") {
-              await runOperation("automation.create", draftArguments(draft));
-            } else {
-              await runOperation("automation.update", {
-                automation_id: editor.id,
-                ...draftArguments(draft),
-              }, { expectedRevision: editor.revision });
+            const ok =
+              editor.kind === "create"
+                ? await runOperation("automation.create", draftArguments(draft))
+                : await runOperation(
+                    "automation.update",
+                    {
+                      automation_id: editor.id,
+                      ...draftArguments(draft),
+                    },
+                    { expectedRevision: editor.revision },
+                  );
+            // A failed save (including revision conflicts) keeps the editor
+            // open so the user's draft is never discarded.
+            if (ok) {
+              setEditor({ kind: "closed" });
             }
-            setEditor({ kind: "closed" });
           }}
         />
       ) : null}

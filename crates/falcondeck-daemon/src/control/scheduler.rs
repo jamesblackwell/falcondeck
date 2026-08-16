@@ -84,7 +84,7 @@ async fn dispatch_due(
                 .lock()
                 .expect("control scheduler lock")
                 .insert(run.id.clone());
-            spawn_execute(app.clone(), run.id, Arc::clone(in_flight));
+            dispatch_claimed(app, &run.id, in_flight).await;
         }
         emit_runs_changed(app).await;
     }
@@ -95,19 +95,10 @@ async fn dispatch_due(
 /// occurrence, which is the queue_one concurrency policy. Returns whether an
 /// executor was spawned.
 pub async fn try_execute_queued(app: &AppState, run_id: &str) -> bool {
-    let Some(run) = app.control().run(run_id).await else {
-        return false;
-    };
-    if run.status != AutomationRunStatus::Queued {
-        return false;
-    }
-    // queue_one occurrences stay queued until the active run finishes; the
-    // finish notification re-wakes the scheduler to dispatch them.
-    if app
-        .control()
-        .automation_has_running_run(&run.automation_id)
-        .await
-    {
+    // The atomic claim covers both gates at once: only queued runs are
+    // taken, and a run whose automation already has an active occurrence
+    // (queue_one) stays queued.
+    if !app.control().claim_run_if_automation_free(run_id).await {
         return false;
     }
     let app = app.clone();
@@ -116,6 +107,22 @@ pub async fn try_execute_queued(app: &AppState, run_id: &str) -> bool {
         execute_run(&app, &run_id).await;
     });
     true
+}
+
+/// Claims a queued run and dispatches it. The in-flight registration only
+/// prevents double spawns within one wake: whether the run was claimed
+/// (no longer queued) or declined (still queued, retried next wake), the
+/// id is released so later wakes can act on it again.
+async fn dispatch_claimed(
+    app: &AppState,
+    run_id: &str,
+    in_flight: &Arc<StdMutex<HashSet<String>>>,
+) {
+    let _ = try_execute_queued(app, run_id).await;
+    in_flight
+        .lock()
+        .expect("control scheduler lock")
+        .remove(run_id);
 }
 
 /// Spawns executors for queued runs that do not have one yet (manual
@@ -130,25 +137,8 @@ async fn spawn_queued_runs(app: &AppState, in_flight: &Arc<StdMutex<HashSet<Stri
             .collect::<Vec<_>>()
     };
     for run_id in spawnable {
-        if !try_execute_queued(app, &run_id).await {
-            // The occurrence stays queued (queue_one hold, or already
-            // settled); deregister it so later wakes can retry it.
-            in_flight
-                .lock()
-                .expect("control scheduler lock")
-                .remove(&run_id);
-        }
+        dispatch_claimed(app, &run_id, in_flight).await;
     }
-}
-
-fn spawn_execute(app: AppState, run_id: String, in_flight: Arc<StdMutex<HashSet<String>>>) {
-    tokio::spawn(async move {
-        execute_run(&app, &run_id).await;
-        in_flight
-            .lock()
-            .expect("control scheduler lock")
-            .remove(&run_id);
-    });
 }
 
 async fn emit_runs_changed(app: &AppState) {
@@ -185,16 +175,9 @@ async fn execute_run(app: &AppState, run_id: &str) {
     let Some(run) = app.control().run(run_id).await else {
         return;
     };
-    if run.status != AutomationRunStatus::Queued {
-        return;
-    }
-    // queue_one occurrences stay queued until the active run finishes; the
-    // finish notification re-wakes the scheduler to dispatch them.
-    if app
-        .control()
-        .automation_has_running_run(&run.automation_id)
-        .await
-    {
+    // The dispatcher claims the run (Queued -> Running) before spawning
+    // this task, so anything else here is a settled run.
+    if run.status != AutomationRunStatus::Running {
         return;
     }
     if app.is_shutting_down() {
@@ -319,6 +302,7 @@ async fn execute_run(app: &AppState, run_id: &str) {
         return;
     }
 
+    let mut dispatched_turn_id: Option<String> = None;
     let mut terminal_poll = interval(RUN_TERMINAL_POLL);
     terminal_poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
     // `interval` ticks immediately once; consume that tick so the fallback is
@@ -348,9 +332,24 @@ async fn execute_run(app: &AppState, run_id: &str) {
             {
                 match envelope.event {
                     UnifiedEvent::TurnStart { turn_id } => {
-                        let _ = app.control().record_run_turn(run_id, &turn_id).await;
+                        // The first turn start after dispatch is the
+                        // automation's own turn: turns are serialized per
+                        // thread, and later turns queue behind it.
+                        if dispatched_turn_id.is_none() {
+                            dispatched_turn_id = Some(turn_id.clone());
+                            let _ = app.control().record_run_turn(run_id, &turn_id).await;
+                        }
                     }
-                    UnifiedEvent::TurnEnd { status, error, .. } => {
+                    UnifiedEvent::TurnEnd {
+                        turn_id,
+                        status,
+                        error,
+                    } => {
+                        // A turn that started before this dispatch (a user
+                        // turn already in flight) must not settle the run.
+                        if Some(turn_id.as_str()) != dispatched_turn_id.as_deref() {
+                            continue;
+                        }
                         let shutting_down = app.is_shutting_down();
                         let succeeded = !shutting_down
                             && error.is_none()
