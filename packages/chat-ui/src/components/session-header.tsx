@@ -24,6 +24,11 @@ export type SessionHeaderProps = {
   compact?: boolean
   navigation?: React.ReactNode
   onNewThread?: () => void
+  /**
+   * Rendered at the head of the trailing group, before New and the embedding
+   * app's own controls. The isolated-thread Merge control lives here.
+   */
+  leadingActions?: React.ReactNode
   children?: React.ReactNode
   className?: string
 }
@@ -34,6 +39,7 @@ export const SessionHeader = memo(function SessionHeader({
   compact = false,
   navigation,
   onNewThread,
+  leadingActions,
   children,
   className,
 }: SessionHeaderProps) {
@@ -99,6 +105,7 @@ export const SessionHeader = memo(function SessionHeader({
       </div>
 
       <ToolbarGroup align="end">
+        {leadingActions}
         {thread && onNewThread ? (
           <Button
             type="button"

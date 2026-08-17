@@ -86,6 +86,8 @@ import {
   ComposerContextBar,
   ExtensionPanel,
   NewThreadState,
+  ShipMenu,
+  useShipThread,
   composePromptWithQuotedSelections,
   normalizeQuotedSelection,
   type ComposerMenuRequest,
@@ -109,7 +111,7 @@ import {
   workspaceComposerDisabled,
   workspaceSendBlockReason,
 } from "./app-utils";
-import { isTauriDesktop, openActivityWindow } from "./api";
+import { isTauriDesktop, openActivityWindow, openExternalUrl } from "./api";
 import {
   ACTIVITY_WINDOW_EVENTS,
   ACTIVITY_WINDOW_LABEL,
@@ -933,6 +935,20 @@ function AppInner() {
     selectedWorkspaceId,
     combinedGitRefreshTrigger,
   );
+  // Lands an isolated thread's branch from the session header. Only isolated
+  // threads have a branch of their own, so the control hides itself otherwise.
+  const {
+    ship: shipThread,
+    pending: isShipPending,
+    projectFolderDirty,
+  } = useShipThread({
+    api: apiFor(selectedWorkspaceId),
+    workspaceId: selectedWorkspaceId,
+    thread: selectedThread,
+    toast,
+    openUrl: openExternalUrl,
+    onShipped: () => setLocalGitBump((bump) => bump + 1),
+  });
   const groups = useMemo(
     () =>
       buildProjectGroups(
@@ -5124,6 +5140,14 @@ function AppInner() {
                       }
                     : undefined,
               }}
+              headerLeadingControls={
+                <ShipMenu
+                  thread={selectedThread}
+                  onShip={shipThread}
+                  pending={isShipPending}
+                  projectFolderDirty={projectFolderDirty}
+                />
+              }
               headerControls={
                 <PanelToggles
                   sidebarVisible={sidebarVisible}

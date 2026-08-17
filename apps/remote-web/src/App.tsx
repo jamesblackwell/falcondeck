@@ -95,6 +95,7 @@ import {
   type EncryptedEnvelope,
   type EventEnvelope,
   type ExtensionUiActionBinding,
+  type GitStatusResponse,
   type ImageInput,
   type InteractiveResponsePayload,
   type MachinePresence,
@@ -110,6 +111,8 @@ import {
   type RelayWebSocketTicketResponse,
   type RelayUpdate,
   type SessionCryptoState,
+  type ShipThreadMode,
+  type ShipThreadResponse,
   type ThreadDetail,
   type ThreadHandle,
   type ThreadSortMode,
@@ -127,11 +130,13 @@ import {
   PromptInput,
   QueuedTurns,
   SessionHeader,
+  ShipMenu,
   OperationalNotice,
   ExtensionPanel,
   ExtensionPanelNavigation,
   WorkspaceSidebar,
   realtimeAudioPlayer,
+  useShipThread,
 } from "@falcondeck/chat-ui";
 import {
   ActivityDiamond,
@@ -2384,6 +2389,39 @@ function RemoteApp() {
     [toast],
   );
 
+  // Isolated-thread shipping runs entirely in the daemon, so remote web only
+  // needs the two RPCs; the control and its toasts are shared with desktop.
+  const shipApi = useMemo(
+    () => ({
+      gitStatus: (workspaceId: string, threadId?: string | null) =>
+        callRpc<GitStatusResponse>("git.status", {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+        }),
+      shipThread: (workspaceId: string, threadId: string, mode: ShipThreadMode) =>
+        callRpc<ShipThreadResponse>("thread.ship", {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          mode,
+        }),
+    }),
+    [callRpc],
+  );
+  const {
+    ship: shipThread,
+    pending: isShipPending,
+    projectFolderDirty,
+  } = useShipThread({
+    api: isEncrypted ? shipApi : null,
+    workspaceId: selectedWorkspace?.id ?? null,
+    thread: selectedThread,
+    toast,
+    // Remote web runs in a real browser, so a new tab is the system browser.
+    openUrl: async (url) => {
+      window.open(url, "_blank", "noopener,noreferrer");
+    },
+  });
+
   const handleSetThreadColor = useCallback(
     async (
       _workspaceId: string,
@@ -4057,6 +4095,14 @@ function RemoteApp() {
         workspace={selectedWorkspace}
         thread={selectedThread}
         onNewThread={selectedThread ? handleNewThreadFromCurrent : undefined}
+        leadingActions={
+          <ShipMenu
+            thread={selectedThread}
+            onShip={shipThread}
+            pending={isShipPending}
+            projectFolderDirty={projectFolderDirty}
+          />
+        }
         className="border-b border-border-subtle pt-3"
         navigation={
           <button

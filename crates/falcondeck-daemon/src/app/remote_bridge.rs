@@ -74,6 +74,8 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "workspace.file.write",
     "git.status",
     "git.diff",
+    "git.commit",
+    "thread.ship",
     "connectors.read",
     "connectors.update",
     "providers.read",
@@ -1118,6 +1120,35 @@ impl AppState {
                     .await
                     .and_then(|diff| serde_json::to_value(diff).map_err(DaemonError::from))
                     .map_err(|error| error.to_string())
+                }
+                "git.commit" => {
+                    let request = falcondeck_core::GitCommitRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        message: extract_string(&params, &["message"]),
+                    };
+                    self.git_commit(&request)
+                        .await
+                        .and_then(|result| serde_json::to_value(result).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
+                }
+                "thread.ship" => {
+                    let mode = params
+                        .get("mode")
+                        .cloned()
+                        .and_then(|value| serde_json::from_value(value).ok())
+                        .ok_or_else(|| {
+                            "thread.ship requires mode: pr, draft_pr or merge".to_string()
+                        })?;
+                    let request = falcondeck_core::ShipThreadRequest {
+                        workspace_id: required(&["workspaceId", "workspace_id"])?,
+                        thread_id: required(&["threadId", "thread_id"])?,
+                        mode,
+                    };
+                    self.ship_thread(&request)
+                        .await
+                        .and_then(|result| serde_json::to_value(result).map_err(DaemonError::from))
+                        .map_err(|error| error.to_string())
                 }
                 "thread.goal.set" => {
                     let request = falcondeck_core::SetThreadGoalRequest {

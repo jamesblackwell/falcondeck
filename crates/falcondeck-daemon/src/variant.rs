@@ -75,7 +75,7 @@ pub async fn create(project_path: &str, slug: &str) -> Result<ThreadVariant, Dae
     create_in_root(project_path, slug, &root).await
 }
 
-async fn create_in_root(
+pub(crate) async fn create_in_root(
     project_path: &str,
     slug: &str,
     root: &Path,
@@ -97,6 +97,7 @@ async fn create_in_root(
 
     let branch = format!("{BRANCH_PREFIX}{slug}");
     let destination_str = destination.to_string_lossy().to_string();
+    let base_branch = current_branch(project_path).await;
 
     add_worktree(project_path, &destination, &branch).await?;
     copy_untracked_allowlist(project_path, &destination).await;
@@ -106,6 +107,7 @@ async fn create_in_root(
         path: destination_str,
         branch,
         kind: ThreadVariantKind::Worktree,
+        base_branch,
     })
 }
 
@@ -179,6 +181,18 @@ async fn preserve_clone_branch(project_path: &str, variant: &ThreadVariant) {
             %error,
             "failed to preserve isolated copy branch before deletion"
         );
+    }
+}
+
+async fn current_branch(project_path: &str) -> Option<String> {
+    let branch = run_git(project_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .ok()?;
+    let branch = branch.trim();
+    if branch.is_empty() || branch == "HEAD" {
+        None
+    } else {
+        Some(branch.to_string())
     }
 }
 
@@ -435,6 +449,7 @@ mod tests {
             path: clone_path,
             branch: "falcondeck/test1234".to_string(),
             kind: ThreadVariantKind::Clone,
+            base_branch: Some("main".to_string()),
         };
         remove(repo_path, &variant).await;
 
@@ -470,6 +485,7 @@ mod tests {
             path: clone_path,
             branch: "falcondeck/empty123".to_string(),
             kind: ThreadVariantKind::Clone,
+            base_branch: Some("main".to_string()),
         };
         remove(repo_path, &variant).await;
 

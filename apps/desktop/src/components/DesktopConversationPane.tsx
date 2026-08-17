@@ -72,6 +72,8 @@ type DesktopConversationPaneProps = {
   canSteerQueuedTurn?: boolean;
   onOpenFile?: OpenFileDiff | null;
   headerControls?: ReactNode;
+  /** Sits at the head of the header's trailing group, before New. */
+  headerLeadingControls?: ReactNode;
   onNewThread?: () => void;
   onRetryResponse?: (
     item: Extract<ConversationItem, { kind: "user_message" }>,
@@ -114,6 +116,7 @@ export function DesktopConversationPane({
   onInteractiveResponse,
   promptInputKey,
   promptInputProps,
+  headerLeadingControls,
   onRemoveQueuedTurn,
   onSteerQueuedTurn,
   onEditQueuedTurn,
@@ -152,6 +155,7 @@ export function DesktopConversationPane({
         workspace={selectedWorkspace}
         thread={selectedThread}
         onNewThread={onNewThread}
+        leadingActions={headerLeadingControls}
         compact
       >
         <RemotePairingPopover

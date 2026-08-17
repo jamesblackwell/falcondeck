@@ -22,9 +22,12 @@ import {
   type EventEnvelope,
   type ExtensionActionResponse,
   type ExtensionSnapshot,
+  type GitCommitResponse,
   type GitDiffResponse,
   type GitFileStatus,
   type GitStatusResponse,
+  type ShipThreadMode,
+  type ShipThreadResponse,
   type InteractiveResponsePayload,
   type InvokeExtensionActionPayload,
   type MachinePresence,
@@ -170,6 +173,16 @@ export type WorkspaceScopedApi = {
   connectWorkspace(path: string): Promise<WorkspaceSummary>
   removeWorkspace(workspaceId: string): Promise<unknown>
   gitStatus(workspaceId: string, threadId?: string | null): Promise<GitStatusResponse>
+  gitCommit(
+    workspaceId: string,
+    threadId: string,
+    message?: string | null,
+  ): Promise<GitCommitResponse>
+  shipThread(
+    workspaceId: string,
+    threadId: string,
+    mode: ShipThreadMode,
+  ): Promise<ShipThreadResponse>
   gitDiff(
     workspaceId: string,
     path?: string,
@@ -548,6 +561,18 @@ export class HostConnection {
       },
       gitStatus: (workspaceId, threadId) =>
         this.rpc('git.status', { workspace_id: workspaceId, thread_id: threadId }),
+      gitCommit: (workspaceId, threadId, message) =>
+        this.rpc('git.commit', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          message,
+        }),
+      shipThread: (workspaceId, threadId, mode) =>
+        this.rpc('thread.ship', {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          mode,
+        }),
       gitDiff: (workspaceId, path, status, threadId) =>
         this.rpc('git.diff', {
           workspace_id: workspaceId,

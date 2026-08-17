@@ -541,6 +541,7 @@ export type ThreadVariant = {
   path: string;
   branch: string;
   kind: "clone" | "worktree";
+  base_branch?: string | null;
 };
 
 export type InteractiveRequestKind = "approval" | "question" | "plan_approval";
@@ -1416,6 +1417,35 @@ export type GitStatusResponse = {
 export type GitDiffResponse = {
   diff: string;
   content: string | null;
+};
+
+export type ShipThreadMode = "pr" | "draft_pr" | "merge";
+
+export type GitCommitPayload = {
+  workspace_id: string;
+  thread_id: string;
+  message?: string | null;
+};
+
+export type GitCommitResponse = {
+  committed: boolean;
+  message?: string | null;
+};
+
+export type ShipThreadPayload = {
+  workspace_id: string;
+  thread_id: string;
+  mode: ShipThreadMode;
+};
+
+export type ShipThreadResponse = {
+  mode: ShipThreadMode;
+  branch: string;
+  base: string;
+  committed: boolean;
+  /** False when the merge landed locally but the push to origin failed. */
+  pushed: boolean;
+  url?: string | null;
 };
 
 export type WorkspaceFilesResponse = {
