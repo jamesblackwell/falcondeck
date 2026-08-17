@@ -174,7 +174,9 @@ export function normalizeInteractiveRequest(
     !request.request_id.trim() ||
     typeof request.workspace_id !== "string" ||
     !request.workspace_id.trim() ||
-    (request.kind !== "approval" && request.kind !== "question") ||
+    (request.kind !== "approval" &&
+      request.kind !== "question" &&
+      request.kind !== "plan_approval") ||
     !Array.isArray(request.questions)
   ) {
     return null;
@@ -182,7 +184,7 @@ export function normalizeInteractiveRequest(
 
   const questionIds = new Set<string>();
   const questions =
-    request.kind === "approval"
+    request.kind !== "question"
       ? []
       : request.questions.flatMap((value) => {
           if (!value || typeof value !== "object" || Array.isArray(value))
@@ -262,7 +264,9 @@ export function normalizeInteractiveRequest(
         ? request.title
         : request.kind === "question"
           ? "Answer question"
-          : "Approval required",
+          : request.kind === "plan_approval"
+            ? "Review implementation plan"
+            : "Approval required",
     detail: nullableString("detail"),
     command: nullableString("command"),
     path: nullableString("path"),
@@ -995,6 +999,9 @@ export function normalizeConversationItem(value: unknown): ConversationItem {
       outcome === "always_allowed" ||
       outcome === "denied" ||
       outcome === "answered" ||
+      outcome === "plan_approved" ||
+      outcome === "plan_changes_requested" ||
+      outcome === "plan_abandoned" ||
       outcome === "expired" ||
       outcome === "cancelled"
         ? outcome
@@ -2114,7 +2121,10 @@ function normalizeUtilityModelPreferences(
         const entry = choice as Partial<UtilityModelChoice>;
         const provider =
           typeof entry.provider === "string" ? entry.provider.trim() : "";
-        if (!provider || choices.some((existing) => existing.provider === provider))
+        if (
+          !provider ||
+          choices.some((existing) => existing.provider === provider)
+        )
           return choices;
         choices.push({
           provider,
@@ -2133,11 +2143,7 @@ function normalizeUtilityModelPreferences(
 }
 
 const HARNESS_KINDS = new Set(["builtin", "acp", "detected"]);
-const HARNESS_UPGRADE_STATUSES = new Set([
-  "running",
-  "completed",
-  "failed",
-]);
+const HARNESS_UPGRADE_STATUSES = new Set(["running", "completed", "failed"]);
 
 function optionalTrimmedString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0
@@ -2190,7 +2196,9 @@ export function normalizeHarnessesOverview(value: unknown): HarnessesOverview {
 }
 
 /** Normalizes a harness upgrade job status body. */
-export function normalizeHarnessUpgradeJob(value: unknown): HarnessUpgradeJob | null {
+export function normalizeHarnessUpgradeJob(
+  value: unknown,
+): HarnessUpgradeJob | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
   const jobId = typeof raw.job_id === "string" ? raw.job_id.trim() : "";
@@ -2200,9 +2208,12 @@ export function normalizeHarnessUpgradeJob(value: unknown): HarnessUpgradeJob | 
   return {
     job_id: jobId,
     harness_id: harnessId,
-    label: typeof raw.label === "string" && raw.label.trim() ? raw.label : harnessId,
+    label:
+      typeof raw.label === "string" && raw.label.trim() ? raw.label : harnessId,
     host:
-      typeof raw.host === "string" && raw.host.trim() ? raw.host.trim() : "local",
+      typeof raw.host === "string" && raw.host.trim()
+        ? raw.host.trim()
+        : "local",
     status: HARNESS_UPGRADE_STATUSES.has(String(raw.status))
       ? (raw.status as HarnessUpgradeJob["status"])
       : "running",

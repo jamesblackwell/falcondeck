@@ -114,6 +114,28 @@ describe('interactive request receipts', () => {
   })
 
   it.each([
+    ['approved', 'plan_approved', 'Approved: Review implementation plan', 'success'],
+    ['cancelled', 'plan_changes_requested', 'Changes requested: Review implementation plan', 'warning'],
+    ['abandoned', 'plan_abandoned', 'Abandoned: Review implementation plan', 'danger'],
+  ] as const)('maps %s plan responses to receipt-safe outcomes', (responseOutcome, outcome, label, tone) => {
+    const resolution = interactiveResolutionFromResponse(
+      {
+        kind: 'plan_approval',
+        outcome: responseOutcome,
+        feedback: 'Do not retain this feedback.',
+      },
+      '2026-08-09T12:00:00Z',
+    )
+
+    expect(resolution).toEqual({ outcome, resolved_at: '2026-08-09T12:00:00Z' })
+    expect(JSON.stringify(resolution)).not.toContain('Do not retain this feedback.')
+    expect(interactiveRequestReceiptPresentation(
+      { kind: 'plan_approval', title: 'Review implementation plan' },
+      resolution,
+    )).toEqual({ label, tone })
+  })
+
+  it.each([
     ['expired', 'Expired: Allow npm test', 'warning'],
     ['cancelled', 'Cancelled: Allow npm test', 'warning'],
   ] as const)('presents %s outcomes explicitly', (outcome, label, tone) => {

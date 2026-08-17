@@ -5,7 +5,7 @@ generic ACP runtime depends on. The pilot is intentionally separate from the
 daemon: it is an engineering diagnostic, not yet a release gate or user-facing
 health check.
 
-This is one of three probes. OpenCode's *native* HTTP transport and the
+This is one of three probes. OpenCode's _native_ HTTP transport and the
 first-party Claude and Codex harnesses have their own; see
 [HARNESS-CONFORMANCE.md](HARNESS-CONFORMANCE.md) for the full set and the
 reasoning behind what each one checks.
@@ -91,6 +91,8 @@ The suite covers:
 
 - the complete live success path;
 - selecting an ACP `allow_once` permission option;
+- Grok's blocking `x.ai/exit_plan_mode` reverse request and its `approved`
+  response shape;
 - cancellation and its stop reason;
 - session replay and cross-process restart/reload;
 - unhandled session-update classification and stderr capture;
@@ -137,11 +139,11 @@ session loading, and cross-process restart/reload locally.
 
 The probe immediately exposed meaningful compatibility differences:
 
-| Adapter | Images | Modes | Resume / restart replay | Session updates FalconDeck does not project |
-|---|---:|---:|---:|---|
-| Pi | yes | 6 | 9 / 9 updates | `available_commands_update`, `session_info_update`, `user_message_chunk` |
-| OpenCode | yes | 0 | 10 / 10 updates | `available_commands_update`, `usage_update`, `user_message_chunk` |
-| Grok | no\* | 0 | 10 / 11 updates | `available_commands_update`, `user_message_chunk` |
+| Adapter  | Images | Modes | Resume / restart replay | Session updates FalconDeck does not project                              |
+| -------- | -----: | ----: | ----------------------: | ------------------------------------------------------------------------ |
+| Pi       |    yes |     6 |           9 / 9 updates | `available_commands_update`, `session_info_update`, `user_message_chunk` |
+| OpenCode |    yes |     0 |         10 / 10 updates | `available_commands_update`, `usage_update`, `user_message_chunk`        |
+| Grok     |   no\* |     0 |         10 / 11 updates | `available_commands_update`, `user_message_chunk`                        |
 
 \*Grok's `initialize` still advertises `promptCapabilities.image: false`, but live
 probes show it accepts ACP image content blocks and performs vision. FalconDeck
@@ -152,6 +154,13 @@ Some Grok 1.0.0 builds support mid-turn steering through the vendor
 same call. FalconDeck probes the live runtime and advertises steering only when
 that method exists. It stays disabled for generic ACP providers because the
 base ACP protocol has no equivalent method.
+
+Grok plan mode also uses a vendor reverse request: `x.ai/exit_plan_mode` sends
+the proposed Markdown plan to the ACP client and blocks the prompt until the
+client returns `approved`, `cancelled` (with optional revision feedback), or
+`abandoned`. FalconDeck projects that request through the same durable
+interactive-request queue used for permissions and questions. It deliberately
+does not apply blanket tool approval to plans.
 
 Grok also reported local configuration, plugin-collision, and unavailable MCP
 server warnings on stderr while still completing the ACP checks. That validates
@@ -179,7 +188,7 @@ and which useful provider events FalconDeck currently leaves on the floor.
 ## What the checks are chosen for
 
 The probe does not try to cover every ACP method. It concentrates on the
-assumptions that fail *quietly* when an adapter changes them.
+assumptions that fail _quietly_ when an adapter changes them.
 
 A dropped route or a renamed field announces itself: the next request returns an
 error and someone sees a stack trace. What survives review is the opposite —

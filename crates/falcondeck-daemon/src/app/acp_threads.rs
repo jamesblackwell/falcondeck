@@ -7,8 +7,8 @@ use std::sync::Arc;
 use chrono::Utc;
 use falcondeck_core::{
     AgentProvider, ApprovalDecision, ContentLifecycle, ConversationFileChange, ConversationItem,
-    InteractiveRequest, InteractiveRequestKind, ServiceLevel, ThreadStatus, ThreadTokenUsage,
-    TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
+    InteractiveRequest, InteractiveRequestKind, PlanApprovalOutcome, ServiceLevel, ThreadStatus,
+    ThreadTokenUsage, TokenUsageBreakdown, TurnInputItem, UnifiedEvent,
 };
 use serde_json::Value;
 use tokio::sync::mpsc;
@@ -906,6 +906,83 @@ impl AppState {
                     },
                 );
             }
+            AcpEvent::PlanApprovalRequest {
+                session_id,
+                request_id,
+                tool_call_id,
+                plan_content,
+            } => {
+                let Some(thread_id) = runtime.thread_for_session(&session_id).await else {
+                    runtime
+                        .respond_plan_approval(&request_id, PlanApprovalOutcome::Abandoned, None)
+                        .await?;
+                    return Ok(());
+                };
+                let request = InteractiveRequest {
+                    request_id: request_id.clone(),
+                    workspace_id: workspace_id.to_string(),
+                    thread_id: Some(thread_id.clone()),
+                    method: "x.ai/exit_plan_mode".to_string(),
+                    kind: InteractiveRequestKind::PlanApproval,
+                    approval_decisions: None,
+                    title: "Review implementation plan".to_string(),
+                    detail: Some(plan_content),
+                    command: None,
+                    path: None,
+                    turn_id: None,
+                    item_id: tool_call_id,
+                    questions: Vec::new(),
+                    created_at: Utc::now(),
+                };
+                self.inner.interactive_requests.lock().await.insert(
+                    (workspace_id.to_string(), request_id.clone()),
+                    PendingServerRequest {
+                        raw_id: Value::Null,
+                        request: request.clone(),
+                        params: Value::Null,
+                    },
+                );
+                let thread = self
+                    .upsert_thread(workspace_id, &thread_id, |thread| {
+                        thread.status = ThreadStatus::WaitingForInput;
+                        thread.updated_at = Utc::now();
+                    })
+                    .await?;
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.clone()),
+                    UnifiedEvent::ThreadUpdated { thread },
+                );
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    Some(thread_id.clone()),
+                    UnifiedEvent::InteractiveRequest {
+                        request: request.clone(),
+                    },
+                );
+                self.notify_remote_attention("approval", workspace_id, Some(thread_id.clone()))
+                    .await;
+                self.push_conversation_item(
+                    workspace_id,
+                    &thread_id,
+                    ConversationItem::InteractiveRequest {
+                        id: request_id,
+                        request: Box::new(request),
+                        created_at: Utc::now(),
+                        resolved: false,
+                        resolution: None,
+                    },
+                    false,
+                )
+                .await?;
+                self.emit(
+                    Some(workspace_id.to_string()),
+                    None,
+                    UnifiedEvent::Snapshot {
+                        snapshot: self.snapshot().await,
+                    },
+                );
+            }
             AcpEvent::TurnEnded {
                 session_id,
                 stop_reason,
@@ -1080,6 +1157,36 @@ impl AppState {
         let runtime = runtime
             .ok_or_else(|| DaemonError::NotFound("ACP permission request not found".to_string()))?;
         runtime.respond_permission(request_id, decision).await
+    }
+
+    /// Answers a pending Grok plan review on the exact runtime that raised it.
+    pub(super) async fn respond_acp_plan_approval(
+        &self,
+        workspace_id: &str,
+        thread_id: Option<&str>,
+        request_id: &str,
+        outcome: PlanApprovalOutcome,
+        feedback: Option<String>,
+    ) -> Result<(), DaemonError> {
+        let Some(thread_id) = thread_id else {
+            return Err(DaemonError::BadRequest(
+                "ACP plan approval has no thread".to_string(),
+            ));
+        };
+        let provider = self.thread_provider(workspace_id, thread_id).await?;
+        let runtime = {
+            let workspaces = self.inner.workspaces.lock().await;
+            workspaces
+                .get(workspace_id)
+                .and_then(|workspace| workspace.acp_runtimes.get(&provider))
+                .filter(|runtime| !runtime.is_closed())
+                .map(Arc::clone)
+        };
+        let runtime = runtime
+            .ok_or_else(|| DaemonError::NotFound("ACP plan approval not found".to_string()))?;
+        runtime
+            .respond_plan_approval(request_id, outcome, feedback)
+            .await
     }
 }
 

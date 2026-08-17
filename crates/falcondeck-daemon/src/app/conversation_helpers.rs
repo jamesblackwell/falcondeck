@@ -6,10 +6,10 @@ use falcondeck_core::{
     ApprovalDecision, AssistantMessagePhase, ContentLifecycle, ConversationArtifact,
     ConversationFileChange, ConversationImage, ConversationItem, ConversationMemoryCitation,
     ConversationWebSearch, InteractiveQuestion, InteractiveQuestionOption,
-    InteractiveResponsePayload, MemoryCitationEntry, ServiceLevel, ThreadPlan, ToolActivityKind,
-    ToolArtifactKind, ToolCallDetail, ToolCallDisplay, ToolCommandAction, ToolHistoryMode,
-    ToolMcpAppContext, ToolOutputContentItem, ToolProviderOutputSummary, ToolTestSummary,
-    TurnInputItem, WebSearchActionKind,
+    InteractiveResponsePayload, MemoryCitationEntry, PlanApprovalOutcome, ServiceLevel, ThreadPlan,
+    ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolCallDisplay, ToolCommandAction,
+    ToolHistoryMode, ToolMcpAppContext, ToolOutputContentItem, ToolProviderOutputSummary,
+    ToolTestSummary, TurnInputItem, WebSearchActionKind,
 };
 use futures_util::future::join_all;
 use regex::Regex;
@@ -1758,6 +1758,18 @@ pub(super) fn parse_interactive_response_params(
                     })
                     .unwrap_or_default(),
             }),
+            "plan_approval" => {
+                let outcome = match extract_string(response, &["outcome"]).as_deref() {
+                    Some("approved") => PlanApprovalOutcome::Approved,
+                    Some("cancelled") => PlanApprovalOutcome::Cancelled,
+                    Some("abandoned") => PlanApprovalOutcome::Abandoned,
+                    _ => return Err("unsupported plan approval outcome".to_string()),
+                };
+                Ok(InteractiveResponsePayload::PlanApproval {
+                    outcome,
+                    feedback: extract_string(response, &["feedback"]),
+                })
+            }
             _ => Err("unsupported interactive response kind".to_string()),
         };
     }
@@ -1773,6 +1785,31 @@ pub(super) fn parse_interactive_response_params(
             decision: ApprovalDecision::AlwaysAllow,
         }),
         _ => Err("interactive response payload is missing a supported response".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod interactive_response_tests {
+    use super::*;
+
+    #[test]
+    fn parses_remote_plan_revision_feedback() {
+        let response = parse_interactive_response_params(&serde_json::json!({
+            "response": {
+                "kind": "plan_approval",
+                "outcome": "cancelled",
+                "feedback": "Add a rollback test"
+            }
+        }))
+        .expect("plan response should parse");
+
+        assert_eq!(
+            response,
+            InteractiveResponsePayload::PlanApproval {
+                outcome: PlanApprovalOutcome::Cancelled,
+                feedback: Some("Add a rollback test".to_string()),
+            }
+        );
     }
 }
 

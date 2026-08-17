@@ -1427,6 +1427,7 @@ pub(super) fn interactive_request_counts(
             |(approvals, questions), request| match request.request.kind {
                 InteractiveRequestKind::Approval => (approvals + 1, questions),
                 InteractiveRequestKind::Question => (approvals, questions + 1),
+                InteractiveRequestKind::PlanApproval => (approvals + 1, questions),
             },
         )
 }

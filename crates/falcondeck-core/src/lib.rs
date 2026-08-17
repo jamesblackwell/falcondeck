@@ -2435,6 +2435,18 @@ pub enum ApprovalDecision {
     AlwaysAllow,
 }
 
+/// Possible responses to a provider-authored implementation plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanApprovalOutcome {
+    /// Approve the plan and let the agent begin implementation.
+    Approved,
+    /// Keep the agent in plan mode and return optional revision feedback.
+    Cancelled,
+    /// Abandon the proposed plan without beginning implementation.
+    Abandoned,
+}
+
 /// Structured payload returned when resolving an interactive request.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -2448,6 +2460,14 @@ pub enum InteractiveResponsePayload {
     Question {
         /// Answers grouped by question identifier.
         answers: std::collections::HashMap<String, Vec<String>>,
+    },
+    /// Response payload for provider-authored implementation plans.
+    PlanApproval {
+        /// Terminal outcome expected by the provider's plan-mode request.
+        outcome: PlanApprovalOutcome,
+        /// Optional revision feedback when the plan is not approved.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        feedback: Option<String>,
     },
 }
 
@@ -2472,6 +2492,12 @@ pub enum InteractiveRequestOutcome {
     Denied,
     /// The user submitted answers. Answer values are deliberately not retained.
     Answered,
+    /// The implementation plan was approved.
+    PlanApproved,
+    /// The implementation plan was returned for changes.
+    PlanChangesRequested,
+    /// The implementation plan was abandoned.
+    PlanAbandoned,
     /// The request expired before it could be answered.
     Expired,
     /// The request was cancelled without an answer.
@@ -2492,6 +2518,11 @@ impl InteractiveRequestResolution {
                 ApprovalDecision::AlwaysAllow => InteractiveRequestOutcome::AlwaysAllowed,
             },
             InteractiveResponsePayload::Question { .. } => InteractiveRequestOutcome::Answered,
+            InteractiveResponsePayload::PlanApproval { outcome, .. } => match outcome {
+                PlanApprovalOutcome::Approved => InteractiveRequestOutcome::PlanApproved,
+                PlanApprovalOutcome::Cancelled => InteractiveRequestOutcome::PlanChangesRequested,
+                PlanApprovalOutcome::Abandoned => InteractiveRequestOutcome::PlanAbandoned,
+            },
         };
         Self {
             outcome,
@@ -3185,6 +3216,8 @@ pub enum InteractiveRequestKind {
     Approval,
     /// Question prompt.
     Question,
+    /// Provider-authored implementation plan awaiting review.
+    PlanApproval,
 }
 
 /// Single interactive question presented to the user.
@@ -4649,6 +4682,25 @@ mod tests {
             !json.contains("do-not-retain-this"),
             "resolution leaked answer: {json}"
         );
+    }
+
+    #[test]
+    fn plan_revision_resolution_does_not_retain_feedback() {
+        let response = InteractiveResponsePayload::PlanApproval {
+            outcome: PlanApprovalOutcome::Cancelled,
+            feedback: Some("do-not-retain-this".to_string()),
+        };
+        let resolution = InteractiveRequestResolution::from_response(
+            &response,
+            "2026-08-09T12:00:00Z".parse().unwrap(),
+        );
+        let json = serde_json::to_string(&resolution).unwrap();
+
+        assert_eq!(
+            resolution.outcome,
+            InteractiveRequestOutcome::PlanChangesRequested
+        );
+        assert!(!json.contains("do-not-retain-this"));
     }
 
     #[test]

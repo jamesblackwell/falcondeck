@@ -2968,6 +2968,70 @@ pub(super) async fn respond_to_interactive_request(
             message: Some("response sent".to_string()),
         });
     }
+    if pending.request.method == "x.ai/exit_plan_mode" {
+        let InteractiveResponsePayload::PlanApproval { outcome, feedback } = response else {
+            return Err(DaemonError::BadRequest(
+                "ACP plan reviews require a plan approval response".to_string(),
+            ));
+        };
+        if let Err(error) = app
+            .respond_acp_plan_approval(
+                &workspace_id,
+                pending.request.thread_id.as_deref(),
+                &request_id,
+                outcome,
+                feedback,
+            )
+            .await
+        {
+            if matches!(error, DaemonError::NotFound(_)) {
+                discard_unanswerable_interactive_request(
+                    app,
+                    &workspace_id,
+                    &request_id,
+                    pending.request.thread_id.as_deref(),
+                )
+                .await;
+                return Err(DaemonError::BadRequest(
+                    "This plan review is no longer live — the agent exited before it was answered. Send the message again.".to_string(),
+                ));
+            }
+            return Err(error);
+        }
+        app.inner
+            .interactive_requests
+            .lock()
+            .await
+            .remove(&request_key);
+        if let Some(thread_id) = pending.request.thread_id {
+            let still_waiting =
+                thread_has_pending_interactive_request(app, &workspace_id, &thread_id).await;
+            app.with_thread_mut(&workspace_id, &thread_id, |thread| {
+                if !still_waiting && matches!(thread.status, ThreadStatus::WaitingForInput) {
+                    thread.status = ThreadStatus::Running;
+                }
+            })
+            .await?;
+            app.resolve_interactive_request_item(
+                &workspace_id,
+                &thread_id,
+                &request_id,
+                Some(resolution),
+            )
+            .await?;
+        }
+        app.emit(
+            Some(workspace_id),
+            None,
+            UnifiedEvent::Snapshot {
+                snapshot: app.snapshot().await,
+            },
+        );
+        return Ok(CommandResponse {
+            ok: true,
+            message: Some("response sent".to_string()),
+        });
+    }
     if pending.request.method == "opencode/permission" {
         let InteractiveResponsePayload::Approval { decision } = response else {
             return Err(DaemonError::BadRequest(
@@ -3086,6 +3150,12 @@ pub(super) async fn respond_to_interactive_request(
                 "interactive question requires question answers".to_string(),
             ));
         }
+        (InteractiveRequestKind::PlanApproval, _) => {
+            return Err(DaemonError::BadRequest(
+                "plan approval requests are only supported by their originating ACP runtime"
+                    .to_string(),
+            ));
+        }
     };
 
     session.respond_to_request(pending.raw_id, result).await?;
@@ -3191,6 +3261,12 @@ fn validate_interactive_response(
         }
         (InteractiveRequestKind::Question, _) => Err(DaemonError::BadRequest(
             "interactive question requires question answers".to_string(),
+        )),
+        (InteractiveRequestKind::PlanApproval, InteractiveResponsePayload::PlanApproval { .. }) => {
+            Ok(())
+        }
+        (InteractiveRequestKind::PlanApproval, _) => Err(DaemonError::BadRequest(
+            "interactive plan review requires a plan approval response".to_string(),
         )),
     }
 }
@@ -3835,6 +3911,34 @@ mod tests {
             questions: Vec::new(),
             ..question_request(&[])
         }
+    }
+
+    #[test]
+    fn plan_reviews_only_accept_plan_approval_responses() {
+        let request = InteractiveRequest {
+            kind: InteractiveRequestKind::PlanApproval,
+            approval_decisions: None,
+            title: "Review implementation plan".to_string(),
+            method: "x.ai/exit_plan_mode".to_string(),
+            detail: Some("## Plan".to_string()),
+            questions: Vec::new(),
+            ..question_request(&[])
+        };
+        let response = InteractiveResponsePayload::PlanApproval {
+            outcome: falcondeck_core::PlanApprovalOutcome::Cancelled,
+            feedback: Some("Add a rollback test".to_string()),
+        };
+
+        assert!(validate_interactive_response(&request, &response).is_ok());
+        assert!(
+            validate_interactive_response(
+                &request,
+                &InteractiveResponsePayload::Approval {
+                    decision: ApprovalDecision::Allow,
+                },
+            )
+            .is_err()
+        );
     }
 
     #[test]

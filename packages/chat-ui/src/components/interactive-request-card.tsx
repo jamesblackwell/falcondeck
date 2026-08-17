@@ -7,10 +7,11 @@ import {
   type InteractiveRequest,
   type InteractiveResponsePayload,
 } from '@falcondeck/client-core'
-import { Badge, Button, Input } from '@falcondeck/ui'
+import { Badge, Button, Input, Textarea } from '@falcondeck/ui'
 
 import { isComposingKeyboardEvent } from '../lib/keyboard'
 import { CodeBlock } from './code-block'
+import { MessageMarkdown } from './message-markdown'
 
 export type InteractiveRequestCardProps = {
   request: InteractiveRequest
@@ -19,10 +20,7 @@ export type InteractiveRequestCardProps = {
   onRespond?: (response: InteractiveResponsePayload) => void | Promise<void>
 }
 
-function mergeQuestionAnswers(
-  selectedOption: string | null,
-  customAnswer: string,
-) {
+function mergeQuestionAnswers(selectedOption: string | null, customAnswer: string) {
   const trimmedCustomAnswer = customAnswer.trim()
   if (trimmedCustomAnswer.length > 0) {
     return [trimmedCustomAnswer]
@@ -41,6 +39,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [planFeedback, setPlanFeedback] = useState('')
   const evidence = interactiveRequestEvidencePresentation(request)
   const approvalDecisions = interactiveApprovalDecisions(request)
 
@@ -49,11 +48,8 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
     () =>
       Object.fromEntries(
         request.questions.map((question) => [
-            question.id,
-            mergeQuestionAnswers(
-              selectedOptions[question.id] ?? null,
-              customAnswers[question.id] ?? '',
-            ),
+          question.id,
+          mergeQuestionAnswers(selectedOptions[question.id] ?? null, customAnswers[question.id] ?? ''),
         ]),
       ),
     [customAnswers, request.questions, selectedOptions],
@@ -61,17 +57,17 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   const allQuestionsAnswered =
     request.kind !== 'question' ||
     request.questions.every((question) => (questionAnswers[question.id] ?? []).length > 0)
-  const currentQuestion = request.kind === 'question' ? request.questions[currentQuestionIndex] ?? null : null
+  const currentQuestion = request.kind === 'question' ? (request.questions[currentQuestionIndex] ?? null) : null
   const currentQuestionAnswer =
     currentQuestion && request.kind === 'question' ? (questionAnswers[currentQuestion.id] ?? []) : []
   const currentQuestionAnswered = currentQuestionAnswer.length > 0
-  const isLastQuestion =
-    request.kind === 'question' ? currentQuestionIndex >= request.questions.length - 1 : true
+  const isLastQuestion = request.kind === 'question' ? currentQuestionIndex >= request.questions.length - 1 : true
 
   useEffect(() => {
     setCurrentQuestionIndex(0)
     setSelectedOptions({})
     setCustomAnswers({})
+    setPlanFeedback('')
     setSubmitError(null)
   }, [request.request_id])
 
@@ -144,7 +140,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
   return (
     <div className="rounded-[var(--fd-radius-md)] border border-warning/20 bg-warning-muted px-4 py-3">
       <div className="flex items-start gap-2.5">
-        {request.kind === 'approval' ? (
+        {request.kind === 'approval' || request.kind === 'plan_approval' ? (
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
         ) : (
           <HelpCircle className="mt-0.5 h-4 w-4 shrink-0 text-info" />
@@ -152,17 +148,23 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">{request.title}</p>
-            <Badge variant={resolved ? 'success' : request.kind === 'approval' ? 'warning' : 'info'}>
-              {resolved ? 'Resolved' : request.kind === 'approval' ? 'Approval required' : 'Response required'}
+            <Badge variant={resolved ? 'success' : request.kind === 'question' ? 'info' : 'warning'}>
+              {resolved
+                ? 'Resolved'
+                : request.kind === 'plan_approval'
+                  ? 'Plan review required'
+                  : request.kind === 'approval'
+                    ? 'Approval required'
+                    : 'Response required'}
             </Badge>
             {!resolved && pendingCount > 1 ? (
-              <span className="text-[length:var(--fd-text-xs)] text-fg-muted">
-                1 of {pendingCount}
-              </span>
+              <span className="text-[length:var(--fd-text-xs)] text-fg-muted">1 of {pendingCount}</span>
             ) : null}
           </div>
-          {evidence.detail ? (
-            <p className="mt-1 whitespace-pre-wrap text-[length:var(--fd-text-xs)] text-fg-secondary">{evidence.detail}</p>
+          {evidence.detail && request.kind !== 'plan_approval' ? (
+            <p className="mt-1 whitespace-pre-wrap text-[length:var(--fd-text-xs)] text-fg-secondary">
+              {evidence.detail}
+            </p>
           ) : null}
           {evidence.command ? (
             <div className="mt-2">
@@ -170,9 +172,19 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
             </div>
           ) : null}
           {evidence.path ? (
-            <p className="mt-1 break-all font-mono text-[length:var(--fd-text-xs)] text-fg-tertiary">
-              {evidence.path}
-            </p>
+            <p className="mt-1 break-all font-mono text-[length:var(--fd-text-xs)] text-fg-tertiary">{evidence.path}</p>
+          ) : null}
+
+          {request.kind === 'plan_approval' ? (
+            <div className="mt-3 max-h-[min(55vh,36rem)] overflow-y-auto rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1/70 p-4">
+              {evidence.detail ? (
+                <MessageMarkdown text={evidence.detail} defer={false} interpretDirectives={false} />
+              ) : (
+                <p role="alert" className="text-[length:var(--fd-text-xs)] text-danger">
+                  This provider did not supply a plan to review.
+                </p>
+              )}
+            </div>
           ) : null}
 
           {request.kind === 'question' && currentQuestion ? (
@@ -249,9 +261,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                   disabled={!canRespond || isSubmitting}
                   onChange={(event) => handleQuestionChange(currentQuestion.id, event.target.value)}
                   onKeyDown={handleQuestionInputKeyDown}
-                  placeholder={
-                    currentQuestion.options?.length ? 'Or type your own answer' : 'Enter your answer'
-                  }
+                  placeholder={currentQuestion.options?.length ? 'Or type your own answer' : 'Enter your answer'}
                 />
               </div>
             </div>
@@ -261,7 +271,7 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
             </p>
           ) : null}
 
-          {canRespond && (request.kind === 'approval' || currentQuestion) ? (
+          {canRespond && (request.kind === 'approval' || request.kind === 'plan_approval' || currentQuestion) ? (
             <div className="mt-3 flex flex-wrap gap-2">
               {request.kind === 'approval' ? (
                 <>
@@ -292,12 +302,72 @@ export const InteractiveRequestCard = memo(function InteractiveRequestCard({
                       size="sm"
                       variant="ghost"
                       disabled={isSubmitting}
-                      onClick={() => void submit({ kind: 'approval', decision: 'always_allow' })}
+                      onClick={() =>
+                        void submit({
+                          kind: 'approval',
+                          decision: 'always_allow',
+                        })
+                      }
                     >
                       Always allow
                     </Button>
                   ) : null}
                 </>
+              ) : request.kind === 'plan_approval' ? (
+                <div className="grid w-full gap-2">
+                  <Textarea
+                    aria-label="Requested plan changes"
+                    value={planFeedback}
+                    disabled={isSubmitting}
+                    onChange={(event) => setPlanFeedback(event.target.value)}
+                    placeholder="Describe changes you want before implementation"
+                    rows={3}
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={isSubmitting}
+                      onClick={() =>
+                        void submit({
+                          kind: 'plan_approval',
+                          outcome: 'abandoned',
+                        })
+                      }
+                    >
+                      Abandon plan
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="secondary"
+                      disabled={isSubmitting || !planFeedback.trim()}
+                      onClick={() =>
+                        void submit({
+                          kind: 'plan_approval',
+                          outcome: 'cancelled',
+                          feedback: planFeedback.trim(),
+                        })
+                      }
+                    >
+                      Request changes
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={isSubmitting || !evidence.detail}
+                      onClick={() =>
+                        void submit({
+                          kind: 'plan_approval',
+                          outcome: 'approved',
+                        })
+                      }
+                    >
+                      Approve and implement
+                    </Button>
+                  </div>
+                </div>
               ) : (
                 <>
                   <Button

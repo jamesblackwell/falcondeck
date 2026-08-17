@@ -4,6 +4,7 @@ const scenario = process.argv[2] ?? 'normal'
 const sessionId = 'fixture-session-1'
 let promptCount = 0
 let permissionPromptId = null
+let planPromptId = null
 let cancelPromptId = null
 
 function send(message) {
@@ -62,6 +63,20 @@ input.on('line', (line) => {
     return
   }
 
+  if (message.id === 901 && planPromptId !== null) {
+    if (message.result?.outcome === 'approved') {
+      result(planPromptId, { stopReason: 'end_turn' })
+    } else {
+      send({
+        jsonrpc: '2.0',
+        id: planPromptId,
+        error: { code: -32000, message: 'probe did not approve the plan' },
+      })
+    }
+    planPromptId = null
+    return
+  }
+
   if (message.method === 'session/cancel' && cancelPromptId !== null) {
     result(cancelPromptId, { stopReason: 'cancelled' })
     cancelPromptId = null
@@ -111,6 +126,20 @@ input.on('line', (line) => {
 
   if (message.method === 'session/prompt') {
     promptCount += 1
+    if (scenario === 'plan-approval') {
+      planPromptId = message.id
+      send({
+        jsonrpc: '2.0',
+        id: 901,
+        method: 'x.ai/exit_plan_mode',
+        params: {
+          sessionId,
+          toolCallId: 'fixture-plan-1',
+          planContent: '## Fixture plan\n\n1. Add the regression test.',
+        },
+      })
+      return
+    }
     if (promptCount === 1) {
       update({ sessionUpdate: 'available_commands_update', availableCommands: [] })
       update({ sessionUpdate: 'provider_extension', fixtureValue: true })

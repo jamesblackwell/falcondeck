@@ -55,12 +55,140 @@ export const InteractiveRequestBanner = memo(function InteractiveRequestBanner({
     );
   }
 
+  if (request.kind === "plan_approval") {
+    return (
+      <PlanApprovalBanner
+        request={request}
+        pendingCount={pendingCount}
+        onRespond={onRespond}
+      />
+    );
+  }
+
   return (
     <QuestionBanner
       request={request}
       pendingCount={pendingCount}
       onRespond={onRespond}
     />
+  );
+});
+
+const PlanApprovalBanner = memo(function PlanApprovalBanner({
+  request,
+  pendingCount = 1,
+  onRespond,
+}: Props) {
+  const { theme } = useUnistyles();
+  const [feedback, setFeedback] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setFeedback("");
+    setSubmitError(null);
+  }, [request.request_id]);
+
+  async function submit(outcome: "approved" | "cancelled" | "abandoned") {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setSubmitError(null);
+    try {
+      await onRespond({
+        kind: "plan_approval",
+        outcome,
+        feedback: outcome === "cancelled" ? feedback.trim() : undefined,
+      });
+      void Haptics.notificationAsync(
+        outcome === "abandoned"
+          ? Haptics.NotificationFeedbackType.Warning
+          : Haptics.NotificationFeedbackType.Success,
+      );
+    } catch (error) {
+      setSubmitError(
+        error instanceof Error ? error.message : "Failed to send your response",
+      );
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <View
+      style={[styles.container, styles.planContainer]}
+      accessibilityLiveRegion="polite"
+    >
+      <View style={styles.header}>
+        <View style={styles.icon}>
+          <HelpCircle
+            accessible={false}
+            size={16}
+            color={theme.colors.warning.default}
+          />
+        </View>
+        <View style={styles.heading}>
+          <Text variant="caption" color="warning" weight="semibold">
+            Plan review required
+          </Text>
+          <Text selectable variant="label" color="primary">
+            {request.title}
+          </Text>
+        </View>
+        {pendingCount > 1 ? (
+          <Text variant="caption" color="muted">
+            1 of {pendingCount}
+          </Text>
+        ) : null}
+      </View>
+
+      <View style={styles.planContent}>
+        <Text selectable variant="caption" color="secondary">
+          {request.detail || "This provider did not supply a plan to review."}
+        </Text>
+      </View>
+
+      <Input
+        accessibilityLabel="Requested plan changes"
+        value={feedback}
+        editable={!isSubmitting}
+        multiline
+        numberOfLines={3}
+        placeholder="Describe changes you want before implementation"
+        onChangeText={setFeedback}
+      />
+
+      <View style={styles.actions}>
+        <Button
+          variant="secondary"
+          size="sm"
+          label="Abandon plan"
+          disabled={isSubmitting}
+          onPress={() => void submit("abandoned")}
+        />
+        <Button
+          variant="secondary"
+          size="sm"
+          label="Request changes"
+          disabled={isSubmitting || !feedback.trim()}
+          onPress={() => void submit("cancelled")}
+        />
+        <Button
+          variant="default"
+          size="sm"
+          label="Approve and implement"
+          loading={isSubmitting}
+          disabled={isSubmitting || !request.detail}
+          onPress={() => void submit("approved")}
+        />
+      </View>
+
+      {submitError ? (
+        <Text accessibilityRole="alert" variant="caption" color="danger">
+          {submitError}
+        </Text>
+      ) : null}
+    </View>
   );
 });
 
@@ -353,6 +481,10 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.info.muted,
     padding: theme.spacing[3],
   },
+  planContainer: {
+    borderColor: theme.colors.warning.default,
+    backgroundColor: theme.colors.warning.muted,
+  },
   header: { flexDirection: "row", alignItems: "center", gap: theme.spacing[2] },
   icon: {
     width: 32,
@@ -363,6 +495,14 @@ const styles = StyleSheet.create((theme) => ({
     backgroundColor: theme.colors.surface[1],
   },
   heading: { flex: 1, gap: 1 },
+  planContent: {
+    borderWidth: 1,
+    borderColor: theme.colors.border.subtle,
+    borderRadius: theme.radius.md,
+    borderCurve: "continuous",
+    backgroundColor: theme.colors.surface[1],
+    padding: theme.spacing[3],
+  },
   question: {
     gap: theme.spacing[2],
     borderWidth: 1,

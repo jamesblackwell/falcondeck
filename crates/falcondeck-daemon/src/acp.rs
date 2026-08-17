@@ -26,8 +26,8 @@ use tokio::time::{Duration, timeout};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use falcondeck_core::{
-    AgentProvider, ApprovalDecision, CollaborationModeSummary, ImageInput, ModelSummary, PlanStep,
-    ReasoningEffortSummary, ThreadPlan,
+    AgentProvider, ApprovalDecision, CollaborationModeSummary, ImageInput, ModelSummary,
+    PlanApprovalOutcome, PlanStep, ReasoningEffortSummary, ThreadPlan,
 };
 
 use crate::acp_protocol::AcpSessionUpdateKind;
@@ -638,6 +638,13 @@ pub enum AcpEvent {
         detail: Option<String>,
         options: Vec<AcpPermissionOption>,
     },
+    /// Grok asks the user to approve, revise, or abandon an implementation plan.
+    PlanApprovalRequest {
+        session_id: String,
+        request_id: String,
+        tool_call_id: Option<String>,
+        plan_content: String,
+    },
     /// The agent finished a prompt turn; ordered after that turn's deltas.
     /// `stop_reason` is the agent-reported reason (`end_turn`, `cancelled`,
     /// `refusal`, ...); `None` means the prompt request itself failed.
@@ -654,6 +661,11 @@ struct PendingPermission {
     raw_id: Value,
     session_id: String,
     options: Vec<AcpPermissionOption>,
+}
+
+struct PendingPlanApproval {
+    raw_id: Value,
+    session_id: String,
 }
 
 /// Remembered identity and last-known output for an announced tool call.
@@ -697,6 +709,7 @@ pub struct AcpRuntime {
     /// the recoverable session with a fresh one.
     session_gates: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     permission_requests: Mutex<HashMap<String, PendingPermission>>,
+    plan_approval_requests: Mutex<HashMap<String, PendingPlanApproval>>,
     /// Per-session accumulating assistant item for the current turn.
     current_items: Mutex<HashMap<String, (String, String)>>,
     /// Per-session accumulating reasoning item for the current turn.
@@ -1181,6 +1194,7 @@ impl AcpRuntime {
             threads_by_session: Mutex::new(HashMap::new()),
             session_gates: Mutex::new(HashMap::new()),
             permission_requests: Mutex::new(HashMap::new()),
+            plan_approval_requests: Mutex::new(HashMap::new()),
             current_items: Mutex::new(HashMap::new()),
             current_thought_items: Mutex::new(HashMap::new()),
             current_user_items: Mutex::new(HashMap::new()),
@@ -1905,10 +1919,10 @@ impl AcpRuntime {
                 }),
             )
             .await;
-        // The turn is over; any permission request the agent left unanswered
-        // can never be acted on, so resolve it as cancelled rather than
-        // leaving the agent (and our map) holding a dead request.
+        // The turn is over; any reverse request the agent left unanswered can
+        // never be acted on, so retire it rather than retaining dead state.
         self.cancel_pending_permissions(session_id).await;
+        self.cancel_pending_plan_approvals(session_id).await;
         // The read loop delivers messages in order, so a vendor failure
         // notice written before the error response is already recorded here.
         let result = match result {
@@ -2111,6 +2125,7 @@ impl AcpRuntime {
         self.notify("session/cancel", json!({ "sessionId": session_id }))
             .await?;
         self.cancel_pending_permissions(session_id).await;
+        self.cancel_pending_plan_approvals(session_id).await;
         Ok(())
     }
 
@@ -2134,6 +2149,30 @@ impl AcpRuntime {
                     "jsonrpc": "2.0",
                     "id": pending.raw_id,
                     "result": { "outcome": { "outcome": "cancelled" } }
+                }))
+                .await;
+        }
+    }
+
+    /// Abandons every pending Grok plan review for a cancelled or ended turn.
+    pub async fn cancel_pending_plan_approvals(&self, session_id: &str) {
+        let drained = {
+            let mut requests = self.plan_approval_requests.lock().await;
+            let ids = requests
+                .iter()
+                .filter(|(_, pending)| pending.session_id == session_id)
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| requests.remove(&id))
+                .collect::<Vec<_>>()
+        };
+        for pending in drained {
+            let _ = self
+                .write_message(&json!({
+                    "jsonrpc": "2.0",
+                    "id": pending.raw_id,
+                    "result": { "outcome": "abandoned" }
                 }))
                 .await;
         }
@@ -2168,6 +2207,41 @@ impl AcpRuntime {
             "result": {
                 "outcome": { "outcome": "selected", "optionId": option.option_id }
             }
+        }))
+        .await
+    }
+
+    /// Answers a pending Grok `x.ai/exit_plan_mode` reverse request.
+    pub async fn respond_plan_approval(
+        &self,
+        request_id: &str,
+        outcome: PlanApprovalOutcome,
+        feedback: Option<String>,
+    ) -> Result<(), DaemonError> {
+        let pending = self
+            .plan_approval_requests
+            .lock()
+            .await
+            .remove(request_id)
+            .ok_or_else(|| DaemonError::NotFound("ACP plan approval not found".to_string()))?;
+        let result = match outcome {
+            PlanApprovalOutcome::Approved => json!({ "outcome": "approved" }),
+            PlanApprovalOutcome::Cancelled => {
+                let feedback = feedback
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|feedback| !feedback.is_empty());
+                match feedback {
+                    Some(feedback) => json!({ "outcome": "cancelled", "feedback": feedback }),
+                    None => json!({ "outcome": "cancelled" }),
+                }
+            }
+            PlanApprovalOutcome::Abandoned => json!({ "outcome": "abandoned" }),
+        };
+        self.write_message(&json!({
+            "jsonrpc": "2.0",
+            "id": pending.raw_id,
+            "result": result
         }))
         .await
     }
@@ -2331,6 +2405,10 @@ impl AcpRuntime {
             "session/request_permission" => {
                 let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
                 self.handle_permission_request(raw_id, &params).await;
+            }
+            "x.ai/exit_plan_mode" => {
+                let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
+                self.handle_plan_approval_request(raw_id, &params).await;
             }
             // Filesystem and terminal capabilities are declined during
             // initialize; refuse politely if an agent tries anyway.
@@ -2644,6 +2722,52 @@ impl AcpRuntime {
             options,
         });
     }
+
+    async fn handle_plan_approval_request(&self, raw_id: Value, params: &Value) {
+        let session_id = params
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if self
+            .threads_by_session
+            .lock()
+            .await
+            .get(&session_id)
+            .is_none()
+        {
+            let _ = self
+                .write_message(&json!({
+                    "jsonrpc": "2.0",
+                    "id": raw_id,
+                    "result": { "outcome": "abandoned" }
+                }))
+                .await;
+            return;
+        }
+
+        let request_id = format!("acp-plan-{}", uuid::Uuid::new_v4().simple());
+        self.plan_approval_requests.lock().await.insert(
+            request_id.clone(),
+            PendingPlanApproval {
+                raw_id,
+                session_id: session_id.clone(),
+            },
+        );
+        let _ = self.events.send(AcpEvent::PlanApprovalRequest {
+            session_id,
+            request_id,
+            tool_call_id: params
+                .get("toolCallId")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            plan_content: params
+                .get("planContent")
+                .and_then(Value::as_str)
+                .unwrap_or("The provider did not include plan content.")
+                .to_string(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -2777,6 +2901,28 @@ mod tests {
             .expect("fixture should initialize")
     }
 
+    async fn plan_approval_fixture_runtime() -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>)
+    {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let config = AcpProviderConfig {
+            id: "plan-approval-fixture".to_string(),
+            label: "Plan approval fixture".to_string(),
+            command: vec![
+                "node".to_string(),
+                fixture.to_string_lossy().into_owned(),
+                "plan-approval".to_string(),
+            ],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events, receiver) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
+            .await
+            .expect("fixture should initialize");
+        (runtime, receiver)
+    }
+
     fn command_path(command: &Command) -> Option<String> {
         command
             .as_std()
@@ -2805,6 +2951,52 @@ mod tests {
         apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &provider_env).await;
 
         assert_eq!(command_path(&command).as_deref(), Some("/custom/bin"));
+    }
+
+    #[tokio::test]
+    async fn grok_plan_mode_reverse_request_is_approved_without_cancelling_the_turn() {
+        let (runtime, mut events) = plan_approval_fixture_runtime().await;
+        let session_id = runtime
+            .ensure_session("thread-1", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .await
+            .expect("fixture session should start");
+        let prompt_runtime = Arc::clone(&runtime);
+        let prompt_session_id = session_id.clone();
+        let prompt = tokio::spawn(async move {
+            prompt_runtime
+                .prompt(
+                    &prompt_session_id,
+                    vec![json!({ "type": "text", "text": "plan first" })],
+                )
+                .await
+        });
+
+        let event = timeout(Duration::from_secs(3), events.recv())
+            .await
+            .expect("plan request should arrive")
+            .expect("event channel should remain open");
+        let AcpEvent::PlanApprovalRequest {
+            session_id: event_session_id,
+            request_id,
+            tool_call_id,
+            plan_content,
+        } = event
+        else {
+            panic!("expected a plan approval request");
+        };
+        assert_eq!(event_session_id, session_id);
+        assert_eq!(tool_call_id.as_deref(), Some("fixture-plan-1"));
+        assert!(plan_content.contains("Add the regression test"));
+
+        runtime
+            .respond_plan_approval(&request_id, PlanApprovalOutcome::Approved, None)
+            .await
+            .expect("plan response should reach fixture");
+        assert_eq!(
+            prompt.await.expect("prompt task should join").unwrap(),
+            "end_turn"
+        );
+        runtime.shutdown().await;
     }
 
     #[tokio::test]

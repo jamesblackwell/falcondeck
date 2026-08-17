@@ -71,6 +71,33 @@ function pressableWithText(
 }
 
 describe("InteractiveRequestBanner", () => {
+  it("approves Grok implementation plans with the plan-specific response", async () => {
+    const onRespond = vi.fn(async () => undefined);
+    const renderer = renderComponent(
+      <InteractiveRequestBanner
+        request={request({
+          method: "x.ai/exit_plan_mode",
+          kind: "plan_approval",
+          title: "Review implementation plan",
+          detail: "## Plan\n\n1. Add the daemon bridge.",
+          questions: [],
+        })}
+        onRespond={onRespond}
+      />,
+    );
+
+    expect(textOf(renderer)).toContain("Add the daemon bridge.");
+    await act(async () => {
+      pressableWithText(renderer, "Approve and implement")?.props.onPress();
+      await Promise.resolve();
+    });
+    expect(onRespond).toHaveBeenCalledWith({
+      kind: "plan_approval",
+      outcome: "approved",
+      feedback: undefined,
+    });
+  });
+
   it("makes provider question context selectable without changing answer controls", () => {
     const renderer = renderComponent(
       <InteractiveRequestBanner request={request()} onRespond={vi.fn()} />,

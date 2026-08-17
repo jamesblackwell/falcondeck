@@ -25,6 +25,15 @@ export function interactiveResolutionFromResponse(
   if (response.kind === "question") {
     return { outcome: "answered", resolved_at: resolvedAt };
   }
+  if (response.kind === "plan_approval") {
+    const outcome =
+      response.outcome === "approved"
+        ? "plan_approved"
+        : response.outcome === "cancelled"
+          ? "plan_changes_requested"
+          : "plan_abandoned";
+    return { outcome, resolved_at: resolvedAt };
+  }
   const outcome =
     response.decision === "allow"
       ? "allowed"
@@ -151,6 +160,12 @@ export function interactiveRequestReceiptPresentation(
       return { label: `Denied ${approvalSubject}`, tone: "danger" };
     case "answered":
       return { label: `Answered: ${title}`, tone: "info" };
+    case "plan_approved":
+      return { label: `Approved: ${title}`, tone: "success" };
+    case "plan_changes_requested":
+      return { label: `Changes requested: ${title}`, tone: "warning" };
+    case "plan_abandoned":
+      return { label: `Abandoned: ${title}`, tone: "danger" };
     case "expired":
       return { label: `Expired: ${title}`, tone: "warning" };
     case "cancelled":

@@ -330,6 +330,23 @@ describe("interactive request boundary normalization", () => {
     ).toEqual([]);
   });
 
+  it("normalizes Grok plan approvals without treating plan text as a question", () => {
+    expect(
+      normalizeInteractiveRequest({
+        request_id: "plan-1",
+        workspace_id: "workspace-1",
+        kind: "plan_approval",
+        detail: "## Implementation plan",
+        questions: [{ id: "wrong-shape", question: "Should be ignored" }],
+      }),
+    ).toMatchObject({
+      kind: "plan_approval",
+      title: "Review implementation plan",
+      detail: "## Implementation plan",
+      questions: [],
+    });
+  });
+
   it("filters invalid pending requests from daemon snapshots", () => {
     const snapshot = normalizeDaemonSnapshot({
       interactive_requests: [

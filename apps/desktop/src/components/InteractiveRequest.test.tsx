@@ -37,19 +37,39 @@ function questionRequest(overrides: Partial<InteractiveRequest> = {}): Interacti
     path: null,
     turn_id: 'turn-1',
     item_id: 'item-1',
-    questions: [{
-      id: 'region',
-      header: 'Region',
-      question: 'Which region?',
-      options: [
-        { label: 'London', description: 'UK region' },
-        { label: 'Virginia', description: 'US region' },
-      ],
-      is_other: false,
-      is_secret: false,
-    }],
+    questions: [
+      {
+        id: 'region',
+        header: 'Region',
+        question: 'Which region?',
+        options: [
+          { label: 'London', description: 'UK region' },
+          { label: 'Virginia', description: 'US region' },
+        ],
+        is_other: false,
+        is_secret: false,
+      },
+    ],
     created_at: '2026-08-06T10:00:00Z',
     ...overrides,
+  }
+}
+
+function planRequest(): InteractiveRequest {
+  return {
+    request_id: 'plan-1',
+    workspace_id: 'workspace-1',
+    thread_id: 'thread-1',
+    method: 'x.ai/exit_plan_mode',
+    kind: 'plan_approval',
+    title: 'Review implementation plan',
+    detail: '## Ship the fix\n\n1. Add the daemon bridge.\n2. Test reconnects.',
+    command: null,
+    path: null,
+    turn_id: null,
+    item_id: 'grok-plan-tool',
+    questions: [],
+    created_at: '2026-08-06T10:00:00Z',
   }
 }
 
@@ -67,9 +87,7 @@ describe('InteractiveRequestBar', () => {
       created_at: '2026-08-06T10:00:01Z',
     }
     const onRespond = vi.fn()
-    const { rerender } = render(
-      <InteractiveRequestBar requests={[newest, oldest]} onRespond={onRespond} />,
-    )
+    const { rerender } = render(<InteractiveRequestBar requests={[newest, oldest]} onRespond={onRespond} />)
 
     expect(screen.getByText('2 responses pending')).toBeVisible()
     expect(screen.getByText('1 of 2')).toBeVisible()
@@ -92,8 +110,8 @@ describe('InteractiveRequestBar', () => {
     expect(screen.getByText('Runs the release suite.')).toBeVisible()
     expect(screen.getByText('/workspace/falcondeck')).toBeVisible()
     expect(screen.queryByText(/\{"command"/)).toBeNull()
-    const code = screen.getByText((_, element) =>
-      element?.tagName === 'CODE' && Boolean(element.textContent?.includes('release step 1')),
+    const code = screen.getByText(
+      (_, element) => element?.tagName === 'CODE' && Boolean(element.textContent?.includes('release step 1')),
     )
     expect(code).toHaveTextContent('release step 4')
     expect(code).not.toHaveTextContent('release step 7')
@@ -137,10 +155,10 @@ describe('InteractiveRequestBar', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Always allow' }))
 
     await waitFor(() => {
-      expect(onRespond).toHaveBeenCalledWith(
-        expect.objectContaining({ request_id: 'request-1' }),
-        { kind: 'approval', decision: 'always_allow' },
-      )
+      expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ request_id: 'request-1' }), {
+        kind: 'approval',
+        decision: 'always_allow',
+      })
     })
   })
 
@@ -159,11 +177,45 @@ describe('InteractiveRequestBar', () => {
     request.approval_decisions = []
     render(<InteractiveRequestBar requests={[request]} onRespond={vi.fn()} />)
 
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      'This provider did not supply an approval decision.',
-    )
+    expect(screen.getByRole('alert')).toHaveTextContent('This provider did not supply an approval decision.')
     expect(screen.queryByRole('button', { name: 'Allow' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument()
+  })
+
+  it('renders and approves a Grok plan through the plan-specific response contract', async () => {
+    const onRespond = vi.fn().mockResolvedValue(undefined)
+    render(<InteractiveRequestBar requests={[planRequest()]} onRespond={onRespond} />)
+
+    expect(screen.getByRole('heading', { name: 'Ship the fix' })).toBeVisible()
+    expect(screen.getByText('Add the daemon bridge.')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Request changes' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve and implement' }))
+
+    await waitFor(() => {
+      expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ request_id: 'plan-1' }), {
+        kind: 'plan_approval',
+        outcome: 'approved',
+      })
+    })
+  })
+
+  it('returns plan revision feedback to Grok', async () => {
+    const onRespond = vi.fn().mockResolvedValue(undefined)
+    render(<InteractiveRequestBar requests={[planRequest()]} onRespond={onRespond} />)
+
+    fireEvent.change(screen.getByLabelText('Requested plan changes'), {
+      target: { value: 'Add a rollback test.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }))
+
+    await waitFor(() => {
+      expect(onRespond).toHaveBeenCalledWith(expect.objectContaining({ request_id: 'plan-1' }), {
+        kind: 'plan_approval',
+        outcome: 'cancelled',
+        feedback: 'Add a rollback test.',
+      })
+    })
   })
 
   it('does not advance a question while an IME candidate is being composed', () => {
@@ -191,12 +243,7 @@ describe('InteractiveRequestBar', () => {
   })
 
   it('surfaces a malformed empty question instead of rendering dead controls', () => {
-    render(
-      <InteractiveRequestBar
-        requests={[questionRequest({ questions: [] })]}
-        onRespond={vi.fn()}
-      />,
-    )
+    render(<InteractiveRequestBar requests={[questionRequest({ questions: [] })]} onRespond={vi.fn()} />)
 
     expect(screen.getByRole('alert')).toHaveTextContent('did not supply a question')
     expect(screen.queryByRole('button', { name: 'Submit answer' })).not.toBeInTheDocument()

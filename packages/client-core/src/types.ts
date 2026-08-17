@@ -543,9 +543,11 @@ export type ThreadVariant = {
   kind: "clone" | "worktree";
 };
 
-export type InteractiveRequestKind = "approval" | "question";
+export type InteractiveRequestKind = "approval" | "question" | "plan_approval";
 
 export type ApprovalDecision = "allow" | "deny" | "always_allow";
+
+export type PlanApprovalOutcome = "approved" | "cancelled" | "abandoned";
 
 export type InteractiveQuestionOption = {
   label: string;
@@ -589,6 +591,11 @@ export type InteractiveResponsePayload =
   | {
       kind: "question";
       answers: Record<string, string[]>;
+    }
+  | {
+      kind: "plan_approval";
+      outcome: PlanApprovalOutcome;
+      feedback?: string | null;
     };
 
 export type InteractiveRequestOutcome =
@@ -596,6 +603,9 @@ export type InteractiveRequestOutcome =
   | "always_allowed"
   | "denied"
   | "answered"
+  | "plan_approved"
+  | "plan_changes_requested"
+  | "plan_abandoned"
   | "expired"
   | "cancelled";
 

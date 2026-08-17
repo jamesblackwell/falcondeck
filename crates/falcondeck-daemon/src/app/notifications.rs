@@ -2911,6 +2911,7 @@ pub(super) async fn ingest_server_request(
             match request.kind {
                 InteractiveRequestKind::Approval => "approval",
                 InteractiveRequestKind::Question => "question",
+                InteractiveRequestKind::PlanApproval => "approval",
             },
             workspace_id,
             request.thread_id.clone(),
