@@ -23,6 +23,7 @@ const thread = {
 
 function renderInfo(overrides: Partial<ReviewInfoContext> = {}, count = 7) {
   const onSelectChangedFile = vi.fn()
+  const onViewAllChanges = vi.fn()
   render(
     <InfoView
       info={{
@@ -36,9 +37,10 @@ function renderInfo(overrides: Partial<ReviewInfoContext> = {}, count = 7) {
       isLoading={false}
       error={null}
       onSelectChangedFile={onSelectChangedFile}
+      onViewAllChanges={onViewAllChanges}
     />,
   )
-  return { onSelectChangedFile }
+  return { onSelectChangedFile, onViewAllChanges }
 }
 
 describe('InfoView', () => {
@@ -46,10 +48,11 @@ describe('InfoView', () => {
     renderInfo()
     expect(screen.getByText('Local')).toBeInTheDocument()
     expect(screen.getByText('Project folder')).toBeInTheDocument()
-    expect(screen.getByText('/Users/James/www/sites/lucidpic')).toBeInTheDocument()
+    // Displayed home-relative, but the tooltip keeps the absolute path.
+    const directory = screen.getByText('~/www/sites/lucidpic')
+    expect(directory).toHaveAttribute('title', '/Users/James/www/sites/lucidpic')
     expect(screen.getByText('main')).toBeInTheDocument()
-    expect(screen.getByText('Dirty')).toBeInTheDocument()
-    expect(screen.getByText('7 files,')).toBeInTheDocument()
+    expect(screen.getByText('7 files')).toBeInTheDocument()
     expect(screen.getByText('+14')).toBeInTheDocument()
     expect(screen.getByText('-7')).toBeInTheDocument()
   })
@@ -81,14 +84,19 @@ describe('InfoView', () => {
     })
     expect(screen.getByText('quizgecko-ops-2')).toBeInTheDocument()
     expect(screen.getByText('Isolated clone')).toBeInTheDocument()
-    expect(
-      screen.getByText('/Users/James/.falcondeck/clones/fix-login'),
-    ).toBeInTheDocument()
+    expect(screen.getByText('~/.falcondeck/clones/fix-login')).toBeInTheDocument()
   })
 
   it('reports a clean checkout with no file list', () => {
     renderInfo({}, 0)
-    expect(screen.getByText('Clean')).toBeInTheDocument()
-    expect(screen.queryByText(/Uncommitted/)).not.toBeInTheDocument()
+    expect(screen.getByText('Working tree clean')).toBeInTheDocument()
+    expect(screen.queryByText('Uncommitted')).not.toBeInTheDocument()
+  })
+
+  it('hands a changeset too large to expand over to the changes tab', () => {
+    const { onViewAllChanges } = renderInfo({}, 40)
+    expect(screen.queryByRole('button', { name: /Show 35 more/ })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'View all 40 in Changes' }))
+    expect(onViewAllChanges).toHaveBeenCalled()
   })
 })
