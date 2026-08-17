@@ -111,6 +111,50 @@ describe("extension snapshot normalization", () => {
     ]);
   });
 
+  it("stays idempotent so a re-normalized snapshot reports no fake unsupported kinds", () => {
+    const raw = {
+      catalog: [
+        {
+          id: "falcondeck.thread-tags",
+          name: "Thread Colours",
+          version: "0.2.0",
+          contributes: {
+            threadDecorations: [{ id: "tag", view: "tag-view" }],
+            statusBarItems: [{ id: "future", title: "Future item" }],
+          },
+        },
+      ],
+      views: [],
+    };
+
+    const once = normalizeExtensionSnapshot(raw);
+    const twice = normalizeExtensionSnapshot(once);
+
+    expect(once.catalog[0]?.contributes.unsupported).toEqual([
+      {
+        kind: "statusBarItems",
+        entries: [{ id: "future", title: "Future item" }],
+      },
+    ]);
+    expect(twice).toEqual(once);
+  });
+
+  it("drops unsupported contribution kinds that carry no entries", () => {
+    const normalized = normalizeExtensionSnapshot({
+      catalog: [
+        {
+          id: "example.extension",
+          name: "Example",
+          version: "1.0.0",
+          contributes: { statusBarItems: [] },
+        },
+      ],
+      views: [],
+    });
+
+    expect(normalized.catalog[0]?.contributes.unsupported).toEqual([]);
+  });
+
   it("normalizes panels as a known declarative contribution", () => {
     const normalized = normalizeExtensionSnapshot({
       catalog: [

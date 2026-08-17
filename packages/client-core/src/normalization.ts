@@ -1573,7 +1573,14 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
             const id = normalizeId(view.id);
             const viewId = normalizeId(view.view);
             const normalizedUi = normalizeExtensionUiDocument(view.ui);
-            const hasUi = Object.hasOwn(view, "ui");
+            // A null `ui` is what this function emits for a contribution that
+            // declared none, so it has to read as "no UI" and not as a
+            // malformed document — otherwise re-normalizing our own output
+            // invents an unsupported reason and blocks rendering.
+            const hasUi =
+              Object.hasOwn(view, "ui") &&
+              view.ui !== null &&
+              view.ui !== undefined;
             return id && viewId
               ? [
                   {
@@ -1594,12 +1601,41 @@ export function normalizeExtensionSnapshot(value: unknown): ExtensionSnapshot {
       "threadDecorations",
       "sidebarFilters",
       "panels",
+      // `unsupported` is this function's own output key. Snapshots get
+      // normalized more than once on their way to the UI, so treating it as an
+      // unknown kind would make the second pass report our own bookkeeping as
+      // an unrenderable contribution.
+      "unsupported",
     ]);
-    const unsupported = Object.entries(contributions).flatMap(
-      ([kind, entries]) =>
+    const carriedUnsupported = Array.isArray(contributions.unsupported)
+      ? contributions.unsupported.flatMap((candidate) => {
+          if (
+            !candidate ||
+            typeof candidate !== "object" ||
+            Array.isArray(candidate)
+          )
+            return [];
+          const entry = candidate as Record<string, unknown>;
+          return typeof entry.kind === "string" &&
+            entry.kind.length > 0 &&
+            Array.isArray(entry.entries)
+            ? [{ kind: entry.kind, entries: entry.entries }]
+            : [];
+        })
+      : [];
+    const unsupported = [
+      ...carriedUnsupported,
+      ...Object.entries(contributions).flatMap(([kind, entries]) =>
         !knownKinds.has(kind) && Array.isArray(entries)
           ? [{ kind, entries }]
           : [],
+      ),
+    ].filter(
+      (contribution, index, all) =>
+        // An empty entry list has nothing for a client to render, so warning
+        // about it would be noise.
+        contribution.entries.length > 0 &&
+        all.findIndex((other) => other.kind === contribution.kind) === index,
     );
     return {
       threadMenuActions: actions,
