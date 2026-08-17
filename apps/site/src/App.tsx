@@ -1,339 +1,366 @@
-import type { ReactNode } from 'react'
+import { useEffect, type ReactNode } from 'react'
 
-import {
-  ArrowRight,
-  Boxes,
-  Check,
-  ChevronRight,
-  CircleDot,
-  Code2,
-  Download,
-  Gauge,
-  Github,
-  LockKeyhole,
-  Puzzle,
-  Server,
-  Smartphone,
-  Zap,
-} from 'lucide-react'
-import { Button } from '@falcondeck/ui'
+import { Check, ChevronLeft, ChevronRight, CircleDot, Code2, Download, Github, Zap } from 'lucide-react'
 
 const REPO_URL = 'https://github.com/jamesblackwell/falcondeck'
 const RELEASES_URL = 'https://github.com/jamesblackwell/falcondeck/releases'
 const APP_URL = 'https://app.falcondeck.com'
+const SELF_HOSTING_URL = 'https://github.com/jamesblackwell/falcondeck/blob/main/docs/SELF-HOSTING.md'
 
-function ProductPreview() {
+/** The key badges in the hero are real: `d` downloads, `s` opens the source. */
+function useKeyShortcuts() {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.metaKey || event.ctrlKey || event.altKey || event.defaultPrevented) return
+      const target = event.target as HTMLElement | null
+      if (target && (target.isContentEditable || /^(input|textarea|select)$/i.test(target.tagName))) return
+
+      const key = event.key.toLowerCase()
+      if (key === 'd') window.location.href = RELEASES_URL
+      else if (key === 's') window.location.href = REPO_URL
+    }
+
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+}
+
+function KeyBadge({ children, variant }: { children: string; variant?: 'ghost' }) {
+  return <kbd className={variant === 'ghost' ? 'key-badge key-badge--ghost' : 'key-badge'}>{children}</kbd>
+}
+
+function Feature({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div className="product-preview" aria-label="FalconDeck product preview">
-      <div className="product-preview__glow" aria-hidden="true" />
-      <div className="window-frame">
-        <div className="window-frame__bar">
-          <div className="window-frame__dots" aria-hidden="true">
-            <span />
-            <span />
-            <span />
+    <div className="feature">
+      <h2>{title}</h2>
+      <p>{children}</p>
+    </div>
+  )
+}
+
+function Thread({ title, meta, active }: { title: string; meta: string; active?: boolean }) {
+  return (
+    <div className={active ? 'mock-thread mock-thread--active' : 'mock-thread'}>
+      <CircleDot aria-hidden="true" />
+      <span>
+        <strong>{title}</strong>
+        <small>{meta}</small>
+      </span>
+    </div>
+  )
+}
+
+function ToolRow({ label, file, state }: { label: string; file: string; state: 'done' | 'running' }) {
+  return (
+    <div className={state === 'running' ? 'mock-tool mock-tool--running' : 'mock-tool'}>
+      {state === 'running' ? <Zap aria-hidden="true" /> : <Check aria-hidden="true" />}
+      <span>
+        {label} <code>{file}</code>
+      </span>
+      <small>{state}</small>
+    </div>
+  )
+}
+
+function DesktopMock() {
+  return (
+    <div className="mock-window">
+      <div className="mock-window__bar">
+        <div className="mock-window__dots" aria-hidden="true">
+          <span />
+          <span />
+          <span />
+        </div>
+        <div className="mock-window__title">
+          <img src="/logomark-mark-light.svg" alt="" />
+          falcondeck / control plane
+        </div>
+        <div />
+      </div>
+
+      <div className="mock-window__body">
+        <aside className="mock-sidebar">
+          <div className="mock-sidebar__workspace">
+            <span className="mock-avatar">F</span>
+            <span>
+              <strong>FalconDeck</strong>
+              <small>local workspace</small>
+            </span>
+            <ChevronRight aria-hidden="true" />
           </div>
-          <div className="window-frame__title">
-            <img src="/icon-192.png" alt="" />
-            falcondeck / control plane
+
+          <p className="mock-label">Workspaces</p>
+          <div className="mock-project">
+            <span className="mock-project__mark">⌘</span>
+            <span>falcondeck</span>
+            <span className="mock-project__count">2</span>
           </div>
-          <div className="window-frame__status">
+
+          <p className="mock-label mock-label--spaced">Threads</p>
+          <Thread title="Add user authentication" meta="Claude · just now" active />
+          <Thread title="Fix database migration" meta="Codex · 45 min ago" />
+          <Thread title="Rename relay events" meta="OpenCode · 2 h ago" />
+
+          <div className="mock-sidebar__footer">
             <span className="status-dot" />
-            daemon online
+            <span>2 agents connected</span>
+          </div>
+        </aside>
+
+        <main className="mock-conversation">
+          <div className="mock-conversation__header">
+            <div>
+              <p className="mock-label">Thread · Claude Sonnet 4.6</p>
+              <h3>Add user authentication</h3>
+            </div>
+            <span className="mock-pill">LIVE</span>
+          </div>
+
+          <div className="mock-message mock-message--user">
+            Add JWT authentication to the Express API. Use bcrypt for password hashing.
+          </div>
+          <div className="mock-message mock-message--agent">
+            I&apos;ll map the existing routes first, then add the auth middleware and run the test suite.
+          </div>
+
+          <div className="mock-tools">
+            <ToolRow label="Read" file="src/server.ts" state="done" />
+            <ToolRow label="Edit" file="src/middleware/auth.ts" state="done" />
+            <ToolRow label="Run" file="npm test" state="running" />
+          </div>
+
+          <div className="mock-composer">
+            <span>Ask Claude to continue…</span>
+            <span className="mock-composer__send">↑</span>
+          </div>
+        </main>
+
+        <aside className="mock-inspector">
+          <p className="mock-label">Session</p>
+          <div className="mock-inspector__state">
+            <span className="status-dot" />
+            <span>
+              <strong>Desktop online</strong>
+              <small>encrypted connection</small>
+            </span>
+          </div>
+
+          <div className="mock-inspector__row">
+            <span>Provider</span>
+            <strong>Claude</strong>
+          </div>
+          <div className="mock-inspector__row">
+            <span>Permission mode</span>
+            <strong>On request</strong>
+          </div>
+
+          <div className="mock-inspector__divider" />
+
+          <p className="mock-label">Workspace</p>
+          <div className="mock-inspector__path">
+            <Code2 aria-hidden="true" />
+            <code>~/Sites/falcondeck</code>
+          </div>
+
+          <div className="mock-diff">
+            <span>
+              <i className="mock-diff__bar mock-diff__bar--add" />
+              <strong>+42</strong>
+            </span>
+            <span>
+              <i className="mock-diff__bar mock-diff__bar--del" />
+              <strong>-8</strong>
+            </span>
+          </div>
+          <small className="mock-diff__caption">working tree</small>
+        </aside>
+      </div>
+    </div>
+  )
+}
+
+function PhoneMock() {
+  return (
+    <div className="mock-phone">
+      <div className="mock-phone__screen">
+        <div className="mock-phone__status">
+          <span>9:41</span>
+          <span className="mock-phone__paired">
+            <span className="status-dot" />
+            paired
+          </span>
+        </div>
+
+        <div className="mock-phone__header">
+          <ChevronLeft aria-hidden="true" />
+          <span>
+            <strong>Add user authentication</strong>
+            <small>falcondeck · Claude</small>
+          </span>
+          <span className="mock-pill mock-pill--sm">LIVE</span>
+        </div>
+
+        <div className="mock-phone__body">
+          <div className="mock-message mock-message--user">Add JWT authentication to the Express API.</div>
+          <div className="mock-message mock-message--agent">
+            I&apos;ll map the existing routes first, then add the auth middleware and run the test suite.
+          </div>
+          <div className="mock-tools">
+            <div className="mock-tool">
+              <Check aria-hidden="true" />
+              <span>
+                Edit <code>auth.ts</code>
+              </span>
+            </div>
+            <div className="mock-tool mock-tool--running">
+              <Zap aria-hidden="true" />
+              <span>
+                Run <code>npm test</code>
+              </span>
+              <small>running</small>
+            </div>
           </div>
         </div>
 
-        <div className="product-preview__body">
-          <aside className="preview-sidebar">
-            <div className="preview-sidebar__workspace">
-              <span className="preview-avatar">F</span>
-              <span>
-                <strong>FalconDeck</strong>
-                <small>local workspace</small>
-              </span>
-              <ChevronRight className="preview-chevron" aria-hidden="true" />
-            </div>
-            <p className="preview-label">WORKSPACES</p>
-            <div className="preview-project preview-project--active">
-              <span className="preview-project__mark">⌘</span>
-              <span>falcondeck</span>
-              <span className="preview-project__count">2</span>
-            </div>
-            <p className="preview-label preview-label--threads">THREADS</p>
-            <div className="preview-thread preview-thread--active">
-              <CircleDot aria-hidden="true" />
-              <span>
-                <strong>Add user authentication</strong>
-                <small>Claude · just now</small>
-              </span>
-            </div>
-            <div className="preview-thread">
-              <CircleDot aria-hidden="true" />
-              <span>
-                <strong>Fix database migration</strong>
-                <small>Codex · 45 min ago</small>
-              </span>
-            </div>
-            <div className="preview-sidebar__footer">
-              <span className="preview-footer-dot" />
-              <span>2 agents connected</span>
-            </div>
-          </aside>
-
-          <main className="preview-conversation">
-            <div className="preview-conversation__header">
-              <div>
-                <p className="preview-kicker">THREAD · CLAUDE OPUS</p>
-                <h3>Add user authentication</h3>
-              </div>
-              <span className="preview-pill">LIVE</span>
-            </div>
-            <div className="preview-message preview-message--user">
-              Add JWT authentication to the Express API. Use bcrypt for password hashing.
-            </div>
-            <div className="preview-message preview-message--assistant">
-              I&apos;ll map the existing routes first, then add the auth middleware and run the test suite.
-            </div>
-            <div className="preview-tool-list">
-              <div className="preview-tool preview-tool--done">
-                <Check aria-hidden="true" />
-                <span>Read <code>src/server.ts</code></span>
-                <small>done</small>
-              </div>
-              <div className="preview-tool preview-tool--done">
-                <Check aria-hidden="true" />
-                <span>Edit <code>src/middleware/auth.ts</code></span>
-                <small>done</small>
-              </div>
-              <div className="preview-tool preview-tool--active">
-                <Zap aria-hidden="true" />
-                <span>Run <code>npm test</code></span>
-                <small>running</small>
-              </div>
-            </div>
-            <div className="preview-composer">
-              <span>Ask Claude to continue…</span>
-              <span className="preview-composer__send">↑</span>
-            </div>
-          </main>
-
-          <aside className="preview-inspector">
-            <p className="preview-label">SESSION</p>
-            <div className="preview-inspector__state">
-              <span className="status-dot" />
-              <span>
-                <strong>Desktop online</strong>
-                <small>encrypted connection</small>
-              </span>
-            </div>
-            <div className="preview-inspector__row">
-              <span>Provider</span>
-              <strong>Claude</strong>
-            </div>
-            <div className="preview-inspector__row">
-              <span>Permission mode</span>
-              <strong>On request</strong>
-            </div>
-            <div className="preview-inspector__divider" />
-            <p className="preview-label">WORKSPACE</p>
-            <div className="preview-inspector__path">
-              <Code2 aria-hidden="true" />
-              <code>~/Sites/falcondeck</code>
-            </div>
-            <div className="preview-diff">
-              <div>
-                <span className="preview-diff__bar preview-diff__bar--green" />
-                <strong>+42</strong>
-              </div>
-              <div>
-                <span className="preview-diff__bar preview-diff__bar--red" />
-                <strong>-8</strong>
-              </div>
-              <small>working tree</small>
-            </div>
-          </aside>
+        <div className="mock-phone__composer">
+          <span>Reply from your phone…</span>
+          <span className="mock-composer__send">↑</span>
         </div>
       </div>
     </div>
   )
 }
 
-function Card({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
-  return (
-    <article className="surface-card">
-      <div className="surface-card__icon" aria-hidden="true">{icon}</div>
-      <h3>{title}</h3>
-      <p>{description}</p>
-    </article>
-  )
-}
-
 export default function App() {
+  useKeyShortcuts()
+
   return (
-    <div className="site-shell">
-      <div className="site-grid" aria-hidden="true" />
+    <div className="site-frame">
+      <div className="site-rail site-rail--left" aria-hidden="true" />
+      <div className="site-rail site-rail--right" aria-hidden="true" />
 
       <header className="site-header">
+        <a className="brand-lockup" href="#top" aria-label="FalconDeck home">
+          <img src="/logomark-mark-light.svg" alt="" />
+          <span>FalconDeck</span>
+        </a>
         <nav className="site-nav" aria-label="Main navigation">
-          <a className="brand-lockup" href="#top" aria-label="FalconDeck home">
-            <img src="/icon-192.png" alt="" />
-            <span>FalconDeck</span>
-          </a>
-          <div className="site-nav__actions">
-            <a className="nav-link" href={RELEASES_URL}>
-              <Download className="icon-xs" aria-hidden="true" />
-              Download
-            </a>
-            <a className="nav-link" href={APP_URL}>
-              Remote client
-            </a>
-            <Button size="sm" asChild>
-              <a href={REPO_URL}>
-                <Github className="icon-xs" aria-hidden="true" />
-                GitHub
-              </a>
-            </Button>
-          </div>
+          <a href="#product">Product</a>
+          <a href="#security">Security</a>
+          <a href="#architecture">Architecture</a>
+          <a href={REPO_URL}>Docs</a>
         </nav>
+        <div className="site-header__actions">
+          <a className="nav-link" href={APP_URL}>
+            Remote client
+          </a>
+          <a className="btn btn--accent btn--sm" href={RELEASES_URL}>
+            Download
+            <KeyBadge>D</KeyBadge>
+          </a>
+        </div>
       </header>
 
-      <main id="top">
-        <section className="hero section-wrap">
-          <div className="hero__copy">
-            <p className="eyebrow">OPEN SOURCE · LOCAL-FIRST</p>
-            <h1>Code with <span>any agent, on every screen.</span></h1>
-            <p className="hero__lede">
-              Keep the harnesses and model subscriptions you already use close to your code. Continue the same live
-              work from your desktop, browser, or phone — with no second copy of the conversation to catch up.
+      <main>
+        <section className="hero" id="top">
+          <p className="eyebrow">
+            <span className="status-dot" />
+            Open source · local-first
+          </p>
+          <h1>One control plane for every coding agent.</h1>
+          <p className="hero__lede">
+            A native Mac app that runs Codex, Claude Code, OpenCode, and any ACP harness against your own code. Sessions
+            sync instantly, so the same live thread continues on your phone or browser.
+          </p>
+          <div className="hero__actions">
+            <a className="btn btn--accent" href={RELEASES_URL}>
+              <Download aria-hidden="true" />
+              Download for Mac
+              <KeyBadge>D</KeyBadge>
+            </a>
+            <a className="btn btn--outline" href={REPO_URL}>
+              <Github aria-hidden="true" />
+              Read the source
+              <KeyBadge variant="ghost">S</KeyBadge>
+            </a>
+          </div>
+          <p className="hero__footnote">Available for macOS · MIT licensed · written in Rust</p>
+        </section>
+
+        <section className="features" id="product">
+          <Feature title="Any harness">
+            Run Codex, Claude Code, OpenCode, and other ACP agents with the subscriptions and model access you already
+            have.
+          </Feature>
+          <Feature title="Local-first">
+            Your daemon and native agent storage stay the source of truth. The relay only pairs, replays, and
+            reconnects.
+          </Feature>
+          <Feature title="In sync">
+            One daemon owns the live turn, so desktop, browser, and phone follow the same thread with nothing to catch
+            up.
+          </Feature>
+        </section>
+
+        <section className="showcase">
+          <div className="showcase__caption">
+            <p>FalconDeck desktop · live Claude session</p>
+            <p className="showcase__status">
+              <span className="status-dot" />
+              Daemon online
             </p>
-            <div className="hero__actions">
-              <Button size="lg" asChild>
-                <a href={REPO_URL}>
-                  <Github className="icon-sm" aria-hidden="true" />
-                  Read the source
-                  <ArrowRight className="icon-sm" aria-hidden="true" />
-                </a>
-              </Button>
-              <Button variant="outline" size="lg" asChild>
-                <a href={RELEASES_URL}>
-                  <Download className="icon-sm" aria-hidden="true" />
-                  Download for Mac
-                </a>
-              </Button>
-            </div>
-            <div className="hero__proof">
-              <span><Check className="icon-xs" aria-hidden="true" /> MIT licensed</span>
-              <span><Check className="icon-xs" aria-hidden="true" /> End-to-end encrypted</span>
-              <span><Check className="icon-xs" aria-hidden="true" /> Rust based</span>
-            </div>
           </div>
-          <ProductPreview />
-        </section>
-
-        <section className="section-wrap section-block">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">THE IMPORTANT PARTS</p>
-              <h2>Everything you need to keep coding moving.</h2>
+          <div className="showcase__stage">
+            <div className="showcase__desktop">
+              <DesktopMock />
             </div>
-            <p>
-              FalconDeck is a fast, open control plane for coding agents. It keeps your files and agent sessions where
-              they belong, then makes the work available wherever you are.
-            </p>
-          </div>
-          <div className="surface-grid">
-            <Card
-              icon={<Server aria-hidden="true" />}
-              title="Open source, self-hostable"
-              description="The daemon, relay, clients, and protocol are open source and fully self-hostable. Run the whole stack on infrastructure you control."
-            />
-            <Card
-              icon={<LockKeyhole aria-hidden="true" />}
-              title="Use the relay with confidence"
-              description="Pair your phone or browser in minutes using our hosted relay. The connection is end-to-end encrypted, so you can test the fast path before self-hosting."
-            />
-            <Card
-              icon={<Boxes aria-hidden="true" />}
-              title="Bring any harness"
-              description="Use Codex, Claude, OpenCode, Pi, and other ACP-compatible harnesses with the subscriptions and model access you already have."
-            />
-            <Card
-              icon={<Smartphone aria-hidden="true" />}
-              title="Desktop and mobile, in sync"
-              description="One daemon owns the live work, so your desktop, browser, and phone follow the same thread without laggy sync or competing copies."
-            />
-            <Card
-              icon={<Gauge aria-hidden="true" />}
-              title="Fast by design"
-              description="A native Rust app and server keep streaming output, approvals, and tool calls responsive while the agent works."
-            />
-            <Card
-              icon={<Puzzle aria-hidden="true" />}
-              title="Extensible from the start"
-              description="Add extensions, actions, and connectors to fit your workflow. New harnesses can arrive through configuration instead of a rewrite."
-            />
+            <PhoneMock />
           </div>
         </section>
 
-        <section className="section-wrap section-block">
-          <div className="relay-card">
-            <div>
-              <p className="eyebrow">TRY IT FIRST</p>
-              <h2>Use our relay today. Self-host when you need to.</h2>
-              <p>
-                You should not have to run your own infrastructure just to see whether remote coding fits your day.
-                Start with the hosted relay, pair your phone, and move to your own relay whenever you want.
-              </p>
-            </div>
-            <div className="relay-card__points" aria-label="Relay benefits">
-              <span><Check className="icon-xs" aria-hidden="true" /> End-to-end encrypted</span>
-              <span><Check className="icon-xs" aria-hidden="true" /> No hosted conversation database</span>
-              <span><Check className="icon-xs" aria-hidden="true" /> Self-hostable whenever you are ready</span>
-            </div>
+        <section className="harnesses" id="architecture">
+          <p className="harnesses__label">Works with</p>
+          <div className="harnesses__list">
+            <span>Codex</span>
+            <span>Claude Code</span>
+            <span>OpenCode</span>
+            <span>Pi</span>
+            <span className="harnesses__more">+ any ACP harness</span>
           </div>
         </section>
 
-        <section className="section-wrap cta-section">
-          <div className="cta-card">
-            <div>
-              <p className="eyebrow">OPEN SOURCE · EXTENSIBLE</p>
-              <h2>Start with the agents you already use.</h2>
-              <p>
-                Download the desktop app, pair your phone, or inspect the code and run the stack yourself. FalconDeck
-                is built to fit around your workflow, not replace it.
-              </p>
-            </div>
-            <div className="cta-card__actions">
-              <Button size="lg" asChild>
-                <a href={REPO_URL}>
-                  <Github className="icon-sm" aria-hidden="true" />
-                  Read the source
-                  <ArrowRight className="icon-sm" aria-hidden="true" />
-                </a>
-              </Button>
-              <a className="text-link" href={RELEASES_URL}>
-                Download desktop builds <ChevronRight className="icon-xs" aria-hidden="true" />
-              </a>
-              <a className="text-link" href={APP_URL}>
-                Open the remote client <ChevronRight className="icon-xs" aria-hidden="true" />
-              </a>
-            </div>
+        <section className="security" id="security">
+          <div className="security__points">
+            <span>
+              <Check aria-hidden="true" />
+              End-to-end encrypted
+            </span>
+            <span>
+              <Check aria-hidden="true" />
+              No hosted conversation database
+            </span>
+            <span>
+              <Check aria-hidden="true" />
+              Self-hostable relay
+            </span>
           </div>
+          <a className="text-link" href={SELF_HOSTING_URL}>
+            Self-hosting guide
+            <ChevronRight aria-hidden="true" />
+          </a>
         </section>
       </main>
 
       <footer className="site-footer">
-        <div className="site-footer__inner">
-          <div className="brand-lockup brand-lockup--footer">
-            <img src="/icon-192.png" alt="" />
-            <span>FalconDeck</span>
-          </div>
-          <p>Open source control for the agents you already use.</p>
-          <div className="site-footer__links">
-            <a href={REPO_URL}>GitHub</a>
-            <a href={RELEASES_URL}>Releases</a>
-            <a href={APP_URL}>Remote client</a>
-          </div>
+        <div className="site-footer__brand">
+          <img src="/logomark-mark-light.svg" alt="" />
+          <span>FalconDeck</span>
+          <small>Open-source control plane for the agents you already use.</small>
+        </div>
+        <div className="site-footer__links">
+          <a href={REPO_URL}>GitHub</a>
+          <a href={RELEASES_URL}>Releases</a>
+          <a href={APP_URL}>Remote client</a>
         </div>
       </footer>
     </div>
