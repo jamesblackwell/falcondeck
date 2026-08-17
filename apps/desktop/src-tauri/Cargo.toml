@@ -8,16 +8,19 @@ name = "falcondeck_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
+cc = "1.2.49"
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 falcondeck-core = { path = "../../../crates/falcondeck-core" }
 falcondeck-daemon = { path = "../../../crates/falcondeck-daemon" }
+base64 = "0.22.1"
 open = "5.3.3"
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "http2"] }
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs"] }
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-notification = "2.3.3"
 tauri-plugin-updater = "2.10.1"

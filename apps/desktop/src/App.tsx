@@ -171,6 +171,7 @@ import {
   useShortcutSettings,
 } from "./shortcuts";
 import { sendDesktopAttentionNotification } from "./desktop-notifications";
+import { useDesktopDictation } from "./dictation";
 import { resolveMainView } from "./main-view-registry";
 
 // Stable empty array so conversations without attachments don't bust the
@@ -249,6 +250,7 @@ function AppInner() {
     setSelectedThreadId,
     gitRefreshTrigger,
   } = useDaemonConnection({ externalSnapshots: hostSnapshots });
+  useDesktopDictation(baseUrl);
   const updater = useAppUpdater();
   const {
     sidebarVisible,

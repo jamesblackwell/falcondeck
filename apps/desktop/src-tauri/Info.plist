@@ -3,6 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>FalconDeck uses the microphone when you choose voice input to transcribe a message.</string>
+  <string>FalconDeck uses the microphone while you hold or toggle your dictation shortcut.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>FalconDeck uses Apple Speech to turn your dictated audio into text.</string>
 </dict>
 </plist>

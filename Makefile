@@ -399,8 +399,16 @@ desktop-install: desktop-brand-assets
 		rm -rf "$(APPLICATIONS_APP)"; \
 		ditto "$(DESKTOP_BUNDLE_APP)" "$(APPLICATIONS_APP)"; \
 		if command -v codesign >/dev/null 2>&1; then \
-			echo "Ad-hoc signing FalconDeck.app for stable local macOS identity"; \
-			codesign --force --deep --sign - "$(APPLICATIONS_APP)"; \
+			signing_identity="$${FALCONDECK_LOCAL_CODESIGN_IDENTITY:--}"; \
+			if [ "$$signing_identity" = "-" ]; then \
+				bundle_identifier=$$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$(APPLICATIONS_APP)/Contents/Info.plist"); \
+				local_requirement="=designated => identifier \"$$bundle_identifier\""; \
+				echo "Warning: using an identifier-only ad-hoc signature for local development"; \
+				codesign --force --deep --sign - --requirements "$$local_requirement" "$(APPLICATIONS_APP)"; \
+			else \
+				echo "Signing FalconDeck.app with local identity $$signing_identity"; \
+				codesign --force --deep --sign "$$signing_identity" "$(APPLICATIONS_APP)"; \
+			fi; \
 		fi; \
 		echo "Installed $(APPLICATIONS_APP)"; \
 		echo "Opening FalconDeck.app"; \

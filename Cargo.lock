@@ -1384,10 +1384,13 @@ dependencies = [
 name = "falcondeck-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "cc",
  "falcondeck-core",
  "falcondeck-daemon",
  "mac-usernotifications",
  "open",
+ "reqwest",
  "rustls",
  "serde",
  "serde_json",

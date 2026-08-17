@@ -13,6 +13,7 @@ export default defineConfig({
       input: {
         main: 'index.html',
         activity: 'activity-window.html',
+        dictation: 'dictation-window.html',
       },
     },
   },

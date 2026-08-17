@@ -16,6 +16,7 @@ use tauri::{async_runtime::Mutex, AppHandle, Manager, RunEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 mod desktop_notifications;
+mod dictation;
 
 /// Kept in sync with ACTIVITY_WINDOW_LABEL in src/activity-window-bridge.ts.
 const ACTIVITY_WINDOW_LABEL: &str = "activity";
@@ -590,6 +591,9 @@ pub fn run() {
                 .plugin(tauri_plugin_updater::Builder::new().build())
                 .map_err(|error| error.to_string())?;
 
+            dictation::initialize(app.handle());
+            dictation::create_overlay_window(app.handle())?;
+
             if cfg!(debug_assertions) {
                 return Ok(());
             }
@@ -611,7 +615,17 @@ pub fn run() {
             focus_main_window,
             desktop_notifications::macos_notification_permission_state,
             desktop_notifications::request_macos_notification_permission,
-            desktop_notifications::send_macos_notification
+            desktop_notifications::send_macos_notification,
+            dictation::configure_dictation,
+            dictation::dictation_audio_devices,
+            dictation::dictation_permission_status,
+            dictation::request_dictation_permissions,
+            dictation::start_dictation,
+            dictation::stop_dictation,
+            dictation::cancel_dictation,
+            dictation::retry_dictation,
+            dictation::discard_dictation,
+            dictation::open_dictation_accessibility_settings
         ])
         .build(tauri::generate_context!())
         .expect("failed to build FalconDeck desktop");
@@ -654,6 +668,7 @@ pub fn run() {
                 });
         }
         RunEvent::Exit if !cfg!(debug_assertions) => {
+            dictation::shutdown();
             let state = app_handle.state::<DesktopState>();
             tauri::async_runtime::block_on(async move { shutdown_embedded_daemon(state).await });
         }
