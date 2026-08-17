@@ -265,12 +265,14 @@ export default function App() {
         <section className="hero" id="top">
           <p className="eyebrow">
             <span className="status-dot" />
-            Open source · local-first
+            Open source · any coding agent
           </p>
-          <h1>One control plane for every coding agent.</h1>
+          <h1>
+            <span>Start on your Mac.</span> <span>Keep going from your phone.</span>
+          </h1>
           <p className="hero__lede">
-            A native Mac app that runs Codex, Claude Code, OpenCode, and any ACP harness against your own code. Sessions
-            sync instantly, so the same live thread continues on your phone or browser.
+            FalconDeck runs Codex, Claude Code, OpenCode, and any ACP harness against your own code — then hands you the
+            same live session on your phone or browser. One daemon owns the turn, so there is nothing to catch up.
           </p>
           <div className="hero__actions">
             <a className="btn btn--accent" href={RELEASES_URL}>
@@ -284,7 +286,7 @@ export default function App() {
               <KeyBadge variant="ghost">S</KeyBadge>
             </a>
           </div>
-          <p className="hero__footnote">Available for macOS · MIT licensed · written in Rust</p>
+          <p className="hero__footnote">macOS · end-to-end encrypted · MIT licensed</p>
         </section>
 
         <section className="features" id="product">

@@ -301,6 +301,13 @@ svg {
   text-wrap: balance;
 }
 
+/* Two sentences, so the break belongs at the full stop rather than wherever
+   the measure happens to run out. Each sentence still wraps inside its own
+   block on narrow screens. */
+.hero h1 span {
+  display: block;
+}
+
 .hero__lede {
   max-width: 620px;
   margin: 26px auto 0;
