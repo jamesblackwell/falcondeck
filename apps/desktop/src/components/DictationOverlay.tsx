@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -19,17 +19,109 @@ const INITIAL_EVENT: DictationEvent = {
   retainedAudio: false,
 };
 
-function Waveform() {
+const LEVEL_EVENT = "falcondeck://dictation-level";
+const SAMPLE_INTERVAL_MS = 45;
+const MAX_SAMPLES = 180;
+
+function LiveWaveform() {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+
+    let unlisten: UnlistenFn | undefined;
+    let cancelled = false;
+    let animationFrame = 0;
+    let latestLevel = 0;
+    let displayedLevel = 0;
+    let lastSampleAt = 0;
+    let width = 0;
+    let height = 0;
+    let color = "currentColor";
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    const samples: number[] = [];
+
+    const resize = () => {
+      const bounds = canvas.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      width = bounds.width;
+      height = bounds.height;
+      color = getComputedStyle(canvas).color;
+      canvas.width = Math.max(1, Math.round(width * scale));
+      canvas.height = Math.max(1, Math.round(height * scale));
+      context.setTransform(scale, 0, 0, scale, 0, 0);
+    };
+
+    const resizeObserver = new ResizeObserver(resize);
+    resizeObserver.observe(canvas);
+    resize();
+
+    const draw = (timestamp: number) => {
+      if (timestamp - lastSampleAt >= SAMPLE_INTERVAL_MS) {
+        displayedLevel += (latestLevel - displayedLevel) * 0.55;
+        latestLevel *= 0.82;
+        samples.push(Math.max(0.025, displayedLevel));
+        if (samples.length > MAX_SAMPLES) samples.shift();
+        lastSampleAt = timestamp;
+      }
+
+      context.clearRect(0, 0, width, height);
+      const slotWidth = 6;
+      const barCount = Math.max(1, Math.floor(width / slotWidth));
+      const firstSample = Math.max(0, samples.length - barCount);
+      const visibleSamples = samples.slice(firstSample);
+      const leadingBars = barCount - visibleSamples.length;
+      context.strokeStyle = color;
+      context.lineWidth = 3;
+      context.lineCap = "round";
+
+      for (let index = 0; index < barCount; index += 1) {
+        const level =
+          index < leadingBars
+            ? 0.025
+            : (visibleSamples[index - leadingBars] ?? 0.025);
+        const barHeight = 3 + level * Math.max(0, height - 5);
+        const x = index * slotWidth + slotWidth / 2;
+        context.globalAlpha = 0.28 + (index / barCount) * 0.72;
+        context.beginPath();
+        context.moveTo(x, (height - barHeight) / 2);
+        context.lineTo(x, (height + barHeight) / 2);
+        context.stroke();
+      }
+      context.globalAlpha = 1;
+      if (!reduceMotion) {
+        animationFrame = window.requestAnimationFrame(draw);
+      }
+    };
+
+    animationFrame = window.requestAnimationFrame(draw);
+    void listen<number>(LEVEL_EVENT, (message) => {
+      latestLevel = Math.max(0, Math.min(1, message.payload));
+    }).then((nextUnlisten) => {
+      if (cancelled) nextUnlisten();
+      else unlisten = nextUnlisten;
+    });
+
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(animationFrame);
+      resizeObserver.disconnect();
+      unlisten?.();
+    };
+  }, []);
+
   return (
-    <span className="flex h-6 items-center gap-1" aria-hidden="true">
-      {[0, 1, 2, 3, 4, 5, 6].map((bar) => (
-        <span
-          key={bar}
-          className="fd-dictation-wave h-2 w-1 rounded-full bg-accent"
-          style={{ animationDelay: `${bar * 90}ms` }}
-        />
-      ))}
-    </span>
+    <canvas
+      ref={canvasRef}
+      className="h-9 min-w-0 flex-1 text-accent"
+      role="img"
+      aria-label="Live microphone level"
+    />
   );
 }
 
@@ -69,7 +161,7 @@ export function DictationOverlay() {
         className={
           failed
             ? "w-full rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1/95 px-4 py-3 shadow-[var(--fd-shadow-lg)] backdrop-blur-xl"
-            : "flex h-14 min-w-72 items-center gap-3 rounded-full border border-border-default bg-surface-1/95 px-4 shadow-[var(--fd-shadow-lg)] backdrop-blur-xl"
+            : "flex h-14 w-full items-center gap-3 rounded-full border border-border-default bg-surface-1/95 px-4 shadow-[var(--fd-shadow-lg)] backdrop-blur-xl"
         }
         role="status"
         aria-live="polite"
@@ -138,8 +230,8 @@ export function DictationOverlay() {
             <span className="min-w-24 text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
               {label}
             </span>
-            {event.state === "recording" ? <Waveform /> : null}
-            <span className="ml-auto font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
+            {event.state === "recording" ? <LiveWaveform /> : null}
+            <span className="shrink-0 font-mono text-[length:var(--fd-text-xs)] text-fg-muted">
               {event.state === "recording" ? "Esc to cancel" : ""}
             </span>
           </>

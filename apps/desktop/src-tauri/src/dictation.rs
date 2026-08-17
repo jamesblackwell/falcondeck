@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition};
 
 const DICTATION_WINDOW_LABEL: &str = "dictation";
 const DICTATION_EVENT: &str = "falcondeck://dictation-state";
+const DICTATION_LEVEL_EVENT: &str = "falcondeck://dictation-level";
 const MAX_RECORDING_BYTES: u64 = 8 * 1024 * 1024;
 const OPENROUTER_TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(75);
 
@@ -160,7 +161,7 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("dictation-window.html".into()),
     )
     .title("FalconDeck Dictation")
-    .inner_size(460.0, 156.0)
+    .inner_size(720.0, 156.0)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
@@ -276,6 +277,14 @@ fn permission_label(value: i32) -> &'static str {
         3 => "unsupported",
         _ => "not_requested",
     }
+}
+
+fn parse_audio_level(payload: &str) -> Option<f32> {
+    payload
+        .parse::<f32>()
+        .ok()
+        .filter(|level| level.is_finite())
+        .map(|level| level.clamp(0.0, 1.0))
 }
 
 #[tauri::command]
@@ -661,6 +670,11 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
             });
         }
         6 => emit_failure(&app, payload, true),
+        7 => {
+            if let Some(level) = parse_audio_level(&payload) {
+                let _ = app.emit_to(DICTATION_WINDOW_LABEL, DICTATION_LEVEL_EVENT, level);
+            }
+        }
         _ => {}
     }
 }
@@ -668,7 +682,7 @@ pub extern "C" fn fd_dictation_emit(kind: i32, payload: *const std::ffi::c_char)
 #[cfg(test)]
 mod tests {
     use super::{
-        dictation_audio_devices, permission_label, validate_local_daemon_url,
+        dictation_audio_devices, parse_audio_level, permission_label, validate_local_daemon_url,
         validate_recording_path,
     };
 
@@ -684,6 +698,14 @@ mod tests {
     #[test]
     fn permission_label_preserves_unsupported_platform_state() {
         assert_eq!(permission_label(3), "unsupported");
+    }
+
+    #[test]
+    fn audio_level_payload_is_validated_and_clamped() {
+        assert_eq!(parse_audio_level("0.42"), Some(0.42));
+        assert_eq!(parse_audio_level("2"), Some(1.0));
+        assert_eq!(parse_audio_level("-1"), Some(0.0));
+        assert_eq!(parse_audio_level("not-a-level"), None);
     }
 
     #[test]

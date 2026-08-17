@@ -3,6 +3,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <IOKit/hidsystem/IOLLEvent.h>
 #import <Speech/Speech.h>
+#include <math.h>
 #include <string.h>
 
 extern void fd_dictation_emit(int32_t kind, const char *payload);
@@ -30,6 +31,7 @@ typedef NS_ENUM(int32_t, FDEventKind) {
   FDEventCancelled = 4,
   FDEventAudioReady = 5,
   FDEventFailedRetained = 6,
+  FDEventAudioLevel = 7,
 };
 
 static const CGKeyCode FDRightCommandKeyCode = 54;
@@ -59,6 +61,7 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 @property(nonatomic, copy) NSString *inputDeviceID;
 @property(nonatomic, strong) AVCaptureSession *captureSession;
 @property(nonatomic, strong) AVCaptureAudioFileOutput *audioFileOutput;
+@property(nonatomic, strong) dispatch_source_t audioLevelTimer;
 @property(nonatomic, strong) NSURL *recordingURL;
 @property(nonatomic, strong) SFSpeechRecognizer *speechRecognizer
     API_AVAILABLE(macos(10.15));
@@ -69,6 +72,8 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 - (void)handleFlagsChanged:(CGKeyCode)keyCode flags:(CGEventFlags)flags;
 - (void)handleKeyDown:(CGKeyCode)keyCode;
 - (void)transcribeSystemRecording:(NSURL *)url API_AVAILABLE(macos(10.15));
+- (void)startAudioLevelMeter;
+- (void)stopAudioLevelMeter;
 @end
 
 static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
@@ -187,6 +192,40 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
           keyCode == FDRightCommandKeyCode) ||
          (shortcut == FDShortcutLeftFunction &&
           keyCode == FDFunctionKeyCode);
+}
+
+- (void)startAudioLevelMeter {
+  [self stopAudioLevelMeter];
+  dispatch_source_t timer = dispatch_source_create(
+      DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+  if (!timer) return;
+  self.audioLevelTimer = timer;
+  dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                            50 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
+  __weak FDDictationController *weakSelf = self;
+  dispatch_source_set_event_handler(timer, ^{
+    FDDictationController *strongSelf = weakSelf;
+    if (!strongSelf || !strongSelf.recording) return;
+    float averagePower = -160.0f;
+    for (AVCaptureConnection *connection in strongSelf.audioFileOutput.connections) {
+      for (AVCaptureAudioChannel *channel in connection.audioChannels) {
+        averagePower = MAX(averagePower, channel.averagePowerLevel);
+      }
+    }
+    // Map the useful voice range onto 0...1. The square root makes quieter
+    // speech visible without letting room noise dominate the meter.
+    float linear = MAX(0.0f, MIN(1.0f, (averagePower + 55.0f) / 55.0f));
+    float level = sqrtf(linear);
+    FDEmit(FDEventAudioLevel,
+           [NSString stringWithFormat:@"%.4f", level]);
+  });
+  dispatch_resume(timer);
+}
+
+- (void)stopAudioLevelMeter {
+  if (!self.audioLevelTimer) return;
+  dispatch_source_cancel(self.audioLevelTimer);
+  self.audioLevelTimer = nil;
 }
 
 - (BOOL)configuredModifierIsDown:(CGEventFlags)flags {
@@ -338,6 +377,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   [output startRecordingToOutputFileURL:url
                          outputFileType:AVFileTypeAppleM4A
                       recordingDelegate:self];
+  [self startAudioLevelMeter];
   FDEmit(FDEventRecording, @"");
 }
 
@@ -345,6 +385,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   if (!self.recording) return;
   self.recording = NO;
   self.stopping = YES;
+  [self stopAudioLevelMeter];
   FDEmit(FDEventProcessing, @"");
   [self.audioFileOutput stopRecording];
 }
@@ -354,6 +395,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   self.cancelling = YES;
   self.recording = NO;
   self.stopping = YES;
+  [self stopAudioLevelMeter];
   [self.audioFileOutput stopRecording];
 }
 
@@ -365,6 +407,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   (void)connections;
   dispatch_async(dispatch_get_main_queue(), ^{
     [self.captureSession stopRunning];
+    [self stopAudioLevelMeter];
     self.captureSession = nil;
     self.audioFileOutput = nil;
     self.stopping = NO;
@@ -457,13 +500,38 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 - (BOOL)pasteText:(NSString *)text {
   if (!AXIsProcessTrusted() || text.length == 0) return NO;
   NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
-  NSArray<NSPasteboardItem *> *previousItems = [pasteboard.pasteboardItems copy];
+  NSMutableArray<NSPasteboardItem *> *previousItems = [NSMutableArray array];
+  // Pasteboard items are lazy views into the current pasteboard. Keeping those
+  // objects and then clearing the pasteboard leaves dangling providers that can
+  // raise an Objective-C exception during the delayed restore. Snapshot each
+  // payload before clearing so restoration owns independent data.
+  @try {
+    for (NSPasteboardItem *item in pasteboard.pasteboardItems) {
+      NSPasteboardItem *snapshot = [[NSPasteboardItem alloc] init];
+      for (NSPasteboardType type in item.types) {
+        NSData *data = [item dataForType:type];
+        if (data) [snapshot setData:[data copy] forType:type];
+      }
+      if (snapshot.types.count > 0) [previousItems addObject:snapshot];
+    }
+  } @catch (__unused NSException *exception) {
+    [previousItems removeAllObjects];
+  }
   void (^restorePreviousClipboard)(void) = ^{
-    [pasteboard clearContents];
-    if (previousItems.count > 0) [pasteboard writeObjects:previousItems];
+    @try {
+      [pasteboard clearContents];
+      if (previousItems.count > 0) [pasteboard writeObjects:previousItems];
+    } @catch (__unused NSException *exception) {
+      // Clipboard restoration is best-effort and must never terminate the app.
+    }
   };
-  [pasteboard clearContents];
-  if (![pasteboard setString:text forType:NSPasteboardTypeString]) {
+  @try {
+    [pasteboard clearContents];
+    if (![pasteboard setString:text forType:NSPasteboardTypeString]) {
+      restorePreviousClipboard();
+      return NO;
+    }
+  } @catch (__unused NSException *exception) {
     restorePreviousClipboard();
     return NO;
   }
@@ -478,6 +546,15 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   CGEventRef pasteDown = CGEventCreateKeyboardEvent(source, (CGKeyCode)9, true);
   CGEventRef pasteUp = CGEventCreateKeyboardEvent(source, (CGKeyCode)9, false);
   CGEventRef commandUp = CGEventCreateKeyboardEvent(source, (CGKeyCode)55, false);
+  if (!commandDown || !pasteDown || !pasteUp || !commandUp) {
+    if (commandDown) CFRelease(commandDown);
+    if (pasteDown) CFRelease(pasteDown);
+    if (pasteUp) CFRelease(pasteUp);
+    if (commandUp) CFRelease(commandUp);
+    CFRelease(source);
+    restorePreviousClipboard();
+    return NO;
+  }
   CGEventSetFlags(pasteDown, kCGEventFlagMaskCommand);
   CGEventSetFlags(pasteUp, kCGEventFlagMaskCommand);
   CGEventPost(kCGHIDEventTap, commandDown);
@@ -548,6 +625,7 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (void)shutdown {
   [NSNotificationCenter.defaultCenter removeObserver:self];
+  [self stopAudioLevelMeter];
   if (@available(macOS 10.15, *)) {
     self.speechGeneration += 1;
     [self.speechTask cancel];
