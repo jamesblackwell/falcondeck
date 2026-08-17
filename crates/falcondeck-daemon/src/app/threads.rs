@@ -692,6 +692,18 @@ impl AppState {
                                     "No output from Claude for {minutes}m. Stop the turn if this looks stuck."
                                 ),
                             };
+                            // The banner is one sentence; the log carries the
+                            // state that explains it, so a stuck turn can be
+                            // diagnosed after the fact rather than re-run.
+                            tracing::warn!(
+                                %workspace_id,
+                                %thread_id,
+                                silent_secs = last_line_at.elapsed().as_secs(),
+                                saw_result,
+                                running_tools = ?running_tool_titles.values().collect::<Vec<_>>(),
+                                background_tasks = ?background_tasks,
+                                "claude turn stalled"
+                            );
                             self.push_conversation_diagnostic(
                                 &workspace_id,
                                 &thread_id,
@@ -995,8 +1007,25 @@ impl AppState {
                             // terminal notification triggers another parent
                             // response/result, which is the real boundary.
                             if is_error || background_tasks.is_empty() {
+                                tracing::info!(
+                                    %workspace_id,
+                                    %thread_id,
+                                    is_error,
+                                    "claude turn finished at result"
+                                );
                                 break;
                             }
+                            // The single most confusing state this monitor can
+                            // be in: the turn is over but the thread still
+                            // reads as running. Say so, with the tasks that
+                            // are keeping it open.
+                            tracing::info!(
+                                %workspace_id,
+                                %thread_id,
+                                held_by = background_tasks.len(),
+                                tasks = ?background_tasks,
+                                "claude result received but holding turn open for background agents"
+                            );
                         }
                     }
                     Err(error) => tracing::debug!(

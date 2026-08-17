@@ -17,6 +17,7 @@ pub mod control;
 mod error;
 mod git;
 pub mod harness_conformance;
+pub mod logging;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
 mod skills;
@@ -155,20 +156,25 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
     // connection is created; otherwise rustls panics in a background worker.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let provider_bins = config.resolved_provider_bins();
+    let state_path = config.state_path.unwrap_or_else(|| {
+        std::env::var("FALCONDECK_STATE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(
+                    std::env::var("HOME")
+                        .map(|home| format!("{home}/.falcondeck/daemon-state.json"))
+                        .unwrap_or_else(|_| ".falcondeck/daemon-state.json".to_string()),
+                )
+            })
+    });
+    // Installed here rather than in `run`: the desktop app embeds the daemon
+    // and never goes through that path, so every diagnostic it logged used to
+    // be dropped on the floor.
+    logging::init(&state_path);
     let state = AppState::new_with_state_path_and_extension_runtime(
         "0.1.0".to_string(),
         provider_bins,
-        config.state_path.unwrap_or_else(|| {
-            std::env::var("FALCONDECK_STATE_PATH")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| {
-                    PathBuf::from(
-                        std::env::var("HOME")
-                            .map(|home| format!("{home}/.falcondeck/daemon-state.json"))
-                            .unwrap_or_else(|_| ".falcondeck/daemon-state.json".to_string()),
-                    )
-                })
-        }),
+        state_path,
         config.deno_bin,
     );
     // Scheduled definitions are small, local, and must be present before the
@@ -220,14 +226,8 @@ pub async fn spawn_embedded(config: DaemonConfig) -> Result<EmbeddedDaemonHandle
 
 /// Runs the daemon until the process receives `Ctrl-C`.
 pub async fn run(config: DaemonConfig) -> Result<(), DaemonError> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            std::env::var("RUST_LOG")
-                .unwrap_or_else(|_| "falcondeck_daemon=info,tower_http=info".to_string()),
-        )
-        .try_init()
-        .ok();
-
+    // Logging is installed by `spawn_embedded`, which this shares with the
+    // desktop app so both get the same sink.
     let handle = spawn_embedded(config).await?;
     tracing::info!("falcondeck-daemon listening on {}", handle.local_addr);
     tokio::signal::ctrl_c().await?;
