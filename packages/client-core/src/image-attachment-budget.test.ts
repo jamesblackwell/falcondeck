@@ -30,7 +30,7 @@ describe('image attachment budgets', () => {
       validateImageAttachmentBudget([
         image('panorama.png', MAX_IMAGE_ATTACHMENT_BYTES + 1),
       ]),
-    ).toThrow('panorama.png is too large. Images must be 3.5 MB or smaller.')
+    ).toThrow('panorama.png is too large. Images must be 7.5 MB or smaller.')
   })
 
   it('rejects an oversized browser file before FileReader allocates it', async () => {
@@ -43,7 +43,7 @@ describe('image attachment budgets', () => {
     ] as unknown as FileList
 
     await expect(filesToImageInputs(files)).rejects.toThrow(
-      'raw-photo.png is too large. Images must be 3.5 MB or smaller.',
+      'raw-photo.png is too large. Images must be 7.5 MB or smaller.',
     )
   })
 

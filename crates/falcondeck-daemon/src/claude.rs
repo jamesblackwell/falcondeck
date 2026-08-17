@@ -762,14 +762,13 @@ fn stable_workspace_hash(value: &str) -> u64 {
     hash
 }
 
-/// Largest raw image file embedded inline as base64 (3.5 MiB); anything
-/// bigger degrades to a text reference so a single stream-json line stays a
-/// sane size even after the ~4/3 base64 expansion.
-const MAX_EMBEDDED_IMAGE_BYTES: u64 = 3 * 1024 * 1024 + 512 * 1024;
+/// Largest raw image file embedded inline as base64. 7.5 MB expands to the
+/// direct Claude API's 10 MB encoded-image ceiling.
+const MAX_EMBEDDED_IMAGE_BYTES: u64 = 7_500_000;
 
 /// Aggregate base64-encoded budget across all images in one turn; images past
 /// the budget degrade to text references instead of ballooning the input line.
-const MAX_TOTAL_ENCODED_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_TOTAL_ENCODED_IMAGE_BYTES: usize = 14_000_000;
 
 pub async fn build_claude_stream_json_input(prompt: &str, images: &[ImageInput]) -> String {
     build_claude_stream_json_input_with_budget(prompt, images, MAX_TOTAL_ENCODED_IMAGE_BYTES).await

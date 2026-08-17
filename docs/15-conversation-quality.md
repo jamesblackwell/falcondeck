@@ -86,12 +86,14 @@ every client, including consecutive fences. A fence at the start or end of a
 message does not add empty outer space beyond the message itself.
 
 Image input is bounded consistently before it enters a provider stream: one
-image may contain at most 3.5 MB of decoded data and one turn may contain at
+image may contain at most 7.5 MB of decoded data and one turn may contain at
 most 10 MB across all images. Browser clients reject over-budget files before
 reading them into base64, native clients reject the materialized picker result
 before relay encryption, and the daemon repeats the check authoritatively before
-writing inline data to disk. The error names an oversized image or explains the
-aggregate limit; attachments already in the composer remain intact.
+writing inline data to disk. The local turn endpoint and encrypted relay frame
+limits include headroom for base64 expansion at that aggregate ceiling. The
+error names an oversized image or explains the aggregate limit; attachments
+already in the composer remain intact.
 
 Browser image preparation is part of the conversation-scoped composer state.
 Each selected or pasted file is announced as preparing, and every submit path

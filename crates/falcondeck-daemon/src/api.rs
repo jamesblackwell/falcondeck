@@ -47,6 +47,12 @@ const ALLOWED_BROWSER_ORIGINS: [&str; 5] = [
     "http://127.0.0.1:1420",
 ];
 
+/// Turn requests can carry base64 image data. The cross-provider attachment
+/// budget allows 10 MB of decoded images, which expands to roughly 13.4 MB on
+/// the wire; Axum's 2 MB JSON default would reject valid sends before the
+/// daemon can materialize and validate them.
+const TURN_REQUEST_BODY_LIMIT_BYTES: usize = 16 << 20;
+
 /// Rejects any request whose `Host` is not a loopback authority. CORS cannot
 /// stop DNS rebinding (the origin looks same-site to the browser), but the
 /// rebound request still carries the attacker's hostname in `Host`, so this
@@ -157,7 +163,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/turns",
-            post(send_turn),
+            post(send_turn).layer(DefaultBodyLimit::max(TURN_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/read",
@@ -1178,7 +1184,15 @@ async fn control_execute(
 
 #[cfg(test)]
 mod tests {
-    use super::is_loopback_host;
+    use super::{TURN_REQUEST_BODY_LIMIT_BYTES, is_loopback_host};
+
+    #[test]
+    fn turn_request_limit_has_headroom_for_the_image_budget() {
+        // 10 MB of raw images becomes at most this many base64 bytes before
+        // the small JSON envelope is added.
+        let max_encoded_image_bytes = 10_000_000_usize.div_ceil(3) * 4;
+        assert!(TURN_REQUEST_BODY_LIMIT_BYTES > max_encoded_image_bytes);
+    }
 
     #[test]
     fn accepts_loopback_hosts_with_and_without_ports() {

@@ -125,6 +125,35 @@ async fn health_and_snapshot_routes_work_with_cors() {
 }
 
 #[tokio::test]
+async fn turn_route_accepts_json_bodies_above_axums_default_limit() {
+    let daemon = spawn_embedded(test_config()).await.unwrap();
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/api/workspaces/missing/threads/missing/turns",
+            daemon.base_url()
+        ))
+        .json(&serde_json::json!({
+            "workspace_id": "missing",
+            "thread_id": "missing",
+            "inputs": [{ "type": "text", "id": null, "text": "x".repeat(3 << 20) }],
+            "model_id": null,
+            "reasoning_effort": null,
+            "approval_policy": null,
+            "service_tier": null,
+            "permission_mode": null,
+            "sandbox_mode": null
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    // Parsing reached the handler. With Axum's 2 MiB default this was 413.
+    assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND);
+    daemon.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn extension_permission_grants_are_explicit_and_persisted() {
     let temp_dir = tempfile::tempdir().unwrap();
     let state_path = temp_dir.path().join("daemon-state.json");

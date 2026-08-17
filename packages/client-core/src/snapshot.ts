@@ -47,7 +47,7 @@ export function threadForSelection(
 
 /** Cross-provider attachment ceiling. The daemon enforces the same limits
  * authoritatively; clients use them to fail before allocating relay payloads. */
-export const MAX_IMAGE_ATTACHMENT_BYTES = 3_500_000;
+export const MAX_IMAGE_ATTACHMENT_BYTES = 7_500_000;
 export const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES = 10_000_000;
 
 function base64PayloadByteSize(value: string): number | null {
@@ -73,7 +73,7 @@ function validateImageByteEntries(
   for (const entry of entries) {
     if (entry.bytes > MAX_IMAGE_ATTACHMENT_BYTES) {
       throw new Error(
-        `${entry.name} is too large. Images must be 3.5 MB or smaller.`,
+        `${entry.name} is too large. Images must be 7.5 MB or smaller.`,
       );
     }
     total += entry.bytes;

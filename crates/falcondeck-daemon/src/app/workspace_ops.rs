@@ -15,7 +15,7 @@ use super::*;
 /// is most likely to look at are worth backfilling.
 const PREVIEW_TITLE_BACKFILL_LIMIT: usize = 5;
 
-const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 3_500_000;
+const MAX_IMAGE_ATTACHMENT_BYTES: u64 = 7_500_000;
 const MAX_TOTAL_IMAGE_ATTACHMENT_BYTES: u64 = 10_000_000;
 
 pub(super) async fn connect_workspace(
@@ -1154,7 +1154,7 @@ fn record_image_attachment_size(
         .unwrap_or("Image");
     if bytes > MAX_IMAGE_ATTACHMENT_BYTES {
         return Err(DaemonError::BadRequest(format!(
-            "{label} is too large. Images must be 3.5 MB or smaller."
+            "{label} is too large. Images must be 7.5 MB or smaller."
         )));
     }
     let next_total = total_image_bytes.saturating_add(bytes);
@@ -4724,7 +4724,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("panorama.png is too large. Images must be 3.5 MB or smaller.")
+                .contains("panorama.png is too large. Images must be 7.5 MB or smaller.")
         );
     }
 
@@ -4759,7 +4759,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("panorama.png is too large. Images must be 3.5 MB or smaller.")
+                .contains("panorama.png is too large. Images must be 7.5 MB or smaller.")
         );
         assert!(!temp_dir.path().join("attachments").exists());
     }

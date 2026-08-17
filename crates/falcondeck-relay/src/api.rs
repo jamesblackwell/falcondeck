@@ -167,8 +167,10 @@ async fn issue_ws_ticket(
 /// Peers mostly exchange small JSON control frames, but daemon payloads
 /// (full encrypted snapshots, large thread.detail RPC results) ride the
 /// same socket and base64 inflates them by a third, so the cap must leave
-/// generous headroom; anything near this limit is abuse, not traffic.
-const WS_MAX_MESSAGE_BYTES: usize = 16 << 20;
+/// generous headroom. A maximum-size image turn is base64-encoded once as
+/// JSON image data and again after encryption, so it can legitimately exceed
+/// 16 MiB even though the decoded attachment budget is only 10 MB.
+const WS_MAX_MESSAGE_BYTES: usize = 24 << 20;
 
 async fn updates_ws(
     ws: WebSocketUpgrade,
@@ -428,7 +430,16 @@ fn auth_token(headers: &HeaderMap) -> Result<String, RelayError> {
 
 #[cfg(test)]
 mod tests {
-    use super::auth_token;
+    use super::{WS_MAX_MESSAGE_BYTES, auth_token};
+
+    #[test]
+    fn websocket_limit_has_headroom_for_an_encrypted_image_turn() {
+        let max_turn_json_bytes = 16_usize << 20;
+        // AES-GCM envelope: version + nonce + authentication tag, followed by
+        // base64 and a small outer RPC JSON envelope.
+        let encrypted_rpc_bytes = (max_turn_json_bytes + 1 + 12 + 16).div_ceil(3) * 4 + 1024;
+        assert!(WS_MAX_MESSAGE_BYTES > encrypted_rpc_bytes);
+    }
 
     #[test]
     fn requires_authorization_header() {
