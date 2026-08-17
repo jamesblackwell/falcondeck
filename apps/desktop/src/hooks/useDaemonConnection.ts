@@ -677,20 +677,19 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       void api
         .snapshot()
         .then((authoritative) => {
-          const corrections = new Map(
-            authoritative.threads
-              .filter((thread) => suspect.includes(thread.id))
-              .map((thread) => [thread.id, thread] as const),
+          const authoritativeById = new Map(
+            authoritative.threads.map((thread) => [thread.id, thread] as const),
           )
-          if (corrections.size === 0) return
           setSnapshot((current) => {
             if (!current) return current
             let changed = false
             const nextThreads = current.threads.map((thread) => {
-              const correction = corrections.get(thread.id)
-              // Only status is corrected here. The rest of this summary may
+              // Only suspect threads are touched, and only their status. The
+              // rest of this summary — and every non-suspect thread — may
               // legitimately be newer than the fetch (events kept flowing while
               // it was in flight), and a wholesale replace would roll that back.
+              if (!suspect.includes(thread.id)) return thread
+              const correction = authoritativeById.get(thread.id)
               if (!correction || correction.status === thread.status) return thread
               changed = true
               return { ...thread, status: correction.status, last_error: correction.last_error }
