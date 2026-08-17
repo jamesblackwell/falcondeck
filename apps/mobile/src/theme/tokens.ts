@@ -666,6 +666,41 @@ export const rosePineLightColors: typeof darkColors = {
   black: '#000000',
 }
 
+// --- Matrix-inspired (dark only) ---
+
+export const matrixDarkColors: typeof darkColors = {
+  surface: { 0: '#060a07', 1: '#0b120d', 2: '#111b13', 3: '#18271b', 4: '#223625' },
+  fg: {
+    primary: '#d8f7df',
+    secondary: '#b4d8bc',
+    tertiary: '#91b39a',
+    muted: '#78947f',
+    faint: '#5d7462',
+  },
+  border: { subtle: '#101b13', default: '#17271b', emphasis: '#213724', strong: '#315039' },
+  accent: {
+    default: '#35f477',
+    muted: 'rgba(53, 244, 119, 0.14)',
+    strong: '#77ff9f',
+    dim: 'rgba(53, 244, 119, 0.07)',
+  },
+  success: { default: '#55d982', muted: 'rgba(85, 217, 130, 0.12)' },
+  warning: { default: '#e0dd72', muted: 'rgba(224, 221, 114, 0.12)' },
+  danger: { default: '#ff7373', muted: 'rgba(255, 115, 115, 0.12)' },
+  info: { default: '#59bff5', muted: 'rgba(89, 191, 245, 0.12)' },
+  diff: {
+    added: 'rgba(85, 217, 130, 0.12)',
+    removed: 'rgba(255, 115, 115, 0.12)',
+    addedText: '#77f29b',
+    removedText: '#ff8e8e',
+  },
+  overlay: 'rgba(0, 0, 0, 0.5)',
+  overlayStrong: 'rgba(6, 10, 7, 0.84)',
+  transparent: 'transparent',
+  white: '#ffffff',
+  black: '#000000',
+}
+
 // Back-compat alias — prefer reading colors from the active unistyles theme
 // (`useUnistyles().theme.colors`) so light mode is respected.
 export const colors = darkColors

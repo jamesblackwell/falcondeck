@@ -69,7 +69,7 @@ export default function SettingsScreen() {
       <SettingsSection title="Preferences">
         <SettingsRow
           label="Appearance"
-          detail="Theme, color palette, and text size"
+          detail="Light and dark themes, and text size"
           value={appearanceValue}
           icon={<Palette size={theme.iconSize.sm} color={theme.colors.accent.default} />}
           onPress={() => router.push('/(app)/settings/appearance')}

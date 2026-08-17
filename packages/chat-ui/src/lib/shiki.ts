@@ -6,7 +6,12 @@ import type {
   ThemedToken,
 } from 'shiki/core'
 
-import { useAppearance, type PaletteSetting } from '@falcondeck/ui'
+import {
+  resolveColorTheme,
+  resolveTheme,
+  useAppearance,
+  type ColorThemeSetting,
+} from '@falcondeck/ui'
 
 /* ================================================================
    Syntax highlighting for transcripts and the diff sidebar.
@@ -32,21 +37,29 @@ const MAX_HIGHLIGHT_CHARS = 200_000
 type LanguageModule = { default: LanguageInput }
 type ThemeModule = { default: ThemeRegistrationAny }
 
-/* Code inherits the palette the user chose for the app. Every palette
-   FalconDeck ships is an editor theme with a first-party Shiki port, so a
-   Gruvbox transcript highlights in Gruvbox rather than in GitHub's blues.
-   Where a family draws no light theme, the neutral GitHub light stands in —
-   preferable to tinting a light surface with a dark theme's token colors. */
-const PALETTE_THEMES: Record<PaletteSetting, { dark: string; light: string }> = {
-  falcon: { dark: DARK_THEME, light: LIGHT_THEME },
-  catppuccin: { dark: 'catppuccin-mocha', light: 'catppuccin-latte' },
-  dracula: { dark: 'dracula', light: LIGHT_THEME },
-  gruvbox: { dark: 'gruvbox-dark-medium', light: 'gruvbox-light-medium' },
-  nord: { dark: 'nord', light: LIGHT_THEME },
-  one: { dark: 'one-dark-pro', light: 'one-light' },
-  'rose-pine': { dark: 'rose-pine', light: 'rose-pine-dawn' },
-  solarized: { dark: 'solarized-dark', light: 'solarized-light' },
-  'tokyo-night': { dark: 'tokyo-night', light: LIGHT_THEME },
+/* Each color theme selects one syntax theme for its own appearance. Themes
+   with no matching upstream Shiki port use a neutral theme of the same mode;
+   they never force a dark syntax palette onto a light surface or vice versa. */
+const COLOR_THEME_THEMES: Record<ColorThemeSetting, string> = {
+  'falcon-light': LIGHT_THEME,
+  'catppuccin-latte': 'catppuccin-latte',
+  alucard: LIGHT_THEME,
+  'gruvbox-light': 'gruvbox-light-medium',
+  'nord-light': LIGHT_THEME,
+  'one-light': 'one-light',
+  'rose-pine-dawn': 'rose-pine-dawn',
+  'solarized-light': 'solarized-light',
+  'tokyo-night-light': LIGHT_THEME,
+  'falcon-dark': DARK_THEME,
+  'catppuccin-mocha': 'catppuccin-mocha',
+  dracula: 'dracula',
+  'gruvbox-dark': 'gruvbox-dark-medium',
+  matrix: 'falcondeck-matrix',
+  nord: 'nord',
+  'one-dark': 'one-dark-pro',
+  'rose-pine': 'rose-pine',
+  'solarized-dark': 'solarized-dark',
+  'tokyo-night': 'tokyo-night',
 }
 
 // Statically analyzable for the same reason as LANGUAGE_LOADERS: each theme
@@ -65,6 +78,7 @@ const THEME_LOADERS: Record<string, () => Promise<ThemeModule>> = {
   'solarized-dark': () => import('shiki/themes/solarized-dark.mjs'),
   'solarized-light': () => import('shiki/themes/solarized-light.mjs'),
   'tokyo-night': () => import('shiki/themes/tokyo-night.mjs'),
+  'falcondeck-matrix': () => import('./themes/matrix'),
 }
 
 // Keep this map deliberately finite and statically analyzable. Importing the
@@ -265,16 +279,16 @@ export function languageFromPath(
 
 function useResolvedTheme(): string {
   const appearance = useAppearance()
-  const themes = PALETTE_THEMES[appearance.palette] ?? PALETTE_THEMES.falcon
-  if (appearance.theme === 'light') return themes.light
-  if (appearance.theme === 'dark') return themes.dark
-  // `initAppearance` mirrors the resolved system theme onto <html data-theme>,
-  // so reading it back avoids a matchMedia call in test environments that lack
-  // one, and re-renders here whenever the appearance store notifies.
-  return typeof document !== 'undefined' &&
-    document.documentElement.dataset.theme === 'light'
-    ? themes.light
-    : themes.dark
+  // `initAppearance` mirrors the resolved system appearance onto <html>, so
+  // reading it back avoids a second media-query source in browser clients.
+  const stampedAppearance = typeof document !== 'undefined'
+    ? document.documentElement.dataset.theme
+    : undefined
+  const resolvedAppearance = stampedAppearance === 'light' || stampedAppearance === 'dark'
+    ? stampedAppearance
+    : resolveTheme(appearance.theme)
+  const colorTheme = resolveColorTheme(appearance, resolvedAppearance)
+  return COLOR_THEME_THEMES[colorTheme.value]
 }
 
 /**

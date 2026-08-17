@@ -1,15 +1,18 @@
 import { Monitor, Moon, Sun } from 'lucide-react'
 
 import {
+  DARK_COLOR_THEME_OPTIONS,
   FONT_SCALE_OPTIONS,
+  LIGHT_COLOR_THEME_OPTIONS,
   MONO_FONT_OPTIONS,
-  PALETTE_OPTIONS,
   SANS_FONT_OPTIONS,
   THEME_OPTIONS,
-  resolveTheme,
   updateAppearance,
   useAppearance,
-  type PaletteSetting,
+  type ColorThemeOption,
+  type ColorThemeSetting,
+  type DarkColorThemeSetting,
+  type LightColorThemeSetting,
   type PalettePreview,
   type ThemeSetting,
 } from '../lib/appearance'
@@ -70,6 +73,51 @@ export function PaletteSwatch({
   )
 }
 
+function ColorThemePicker({
+  title,
+  hint,
+  value,
+  options,
+  onValueChange,
+}: {
+  title: string
+  hint: string
+  value: ColorThemeSetting
+  options: readonly ColorThemeOption[]
+  onValueChange: (value: string) => void
+}) {
+  const activeTheme = options.find((option) => option.value === value) ?? options[0]
+  return (
+    <section className="space-y-3">
+      <GroupLabel title={title} hint={hint} />
+      <Select value={value} onValueChange={onValueChange}>
+        <SelectTrigger
+          aria-label={title}
+          className="h-10 w-full justify-between gap-2 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
+        >
+          <span className="flex min-w-0 items-center gap-2.5">
+            <PaletteSwatch preview={activeTheme.preview} />
+            <span className="truncate">{activeTheme.label}</span>
+          </span>
+        </SelectTrigger>
+        <SelectContent viewportClassName="max-h-[min(26rem,var(--radix-select-content-available-height))]">
+          {options.map((option) => (
+            <SelectItem
+              key={option.value}
+              value={option.value}
+              leading={<PaletteSwatch preview={option.preview} size={20} />}
+              description={option.description}
+              className="py-2"
+            >
+              {option.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </section>
+  )
+}
+
 /**
  * Theme, font, and text-size pickers backed by the shared appearance store.
  * Presentation-free at the edges so both the desktop settings page and the
@@ -77,9 +125,6 @@ export function PaletteSwatch({
  */
 export function AppearanceControls() {
   const appearance = useAppearance()
-  const resolvedTheme = resolveTheme(appearance.theme)
-  const activePalette =
-    PALETTE_OPTIONS.find((option) => option.value === appearance.palette) ?? PALETTE_OPTIONS[0]
 
   return (
     <div className="space-y-6">
@@ -107,41 +152,25 @@ export function AppearanceControls() {
         </div>
       </section>
 
-      <section className="space-y-3">
-        <GroupLabel
-          title="Color theme"
-          hint="Every palette ships light and dark variants, so it composes with the theme above."
-        />
-        <Select
-          value={appearance.palette}
-          onValueChange={(value) => updateAppearance({ palette: value as PaletteSetting })}
-        >
-          <SelectTrigger
-            aria-label="Color theme"
-            className="h-10 w-full justify-between gap-2 px-3 text-[length:var(--fd-text-sm)] text-fg-primary"
-          >
-            <span className="flex min-w-0 items-center gap-2.5">
-              <PaletteSwatch preview={activePalette.preview[resolvedTheme]} />
-              <span className="truncate">{activePalette.label}</span>
-            </span>
-          </SelectTrigger>
-          {/* Two-line rows, so the default list height would only show five of
-              nine palettes before scrolling. */}
-          <SelectContent viewportClassName="max-h-[min(26rem,var(--radix-select-content-available-height))]">
-            {PALETTE_OPTIONS.map((option) => (
-              <SelectItem
-                key={option.value}
-                value={option.value}
-                leading={<PaletteSwatch preview={option.preview[resolvedTheme]} size={20} />}
-                description={option.description}
-                className="py-2"
-              >
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </section>
+      <ColorThemePicker
+        title="Light theme"
+        hint="Used when FalconDeck or this device is in light appearance."
+        value={appearance.lightColorTheme}
+        options={LIGHT_COLOR_THEME_OPTIONS}
+        onValueChange={(value) =>
+          updateAppearance({ lightColorTheme: value as LightColorThemeSetting })
+        }
+      />
+
+      <ColorThemePicker
+        title="Dark theme"
+        hint="Used when FalconDeck or this device is in dark appearance."
+        value={appearance.darkColorTheme}
+        options={DARK_COLOR_THEME_OPTIONS}
+        onValueChange={(value) =>
+          updateAppearance({ darkColorTheme: value as DarkColorThemeSetting })
+        }
+      />
 
       <section className="space-y-3">
         <GroupLabel title="Interface font" hint="Used for all app text outside of code." />

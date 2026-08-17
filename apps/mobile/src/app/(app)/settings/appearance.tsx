@@ -6,11 +6,13 @@ import { ChevronDown } from 'lucide-react-native'
 import { OptionSheet, PaletteSwatch, SegmentedControl, Text } from '@/components/ui'
 import { SettingsSection, settingsPageStyles } from '@/components/settings'
 import {
+  DARK_COLOR_THEME_OPTIONS,
   FONT_SCALE_OPTIONS,
-  PALETTE_OPTIONS,
+  LIGHT_COLOR_THEME_OPTIONS,
   THEME_MODE_OPTIONS,
-  paletteSwatchColors,
-  type PaletteSetting,
+  colorThemeSwatchColors,
+  type DarkColorThemeSetting,
+  type LightColorThemeSetting,
   type ThemeModeSetting,
   useAppearanceStore,
 } from '@/theme/appearance'
@@ -22,15 +24,20 @@ const FONT_SCALE_SEGMENTS = FONT_SCALE_OPTIONS.map((option) => ({
 
 export default function AppearanceSettingsScreen() {
   const themeMode = useAppearanceStore((state) => state.themeMode)
-  const palette = useAppearanceStore((state) => state.palette)
+  const lightColorTheme = useAppearanceStore((state) => state.lightColorTheme)
+  const darkColorTheme = useAppearanceStore((state) => state.darkColorTheme)
   const fontScale = useAppearanceStore((state) => state.fontScale)
-  const { setThemeMode, setPalette, setFontScale } = useAppearanceStore.getState()
-  const { theme, rt } = useUnistyles()
-  const [pickingPalette, setPickingPalette] = useState(false)
+  const { setThemeMode, setLightColorTheme, setDarkColorTheme, setFontScale } =
+    useAppearanceStore.getState()
+  const { theme } = useUnistyles()
+  const [pickingTheme, setPickingTheme] = useState<'light' | 'dark' | null>(null)
 
-  // Swatches preview each palette in the mode the phone is actually showing.
-  const base = rt.themeName === 'light' ? 'light' : 'dark'
-  const activePalette = PALETTE_OPTIONS.find((option) => option.value === palette) ?? PALETTE_OPTIONS[0]
+  const activeLightTheme =
+    LIGHT_COLOR_THEME_OPTIONS.find((option) => option.value === lightColorTheme) ??
+    LIGHT_COLOR_THEME_OPTIONS[0]
+  const activeDarkTheme =
+    DARK_COLOR_THEME_OPTIONS.find((option) => option.value === darkColorTheme) ??
+    DARK_COLOR_THEME_OPTIONS[0]
 
   return (
     <>
@@ -52,18 +59,36 @@ export default function AppearanceSettingsScreen() {
             />
             <View>
               <Text variant="label" color="muted">
-                Color theme
+                Light theme
               </Text>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Color theme: ${activePalette.label}`}
-                accessibilityHint="Opens the palette picker"
-                onPress={() => setPickingPalette(true)}
+                accessibilityLabel={`Light theme: ${activeLightTheme.label}`}
+                accessibilityHint="Opens the light theme picker"
+                onPress={() => setPickingTheme('light')}
                 style={({ pressed }) => [styles.paletteField, pressed && styles.pressed]}
               >
-                <PaletteSwatch colors={paletteSwatchColors(palette, base)} />
+                <PaletteSwatch colors={colorThemeSwatchColors(lightColorTheme)} />
                 <Text variant="label" color="primary" style={styles.paletteLabel}>
-                  {activePalette.label}
+                  {activeLightTheme.label}
+                </Text>
+                <ChevronDown size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+              </Pressable>
+            </View>
+            <View>
+              <Text variant="label" color="muted">
+                Dark theme
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Dark theme: ${activeDarkTheme.label}`}
+                accessibilityHint="Opens the dark theme picker"
+                onPress={() => setPickingTheme('dark')}
+                style={({ pressed }) => [styles.paletteField, pressed && styles.pressed]}
+              >
+                <PaletteSwatch colors={colorThemeSwatchColors(darkColorTheme)} />
+                <Text variant="label" color="primary" style={styles.paletteLabel}>
+                  {activeDarkTheme.label}
                 </Text>
                 <ChevronDown size={theme.iconSize.sm} color={theme.colors.fg.muted} />
               </Pressable>
@@ -80,21 +105,28 @@ export default function AppearanceSettingsScreen() {
           FalconDeck keeps its mobile font choices intentionally native and readable rather than copying desktop font controls.
         </Text>
       </ScrollView>
-      {pickingPalette ? (
+      {pickingTheme ? (
         <OptionSheet
-          title="Color theme"
-          items={PALETTE_OPTIONS.map((option) => ({
+          title={`${pickingTheme === 'light' ? 'Light' : 'Dark'} theme`}
+          items={(pickingTheme === 'light'
+            ? LIGHT_COLOR_THEME_OPTIONS
+            : DARK_COLOR_THEME_OPTIONS
+          ).map((option) => ({
             value: option.value,
             label: option.label,
             description: option.description,
-            swatch: paletteSwatchColors(option.value, base),
+            swatch: colorThemeSwatchColors(option.value),
           }))}
-          selected={palette}
+          selected={pickingTheme === 'light' ? lightColorTheme : darkColorTheme}
           onSelect={(value) => {
-            setPalette(value as PaletteSetting)
-            setPickingPalette(false)
+            if (pickingTheme === 'light') {
+              setLightColorTheme(value as LightColorThemeSetting)
+            } else {
+              setDarkColorTheme(value as DarkColorThemeSetting)
+            }
+            setPickingTheme(null)
           }}
-          onClose={() => setPickingPalette(false)}
+          onClose={() => setPickingTheme(null)}
         />
       ) : null}
     </>

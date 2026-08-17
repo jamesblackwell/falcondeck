@@ -319,10 +319,11 @@
 }
 
 /* ================================================================
-   Color palettes — data-palette on <html> swaps the whole scheme.
-   Each palette ships a dark block and a light override, so palette
-   and light/dark mode compose freely. Palettes are "inspired by"
-   the classics, tuned to FalconDeck's contrast floors (fg-3 ≥ 4.5:1
+   Color themes — data-palette on <html> swaps the whole scheme after
+   the appearance store has selected a theme of the matching mode.
+   Related light and dark themes may share a palette selector, but
+   standalone themes do not need an invented opposite-mode variant.
+   Every theme is tuned to FalconDeck's contrast floors (fg-3 ≥ 4.5:1
    on bg-1, fg-4 ≥ 3:1).
    ================================================================ */
 
@@ -396,6 +397,45 @@
   --fd-info-muted: rgba(7, 102, 120, 0.1);
 
   --fd-shadow-glow: 0 0 24px rgba(66, 123, 88, 0.08);
+}
+
+/* --- Matrix-inspired (dark only) --- */
+:root[data-palette="matrix"] {
+  --fd-bg-0: #060a07;
+  --fd-bg-1: #0b120d;
+  --fd-bg-2: #111b13;
+  --fd-bg-3: #18271b;
+  --fd-bg-4: #223625;
+
+  --fd-fg-0: #d8f7df;
+  --fd-fg-1: #b4d8bc;
+  --fd-fg-2: #91b39a;
+  --fd-fg-3: #78947f;
+  --fd-fg-4: #5d7462;
+
+  --fd-border-0: rgba(98, 255, 148, 0.07);
+  --fd-border-1: rgba(98, 255, 148, 0.11);
+  --fd-border-2: rgba(98, 255, 148, 0.17);
+  --fd-border-3: rgba(98, 255, 148, 0.26);
+
+  --fd-accent: #35f477;
+  --fd-accent-muted: rgba(53, 244, 119, 0.14);
+  --fd-accent-strong: #77ff9f;
+  --fd-accent-dim: rgba(53, 244, 119, 0.07);
+
+  --fd-overlay: rgba(0, 0, 0, 0.5);
+  --fd-overlay-strong: rgba(6, 10, 7, 0.84);
+
+  --fd-success: #55d982;
+  --fd-success-muted: rgba(85, 217, 130, 0.12);
+  --fd-warning: #e0dd72;
+  --fd-warning-muted: rgba(224, 221, 114, 0.12);
+  --fd-danger: #ff7373;
+  --fd-danger-muted: rgba(255, 115, 115, 0.12);
+  --fd-info: #59bff5;
+  --fd-info-muted: rgba(89, 191, 245, 0.12);
+
+  --fd-shadow-glow: 0 0 24px rgba(53, 244, 119, 0.07);
 }
 
 /* --- Tokyo Night-inspired --- */

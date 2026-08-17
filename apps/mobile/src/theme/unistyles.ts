@@ -4,8 +4,8 @@ import { buildTheme, readAppearance } from './appearance'
 
 const appearance = readAppearance()
 
-const darkTheme = buildTheme('dark', appearance.fontScale, appearance.palette)
-const lightTheme = buildTheme('light', appearance.fontScale, appearance.palette)
+const darkTheme = buildTheme('dark', appearance.fontScale, appearance.darkColorTheme)
+const lightTheme = buildTheme('light', appearance.fontScale, appearance.lightColorTheme)
 
 type AppThemes = {
   light: typeof lightTheme

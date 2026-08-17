@@ -34,16 +34,16 @@ Avoid:
 ## Color System
 
 FalconDeck is dark-first but fully themeable. All color flows through the
-`--fd-*` tokens in `packages/ui/src/styles.css`; the dark Falcon palette on
-`:root` is the default, a light variant lives under `:root[data-theme="light"]`,
-and preset palettes (Gruvbox- and Tokyo Night-inspired, each with dark and
-light variants) live under `:root[data-palette="…"]`. The appearance module in
-`packages/ui/src/lib/appearance.ts` resolves the user's theme mode
-(system/light/dark), palette, fonts, and text scale, and stamps
-`data-theme`/`data-palette` plus CSS variable overrides on `<html>`. Mobile
-mirrors the same palettes in `apps/mobile/src/theme/tokens.ts` with unistyles
-`light`/`dark` themes. Never hardcode a hex in a component — it will break in
-at least one theme.
+`--fd-*` tokens in `packages/ui/src/styles.css`; the default Falcon themes live
+on `:root` and `:root[data-theme="light"]`, while other themes use
+`data-palette`. The appearance module in `packages/ui/src/lib/appearance.ts`
+stores an independent preferred light and dark theme. System mode selects
+between those preferences as the device appearance changes. A named theme can
+be light-only or dark-only; related themes such as Catppuccin Latte/Mocha share
+a family, but no theme needs an invented opposite-mode variant. Mobile mirrors
+the same catalogue in `apps/mobile/src/theme/tokens.ts` and updates the two
+unistyles themes independently. Never hardcode a hex in a component — it will
+break in at least one theme.
 
 Contrast floors for every palette: `fg-0`–`fg-3` carry real copy and must hold
 ≥ 4.5:1 on `bg-1`; `fg-4` is decorative-only and must hold ≥ 3:1.

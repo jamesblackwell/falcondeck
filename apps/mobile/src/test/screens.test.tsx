@@ -48,10 +48,12 @@ const { routerMock, useRelayStore, useSessionStore, useAppearanceStore } = vi.ho
   // zustand copy binds to the wrong React instance under react-test-renderer.
   const appearanceState = {
     themeMode: 'system' as const,
-    palette: 'falcon' as const,
+    lightColorTheme: 'falcon-light' as const,
+    darkColorTheme: 'falcon-dark' as const,
     fontScale: 1,
     setThemeMode: vi.fn(),
-    setPalette: vi.fn(),
+    setLightColorTheme: vi.fn(),
+    setDarkColorTheme: vi.fn(),
     setFontScale: vi.fn(),
   }
   const appearanceStore = Object.assign(

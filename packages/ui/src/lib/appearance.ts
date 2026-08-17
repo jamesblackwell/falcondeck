@@ -17,17 +17,41 @@ export type PaletteSetting =
   | 'catppuccin'
   | 'dracula'
   | 'gruvbox'
+  | 'matrix'
   | 'nord'
   | 'one'
   | 'rose-pine'
   | 'solarized'
   | 'tokyo-night'
+export type LightColorThemeSetting =
+  | 'falcon-light'
+  | 'catppuccin-latte'
+  | 'alucard'
+  | 'gruvbox-light'
+  | 'nord-light'
+  | 'one-light'
+  | 'rose-pine-dawn'
+  | 'solarized-light'
+  | 'tokyo-night-light'
+export type DarkColorThemeSetting =
+  | 'falcon-dark'
+  | 'catppuccin-mocha'
+  | 'dracula'
+  | 'gruvbox-dark'
+  | 'matrix'
+  | 'nord'
+  | 'one-dark'
+  | 'rose-pine'
+  | 'solarized-dark'
+  | 'tokyo-night'
+export type ColorThemeSetting = LightColorThemeSetting | DarkColorThemeSetting
 export type SansFontSetting = 'geist' | 'system' | 'serif'
 export type MonoFontSetting = 'geist-mono' | 'system-mono'
 
 export type AppearanceSettings = {
   theme: ThemeSetting
-  palette: PaletteSetting
+  lightColorTheme: LightColorThemeSetting
+  darkColorTheme: DarkColorThemeSetting
   sansFont: SansFontSetting
   monoFont: MonoFontSetting
   /** Multiplier applied to the --fd-text-* scale. */
@@ -36,7 +60,8 @@ export type AppearanceSettings = {
 
 export const DEFAULT_APPEARANCE: AppearanceSettings = {
   theme: 'system',
-  palette: 'falcon',
+  lightColorTheme: 'falcon-light',
+  darkColorTheme: 'falcon-dark',
   sansFont: 'geist',
   monoFont: 'geist-mono',
   fontScale: 1.05,
@@ -56,94 +81,202 @@ export type PalettePreview = { bg: string; surface: string; fg: string; accent: 
  * picker — canvas, raised surface, text, accent — pulled from the palette's own
  * bg-1 / bg-2 / fg-0 / accent so the chip never drifts from the real theme.
  */
-export const PALETTE_OPTIONS: Array<{
-  value: PaletteSetting
+type ColorThemeOptionBase = {
   label: string
   description: string
-  preview: { dark: PalettePreview; light: PalettePreview }
-}> = [
+  palette: PaletteSetting
+  preview: PalettePreview
+}
+export type ColorThemeOption =
+  | (ColorThemeOptionBase & { value: LightColorThemeSetting; appearance: 'light' })
+  | (ColorThemeOptionBase & { value: DarkColorThemeSetting; appearance: 'dark' })
+type LightColorThemeOption = Extract<ColorThemeOption, { appearance: 'light' }>
+type DarkColorThemeOption = Extract<ColorThemeOption, { appearance: 'dark' }>
+
+export const LIGHT_COLOR_THEME_OPTIONS: LightColorThemeOption[] = [
   {
-    value: 'falcon',
-    label: 'Falcon',
-    description: 'Deep black with an emerald accent — the FalconDeck default.',
-    preview: {
-      dark: { bg: '#111113', surface: '#1a1a1f', fg: '#f4f4f6', accent: '#34d399' },
-      light: { bg: '#fbfbfc', surface: '#ffffff', fg: '#17171c', accent: '#059669' },
-    },
+    value: 'falcon-light',
+    label: 'Falcon Light',
+    description: 'Crisp white surfaces with a deep emerald accent.',
+    appearance: 'light',
+    palette: 'falcon',
+    preview: { bg: '#fbfbfc', surface: '#ffffff', fg: '#17171c', accent: '#059669' },
   },
   {
-    value: 'catppuccin',
-    label: 'Catppuccin',
-    description: 'Soft pastel mauve — inspired by Catppuccin Mocha and Latte.',
-    preview: {
-      dark: { bg: '#1e1e2e', surface: '#282839', fg: '#cdd6f4', accent: '#cba6f7' },
-      light: { bg: '#eff1f5', surface: '#ffffff', fg: '#4c4f69', accent: '#8839ef' },
-    },
+    value: 'catppuccin-latte',
+    label: 'Catppuccin Latte',
+    description: 'Warm, soft pastels on a pale canvas.',
+    appearance: 'light',
+    palette: 'catppuccin',
+    preview: { bg: '#eff1f5', surface: '#ffffff', fg: '#4c4f69', accent: '#8839ef' },
+  },
+  {
+    value: 'alucard',
+    label: 'Alucard',
+    description: 'Dracula-inspired ink and violet on warm ivory.',
+    appearance: 'light',
+    palette: 'dracula',
+    preview: { bg: '#fbf8e8', surface: '#fffbeb', fg: '#1f1f1f', accent: '#644ac9' },
+  },
+  {
+    value: 'gruvbox-light',
+    label: 'Gruvbox Light',
+    description: 'Warm retro ink on a parchment-like canvas.',
+    appearance: 'light',
+    palette: 'gruvbox',
+    preview: { bg: '#f9efc6', surface: '#fbf1c7', fg: '#282828', accent: '#427b58' },
+  },
+  {
+    value: 'nord-light',
+    label: 'Nord Light',
+    description: 'Cool arctic greys with a restrained blue accent.',
+    appearance: 'light',
+    palette: 'nord',
+    preview: { bg: '#e9edf4', surface: '#f8fafc', fg: '#2e3440', accent: '#4c6f96' },
+  },
+  {
+    value: 'one-light',
+    label: 'One Light',
+    description: 'Classic editor grey and blue on a clean canvas.',
+    appearance: 'light',
+    palette: 'one',
+    preview: { bg: '#f2f2f3', surface: '#fafafa', fg: '#383a42', accent: '#3568d4' },
+  },
+  {
+    value: 'rose-pine-dawn',
+    label: 'Rosé Pine Dawn',
+    description: 'Muted rose and pine on a warm morning canvas.',
+    appearance: 'light',
+    palette: 'rose-pine',
+    preview: { bg: '#faf4ed', surface: '#fffaf3', fg: '#4a4566', accent: '#907aa9' },
+  },
+  {
+    value: 'solarized-light',
+    label: 'Solarized Light',
+    description: 'Precision-tuned cyan and cream.',
+    appearance: 'light',
+    palette: 'solarized',
+    preview: { bg: '#f8f2e0', surface: '#fdf6e3', fg: '#002b36', accent: '#1a6c9c' },
+  },
+  {
+    value: 'tokyo-night-light',
+    label: 'Tokyo Night Light',
+    description: 'Cool indigo structure on a pale blue-grey canvas.',
+    appearance: 'light',
+    palette: 'tokyo-night',
+    preview: { bg: '#e4e6ee', surface: '#eff1f7', fg: '#2e3350', accent: '#2e7de9' },
+  },
+]
+
+export const DARK_COLOR_THEME_OPTIONS: DarkColorThemeOption[] = [
+  {
+    value: 'falcon-dark',
+    label: 'Falcon Dark',
+    description: 'Deep black with an emerald accent — the FalconDeck default.',
+    appearance: 'dark',
+    palette: 'falcon',
+    preview: { bg: '#111113', surface: '#1a1a1f', fg: '#f4f4f6', accent: '#34d399' },
+  },
+  {
+    value: 'catppuccin-mocha',
+    label: 'Catppuccin Mocha',
+    description: 'Soft pastel mauve on a deep blue-grey canvas.',
+    appearance: 'dark',
+    palette: 'catppuccin',
+    preview: { bg: '#1e1e2e', surface: '#282839', fg: '#cdd6f4', accent: '#cba6f7' },
   },
   {
     value: 'dracula',
     label: 'Dracula',
-    description: 'Neon purple on graphite — inspired by Dracula and Alucard.',
-    preview: {
-      dark: { bg: '#282a36', surface: '#343746', fg: '#f8f8f2', accent: '#bd93f9' },
-      light: { bg: '#fbf8e8', surface: '#fffbeb', fg: '#1f1f1f', accent: '#644ac9' },
-    },
+    description: 'Neon purple on graphite.',
+    appearance: 'dark',
+    palette: 'dracula',
+    preview: { bg: '#282a36', surface: '#343746', fg: '#f8f8f2', accent: '#bd93f9' },
   },
   {
-    value: 'gruvbox',
-    label: 'Gruvbox',
-    description: 'Warm, retro groove — inspired by the classic Gruvbox scheme.',
-    preview: {
-      dark: { bg: '#282828', surface: '#32302f', fg: '#fbf1c7', accent: '#8ec07c' },
-      light: { bg: '#f9efc6', surface: '#fbf1c7', fg: '#282828', accent: '#427b58' },
-    },
+    value: 'gruvbox-dark',
+    label: 'Gruvbox Dark',
+    description: 'Warm, retro groove on charcoal.',
+    appearance: 'dark',
+    palette: 'gruvbox',
+    preview: { bg: '#282828', surface: '#32302f', fg: '#fbf1c7', accent: '#8ec07c' },
+  },
+  {
+    value: 'matrix',
+    label: 'Matrix',
+    description: 'Digital-rain green on near-black.',
+    appearance: 'dark',
+    palette: 'matrix',
+    preview: { bg: '#0b120d', surface: '#111b13', fg: '#d8f7df', accent: '#35f477' },
   },
   {
     value: 'nord',
     label: 'Nord',
-    description: 'Arctic blue-grey calm — inspired by the Nord scheme.',
-    preview: {
-      dark: { bg: '#2e3440', surface: '#3b4252', fg: '#eceff4', accent: '#88c0d0' },
-      light: { bg: '#e9edf4', surface: '#f8fafc', fg: '#2e3440', accent: '#4c6f96' },
-    },
+    description: 'Arctic blue-grey calm.',
+    appearance: 'dark',
+    palette: 'nord',
+    preview: { bg: '#2e3440', surface: '#3b4252', fg: '#eceff4', accent: '#88c0d0' },
   },
   {
-    value: 'one',
-    label: 'One',
-    description: 'The classic editor grey and blue — inspired by Atom One.',
-    preview: {
-      dark: { bg: '#282c34', surface: '#31353f', fg: '#dcdfe4', accent: '#61afef' },
-      light: { bg: '#f2f2f3', surface: '#fafafa', fg: '#383a42', accent: '#3568d4' },
-    },
+    value: 'one-dark',
+    label: 'One Dark',
+    description: 'Classic editor grey and blue.',
+    appearance: 'dark',
+    palette: 'one',
+    preview: { bg: '#282c34', surface: '#31353f', fg: '#dcdfe4', accent: '#61afef' },
   },
   {
     value: 'rose-pine',
     label: 'Rosé Pine',
-    description: 'Muted rose and pine — inspired by Rosé Pine and Dawn.',
-    preview: {
-      dark: { bg: '#191724', surface: '#1f1d2e', fg: '#e0def4', accent: '#c4a7e7' },
-      light: { bg: '#faf4ed', surface: '#fffaf3', fg: '#4a4566', accent: '#907aa9' },
-    },
+    description: 'Muted rose and pine on deep aubergine.',
+    appearance: 'dark',
+    palette: 'rose-pine',
+    preview: { bg: '#191724', surface: '#1f1d2e', fg: '#e0def4', accent: '#c4a7e7' },
   },
   {
-    value: 'solarized',
-    label: 'Solarized',
-    description: 'Precision-tuned cyan and cream — inspired by Solarized.',
-    preview: {
-      dark: { bg: '#002b36', surface: '#073642', fg: '#fdf6e3', accent: '#268bd2' },
-      light: { bg: '#f8f2e0', surface: '#fdf6e3', fg: '#002b36', accent: '#1a6c9c' },
-    },
+    value: 'solarized-dark',
+    label: 'Solarized Dark',
+    description: 'Precision-tuned cyan on deep teal.',
+    appearance: 'dark',
+    palette: 'solarized',
+    preview: { bg: '#002b36', surface: '#073642', fg: '#fdf6e3', accent: '#268bd2' },
   },
   {
     value: 'tokyo-night',
     label: 'Tokyo Night',
-    description: 'Cool indigo dusk — inspired by the Tokyo Night scheme.',
-    preview: {
-      dark: { bg: '#1a1b26', surface: '#24283b', fg: '#c0caf5', accent: '#7aa2f7' },
-      light: { bg: '#e4e6ee', surface: '#eff1f7', fg: '#2e3350', accent: '#2e7de9' },
-    },
+    description: 'Cool indigo dusk.',
+    appearance: 'dark',
+    palette: 'tokyo-night',
+    preview: { bg: '#1a1b26', surface: '#24283b', fg: '#c0caf5', accent: '#7aa2f7' },
   },
 ]
+
+export const COLOR_THEME_OPTIONS: ColorThemeOption[] = [
+  ...LIGHT_COLOR_THEME_OPTIONS,
+  ...DARK_COLOR_THEME_OPTIONS,
+]
+
+const LIGHT_COLOR_THEME_IDS = new Set<LightColorThemeSetting>(
+  LIGHT_COLOR_THEME_OPTIONS.map((option) => option.value),
+)
+const DARK_COLOR_THEME_IDS = new Set<DarkColorThemeSetting>(
+  DARK_COLOR_THEME_OPTIONS.map((option) => option.value),
+)
+
+const LEGACY_PALETTE_THEMES: Record<
+  Exclude<PaletteSetting, 'matrix'>,
+  { light: LightColorThemeSetting; dark: DarkColorThemeSetting }
+> = {
+  falcon: { light: 'falcon-light', dark: 'falcon-dark' },
+  catppuccin: { light: 'catppuccin-latte', dark: 'catppuccin-mocha' },
+  dracula: { light: 'alucard', dark: 'dracula' },
+  gruvbox: { light: 'gruvbox-light', dark: 'gruvbox-dark' },
+  nord: { light: 'nord-light', dark: 'nord' },
+  one: { light: 'one-light', dark: 'one-dark' },
+  'rose-pine': { light: 'rose-pine-dawn', dark: 'rose-pine' },
+  solarized: { light: 'solarized-light', dark: 'solarized-dark' },
+  'tokyo-night': { light: 'tokyo-night-light', dark: 'tokyo-night' },
+}
 
 export const SANS_FONT_OPTIONS: Array<{
   value: SansFontSetting
@@ -196,12 +329,21 @@ const DARK_QUERY = '(prefers-color-scheme: dark)'
 
 export function normalizeAppearance(value: unknown): AppearanceSettings {
   if (!value || typeof value !== 'object') return { ...DEFAULT_APPEARANCE }
-  const raw = value as Partial<AppearanceSettings>
+  const raw = value as Partial<AppearanceSettings> & { palette?: string }
+  const legacyThemes =
+    raw.palette && raw.palette in LEGACY_PALETTE_THEMES
+      ? LEGACY_PALETTE_THEMES[raw.palette as keyof typeof LEGACY_PALETTE_THEMES]
+      : null
   return {
     theme: raw.theme === 'light' || raw.theme === 'dark' ? raw.theme : 'system',
-    palette: PALETTE_OPTIONS.some((o) => o.value === raw.palette)
-      ? (raw.palette as PaletteSetting)
-      : 'falcon',
+    lightColorTheme:
+      raw.lightColorTheme && LIGHT_COLOR_THEME_IDS.has(raw.lightColorTheme)
+        ? raw.lightColorTheme
+        : legacyThemes?.light ?? DEFAULT_APPEARANCE.lightColorTheme,
+    darkColorTheme:
+      raw.darkColorTheme && DARK_COLOR_THEME_IDS.has(raw.darkColorTheme)
+        ? raw.darkColorTheme
+        : legacyThemes?.dark ?? DEFAULT_APPEARANCE.darkColorTheme,
     sansFont: SANS_FONT_OPTIONS.some((o) => o.value === raw.sansFont)
       ? (raw.sansFont as SansFontSetting)
       : 'geist',
@@ -243,13 +385,25 @@ export function resolveTheme(setting: ThemeSetting): ResolvedTheme {
   return darkMediaQuery()?.matches ? 'dark' : 'light'
 }
 
+export function resolveColorTheme(
+  settings: AppearanceSettings,
+  appearance = resolveTheme(settings.theme),
+): ColorThemeOption {
+  const value = appearance === 'light' ? settings.lightColorTheme : settings.darkColorTheme
+  const options = appearance === 'light' ? LIGHT_COLOR_THEME_OPTIONS : DARK_COLOR_THEME_OPTIONS
+  return options.find((option) => option.value === value) ?? options[0]
+}
+
 function applyAppearance(settings: AppearanceSettings) {
   const root = document.documentElement
-  root.dataset.theme = resolveTheme(settings.theme)
-  if (settings.palette === 'falcon') {
+  const resolvedTheme = resolveTheme(settings.theme)
+  const colorTheme = resolveColorTheme(settings, resolvedTheme)
+  root.dataset.theme = resolvedTheme
+  root.dataset.colorTheme = colorTheme.value
+  if (colorTheme.palette === 'falcon') {
     delete root.dataset.palette
   } else {
-    root.dataset.palette = settings.palette
+    root.dataset.palette = colorTheme.palette
   }
 
   const sans = SANS_FONT_OPTIONS.find((o) => o.value === settings.sansFont)

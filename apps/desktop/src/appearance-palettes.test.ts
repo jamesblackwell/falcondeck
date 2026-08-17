@@ -2,13 +2,18 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { PALETTE_OPTIONS } from "@falcondeck/ui";
+import {
+  COLOR_THEME_OPTIONS,
+  DARK_COLOR_THEME_OPTIONS,
+  LIGHT_COLOR_THEME_OPTIONS,
+  normalizeAppearance,
+  type ColorThemeOption,
+} from "@falcondeck/ui";
 
 /**
- * A palette is only real once it exists in three places: the option list, a
- * dark CSS block, and a light one. The swatch in the picker is drawn from the
- * option's `preview`, so these tests also pin that quartet to the tokens it
- * claims to show — a chip that lies about the theme is worse than no chip.
+ * A theme is only real once its option and matching CSS block agree. Related
+ * light and dark themes can share one data-palette selector, while standalone
+ * themes such as Matrix intentionally ship in only one appearance.
  */
 // jsdom hands import.meta.url an http URL, so resolve from the workspace root.
 const STYLES = readFileSync(
@@ -27,13 +32,14 @@ function tokensFor(selector: string): Record<string, string> {
   return tokens;
 }
 
-function selectorsFor(palette: string) {
-  return palette === "falcon"
-    ? { dark: ":root", light: ':root[data-theme="light"]' }
-    : {
-        dark: `:root[data-palette="${palette}"]`,
-        light: `:root[data-palette="${palette}"][data-theme="light"]`,
-      };
+function selectorFor(option: ColorThemeOption) {
+  if (option.palette === "falcon") {
+    return option.appearance === "light" ? ':root[data-theme="light"]' : ":root";
+  }
+  const paletteSelector = `:root[data-palette="${option.palette}"]`;
+  return option.appearance === "light"
+    ? `${paletteSelector}[data-theme="light"]`
+    : paletteSelector;
 }
 
 function relativeLuminance(hex: string): number {
@@ -56,57 +62,57 @@ function contrastRatio(foreground: string, background: string): number {
 }
 
 describe("color palettes", () => {
-  it("ships a dark and a light CSS block for every option", () => {
-    for (const option of PALETTE_OPTIONS) {
-      const { dark, light } = selectorsFor(option.value);
-      expect(Object.keys(tokensFor(dark)).length, `${option.value} dark`).toBeGreaterThan(0);
-      expect(Object.keys(tokensFor(light)).length, `${option.value} light`).toBeGreaterThan(0);
+  it("ships a CSS block matching every theme's declared appearance", () => {
+    for (const option of COLOR_THEME_OPTIONS) {
+      expect(Object.keys(tokensFor(selectorFor(option))).length, option.value).toBeGreaterThan(0);
     }
   });
 
-  it("previews the tokens the palette actually applies", () => {
-    for (const option of PALETTE_OPTIONS) {
-      const selectors = selectorsFor(option.value);
-      for (const mode of ["dark", "light"] as const) {
-        // Light blocks only override what changes, so fall back to the dark
-        // block the same way the cascade does.
-        const tokens = { ...tokensFor(selectors.dark), ...tokensFor(selectors[mode]) };
-        expect({ mode, ...option.preview[mode] }).toEqual({
-          mode,
-          bg: tokens["--fd-bg-1"],
-          surface: tokens["--fd-bg-2"],
-          fg: tokens["--fd-fg-0"],
-          accent: tokens["--fd-accent"],
-        });
-      }
+  it("previews the tokens the theme actually applies", () => {
+    for (const option of COLOR_THEME_OPTIONS) {
+      const tokens = tokensFor(selectorFor(option));
+      expect(option.preview).toEqual({
+        bg: tokens["--fd-bg-1"],
+        surface: tokens["--fd-bg-2"],
+        fg: tokens["--fd-fg-0"],
+        accent: tokens["--fd-accent"],
+      });
     }
   });
 
-  it("keeps every palette distinguishable in the picker", () => {
-    for (const mode of ["dark", "light"] as const) {
-      const swatches = PALETTE_OPTIONS.map((option) =>
-        Object.values(option.preview[mode]).join("/"),
-      );
+  it("keeps every theme distinguishable within its picker", () => {
+    for (const options of [LIGHT_COLOR_THEME_OPTIONS, DARK_COLOR_THEME_OPTIONS]) {
+      const swatches = options.map((option) => Object.values(option.preview).join("/"));
       expect(new Set(swatches).size).toBe(swatches.length);
     }
   });
 
   it("keeps copy and decorative foregrounds above their documented contrast floors", () => {
-    for (const option of PALETTE_OPTIONS) {
-      const selectors = selectorsFor(option.value);
-      for (const mode of ["dark", "light"] as const) {
-        const tokens = { ...tokensFor(selectors.dark), ...tokensFor(selectors[mode]) };
-        for (const foreground of ["--fd-fg-0", "--fd-fg-1", "--fd-fg-2", "--fd-fg-3"]) {
-          expect(
-            contrastRatio(tokens[foreground], tokens["--fd-bg-1"]),
-            `${option.value} ${mode} ${foreground}`,
-          ).toBeGreaterThanOrEqual(4.5);
-        }
+    for (const option of COLOR_THEME_OPTIONS) {
+      const tokens = tokensFor(selectorFor(option));
+      for (const foreground of ["--fd-fg-0", "--fd-fg-1", "--fd-fg-2", "--fd-fg-3"]) {
         expect(
-          contrastRatio(tokens["--fd-fg-4"], tokens["--fd-bg-1"]),
-          `${option.value} ${mode} --fd-fg-4`,
-        ).toBeGreaterThanOrEqual(3);
+          contrastRatio(tokens[foreground], tokens["--fd-bg-1"]),
+          `${option.value} ${foreground}`,
+        ).toBeGreaterThanOrEqual(4.5);
       }
+      expect(
+        contrastRatio(tokens["--fd-fg-4"], tokens["--fd-bg-1"]),
+        `${option.value} --fd-fg-4`,
+      ).toBeGreaterThanOrEqual(3);
     }
+  });
+
+  it("keeps Matrix dark-only", () => {
+    expect(DARK_COLOR_THEME_OPTIONS.some((option) => option.value === "matrix")).toBe(true);
+    expect(LIGHT_COLOR_THEME_OPTIONS.some((option) => option.palette === "matrix")).toBe(false);
+  });
+
+  it("migrates a legacy palette into independent light and dark preferences", () => {
+    expect(normalizeAppearance({ theme: "system", palette: "dracula" })).toMatchObject({
+      theme: "system",
+      lightColorTheme: "alucard",
+      darkColorTheme: "dracula",
+    });
   });
 });

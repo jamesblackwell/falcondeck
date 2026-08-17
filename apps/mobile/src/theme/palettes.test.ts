@@ -2,7 +2,15 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { PALETTE_COLORS, PALETTE_OPTIONS, paletteSwatchColors } from './appearance'
+import {
+  COLOR_THEME_COLORS,
+  COLOR_THEME_OPTIONS,
+  DARK_COLOR_THEME_OPTIONS,
+  LIGHT_COLOR_THEME_OPTIONS,
+  colorThemeSwatchColors,
+  normalizeAppearance,
+  type ColorThemeOption,
+} from './appearance'
 import { darkColors } from './tokens'
 
 /**
@@ -27,13 +35,14 @@ function tokensFor(selector: string): Record<string, string> {
   return tokens
 }
 
-function selectorsFor(palette: string) {
-  return palette === 'falcon'
-    ? { dark: ':root', light: ':root[data-theme="light"]' }
-    : {
-        dark: `:root[data-palette="${palette}"]`,
-        light: `:root[data-palette="${palette}"][data-theme="light"]`,
-      }
+function selectorFor(option: ColorThemeOption) {
+  if (option.palette === 'falcon') {
+    return option.appearance === 'light' ? ':root[data-theme="light"]' : ':root'
+  }
+  const paletteSelector = `:root[data-palette="${option.palette}"]`
+  return option.appearance === 'light'
+    ? `${paletteSelector}[data-theme="light"]`
+    : paletteSelector
 }
 
 function keyShape(value: unknown, prefix = ''): string[] {
@@ -44,56 +53,60 @@ function keyShape(value: unknown, prefix = ''): string[] {
 }
 
 describe('mobile color palettes', () => {
-  it('backs every option with a light and dark color set', () => {
-    expect(Object.keys(PALETTE_COLORS).sort()).toEqual(
-      PALETTE_OPTIONS.map((option) => option.value).sort(),
+  it('backs every theme option with one matching color set', () => {
+    expect(Object.keys(COLOR_THEME_COLORS).sort()).toEqual(
+      COLOR_THEME_OPTIONS.map((option) => option.value).sort(),
     )
   })
 
-  it('keeps every palette the same shape as the default theme', () => {
+  it('keeps every color theme the same shape as the default theme', () => {
     const expected = keyShape(darkColors)
-    for (const [palette, modes] of Object.entries(PALETTE_COLORS)) {
-      expect(keyShape(modes.dark), `${palette} dark`).toEqual(expected)
-      expect(keyShape(modes.light), `${palette} light`).toEqual(expected)
+    for (const [colorTheme, colors] of Object.entries(COLOR_THEME_COLORS)) {
+      expect(keyShape(colors), colorTheme).toEqual(expected)
     }
   })
 
   it('mirrors the web tokens for surfaces and accents', () => {
-    for (const option of PALETTE_OPTIONS) {
-      const selectors = selectorsFor(option.value)
-      for (const mode of ['dark', 'light'] as const) {
-        // Light blocks only override what changes, so fall back to the dark
-        // block the same way the cascade does.
-        const tokens = { ...tokensFor(selectors.dark), ...tokensFor(selectors[mode]) }
-        const colors = PALETTE_COLORS[option.value][mode]
-        expect(
-          { palette: option.value, mode, ...colors.surface, fg: colors.fg.primary, accent: colors.accent.default },
-        ).toEqual({
-          palette: option.value,
-          mode,
-          0: tokens['--fd-bg-0'],
-          1: tokens['--fd-bg-1'],
-          2: tokens['--fd-bg-2'],
-          3: tokens['--fd-bg-3'],
-          4: tokens['--fd-bg-4'],
-          fg: tokens['--fd-fg-0'],
-          accent: tokens['--fd-accent'],
-        })
-      }
+    for (const option of COLOR_THEME_OPTIONS) {
+      const tokens = tokensFor(selectorFor(option))
+      const colors = COLOR_THEME_COLORS[option.value]
+      expect(
+        { theme: option.value, ...colors.surface, fg: colors.fg.primary, accent: colors.accent.default },
+      ).toEqual({
+        theme: option.value,
+        0: tokens['--fd-bg-0'],
+        1: tokens['--fd-bg-1'],
+        2: tokens['--fd-bg-2'],
+        3: tokens['--fd-bg-3'],
+        4: tokens['--fd-bg-4'],
+        fg: tokens['--fd-fg-0'],
+        accent: tokens['--fd-accent'],
+      })
     }
   })
 
-  it('draws swatches from the palette they advertise', () => {
-    for (const option of PALETTE_OPTIONS) {
-      for (const mode of ['dark', 'light'] as const) {
-        const colors = PALETTE_COLORS[option.value][mode]
-        expect(paletteSwatchColors(option.value, mode)).toEqual({
-          bg: colors.surface[1],
-          surface: colors.surface[2],
-          fg: colors.fg.primary,
-          accent: colors.accent.default,
-        })
-      }
+  it('draws swatches from the color theme they advertise', () => {
+    for (const option of COLOR_THEME_OPTIONS) {
+      const colors = COLOR_THEME_COLORS[option.value]
+      expect(colorThemeSwatchColors(option.value)).toEqual({
+        bg: colors.surface[1],
+        surface: colors.surface[2],
+        fg: colors.fg.primary,
+        accent: colors.accent.default,
+      })
     }
+  })
+
+  it('keeps Matrix dark-only', () => {
+    expect(DARK_COLOR_THEME_OPTIONS.some((option) => option.value === 'matrix')).toBe(true)
+    expect(LIGHT_COLOR_THEME_OPTIONS.some((option) => option.palette === 'matrix')).toBe(false)
+  })
+
+  it('migrates a legacy palette into independent light and dark preferences', () => {
+    expect(normalizeAppearance({ themeMode: 'system', palette: 'tokyo-night' })).toMatchObject({
+      themeMode: 'system',
+      lightColorTheme: 'tokyo-night-light',
+      darkColorTheme: 'tokyo-night',
+    })
   })
 })

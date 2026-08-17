@@ -26,11 +26,10 @@ import {
 } from '@falcondeck/client-core'
 import {
   ActivityDiamond,
+  COLOR_THEME_OPTIONS,
   Kbd,
-  PALETTE_OPTIONS,
   PaletteSwatch,
   cn,
-  resolveTheme,
   updateAppearance,
   useAppearance,
 } from '@falcondeck/ui'
@@ -449,25 +448,34 @@ export const CommandPalette = memo(function CommandPalette({
         run: () => updateAppearance({ theme: value }),
       })
     }
-    for (const option of PALETTE_OPTIONS) {
+    for (const option of COLOR_THEME_OPTIONS) {
+      const selected = option.appearance === 'light'
+        ? appearance.lightColorTheme === option.value
+        : appearance.darkColorTheme === option.value
       result.push({
-        id: `palette:${option.value}`,
+        id: `color-theme:${option.value}`,
         kind: 'appearance',
         section: 'Appearance',
-        label: `Color theme: ${option.label}`,
-        icon: <PaletteSwatch preview={option.preview[resolveTheme(appearance.theme)]} size={14} />,
+        label: `${option.appearance === 'light' ? 'Light' : 'Dark'} theme: ${option.label}`,
+        icon: <PaletteSwatch preview={option.preview} size={14} />,
         search: normalizeSearchFields({
-          primary: `Color theme: ${option.label}`,
+          primary: `${option.appearance} theme: ${option.label}`,
           secondary: '',
-          keywords: `palette color theme appearance ${option.label}`,
+          keywords: `palette color theme appearance ${option.appearance} ${option.label}`,
         }),
-        active: appearance.palette === option.value,
-        run: () => updateAppearance({ palette: option.value }),
+        active: selected,
+        run: () => {
+          if (option.appearance === 'light') {
+            updateAppearance({ lightColorTheme: option.value })
+          } else {
+            updateAppearance({ darkColorTheme: option.value })
+          }
+        },
       })
     }
 
     return result
-  }, [appearance.palette, appearance.theme, groups, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenSettings, onSelectThread, open, shortcutHints])
+  }, [appearance.darkColorTheme, appearance.lightColorTheme, appearance.theme, groups, onNewThread, onOpenActivity, onOpenKeyboardShortcuts, onOpenSettings, onSelectThread, open, shortcutHints])
 
   const filtered = useMemo(() => {
     const scopedItems = initialScope === 'threads'

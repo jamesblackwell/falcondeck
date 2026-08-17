@@ -96,12 +96,12 @@ Mono, a missing mono family means code renders in a *proportional* face.
 
 ## Syntax highlighting
 
-Code inherits the palette the user chose for the app. Every palette FalconDeck
-ships is an editor theme with a first-party Shiki port, mapped in
-`PALETTE_THEMES` in `packages/chat-ui/src/lib/shiki.ts`. Themes load as separate
-chunks, on demand, exactly like grammars. Where a family draws no light theme
-(Dracula, Nord, Tokyo Night), the neutral GitHub light theme stands in — better
-than tinting a light surface with a dark theme's token colours.
+Code inherits the active color theme. Each light or dark theme maps independently
+to a same-appearance Shiki theme in `COLOR_THEME_THEMES` in
+`packages/chat-ui/src/lib/shiki.ts`. Themes load as separate chunks, on demand,
+exactly like grammars. Where a theme has no matching upstream Shiki port, the
+neutral GitHub theme for that appearance stands in. FalconDeck's Matrix theme
+ships its own on-demand Shiki definition.
 
 Mobile does not tokenize; its code blocks are plain monospace text.
 
