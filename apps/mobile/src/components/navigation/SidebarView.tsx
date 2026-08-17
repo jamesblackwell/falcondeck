@@ -308,7 +308,11 @@ export const SidebarView = memo(function SidebarView({
       if (item.type === "section") {
         return (
           <View style={styles.sectionHeading}>
-            <Text variant="caption" color="muted" weight="medium">
+            {/* Explicitly 400: the bundled Geist has only Regular and Bold, so
+                RN resolves any in-between weight to the nearest real face.
+                Naming the weight we actually have keeps this row off that
+                rounding edge — see docs/MARKDOWN_STYLE.md. */}
+            <Text variant="caption" color="muted" weight="normal">
               {item.title.toUpperCase()}
             </Text>
             {item.title === "Projects" && supportedExtensionFilters.length > 0 ? (
@@ -373,7 +377,7 @@ export const SidebarView = memo(function SidebarView({
               <Text
                 variant="label"
                 color="secondary"
-                weight="medium"
+                weight="normal"
                 numberOfLines={1}
                 style={styles.workspaceName}
               >
