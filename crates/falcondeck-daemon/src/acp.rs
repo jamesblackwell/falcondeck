@@ -70,6 +70,10 @@ fn acp_may_support_steering(provider: &str) -> bool {
     provider.eq_ignore_ascii_case("grok")
 }
 
+fn is_grok_plan_approval_method(method: &str) -> bool {
+    matches!(method, "_x.ai/exit_plan_mode" | "x.ai/exit_plan_mode")
+}
+
 fn acp_interject_probe_supported(outcome: &Result<Value, DaemonError>) -> bool {
     match outcome {
         Ok(_) => true,
@@ -2211,7 +2215,7 @@ impl AcpRuntime {
         .await
     }
 
-    /// Answers a pending Grok `x.ai/exit_plan_mode` reverse request.
+    /// Answers a pending Grok `_x.ai/exit_plan_mode` reverse request.
     pub async fn respond_plan_approval(
         &self,
         request_id: &str,
@@ -2406,7 +2410,9 @@ impl AcpRuntime {
                 let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
                 self.handle_permission_request(raw_id, &params).await;
             }
-            "x.ai/exit_plan_mode" => {
+            // Grok 1.0.4 uses the private `_x.ai` namespace. Retain the
+            // unprefixed spelling for compatibility with earlier builds.
+            method if is_grok_plan_approval_method(method) => {
                 let raw_id = message.get("id").cloned().unwrap_or(Value::Null);
                 self.handle_plan_approval_request(raw_id, &params).await;
             }
@@ -2951,6 +2957,13 @@ mod tests {
         apply_provider_environment(&mut command, "/opt/homebrew/bin/pi-acp", &provider_env).await;
 
         assert_eq!(command_path(&command).as_deref(), Some("/custom/bin"));
+    }
+
+    #[test]
+    fn grok_plan_approval_method_accepts_current_and_legacy_spellings() {
+        assert!(is_grok_plan_approval_method("_x.ai/exit_plan_mode"));
+        assert!(is_grok_plan_approval_method("x.ai/exit_plan_mode"));
+        assert!(!is_grok_plan_approval_method("_x.ai/enter_plan_mode"));
     }
 
     #[tokio::test]

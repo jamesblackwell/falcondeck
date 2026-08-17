@@ -91,7 +91,7 @@ The suite covers:
 
 - the complete live success path;
 - selecting an ACP `allow_once` permission option;
-- Grok's blocking `x.ai/exit_plan_mode` reverse request and its `approved`
+- Grok's blocking `_x.ai/exit_plan_mode` reverse request and its `approved`
   response shape;
 - cancellation and its stop reason;
 - session replay and cross-process restart/reload;
@@ -155,7 +155,7 @@ same call. FalconDeck probes the live runtime and advertises steering only when
 that method exists. It stays disabled for generic ACP providers because the
 base ACP protocol has no equivalent method.
 
-Grok plan mode also uses a vendor reverse request: `x.ai/exit_plan_mode` sends
+Grok plan mode also uses a vendor reverse request: `_x.ai/exit_plan_mode` sends
 the proposed Markdown plan to the ACP client and blocks the prompt until the
 client returns `approved`, `cancelled` (with optional revision feedback), or
 `abandoned`. FalconDeck projects that request through the same durable

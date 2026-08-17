@@ -131,7 +131,7 @@ input.on('line', (line) => {
       send({
         jsonrpc: '2.0',
         id: 901,
-        method: 'x.ai/exit_plan_mode',
+        method: '_x.ai/exit_plan_mode',
         params: {
           sessionId,
           toolCallId: 'fixture-plan-1',
