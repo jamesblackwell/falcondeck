@@ -30,10 +30,13 @@ const THREAD_PREFETCH_LIMIT = 3
 const THREAD_PREFETCH_FALLBACK_DELAY_MS = 250
 // A thread the client believes is live but that has gone this long without a
 // single event is a candidate for a stuck spinner: re-check it against the
-// daemon. Long tool calls do go quiet for minutes, so this must be generous
-// enough that the check is rare and cheap rather than a status poll.
-const THREAD_STATUS_RECHECK_AFTER_MS = 45_000
-const THREAD_STATUS_RECHECK_INTERVAL_MS = 15_000
+// daemon. A missed terminal thread-update strands the composer on Stop and the
+// transcript on "Thinking…" until this fires, so the window is sized to what a
+// user staring at a finished answer will tolerate, not to how long tool calls
+// can run silently — a quiet-but-live thread just costs one cheap local
+// snapshot fetch per interval until it speaks again.
+const THREAD_STATUS_RECHECK_AFTER_MS = 10_000
+const THREAD_STATUS_RECHECK_INTERVAL_MS = 5_000
 
 type IdleWindow = Window & {
   requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
@@ -674,20 +677,19 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
       void api
         .snapshot()
         .then((authoritative) => {
-          const corrections = new Map(
-            authoritative.threads
-              .filter((thread) => suspect.includes(thread.id))
-              .map((thread) => [thread.id, thread] as const),
+          const authoritativeById = new Map(
+            authoritative.threads.map((thread) => [thread.id, thread] as const),
           )
-          if (corrections.size === 0) return
           setSnapshot((current) => {
             if (!current) return current
             let changed = false
             const nextThreads = current.threads.map((thread) => {
-              const correction = corrections.get(thread.id)
-              // Only status is corrected here. The rest of this summary may
+              // Only suspect threads are touched, and only their status. The
+              // rest of this summary — and every non-suspect thread — may
               // legitimately be newer than the fetch (events kept flowing while
               // it was in flight), and a wholesale replace would roll that back.
+              if (!suspect.includes(thread.id)) return thread
+              const correction = authoritativeById.get(thread.id)
               if (!correction || correction.status === thread.status) return thread
               changed = true
               return { ...thread, status: correction.status, last_error: correction.last_error }

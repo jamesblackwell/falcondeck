@@ -111,11 +111,14 @@ export const FileListView = memo(function FileListView({
     return matches
   }, [deferredQuery, files])
   const rows = useVirtualRows(filteredEntries.length, ROW_HEIGHT)
+  const tabs = (info ? ['info', 'changes', 'files'] : ['changes', 'files']) as ReviewPanelTab[]
+  // The overview is the default tab, but a workspace-less panel has no overview
+  // to show, so those callers fall back to the changes list.
+  const visibleTab = activeTab === 'info' && !info ? 'changes' : activeTab
   // The overview reads the same git status the changes tab does, so it shares
   // that tab's loading and error state rather than owning one of its own.
-  const activeError = activeTab === 'files' ? filesError : error
-  const activeLoading = activeTab === 'files' ? isFilesLoading : isLoading
-  const tabs = (info ? ['info', 'changes', 'files'] : ['changes', 'files']) as ReviewPanelTab[]
+  const activeError = visibleTab === 'files' ? filesError : error
+  const activeLoading = visibleTab === 'files' ? isFilesLoading : isLoading
 
   return (
     <div className="flex h-full flex-col">
@@ -123,14 +126,14 @@ export const FileListView = memo(function FileListView({
         <div className="flex h-7 items-center gap-2">
           <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">Review</p>
           {/* The overview spells the branch out in its own row. */}
-          {branch && activeTab !== 'info' ? (
+          {branch && visibleTab !== 'info' ? (
             <div className="flex min-w-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
               <GitBranch aria-hidden="true" className="h-3 w-3 shrink-0" />
               <span className="truncate">{branch}</span>
             </div>
           ) : null}
           <div className="ml-auto" />
-          {activeTab === 'changes' && onStartReview && entries.length > 0 ? (
+          {visibleTab === 'changes' && onStartReview && entries.length > 0 ? (
             <button
               type="button"
               onClick={onStartReview}
@@ -149,10 +152,10 @@ export const FileListView = memo(function FileListView({
           ) : null}
           <button
             type="button"
-            onClick={activeTab === 'files' ? onRefreshFiles : onRefresh}
+            onClick={visibleTab === 'files' ? onRefreshFiles : onRefresh}
             disabled={activeLoading}
-            title={`Refresh ${activeTab}`}
-            aria-label={`Refresh ${activeTab}`}
+            title={`Refresh ${visibleTab}`}
+            aria-label={`Refresh ${visibleTab}`}
             aria-busy={activeLoading}
             className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted transition-colors hover:bg-surface-3 hover:text-fg-secondary disabled:opacity-40"
           >
@@ -173,9 +176,9 @@ export const FileListView = memo(function FileListView({
                 onTabChange(tab)
                 setQuery('')
               }}
-              aria-pressed={activeTab === tab}
+              aria-pressed={visibleTab === tab}
               className={`fd-focus -mb-px border-b px-2 py-1.5 text-[length:var(--fd-text-sm)] font-medium capitalize transition-colors ${
-                activeTab === tab
+                visibleTab === tab
                   ? 'border-accent text-fg-primary'
                   : 'border-transparent text-fg-muted hover:text-fg-secondary'
               }`}
@@ -190,14 +193,14 @@ export const FileListView = memo(function FileListView({
           ))}
         </div>
 
-        {activeTab === 'info' ? null : (
+        {visibleTab === 'info' ? null : (
           <label className="mt-2 flex h-7 items-center gap-1.5 rounded-[var(--fd-radius-sm)] border border-border-default bg-surface-0 px-2 focus-within:border-border-strong">
             <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
-            <span className="sr-only">Filter {activeTab}</span>
+            <span className="sr-only">Filter {visibleTab}</span>
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder={activeTab === 'changes' ? 'Filter changed files' : 'Go to file'}
+              placeholder={visibleTab === 'changes' ? 'Filter changed files' : 'Go to file'}
               className="min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-faint"
             />
             {query ? (
@@ -219,7 +222,7 @@ export const FileListView = memo(function FileListView({
         onScroll={rows.onScroll}
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        {activeTab === 'info' && info ? (
+        {visibleTab === 'info' && info ? (
           <InfoView
             info={info}
             entries={entries}
@@ -227,12 +230,13 @@ export const FileListView = memo(function FileListView({
             isLoading={isLoading}
             error={error}
             onSelectChangedFile={onSelectChangedFile}
+            onViewAllChanges={() => onTabChange('changes')}
           />
         ) : activeError ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-danger">
             {activeError}
           </div>
-        ) : activeTab === 'changes' ? (
+        ) : visibleTab === 'changes' ? (
           filteredEntries.length === 0 ? (
             <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-fg-muted">
               {isLoading ? (

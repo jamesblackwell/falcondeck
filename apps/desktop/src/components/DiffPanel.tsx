@@ -77,7 +77,8 @@ export const DiffPanel = memo(function DiffPanel({
   info = null,
 }: DiffPanelProps) {
   const { toast } = useToast()
-  const [activeTab, setActiveTab] = useState<ReviewPanelTab>('changes')
+  // The overview opens first: it frames what the changes list is a list *of*.
+  const [activeTab, setActiveTab] = useState<ReviewPanelTab>('info')
   const [isReviewPending, setIsReviewPending] = useState(false)
   const previewContextRef = useRef({ workspaceId, threadId })
   const selectedFile =

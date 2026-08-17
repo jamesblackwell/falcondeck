@@ -433,7 +433,11 @@ pub(super) async fn ingest_notification(
                             ThreadStatus::Idle
                         };
                         thread.last_error = error.clone();
-                        thread.updated_at = updated_at;
+                        // Clients drop thread summaries whose timestamp moved
+                        // backwards, and a dropped terminal update strands the
+                        // thread as running. The provider's clock is not
+                        // trusted to outrank anything we already stamped.
+                        thread.updated_at = updated_at.max(thread.updated_at);
                     })
                     .await?;
                 let tool_settlement = if turn_was_interrupted {
