@@ -60,6 +60,7 @@ type EditResendHandler = (
 const ConversationHistoryRow = memo(function ConversationHistoryRow({
   block,
   deferred,
+  animateEnter,
   expansionMode,
   thinkingDisplay,
   isStreamingReasoning,
@@ -68,6 +69,9 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
 }: {
   block: ConversationRenderBlock;
   deferred: boolean;
+  /** Plays the slide-up entrance. Stays true for the whole mount once granted
+      (the animation is one-shot anyway) so re-renders can't cancel it midway. */
+  animateEnter: boolean;
   expansionMode: "default" | "expanded" | "collapsed";
   thinkingDisplay: ReturnType<
     typeof normalizePreferences
@@ -82,6 +86,7 @@ const ConversationHistoryRow = memo(function ConversationHistoryRow({
       className={cn(
         "fd-conversation-block min-w-0",
         deferred && "fd-conversation-block--deferred",
+        animateEnter && "fd-conversation-block--enter",
       )}
     >
       {block.kind === "item" ? (
@@ -206,6 +211,12 @@ export const Conversation = memo(function Conversation({
     scrollHeight: number;
     scrollTop: number;
   } | null>(null);
+  const enterTrackerRef = useRef<{
+    threadKey: string | null;
+    hydrating: boolean;
+    seenIds: Set<string>;
+    enteringIds: Set<string>;
+  } | null>(null);
   const [showJump, setShowJump] = useState(false);
   const [selectedExcerpt, setSelectedExcerpt] = useState<{
     text: string;
@@ -256,6 +267,46 @@ export const Conversation = memo(function Conversation({
     return stable;
   }, [isThinking, normalizedPreferences, renderableItems]);
   const renderBlocks = presentation.history_blocks;
+  // A message sent into an on-screen thread slides up into place; everything
+  // else must mount statically. Ids present at thread mount, arriving while
+  // (or immediately after) history hydrates, or prepended by "load earlier"
+  // are absorbed as seen — only user messages in the trailing run of unseen
+  // blocks animate. Sets only grow while a thread stays mounted, so StrictMode
+  // double-renders and memoized rows see a stable one-shot grant.
+  let enterTracker = enterTrackerRef.current;
+  if (!enterTracker || enterTracker.threadKey !== threadKey) {
+    enterTracker = {
+      threadKey,
+      hydrating: isLoading,
+      seenIds: new Set(renderBlocks.map((block) => block.id)),
+      enteringIds: new Set<string>(),
+    };
+    enterTrackerRef.current = enterTracker;
+  } else if (isLoading || enterTracker.hydrating) {
+    enterTracker.hydrating = isLoading;
+    for (const block of renderBlocks) enterTracker.seenIds.add(block.id);
+  } else {
+    let lastSeenIndex = -1;
+    for (let index = renderBlocks.length - 1; index >= 0; index -= 1) {
+      if (enterTracker.seenIds.has(renderBlocks[index].id)) {
+        lastSeenIndex = index;
+        break;
+      }
+    }
+    for (let index = 0; index < renderBlocks.length; index += 1) {
+      const block = renderBlocks[index];
+      if (enterTracker.seenIds.has(block.id)) continue;
+      enterTracker.seenIds.add(block.id);
+      if (
+        index > lastSeenIndex &&
+        block.kind === "item" &&
+        block.item.kind === "user_message"
+      ) {
+        enterTracker.enteringIds.add(block.id);
+      }
+    }
+  }
+  const enteringBlockIds = enterTracker.enteringIds;
   const retrySources = useMemo(() => {
     if (!onRetryResponse) {
       retrySourcesRef.current = null;
@@ -741,6 +792,7 @@ export const Conversation = memo(function Conversation({
                   deferred={
                     index < renderBlocks.length - EAGER_RECENT_BLOCK_COUNT
                   }
+                  animateEnter={enteringBlockIds.has(block.id)}
                   expansionMode={expansionMode}
                   thinkingDisplay={thinkingDisplay}
                   isStreamingReasoning={

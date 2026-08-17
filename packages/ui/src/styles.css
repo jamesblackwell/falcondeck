@@ -1320,6 +1320,22 @@ body {
   contain-intrinsic-size: auto 96px;
 }
 
+/* A just-sent message glides up into the transcript instead of flashing in.
+   Conversation applies this only to messages appended while the thread is
+   already on screen — hydrated history, thread switches, and older-page
+   prepends mount without it. `backwards` (not `both`) so no transform lingers
+   after the entrance: a retained transform would make the block a containing
+   block and stacking context for its descendants. */
+@keyframes fd-message-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+.fd-conversation-block--enter {
+  animation: fd-message-in 300ms var(--fd-ease-panel) backwards;
+}
+
 @theme {
   --animate-expand: fd-expand var(--fd-duration-slow) var(--fd-ease-default);
   --animate-collapse: fd-collapse var(--fd-duration-slow) var(--fd-ease-default);
