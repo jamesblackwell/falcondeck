@@ -10,21 +10,23 @@ export function basePart(path: string) {
   return idx >= 0 ? path.slice(idx + 1) : path
 }
 
-export type FileStatusVariant = 'success' | 'danger' | 'info' | 'warning' | 'muted'
+/** The single letter git itself uses for a status, as shown in file lists. */
+export function statusLabel(status: GitFileStatus) {
+  return status === 'untracked' ? 'U' : status.slice(0, 1).toUpperCase()
+}
 
-export function statusVariant(status: GitFileStatus): FileStatusVariant {
+/** Colour for that letter, shared by every list that prints one. */
+export function statusToneClass(status: GitFileStatus) {
   switch (status) {
     case 'added':
     case 'untracked':
-      return 'success'
+      return 'text-success'
     case 'deleted':
-      return 'danger'
-    case 'modified':
-      return 'info'
+      return 'text-danger'
     case 'renamed':
     case 'copied':
-      return 'warning'
+      return 'text-warning'
     default:
-      return 'muted'
+      return 'text-info'
   }
 }

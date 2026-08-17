@@ -14,7 +14,7 @@ import { useVirtualRows } from '../../hooks/useVirtualRows'
 import { FileTreeView } from './FileTreeView'
 import { FileTypeIcon } from './FileTypeIcon'
 import { InfoView, type ReviewInfoContext } from './InfoView'
-import { basePart, dirPart } from './diff-utils'
+import { basePart, dirPart, statusLabel, statusToneClass } from './diff-utils'
 
 export type ReviewPanelTab = 'info' | 'changes' | 'files'
 
@@ -37,11 +37,6 @@ export type FileListViewProps = {
   isReviewPending?: boolean
   /** Context for the overview tab; omitted only by callers without a workspace. */
   info?: ReviewInfoContext | null
-}
-
-function statusLabel(entry: GitStatusEntry) {
-  if (entry.status === 'untracked') return 'U'
-  return entry.status.slice(0, 1).toUpperCase()
 }
 
 const ROW_HEIGHT = 32
@@ -68,17 +63,7 @@ const FileRow = memo(function FileRow({
       <span className="flex items-center gap-1.5 text-[length:var(--fd-text-xs)] tabular-nums">
         {entry.insertions != null ? <span className="text-success">+{entry.insertions}</span> : null}
         {entry.deletions != null ? <span className="text-danger">-{entry.deletions}</span> : null}
-        <span
-          className={
-            entry.status === 'added' || entry.status === 'untracked'
-              ? 'text-success'
-              : entry.status === 'deleted'
-                ? 'text-danger'
-                : 'text-info'
-          }
-        >
-          {statusLabel(entry)}
-        </span>
+        <span className={statusToneClass(entry.status)}>{statusLabel(entry.status)}</span>
       </span>
     </button>
   )

@@ -21,8 +21,6 @@ import { FileListView, type ReviewPanelTab } from './diff/FileListView'
 import { FileView } from './diff/FileView'
 import type { ReviewInfoContext } from './diff/InfoView'
 
-export type { ReviewInfoContext } from './diff/InfoView'
-
 const EMPTY_ENTRIES: GitStatusEntry[] = []
 const EMPTY_FILES: string[] = []
 

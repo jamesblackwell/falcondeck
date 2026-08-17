@@ -14,7 +14,7 @@ import type { GitStatusEntry, ThreadSummary } from '@falcondeck/client-core'
 import { CopyButton } from '@falcondeck/ui'
 
 import { FileTypeIcon } from './FileTypeIcon'
-import { basePart, dirPart } from './diff-utils'
+import { basePart, dirPart, statusLabel, statusToneClass } from './diff-utils'
 
 /** Everything the info tab needs that the review panel does not already load. */
 export type ReviewInfoContext = {
@@ -38,11 +38,6 @@ export type InfoViewProps = {
 /** How many changed files show before the list collapses behind "Show N more". */
 const PREVIEW_LIMIT = 5
 
-function statusLabel(entry: GitStatusEntry) {
-  if (entry.status === 'untracked') return 'U'
-  return entry.status.slice(0, 1).toUpperCase()
-}
-
 /** The one-line description of where this thread came from, when it was not
  * started by hand. */
 function originLabel(thread: ThreadSummary | null): string | null {
@@ -57,13 +52,17 @@ function originLabel(thread: ThreadSummary | null): string | null {
   return null
 }
 
+/** One `label: value` line. Passing `copy` appends a copy button for a value
+ * worth pasting elsewhere — a path or a branch name. */
 function Row({
   icon,
   label,
+  copy,
   children,
 }: {
   icon: ReactNode
   label: string
+  copy?: string
   children: ReactNode
 }) {
   return (
@@ -74,6 +73,7 @@ function Row({
       </span>
       <span className="flex min-w-0 flex-1 items-center gap-1 text-[length:var(--fd-text-sm)] text-fg-primary">
         {children}
+        {copy ? <CopyButton text={copy} label={`Copy ${label.toLowerCase()}`} className="h-5 w-5" /> : null}
       </span>
     </div>
   )
@@ -157,22 +157,25 @@ export const InfoView = memo(function InfoView({
         <Row
           icon={<FolderClosed aria-hidden="true" className="h-3.5 w-3.5" />}
           label="Directory"
+          copy={directory}
         >
           {/* Paths are the row most worth reading in full, so this one wraps
               rather than truncating the tail that identifies the checkout. */}
           <span className="min-w-0 break-all" title={directory}>
             {directory}
           </span>
-          <CopyButton text={directory} label="Copy directory" className="h-5 w-5" />
         </Row>
       ) : null}
 
       {branch ? (
-        <Row icon={<GitBranch aria-hidden="true" className="h-3.5 w-3.5" />} label="Branch">
+        <Row
+          icon={<GitBranch aria-hidden="true" className="h-3.5 w-3.5" />}
+          label="Branch"
+          copy={branch}
+        >
           <span className="truncate" title={branch}>
             {branch}
           </span>
-          <CopyButton text={branch} label="Copy branch" className="h-5 w-5" />
         </Row>
       ) : null}
 
@@ -213,15 +216,9 @@ export const InfoView = memo(function InfoView({
               className="fd-focus-inset flex h-7 w-full items-center gap-2 px-3 text-left hover:bg-surface-2"
             >
               <span
-                className={`w-3 shrink-0 text-center text-[length:var(--fd-text-xs)] ${
-                  entry.status === 'added' || entry.status === 'untracked'
-                    ? 'text-success'
-                    : entry.status === 'deleted'
-                      ? 'text-danger'
-                      : 'text-info'
-                }`}
+                className={`w-3 shrink-0 text-center text-[length:var(--fd-text-xs)] ${statusToneClass(entry.status)}`}
               >
-                {statusLabel(entry)}
+                {statusLabel(entry.status)}
               </span>
               <FileTypeIcon path={entry.path} />
               <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)]">
