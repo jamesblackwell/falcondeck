@@ -45,6 +45,36 @@ describe('FileListView', () => {
     expect(onSelectChangedFile).toHaveBeenCalledWith(entry)
   })
 
+  it('offers the overview tab only when the host supplies its context', () => {
+    const { unmount } = render(
+      <FileListView
+        entries={[entry]}
+        files={[]}
+        filesTruncated={false}
+        branch="main"
+        activeTab="info"
+        isLoading={false}
+        isFilesLoading={false}
+        error={null}
+        filesError={null}
+        onTabChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onRefreshFiles={vi.fn()}
+        onSelectChangedFile={vi.fn()}
+        onSelectWorkspaceFile={vi.fn()}
+        info={{ workspacePath: '/tmp/project', hostName: null, thread: null }}
+      />,
+    )
+    expect(screen.getByRole('button', { name: 'info' })).toBeInTheDocument()
+    expect(screen.getByText('/tmp/project')).toBeInTheDocument()
+    // The overview has nothing to filter, so the field steps aside.
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    unmount()
+
+    renderView()
+    expect(screen.queryByRole('button', { name: 'info' })).not.toBeInTheDocument()
+  })
+
   it('switches to the file browser', () => {
     const { onTabChange } = renderView()
     fireEvent.click(screen.getByRole('button', { name: 'files' }))

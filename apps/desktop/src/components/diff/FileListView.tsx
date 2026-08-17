@@ -13,9 +13,10 @@ import { ActivityDiamond } from '@falcondeck/ui'
 import { useVirtualRows } from '../../hooks/useVirtualRows'
 import { FileTreeView } from './FileTreeView'
 import { FileTypeIcon } from './FileTypeIcon'
+import { InfoView, type ReviewInfoContext } from './InfoView'
 import { basePart, dirPart } from './diff-utils'
 
-export type ReviewPanelTab = 'changes' | 'files'
+export type ReviewPanelTab = 'info' | 'changes' | 'files'
 
 export type FileListViewProps = {
   entries: GitStatusEntry[]
@@ -34,6 +35,8 @@ export type FileListViewProps = {
   onSelectWorkspaceFile: (path: string) => void
   onStartReview?: (() => void) | null
   isReviewPending?: boolean
+  /** Context for the overview tab; omitted only by callers without a workspace. */
+  info?: ReviewInfoContext | null
 }
 
 function statusLabel(entry: GitStatusEntry) {
@@ -98,6 +101,7 @@ export const FileListView = memo(function FileListView({
   onSelectWorkspaceFile,
   onStartReview = null,
   isReviewPending = false,
+  info = null,
 }: FileListViewProps) {
   const [query, setQuery] = useState('')
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
@@ -122,15 +126,19 @@ export const FileListView = memo(function FileListView({
     return matches
   }, [deferredQuery, files])
   const rows = useVirtualRows(filteredEntries.length, ROW_HEIGHT)
-  const activeError = activeTab === 'changes' ? error : filesError
-  const activeLoading = activeTab === 'changes' ? isLoading : isFilesLoading
+  // The overview reads the same git status the changes tab does, so it shares
+  // that tab's loading and error state rather than owning one of its own.
+  const activeError = activeTab === 'files' ? filesError : error
+  const activeLoading = activeTab === 'files' ? isFilesLoading : isLoading
+  const tabs = (info ? ['info', 'changes', 'files'] : ['changes', 'files']) as ReviewPanelTab[]
 
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border-subtle px-3 pb-2 pt-2">
         <div className="flex h-7 items-center gap-2">
           <p className="text-[length:var(--fd-text-sm)] font-semibold text-fg-primary">Review</p>
-          {branch ? (
+          {/* The overview spells the branch out in its own row. */}
+          {branch && activeTab !== 'info' ? (
             <div className="flex min-w-0 items-center gap-1 text-[length:var(--fd-text-xs)] text-fg-muted">
               <GitBranch aria-hidden="true" className="h-3 w-3 shrink-0" />
               <span className="truncate">{branch}</span>
@@ -156,7 +164,7 @@ export const FileListView = memo(function FileListView({
           ) : null}
           <button
             type="button"
-            onClick={activeTab === 'changes' ? onRefresh : onRefreshFiles}
+            onClick={activeTab === 'files' ? onRefreshFiles : onRefresh}
             disabled={activeLoading}
             title={`Refresh ${activeTab}`}
             aria-label={`Refresh ${activeTab}`}
@@ -172,7 +180,7 @@ export const FileListView = memo(function FileListView({
         </div>
 
         <div className="mt-1 flex items-center gap-1 border-b border-border-subtle">
-          {(['changes', 'files'] as const).map((tab) => (
+          {tabs.map((tab) => (
             <button
               key={tab}
               type="button"
@@ -197,26 +205,28 @@ export const FileListView = memo(function FileListView({
           ))}
         </div>
 
-        <label className="mt-2 flex h-7 items-center gap-1.5 rounded-[var(--fd-radius-sm)] border border-border-default bg-surface-0 px-2 focus-within:border-border-strong">
-          <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
-          <span className="sr-only">Filter {activeTab}</span>
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={activeTab === 'changes' ? 'Filter changed files' : 'Go to file'}
-            className="min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-faint"
-          />
-          {query ? (
-            <button
-              type="button"
-              onClick={() => setQuery('')}
-              aria-label="Clear filter"
-              className="fd-focus rounded-[var(--fd-radius-sm)] text-fg-faint hover:text-fg-secondary"
-            >
-              <X aria-hidden="true" className="h-3.5 w-3.5" />
-            </button>
-          ) : null}
-        </label>
+        {activeTab === 'info' ? null : (
+          <label className="mt-2 flex h-7 items-center gap-1.5 rounded-[var(--fd-radius-sm)] border border-border-default bg-surface-0 px-2 focus-within:border-border-strong">
+            <Search aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-faint" />
+            <span className="sr-only">Filter {activeTab}</span>
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={activeTab === 'changes' ? 'Filter changed files' : 'Go to file'}
+              className="min-w-0 flex-1 bg-transparent text-[length:var(--fd-text-sm)] text-fg-primary outline-none placeholder:text-fg-faint"
+            />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery('')}
+                aria-label="Clear filter"
+                className="fd-focus rounded-[var(--fd-radius-sm)] text-fg-faint hover:text-fg-secondary"
+              >
+                <X aria-hidden="true" className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+          </label>
+        )}
       </div>
 
       <div
@@ -224,7 +234,16 @@ export const FileListView = memo(function FileListView({
         onScroll={rows.onScroll}
         className="min-h-0 flex-1 overflow-y-auto"
       >
-        {activeError ? (
+        {activeTab === 'info' && info ? (
+          <InfoView
+            info={info}
+            entries={entries}
+            branch={branch}
+            isLoading={isLoading}
+            error={error}
+            onSelectChangedFile={onSelectChangedFile}
+          />
+        ) : activeError ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-danger">
             {activeError}
           </div>

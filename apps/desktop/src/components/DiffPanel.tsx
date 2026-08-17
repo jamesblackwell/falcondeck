@@ -19,6 +19,9 @@ import { useWorkspaceFiles } from '../hooks/useWorkspaceFiles'
 import { DiffView } from './diff/DiffView'
 import { FileListView, type ReviewPanelTab } from './diff/FileListView'
 import { FileView } from './diff/FileView'
+import type { ReviewInfoContext } from './diff/InfoView'
+
+export type { ReviewInfoContext } from './diff/InfoView'
 
 const EMPTY_ENTRIES: GitStatusEntry[] = []
 const EMPTY_FILES: string[] = []
@@ -61,6 +64,8 @@ export type DiffPanelProps = {
   reviewThreadId?: string | null
   selection: DiffPanelSelection | null
   onSelectionChange: (selection: DiffPanelSelection | null) => void
+  /** Where the work happens, for the overview tab. Null hides that tab. */
+  info?: ReviewInfoContext | null
 }
 
 export const DiffPanel = memo(function DiffPanel({
@@ -71,6 +76,7 @@ export const DiffPanel = memo(function DiffPanel({
   reviewThreadId = null,
   selection,
   onSelectionChange,
+  info = null,
 }: DiffPanelProps) {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState<ReviewPanelTab>('changes')
@@ -259,6 +265,7 @@ export const DiffPanel = memo(function DiffPanel({
         onStartReview={api?.startReview && workspaceId && reviewThreadId ? startReview : null}
         onSelectChangedFile={selectChangedFile}
         onSelectWorkspaceFile={selectWorkspaceFile}
+        info={info}
       />
     </div>
   )

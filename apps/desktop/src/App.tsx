@@ -901,6 +901,18 @@ function AppInner() {
       ),
     [selectedThreadId, selectedWorkspaceId, viewSnapshot?.threads],
   );
+  // Where the selected thread's work lands, for the review rail's overview
+  // tab. Without a project there is nothing to describe, so the tab hides.
+  const reviewInfo = useMemo(() => {
+    if (!selectedWorkspace) return null;
+    const host = workspaceHostBadges[selectedWorkspace.id] ?? null;
+    return {
+      workspacePath: selectedWorkspace.path,
+      hostName: host?.name ?? null,
+      hostConnected: host?.connected,
+      thread: selectedThread,
+    };
+  }, [selectedThread, selectedWorkspace, workspaceHostBadges]);
   // Checkouts happen outside the daemon's event stream, so the app keeps its
   // own bump to refresh the changes rail after a branch switch.
   const [localGitBump, setLocalGitBump] = useState(0);
@@ -5136,6 +5148,7 @@ function AppInner() {
                 }
                 selection={diffSelection}
                 onSelectionChange={setDiffSelection}
+                info={reviewInfo}
               />
             </Suspense>
           )
