@@ -8,8 +8,8 @@ use falcondeck_core::{
     ConversationWebSearch, InteractiveQuestion, InteractiveQuestionOption,
     InteractiveResponsePayload, MemoryCitationEntry, PlanApprovalOutcome, ServiceLevel, ThreadPlan,
     ToolActivityKind, ToolArtifactKind, ToolCallDetail, ToolCallDisplay, ToolCommandAction,
-    ToolHistoryMode, ToolMcpAppContext, ToolOutputContentItem, ToolProviderOutputSummary,
-    ToolTestSummary, TurnInputItem, WebSearchActionKind,
+    ThreadStatus, ToolHistoryMode, ToolMcpAppContext, ToolOutputContentItem,
+    ToolProviderOutputSummary, ToolTestSummary, TurnInputItem, WebSearchActionKind,
 };
 use futures_util::future::join_all;
 use regex::Regex;
@@ -1462,24 +1462,45 @@ pub(super) fn provisional_thread_title_from_text(text: &str) -> Option<String> {
 }
 
 pub(super) fn should_generate_ai_thread_title(thread: &ManagedThread) -> bool {
+    // Flags first: this runs per pushed item now, and the scans below are
+    // linear in a transcript that can hold thousands of them.
+    if thread.manual_title
+        || thread.ai_title_generated
+        || !(thread.title_is_provider_preview
+            || is_placeholder_thread_title(&thread.summary.title)
+            || is_provisional_thread_title(&thread.summary.title))
+    {
+        return false;
+    }
+
     let has_user_message = thread
         .items
         .iter()
         .any(|item| matches!(item, ConversationItem::UserMessage { .. }));
+    // Reasoning counts: a thread that is still thinking has already committed
+    // to the user's request, and waiting for prose or a tool call leaves the
+    // opening-prompt preview on screen for the whole first turn.
     let has_agent_output = thread.items.iter().any(|item| {
         matches!(
             item,
-            ConversationItem::AssistantMessage { .. } | ConversationItem::ToolCall { .. }
+            ConversationItem::AssistantMessage { .. }
+                | ConversationItem::ToolCall { .. }
+                | ConversationItem::Reasoning { .. }
+                | ConversationItem::Plan { .. }
         )
     });
+    // A live turn is as good as output for titling purposes, and it is all
+    // native OpenCode offers until it goes idle: that transport projects the
+    // whole transcript in one shot at the end of the turn, so gating on items
+    // alone leaves those threads named after their opening prompt for as long
+    // as the turn runs. The guard only exists to skip threads no provider ever
+    // accepted, and a running turn proves acceptance.
+    let turn_in_flight = matches!(
+        thread.summary.status,
+        ThreadStatus::Running | ThreadStatus::WaitingForInput
+    );
 
-    has_user_message
-        && has_agent_output
-        && !thread.manual_title
-        && !thread.ai_title_generated
-        && (thread.title_is_provider_preview
-            || is_placeholder_thread_title(&thread.summary.title)
-            || is_provisional_thread_title(&thread.summary.title))
+    has_user_message && (has_agent_output || turn_in_flight)
 }
 
 pub(super) fn is_placeholder_thread_title(title: &str) -> bool {

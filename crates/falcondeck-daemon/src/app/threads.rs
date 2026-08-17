@@ -46,6 +46,11 @@ const CLAUDE_STALL_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// `result` event. `bounded_turn_error` clamps the final string anyway.
 const CLAUDE_STDERR_TAIL_LINES: usize = 6;
 
+/// Titler runs allowed per thread per daemon run. A failing utility chain
+/// (missing CLI, expired auth) returns fast, so without a cap every item a
+/// long turn produces would spawn another doomed process.
+const MAX_AI_TITLE_ATTEMPTS: u8 = 3;
+
 struct AiThreadTitleInput {
     workspace_path: String,
     prompt: String,
@@ -467,10 +472,14 @@ impl AppState {
             if thread.manual_title || thread.ai_title_generated || thread.ai_title_in_flight {
                 return;
             }
+            if thread.ai_title_attempts >= MAX_AI_TITLE_ATTEMPTS {
+                return;
+            }
             if !should_generate_ai_thread_title(thread) {
                 return;
             }
             thread.ai_title_in_flight = true;
+            thread.ai_title_attempts += 1;
             AiThreadTitleInput {
                 workspace_path: thread
                     .summary
@@ -1203,6 +1212,10 @@ impl AppState {
                 .last_agent_activity_seq
                 .max(self.inner.sequence.load(Ordering::Relaxed));
         }
+        // A new item is the only thing that can make a thread newly titleable,
+        // so this is the earliest moment worth asking. Turn end also asks, as a
+        // backstop for threads whose first agent item never arrives.
+        let wants_title = !thread.ai_title_in_flight && should_generate_ai_thread_title(thread);
         drop(workspaces);
         let emitted_item = with_renderable_attachment_previews(item).await;
         self.emit(
@@ -1219,6 +1232,10 @@ impl AppState {
             );
             // Deferred for the same reason as the update path above.
             self.schedule_persist();
+        }
+        if wants_title {
+            self.maybe_schedule_ai_thread_title(workspace_id.to_string(), thread_id.to_string())
+                .await;
         }
         Ok(())
     }
@@ -1280,6 +1297,7 @@ impl ManagedThread {
             manual_title: false,
             ai_title_generated,
             ai_title_in_flight: false,
+            ai_title_attempts: 0,
             title_is_provider_preview: false,
             requires_resume: false,
             queued_requests: Vec::new(),

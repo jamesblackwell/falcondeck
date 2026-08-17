@@ -1966,6 +1966,56 @@ tokens used\n5,767\n"
     );
 }
 
+#[test]
+fn a_running_turn_is_titleable_before_the_agent_produces_anything() {
+    // Native OpenCode projects its whole transcript once the turn goes idle,
+    // so the opening-prompt preview would otherwise stand for the entire turn.
+    let mut thread = super::ManagedThread::new(ThreadSummary {
+        id: "thread-1".to_string(),
+        workspace_id: "workspace-1".to_string(),
+        title: "Can we tidy up...".to_string(),
+        provider: AgentProvider::new("opencode"),
+        native_session_id: None,
+        provider_transport: None,
+        handoff_from: None,
+        origin: None,
+        status: ThreadStatus::Running,
+        updated_at: Utc::now(),
+        last_message_preview: None,
+        latest_turn_id: None,
+        latest_plan: None,
+        latest_diff: None,
+        last_tool: None,
+        last_error: None,
+        agent: ThreadAgentParams::default(),
+        attention: ThreadAttention::default(),
+        is_archived: false,
+        is_pinned: false,
+        goal: None,
+        queued_turns: Vec::new(),
+        variant: None,
+    });
+    thread.items.push(ConversationItem::UserMessage {
+        id: "user-1".to_string(),
+        text: "Can we tidy up the local branches".to_string(),
+        attachments: Vec::new(),
+        turn_id: None,
+        previous_turn_id: None,
+        created_at: Utc::now(),
+    });
+
+    assert!(super::conversation_helpers::should_generate_ai_thread_title(
+        &thread
+    ));
+
+    // An idle thread that never ran still needs agent output: a prompt the
+    // provider rejected is not worth a utility-model call.
+    thread.summary.status = ThreadStatus::Idle;
+    assert!(!super::conversation_helpers::should_generate_ai_thread_title(
+        &thread
+    ));
+}
+
 #[tokio::test]
 async fn update_thread_title_marks_thread_as_manual() {
     let temp_dir = tempdir().unwrap();

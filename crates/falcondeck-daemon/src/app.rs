@@ -202,6 +202,11 @@ struct ManagedThread {
     manual_title: bool,
     ai_title_generated: bool,
     ai_title_in_flight: bool,
+    /// Titler runs spent on this thread since the daemon started. Titling is
+    /// now attempted as soon as a thread becomes eligible rather than once per
+    /// turn, so a utility chain that is missing or unauthenticated would
+    /// otherwise spawn a CLI for every item a long turn produces.
+    ai_title_attempts: u8,
     /// The current title is only a provider-side preview of the opening prompt
     /// (Claude sessions without their own title, Codex previews). It reads like
     /// a real title, so the titler needs this flag to know it may replace it.
