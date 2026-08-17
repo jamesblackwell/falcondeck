@@ -7,6 +7,7 @@ import type { ThreadSummary, ThreadTag } from '@falcondeck/client-core'
 
 import { ActivityDiamond, Badge, Text } from '@/components/ui'
 import { formatRelativeTime } from './sessionListItem.utils'
+import { stageColor, ThreadStageMark } from './ThreadStageMark'
 
 interface SessionListItemProps {
   thread: ThreadSummary
@@ -16,11 +17,6 @@ interface SessionListItemProps {
   onOpenThreadOptions?: (workspaceId: string, thread: ThreadSummary) => void
   nowTick?: number
   tags?: ThreadTag[]
-}
-
-const TAG_COLORS: Record<string, string> = {
-  gray: '#94a3b8', red: '#ef4444', orange: '#f97316', yellow: '#eab308',
-  green: '#22c55e', blue: '#3b82f6', purple: '#a855f7', pink: '#ec4899',
 }
 
 function SessionListItemInner({
@@ -80,8 +76,12 @@ function SessionListItemInner({
       </Text>
       {tags.length > 0 ? (
         <View style={styles.tags} accessibilityLabel={tags.map(tag => tag.label).join(', ')}>
-          {tags.slice(0, 3).map(tag => (
-            <View key={tag.id} style={[styles.tagDot, { backgroundColor: TAG_COLORS[tag.color] ?? TAG_COLORS.gray }]} />
+          {tags.slice(0, 1).map(tag => (
+            <ThreadStageMark
+              key={tag.id}
+              stage={tag}
+              color={stageColor(tag.color, theme)}
+            />
           ))}
         </View>
       ) : null}
@@ -123,8 +123,7 @@ const styles = StyleSheet.create((theme) => ({
     height: 10,
     borderRadius: theme.radius.full,
   },
-  tags: { flexDirection: 'row', gap: theme.spacing[1] },
-  tagDot: { width: 8, height: 8, borderRadius: theme.radius.full },
+  tags: { flexDirection: 'row', alignItems: 'center' },
 }))
 
 const areEqual = (prev: SessionListItemProps, next: SessionListItemProps) =>

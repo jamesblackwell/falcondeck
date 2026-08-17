@@ -32,13 +32,23 @@ import type {
   ActiveExtensionThreadFilter,
   ExtensionSidebarFilterDefinition,
   ExtensionSnapshot,
+  ExtensionUiTone,
   ProjectGroup,
   ThreadSummary,
   ThreadTag,
 } from "@falcondeck/client-core";
-import { filterProjectGroupsByExtensions } from "@falcondeck/client-core";
+import {
+  filterProjectGroupsByExtensions,
+  THREAD_TAGS_EXTENSION_ID,
+} from "@falcondeck/client-core";
 
-import { Text, Button, EmptyState, Skeleton, SyncBanner } from "@/components/ui";
+import {
+  Text,
+  Button,
+  EmptyState,
+  Skeleton,
+  SyncBanner,
+} from "@/components/ui";
 import { SessionListItem } from "@/components/chat";
 import { useCollapsible } from "@/components/chat/useCollapsible";
 import { useSessionSyncStatus } from "@/hooks/useSessionSyncStatus";
@@ -61,6 +71,7 @@ interface SidebarViewProps {
   /** Dismisses the drawer; the full-width sidebar leaves no scrim to tap. */
   onClose?: () => void;
   threadTagsById?: Record<string, ThreadTag[]>;
+  threadTagOptions?: readonly ThreadTag[];
   extensionSnapshot?: ExtensionSnapshot | null;
   extensionSidebarFilters?: readonly ExtensionSidebarFilterDefinition[];
   /** Visible fallback for full-main-area extension panels not rendered on mobile v1. */
@@ -73,6 +84,23 @@ const CHEVRON_TIMING = {
   duration: 150,
   easing: Easing.out(Easing.cubic),
 } as const;
+
+const EXTENSION_UI_TONES = new Set<ExtensionUiTone>([
+  "gray",
+  "red",
+  "orange",
+  "yellow",
+  "green",
+  "blue",
+  "purple",
+  "pink",
+]);
+
+function extensionUiTone(color: string): ExtensionUiTone {
+  return EXTENSION_UI_TONES.has(color as ExtensionUiTone)
+    ? (color as ExtensionUiTone)
+    : "gray";
+}
 
 const WorkspaceChevron = memo(function WorkspaceChevron({
   workspaceId,
@@ -147,6 +175,7 @@ export const SidebarView = memo(function SidebarView({
   onOpenSettings,
   onClose,
   threadTagsById,
+  threadTagOptions = [],
   extensionSnapshot,
   extensionSidebarFilters = [],
   extensionPanelCount = 0,
@@ -174,10 +203,33 @@ export const SidebarView = memo(function SidebarView({
 
   const supportedExtensionFilters = useMemo(
     () =>
-      extensionSidebarFilters.filter(
-        (definition) => definition.document?.root.type === "select",
-      ),
-    [extensionSidebarFilters],
+      extensionSidebarFilters.flatMap((definition) => {
+        const document = definition.document;
+        if (document?.root.type !== "select") return [];
+        if (
+          definition.extensionId !== THREAD_TAGS_EXTENSION_ID ||
+          threadTagOptions.length === 0
+        ) {
+          return [definition];
+        }
+        return [
+          {
+            ...definition,
+            document: {
+              ...document,
+              root: {
+                ...document.root,
+                options: threadTagOptions.map((stage) => ({
+                  value: stage.id,
+                  label: stage.label,
+                  tone: extensionUiTone(stage.color),
+                })),
+              },
+            },
+          },
+        ];
+      }),
+    [extensionSidebarFilters, threadTagOptions],
   );
   const activeExtensionFilters = useMemo(
     () =>
@@ -315,7 +367,8 @@ export const SidebarView = memo(function SidebarView({
             <Text variant="caption" color="muted" weight="normal">
               {item.title.toUpperCase()}
             </Text>
-            {item.title === "Projects" && supportedExtensionFilters.length > 0 ? (
+            {item.title === "Projects" &&
+            supportedExtensionFilters.length > 0 ? (
               <Pressable
                 style={({ pressed }) => [
                   styles.filterButton,
@@ -330,9 +383,11 @@ export const SidebarView = memo(function SidebarView({
                 accessibilityHint={
                   activeExtensionFilterCount > 0
                     ? `${activeExtensionFilterCount} selected`
-                    : "Filter threads by colour"
+                    : "Filter threads by stage"
                 }
-                accessibilityState={{ selected: activeExtensionFilterCount > 0 }}
+                accessibilityState={{
+                  selected: activeExtensionFilterCount > 0,
+                }}
               >
                 <ListFilter
                   size={theme.iconSize.xs}
@@ -343,7 +398,12 @@ export const SidebarView = memo(function SidebarView({
                   }
                 />
                 {activeExtensionFilterCount > 0 ? (
-                  <Text variant="caption" size="2xs" color="accent" weight="semibold">
+                  <Text
+                    variant="caption"
+                    size="2xs"
+                    color="accent"
+                    weight="semibold"
+                  >
                     {activeExtensionFilterCount}
                   </Text>
                 ) : null}

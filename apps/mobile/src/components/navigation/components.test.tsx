@@ -232,18 +232,22 @@ describe("SidebarView component", () => {
     expect(text).not.toContain("Loading your projects");
     expect(text).not.toContain("No projects");
   });
-  it("filters threads with a declarative colour filter", () => {
+  it("filters threads with a synchronized custom stage", () => {
     const groups: ProjectGroup[] = [
       {
         workspace: workspace({ id: "w1" }),
         threads: [
           thread({
-            id: "red-thread",
+            id: "blocked-thread",
             workspace_id: "w1",
-            title: "Red thread",
+            title: "Blocked thread",
             is_pinned: true,
           }),
-          thread({ id: "blue-thread", workspace_id: "w1", title: "Blue thread" }),
+          thread({
+            id: "done-thread",
+            workspace_id: "w1",
+            title: "Done thread",
+          }),
         ],
       },
     ];
@@ -253,38 +257,35 @@ describe("SidebarView component", () => {
         {
           extension_id: "falcondeck.thread-tags",
           view_id: "thread-tags",
-          scope: { kind: "thread", id: "red-thread" },
-          value: { tagIds: ["red"] },
+          scope: { kind: "thread", id: "blocked-thread" },
+          value: { tagIds: ["blocked"] },
           updated_at: "2026-08-13T00:00:00Z",
         },
         {
           extension_id: "falcondeck.thread-tags",
           view_id: "thread-tags",
-          scope: { kind: "thread", id: "blue-thread" },
-          value: { tagIds: ["blue"] },
+          scope: { kind: "thread", id: "done-thread" },
+          value: { tagIds: ["done"] },
           updated_at: "2026-08-13T00:00:00Z",
         },
       ],
     };
     const extensionSidebarFilters: ExtensionSidebarFilterDefinition[] = [
       {
-        key: "falcondeck.thread-tags:colors",
+        key: "falcondeck.thread-tags:stages",
         extensionId: "falcondeck.thread-tags",
-        extensionName: "Thread Colours",
-        contributionId: "colors",
-        title: "Colours",
+        extensionName: "Thread Stages",
+        contributionId: "stages",
+        title: "Stages",
         unsupportedReason: null,
         document: {
           version: 1,
           root: {
             type: "select",
-            id: "colors",
-            label: "Filter by colour",
+            id: "stages",
+            label: "Filter by stage",
             multiple: true,
-            options: [
-              { value: "red", label: "Red", tone: "red" },
-              { value: "blue", label: "Blue", tone: "blue" },
-            ],
+            options: [{ value: "done", label: "Done", tone: "orange" }],
             binding: {
               view: "thread-tags",
               path: ["tagIds"],
@@ -300,6 +301,15 @@ describe("SidebarView component", () => {
         groups={groups}
         extensionSnapshot={extensionSnapshot}
         extensionSidebarFilters={extensionSidebarFilters}
+        threadTagOptions={[
+          {
+            id: "blocked",
+            label: "Blocked",
+            color: "red",
+            icon: "custom",
+          },
+          { id: "done", label: "Done", color: "orange", icon: "done" },
+        ]}
       />,
     );
 
@@ -308,10 +318,12 @@ describe("SidebarView component", () => {
       r.root.findAllByProps({ accessibilityLabel: "Filter threads" }),
     ).toHaveLength(1);
     act(() => {
-      r.root.findByProps({ accessibilityLabel: "Filter threads" }).props.onPress();
+      r.root
+        .findByProps({ accessibilityLabel: "Filter threads" })
+        .props.onPress();
     });
     act(() => {
-      r.root.findByProps({ accessibilityLabel: "Red" }).props.onPress();
+      r.root.findByProps({ accessibilityLabel: "Blocked" }).props.onPress();
     });
     act(() => {
       r.root
@@ -323,8 +335,8 @@ describe("SidebarView component", () => {
         .props.onPress();
     });
 
-    expect(textOf(r)).toContain("Red thread");
-    expect(textOf(r)).not.toContain("Blue thread");
+    expect(textOf(r)).toContain("Blocked thread");
+    expect(textOf(r)).not.toContain("Done thread");
   });
   it("shows a visible fallback for extension panels not supported on mobile", () => {
     const r = renderComponent(

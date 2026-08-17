@@ -10,6 +10,8 @@ import {
 } from '@falcondeck/client-core'
 import { ActivityDiamond, Badge, cn } from '@falcondeck/ui'
 
+import { ThreadStageIcon } from './thread-stage-icon'
+
 export type ThreadItemArchiveHandler = (
   workspaceId: string,
   threadId: string,
@@ -33,17 +35,6 @@ export type ThreadItemProps = {
   }) => void
   nowTick?: number
   tags?: ThreadTag[]
-}
-
-const TAG_COLORS: Record<string, string> = {
-  gray: '#94a3b8',
-  red: '#ef4444',
-  orange: '#f97316',
-  yellow: '#eab308',
-  green: '#22c55e',
-  blue: '#3b82f6',
-  purple: '#a855f7',
-  pink: '#ec4899',
 }
 
 function timeAgo(dateStr: string) {
@@ -159,13 +150,10 @@ export const ThreadItem = memo(
           ) : null}
           {tags.length > 0 ? (
             <span className="flex shrink-0 items-center gap-1" aria-label={tags.map(tag => tag.label).join(', ')}>
-              {tags.slice(0, 3).map(tag => (
-                <span
-                  key={tag.id}
-                  title={tag.label}
-                  className="h-2 w-2 rounded-full"
-                  style={{ backgroundColor: TAG_COLORS[tag.color] ?? TAG_COLORS.gray }}
-                />
+              {tags.slice(0, 1).map(tag => (
+                <span key={tag.id} title={tag.label} className="flex items-center">
+                  <ThreadStageIcon stage={tag} />
+                </span>
               ))}
             </span>
           ) : null}
@@ -241,7 +229,12 @@ function tagsEqual(a: ThreadTag[] | undefined, b: ThreadTag[] | undefined) {
   if ((a?.length ?? 0) !== (b?.length ?? 0)) return false
   return (a ?? []).every((tag, index) => {
     const other = b?.[index]
-    return tag.id === other?.id && tag.label === other.label && tag.color === other.color
+    return (
+      tag.id === other?.id &&
+      tag.label === other.label &&
+      tag.color === other.color &&
+      tag.icon === other.icon
+    )
   })
 }
 

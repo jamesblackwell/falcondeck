@@ -1,8 +1,8 @@
 {
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.thread-tags",
-  "name": "Thread Colours",
-  "version": "0.2.0",
+  "name": "Thread Stages",
+  "version": "0.3.0",
   "engines": {
     "falcondeck": "^0.1"
   },
@@ -11,7 +11,7 @@
     "threadMenuActions": [
       {
         "id": "manage-tags",
-        "title": "Set colour"
+        "title": "Set stage"
       }
     ],
     "threadDecorations": [
@@ -23,24 +23,21 @@
     "sidebarFilters": [
       {
         "id": "tags",
-        "title": "Colours",
+        "title": "Stages",
         "view": "tag-index",
         "ui": {
           "version": 1,
           "root": {
             "type": "select",
-            "id": "colors",
-            "label": "Filter by colour",
+            "id": "stages",
+            "label": "Filter by stage",
             "multiple": true,
             "options": [
-              { "value": "gray", "label": "Gray", "tone": "gray" },
-              { "value": "red", "label": "Red", "tone": "red" },
-              { "value": "orange", "label": "Orange", "tone": "orange" },
-              { "value": "yellow", "label": "Yellow", "tone": "yellow" },
-              { "value": "green", "label": "Green", "tone": "green" },
-              { "value": "blue", "label": "Blue", "tone": "blue" },
-              { "value": "purple", "label": "Purple", "tone": "purple" },
-              { "value": "pink", "label": "Pink", "tone": "pink" }
+              { "value": "backlog", "label": "Backlog", "tone": "gray" },
+              { "value": "in_progress", "label": "In progress", "tone": "yellow" },
+              { "value": "in_review", "label": "In review", "tone": "green" },
+              { "value": "done", "label": "Done", "tone": "orange" },
+              { "value": "canceled", "label": "Canceled", "tone": "gray" }
             ],
             "binding": {
               "view": "thread-tags",
