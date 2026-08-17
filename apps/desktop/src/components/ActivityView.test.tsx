@@ -496,14 +496,81 @@ describe("ActivityView", () => {
       expect(selectedThreadId()).toBe("d");
     });
 
-    it("clears the selected thread with R", () => {
+    it("follows the rendered card grid with WASD", () => {
+      const running = ["a", "b", "c", "d"].map((id) =>
+        thread({
+          id,
+          status: "running",
+          attention: {
+            ...thread({ id: "base" }).attention,
+            level: "running",
+          },
+        }),
+      );
+      render(<ActivityView {...props({ groups: groups(running) })} />);
+
+      const positions = [[0, 0], [100, 0], [200, 0], [0, 100]];
+      for (const [index, element] of Array.from(
+        document.querySelectorAll<HTMLElement>("[data-activity-key]"),
+      ).entries()) {
+        const [left, top] = positions[index]!;
+        element.getBoundingClientRect = vi.fn(() => ({
+          left, top, width: 80, height: 60,
+          right: left + 80, bottom: top + 60, x: left, y: top,
+          toJSON: () => ({}),
+        }));
+      }
+
+      fireEvent.keyDown(window, { key: "d" });
+      expect(selectedThreadId()).toBe("a");
+      fireEvent.keyDown(window, { key: "d" });
+      expect(selectedThreadId()).toBe("b");
+      fireEvent.keyDown(window, { key: "a" });
+      expect(selectedThreadId()).toBe("a");
+      fireEvent.keyDown(window, { key: "s" });
+      expect(selectedThreadId()).toBe("d");
+      fireEvent.keyDown(window, { key: "w" });
+      expect(selectedThreadId()).toBe("a");
+    });
+
+    it("opens the selected thread with E", () => {
+      const onOpenThread = vi.fn();
+      render(<ActivityView {...props({ groups: queue(), onOpenThread })} />);
+
+      fireEvent.keyDown(window, { key: "s" });
+      fireEvent.keyDown(window, { key: "e" });
+      expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "first");
+    });
+
+    it("jumps to a lane with its digit", () => {
+      const running = thread({
+        id: "busy",
+        status: "running",
+        attention: { ...thread({ id: "base" }).attention, level: "running" },
+      });
+      render(
+        <ActivityView
+          {...props({ groups: groups([...queue()[0]!.threads, running]) })}
+        />,
+      );
+
+      // 3 is "ready for you", 4 is "running"; 1 and 2 are empty here.
+      fireEvent.keyDown(window, { key: "4" });
+      expect(selectedThreadId()).toBe("busy");
+      fireEvent.keyDown(window, { key: "3" });
+      expect(selectedThreadId()).toBe("first");
+      fireEvent.keyDown(window, { key: "1" });
+      expect(selectedThreadId()).toBe("first");
+    });
+
+    it.each(["q", "r"])("clears the selected thread with %s", (key) => {
       const onMarkThreadRead = vi.fn();
       render(
         <ActivityView {...props({ groups: queue(), onMarkThreadRead })} />,
       );
 
       fireEvent.keyDown(window, { key: "ArrowDown" });
-      fireEvent.keyDown(window, { key: "r" });
+      fireEvent.keyDown(window, { key });
       expect(onMarkThreadRead).toHaveBeenCalledWith(workspace.id, "first");
     });
 
@@ -619,7 +686,7 @@ describe("ActivityView", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: finished(), onOpenThread })} />);
 
-      fireEvent.keyDown(window, { key: "e" });
+      fireEvent.keyDown(window, { key: "t" });
       expect(screen.getByRole("button", { name: /Recent/ })).toHaveAttribute(
         "aria-expanded",
         "true",

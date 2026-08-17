@@ -8,16 +8,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import {
-  Activity,
-  Check,
-  ChevronRight,
-  CircleAlert,
-  PanelsTopLeft,
-  Plus,
-  Play,
-  X,
-} from "lucide-react";
+import { Check, ChevronRight, PanelsTopLeft, Plus, X } from "lucide-react";
 
 import {
   collectActivityEntries,
@@ -82,14 +73,22 @@ type ResolvedEntry = {
   request: InteractiveRequest;
 };
 
-/** Per-section tone. Everything visual keys off `toneVar` through --fd-tone,
- *  so palettes and light mode carry through without a hard-coded color. */
+/**
+ * Per-section tone. Everything visual keys off `toneVar` through --fd-tone,
+ * so palettes and light mode carry through without a hard-coded color.
+ *
+ * Three hues, and only three: amber and red are alarms, and green is the
+ * brand accent spent on the one pile that wants you. Running is the ambient
+ * majority, so it is neutral — colouring it made a busy queue read as a
+ * wall of green and left the accent meaning nothing.
+ */
 const SECTION_META: Record<
   ActivitySection,
   {
     title: string;
     description: string;
-    icon: typeof Activity;
+    /** Lane digit — the section's slot in SECTION_ORDER, bound to 1–4. */
+    lane: number;
     tone: string;
     toneVar: string;
     glyph: string;
@@ -98,7 +97,7 @@ const SECTION_META: Record<
   blocked: {
     title: "Blocked",
     description: "Waiting for your approval or answer",
-    icon: CircleAlert,
+    lane: 1,
     tone: "text-warning",
     toneVar: "var(--fd-warning)",
     glyph: "?",
@@ -106,7 +105,7 @@ const SECTION_META: Record<
   failed: {
     title: "Failed",
     description: "Runs that need acknowledging",
-    icon: X,
+    lane: 2,
     tone: "text-danger",
     toneVar: "var(--fd-danger)",
     glyph: "✗",
@@ -114,17 +113,17 @@ const SECTION_META: Record<
   ready: {
     title: "Ready for you",
     description: "Finished turns you have not read",
-    icon: Check,
-    tone: "text-info",
-    toneVar: "var(--fd-info)",
+    lane: 3,
+    tone: "text-accent",
+    toneVar: "var(--fd-accent)",
     glyph: "✓",
   },
   running: {
     title: "Running",
     description: "Work in progress",
-    icon: Play,
-    tone: "text-success",
-    toneVar: "var(--fd-success)",
+    lane: 4,
+    tone: "text-fg-muted",
+    toneVar: "var(--fd-fg-3)",
     glyph: "›",
   },
 };
@@ -132,26 +131,53 @@ const SECTION_META: Record<
 const SUMMARY_STATS: readonly {
   section: ActivitySection;
   label: string;
-  tone: string;
 }[] = [
-  { section: "blocked", label: "Needs response", tone: "text-warning" },
-  { section: "failed", label: "Failed", tone: "text-danger" },
-  { section: "ready", label: "Ready", tone: "text-info" },
-  { section: "running", label: "Running", tone: "text-success" },
+  { section: "blocked", label: "Needs response" },
+  { section: "failed", label: "Failed" },
+  { section: "ready", label: "Ready" },
+  { section: "running", label: "Running" },
 ];
 
+/**
+ * Left hand on the keys, right hand free. WASD moves, E interacts, Q
+ * dismisses, 1–4 pick a lane — the bindings anyone who has played a game
+ * already knows. Arrows and j/k stay wired for everyone else.
+ */
 const KEY_HINTS: readonly {
   key: string;
+  /** The non-gaming binding for the same action, listed behind `?`. */
+  alt?: string;
   label: string;
   description: string;
+  /** Shown in the always-on status bar; the rest live behind `?`. */
+  compact?: boolean;
 }[] = [
-  { key: "← ↑ ↓ →", label: "move", description: "Move through the visual grid" },
-  { key: "j / k", label: "scan", description: "Scan the queue in order" },
-  { key: "↵", label: "open", description: "Open in the main window" },
-  { key: "r", label: "read", description: "Mark the selected thread read" },
-  { key: "e", label: "recent", description: "Show what finished recently" },
-  { key: "?", label: "keys", description: "Show this list" },
-  { key: "esc", label: "clear", description: "Clear the selection" },
+  {
+    key: "W A S D",
+    alt: "← ↑ ↓ →",
+    label: "move",
+    description: "Move across the grid",
+    compact: true,
+  },
+  {
+    key: "E",
+    alt: "↵ / space",
+    label: "open",
+    description: "Open the selected thread",
+    compact: true,
+  },
+  {
+    key: "Q",
+    alt: "R",
+    label: "clear",
+    description: "Mark the selected thread read",
+    compact: true,
+  },
+  { key: "1–4", label: "lane", description: "Jump to a lane", compact: true },
+  { key: "J / K", label: "scan", description: "Scan the queue in order" },
+  { key: "T", label: "recent", description: "Show what finished recently" },
+  { key: "?", alt: "H", label: "keys", description: "Show this list" },
+  { key: "esc", label: "back", description: "Clear the selection" },
 ];
 
 /** Counters read as instrument digits: fixed width, never a bare "0". */
@@ -210,13 +236,19 @@ function spatialNeighbor(
   return best?.key ?? null;
 }
 
-/** Typing in a card's answer box must not steal j/k/Enter. */
+/** Typing in a card's answer box must not steal the movement keys. */
 function isTypingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) return false;
   return (
     target.isContentEditable ||
     ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName)
   );
+}
+
+/** A focused control answers Enter and space itself; don't open twice. */
+function isActivatableTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest("button, a[href], summary"));
 }
 
 function timeAgo(dateStr: string, nowMs: number) {
@@ -390,13 +422,13 @@ const ActivityRow = memo(
       <article
         style={{ "--fd-tone": meta.toneVar } as CSSProperties}
         className={cn(
-          "fd-tone-edge fd-terminal-card group flex flex-col rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1",
+          "fd-tone-edge fd-terminal-card fd-reticle group flex flex-col rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1",
           // Taller on wide screens, where the extra room buys readout lines
           // rather than empty card.
           entry.section !== "blocked" && "h-36 overflow-hidden xl:h-40",
           offline && "opacity-60",
           selected &&
-            "border-[color:color-mix(in_srgb,var(--fd-tone)_55%,transparent)]",
+            "border-[color:color-mix(in_srgb,var(--fd-accent)_50%,transparent)]",
         )}
         data-activity-thread={entry.thread.id}
         data-activity-key={entryKey(entry)}
@@ -602,8 +634,10 @@ const RecentTrail = memo(function RecentTrail({
                 data-activity-key={key}
                 data-selected={selectedKey === key ? "true" : undefined}
                 className={cn(
-                  "border-b border-border-subtle last:border-b-0",
-                  selectedKey === key && "bg-[color:var(--fd-interactive-hover)]",
+                  "border-b border-l-2 border-l-transparent border-border-subtle last:border-b-0",
+                  // Same accent cursor the cards wear, at list scale.
+                  selectedKey === key &&
+                    "border-l-accent bg-[color:var(--fd-interactive-hover)]",
                 )}
               >
                 <button
@@ -743,17 +777,23 @@ export const ActivityView = memo(function ActivityView({
   /* ================================================================
      Keyboard model.
 
-     The queue is a list, so it navigates like one: j/k or arrows to
-     move, Enter to open, R to clear, E for the trail. Handled on the
+     Activity is a grid you fly around, so it takes the bindings your
+     left hand already knows: WASD to move, E to open, Q to clear,
+     1–4 to drop into a lane, T for the trail. Arrows and j/k stay
+     wired for anyone who reaches for those instead. Handled on the
      window rather than per-card so the keys work the moment Activity
      has focus, without the user first clicking a card.
      ================================================================ */
   const selectable = useMemo(() => {
-    const rows: { key: string; entry?: ActivityEntry; recent?: RecentEntry }[] =
-      [];
+    const rows: {
+      key: string;
+      section?: ActivitySection;
+      entry?: ActivityEntry;
+      recent?: RecentEntry;
+    }[] = [];
     for (const section of SECTION_ORDER) {
       for (const entry of sections.get(section) ?? []) {
-        rows.push({ key: entryKey(entry), entry });
+        rows.push({ key: entryKey(entry), section, entry });
       }
     }
     if (recentOpen) {
@@ -813,45 +853,83 @@ export const ActivityView = memo(function ActivityView({
         if (next) setSelectedKey(next);
       };
 
+      /** Drop onto the first card of a lane, whatever it holds today. */
+      const jumpToLane = (lane: number) => {
+        event.preventDefault();
+        const section = SECTION_ORDER[lane - 1];
+        const row = selectable.find((entry) => entry.section === section);
+        if (row) setSelectedKey(row.key);
+      };
+
+      const openSelected = () => {
+        // Enter and space belong to whatever control has focus first.
+        if (event.key !== "e" && event.key !== "E") {
+          if (isActivatableTarget(event.target)) return;
+        }
+        const row = selectable.find((entry) => entry.key === selectedKey);
+        const target = row?.entry ?? row?.recent;
+        if (!target) return;
+        event.preventDefault();
+        onOpenThread(target.workspaceId, target.thread.id);
+      };
+
+      const markSelectedRead = () => {
+        const row = selectable.find((entry) => entry.key === selectedKey);
+        if (!row?.entry) return;
+        if (row.entry.section !== "failed" && row.entry.section !== "ready") {
+          return;
+        }
+        event.preventDefault();
+        void Promise.resolve(
+          onMarkThreadRead(row.entry.workspaceId, row.entry.thread.id),
+        ).catch(() => {});
+      };
+
       switch (event.key) {
-        case "ArrowDown":
-          return moveSpatially("down");
-        case "j":
-          return step(1);
         case "ArrowUp":
+        case "w":
+        case "W":
           return moveSpatially("up");
-        case "k":
-          return step(-1);
         case "ArrowLeft":
+        case "a":
+        case "A":
           return moveSpatially("left");
+        case "ArrowDown":
+        case "s":
+        case "S":
+          return moveSpatially("down");
         case "ArrowRight":
+        case "d":
+        case "D":
           return moveSpatially("right");
-        case "Enter": {
-          const row = selectable.find((entry) => entry.key === selectedKey);
-          const target = row?.entry ?? row?.recent;
-          if (!target) return;
-          event.preventDefault();
-          onOpenThread(target.workspaceId, target.thread.id);
-          return;
-        }
-        case "r":
-        case "R": {
-          const row = selectable.find((entry) => entry.key === selectedKey);
-          if (!row?.entry) return;
-          if (row.entry.section !== "failed" && row.entry.section !== "ready") {
-            return;
-          }
-          event.preventDefault();
-          void Promise.resolve(
-            onMarkThreadRead(row.entry.workspaceId, row.entry.thread.id),
-          ).catch(() => {});
-          return;
-        }
+        case "j":
+        case "J":
+          return step(1);
+        case "k":
+        case "K":
+          return step(-1);
+        case "Enter":
+        case " ":
         case "e":
         case "E":
+          return openSelected();
+        case "q":
+        case "Q":
+        case "r":
+        case "R":
+          return markSelectedRead();
+        case "t":
+        case "T":
           event.preventDefault();
           return setRecentOpen((current) => !current);
+        case "1":
+        case "2":
+        case "3":
+        case "4":
+          return jumpToLane(Number(event.key));
         case "?":
+        case "h":
+        case "H":
           event.preventDefault();
           return setShowKeys((current) => !current);
         case "Escape":
@@ -943,9 +1021,7 @@ export const ActivityView = memo(function ActivityView({
             className="fd-tone-edge flex flex-col gap-4 overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1 px-4 py-3 md:flex-row md:items-center"
           >
             <div className="flex min-w-0 items-center gap-2.5 md:w-52 md:shrink-0">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[var(--fd-radius-sm)] border border-[color:color-mix(in_srgb,var(--fd-tone)_28%,transparent)] text-[color:var(--fd-tone)]">
-                <Activity aria-hidden="true" className="h-4 w-4" />
-              </span>
+              <span aria-hidden="true" className="fd-led shrink-0" />
               <div className="min-w-0">
                 <p className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
                   {attentionCount === 0
@@ -961,27 +1037,30 @@ export const ActivityView = memo(function ActivityView({
             </div>
 
             {/* Instrument row. A zeroed counter drops to a flat, faint digit so
-                the only lit ones are those with work behind them. */}
+                the only lit ones are those with work behind them, and each
+                tile wears the lane digit that jumps to it. */}
             <dl className="grid min-w-0 flex-1 grid-cols-2 gap-px overflow-hidden rounded-[var(--fd-radius-sm)] border border-border-subtle bg-border-subtle sm:grid-cols-4">
               {SUMMARY_STATS.map((stat) => {
+                const meta = SECTION_META[stat.section];
                 const count = summaryCounts.get(stat.section) ?? 0;
                 return (
                   <div
                     key={stat.section}
-                    style={
-                      {
-                        "--fd-tone": SECTION_META[stat.section].toneVar,
-                      } as CSSProperties
-                    }
+                    style={{ "--fd-tone": meta.toneVar } as CSSProperties}
                     className="relative flex min-w-0 items-baseline justify-between gap-2 bg-surface-0 px-3 py-2 sm:block"
                   >
-                    <dt className="fd-microlabel truncate text-fg-muted">
-                      {stat.label}
+                    <dt className="flex min-w-0 items-center gap-1.5">
+                      <span aria-hidden="true" className="fd-keycap shrink-0">
+                        {meta.lane}
+                      </span>
+                      <span className="fd-microlabel truncate text-fg-muted">
+                        {stat.label}
+                      </span>
                     </dt>
                     <dd
                       className={cn(
                         "mt-1 font-mono text-[length:var(--fd-text-lg)] font-semibold leading-none tabular-nums",
-                        count > 0 ? stat.tone : "text-fg-faint",
+                        count > 0 ? meta.tone : "text-fg-faint",
                       )}
                     >
                       {padCount(count)}
@@ -989,7 +1068,7 @@ export const ActivityView = memo(function ActivityView({
                     <span
                       aria-hidden="true"
                       className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-[color:var(--fd-tone)]"
-                      style={{ opacity: count > 0 ? 0.45 : 0.08 }}
+                      style={{ opacity: count > 0 ? 0.4 : 0.06 }}
                     />
                   </div>
                 );
@@ -1023,19 +1102,22 @@ export const ActivityView = memo(function ActivityView({
               const sectionEntries = sections.get(section) ?? [];
               if (sectionEntries.length === 0) return null;
               const meta = SECTION_META[section];
-              const Icon = meta.icon;
               return (
                 <section
                   key={section}
                   aria-labelledby={`activity-${section}`}
+                  data-activity-lane={meta.lane}
                   style={{ "--fd-tone": meta.toneVar } as CSSProperties}
                 >
-                  {/* Channel divider: label, hairline run-out, count. */}
+                  {/* Channel divider: lane digit, label, hairline run-out,
+                      count. The digit is the key that jumps here. */}
                   <div className="mb-2.5 flex items-center gap-2.5">
-                    <Icon
+                    <span
                       aria-hidden="true"
-                      className={cn("h-3.5 w-3.5 shrink-0", meta.tone)}
-                    />
+                      className="fd-keycap shrink-0 border-[color:color-mix(in_srgb,var(--fd-tone)_35%,transparent)] text-[color:var(--fd-tone)]"
+                    >
+                      {meta.lane}
+                    </span>
                     <h2
                       id={`activity-${section}`}
                       className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
@@ -1119,21 +1201,16 @@ export const ActivityView = memo(function ActivityView({
           className="h-px min-w-4 flex-1 bg-border-subtle"
         />
         <ul className="flex shrink-0 items-center gap-3">
-          {KEY_HINTS.filter(
-            (hint) => hint.key !== "esc" || onReturnFocus || onClose,
-          ).map((hint) => (
-            <li
-              key={hint.key}
-              className="hidden items-center gap-1.5 md:flex"
-            >
-              <kbd className="fd-readout rounded-[var(--fd-radius-sm)] border border-border-default px-1.5 py-0.5 text-fg-secondary">
-                {hint.key}
-              </kbd>
-              <span className="fd-microlabel text-fg-muted">
-                {hint.key === "esc" && onReturnFocus ? "main app" : hint.label}
-              </span>
+          {KEY_HINTS.filter((hint) => hint.compact).map((hint) => (
+            <li key={hint.key} className="hidden items-center gap-1.5 md:flex">
+              <kbd className="fd-keycap">{hint.key}</kbd>
+              <span className="fd-microlabel text-fg-muted">{hint.label}</span>
             </li>
           ))}
+          <li className="flex items-center gap-1.5">
+            <kbd className="fd-keycap">?</kbd>
+            <span className="fd-microlabel text-fg-muted">keys</span>
+          </li>
         </ul>
       </footer>
 
@@ -1149,7 +1226,9 @@ export const ActivityView = memo(function ActivityView({
               Keyboard
             </p>
             <dl className="space-y-2">
-              {KEY_HINTS.map((hint) => (
+              {KEY_HINTS.filter(
+                (hint) => hint.key !== "esc" || onReturnFocus || onClose,
+              ).map((hint) => (
                 <div
                   key={hint.key}
                   className="flex items-center justify-between gap-4"
@@ -1159,10 +1238,14 @@ export const ActivityView = memo(function ActivityView({
                       ? "Back to the main app"
                       : hint.description}
                   </dt>
-                  <dd>
-                    <kbd className="fd-readout rounded-[var(--fd-radius-sm)] border border-border-default px-1.5 py-0.5 text-fg-secondary">
-                      {hint.key}
-                    </kbd>
+                  <dd className="flex shrink-0 items-center gap-1.5">
+                    <kbd className="fd-keycap">{hint.key}</kbd>
+                    {hint.alt ? (
+                      <>
+                        <span className="fd-microlabel text-fg-faint">or</span>
+                        <kbd className="fd-keycap">{hint.alt}</kbd>
+                      </>
+                    ) : null}
                   </dd>
                 </div>
               ))}
