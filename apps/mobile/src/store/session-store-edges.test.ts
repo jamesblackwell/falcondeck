@@ -149,7 +149,14 @@ describe('session-store edge cases', () => {
       const { applyDaemonEvent } = useSessionStore.getState()
       applyDaemonEvent(snapshotEvent(snap))
 
-      const updatedThread = thread({ status: 'running', title: 'Updated title' })
+      // Reviving a settled thread needs a strictly newer timestamp: the daemon
+      // stamps every real mutation with a fresh one, and an equal stamp is how
+      // a stale background rebroadcast reads. See isStaleThreadSummary.
+      const updatedThread = thread({
+        status: 'running',
+        title: 'Updated title',
+        updated_at: '2026-03-16T10:00:01Z',
+      })
       applyDaemonEvent(threadUpdatedEvent(updatedThread))
 
       // The snapshot should reflect the update (via applySnapshotEvent)
@@ -164,7 +171,11 @@ describe('session-store edge cases', () => {
         threads: [thread({ status: 'idle', title: 'Before RPC' })],
       })
       const racedUpdate = threadUpdatedEvent(
-        thread({ status: 'running', title: 'Streaming now' }),
+        thread({
+          status: 'running',
+          title: 'Streaming now',
+          updated_at: '2026-03-16T10:00:01Z',
+        }),
       )
       let notifications = 0
       const unsubscribe = useSessionStore.subscribe(() => {

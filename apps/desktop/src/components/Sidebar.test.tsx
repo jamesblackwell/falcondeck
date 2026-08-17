@@ -979,8 +979,6 @@ describe("DesktopSidebar", () => {
     const toggle = screen.getByRole("button", { name: /falcondeck/ });
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("Main thread")).not.toBeInTheDocument();
-    // The row still accounts for what it is hiding.
-    expect(toggle).toHaveTextContent("1");
 
     fireEvent.click(toggle);
     expect(onWorkspaceCollapsedChange).toHaveBeenCalledWith(

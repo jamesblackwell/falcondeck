@@ -16,7 +16,11 @@ export function useControlStateEvents(
   onChange: (storeRevision: number, domains: string[]) => void,
 ): void {
   const handlerRef = useRef(onChange);
-  handlerRef.current = onChange;
+  // Kept current in an effect, not during render: the socket only delivers
+  // messages after mount, so the latest handler is always in place by then.
+  useEffect(() => {
+    handlerRef.current = onChange;
+  }, [onChange]);
 
   useEffect(() => {
     if (!baseUrl) return;
