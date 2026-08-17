@@ -144,7 +144,7 @@ describe('useDaemonConnection thread restoration', () => {
       // The first tick only starts the thread's quiet clock; the correction
       // waits until it has been silent for the full recheck window.
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(15_000)
+        await vi.advanceTimersByTimeAsync(5_000)
       })
       expect(mocks.snapshot).not.toHaveBeenCalled()
       expect(result.current.snapshot?.threads[0]?.status).toBe('running')
@@ -179,7 +179,7 @@ describe('useDaemonConnection thread restoration', () => {
             thread_id: 'thread-1',
             event: { type: 'turn-start', turn_id: `turn-${tick}` },
           } as unknown as EventEnvelope)
-          await vi.advanceTimersByTimeAsync(15_000)
+          await vi.advanceTimersByTimeAsync(8_000)
         })
       }
       expect(mocks.snapshot).not.toHaveBeenCalled()

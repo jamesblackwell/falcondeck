@@ -30,10 +30,13 @@ const THREAD_PREFETCH_LIMIT = 3
 const THREAD_PREFETCH_FALLBACK_DELAY_MS = 250
 // A thread the client believes is live but that has gone this long without a
 // single event is a candidate for a stuck spinner: re-check it against the
-// daemon. Long tool calls do go quiet for minutes, so this must be generous
-// enough that the check is rare and cheap rather than a status poll.
-const THREAD_STATUS_RECHECK_AFTER_MS = 45_000
-const THREAD_STATUS_RECHECK_INTERVAL_MS = 15_000
+// daemon. A missed terminal thread-update strands the composer on Stop and the
+// transcript on "Thinking…" until this fires, so the window is sized to what a
+// user staring at a finished answer will tolerate, not to how long tool calls
+// can run silently — a quiet-but-live thread just costs one cheap local
+// snapshot fetch per interval until it speaks again.
+const THREAD_STATUS_RECHECK_AFTER_MS = 10_000
+const THREAD_STATUS_RECHECK_INTERVAL_MS = 5_000
 
 type IdleWindow = Window & {
   requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
