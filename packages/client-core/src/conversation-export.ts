@@ -144,8 +144,10 @@ function itemMarkdown(item: ConversationItem): string {
           `${contentLifecycleLabel(lifecycle)}${duration}`,
           item.created_at,
         ),
-        item.content.trim() || "_No reasoning text was retained._",
-      ].join("\n\n");
+        item.content.trim() || null,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
     }
     case "code_review": {
       const lifecycle = contentLifecycle(item);
@@ -344,6 +346,13 @@ export function conversationItemsToMarkdown(
     ? "> Earlier authoritative history is not currently loaded and is not included in this export."
     : null;
   const preamble = [`# ${title}`, partial].filter(Boolean).join("\n\n");
-  const transcript = items.map(itemMarkdown).join("\n\n---\n\n");
+  const transcript = items
+    .filter(
+      (item) =>
+        item.kind !== "reasoning" ||
+        Boolean(item.content.trim() || item.summary?.trim()),
+    )
+    .map(itemMarkdown)
+    .join("\n\n---\n\n");
   return [preamble, transcript].filter(Boolean).join("\n\n").concat("\n");
 }

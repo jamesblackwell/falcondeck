@@ -298,6 +298,33 @@ describe("conversation Markdown export", () => {
     );
   });
 
+  it("omits reasoning items that retained no text or summary", () => {
+    const items: ConversationItem[] = [
+      {
+        kind: "reasoning",
+        id: "reasoning-empty",
+        summary: null,
+        content: "",
+        lifecycle: "complete",
+        duration_ms: 268,
+        created_at,
+      },
+      {
+        kind: "reasoning",
+        id: "reasoning-kept",
+        summary: "Checking evidence",
+        content: "",
+        lifecycle: "complete",
+        duration_ms: 238,
+        created_at,
+      },
+    ];
+    const markdown = conversationItemsToMarkdown(items);
+    expect(markdown).not.toContain("No reasoning text was retained");
+    expect(markdown).not.toContain("268 ms");
+    expect(markdown).toContain("## Reasoning — Checking evidence");
+  });
+
   it("creates portable Markdown filenames", () => {
     expect(conversationExportFilename("../../Release audit?")).toBe(
       "Release-audit.md",
