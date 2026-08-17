@@ -4847,10 +4847,15 @@ async fn a_send_without_steer_queues_even_where_the_provider_supports_steering()
 #[tokio::test]
 async fn a_steer_falls_back_to_the_queue_when_the_provider_cannot_steer() {
     let temp_dir = tempdir().unwrap();
+    // ACP providers all steer now (cancel + re-prompt), so a steering-less
+    // capability set has to be spelled out to exercise the queue fallback.
     let (app, workspace_id) = busy_thread_app(
         &temp_dir,
         AgentProvider::new("non-steering-acp"),
-        falcondeck_core::AgentCapabilitySummary::acp_minimal(),
+        falcondeck_core::AgentCapabilitySummary {
+            supports_interrupt: true,
+            ..Default::default()
+        },
     )
     .await;
 
@@ -5096,7 +5101,10 @@ async fn a_queued_turn_cannot_be_steered_on_a_provider_without_steering() {
     let (app, workspace_id) = busy_thread_app(
         &temp_dir,
         AgentProvider::new("non-steering-acp"),
-        falcondeck_core::AgentCapabilitySummary::acp_minimal(),
+        falcondeck_core::AgentCapabilitySummary {
+            supports_interrupt: true,
+            ..Default::default()
+        },
     )
     .await;
     let queued_ids = queue_messages(&app, &workspace_id, 1).await;

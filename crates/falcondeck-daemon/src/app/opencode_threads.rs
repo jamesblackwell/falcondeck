@@ -125,7 +125,10 @@ impl AppState {
         }) else {
             return;
         };
-        agent.capabilities.supports_steering = available;
+        // Steering survives the ACP fallback: without native `delivery:
+        // "steer"` the daemon cancels the in-flight ACP prompt and re-prompts
+        // on the same session.
+        agent.capabilities.supports_steering = true;
         agent.capabilities.supports_images = available || agent.capabilities.supports_images;
         if available {
             agent.capabilities.permission_modes = native_permission_modes();

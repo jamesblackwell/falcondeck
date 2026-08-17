@@ -1816,8 +1816,11 @@ async fn run_acp_turn_startup(
     Ok(())
 }
 
-/// Injects a message into a running ACP turn where the provider exposes a
-/// compatible vendor extension.
+/// Injects a message into a running ACP turn. Providers with a compatible
+/// vendor extension (Grok's probed `x.ai/interject`) get true injection —
+/// the running prompt keeps its in-flight work. Everyone else is steered by
+/// cancelling the in-flight prompt and re-prompting on the same session,
+/// which any ACP agent supports.
 pub(super) async fn steer_acp_turn(
     app: &AppState,
     workspace_id: &str,
@@ -1836,9 +1839,12 @@ pub(super) async fn steer_acp_turn(
             .ok_or_else(|| DaemonError::BadRequest("no active ACP session to steer".to_string()))?
     };
     let content = acp_turn_content(&runtime, inputs, selected_skills).await;
-    runtime
-        .interject(&session_id, &content.text, content.blocks)
-        .await
+    if runtime.supports_interject() {
+        return runtime
+            .interject(&session_id, &content.text, content.blocks)
+            .await;
+    }
+    runtime.steer_with_cancel(&session_id, content.blocks).await
 }
 
 struct AcpTurnContent {

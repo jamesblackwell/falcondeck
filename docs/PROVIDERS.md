@@ -330,7 +330,7 @@ pub struct AgentCapabilitySummary {
     pub supports_images: bool,
     pub supports_skills: bool,
     pub supports_collaboration_modes: bool,
-    pub supports_steering: bool,           // mid-turn injection; OpenCode only
+    pub supports_steering: bool,           // mid-turn injection; all ACP agents via cancel + re-prompt
     pub supports_mid_session_model_switch: bool,
 }
 ```

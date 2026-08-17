@@ -126,6 +126,24 @@ input.on('line', (line) => {
 
   if (message.method === 'session/prompt') {
     promptCount += 1
+    if (scenario === 'steer') {
+      // Echoes each prompt so the test can observe delivery order. A prompt
+      // containing "hold" stays open until session/cancel resolves it as
+      // cancelled — the shape a steered prompt takes in the wild.
+      const text = (message.params?.prompt ?? [])
+        .map((block) => block.text ?? '')
+        .join('')
+      update({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: `SEEN:${text}` },
+      })
+      if (text.includes('hold')) {
+        cancelPromptId = message.id
+        return
+      }
+      result(message.id, { stopReason: 'end_turn' })
+      return
+    }
     if (scenario === 'plan-approval') {
       planPromptId = message.id
       send({

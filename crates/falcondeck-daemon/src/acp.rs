@@ -63,10 +63,11 @@ pub fn acp_supports_images(provider: &str, advertised: bool) -> bool {
     advertised || provider.eq_ignore_ascii_case("grok")
 }
 
-/// Whether a provider is known to have builds with a steering extension.
-/// Actual support is probed because Grok 1.0.0 builds exist both with and
-/// without `x.ai/interject`.
-fn acp_may_support_steering(provider: &str) -> bool {
+/// Whether a provider is known to have builds with a vendor interjection
+/// extension. Actual support is probed because Grok 1.0.0 builds exist both
+/// with and without `x.ai/interject`. Providers without the extension are
+/// still steerable via cancel-and-re-prompt.
+fn acp_may_support_interject(provider: &str) -> bool {
     provider.eq_ignore_ascii_case("grok")
 }
 
@@ -753,9 +754,34 @@ pub struct AcpRuntime {
     /// real cause (for example an API 402) to surface instead.
     turn_failure_details: Mutex<HashMap<String, String>>,
     initialize_result: Mutex<Option<Value>>,
-    supports_steering: AtomicBool,
+    /// Whether the live process answered the vendor interjection probe
+    /// (Grok's `x.ai/interject`). Steering itself needs no extension: every
+    /// other agent is steered by cancelling the in-flight prompt and
+    /// re-prompting on the same session (see [`AcpRuntime::steer_with_cancel`]).
+    supports_interject: AtomicBool,
+    /// Per-session steer bookkeeping for the active turn. An entry exists
+    /// exactly while [`AcpRuntime::prompt`] runs its segment loop, so a steer
+    /// landing without one is stale by definition.
+    steer_queues: Mutex<HashMap<String, SteerQueue>>,
     closed: AtomicBool,
     events: mpsc::UnboundedSender<AcpEvent>,
+}
+
+/// Steer state for one session's active turn. Mirrors the semantics bb's ACP
+/// bridge established: a steer queues its input and cancels the in-flight
+/// prompt; the prompt loop then delivers the queued input as the next
+/// `session/prompt` on the same session, continuing the same logical turn.
+#[derive(Default)]
+struct SteerQueue {
+    /// Prompt content blocks waiting to be delivered after the current
+    /// prompt settles.
+    queued: VecDeque<Vec<Value>>,
+    /// True after a steer sent `session/cancel` for the current prompt, so
+    /// stacked steers do not fire redundant cancels.
+    cancel_requested: bool,
+    /// True after a user interrupt: the turn is ending, queued steers are
+    /// dropped, and new steers are refused.
+    stopping: bool,
 }
 
 /// ACP session mode state: the agent's current mode plus the ids it accepts
@@ -1215,7 +1241,8 @@ impl AcpRuntime {
             reported_update_kinds: Mutex::new(HashSet::new()),
             turn_failure_details: Mutex::new(HashMap::new()),
             initialize_result: Mutex::new(None),
-            supports_steering: AtomicBool::new(false),
+            supports_interject: AtomicBool::new(false),
+            steer_queues: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             events,
         });
@@ -1265,7 +1292,7 @@ impl AcpRuntime {
             )));
         }
         *runtime.initialize_result.lock().await = Some(init);
-        if acp_may_support_steering(runtime.provider.as_str()) {
+        if acp_may_support_interject(runtime.provider.as_str()) {
             let outcome = runtime
                 .request_with_timeout(
                     "x.ai/interject",
@@ -1279,7 +1306,7 @@ impl AcpRuntime {
                 .await;
             let supported = acp_interject_probe_supported(&outcome);
             runtime
-                .supports_steering
+                .supports_interject
                 .store(supported, Ordering::Release);
         }
         Ok(runtime)
@@ -1337,7 +1364,12 @@ impl AcpRuntime {
         falcondeck_core::AgentCapabilitySummary {
             supports_interrupt: true,
             supports_images,
-            supports_steering: self.supports_steering.load(Ordering::Acquire),
+            // Every ACP agent is steerable: the ACP contract requires
+            // `session/cancel` to settle the in-flight prompt, and the prompt
+            // loop re-prompts on the same session with the steer input. Grok's
+            // probed `x.ai/interject` remains the preferred path because it
+            // injects without discarding in-flight work.
+            supports_steering: true,
             permission_modes,
             ..falcondeck_core::AgentCapabilitySummary::default()
         }
@@ -1492,12 +1524,14 @@ impl AcpRuntime {
             .await
     }
 
-    async fn request_inner(
+    /// Writes a request and returns the pending-response receiver without
+    /// awaiting it, so a caller can interleave other traffic (a steer's
+    /// `session/cancel`) between issue and settlement.
+    async fn begin_request(
         &self,
         method: &str,
         params: Value,
-        response_timeout: Option<Duration>,
-    ) -> Result<Value, DaemonError> {
+    ) -> Result<(i64, oneshot::Receiver<Result<Value, DaemonError>>), DaemonError> {
         if self.is_closed() {
             return Err(DaemonError::Process(format!(
                 "ACP provider '{}' is not running",
@@ -1519,6 +1553,16 @@ impl AcpRuntime {
             self.pending.lock().await.remove(&id);
             return Err(error);
         }
+        Ok((id, receiver))
+    }
+
+    async fn request_inner(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout: Option<Duration>,
+    ) -> Result<Value, DaemonError> {
+        let (id, receiver) = self.begin_request(method, params).await?;
         let response = if let Some(response_timeout) = response_timeout {
             match timeout(response_timeout, receiver).await {
                 Ok(response) => response,
@@ -1895,6 +1939,15 @@ impl AcpRuntime {
 
     /// Runs one prompt turn; resolves when the agent reports a stop reason.
     ///
+    /// A turn is a loop of `session/prompt` requests on the same session: a
+    /// steer ([`Self::steer_with_cancel`]) cancels the in-flight prompt and
+    /// queues its input, and this loop delivers the queued input as the next
+    /// prompt — so the steer lands inside the same logical turn. Each settled
+    /// prompt emits its own `TurnEnded` so the app layer settles that
+    /// segment's items (a cancelled segment's tools read as interrupted, and
+    /// the steer's reply starts fresh stream items); the returned stop reason
+    /// is the final segment's.
+    ///
     /// The turn-ended marker is delivered through the event channel rather
     /// than handled here: the channel already holds every delta the agent
     /// wrote before its response, so ordering the reset behind them prevents
@@ -1906,56 +1959,169 @@ impl AcpRuntime {
         session_id: &str,
         content: Vec<Value>,
     ) -> Result<String, DaemonError> {
+        let mut content = if content.is_empty() {
+            vec![json!({ "type": "text", "text": "[empty prompt]" })]
+        } else {
+            content
+        };
+        self.steer_queues
+            .lock()
+            .await
+            .insert(session_id.to_string(), SteerQueue::default());
+        loop {
+            // A detail left over from an earlier prompt must not masquerade
+            // as this one's cause.
+            self.turn_failure_details.lock().await.remove(session_id);
+            let begun = self
+                .begin_request(
+                    "session/prompt",
+                    json!({
+                        "sessionId": session_id,
+                        "prompt": content
+                    }),
+                )
+                .await;
+            if begun.is_ok() {
+                // A steer that stacked behind the previous, already-cancelled
+                // prompt still needs its own cancel; otherwise this prompt
+                // runs to completion before the queued input lands.
+                let stacked = {
+                    let mut queues = self.steer_queues.lock().await;
+                    queues.get_mut(session_id).is_some_and(|queue| {
+                        let stacked = !queue.queued.is_empty();
+                        if stacked {
+                            queue.cancel_requested = true;
+                        }
+                        stacked
+                    })
+                };
+                if stacked {
+                    let _ = self.send_cancel(session_id).await;
+                }
+            }
+            let result = match begun {
+                Ok((_, receiver)) => receiver
+                    .await
+                    .map_err(|_| {
+                        DaemonError::Process(format!(
+                            "ACP provider '{}' closed mid-request",
+                            self.config.id
+                        ))
+                    })
+                    .and_then(|response| response),
+                Err(error) => Err(error),
+            };
+            // The prompt is over; any reverse request the agent left
+            // unanswered can never be acted on, so retire it rather than
+            // retaining dead state.
+            self.cancel_pending_permissions(session_id).await;
+            self.cancel_pending_plan_approvals(session_id).await;
+            // The read loop delivers messages in order, so a vendor failure
+            // notice written before the error response is already recorded.
+            let result = match result {
+                Err(error) => {
+                    let detail = self.turn_failure_details.lock().await.remove(session_id);
+                    Err(match detail {
+                        Some(detail) if !error.to_string().contains(&detail) => {
+                            DaemonError::Rpc(format!("{} ({})", detail, self.config.id))
+                        }
+                        _ => error,
+                    })
+                }
+                ok => ok,
+            };
+            let response = match result {
+                Err(error) => {
+                    // A failed prompt ends the whole turn: queued steers must
+                    // not restart the loop against a session in an unknown
+                    // state.
+                    self.steer_queues.lock().await.remove(session_id);
+                    let _ = self.events.send(AcpEvent::TurnEnded {
+                        session_id: session_id.to_string(),
+                        stop_reason: None,
+                        error: Some(error.to_string()),
+                    });
+                    return Err(error);
+                }
+                Ok(response) => response,
+            };
+            let stop_reason = response
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("end_turn")
+                .to_string();
+            // Shift the queue regardless of the stop reason: a steer that
+            // raced with normal completion is still delivered, as a follow-up
+            // prompt in the same turn.
+            let next = {
+                let mut queues = self.steer_queues.lock().await;
+                queues.get_mut(session_id).and_then(|queue| {
+                    queue.cancel_requested = false;
+                    if queue.stopping {
+                        None
+                    } else {
+                        queue.queued.pop_front()
+                    }
+                })
+            };
+            let _ = self.events.send(AcpEvent::TurnEnded {
+                session_id: session_id.to_string(),
+                stop_reason: Some(stop_reason.clone()),
+                error: None,
+            });
+            match next {
+                Some(next_content) => content = next_content,
+                None => {
+                    self.steer_queues.lock().await.remove(session_id);
+                    return Ok(stop_reason);
+                }
+            }
+        }
+    }
+
+    /// Steers the session's active turn without a vendor extension: queues
+    /// the content and cancels the in-flight prompt; the prompt loop then
+    /// delivers the queued content as the next `session/prompt` on the same
+    /// session, continuing the same logical turn. Works with any ACP agent —
+    /// the protocol requires `session/cancel` to settle the active prompt.
+    /// Unlike Grok's interject this discards the cancelled prompt's
+    /// in-flight work, which is why the vendor path stays preferred.
+    pub async fn steer_with_cancel(
+        &self,
+        session_id: &str,
+        content: Vec<Value>,
+    ) -> Result<(), DaemonError> {
         let content = if content.is_empty() {
             vec![json!({ "type": "text", "text": "[empty prompt]" })]
         } else {
             content
         };
-        // A detail left over from an earlier turn must not masquerade as this
-        // turn's cause.
-        self.turn_failure_details.lock().await.remove(session_id);
-        let result = self
-            .request(
-                "session/prompt",
-                json!({
-                    "sessionId": session_id,
-                    "prompt": content
-                }),
-            )
-            .await;
-        // The turn is over; any reverse request the agent left unanswered can
-        // never be acted on, so retire it rather than retaining dead state.
-        self.cancel_pending_permissions(session_id).await;
-        self.cancel_pending_plan_approvals(session_id).await;
-        // The read loop delivers messages in order, so a vendor failure
-        // notice written before the error response is already recorded here.
-        let result = match result {
-            Err(error) => {
-                let detail = self.turn_failure_details.lock().await.remove(session_id);
-                Err(match detail {
-                    Some(detail) if !error.to_string().contains(&detail) => {
-                        DaemonError::Rpc(format!("{} ({})", detail, self.config.id))
-                    }
-                    _ => error,
-                })
+        let should_cancel = {
+            let mut queues = self.steer_queues.lock().await;
+            let Some(queue) = queues.get_mut(session_id) else {
+                return Err(DaemonError::BadRequest(
+                    "no active ACP turn to steer".to_string(),
+                ));
+            };
+            if queue.stopping {
+                return Err(DaemonError::BadRequest(
+                    "the turn is being interrupted".to_string(),
+                ));
             }
-            ok => ok,
+            queue.queued.push_back(content);
+            !std::mem::replace(&mut queue.cancel_requested, true)
         };
-        let stop_reason = result.as_ref().ok().map(|result| {
-            result
-                .get("stopReason")
-                .and_then(Value::as_str)
-                .unwrap_or("end_turn")
-                .to_string()
-        });
-        let error = result.as_ref().err().map(ToString::to_string);
-        let _ = self.events.send(AcpEvent::TurnEnded {
-            session_id: session_id.to_string(),
-            stop_reason: stop_reason.clone(),
-            error,
-        });
-        result?;
-        Ok(stop_reason.unwrap_or_else(|| "end_turn".to_string()))
+        if should_cancel {
+            self.send_cancel(session_id).await?;
+        }
+        Ok(())
+    }
+
+    /// Whether the live process answered the vendor interjection probe
+    /// (Grok's `x.ai/interject`). When false, steering goes through
+    /// [`Self::steer_with_cancel`] instead.
+    pub fn supports_interject(&self) -> bool {
+        self.supports_interject.load(Ordering::Acquire)
     }
 
     /// Injects content into Grok's running ACP turn using its vendor
@@ -1966,9 +2132,9 @@ impl AcpRuntime {
         text: &str,
         content: Vec<Value>,
     ) -> Result<(), DaemonError> {
-        if !self.supports_steering.load(Ordering::Acquire) {
+        if !self.supports_interject() {
             return Err(DaemonError::BadRequest(format!(
-                "ACP provider '{}' does not support steering",
+                "ACP provider '{}' does not support vendor interjection",
                 self.provider
             )));
         }
@@ -2121,11 +2287,23 @@ impl AcpRuntime {
         self.sessions.lock().await.keys().cloned().collect()
     }
 
-    /// Cancels the in-flight turn for a session. The ACP contract requires
-    /// the client to resolve any outstanding permission requests as
+    /// Cancels the in-flight turn for a session: a user interrupt. Queued
+    /// steers are dropped and further steers refused — the whole turn is
+    /// ending, so the prompt loop must not restart it with queued input.
+    pub async fn cancel(&self, session_id: &str) -> Result<(), DaemonError> {
+        if let Some(queue) = self.steer_queues.lock().await.get_mut(session_id) {
+            queue.queued.clear();
+            queue.cancel_requested = true;
+            queue.stopping = true;
+        }
+        self.send_cancel(session_id).await
+    }
+
+    /// Sends `session/cancel` and retires reverse requests. The ACP contract
+    /// requires the client to resolve any outstanding permission requests as
     /// `cancelled` once it cancels the turn; agents may block their prompt
     /// future on those responses.
-    pub async fn cancel(&self, session_id: &str) -> Result<(), DaemonError> {
+    async fn send_cancel(&self, session_id: &str) -> Result<(), DaemonError> {
         self.notify("session/cancel", json!({ "sessionId": session_id }))
             .await?;
         self.cancel_pending_permissions(session_id).await;
@@ -2929,6 +3107,156 @@ mod tests {
         (runtime, receiver)
     }
 
+    async fn steer_fixture_runtime() -> (Arc<AcpRuntime>, mpsc::UnboundedReceiver<AcpEvent>) {
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/acp_conformance_agent.mjs");
+        let config = AcpProviderConfig {
+            id: "steer-fixture".to_string(),
+            label: "Steer fixture".to_string(),
+            command: vec![
+                "node".to_string(),
+                fixture.to_string_lossy().into_owned(),
+                "steer".to_string(),
+            ],
+            env: HashMap::new(),
+            transport: ProviderTransport::default(),
+        };
+        let (events, receiver) = mpsc::unbounded_channel();
+        let runtime = AcpRuntime::connect(config, env!("CARGO_MANIFEST_DIR"), events)
+            .await
+            .expect("fixture should initialize");
+        (runtime, receiver)
+    }
+
+    async fn next_acp_event(events: &mut mpsc::UnboundedReceiver<AcpEvent>) -> AcpEvent {
+        timeout(Duration::from_secs(5), events.recv())
+            .await
+            .expect("an event should arrive")
+            .expect("event channel should remain open")
+    }
+
+    async fn wait_for_message_delta(events: &mut mpsc::UnboundedReceiver<AcpEvent>, needle: &str) {
+        loop {
+            if let AcpEvent::MessageDelta { text, .. } = next_acp_event(events).await
+                && text.contains(needle)
+            {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_steer_cancels_the_prompt_and_continues_the_same_turn() {
+        let (runtime, mut events) = steer_fixture_runtime().await;
+        let session_id = runtime
+            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .await
+            .expect("fixture session should start");
+        let prompt_runtime = Arc::clone(&runtime);
+        let prompt_session = session_id.clone();
+        let prompt = tokio::spawn(async move {
+            prompt_runtime
+                .prompt(
+                    &prompt_session,
+                    vec![json!({ "type": "text", "text": "hold this prompt" })],
+                )
+                .await
+        });
+        wait_for_message_delta(&mut events, "SEEN:hold this prompt").await;
+
+        runtime
+            .steer_with_cancel(
+                &session_id,
+                vec![json!({ "type": "text", "text": "use the other endpoint" })],
+            )
+            .await
+            .expect("steer should be accepted while the prompt is in flight");
+
+        // The steered turn resolves with the final segment's stop reason:
+        // the steer continued the turn instead of ending it.
+        assert_eq!(
+            prompt.await.expect("prompt task should join").unwrap(),
+            "end_turn"
+        );
+        let mut stop_reasons = Vec::new();
+        let mut saw_steer_delivery = false;
+        while stop_reasons.len() < 2 {
+            match next_acp_event(&mut events).await {
+                AcpEvent::TurnEnded { stop_reason, .. } => stop_reasons.push(stop_reason),
+                AcpEvent::MessageDelta { text, .. } => {
+                    saw_steer_delivery |= text.contains("SEEN:use the other endpoint");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            stop_reasons,
+            vec![Some("cancelled".to_string()), Some("end_turn".to_string())]
+        );
+        assert!(
+            saw_steer_delivery,
+            "the queued steer should re-prompt on the same session"
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn a_steer_without_an_active_turn_is_stale() {
+        let (runtime, _events) = steer_fixture_runtime().await;
+        let session_id = runtime
+            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .await
+            .expect("fixture session should start");
+
+        let error = runtime
+            .steer_with_cancel(&session_id, vec![json!({ "type": "text", "text": "late" })])
+            .await
+            .expect_err("a steer with no prompt in flight must not land");
+
+        assert!(error.to_string().contains("no active ACP turn"));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn an_interrupt_ends_a_steered_turn_instead_of_continuing_it() {
+        let (runtime, mut events) = steer_fixture_runtime().await;
+        let session_id = runtime
+            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .await
+            .expect("fixture session should start");
+        let prompt_runtime = Arc::clone(&runtime);
+        let prompt_session = session_id.clone();
+        let prompt = tokio::spawn(async move {
+            prompt_runtime
+                .prompt(
+                    &prompt_session,
+                    vec![json!({ "type": "text", "text": "hold the first segment" })],
+                )
+                .await
+        });
+        wait_for_message_delta(&mut events, "SEEN:hold the first segment").await;
+        runtime
+            .steer_with_cancel(
+                &session_id,
+                vec![json!({ "type": "text", "text": "hold the steered segment" })],
+            )
+            .await
+            .expect("steer should be accepted while the prompt is in flight");
+        // The steer continued the turn; its own segment is now in flight.
+        wait_for_message_delta(&mut events, "SEEN:hold the steered segment").await;
+
+        runtime
+            .cancel(&session_id)
+            .await
+            .expect("interrupt should reach the fixture");
+
+        assert_eq!(
+            prompt.await.expect("prompt task should join").unwrap(),
+            "cancelled"
+        );
+        runtime.shutdown().await;
+    }
+
     fn command_path(command: &Command) -> Option<String> {
         command
             .as_std()
@@ -3246,11 +3574,11 @@ mod tests {
     }
 
     #[test]
-    fn only_grok_acp_is_probed_for_vendor_steering() {
-        assert!(super::acp_may_support_steering("grok"));
-        assert!(super::acp_may_support_steering("Grok"));
-        assert!(!super::acp_may_support_steering("opencode"));
-        assert!(!super::acp_may_support_steering("pi"));
+    fn only_grok_acp_is_probed_for_vendor_interjection() {
+        assert!(super::acp_may_support_interject("grok"));
+        assert!(super::acp_may_support_interject("Grok"));
+        assert!(!super::acp_may_support_interject("opencode"));
+        assert!(!super::acp_may_support_interject("pi"));
     }
 
     #[test]

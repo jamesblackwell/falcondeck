@@ -2676,6 +2676,10 @@ impl AgentCapabilitySummary {
     pub fn acp_minimal() -> Self {
         Self {
             supports_interrupt: true,
+            // Steering needs no agent capability: the daemon cancels the
+            // in-flight `session/prompt` and re-prompts on the same session,
+            // which the ACP contract supports for every agent.
+            supports_steering: true,
             ..Self::default()
         }
     }

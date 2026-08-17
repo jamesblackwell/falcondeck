@@ -874,13 +874,13 @@ mod tests {
         assert!(capabilities.supports_interrupt);
         // Grok advertises image:false over ACP but still accepts image blocks.
         assert!(capabilities.supports_images);
-        // Steering is enabled only after the live ACP runtime proves that its
-        // vendor interjection method exists.
-        assert!(!capabilities.supports_steering);
+        // Every ACP agent can be steered: the daemon cancels the in-flight
+        // prompt and re-prompts on the same session, no vendor method needed.
+        assert!(capabilities.supports_steering);
         let opencode_caps =
             ProviderRuntime::for_provider(&AgentProvider::new("opencode".to_string()))
                 .default_capabilities();
         assert!(!opencode_caps.supports_images);
-        assert!(!opencode_caps.supports_steering);
+        assert!(opencode_caps.supports_steering);
     }
 }
