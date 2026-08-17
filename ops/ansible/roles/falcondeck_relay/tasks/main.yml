@@ -1,9 +1,12 @@
 ---
+# The source sync is tagged `always` because every build role downstream reads
+# the synced tree — a tag-scoped run such as `--tags site` still needs it.
 - name: Assert local repo source is configured
   ansible.builtin.assert:
     that:
       - falcondeck_repo_src is defined
     fail_msg: Set falcondeck_repo_src to the local FalconDeck workspace path before deploying.
+  tags: [always]
 
 - name: Check local repo source exists
   ansible.builtin.stat:
@@ -11,6 +14,7 @@
   delegate_to: localhost
   become: false
   register: falcondeck_repo_src_stat
+  tags: [always]
 
 - name: Validate PostgreSQL configuration when enabled
   ansible.builtin.assert:
@@ -26,6 +30,7 @@
       - falcondeck_repo_src_stat.stat.isdir
     fail_msg: >-
       falcondeck_repo_src must point at a local FalconDeck checkout.
+  tags: [always]
 
 - name: Sync FalconDeck source tree to the server
   ansible.posix.synchronize:
@@ -42,6 +47,7 @@
       - --exclude=.DS_Store
   delegate_to: localhost
   become: false
+  tags: [always]
 
 - name: Install PostgreSQL packages
   ansible.builtin.apt:

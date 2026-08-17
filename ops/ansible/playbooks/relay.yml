@@ -1,14 +1,23 @@
 ---
+# Every role runs by default. The tags exist so a single artefact can be shipped
+# on its own — `./deploy.sh --tags site` publishes the marketing site without
+# rebuilding the relay or daemon from whatever is currently in the working tree.
 - name: Deploy FalconDeck relay
   hosts: relay
   become: true
 
   roles:
     - role: common
+      tags: [common]
     - role: falcondeck_relay
+      tags: [relay]
     - role: falcondeck_dist
+      tags: [dist]
     - role: falcondeck_remote_web
       vars:
         falcondeck_remote_web_relay_url: "{{ falcondeck_relay_public_url }}"
+      tags: [remote_web]
     - role: falcondeck_site
+      tags: [site]
     - role: caddy
+      tags: [caddy]
