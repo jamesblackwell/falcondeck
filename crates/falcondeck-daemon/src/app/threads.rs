@@ -676,6 +676,18 @@ impl AppState {
                                 Some(title) => format!(
                                     "Still running {title} — no output for {minutes}m. Stop the turn if this looks stuck."
                                 ),
+                                // Past the turn's own `result`, silence means
+                                // the parent already yielded and only async
+                                // agents are outstanding — "no output from
+                                // Claude" would read as a wedge when nothing
+                                // is actually wrong.
+                                None if saw_result && !background_tasks.is_empty() => {
+                                    let count = background_tasks.len();
+                                    let plural = if count == 1 { "" } else { "s" };
+                                    format!(
+                                        "Waiting on {count} background agent{plural} — no output for {minutes}m. Stop the turn if this looks stuck."
+                                    )
+                                }
                                 None => format!(
                                     "No output from Claude for {minutes}m. Stop the turn if this looks stuck."
                                 ),
@@ -703,9 +715,14 @@ impl AppState {
                         if let Some(tasks) = claude_background_tasks(&value) {
                             background_tasks = tasks;
                         }
-                        if let Some((task_id, tool_use_id)) = claude_task_started(&value) {
-                            background_tasks.insert(task_id.clone());
-                            background_task_tools.insert(task_id, tool_use_id);
+                        if let Some(task) = claude_task_started(&value) {
+                            if task.holds_turn_open {
+                                background_tasks.insert(task.task_id.clone());
+                            }
+                            // Recorded for every task, blocking or not: a
+                            // backgrounded command still needs its spawning
+                            // tool card settled when it eventually reports.
+                            background_task_tools.insert(task.task_id, task.tool_use_id);
                         }
                         if let Some(task) = claude_task_finished(&value) {
                             background_tasks.remove(&task.task_id);
@@ -1506,6 +1523,22 @@ struct ClaudeTaskFinished {
     summary: Option<String>,
 }
 
+/// Whether an outstanding background task should hold the turn open past the
+/// CLI's terminal `result`.
+///
+/// Only async *agents* should: they keep working after the parent yields, and
+/// closing stdin would kill them mid-flight. A backgrounded shell command
+/// (`local_bash` — a dev server, a file watcher, `tail -f`) is the opposite
+/// case: it is meant to outlive the turn and reports nothing until something
+/// stops it, so counting it here pins the thread "running" forever and leaves
+/// the composer stuck behind a stop button.
+fn claude_task_holds_turn_open(task_type: Option<&str>) -> bool {
+    // Match on "agent" rather than excluding known shell types: an unknown
+    // task type that never completes is what wedges a turn, so anything not
+    // recognisably an agent is treated as fire-and-forget.
+    task_type.is_some_and(|task_type| task_type.contains("agent"))
+}
+
 fn claude_background_tasks(value: &Value) -> Option<HashSet<String>> {
     if value.get("type").and_then(Value::as_str) != Some("system")
         || value.get("subtype").and_then(Value::as_str) != Some("background_tasks_changed")
@@ -1518,13 +1551,22 @@ fn claude_background_tasks(value: &Value) -> Option<HashSet<String>> {
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
+            .filter(|task| {
+                claude_task_holds_turn_open(task.get("task_type").and_then(Value::as_str))
+            })
             .filter_map(|task| task.get("task_id").and_then(Value::as_str))
             .map(str::to_string)
             .collect(),
     )
 }
 
-fn claude_task_started(value: &Value) -> Option<(String, String)> {
+struct ClaudeTaskStarted {
+    task_id: String,
+    tool_use_id: String,
+    holds_turn_open: bool,
+}
+
+fn claude_task_started(value: &Value) -> Option<ClaudeTaskStarted> {
     if value.get("type").and_then(Value::as_str) != Some("system")
         || value.get("subtype").and_then(Value::as_str) != Some("task_started")
     {
@@ -1532,7 +1574,13 @@ fn claude_task_started(value: &Value) -> Option<(String, String)> {
     }
     let task_id = value.get("task_id")?.as_str()?.to_string();
     let tool_use_id = value.get("tool_use_id")?.as_str()?.to_string();
-    Some((task_id, tool_use_id))
+    let holds_turn_open =
+        claude_task_holds_turn_open(value.get("task_type").and_then(Value::as_str));
+    Some(ClaudeTaskStarted {
+        task_id,
+        tool_use_id,
+        holds_turn_open,
+    })
 }
 
 fn claude_task_finished(value: &Value) -> Option<ClaudeTaskFinished> {
@@ -1855,6 +1903,62 @@ mod tests {
             tasks,
             HashSet::from(["agent-1".to_string(), "agent-2".to_string()])
         );
+    }
+
+    /// A `run_in_background` shell command (dev server, watcher) reports
+    /// nothing until something stops it. Counting it as a reason to keep the
+    /// turn open left the thread pinned "running" long after the CLI had
+    /// finished, behind a stop button and a bogus "no output" warning.
+    #[test]
+    fn backgrounded_shell_tasks_do_not_hold_the_turn_open() {
+        let tasks = claude_background_tasks(&json!({
+            "type": "system",
+            "subtype": "background_tasks_changed",
+            "tasks": [
+                { "task_id": "bash-1", "task_type": "local_bash", "description": "pnpm dev" },
+                { "task_id": "agent-1", "task_type": "local_agent" }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(tasks, HashSet::from(["agent-1".to_string()]));
+    }
+
+    #[test]
+    fn task_started_marks_only_agents_as_blocking() {
+        let shell = claude_task_started(&json!({
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "bash-1",
+            "tool_use_id": "toolu_bash",
+            "task_type": "local_bash"
+        }))
+        .unwrap();
+        assert_eq!(shell.task_id, "bash-1");
+        // Still mapped to its tool call so the card settles on completion.
+        assert_eq!(shell.tool_use_id, "toolu_bash");
+        assert!(!shell.holds_turn_open);
+
+        let agent = claude_task_started(&json!({
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "agent-1",
+            "tool_use_id": "toolu_agent",
+            "task_type": "local_agent"
+        }))
+        .unwrap();
+        assert!(agent.holds_turn_open);
+
+        // An unknown/absent type is treated as fire-and-forget: a task that
+        // never reports must not be able to wedge the turn.
+        let unknown = claude_task_started(&json!({
+            "type": "system",
+            "subtype": "task_started",
+            "task_id": "mystery-1",
+            "tool_use_id": "toolu_mystery"
+        }))
+        .unwrap();
+        assert!(!unknown.holds_turn_open);
     }
 
     #[test]
