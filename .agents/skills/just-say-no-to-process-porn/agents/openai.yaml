@@ -1,0 +1,4 @@
+interface:
+  display_name: "Just Say No to Process Porn"
+  short_description: "Keep coding agents focused on real implementation"
+  default_prompt: "Use $just-say-no-to-process-porn to refocus coding work on implementation and verification."
