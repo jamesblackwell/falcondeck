@@ -10,6 +10,7 @@ import {
 import type { GitStatusEntry } from '@falcondeck/client-core'
 import { ActivityDiamond } from '@falcondeck/ui'
 
+import { useVirtualRows } from '../../hooks/useVirtualRows'
 import { FileTreeView } from './FileTreeView'
 import { FileTypeIcon } from './FileTypeIcon'
 import { basePart, dirPart } from './diff-utils'
@@ -39,6 +40,46 @@ function statusLabel(entry: GitStatusEntry) {
   if (entry.status === 'untracked') return 'U'
   return entry.status.slice(0, 1).toUpperCase()
 }
+
+const ROW_HEIGHT = 32
+const LIST_PADDING = 8
+
+const FileRow = memo(function FileRow({
+  entry,
+  onSelect,
+}: {
+  entry: GitStatusEntry
+  onSelect: (entry: GitStatusEntry) => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(entry)}
+      className="fd-focus-inset flex h-8 w-full items-center gap-2 px-3 text-left hover:bg-surface-2"
+    >
+      <FileTypeIcon path={entry.path} />
+      <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)]">
+        <span className="text-fg-muted">{dirPart(entry.path)}</span>
+        <span className="font-medium text-fg-primary">{basePart(entry.path)}</span>
+      </span>
+      <span className="flex items-center gap-1.5 text-[length:var(--fd-text-xs)] tabular-nums">
+        {entry.insertions != null ? <span className="text-success">+{entry.insertions}</span> : null}
+        {entry.deletions != null ? <span className="text-danger">-{entry.deletions}</span> : null}
+        <span
+          className={
+            entry.status === 'added' || entry.status === 'untracked'
+              ? 'text-success'
+              : entry.status === 'deleted'
+                ? 'text-danger'
+                : 'text-info'
+          }
+        >
+          {statusLabel(entry)}
+        </span>
+      </span>
+    </button>
+  )
+})
 
 export const FileListView = memo(function FileListView({
   entries,
@@ -80,6 +121,7 @@ export const FileListView = memo(function FileListView({
     }
     return matches
   }, [deferredQuery, files])
+  const rows = useVirtualRows(filteredEntries.length, ROW_HEIGHT)
   const activeError = activeTab === 'changes' ? error : filesError
   const activeLoading = activeTab === 'changes' ? isLoading : isFilesLoading
 
@@ -177,7 +219,11 @@ export const FileListView = memo(function FileListView({
         </label>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        ref={rows.containerRef}
+        onScroll={rows.onScroll}
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
         {activeError ? (
           <div className="p-4 text-center text-[length:var(--fd-text-xs)] text-danger">
             {activeError}
@@ -194,36 +240,15 @@ export const FileListView = memo(function FileListView({
               )}
             </div>
           ) : (
-            <div className="py-1">
-              {filteredEntries.map((entry) => (
-                <button
-                  key={entry.path}
-                  type="button"
-                  onClick={() => onSelectChangedFile(entry)}
-                  className="fd-focus-inset flex h-8 w-full items-center gap-2 px-3 text-left [contain-intrinsic-size:32px] [content-visibility:auto] hover:bg-surface-2"
-                >
-                  <FileTypeIcon path={entry.path} />
-                  <span className="min-w-0 flex-1 truncate text-[length:var(--fd-text-sm)]">
-                    <span className="text-fg-muted">{dirPart(entry.path)}</span>
-                    <span className="font-medium text-fg-primary">{basePart(entry.path)}</span>
-                  </span>
-                  <span className="flex items-center gap-1.5 text-[length:var(--fd-text-xs)] tabular-nums">
-                    {entry.insertions != null ? <span className="text-success">+{entry.insertions}</span> : null}
-                    {entry.deletions != null ? <span className="text-danger">-{entry.deletions}</span> : null}
-                    <span
-                      className={
-                        entry.status === 'added' || entry.status === 'untracked'
-                          ? 'text-success'
-                          : entry.status === 'deleted'
-                            ? 'text-danger'
-                            : 'text-info'
-                      }
-                    >
-                      {statusLabel(entry)}
-                    </span>
-                  </span>
-                </button>
-              ))}
+            <div className="relative" style={{ height: rows.totalHeight + LIST_PADDING }}>
+              <div
+                className="absolute inset-x-0 top-0"
+                style={{ transform: `translateY(${rows.offsetY + LIST_PADDING / 2}px)` }}
+              >
+                {filteredEntries.slice(rows.start, rows.end).map((entry) => (
+                  <FileRow key={entry.path} entry={entry} onSelect={onSelectChangedFile} />
+                ))}
+              </div>
             </div>
           )
         ) : isFilesLoading && files.length === 0 ? (

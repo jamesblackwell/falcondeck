@@ -6,6 +6,25 @@ type DaemonApi = {
   gitStatus: (workspaceId: string, threadId?: string | null) => Promise<GitStatusResponse>
 }
 
+function sameStatus(previous: GitStatusResponse | null, next: GitStatusResponse) {
+  if (!previous) return false
+  if (previous.branch !== next.branch) return false
+  if (previous.entries.length !== next.entries.length) return false
+  for (let i = 0; i < previous.entries.length; i++) {
+    const a = previous.entries[i]
+    const b = next.entries[i]
+    if (
+      a.path !== b.path ||
+      a.status !== b.status ||
+      a.insertions !== b.insertions ||
+      a.deletions !== b.deletions
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
 export function useGitStatus(
   api: DaemonApi | null,
   workspaceId: string | null,
@@ -33,7 +52,7 @@ export function useGitStatus(
     try {
       const result = await api.gitStatus(workspaceId, threadId)
       if (generationRef.current !== generation) return
-      setStatus(result)
+      setStatus((previous) => (sameStatus(previous, result) ? previous : result))
     } catch (err) {
       if (generationRef.current !== generation) return
       setError(err instanceof Error ? err.message : 'Failed to fetch git status')

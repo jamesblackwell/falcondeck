@@ -4,6 +4,7 @@ import { useToast } from '@falcondeck/ui'
 import type {
   GitDiffResponse,
   GitFileStatus,
+  GitStatusEntry,
   GitStatusResponse,
   StartReviewPayload,
   WorkspaceFileResponse,
@@ -18,6 +19,9 @@ import { useWorkspaceFiles } from '../hooks/useWorkspaceFiles'
 import { DiffView } from './diff/DiffView'
 import { FileListView, type ReviewPanelTab } from './diff/FileListView'
 import { FileView } from './diff/FileView'
+
+const EMPTY_ENTRIES: GitStatusEntry[] = []
+const EMPTY_FILES: string[] = []
 
 type ReviewApi = {
   gitStatus: (workspaceId: string, threadId?: string | null) => Promise<GitStatusResponse>
@@ -142,6 +146,46 @@ export const DiffPanel = memo(function DiffPanel({
     [onSelectionChange, workspaceId],
   )
 
+  const selectChangedFile = useCallback(
+    (entry: GitStatusEntry) => selectFile(entry.path, 'changes'),
+    [selectFile],
+  )
+
+  const selectWorkspaceFile = useCallback(
+    (path: string) => selectFile(path, 'files'),
+    [selectFile],
+  )
+
+  const refreshChanges = useCallback(() => void refreshStatus(), [refreshStatus])
+
+  const refreshWorkspaceFiles = useCallback(() => void refreshFiles(), [refreshFiles])
+
+  const startReview = useCallback(() => {
+    if (!api?.startReview || !workspaceId || !reviewThreadId) return
+    setIsReviewPending(true)
+    void api
+      .startReview?.({
+        workspace_id: workspaceId,
+        thread_id: reviewThreadId,
+        target: { type: 'uncommittedChanges' },
+      })
+      .then(() =>
+        toast({
+          variant: 'default',
+          title: 'Review started',
+          description: 'Codex is reviewing the uncommitted changes in this thread.',
+        }),
+      )
+      .catch((error: unknown) =>
+        toast({
+          variant: 'danger',
+          title: 'Failed to start review',
+          description: error instanceof Error ? error.message : undefined,
+        }),
+      )
+      .finally(() => setIsReviewPending(false))
+  }, [api, reviewThreadId, toast, workspaceId])
+
   const adjacentSelection = useCallback(
     (direction: -1 | 1) => {
       if (!selectedFile || !status?.entries.length) return
@@ -199,8 +243,8 @@ export const DiffPanel = memo(function DiffPanel({
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface-1">
       <FileListView
-        entries={status?.entries ?? []}
-        files={workspaceFiles?.files ?? []}
+        entries={status?.entries ?? EMPTY_ENTRIES}
+        files={workspaceFiles?.files ?? EMPTY_FILES}
         filesTruncated={workspaceFiles?.truncated ?? false}
         branch={status?.branch ?? null}
         activeTab={activeTab}
@@ -209,39 +253,12 @@ export const DiffPanel = memo(function DiffPanel({
         error={error}
         filesError={filesError}
         onTabChange={setActiveTab}
-        onRefresh={() => void refreshStatus()}
-        onRefreshFiles={() => void refreshFiles()}
+        onRefresh={refreshChanges}
+        onRefreshFiles={refreshWorkspaceFiles}
         isReviewPending={isReviewPending}
-        onStartReview={
-          api?.startReview && workspaceId && reviewThreadId
-            ? () => {
-                setIsReviewPending(true)
-                void api
-                  .startReview?.({
-                    workspace_id: workspaceId,
-                    thread_id: reviewThreadId,
-                    target: { type: 'uncommittedChanges' },
-                  })
-                  .then(() =>
-                    toast({
-                      variant: 'default',
-                      title: 'Review started',
-                      description: 'Codex is reviewing the uncommitted changes in this thread.',
-                    }),
-                  )
-                  .catch((error: unknown) =>
-                    toast({
-                      variant: 'danger',
-                      title: 'Failed to start review',
-                      description: error instanceof Error ? error.message : undefined,
-                    }),
-                  )
-                  .finally(() => setIsReviewPending(false))
-              }
-            : null
-        }
-        onSelectChangedFile={(entry) => selectFile(entry.path, 'changes')}
-        onSelectWorkspaceFile={(path) => selectFile(path, 'files')}
+        onStartReview={api?.startReview && workspaceId && reviewThreadId ? startReview : null}
+        onSelectChangedFile={selectChangedFile}
+        onSelectWorkspaceFile={selectWorkspaceFile}
       />
     </div>
   )
