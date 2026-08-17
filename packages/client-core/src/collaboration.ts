@@ -157,6 +157,24 @@ export function formatModelLabel(label: string) {
 }
 
 /**
+ * Display label for the model a thread runs on, for places that only hold a
+ * `model_id` (the sidebar rows). Resolves against the workspace's advertised
+ * models so it reads like the picker ("opus 4.5"); an id the workspace no
+ * longer advertises still shows, because a stale name beats a blank.
+ */
+export function threadModelLabel(
+  workspace: WorkspaceSummary | null | undefined,
+  thread: ThreadSummary,
+): string | null {
+  const modelId = thread.agent?.model_id;
+  if (!modelId) return null;
+  const model = workspaceModels(workspace, thread.provider).find(
+    (entry) => entry.id === modelId,
+  );
+  return formatModelLabel(model?.label ?? modelId);
+}
+
+/**
  * Wire value that explicitly resets a provider to its standard service tier.
  * Sending it (rather than omitting the field) matters because an absent tier
  * means "keep whatever the session already has" all the way down to the CLI.

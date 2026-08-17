@@ -33,6 +33,8 @@ export type ThreadItemProps = {
   }) => void
   nowTick?: number
   tags?: ThreadTag[]
+  /** Model the thread was started on; revealed on hover when the row has room. */
+  modelLabel?: string | null
 }
 
 const TAG_COLORS: Record<string, string> = {
@@ -68,6 +70,7 @@ export const ThreadItem = memo(
     onRequestRename,
     nowTick = 0,
     tags = [],
+    modelLabel = null,
   }: ThreadItemProps) {
     const attention = deriveThreadAttentionPresentation(thread)
     const wasInterrupted = wasTurnInterruptedByShutdown(thread)
@@ -79,7 +82,9 @@ export const ThreadItem = memo(
     return (
       <div
         className={cn(
-          'group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2',
+          // A container so the model label can bow out on a narrow sidebar
+          // without the row measuring itself in JS.
+          '@container group flex w-full items-center gap-2 overflow-hidden rounded-[var(--fd-radius-md)] px-2.5 py-2',
           'transition-colors duration-[var(--fd-duration-fast)]',
           // Pressing previews the selection fill rather than a brighter tone of
           // its own. A hotter pressed state overshoots the colour the row is
@@ -189,6 +194,16 @@ export const ThreadItem = memo(
             />
           ) : null}
         </button>
+        {modelLabel ? (
+          // Takes over the space the timestamp vacates on hover, and only once
+          // the row is wide enough that the title is not paying for it.
+          <span
+            data-testid="thread-model-label"
+            className="fd-type-meta hidden max-w-[45%] shrink-0 truncate text-fg-muted @[15rem]:group-hover:block"
+          >
+            {modelLabel}
+          </span>
+        ) : null}
         {wasInterrupted ? (
           <Badge variant="danger" className="shrink-0">
             Stopped
@@ -228,6 +243,7 @@ export const ThreadItem = memo(
     threadRenderEqual(prev.thread, next.thread) &&
     prev.workspaceId === next.workspaceId &&
     prev.isSelected === next.isSelected &&
+    prev.modelLabel === next.modelLabel &&
     prev.nowTick === next.nowTick &&
     prev.onSelect === next.onSelect &&
     prev.onArchive === next.onArchive &&

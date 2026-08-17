@@ -12,6 +12,7 @@ import {
 import {
   compareThreads,
   filterProjectGroupsByExtensions,
+  threadModelLabel,
   threadPriorityRank,
 } from "@falcondeck/client-core";
 import type {
@@ -313,6 +314,7 @@ const ThreadList = memo(function ThreadList({
           onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
           tags={threadTagsById?.[thread.id]}
+          modelLabel={threadModelLabel(group.workspace, thread)}
         />
       ))}
       {trailingSelected ? (
@@ -327,6 +329,7 @@ const ThreadList = memo(function ThreadList({
           onRequestRename={onRequestRenameThread}
           nowTick={nowTick}
           tags={threadTagsById?.[trailingSelected.id]}
+          modelLabel={threadModelLabel(group.workspace, trailingSelected)}
         />
       ) : null}
       {hiddenCount > 0 || canCollapse ? (
@@ -365,6 +368,8 @@ const ThreadList = memo(function ThreadList({
 type PinnedThreadEntry = {
   workspaceId: string;
   thread: ThreadSummary;
+  /** Resolved where the workspace is still in hand; the row only has the id. */
+  modelLabel: string | null;
 };
 
 const pinnedEntryKey = (entry: PinnedThreadEntry) =>
@@ -414,7 +419,7 @@ const PinnedThreadList = memo(function PinnedThreadList({
         Pinned
       </h2>
       <div>
-        {entries.map(({ workspaceId, thread }) => (
+        {entries.map(({ workspaceId, thread, modelLabel }) => (
           <ThreadItem
             key={`${workspaceId}:${thread.id}`}
             thread={thread}
@@ -426,6 +431,7 @@ const PinnedThreadList = memo(function PinnedThreadList({
             onRequestRename={onRequestRenameThread}
             nowTick={nowTick}
             tags={threadTagsById?.[thread.id]}
+            modelLabel={modelLabel}
           />
         ))}
       </div>
@@ -1142,7 +1148,11 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       displayGroups.flatMap((group) =>
         group.threads
           .filter((thread) => thread.is_pinned)
-          .map((thread) => ({ workspaceId: group.workspace.id, thread })),
+          .map((thread) => ({
+            workspaceId: group.workspace.id,
+            thread,
+            modelLabel: threadModelLabel(group.workspace, thread),
+          })),
       ),
     [displayGroups],
   );

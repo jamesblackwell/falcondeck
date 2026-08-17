@@ -1427,6 +1427,49 @@ describe("DesktopSidebar", () => {
     expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
   });
 
+  it("keeps the thread's model on the row, revealed on hover once the row is wide", () => {
+    renderSidebar({
+      groups: [
+        {
+          workspace: workspace({
+            models: [
+              {
+                id: "gpt-5-codex",
+                label: "GPT-5 Codex",
+                is_default: true,
+                default_reasoning_effort: null,
+                supported_reasoning_efforts: [],
+              },
+            ],
+          }),
+          threads: [
+            thread({
+              agent: {
+                model_id: "gpt-5-codex",
+                reasoning_effort: null,
+                collaboration_mode_id: null,
+                approval_policy: null,
+                service_tier: null,
+              },
+            }),
+          ],
+        },
+      ],
+    });
+
+    const label = screen.getByTestId("thread-model-label");
+    expect(label).toHaveTextContent("gpt-5 codex");
+    // Hidden until the row is both hovered and wide enough for it.
+    expect(label.className).toContain("hidden");
+    expect(label.className).toContain("@[15rem]:group-hover:block");
+  });
+
+  it("shows no model on a thread that never pinned one", () => {
+    renderSidebar();
+
+    expect(screen.queryByTestId("thread-model-label")).not.toBeInTheDocument();
+  });
+
   it("leaves the project menu out when removal is unavailable", () => {
     renderSidebar({ onRemoveWorkspace: undefined });
 
