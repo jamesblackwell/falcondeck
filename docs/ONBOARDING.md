@@ -39,7 +39,7 @@ a UI that sequences existing daemon capabilities.
 
 | Capability | Where | Notes |
 | --- | --- | --- |
-| Harness inventory | `crates/falcondeck-daemon/src/app/harness_manager.rs` | Curated `KNOWN_HARNESSES` (codex, claude, opencode, gemini, pi, zcode) + `providers.json` ACP overlay; 60s cache |
+| Harness inventory | `crates/falcondeck-daemon/src/app/harness_manager.rs` | Curated `KNOWN_HARNESSES` (codex, claude, opencode, gemini, pi) + `providers.json` ACP overlay; 60s cache |
 | Probe endpoints | `GET /api/harnesses`, `POST /api/harnesses/refresh` (`include_latest` hits npm registry) | Also relay RPCs `harnesses.read/refresh/upgrade/job` |
 | Install/upgrade | `POST /api/harnesses/upgrade` → job, poll `GET /api/harnesses/jobs/{id}` | Commands come only from the curated registry (OpenCode = `curl -fsSL https://opencode.ai/install \| bash`); `HarnessesPanel.tsx` already implements the polling UI |
 | Binary resolution + diagnostics | `crates/falcondeck-daemon/src/agent_binary.rs` | PATH, known locations, login shell; `ResolutionDiagnostics` supports "we looked here" messaging |
@@ -98,7 +98,7 @@ moment they're wanted). Render a card per curated harness:
 - **Installed + current** → check, version.
 - **Installed + `update_available`** → "Update" button → upgrade job + poll.
 - **Not installed** → "Install" button (same job API) where the registry has
-  an upgrade command; zcode stays detection-only.
+  an upgrade command.
 - **Sign-in state** — `account_status` today is a raw truncated string and
   only codex/claude have auth probes at all. Phase 1 renders it as best-effort
   text plus a copyable sign-in command (`claude` / `codex login` — auth flows

@@ -77,6 +77,21 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
         };
     }
 
+    // Packaged macOS apps inherit a minimal launch-services PATH which can
+    // select a stale /usr/local installation ahead of the user's active
+    // Homebrew or standalone CLI. Prefer the standard user/macOS locations
+    // in that environment; terminal-launched daemons still honor PATH first.
+    let prefer_known_locations =
+        cfg!(target_os = "macos") && env::var_os("__CFBundleIdentifier").is_some();
+    if prefer_known_locations
+        && let Some(path) = resolve_from_known_locations(bin_name, &mut diagnostics)
+    {
+        return AgentBinaryResolution {
+            executable: path,
+            diagnostics,
+        };
+    }
+
     if let Some(path) = resolve_from_path(bin_name) {
         diagnostics.searched_path = true;
         return AgentBinaryResolution {
@@ -86,11 +101,13 @@ pub fn resolve_agent_binary(bin_name: &str, configured: &str) -> AgentBinaryReso
     }
     diagnostics.searched_path = true;
 
-    if let Some(path) = resolve_from_known_locations(bin_name, &mut diagnostics) {
-        return AgentBinaryResolution {
-            executable: path,
-            diagnostics,
-        };
+    if !prefer_known_locations {
+        if let Some(path) = resolve_from_known_locations(bin_name, &mut diagnostics) {
+            return AgentBinaryResolution {
+                executable: path,
+                diagnostics,
+            };
+        }
     }
 
     if let Some(path) = resolve_from_login_shell(bin_name) {

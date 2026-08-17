@@ -847,14 +847,14 @@ describe("harness normalization", () => {
           latest_version: "0.13.0",
           update_available: true,
           install_source: "npm",
-          upgrade_command: "npm install -g @openai/codex",
+          upgrade_command: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
           account_status: "Logged in using ChatGPT",
         },
         {
-          id: "zcode",
-          label: "Zcode (GLM)",
+          id: "custom-agent",
+          label: "Custom Agent",
           kind: "detected",
-          bin: "zcode",
+          bin: "custom-agent",
           installed: false,
         },
       ],
@@ -864,10 +864,10 @@ describe("harness normalization", () => {
     const codex = normalized.harnesses[0];
     expect(codex?.update_available).toBe(true);
     expect(codex?.install_source).toBe("npm");
-    const zcode = normalized.harnesses[1];
-    expect(zcode?.kind).toBe("detected");
-    expect(zcode?.resolved_path).toBeNull();
-    expect(zcode?.installed).toBe(false);
+    const customAgent = normalized.harnesses[1];
+    expect(customAgent?.kind).toBe("detected");
+    expect(customAgent?.resolved_path).toBeNull();
+    expect(customAgent?.installed).toBe(false);
   });
 
   it("drops malformed harness entries and falls back to defaults", () => {
@@ -896,11 +896,13 @@ describe("harness normalization", () => {
       label: "Codex",
       host: "local",
       status: "failed",
-      log: ["Running: npm install -g @openai/codex", 42],
+      log: ["Running: curl -fsSL https://chatgpt.com/codex/install.sh | sh", 42],
       error: "exit code 1",
     });
     expect(job?.status).toBe("failed");
-    expect(job?.log).toEqual(["Running: npm install -g @openai/codex"]);
+    expect(job?.log).toEqual([
+      "Running: curl -fsSL https://chatgpt.com/codex/install.sh | sh",
+    ]);
     expect(normalizeHarnessUpgradeJob({ status: "running" })).toBeNull();
   });
 });

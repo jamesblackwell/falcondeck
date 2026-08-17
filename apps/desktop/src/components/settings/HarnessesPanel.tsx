@@ -440,10 +440,7 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
         <CardContent>
           <ul className="list-inside list-disc space-y-1 text-[length:var(--fd-text-sm)] text-fg-muted">
             <li>Custom ACP agents are listed with status but never auto-upgraded.</li>
-            <li>
-              Detected CLIs without a managed path (e.g. Zcode) show install location and version
-              only.
-            </li>
+            <li>Detected CLIs without a managed path show install location and version only.</li>
           </ul>
         </CardContent>
       </Card>

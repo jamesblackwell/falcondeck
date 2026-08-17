@@ -30,7 +30,7 @@ An overview is a list of `HarnessSummary` entries for one host:
 Entries come from two sources, merged by id:
 
 1. **Curated registry** (`KNOWN_HARNESSES` in `harness_manager.rs`): codex,
-   claude, opencode, gemini, pi, zcode. Each entry declares its npm package
+   claude, opencode, gemini, and pi. Each entry declares its npm package
    (for latest-version lookups), upgrade command, and optional auth probe.
    Adding a harness means adding one struct — the panel, RPC, and per-host
    probing pick it up automatically.
@@ -64,9 +64,11 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 ## Probing
 
 - **Local:** binaries resolve through `agent_binary.rs` (configured path →
-  PATH → known locations → login-shell `command -v`). Version and auth probes
-  run concurrently per harness, each capped at 15s, and only when the binary
-  exists.
+  PATH → known locations → login-shell `command -v`). Packaged macOS builds
+  prefer standard user/Homebrew locations before their inherited GUI PATH so
+  stale `/usr/local` installs do not mask active Apple Silicon installs.
+  Version and auth probes run concurrently per harness, each capped at 15s,
+  and only when the binary exists.
 - **SSH hosts:** one BatchMode `ssh` invocation batches every bin probe
   (`command -v`, `--version`, auth) using `FD_BIN:` / `FD_VER:` /
   `FD_AUTH:` / `FD_MISSING:` markers parsed with `splitn(3, ':')` so paths
@@ -86,7 +88,7 @@ Per AGENTS.md, protocol changes start in `falcondeck-core` and
 
 - Upgrade commands come **exclusively from the curated registry** — never
   from client input. `harness_id` is validated against the registry and
-  entries without an `upgrade_command` (e.g. zcode, custom ACP agents) are
+  entries without an `upgrade_command` (such as custom ACP agents) are
   rejected with a clear error.
 - Local upgrades run through `$SHELL -l -c "<command>"` so the user's
   login-shell PATH resolves `npm` / `curl` (the packaged macOS daemon does

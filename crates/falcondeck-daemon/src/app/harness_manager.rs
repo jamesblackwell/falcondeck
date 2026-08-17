@@ -76,7 +76,7 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         label: "Codex",
         bin: "codex",
         npm_package: Some("@openai/codex"),
-        upgrade_command: Some("npm install -g @openai/codex"),
+        upgrade_command: Some("curl -fsSL https://chatgpt.com/codex/install.sh | sh"),
         auth_probe: Some(&["login", "status"]),
         builtin: true,
     },
@@ -115,17 +115,6 @@ const KNOWN_HARNESSES: &[KnownHarness] = &[
         upgrade_command: Some(
             "npm install -g --ignore-scripts @earendil-works/pi-coding-agent pi-acp",
         ),
-        auth_probe: None,
-        builtin: false,
-    },
-    KnownHarness {
-        // Z.ai's GLM coding harness. Detection-only until a canonical
-        // package/channel is confirmed; status and version still surface.
-        id: "zcode",
-        label: "Zcode (GLM)",
-        bin: "zcode",
-        npm_package: None,
-        upgrade_command: None,
         auth_probe: None,
         builtin: false,
     },
@@ -272,18 +261,20 @@ impl AppState {
             match result {
                 Ok(output) => {
                     app.push_harness_job_log(&background_job_id, &output).await;
+                    // A completed job must never become visible before the
+                    // pre-upgrade inventory is invalidated: clients refresh
+                    // as soon as they observe the terminal status.
+                    app.inner.harness_cache.lock().unwrap().remove(&host);
                     app.finish_harness_job(&background_job_id, None).await;
                     tracing::info!("harness upgrade on {host} finished: {}", harness.id);
                 }
                 Err(error) => {
                     tracing::warn!("harness upgrade on {host} failed: {error}");
+                    app.inner.harness_cache.lock().unwrap().remove(&host);
                     app.finish_harness_job(&background_job_id, Some(error))
                         .await;
                 }
             }
-            // The install may have changed binaries or versions; never serve
-            // the pre-upgrade probe result again.
-            app.inner.harness_cache.lock().unwrap().remove(&host);
         });
 
         Ok(StartHarnessUpgradeResponse { job_id })
@@ -595,7 +586,10 @@ fn classify_install_source(path: &str) -> &'static str {
         "homebrew"
     } else if path.contains(".cargo/bin") {
         "cargo"
-    } else if path.contains(".local/bin") || path.contains(".opencode/bin") {
+    } else if path.contains(".local/bin")
+        || path.contains(".opencode/bin")
+        || path.contains(".codex/packages/standalone")
+    {
         "local"
     } else {
         "unknown"
@@ -840,6 +834,10 @@ mod tests {
             classify_install_source("/Users/x/.opencode/bin/opencode"),
             "local"
         );
+        assert_eq!(
+            classify_install_source("/Users/x/.codex/packages/standalone/releases/0.147.0/codex"),
+            "local"
+        );
         assert_eq!(classify_install_source("/usr/bin/tool"), "unknown");
     }
 
@@ -852,7 +850,6 @@ mod tests {
         // Auth probes only for harnesses that define them.
         assert!(script.contains("FD_AUTH:codex:"));
         assert!(script.contains("FD_AUTH:claude:"));
-        assert!(!script.contains("FD_AUTH:zcode:"));
     }
 
     #[test]
