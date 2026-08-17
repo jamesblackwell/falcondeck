@@ -240,6 +240,7 @@ export default function HomeScreen() {
     resetScrollState,
     scrollToBottom,
     scrollToBottomIfFollowing,
+    scrollToBottomIfNear,
   } = useScrollToBottom<ConversationRenderBlock>();
   const isKeyboardVisible = useKeyboardVisible();
   const [appState, setAppState] = useState(AppState.currentState);
@@ -1315,7 +1316,13 @@ export default function HomeScreen() {
           textInputRef={composerInputRef}
           value={draft}
           onChangeText={setDraft}
-          onSubmit={() => void submitTurn()}
+          onSubmit={() => {
+            // Sending from just above the tail means the reader wants to see
+            // their message land; only a reader far enough up for the jump
+            // button keeps their place.
+            scrollToBottomIfNear();
+            void submitTurn();
+          }}
           onStop={() => {
             if (isStopping) return;
             setIsStopping(true);

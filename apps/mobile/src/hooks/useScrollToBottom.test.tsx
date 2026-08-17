@@ -185,6 +185,45 @@ describe('useScrollToBottom', () => {
     expect(hook.scrollToEnd).toHaveBeenCalledTimes(3)
   })
 
+  it('snaps a send to the tail when the reader is hovering just above it', () => {
+    const hook = renderHook()
+
+    // Scrolled up a little — not following, but the jump button is not showing.
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onScrollEndDrag(scrollEvent(350))
+    })
+    expect(hook.value.showJumpButton).toBe(false)
+
+    act(() => {
+      hook.value.scrollToBottomIfNear()
+    })
+    expect(hook.scrollToEnd).toHaveBeenCalledWith({ animated: true })
+
+    // Re-armed: streamed content keeps pinning.
+    act(() => {
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.scrollToEnd).toHaveBeenCalledTimes(2)
+  })
+
+  it('leaves a send alone for a reader deep enough that the jump button shows', () => {
+    const hook = renderHook()
+
+    act(() => {
+      hook.value.onScrollBeginDrag(scrollEvent(500))
+      hook.value.onScrollEndDrag(scrollEvent(100))
+      hook.value.onScroll(scrollEvent(100))
+    })
+    expect(hook.value.showJumpButton).toBe(true)
+
+    act(() => {
+      hook.value.scrollToBottomIfNear()
+      hook.value.onContentSizeChange()
+    })
+    expect(hook.scrollToEnd).not.toHaveBeenCalled()
+  })
+
   it('snaps a refreshed thread to the tail only for a reader who has not scrolled away', () => {
     const hook = renderHook()
 

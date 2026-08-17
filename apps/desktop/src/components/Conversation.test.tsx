@@ -484,6 +484,86 @@ describe("Conversation empty state", () => {
     expect(transcript.scrollTop).toBe(500);
   });
 
+  it("snaps a send to the bottom for a reader hovering just above the tail", () => {
+    const item = {
+      kind: "user_message" as const,
+      id: "user-1",
+      text: "Earlier message",
+      attachments: [],
+      created_at: "2026-08-08T12:00:00Z",
+    };
+    const { rerender } = render(
+      <Conversation threadKey="thread-1" items={[item]} />,
+    );
+    const transcript = screen.getByRole("log", { name: "Conversation" });
+    Object.defineProperty(transcript, "scrollHeight", {
+      configurable: true,
+      get: () => 1_000,
+    });
+    Object.defineProperty(transcript, "clientHeight", {
+      configurable: true,
+      get: () => 500,
+    });
+    // Parked 150px above the tail — inside the jump-button threshold.
+    transcript.scrollTop = 350;
+    fireEvent.scroll(transcript);
+
+    // Run the smooth-scroll glide to completion synchronously: hand each
+    // frame a timestamp past the animation's duration.
+    const raf = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((frame) => {
+        frame(performance.now() + 10_000);
+        return 0;
+      });
+    try {
+      rerender(<Conversation threadKey="thread-1" items={[item]} isSending />);
+    } finally {
+      raf.mockRestore();
+    }
+
+    expect(transcript.scrollTop).toBe(500);
+  });
+
+  it("keeps a reader's place on send when they are far up the transcript", () => {
+    const item = {
+      kind: "user_message" as const,
+      id: "user-1",
+      text: "Earlier message",
+      attachments: [],
+      created_at: "2026-08-08T12:00:00Z",
+    };
+    const { rerender } = render(
+      <Conversation threadKey="thread-1" items={[item]} />,
+    );
+    const transcript = screen.getByRole("log", { name: "Conversation" });
+    Object.defineProperty(transcript, "scrollHeight", {
+      configurable: true,
+      get: () => 1_000,
+    });
+    Object.defineProperty(transcript, "clientHeight", {
+      configurable: true,
+      get: () => 500,
+    });
+    transcript.scrollTop = 100;
+    fireEvent.scroll(transcript);
+
+    // Complete any glide synchronously so a wrongly-started one is visible.
+    const raf = vi
+      .spyOn(window, "requestAnimationFrame")
+      .mockImplementation((frame) => {
+        frame(performance.now() + 10_000);
+        return 0;
+      });
+    try {
+      rerender(<Conversation threadKey="thread-1" items={[item]} isSending />);
+    } finally {
+      raf.mockRestore();
+    }
+
+    expect(transcript.scrollTop).toBe(100);
+  });
+
   it("copies a complete assistant response from a keyboard-accessible action", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {

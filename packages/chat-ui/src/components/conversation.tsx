@@ -42,6 +42,7 @@ import {
 
 const AUTO_SCROLL_THRESHOLD = 40;
 const JUMP_THRESHOLD = 200;
+const SMOOTH_SCROLL_DURATION_MS = 320;
 const MAX_THREAD_UI_STATE = 48;
 // Keep the newest context fully laid out for streaming and bottom anchoring.
 // Older blocks use browser-native layout/paint deferral once a transcript is
@@ -205,6 +206,8 @@ export const Conversation = memo(function Conversation({
   const activeThreadKeyRef = useRef<string | null>(threadKey);
   const lastRestoredThreadKeyRef = useRef<string | null>(null);
   const stickyToBottomRef = useRef(true);
+  const wasSendingRef = useRef(isSending);
+  const smoothScrollFrameRef = useRef<number | null>(null);
   const prependAnchorRef = useRef<{
     blockId: string | null;
     blockTop: number;
@@ -409,15 +412,60 @@ export const Conversation = memo(function Conversation({
     [threadKey],
   );
 
+  const cancelSmoothScroll = useCallback(() => {
+    if (smoothScrollFrameRef.current === null) return;
+    window.cancelAnimationFrame(smoothScrollFrameRef.current);
+    smoothScrollFrameRef.current = null;
+  }, []);
+
   const scrollToBottom = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
 
+    cancelSmoothScroll();
     el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
     stickyToBottomRef.current = true;
     setShowJump(false);
     persistScrollPosition();
-  }, [persistScrollPosition]);
+  }, [cancelSmoothScroll, persistScrollPosition]);
+
+  /// Glides to the bottom instead of teleporting — for the send snap and the
+  /// jump button, where the reader is watching. The target is re-read every
+  /// frame so a tail that grows mid-glide is still caught, and following arms
+  /// only on arrival, keeping the streaming pin from teleporting underneath a
+  /// running glide. Wheel, touch, or a scrollbar grab cancels it — the glide
+  /// must never wrestle the reader for the scroll position.
+  const smoothScrollToBottom = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const target = () => Math.max(0, el.scrollHeight - el.clientHeight);
+    const from = el.scrollTop;
+    const prefersReducedMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (prefersReducedMotion || target() - from <= 1) {
+      scrollToBottom();
+      return;
+    }
+
+    cancelSmoothScroll();
+    setShowJump(false);
+    const start = performance.now();
+    const step = (now: number) => {
+      const t = Math.min(1, (now - start) / SMOOTH_SCROLL_DURATION_MS);
+      const eased = 1 - (1 - t) ** 3;
+      el.scrollTop = from + (target() - from) * eased;
+      if (t < 1) {
+        smoothScrollFrameRef.current = window.requestAnimationFrame(step);
+        return;
+      }
+      smoothScrollFrameRef.current = null;
+      stickyToBottomRef.current = true;
+      persistScrollPosition();
+    };
+    smoothScrollFrameRef.current = window.requestAnimationFrame(step);
+  }, [cancelSmoothScroll, persistScrollPosition, scrollToBottom]);
 
   /// Pins to the bottom before the browser paints. Streaming must use this:
   /// deferring the scroll by even one frame paints the taller content at the
@@ -456,6 +504,10 @@ export const Conversation = memo(function Conversation({
     const el = scrollRef.current;
     if (!el) return;
 
+    // A glide left over from the previous thread must not keep writing into
+    // the restored position.
+    cancelSmoothScroll();
+
     const savedPosition = threadKey
       ? (scrollPositionsRef.current.get(threadKey) ?? null)
       : null;
@@ -470,11 +522,22 @@ export const Conversation = memo(function Conversation({
     stickyToBottomRef.current = distanceFromBottom <= AUTO_SCROLL_THRESHOLD;
     setShowJump(distanceFromBottom > JUMP_THRESHOLD);
     persistScrollPosition();
-  }, [persistScrollPosition, schedulePinToBottom, scrollToBottom, threadKey]);
+  }, [
+    cancelSmoothScroll,
+    persistScrollPosition,
+    schedulePinToBottom,
+    scrollToBottom,
+    threadKey,
+  ]);
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
+    // A glide's own frame writes land here too; judging stickiness or the jump
+    // button from those mid-flight positions would flash the button and record
+    // a position the glide is about to leave. Arrival state is set by the
+    // glide itself; user input cancels it first and re-enters normally.
+    if (smoothScrollFrameRef.current !== null) return;
 
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const isNearBottom = distanceFromBottom <= AUTO_SCROLL_THRESHOLD;
@@ -627,6 +690,24 @@ export const Conversation = memo(function Conversation({
     }
   }, [isLoadingOlder, persistScrollPosition, renderBlocks]);
 
+  // Sending re-arms bottom-following for a reader hovering just above the tail
+  // (within the jump-button threshold, wider than the streaming stick), so
+  // their own message lands in view; a reader deep in the history keeps their
+  // place. Rising edge only — isSending holding true across a slow transport
+  // must not fight someone who scrolls up mid-send.
+  useLayoutEffect(() => {
+    const wasSending = wasSendingRef.current;
+    wasSendingRef.current = isSending;
+    if (!isSending || wasSending) return;
+
+    const el = scrollRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom > JUMP_THRESHOLD) return;
+
+    smoothScrollToBottom();
+  }, [isSending, smoothScrollToBottom]);
+
   useLayoutEffect(() => {
     if (isLoading) return;
     if (!renderBlocks.length && !isBusy && !isWaitingForInput) return;
@@ -634,7 +715,9 @@ export const Conversation = memo(function Conversation({
     // same forced scroll-height read twice on every streaming update.
     if (typeof ResizeObserver !== "undefined") return;
 
-    if (!stickyToBottomRef.current) {
+    // A running glide already converges on the live bottom; teleporting from
+    // under it would end the animation with a visible snap.
+    if (!stickyToBottomRef.current || smoothScrollFrameRef.current !== null) {
       persistScrollPosition();
       return;
     }
@@ -659,7 +742,7 @@ export const Conversation = memo(function Conversation({
     // synchronously here too — scheduling a frame would reintroduce the
     // paint-then-snap jitter for content that grows while streaming.
     const observer = new ResizeObserver(() => {
-      if (!stickyToBottomRef.current) {
+      if (!stickyToBottomRef.current || smoothScrollFrameRef.current !== null) {
         persistScrollPosition();
         return;
       }
@@ -673,17 +756,34 @@ export const Conversation = memo(function Conversation({
     };
   }, [isLoading, persistScrollPosition, pinToBottomNow, threadKey]);
 
+  // Any real scroll input takes the position back from a running glide.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+
+    const cancel = () => cancelSmoothScroll();
+    el.addEventListener("wheel", cancel, { passive: true });
+    el.addEventListener("touchstart", cancel, { passive: true });
+    el.addEventListener("mousedown", cancel);
+    return () => {
+      el.removeEventListener("wheel", cancel);
+      el.removeEventListener("touchstart", cancel);
+      el.removeEventListener("mousedown", cancel);
+    };
+  }, [cancelSmoothScroll]);
+
   useEffect(() => {
     return () => {
       if (pinToBottomFrameRef.current !== null) {
         window.cancelAnimationFrame(pinToBottomFrameRef.current);
       }
+      cancelSmoothScroll();
     };
-  }, []);
+  }, [cancelSmoothScroll]);
 
   const jumpToBottom = useCallback(() => {
-    scrollToBottom();
-  }, [scrollToBottom]);
+    smoothScrollToBottom();
+  }, [smoothScrollToBottom]);
 
   return (
     <FileDiffProvider onOpenFile={onOpenFile}>

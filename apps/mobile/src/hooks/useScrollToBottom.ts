@@ -124,6 +124,18 @@ export function useScrollToBottom<T>() {
     [scrollToBottom],
   )
 
+  /**
+   * For the send path. A reader hovering just above the tail wants to watch
+   * their message land, so sending snaps down and re-arms following — but a
+   * reader deep in the transcript keeps their place. "Near" is the jump-button
+   * threshold, so the FAB being visible and a send leaving the list alone are
+   * the same state.
+   */
+  const scrollToBottomIfNear = useCallback(() => {
+    if (showJumpButtonRef.current) return
+    scrollToBottom()
+  }, [scrollToBottom])
+
   const resetScrollState = useCallback(() => {
     showJumpButtonRef.current = false
     setShowJumpButton(false)
@@ -142,5 +154,6 @@ export function useScrollToBottom<T>() {
     resetScrollState,
     scrollToBottom,
     scrollToBottomIfFollowing,
+    scrollToBottomIfNear,
   }
 }
