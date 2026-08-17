@@ -1528,6 +1528,27 @@ function isSummarizableTool(
   );
 }
 
+/**
+ * Hook runs are harness bookkeeping, not agent work: most of them complete in
+ * milliseconds and say nothing. They only earn a timeline row when they
+ * actually spoke up — a failure, a denial, or feedback entries that changed
+ * the turn. Expanded still shows every run, and collapsed buries them inside
+ * the work-session fold like any other tool call.
+ */
+function isQuietHookRun(
+  item: Extract<ConversationItem, { kind: "tool_call" }>,
+): boolean {
+  if (item.detail?.kind !== "hook") return false;
+  const lifecycle = toolLifecycle(item);
+  if (lifecycle === "failed" || lifecycle === "denied") return false;
+  return !item.detail.entries.some(
+    (entry) =>
+      entry.entry_kind === "warning" ||
+      entry.entry_kind === "error" ||
+      entry.entry_kind === "stop",
+  );
+}
+
 function shouldSuppressReadOnlyDetail(
   item: ConversationItem,
   mode: ToolDetailsMode,
@@ -1844,6 +1865,12 @@ export function deriveConversationPresentation(
 
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
+
+    // Skipped before the buffers flush so a hook firing between two reads
+    // doesn't split an "Explored N files" group.
+    if (mode !== "expanded" && isToolCall(item) && isQuietHookRun(item)) {
+      continue;
+    }
 
     if (isToolCall(item) && isSummarizableTool(item, preferences)) {
       const family = toolActivityFamily(item);
