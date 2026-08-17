@@ -18,10 +18,12 @@ import { ExternalLink, KeyRound, Mic, ShieldCheck, Trash2 } from "lucide-react";
 import {
   readDictationAudioDevices,
   readDictationPermissions,
-  requestDictationPermissions,
+  nextRequiredDictationPermission,
+  requestDictationPermission,
   useDictationSettings,
   writeDictationSettings,
   type DictationAudioDevice,
+  type DictationPermission,
   type DictationPermissionStatus,
   type DictationSettings,
 } from "../dictation";
@@ -43,6 +45,12 @@ type DictationSetupProps = {
 
 const SELECT_CLASS =
   "fd-focus h-10 w-full rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 px-3 text-[length:var(--fd-text-sm)] text-fg-primary";
+
+const PERMISSION_LABELS: Record<DictationPermission, string> = {
+  microphone: "microphone access",
+  speech_recognition: "Speech Recognition",
+  accessibility: "Accessibility",
+};
 
 function PermissionBadge({
   label,
@@ -166,17 +174,24 @@ export function DictationSetup({
       .catch(() => setModels([]));
   }, [baseUrl, settings.provider]);
 
-  const requestPermissions = async () => {
+  const nextPermission = permissions
+    ? nextRequiredDictationPermission(permissions, settings.provider)
+    : null;
+
+  const requestPermission = async () => {
+    if (!nextPermission) return;
     setPermissionBusy(true);
     try {
-      await requestDictationPermissions(settings.provider === "system");
+      await requestDictationPermission(nextPermission);
       window.setTimeout(() => void refreshPermissions(), 600);
       window.setTimeout(() => void refreshPermissions(), 1800);
-      window.setTimeout(() => void refreshAudioDevices(), 1800);
+      if (nextPermission === "microphone") {
+        window.setTimeout(() => void refreshAudioDevices(), 1800);
+      }
     } catch (error) {
       onToast({
         variant: "danger",
-        title: "Could not request dictation access",
+        title: `Could not request ${PERMISSION_LABELS[nextPermission]}`,
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
@@ -184,9 +199,8 @@ export function DictationSetup({
     }
   };
 
-  const setEnabled = async (enabled: boolean) => {
+  const setEnabled = (enabled: boolean) => {
     updateSettings({ enabled });
-    if (enabled) await requestPermissions();
   };
 
   const saveKey = async () => {
@@ -259,7 +273,7 @@ export function DictationSetup({
           <button
             type="button"
             aria-pressed={settings.enabled}
-            onClick={() => void setEnabled(!settings.enabled)}
+            onClick={() => setEnabled(!settings.enabled)}
             className={cn(
               "fd-focus flex w-full items-center justify-between gap-4 rounded-[var(--fd-radius-lg)] border px-4 py-3 text-left transition-colors",
               settings.enabled
@@ -303,7 +317,8 @@ export function DictationSetup({
                 value={settings.shortcut}
                 onChange={(event) =>
                   updateSettings({
-                    shortcut: event.target.value as DictationSettings["shortcut"],
+                    shortcut: event.target
+                      .value as DictationSettings["shortcut"],
                   })
                 }
               >
@@ -379,7 +394,9 @@ export function DictationSetup({
                 id="dictation-model"
                 className={SELECT_CLASS}
                 value={settings.model}
-                onChange={(event) => updateSettings({ model: event.target.value })}
+                onChange={(event) =>
+                  updateSettings({ model: event.target.value })
+                }
               >
                 {!models.some((model) => model.id === settings.model) ? (
                   <option value={settings.model}>{settings.model}</option>
@@ -418,10 +435,12 @@ export function DictationSetup({
                     size="sm"
                     variant="secondary"
                     disabled={permissionBusy}
-                    onClick={() => void requestPermissions()}
+                    onClick={() => void requestPermission()}
                   >
                     {permissionBusy ? <ActivityDiamond size="sm" /> : null}
-                    Allow dictation access
+                    {nextPermission
+                      ? `Allow ${PERMISSION_LABELS[nextPermission]}`
+                      : "Check permissions"}
                   </Button>
                   {!permissions.accessibility ? (
                     <Button
@@ -441,7 +460,10 @@ export function DictationSetup({
                 </div>
               ) : (
                 <p className="flex items-center gap-2 text-[length:var(--fd-text-sm)] text-fg-secondary">
-                  <ShieldCheck aria-hidden="true" className="h-4 w-4 text-success" />
+                  <ShieldCheck
+                    aria-hidden="true"
+                    className="h-4 w-4 text-success"
+                  />
                   Ready to dictate
                 </p>
               )}
@@ -474,13 +496,17 @@ export function DictationSetup({
           </div>
           <div className="space-y-2">
             <label
-              htmlFor={compact ? "onboarding-openrouter-key" : "openrouter-speech-key"}
+              htmlFor={
+                compact ? "onboarding-openrouter-key" : "openrouter-speech-key"
+              }
               className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary"
             >
               {configured ? "Replace API key" : "API key"}
             </label>
             <Input
-              id={compact ? "onboarding-openrouter-key" : "openrouter-speech-key"}
+              id={
+                compact ? "onboarding-openrouter-key" : "openrouter-speech-key"
+              }
               type="password"
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}

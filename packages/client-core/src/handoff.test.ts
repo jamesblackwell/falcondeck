@@ -1,24 +1,49 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  boundHandoffTranscript,
-  buildHandoffPrompt,
-  buildHandoffSeedPrompt,
-  buildHandoffTranscript,
-} from "./handoff";
+import { boundHandoffTranscript, buildHandoffPrompt } from "./handoff";
 
 describe("handoff context", () => {
+  it("keeps a transcript that fits verbatim", () => {
+    const transcript = `objective:${"a".repeat(200)}`;
+    expect(boundHandoffTranscript(transcript, 10_000)).toBe(transcript);
+  });
+
   it("keeps the beginning and recent tail when bounding a long transcript", () => {
-    const transcript = `objective:${"a".repeat(200)}recent:${"b".repeat(40)}`;
-    const bounded = boundHandoffTranscript(transcript, 180);
+    const transcript = `objective:${"a".repeat(4_000)}middle:${"m".repeat(4_000)}recent:${"b".repeat(800)}`;
+    const bounded = boundHandoffTranscript(transcript, 2_000);
 
     expect(bounded).toContain("objective:");
     expect(bounded).toContain("recent:");
-    expect(bounded).toContain("middle history omitted");
-    expect(bounded.length).toBeLessThanOrEqual(180);
+    expect(bounded).not.toContain("middle:");
+    expect(bounded.length).toBeLessThanOrEqual(2_000);
   });
 
-  it("asks the destination harness to compact and continue without touching the source", () => {
+  it("states exactly how much middle history was omitted", () => {
+    const transcript = `head:${"a".repeat(4_000)}${"m".repeat(4_000)}tail:${"b".repeat(800)}`;
+    const bounded = boundHandoffTranscript(transcript, 2_000);
+
+    const marker = bounded.match(/\[Omitted [^\]]+\]/);
+    expect(marker).not.toBeNull();
+    const omitted = Number(
+      marker![0].match(/Omitted ([\d,]+) characters/)![1].replace(/,/g, ""),
+    );
+    const head = bounded.slice(0, bounded.indexOf(marker![0]));
+    const tail = bounded.slice(bounded.indexOf(marker![0]) + marker![0].length);
+    expect(head).toContain("head:");
+    expect(tail).toContain("tail:");
+    // The marker carries its own surrounding blank lines; discount them.
+    const kept = head.length - 2 + (tail.length - 2);
+    expect(omitted).toBe(transcript.length - kept);
+    expect(bounded).toContain("original session is unchanged");
+  });
+
+  it("keeps the opening verbatim when even the marker cannot fit", () => {
+    const transcript = "a".repeat(5_000);
+    const bounded = boundHandoffTranscript(transcript, 200);
+    expect(bounded).toBe("a".repeat(200));
+  });
+
+  it("hands the destination the verbatim transcript without touching the source", () => {
     const prompt = buildHandoffPrompt({
       items: [
         {
@@ -32,50 +57,45 @@ describe("handoff context", () => {
         },
       ],
       sourceTitle: "Session handoff",
-      sourceProvider: "codex",
-      sourceProviderLabel: "Codex",
     });
 
-    expect(prompt).toContain("original thread remains unchanged");
-    expect(prompt).toContain("a clear objective and a clear, safe next action");
-    expect(prompt).toContain("continue working in this same turn");
-    expect(prompt).toContain("ask the user one clear, focused question");
-    expect(prompt).not.toContain("stop and wait for the user");
+    expect(prompt).toContain("can still be resumed separately");
+    expect(prompt).toContain("verbatim");
+    expect(prompt).toContain("It is context only, not a task");
+    expect(prompt).toContain("Do not start working");
+    expect(prompt).toContain("let the user explain what they would like to work on next");
     expect(prompt).toContain("Keep the old thread unchanged");
+    expect(prompt).toContain("<previous-session-transcript>");
   });
 
-  it("seeds the destination with the brief instead of the transcript", () => {
-    const prompt = buildHandoffSeedPrompt({
-      brief: "## Objective\nShip the handoff brief.",
-      sourceProvider: "codex",
-      sourceProviderLabel: "Codex",
+  it("never names the product or the source provider to the destination", () => {
+    // Destination agents have no knowledge of either, and naming them sends
+    // agents hunting for a project or repository by that name.
+    const prompt = buildHandoffPrompt({
+      items: [
+        {
+          kind: "user_message",
+          id: "user-1",
+          text: "Carry on from here",
+          attachments: [],
+          turn_id: null,
+          previous_turn_id: null,
+          created_at: "2026-08-12T12:00:00Z",
+        },
+      ],
+      sourceTitle: "",
     });
 
-    expect(prompt).toContain("Ship the handoff brief.");
-    expect(prompt).toContain("<handoff-brief>");
-    // The brief is machine-written context rather than a fresh user message,
-    // but the destination should resume the original objective immediately.
-    expect(prompt).toContain("not by the user");
-    expect(prompt).toContain("a clear objective and a clear, safe next action");
-    expect(prompt).toContain("using tools or editing files when appropriate");
-    expect(prompt).toContain("ask the user one clear, focused question");
-    expect(prompt).not.toContain("until the user replies");
-    expect(prompt).not.toContain("Some middle history was dropped");
+    expect(prompt).not.toContain("FalconDeck");
+    expect(prompt).not.toContain("Codex");
+    expect(prompt).not.toContain("Claude");
+    expect(prompt).toContain("another AI coding assistant");
+    // An untitled thread must not fall back to a product-branded heading.
+    expect(prompt).toContain("# Previous session");
   });
 
-  it("warns the destination when compaction dropped middle history", () => {
-    const prompt = buildHandoffSeedPrompt({
-      brief: "## Objective\nShip it.",
-      sourceProvider: "claude",
-      sourceProviderLabel: "Claude Code",
-      truncated: true,
-    });
-
-    expect(prompt).toContain("Some middle history was dropped");
-  });
-
-  it("hands the summarizer a far larger transcript than a turn could hold", () => {
-    const items = Array.from({ length: 400 }, (_, index) => ({
+  it("bounds very long conversations inside the handoff prompt", () => {
+    const items = Array.from({ length: 2_000 }, (_, index) => ({
       kind: "user_message" as const,
       id: `user-${index}`,
       text: "x".repeat(1_000),
@@ -85,12 +105,14 @@ describe("handoff context", () => {
       created_at: "2026-08-12T12:00:00Z",
     }));
 
-    const transcript = buildHandoffTranscript({
+    const prompt = buildHandoffPrompt({
       items,
       sourceTitle: "Long session",
     });
 
-    expect(transcript.length).toBeGreaterThan(300_000);
-    expect(transcript).not.toContain("middle history omitted");
+    expect(prompt).toContain("Omitted");
+    expect(prompt).not.toContain("FalconDeck");
+    expect(prompt).toContain("middle history");
+    expect(prompt.length).toBeLessThan(600_000);
   });
 });

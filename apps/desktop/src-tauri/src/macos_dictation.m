@@ -172,8 +172,6 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
       kCGSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
       mask, FDEventTapCallback, (__bridge void *)self);
   if (!self.eventTap) {
-    FDEmit(FDEventFailed,
-           @"Enable FalconDeck in System Settings → Privacy & Security → Accessibility, then try again.");
     return;
   }
   self.eventTapSource = CFMachPortCreateRunLoopSource(
@@ -617,18 +615,40 @@ void fd_dictation_free_string(char *value) {
   free(value);
 }
 
-void fd_dictation_request_permissions(bool include_speech) {
-  NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt : @YES};
-  AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
+static void FDOpenPrivacySettings(NSString *pane) {
+  NSString *value = [NSString stringWithFormat:
+      @"x-apple.systempreferences:com.apple.preference.security?%@", pane];
+  [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:value]];
+}
+
+void fd_dictation_request_microphone_permission(void) {
   if (@available(macOS 10.14, *)) {
-    [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
-                             completionHandler:^(__unused BOOL granted) {}];
-  }
-  if (include_speech) {
-    if (@available(macOS 10.15, *)) {
-      [SFSpeechRecognizer requestAuthorization:^(__unused SFSpeechRecognizerAuthorizationStatus status) {}];
+    AVAuthorizationStatus status =
+        [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (status == AVAuthorizationStatusNotDetermined) {
+      [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio
+                               completionHandler:^(__unused BOOL granted) {}];
+    } else if (status != AVAuthorizationStatusAuthorized) {
+      FDOpenPrivacySettings(@"Privacy_Microphone");
     }
   }
+}
+
+void fd_dictation_request_speech_permission(void) {
+  if (@available(macOS 10.15, *)) {
+    SFSpeechRecognizerAuthorizationStatus status =
+        [SFSpeechRecognizer authorizationStatus];
+    if (status == SFSpeechRecognizerAuthorizationStatusNotDetermined) {
+      [SFSpeechRecognizer requestAuthorization:^(__unused SFSpeechRecognizerAuthorizationStatus status) {}];
+    } else if (status != SFSpeechRecognizerAuthorizationStatusAuthorized) {
+      FDOpenPrivacySettings(@"Privacy_SpeechRecognition");
+    }
+  }
+}
+
+void fd_dictation_request_accessibility_permission(void) {
+  NSDictionary *options = @{(__bridge NSString *)kAXTrustedCheckOptionPrompt : @YES};
+  AXIsProcessTrustedWithOptions((__bridge CFDictionaryRef)options);
 }
 
 int32_t fd_dictation_microphone_permission(void) {
@@ -698,8 +718,7 @@ void fd_dictation_mark_completed(void) {
 }
 
 void fd_dictation_open_accessibility_settings(void) {
-  NSURL *url = [NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"];
-  [NSWorkspace.sharedWorkspace openURL:url];
+  FDOpenPrivacySettings(@"Privacy_Accessibility");
 }
 
 void fd_dictation_shutdown(void) {

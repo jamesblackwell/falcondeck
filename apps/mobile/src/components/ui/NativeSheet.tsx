@@ -10,6 +10,7 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native'
+import { X } from 'lucide-react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
@@ -26,7 +27,8 @@ const DISMISS_FLING_VELOCITY = 0.8
 /**
  * The app's bottom sheet: slides up from the bottom, takes only the height
  * its content needs, and closes from a tap on the dimmed backdrop, a drag
- * down on the grabber, or the system back gesture.
+ * down on the grabber, an explicit close button, or the system back gesture.
+ * The button is the escape hatch that does not depend on knowing a gesture.
  *
  * Deliberately NOT the native iOS form sheet: on an iPhone that presents as
  * a nearly full-screen card regardless of content height, with no visible
@@ -85,6 +87,18 @@ export const NativeSheet = memo(function NativeSheet({
           <View style={styles.grabberZone} {...panResponder.panHandlers}>
             <View style={styles.grabber} />
           </View>
+          <Pressable
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel={accessibilityLabel}
+            hitSlop={8}
+            style={({ pressed }) => [
+              styles.closeButton,
+              pressed && styles.closeButtonPressed,
+            ]}
+          >
+            <X size={theme.iconSize.sm} color={theme.colors.fg.muted} />
+          </Pressable>
           <View style={contentStyle}>{children}</View>
         </Animated.View>
       </KeyboardAvoidingView>
@@ -110,6 +124,22 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: 'center',
     paddingTop: theme.spacing[2],
     paddingBottom: theme.spacing[3],
+  },
+  // Sits over the grabber row rather than in it, so the drag target stays the
+  // full width and sheet content keeps its own header space.
+  closeButton: {
+    position: 'absolute',
+    top: theme.spacing[2],
+    right: theme.spacing[3],
+    width: theme.spacing[8],
+    height: theme.spacing[8],
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surface[3],
+  },
+  closeButtonPressed: {
+    backgroundColor: theme.colors.surface[4],
   },
   grabber: {
     width: theme.spacing[8] + theme.spacing[1],

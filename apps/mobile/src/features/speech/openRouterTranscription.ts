@@ -32,7 +32,7 @@ function formatFromUri(uri: string): string {
 
 export type DesktopSpeechStatus = {
   configured: boolean
-  storage: 'os_credential_store'
+  storage: 'daemon_secret_store'
 }
 
 export async function getDesktopSpeechStatus(): Promise<DesktopSpeechStatus> {

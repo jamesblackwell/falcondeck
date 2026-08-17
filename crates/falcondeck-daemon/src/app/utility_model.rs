@@ -1,10 +1,10 @@
 //! Cheap, tool-free provider runs used for FalconDeck's own background work.
 //!
-//! Thread titles and handoff briefs are short, frequent, and invisible until
-//! they land, so they never spend a user-facing session: they shell out to
-//! whichever agent CLI the user already has installed, on the cheapest model
-//! that provider offers, and fall back down a preference-ordered chain when a
-//! provider is missing, unauthenticated, or fails.
+//! Thread titles are short, frequent, and invisible until they land, so they
+//! never spend a user-facing session: they shell out to whichever agent CLI
+//! the user already has installed, on the cheapest model that provider
+//! offers, and fall back down a preference-ordered chain when a provider is
+//! missing, unauthenticated, or fails.
 
 use std::process::Stdio;
 
@@ -26,14 +26,6 @@ pub(super) struct UtilityCandidate {
     pub provider: AgentProvider,
     /// Model id to request, or `None` for the provider's own default.
     pub model_id: Option<String>,
-}
-
-/// The output of a successful utility run, tagged with what produced it.
-#[derive(Debug, Clone)]
-pub(super) struct UtilityRun {
-    pub provider: AgentProvider,
-    pub model_id: Option<String>,
-    pub text: String,
 }
 
 impl AppState {
@@ -80,17 +72,13 @@ impl AppState {
         workspace_path: &str,
         prompt: &str,
         run_timeout: Duration,
-    ) -> Option<UtilityRun> {
+    ) -> Option<String> {
         for candidate in candidates {
             let text = self
                 .run_utility_prompt_with(candidate, workspace_path, prompt, run_timeout)
                 .await;
             if let Some(text) = text.filter(|text| !text.trim().is_empty()) {
-                return Some(UtilityRun {
-                    provider: candidate.provider.clone(),
-                    model_id: candidate.model_id.clone(),
-                    text,
-                });
+                return Some(text);
             }
         }
         None

@@ -25,6 +25,8 @@ import type {
 
 import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
+const RECENT_THREAD_PREFETCH_LIMIT = 5;
+
 export function useSessionActions() {
   const detailRequestVersion = useRef(0);
 
@@ -355,6 +357,9 @@ export function useSessionActions() {
         useSessionStore.getState().setThreadDetail(detail, {
           mergeMode: options?.older ? "prepend" : "refresh",
         });
+        if (!options?.older) {
+          useSessionStore.getState().setThreadDetailError(threadId, null);
+        }
         relay._setError(null);
         return detail;
       } catch (e) {
@@ -374,13 +379,72 @@ export function useSessionActions() {
         if (options?.older) {
           relay._setError("Couldn't load older messages. Try again.");
         } else {
+          // A tail-load failure on an uncached thread must not read as an
+          // empty conversation; record it so the transcript shows an explicit
+          // sync error with a retry instead of "No messages yet".
           console.warn("Failed to refresh thread detail", e);
+          useSessionStore
+            .getState()
+            .setThreadDetailError(
+              threadId,
+              "Couldn't sync this conversation. Check your connection and try again.",
+            );
         }
         return null;
       }
     },
     [],
   );
+
+  /**
+   * Background warm-up of the most recently updated threads so switching to
+   * them from the sidebar is instant. Only threads with no locally cached
+   * items are fetched (the offline cache and the live event stream already
+   * cover the rest), serially, to stay gentle on a flaky mobile link.
+   */
+  const prefetchRecentThreadDetails = useCallback(async () => {
+    const relay = useRelayStore.getState();
+    if (!relay._getSessionCrypto()) return;
+    const session = useSessionStore.getState();
+    if (!session.snapshot) return;
+
+    const candidates = [...session.snapshot.threads]
+      .filter((thread) => !thread.is_archived)
+      .sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
+      .filter(
+        (thread) =>
+          thread.id !== session.selectedThreadId &&
+          (session.threadItems[thread.id]?.length ?? 0) === 0,
+      )
+      .slice(0, RECENT_THREAD_PREFETCH_LIMIT);
+
+    for (const thread of candidates) {
+      // Re-check each iteration: a foreground load, cache write, or thread
+      // selection may have populated (or taken over) this thread meanwhile.
+      const current = useSessionStore.getState();
+      if (current.threadItems[thread.id]?.length) continue;
+      try {
+        const detail = normalizeThreadDetail(
+          await relay._callRpc<ThreadDetail>(
+            "thread.detail",
+            {
+              workspace_id: thread.workspace_id,
+              thread_id: thread.id,
+              mode: "tail",
+              limit: THREAD_DETAIL_TAIL_LIMIT,
+            },
+            { requestIdPrefix: "mobile-prefetch" },
+          ),
+        );
+        useSessionStore.getState().setThreadDetail(detail, {
+          mergeMode: "refresh",
+        });
+      } catch {
+        // Background best-effort: a failure here surfaces through the normal
+        // foreground load (and its error state) if the user opens the thread.
+      }
+    }
+  }, []);
 
   const branchFromMessage = useCallback(
     async (item: Extract<ConversationItem, { kind: "user_message" }>) => {
@@ -509,6 +573,7 @@ export function useSessionActions() {
     respondApproval,
     respondInteractive,
     loadThreadDetail,
+    prefetchRecentThreadDetails,
     retryResponse,
   };
 }

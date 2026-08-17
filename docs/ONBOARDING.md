@@ -1,6 +1,10 @@
 # Desktop onboarding
 
-> Status: **Draft plan — not implemented** (2026-08-17)
+> Status: **Phase 1 implemented** (2026-08-17) — flag + gating
+> (`shouldShowFirstRunOnboarding`), `OnboardingWizard` (welcome / appearance /
+> tools / project / finish), rerun control in Settings → General, and the
+> client-core harness methods (`harnesses`, `refreshHarnesses`,
+> `upgradeHarness`, `harnessUpgradeJob`). Phases 2–4 below remain planned.
 >
 > The Mac app is the entry point into FalconDeck for most new users. Today a
 > fresh install shows an empty sidebar, the line "Choose a project and let's
@@ -18,14 +22,16 @@ sequence:
 
 1. **Welcome** — brand moment, one sentence on what FalconDeck is, "Get
    started".
-2. **Check your tools** — probe installed harnesses (Claude Code, Codex,
+2. **Choose your appearance** — choose System/Light/Dark mode and the named
+   light and dark themes, applying the shared device-local preference live.
+3. **Check your tools** — probe installed harnesses (Claude Code, Codex,
    OpenCode, Gemini, Pi), show version / update / sign-in state, offer
    one-click install and update.
-3. **Quick path: OpenCode + OpenRouter** — for users with no harness (or who
+4. **Quick path: OpenCode + OpenRouter** — for users with no harness (or who
    choose it): install OpenCode, register it as an agent, store an OpenRouter
    API key so models work immediately without another vendor sign-up.
-4. **Add your first project** — directory picker → `connectWorkspace`.
-5. **Finish** — request notification permission explicitly, summary of what
+5. **Add your first project** — directory picker → `connectWorkspace`.
+6. **Finish** — request notification permission explicitly, summary of what
    was set up, drop into the composer with a starter suggestion.
 
 Later phases add recommended OpenCode plugin installs (e.g. the image-vision
@@ -85,11 +91,18 @@ new user would see it.
 This forces a property the wizard needs anyway: **every step is idempotent
 and reads live state**. A harness already installed renders as a green check,
 a key already stored renders as "already configured", an existing project
-list renders step 4 as "add another or continue". Rerunning on a
+list renders step 5 as "add another or continue". Rerunning on a
 fully-set-up machine should be a pleasant 30-second review, not an error
 farm.
 
-### Step 2 — Check your tools
+### Step 2 — Choose your appearance
+
+Reuse the shared `ThemeControls` from `@falcondeck/ui` so onboarding and
+Settings → Appearance update the same device-local `fd-appearance` record.
+Mode and palette changes apply immediately; no onboarding-only draft state or
+extra completion write is needed.
+
+### Step 3 — Check your tools
 
 On entry: `POST /api/harnesses/refresh { include_latest: true }` (network
 lookups are on-demand only, by existing product decision — this is the
@@ -106,9 +119,9 @@ moment they're wanted). Render a card per curated harness:
   "Check again" button. A structured `Ready/NeedsAuth/Unknown` verdict on
   `HarnessSummary` is a phase-2 daemon improvement.
 
-If nothing is installed, the step's primary CTA routes to step 3.
+If nothing is installed, the step's primary CTA routes to step 4.
 
-### Step 3 — OpenCode + OpenRouter quick path
+### Step 4 — OpenCode + OpenRouter quick path
 
 Three sub-actions, each independently skippable and idempotent:
 
@@ -131,7 +144,7 @@ Daemon work for (3): a small module modeled on `speech.rs` (routes
 validate-on-save against the OpenRouter API), plus the env-injection hook in
 `opencode_threads.rs` / `acp.rs` spawn paths.
 
-### Step 5 — Finish
+### Step 6 — Finish
 
 - Request macOS notification permission via the existing
   `request_macos_notification_permission` command — today this happens lazily
@@ -200,7 +213,7 @@ actually offers first).
 
 | Phase | Scope | Daemon changes |
 | --- | --- | --- |
-| 1 | Flag + gating, rerun control in Settings → General, welcome, harness check step (install/update/auth-text), first project, notifications + finish, client-core harness methods | None |
+| 1 | Flag + gating, rerun control in Settings → General, welcome, appearance, harness check step (install/update/auth-text), first project, notifications + finish, client-core harness methods | None |
 | 2 | OpenCode quick path: provider entry one-click + OpenRouter key secret with env injection; structured auth verdict on `HarnessSummary` | New secret route + spawn env injection; probe enum |
 | 3 | Polish: `wizardVersion` re-run variant, Grok in `KNOWN_HARNESSES`, richer diagnostics ("we looked in…") | Small |
 | 4 | OpenCode plugin recommendations (image-vision), extension/MCP suggestions once the extensions UI layer lands | opencode.json merge endpoint |

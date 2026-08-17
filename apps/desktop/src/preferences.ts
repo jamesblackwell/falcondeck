@@ -6,6 +6,7 @@ import type {
 } from '@falcondeck/client-core'
 import { isThreadSortMode, normalizePreferences } from '@falcondeck/client-core'
 
+const ONBOARDING_STORAGE_KEY = 'falcondeck.desktop.onboarding.v1'
 const THINKING_DISPLAY_STORAGE_KEY = 'falcondeck.desktop.thinking-display.v1'
 const THREAD_SORT_STORAGE_KEY = 'falcondeck.desktop.thread-sort.v1'
 const COLLAPSED_WORKSPACES_STORAGE_KEY =
@@ -17,6 +18,86 @@ const THINKING_DISPLAY_VALUES: ThinkingDisplay[] = [
   'always_expanded',
   'always_collapsed',
 ]
+
+export type StoredOnboardingRecord = {
+  completedAt: string
+  skipped: boolean
+  wizardVersion: number
+}
+
+export const CURRENT_ONBOARDING_WIZARD_VERSION = 1
+
+/**
+ * First-run onboarding is per-install UX: the completed flag lives in
+ * device-local storage so resetting it never touches daemon state, and
+ * remote-web clients pointed at an established daemon never see the wizard.
+ * Returns null when onboarding has not been completed (the wizard should show).
+ */
+export function readStoredOnboarding(): StoredOnboardingRecord | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(ONBOARDING_STORAGE_KEY)
+    if (!raw) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      typeof (parsed as StoredOnboardingRecord).completedAt !== 'string' ||
+      typeof (parsed as StoredOnboardingRecord).skipped !== 'boolean' ||
+      typeof (parsed as StoredOnboardingRecord).wizardVersion !== 'number'
+    ) {
+      return null
+    }
+    return parsed as StoredOnboardingRecord
+  } catch {
+    return null
+  }
+}
+
+export function writeStoredOnboarding(record: StoredOnboardingRecord) {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(ONBOARDING_STORAGE_KEY, JSON.stringify(record))
+  } catch {
+    // Storage can be unavailable; the in-session memory value stays
+    // authoritative and the wizard simply re-runs next launch.
+  }
+}
+
+/**
+ * The Settings → General rerun control. Deletes only the onboarding flag;
+ * projects, threads, keys, and daemon state all survive.
+ */
+export function clearStoredOnboarding() {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.removeItem(ONBOARDING_STORAGE_KEY)
+  } catch {
+    // Ignore storage failures.
+  }
+}
+
+/**
+ * The App-level gate for the first-run wizard. Eligibility is latched once per
+ * launch (captured from storage at mount) so the Settings → General rerun
+ * control takes effect on the next start, not mid-session: after the wizard
+ * completes, `onboardingRecord` stays non-null for the rest of the session
+ * even though storage was cleared. The wizard also only opens against a live
+ * daemon connection, never a connecting spinner.
+ */
+export function shouldShowFirstRunOnboarding(options: {
+  isTauri: boolean
+  eligibleThisLaunch: boolean
+  onboardingRecord: StoredOnboardingRecord | null
+  connectionState: 'connecting' | 'ready' | 'error'
+}): boolean {
+  return (
+    options.isTauri &&
+    options.eligibleThisLaunch &&
+    options.onboardingRecord === null &&
+    options.connectionState === 'ready'
+  )
+}
 
 export function isThinkingDisplay(value: unknown): value is ThinkingDisplay {
   return THINKING_DISPLAY_VALUES.includes(value as ThinkingDisplay)

@@ -2793,8 +2793,8 @@ impl AcpRuntime {
             return;
         };
         let detail = match update.get("sessionUpdate").and_then(Value::as_str) {
-            Some("turn_completed") if update.get("stop_reason").and_then(Value::as_str)
-                == Some("error") =>
+            Some("turn_completed")
+                if update.get("stop_reason").and_then(Value::as_str) == Some("error") =>
             {
                 update.get("agent_result").and_then(Value::as_str)
             }

@@ -8,10 +8,18 @@ import TestRenderer, { act } from 'react-test-renderer'
 
 const activeRenderers = new Set<TestRenderer.ReactTestRenderer>()
 
-export function renderComponent(element: React.ReactElement): TestRenderer.ReactTestRenderer {
+export function renderComponent(
+  element: React.ReactElement,
+  /** Stand-ins for host refs — components that call imperative methods on a
+   *  ref (ScrollView.scrollTo, TextInput.focus) get null without these. */
+  nodeMocks?: Record<string, unknown>,
+): TestRenderer.ReactTestRenderer {
   let renderer!: TestRenderer.ReactTestRenderer
   act(() => {
-    renderer = TestRenderer.create(element)
+    renderer = TestRenderer.create(element, {
+      createNodeMock: (node) =>
+        nodeMocks?.[String(node.type)] ?? null,
+    })
   })
   activeRenderers.add(renderer)
   return renderer

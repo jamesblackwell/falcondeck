@@ -55,6 +55,9 @@ interface SessionState {
   threadItems: Record<string, ConversationItem[]>;
   threadHistory: Record<string, ThreadHistoryState>;
   threadDetail: ThreadDetail | null;
+  /** Per-thread tail-load failures, so a flaky network shows an explicit
+   * error instead of a false "No messages yet" empty state. */
+  threadDetailErrors: Record<string, string>;
 }
 
 interface SessionActions {
@@ -71,6 +74,7 @@ interface SessionActions {
     detail: ThreadDetail | null,
     options?: { mergeMode?: ThreadDetailMergeMode },
   ) => void;
+  setThreadDetailError: (threadId: string, message: string | null) => void;
   /** Inserts a client-local (optimistic) item until the daemon echoes it. */
   upsertLocalThreadItem: (threadId: string, item: ConversationItem) => void;
   /** Removes a client-local item again (send failed or was queued). */
@@ -88,6 +92,7 @@ const initialState: SessionState = {
   threadItems: {},
   threadHistory: {},
   threadDetail: null,
+  threadDetailErrors: {},
 };
 
 const EMPTY_ITEMS: ConversationItem[] = [];
@@ -271,6 +276,7 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
   let nextThreadItems = state.threadItems;
   let nextThreadHistory = state.threadHistory;
   let nextThreadDetail = state.threadDetail;
+  let nextThreadDetailErrors = state.threadDetailErrors;
 
   const conversationEventsByThread = new Map<string, EventEnvelope[]>();
 
@@ -316,6 +322,7 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     const visibleThreadIds = new Set(nextSnapshot.threads.map((thread) => thread.id));
     nextThreadItems = pruneThreadRecord(nextThreadItems, visibleThreadIds);
     nextThreadHistory = pruneThreadRecord(nextThreadHistory, visibleThreadIds);
+    nextThreadDetailErrors = pruneThreadRecord(nextThreadDetailErrors, visibleThreadIds);
     if (nextThreadDetail && !visibleThreadIds.has(nextThreadDetail.thread.id)) {
       nextThreadDetail = null;
     }
@@ -338,6 +345,7 @@ function applyEventsToState(state: SessionState, events: EventEnvelope[]): Sessi
     threadItems: nextThreadItems,
     threadHistory: nextThreadHistory,
     threadDetail: reconciledThreadDetail,
+    threadDetailErrors: nextThreadDetailErrors,
     selectedWorkspaceId: nextSelection.workspaceId,
     selectedThreadId: nextSelection.threadId,
   };
@@ -399,6 +407,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       threadItems,
       threadHistory,
       threadDetail: null,
+      threadDetailErrors: {},
     });
     persistStateCache(get());
   },
@@ -490,9 +499,29 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         threadDetail: isSelectedThread ? mergedDetail : state.threadDetail,
         threadItems: { ...state.threadItems, [threadId]: mergedItems },
         threadHistory: { ...state.threadHistory, [threadId]: nextHistory },
+        threadDetailErrors: state.threadDetailErrors[threadId]
+          ? Object.fromEntries(
+              Object.entries(state.threadDetailErrors).filter(([id]) => id !== threadId),
+            )
+          : state.threadDetailErrors,
       };
     });
     persistStateCache(get());
+  },
+
+  setThreadDetailError: (threadId, message) => {
+    set((state) => {
+      if (!message) {
+        if (!state.threadDetailErrors[threadId]) return state;
+        return {
+          threadDetailErrors: Object.fromEntries(
+            Object.entries(state.threadDetailErrors).filter(([id]) => id !== threadId),
+          ),
+        };
+      }
+      if (state.threadDetailErrors[threadId] === message) return state;
+      return { threadDetailErrors: { ...state.threadDetailErrors, [threadId]: message } };
+    });
   },
 
   upsertLocalThreadItem: (threadId, item) => {
@@ -642,6 +671,12 @@ export function useSelectedThreadHistory() {
       return EMPTY_HISTORY;
     return s.threadHistory[selectedThreadId] ?? EMPTY_HISTORY;
   });
+}
+
+export function useSelectedThreadDetailError() {
+  return useSessionStore((s) =>
+    s.selectedThreadId ? (s.threadDetailErrors[s.selectedThreadId] ?? null) : null,
+  );
 }
 
 export function useConversationItems() {

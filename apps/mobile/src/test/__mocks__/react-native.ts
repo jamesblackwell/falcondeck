@@ -16,6 +16,11 @@ export const AppState = {
   addEventListener: () => ({ remove: () => {} }),
 }
 export const Keyboard = { addListener: () => ({ remove: () => {} }) }
+export const Appearance = {
+  getColorScheme: () => 'light' as const,
+  setColorScheme: (_scheme: 'light' | 'dark' | null) => {},
+  addChangeListener: () => ({ remove: () => {} }),
+}
 export const Alert = {
   alert: () => {},
   prompt: () => {},

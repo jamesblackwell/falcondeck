@@ -5,6 +5,8 @@ import { Split, SquarePen } from 'lucide-react'
 import type { ThreadSummary, WorkspaceSummary } from '@falcondeck/client-core'
 import { ActivityDiamond, Badge, Button, StatusIndicator, Toolbar, ToolbarGroup, cn } from '@falcondeck/ui'
 
+import { ProviderIcon } from './provider-icon'
+
 function threadStatusDisplay(status: ThreadSummary['status']) {
   switch (status) {
     case 'running':
@@ -76,6 +78,7 @@ export const SessionHeader = memo(function SessionHeader({
                 variant="default"
                 className="h-5 px-1.5 text-[length:var(--fd-text-2xs)] uppercase tracking-[0.08em]"
               >
+                <ProviderIcon provider={thread.provider} className="h-3 w-3" />
                 {thread.provider}
               </Badge>
             ) : null}

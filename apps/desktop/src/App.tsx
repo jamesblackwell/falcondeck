@@ -13,8 +13,6 @@ import {
 import {
   buildOptimisticUserItem,
   buildHandoffPrompt,
-  buildHandoffSeedPrompt,
-  buildHandoffTranscript,
   buildProjectGroups,
   approvalPolicyForProvider,
   composerProviderFor,
@@ -128,12 +126,17 @@ import {
   writeStoredDrafts,
 } from "./composer-persistence";
 import {
+  clearStoredOnboarding,
   preferencesWithThinkingDisplay,
   readStoredCollapsedWorkspaces,
+  readStoredOnboarding,
   readStoredThinkingDisplay,
   readStoredThreadSort,
+  shouldShowFirstRunOnboarding,
   splitPreferencesUpdate,
+  CURRENT_ONBOARDING_WIZARD_VERSION,
   writeStoredCollapsedWorkspaces,
+  writeStoredOnboarding,
   writeStoredThinkingDisplay,
   writeStoredThreadSort,
 } from "./preferences";
@@ -144,13 +147,14 @@ import {
   resolveThreadModelId,
 } from "./utils";
 import { DesktopConversationPane } from "./components/DesktopConversationPane";
-import { DesktopVoiceInput } from "./components/DesktopVoiceInput";
+import { useVoiceRecorder } from "./hooks/useVoiceRecorder";
 import { DesktopSidebar } from "./components/Sidebar";
 import { DesktopShell } from "./components/DesktopShell";
 import type { DiffPanelSelection } from "./components/DiffPanel";
 import { PanelToggles } from "./components/PanelToggles";
 import { ProjectImportOverlay } from "./components/ProjectImportOverlay";
 import { ResumeStoppedThreadsDialog } from "./components/ResumeStoppedThreadsDialog";
+import { OnboardingWizard } from "./components/OnboardingWizard";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
 import { useAppUpdater } from "./hooks/useAppUpdater";
 import { useDaemonConnection } from "./hooks/useDaemonConnection";
@@ -236,6 +240,7 @@ function AppInner() {
     api,
     baseUrl,
     connectionError,
+    connectionState,
     snapshot,
     setSnapshot,
     threadDetail,
@@ -252,6 +257,30 @@ function AppInner() {
   } = useDaemonConnection({ externalSnapshots: hostSnapshots });
   useDesktopDictation(baseUrl);
   const updater = useAppUpdater();
+  // First-run onboarding: device-local flag, eligible only once per launch so
+  // the Settings → General rerun control takes effect on the next start, not
+  // mid-session. The wizard opens only against a live daemon connection.
+  const [onboardingRecord, setOnboardingRecord] = useState(() =>
+    readStoredOnboarding(),
+  );
+  const [onboardingEligibleThisLaunch] = useState(
+    () => readStoredOnboarding() === null,
+  );
+  const isOnboardingActive = shouldShowFirstRunOnboarding({
+    isTauri: isTauriDesktop(),
+    eligibleThisLaunch: onboardingEligibleThisLaunch,
+    onboardingRecord,
+    connectionState,
+  });
+  const handleOnboardingComplete = useCallback((skipped: boolean) => {
+    const record = {
+      completedAt: new Date().toISOString(),
+      skipped,
+      wizardVersion: CURRENT_ONBOARDING_WIZARD_VERSION,
+    };
+    writeStoredOnboarding(record);
+    setOnboardingRecord(record);
+  }, []);
   const {
     sidebarVisible,
     railVisible,
@@ -330,7 +359,6 @@ function AppInner() {
     useState(false);
   const [isStartingRemote, setIsStartingRemote] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isVoiceInputOpen, setIsVoiceInputOpen] = useState(false);
   // Launch-time "continue everything the quit stopped" prompt. Null means no
   // prompt; the ref makes the offer once per app launch.
   const [resumePromptThreads, setResumePromptThreads] = useState<
@@ -365,9 +393,9 @@ function AppInner() {
   const [handoffPendingProvider, setHandoffPendingProvider] =
     useState<AgentProvider | null>(null);
   // Once the destination exists, keep the otherwise-empty transcript visibly
-  // busy while FalconDeck compacts the source conversation into its handoff.
-  // Keying this to the destination avoids showing the indicator if the user
-  // navigates back to another thread while summarization is still running.
+  // busy while the handoff turn is sent. Keying this to the destination
+  // avoids showing the indicator if the user navigates back to another
+  // thread while the handoff is still running.
   const [handoffPendingThreadKey, setHandoffPendingThreadKey] = useState<
     string | null
   >(null);
@@ -608,6 +636,15 @@ function AppInner() {
     (value: string) => setDraftForConversation(conversationKey, value),
     [conversationKey, setDraftForConversation],
   );
+
+  const voiceRecorder = useVoiceRecorder({ baseUrl, onTranscript: setDraft });
+  const openSpeechSettings = useCallback(() => {
+    setSettingsSection("speech");
+    setSettingsRequestKey((current) => current + 1);
+    setIsSettingsOpen(true);
+    setIsScheduledOpen(false);
+    setIsActivityOpen(false);
+  }, []);
 
   const addQuotedSelection = useCallback(
     (text: string) => {
@@ -1494,6 +1531,9 @@ function AppInner() {
   useEffect(() => {
     if (updater.state.status !== "available" || !updater.state.availableVersion)
       return;
+    // The updater's first check lands ~15s after launch; while the onboarding
+    // wizard is open, an update toast would collide with the welcome moment.
+    if (isOnboardingActive) return;
     if (announcedUpdateVersionRef.current === updater.state.availableVersion)
       return;
     announcedUpdateVersionRef.current = updater.state.availableVersion;
@@ -1502,7 +1542,7 @@ function AppInner() {
       title: "Update available",
       description: `FalconDeck ${updater.state.availableVersion} is ready to download from GitHub Releases.`,
     });
-  }, [toast, updater.state.availableVersion, updater.state.status]);
+  }, [toast, updater.state.availableVersion, updater.state.status, isOnboardingActive]);
 
   useEffect(() => {
     if (
@@ -1510,6 +1550,7 @@ function AppInner() {
       !updater.state.availableVersion
     )
       return;
+    if (isOnboardingActive) return;
     if (
       announcedDownloadedVersionRef.current === updater.state.availableVersion
     )
@@ -1521,7 +1562,7 @@ function AppInner() {
       description:
         "Restart FalconDeck when you are ready to install the new desktop build.",
     });
-  }, [toast, updater.state.availableVersion, updater.state.status]);
+  }, [toast, updater.state.availableVersion, updater.state.status, isOnboardingActive]);
 
   const applyThreadHandle = useCallback(
     (handle: ThreadHandle) => {
@@ -2049,10 +2090,6 @@ function AppInner() {
           { mode: "full" },
         );
         targetLabel = workspaceProviderLabel(selectedWorkspace, provider);
-        const sourceLabel = workspaceProviderLabel(
-          selectedWorkspace,
-          selectedThread.provider,
-        );
         const preferred = composerSelectionFor(
           persistedComposerSelections,
           selectedWorkspace.path,
@@ -2076,10 +2113,6 @@ function AppInner() {
           preferred?.sandboxMode,
           targetCapabilities.sandbox_modes,
         );
-        const transcript = buildHandoffTranscript({
-          items: sourceDetail.items,
-          sourceTitle: selectedThread.title,
-        });
         const started = await client.startThread({
           workspace_id: selectedWorkspace.id,
           provider,
@@ -2102,36 +2135,15 @@ function AppInner() {
         createdHandoff = titled;
         showHandoffThread(titled);
 
-        // Compaction runs out of band on a cheap utility model, so the
-        // destination spends neither its first turn nor its context window
-        // re-reading a transcript that may not even fit. If no utility
-        // provider is available the destination compacts it itself, which is
-        // the old behaviour and still correct — just more expensive.
-        let summarizedBy: string | null = null;
-        try {
-          const summary = await client.handoffBrief({
-            workspace_id: selectedWorkspace.id,
-            thread_id: selectedThread.id,
-            transcript,
-            source_provider_label: sourceLabel,
-          });
-          handoffPrompt = buildHandoffSeedPrompt({
-            brief: summary.brief,
-            sourceProvider: selectedThread.provider,
-            sourceProviderLabel: sourceLabel,
-            truncated: summary.truncated ?? false,
-          });
-          summarizedBy = summary.model_id
-            ? `${summary.provider} · ${summary.model_id}`
-            : summary.provider;
-        } catch {
-          handoffPrompt = buildHandoffPrompt({
-            items: sourceDetail.items,
-            sourceTitle: selectedThread.title,
-            sourceProvider: selectedThread.provider,
-            sourceProviderLabel: sourceLabel,
-          });
-        }
+        // The verbatim source transcript is handed over directly — bounded
+        // head + tail only when it cannot fit a destination context window.
+        // No summarization pass runs: a lossless transcript is always
+        // preferable, and it keeps handoffs working without any background
+        // model signed in.
+        handoffPrompt = buildHandoffPrompt({
+          items: sourceDetail.items,
+          sourceTitle: selectedThread.title,
+        });
 
         await client.sendTurn({
           workspace_id: titled.workspace.id,
@@ -2152,9 +2164,8 @@ function AppInner() {
         toast({
           variant: "success",
           title: `Continuing with ${targetLabel}`,
-          description: summarizedBy
-            ? `Handoff summarized in the background by ${summarizedBy}. The original is unchanged.`
-            : "No background summarizer was available, so the linked thread is compacting the transcript itself. The original is unchanged.",
+          description:
+            "The source conversation was carried over verbatim. The original is unchanged.",
         });
       } catch (error: unknown) {
         const message =
@@ -2169,14 +2180,14 @@ function AppInner() {
               { mode: "full" },
             )
             .catch(() => null);
-          const summaryStarted = Boolean(
+          const turnStarted = Boolean(
             recoveredDetail &&
             (recoveredDetail.items.length > 0 ||
               recoveredDetail.thread.status === "running" ||
               recoveredDetail.thread.status === "waiting_for_input"),
           );
           if (recoveredDetail) setThreadDetail(recoveredDetail);
-          if (!summaryStarted && handoffPrompt) {
+          if (!turnStarted && handoffPrompt) {
             setDraftForConversation(
               draftKeyFor(
                 createdHandoff.workspace.id,
@@ -2188,9 +2199,9 @@ function AppInner() {
           toast({
             variant: "warning",
             title: `Linked ${targetLabel} thread created`,
-            description: summaryStarted
-              ? "FalconDeck lost confirmation after starting the summary. Check the linked thread before retrying."
-              : "The summary did not start. Its handoff prompt is ready in the composer to resend.",
+            description: turnStarted
+              ? "FalconDeck lost confirmation after starting the handoff turn. Check the linked thread before retrying."
+              : "The handoff turn did not start. Its prompt is ready in the composer to resend.",
           });
           return;
         }
@@ -4912,6 +4923,18 @@ function AppInner() {
                     onCheckForUpdates={handleCheckForUpdates}
                     onDownloadUpdate={handleDownloadUpdate}
                     onRestartToInstallUpdate={handleRestartToInstallUpdate}
+                    onShowOnboardingAtNextLaunch={() => {
+                      // Clear storage only. The in-session record stays set so
+                      // the wizard does not reopen mid-session; the latch plus
+                      // the absent flag show it on the next launch.
+                      clearStoredOnboarding();
+                      toast({
+                        variant: "success",
+                        title: "Onboarding will show at next launch",
+                        description:
+                          "Quit and relaunch FalconDeck to replay the welcome wizard.",
+                      });
+                    }}
                     extensions={
                       snapshot?.extensions ?? { catalog: [], views: [] }
                     }
@@ -5014,8 +5037,23 @@ function AppInner() {
                 autoFocusKey: conversationKey,
                 onSubmit: handleSubmitCallback,
                 onVoiceInput: baseUrl
-                  ? () => setIsVoiceInputOpen(true)
+                  ? () => void voiceRecorder.start()
                   : undefined,
+                voice:
+                  baseUrl && voiceRecorder.state !== "idle"
+                    ? {
+                        state: voiceRecorder.state,
+                        seconds: voiceRecorder.seconds,
+                        error: voiceRecorder.error,
+                        configured: voiceRecorder.configured === true,
+                        hasPending: voiceRecorder.hasPending,
+                        onStop: voiceRecorder.stop,
+                        onRetry: () => void voiceRecorder.retry(),
+                        onDiscard: () => void voiceRecorder.discard(),
+                        onDismiss: voiceRecorder.dismiss,
+                        onOpenSettings: openSpeechSettings,
+                      }
+                    : undefined,
                 onAlternateSubmit: handleAlternateSubmitCallback,
                 resolveComposerShortcut,
                 focusRequestKey: composerFocusRequestKey,
@@ -5095,7 +5133,7 @@ function AppInner() {
                 sendDisabledReason:
                   attachmentSendBlockReason ??
                   (isPreparingSelectedHandoff
-                    ? "Wait for the handoff summary to finish"
+                    ? "Wait for the handoff turn to start"
                     : undefined),
                 // waiting_for_input counts: the CLI is alive and blocked on an
                 // approval, and Stop is the only way out of one that has gone
@@ -5155,13 +5193,28 @@ function AppInner() {
             </Suspense>
           )
         }
-        sidebarVisible={sidebarVisible}
+        // Settings takes over the window: the project sidebar steps aside so
+        // its own nav owns the left edge, and comes back on "Back to app".
+        sidebarVisible={sidebarVisible && !isSettingsOpen}
         railVisible={railVisible}
         onSidebarCollapsedByDrag={hideSidebar}
         onRailCollapsedByDrag={hideRail}
       />
       {isImportingProjectSessions ? <ProjectImportOverlay /> : null}
-      {resumePromptThreads && resumePromptThreads.length > 0 ? (
+      {isOnboardingActive ? (
+        <OnboardingWizard
+          api={api}
+          baseUrl={baseUrl}
+          workspacesCount={snapshot?.workspaces.length ?? 0}
+          isImportingSessions={isImportingProjectSessions}
+          onAddProject={() => {
+            void handleAddProject();
+          }}
+          onToast={toast}
+          onComplete={handleOnboardingComplete}
+        />
+      ) : null}
+      {resumePromptThreads && resumePromptThreads.length > 0 && !isOnboardingActive ? (
         <ResumeStoppedThreadsDialog
           threads={resumePromptThreads}
           onContinueAll={() => {
@@ -5169,21 +5222,6 @@ function AppInner() {
           }}
           onDismiss={handleDismissStoppedThreadsPrompt}
           isContinuing={isContinuingStoppedThreads}
-        />
-      ) : null}
-      {isVoiceInputOpen && baseUrl ? (
-        <DesktopVoiceInput
-          baseUrl={baseUrl}
-          onTranscript={setDraft}
-          onClose={() => setIsVoiceInputOpen(false)}
-          onOpenSettings={() => {
-            setIsVoiceInputOpen(false);
-            setSettingsSection("speech");
-            setSettingsRequestKey((current) => current + 1);
-            setIsSettingsOpen(true);
-            setIsScheduledOpen(false);
-            setIsActivityOpen(false);
-          }}
         />
       ) : null}
     </>

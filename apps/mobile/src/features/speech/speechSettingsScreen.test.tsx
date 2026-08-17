@@ -36,7 +36,7 @@ describe('SpeechSettingsScreen', () => {
     })
 
     const failedRow = rendered.root.findByProps({
-      label: 'Desktop credential',
+      label: 'API key',
     })
     expect(failedRow.props.detail).toBe(
       'Paired desktop did not respond. Tap to retry.',
@@ -45,7 +45,7 @@ describe('SpeechSettingsScreen', () => {
     rpc.mockImplementation((method: string) =>
       Promise.resolve(
         method === 'speech.status'
-          ? { configured: true, storage: 'os_credential_store' }
+          ? { configured: true, storage: 'daemon_secret_store' }
           : [{ id: 'openai/gpt-transcribe', name: 'GPT Transcribe' }],
       ),
     )
@@ -57,10 +57,10 @@ describe('SpeechSettingsScreen', () => {
     })
 
     expect(
-      rendered.root.findByProps({ label: 'Desktop credential' }).props.value,
+      rendered.root.findByProps({ label: 'API key' }).props.value,
     ).toBe('Ready')
     expect(rendered.root.findByProps({ label: 'Model' }).props.detail).toBe(
-      '1 transcription models available',
+      '1 model available',
     )
   })
 })

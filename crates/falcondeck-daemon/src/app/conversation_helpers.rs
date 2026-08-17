@@ -1880,15 +1880,11 @@ pub(crate) fn synthesize_tool_title(
             "List files",
         ),
         "glob" | "file_search" | "glob_file_search" => ("Find", &["pattern", "path"], "Find files"),
-        "grep" | "grep_search" | "ripgrep" => {
-            ("Search", &["pattern", "query"], "Search workspace")
-        }
+        "grep" | "grep_search" | "ripgrep" => ("Search", &["pattern", "query"], "Search workspace"),
         "webfetch" | "web_fetch" => ("Web fetch", &["url"], "Web fetch"),
         "websearch" | "web_search" => ("Search web:", &["query"], "Search web"),
         // A sub-agent's own summary of its errand beats the word "Agent".
-        "agent" | "task" | "spawn_agent" => {
-            ("Agent:", &["description", "subagent_type"], "Agent")
-        }
+        "agent" | "task" | "spawn_agent" => ("Agent:", &["description", "subagent_type"], "Agent"),
         "search_tool" => ("Search tools:", &["query"], "Search tools"),
         "slashcommand" => ("Run", &["command"], "Run command"),
         "todowrite" | "todo_write" => ("Update plan", &[], "Update plan"),

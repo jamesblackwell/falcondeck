@@ -23,6 +23,7 @@ import {
 } from "@falcondeck/ui";
 
 import { OptionFilterField } from "./option-filter-field";
+import { ProviderIcon } from "./provider-icon";
 
 /**
  * Optional controlled-open wiring so app-level shortcuts can pop a picker
@@ -83,11 +84,16 @@ export function ProviderSelector({
         aria-label="Agent"
         title={triggerTitle("Choose agent", shortcutHint)}
       >
+        <ProviderIcon provider={value} />
         <SelectValue placeholder="Agent" />
       </SelectTrigger>
       <SelectContent onCloseAutoFocus={onCloseAutoFocus}>
         {providers.map((option) => (
-          <SelectItem key={option.provider} value={option.provider}>
+          <SelectItem
+            key={option.provider}
+            value={option.provider}
+            leading={<ProviderIcon provider={option.provider} />}
+          >
             {option.label}
           </SelectItem>
         ))}
@@ -661,6 +667,7 @@ function HandoffProviderPanel({
                 activeRowId === rowId && "bg-interactive-hover",
               )}
             >
+              <ProviderIcon provider={option.provider} />
               <span className="min-w-0 flex-1 truncate">{option.label}</span>
               <ArrowRight
                 aria-hidden="true"

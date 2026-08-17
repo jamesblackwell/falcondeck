@@ -37,7 +37,9 @@ export default function SettingsLayout() {
         name="index"
         options={{
           title: 'Settings',
-          headerLargeTitleEnabled: true,
+          // No large title here: on iOS 26 the nav bar reserved its row but
+          // never painted the label, leaving a headerless-looking gap. The
+          // inline title matches the child screens anyway.
           headerRight: renderCloseButton,
         }}
       />

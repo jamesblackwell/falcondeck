@@ -11,6 +11,8 @@ import type {
   GitDiffResponse,
   GitFileStatus,
   GitStatusResponse,
+  HarnessesOverview,
+  HarnessUpgradeJob,
   WorkspaceFileResponse,
   WorkspaceFilesResponse,
   WriteWorkspaceFilePayload,
@@ -51,6 +53,8 @@ import type {
 import {
   normalizeDaemonSnapshot,
   normalizeEventEnvelope,
+  normalizeHarnessesOverview,
+  normalizeHarnessUpgradeJob,
   normalizePreferences,
   normalizeThreadDetail,
   normalizeThreadHandle,
@@ -62,9 +66,14 @@ async function parseJson<T>(response: Response): Promise<T> {
     const payload = (await response.json().catch(() => null)) as {
       error?: string;
     } | null;
-    throw new Error(
+    // Carry the HTTP status so callers can branch on it (e.g. a 404 from an
+    // in-memory job store after a daemon restart) instead of parsing the
+    // daemon's error text.
+    const error = new Error(
       payload?.error ?? `Request failed with status ${response.status}`,
-    );
+    ) as Error & { status?: number };
+    error.status = response.status;
+    throw error;
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -110,21 +119,6 @@ export type ForkThreadPayload = {
   workspace_id: string;
   thread_id: string;
   last_turn_id: string;
-};
-
-export type HandoffBriefPayload = {
-  workspace_id: string;
-  thread_id: string;
-  transcript: string;
-  source_provider_label?: string | null;
-};
-
-export type HandoffBrief = {
-  brief: string;
-  provider: string;
-  model_id?: string | null;
-  segments: number;
-  truncated?: boolean;
 };
 
 export function createDaemonApiClient(baseUrl: string) {
@@ -247,6 +241,48 @@ export function createDaemonApiClient(baseUrl: string) {
       return parseJson<RemoteStatusResponse>(
         await fetch(`${baseUrl}/api/remote/status`),
       );
+    },
+    /** Cached (60s) local harness inventory; shallow, no network lookups. */
+    async harnesses() {
+      return normalizeHarnessesOverview(
+        await parseJson<HarnessesOverview>(
+          await fetch(`${baseUrl}/api/harnesses`),
+        ),
+      );
+    },
+    /** Deep re-probe; `includeLatest` (default true) also hits package registries. */
+    async refreshHarnesses(options: { includeLatest?: boolean } = {}) {
+      return normalizeHarnessesOverview(
+        await parseJson<HarnessesOverview>(
+          await fetch(`${baseUrl}/api/harnesses/refresh`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ include_latest: options.includeLatest ?? true }),
+          }),
+        ),
+      );
+    },
+    /** Starts an install/upgrade job; poll it with `harnessUpgradeJob`. */
+    async upgradeHarness(harnessId: string) {
+      const body = await parseJson<{ job_id: string }>(
+        await fetch(`${baseUrl}/api/harnesses/upgrade`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ harness_id: harnessId }),
+        }),
+      );
+      return body.job_id;
+    },
+    async harnessUpgradeJob(jobId: string) {
+      const job = normalizeHarnessUpgradeJob(
+        await parseJson<HarnessUpgradeJob>(
+          await fetch(
+            `${baseUrl}/api/harnesses/jobs/${encodeURIComponent(jobId)}`,
+          ),
+        ),
+      );
+      if (!job) throw new Error("invalid harness upgrade job response");
+      return job;
     },
     async startRemotePairing(relay_url: string) {
       return parseJson<RemoteStatusResponse>(
@@ -403,18 +439,6 @@ export function createDaemonApiClient(baseUrl: string) {
               body: JSON.stringify(payload),
             },
           ),
-        ),
-      );
-    },
-    async handoffBrief(payload: HandoffBriefPayload) {
-      return parseJson<HandoffBrief>(
-        await fetch(
-          `${baseUrl}/api/workspaces/${encodeURIComponent(payload.workspace_id)}/threads/${encodeURIComponent(payload.thread_id)}/handoff-brief`,
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(payload),
-          },
         ),
       );
     },
@@ -756,3 +780,6 @@ export function createDaemonApiClient(baseUrl: string) {
     },
   };
 }
+
+/** The client shape produced by `createDaemonApiClient`, for prop typing. */
+export type DaemonApiClient = ReturnType<typeof createDaemonApiClient>;

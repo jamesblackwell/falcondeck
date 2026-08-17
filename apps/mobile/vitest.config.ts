@@ -33,6 +33,7 @@ export default defineConfig({
       'expo-device': path.resolve(__dirname, 'src/test/__mocks__/expo-device.ts'),
       'expo-notifications': path.resolve(__dirname, 'src/test/__mocks__/expo-notifications.ts'),
       'lucide-react-native': path.resolve(__dirname, 'src/test/__mocks__/lucide-react-native.ts'),
+      'react-native-svg': path.resolve(__dirname, 'src/test/__mocks__/react-native-svg.ts'),
       'react-native-safe-area-context': path.resolve(__dirname, 'src/test/__mocks__/react-native-safe-area-context.ts'),
       'react-native-markdown-display': path.resolve(__dirname, 'src/test/__mocks__/react-native-markdown-display.ts'),
       '@shopify/flash-list': path.resolve(__dirname, 'src/test/__mocks__/flash-list.tsx'),

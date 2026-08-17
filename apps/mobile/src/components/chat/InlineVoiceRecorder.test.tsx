@@ -24,7 +24,7 @@ describe('InlineVoiceRecorder', () => {
     clearPendingVoiceRecording()
     useRelayStore.getState()._callRpc = vi.fn().mockResolvedValue({
       configured: true,
-      storage: 'os_credential_store',
+      storage: 'daemon_secret_store',
     }) as typeof originalCallRpc
   })
 
@@ -99,7 +99,7 @@ describe('InlineVoiceRecorder', () => {
     setPendingVoiceRecording('file:///saved-voice.m4a', 'openrouter')
     const callRpc = vi.fn().mockResolvedValue({
       configured: false,
-      storage: 'os_credential_store',
+      storage: 'daemon_secret_store',
     })
     useRelayStore.getState()._callRpc = callRpc as typeof originalCallRpc
     const r = renderComponent(

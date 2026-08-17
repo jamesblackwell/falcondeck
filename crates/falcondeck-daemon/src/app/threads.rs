@@ -534,15 +534,15 @@ impl AppState {
         });
     }
 
-    /// Titles run on the same cheap utility chain as handoff briefs, so a
-    /// user with only Codex, `OpenCode`, or Grok installed still gets one.
+    /// Titles run on the cheap utility chain, so a user with only Codex,
+    /// `OpenCode`, or Grok installed still gets one.
     async fn generate_ai_thread_title(
         &self,
         workspace_id: &str,
         input: &AiThreadTitleInput,
     ) -> Option<String> {
         let candidates = self.utility_model_candidates(workspace_id).await;
-        let run = self
+        let text = self
             .run_utility_prompt(
                 &candidates,
                 &input.workspace_path,
@@ -550,7 +550,7 @@ impl AppState {
                 Duration::from_secs(25),
             )
             .await?;
-        normalize_generated_thread_title(&run.text)
+        normalize_generated_thread_title(&text)
     }
 
     pub(super) async fn monitor_claude_turn(

@@ -619,7 +619,7 @@ pub fn run() {
             dictation::configure_dictation,
             dictation::dictation_audio_devices,
             dictation::dictation_permission_status,
-            dictation::request_dictation_permissions,
+            dictation::request_dictation_permission,
             dictation::start_dictation,
             dictation::stop_dictation,
             dictation::cancel_dictation,

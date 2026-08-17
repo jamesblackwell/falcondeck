@@ -119,11 +119,11 @@ function ColorThemePicker({
 }
 
 /**
- * Theme, font, and text-size pickers backed by the shared appearance store.
- * Presentation-free at the edges so both the desktop settings page and the
- * remote web preferences modal can embed it.
+ * Theme-mode and palette pickers backed by the shared appearance store.
+ * Kept separate from typography controls so focused surfaces such as
+ * onboarding can offer appearance without exposing every display setting.
  */
-export function AppearanceControls() {
+export function ThemeControls() {
   const appearance = useAppearance()
 
   return (
@@ -171,6 +171,21 @@ export function AppearanceControls() {
           updateAppearance({ darkColorTheme: value as DarkColorThemeSetting })
         }
       />
+    </div>
+  )
+}
+
+/**
+ * Theme, font, and text-size pickers backed by the shared appearance store.
+ * Presentation-free at the edges so both the desktop settings page and the
+ * remote web preferences modal can embed it.
+ */
+export function AppearanceControls() {
+  const appearance = useAppearance()
+
+  return (
+    <div className="space-y-6">
+      <ThemeControls />
 
       <section className="space-y-3">
         <GroupLabel title="Interface font" hint="Used for all app text outside of code." />

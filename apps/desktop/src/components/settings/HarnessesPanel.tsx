@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { ProviderIcon } from '@falcondeck/chat-ui'
 import {
   ActivityDiamond,
   Badge,
@@ -365,7 +366,10 @@ export function HarnessesPanel({ baseUrl, hosts, onToast }: HarnessesPanelProps)
                   className="rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3"
                 >
                   <div className="flex items-center gap-3">
-                    <Terminal className="h-4 w-4 shrink-0 text-fg-muted" />
+                    <ProviderIcon
+                      provider={harness.id}
+                      className="h-4 w-4 text-fg-muted"
+                    />
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">

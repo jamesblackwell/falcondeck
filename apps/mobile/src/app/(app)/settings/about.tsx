@@ -12,14 +12,12 @@ export default function AboutSettingsScreen() {
       contentContainerStyle={settingsPageStyles.content}
       contentInsetAdjustmentBehavior="automatic"
     >
-      <SettingsSection title="FalconDeck Mobile" footer="The daemon remains the source of truth for workspaces and agent conversation history. This phone stores encrypted connection credentials and a reconnect cache.">
+      <SettingsSection
+        title="FalconDeck Mobile"
+        footer="Your projects and conversation history live on your desktop. This phone stores only its encrypted connection and a cache for fast reconnects."
+      >
         <SettingsRow label="Version" value={version} />
         <SettingsRow label="Build" value={build ? String(build) : '—'} />
-      </SettingsSection>
-      <SettingsSection title="Architecture">
-        <SettingsRow label="Connection" value="Encrypted relay" />
-        <SettingsRow label="Conversation storage" value="Agent and daemon" />
-        <SettingsRow label="Appearance" value="This device" />
       </SettingsSection>
     </ScrollView>
   )

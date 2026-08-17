@@ -481,9 +481,11 @@ impl AppState {
             .iter()
             .filter_map(|harness| Some((harness.id, harness.npm_package?)))
             .collect();
-        let results = join_all(packages.iter().map(|(_, package)| {
-            fetch_latest_version(&client, package)
-        }))
+        let results = join_all(
+            packages
+                .iter()
+                .map(|(_, package)| fetch_latest_version(&client, package)),
+        )
         .await;
         for ((id, _), latest) in packages.iter().zip(results) {
             let Some(latest) = latest else { continue };
@@ -715,12 +717,11 @@ async fn probe_remote_harnesses(
             {
                 versions.insert(bin.to_string(), version);
             }
-        } else if let Some(rest) = line.strip_prefix(REMOTE_AUTH) {
-            if let Some((bin, status)) = rest.split_once(':')
-                && !status.trim().is_empty()
-            {
-                auths.insert(bin.to_string(), truncate(status.trim(), 300));
-            }
+        } else if let Some(rest) = line.strip_prefix(REMOTE_AUTH)
+            && let Some((bin, status)) = rest.split_once(':')
+            && !status.trim().is_empty()
+        {
+            auths.insert(bin.to_string(), truncate(status.trim(), 300));
         }
     }
 

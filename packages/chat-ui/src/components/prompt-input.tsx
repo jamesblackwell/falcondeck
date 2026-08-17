@@ -57,8 +57,26 @@ import {
   canRenderAttachmentImage,
 } from "./attachment-preview";
 import { GoalPanel, type GoalPanelProps } from "./goal-control";
+import { formatVoiceDuration, VoiceWaveform } from "./voice-waveform";
 import { isComposingKeyboardEvent } from "../lib/keyboard";
 import type { QuotedSelection } from "../lib/quoted-selection";
+
+/**
+ * Inline voice recording session rendered inside the composer while active.
+ * The host owns the recorder; this only mirrors its state and forwards taps.
+ */
+export type VoiceComposerActive = {
+  state: "recording" | "transcribing" | "failed";
+  seconds: number;
+  error?: string | null;
+  configured: boolean;
+  hasPending: boolean;
+  onStop: () => void;
+  onRetry: () => void;
+  onDiscard: () => void;
+  onDismiss: () => void;
+  onOpenSettings?: () => void;
+};
 
 /** Composer option menus that app-level shortcuts can open. */
 export type ComposerMenu = "provider" | "permissions" | "sandbox" | "model";
@@ -81,8 +99,10 @@ export type PromptInputProps = {
   ) => "submit" | "alternate-submit" | "newline" | null;
   /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
   onStop?: () => void;
-  /** Opens a host-provided speech recorder when the composer is empty. */
+  /** Starts an inline voice recording inside the composer when it is empty. */
   onVoiceInput?: () => void;
+  /** Active inline voice session; replaces the composer body while present. */
+  voice?: VoiceComposerActive;
   onPickImages?: (files: FileList | readonly File[] | null) => void;
   onRemoveAttachment?: (attachmentId: string) => void;
   attachments: ImageInput[];
@@ -203,6 +223,7 @@ export const PromptInput = memo(function PromptInput({
   resolveComposerShortcut,
   onStop,
   onVoiceInput,
+  voice,
   onPickImages,
   onRemoveAttachment,
   attachments,
@@ -781,32 +802,102 @@ export const PromptInput = memo(function PromptInput({
         ) : null}
 
         {/* Textarea */}
-        <label htmlFor={textareaId} className="sr-only">
-          Message composer
-        </label>
-        <textarea
-          id={textareaId}
-          ref={textareaRef}
-          value={value}
-          disabled={disabled}
-          aria-label="Message composer"
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          onClick={() => updateSlashQuery(value)}
-          onKeyUp={() => updateSlashQuery(value)}
-          onPaste={handlePaste}
-          placeholder={
-            disabled ? "Add a project to get started..." : "Ask anything"
-          }
-          /* 16px on small screens keeps iOS Safari from zooming in on focus;
-             drops to the standard body size once there is room. */
-          className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[length:var(--fd-text-md)] leading-relaxed text-fg-primary placeholder:text-fg-muted focus:outline-none md:text-[length:var(--fd-text-base)]"
-          style={{
-            minHeight: `${PROMPT_INPUT_MIN_HEIGHT}px`,
-            maxHeight: `${PROMPT_INPUT_MAX_HEIGHT}px`,
-          }}
-          rows={1}
-        />
+        {voice ? (
+          <div className="flex min-h-[52px] items-center gap-3 px-4 pt-4 pb-3">
+            {voice.state === "recording" ? (
+              <>
+                <span role="status" aria-live="polite" className="sr-only">
+                  Recording voice input
+                </span>
+                <VoiceWaveform className="min-w-0 flex-1" />
+              </>
+            ) : null}
+            {voice.state === "transcribing" ? (
+              <div className="flex w-full items-center gap-2 text-fg-secondary">
+                <ActivityDiamond size="md" />
+                <span className="text-[length:var(--fd-text-sm)]">
+                  Transcribing…
+                </span>
+              </div>
+            ) : null}
+            {voice.state === "failed" ? (
+              <div className="flex w-full flex-wrap items-center justify-between gap-2">
+                <p
+                  role="status"
+                  aria-live="polite"
+                  className="min-w-0 flex-1 text-[length:var(--fd-text-sm)] text-danger"
+                >
+                  {voice.error ?? "Voice input failed."}
+                </p>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {!voice.configured && voice.onOpenSettings ? (
+                    <button
+                      type="button"
+                      onClick={voice.onOpenSettings}
+                      className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                    >
+                      Open Speech settings
+                    </button>
+                  ) : null}
+                  {voice.hasPending ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={voice.onDiscard}
+                        className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                      >
+                        Discard
+                      </button>
+                      <button
+                        type="button"
+                        onClick={voice.onRetry}
+                        className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] font-medium text-fg-primary transition-colors hover:bg-surface-3"
+                      >
+                        Retry
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={voice.onDismiss}
+                    className="fd-focus inline-flex items-center rounded-[var(--fd-radius-md)] px-2 py-1 text-[length:var(--fd-text-xs)] text-fg-secondary transition-colors hover:bg-surface-3 hover:text-fg-primary"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <label htmlFor={textareaId} className="sr-only">
+              Message composer
+            </label>
+            <textarea
+              id={textareaId}
+              ref={textareaRef}
+              value={value}
+              disabled={disabled}
+              aria-label="Message composer"
+              onChange={handleChange}
+              onKeyDown={handleKeyDown}
+              onClick={() => updateSlashQuery(value)}
+              onKeyUp={() => updateSlashQuery(value)}
+              onPaste={handlePaste}
+              placeholder={
+                disabled ? "Add a project to get started..." : "Ask anything"
+              }
+              /* 16px on small screens keeps iOS Safari from zooming in on focus;
+                 drops to the standard body size once there is room. */
+              className="block w-full resize-none bg-transparent px-4 pt-4 pb-3 text-[length:var(--fd-text-md)] leading-relaxed text-fg-primary placeholder:text-fg-muted focus:outline-none md:text-[length:var(--fd-text-base)]"
+              style={{
+                minHeight: `${PROMPT_INPUT_MIN_HEIGHT}px`,
+                maxHeight: `${PROMPT_INPUT_MAX_HEIGHT}px`,
+              }}
+              rows={1}
+            />
+          </>
+        )}
 
         {attachmentInputNotice ? (
           <div className="flex items-center gap-2 px-4 pb-2 text-[length:var(--fd-text-xs)] text-warning">
@@ -1064,8 +1155,9 @@ export const PromptInput = memo(function PromptInput({
           </Popover.Root>
 
           {/* Capability → mode → model → effort → switches. Permission scope
-              leads because it is the toggle with consequences. */}
-          {!compact ? (
+              leads because it is the toggle with consequences. Hidden while a
+              voice session owns the composer. */}
+          {!compact && !voice ? (
             <>
               {showProviderSelector ? (
                 <ProviderSelector
@@ -1136,7 +1228,7 @@ export const PromptInput = memo(function PromptInput({
             </>
           ) : null}
 
-          {!compact && connectorCount > 0 ? (
+          {!compact && !voice && connectorCount > 0 ? (
             <button
               type="button"
               onClick={onConnectorsClick}
@@ -1154,7 +1246,46 @@ export const PromptInput = memo(function PromptInput({
           ) : null}
 
           <div className="ml-auto flex items-center gap-2">
-            {showStop ? (
+            {voice?.state === "recording" ? (
+              <>
+                <span
+                  aria-hidden="true"
+                  className="font-mono text-[length:var(--fd-text-sm)] tabular-nums text-fg-secondary"
+                >
+                  {formatVoiceDuration(voice.seconds)}
+                </span>
+                <Button
+                  type="button"
+                  onClick={voice.onStop}
+                  aria-label="Stop recording"
+                  title="Stop and transcribe"
+                  className="h-9 w-9 rounded-full p-0 text-danger"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </Button>
+                {showStop ? (
+                  <Button
+                    type="button"
+                    onClick={onStop}
+                    disabled={disabled || isStopping}
+                    aria-label={isStopping ? "Stopping" : "Stop generating"}
+                    title={isStopping ? "Stopping…" : "Stop"}
+                    className="h-9 w-9 rounded-full p-0"
+                  >
+                    <Square className="h-3.5 w-3.5 fill-current" />
+                  </Button>
+                ) : (
+                  <Button
+                    type="button"
+                    disabled
+                    aria-label="Send message"
+                    className="h-9 w-9 rounded-full p-0"
+                  >
+                    <Send className="h-4 w-4" />
+                  </Button>
+                )}
+              </>
+            ) : showStop ? (
               <Button
                 type="button"
                 onClick={onStop}
@@ -1165,7 +1296,7 @@ export const PromptInput = memo(function PromptInput({
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
               </Button>
-            ) : onVoiceInput && !hasContent ? (
+            ) : onVoiceInput && !hasContent && !voice ? (
               <Button
                 type="button"
                 onClick={onVoiceInput}

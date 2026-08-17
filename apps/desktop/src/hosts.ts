@@ -42,8 +42,6 @@ import {
   type ThreadDetailRequest,
   type ThreadHandle,
   type ForkThreadPayload,
-  type HandoffBrief,
-  type HandoffBriefPayload,
   type ThreadSummary,
   type UpdateThreadPayload,
   type UpdateScheduledTaskPayload,
@@ -125,7 +123,6 @@ export type WorkspaceScopedApi = {
   ): Promise<ExtensionActionResponse>
   startThread(payload: StartThreadPayload): Promise<ThreadHandle>
   forkThread(payload: ForkThreadPayload): Promise<ThreadHandle>
-  handoffBrief(payload: HandoffBriefPayload): Promise<HandoffBrief>
   sendTurn(payload: SendTurnPayload): Promise<{ ok: boolean; message?: string | null }>
   interruptTurn(workspaceId: string, threadId: string): Promise<{ ok: boolean; message?: string | null }>
   removeQueuedTurn(
@@ -470,7 +467,6 @@ export class HostConnection {
         normalizeThreadHandle(await this.rpc('thread.start', payload)),
       forkThread: async (payload) =>
         normalizeThreadHandle(await this.rpc('thread.fork', payload)),
-      handoffBrief: (payload) => this.rpc<HandoffBrief>('thread.handoff_brief', payload),
       sendTurn: (payload) => this.rpc('turn.start', payload),
       interruptTurn: (workspaceId, threadId) =>
         this.rpc('turn.interrupt', { workspace_id: workspaceId, thread_id: threadId }),

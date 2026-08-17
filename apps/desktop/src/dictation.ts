@@ -8,6 +8,8 @@ const DICTATION_SETTINGS_EVENT = "falcondeck:dictation-settings-changed";
 export type DictationShortcut = "right_command" | "left_function";
 export type DictationActivation = "hold" | "toggle";
 export type DictationProvider = "system" | "open_router";
+export type DictationPermission =
+  "microphone" | "speech_recognition" | "accessibility";
 
 export type DictationSettings = {
   enabled: boolean;
@@ -31,6 +33,18 @@ export type DictationPermissionStatus = {
   supported: boolean;
 };
 
+export function nextRequiredDictationPermission(
+  status: DictationPermissionStatus,
+  provider: DictationProvider,
+): DictationPermission | null {
+  if (status.microphone !== "granted") return "microphone";
+  if (provider === "system" && status.speechRecognition !== "granted") {
+    return "speech_recognition";
+  }
+  if (!status.accessibility) return "accessibility";
+  return null;
+}
+
 export const DEFAULT_DICTATION_SETTINGS: DictationSettings = {
   enabled: false,
   shortcut: "right_command",
@@ -52,9 +66,7 @@ function isDictationProvider(value: unknown): value is DictationProvider {
   return value === "system" || value === "open_router";
 }
 
-export function normalizeDictationSettings(
-  value: unknown,
-): DictationSettings {
+export function normalizeDictationSettings(value: unknown): DictationSettings {
   if (!value || typeof value !== "object") return DEFAULT_DICTATION_SETTINGS;
   const candidate = value as Partial<DictationSettings>;
   return {
@@ -176,15 +188,17 @@ export async function readDictationPermissions(): Promise<DictationPermissionSta
   return invoke<DictationPermissionStatus>("dictation_permission_status");
 }
 
-export async function readDictationAudioDevices(): Promise<DictationAudioDevice[]> {
+export async function readDictationAudioDevices(): Promise<
+  DictationAudioDevice[]
+> {
   if (!isTauriDesktop()) return [];
   const { invoke } = await import("@tauri-apps/api/core");
   return invoke<DictationAudioDevice[]>("dictation_audio_devices");
 }
 
-export async function requestDictationPermissions(
-  includeSpeech: boolean,
+export async function requestDictationPermission(
+  permission: DictationPermission,
 ): Promise<void> {
   const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("request_dictation_permissions", { includeSpeech });
+  await invoke("request_dictation_permission", { permission });
 }

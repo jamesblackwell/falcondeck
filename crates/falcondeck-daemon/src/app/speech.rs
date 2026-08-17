@@ -1,15 +1,13 @@
+use std::sync::Mutex as StdMutex;
 #[cfg(test)]
 use std::sync::OnceLock;
-use std::sync::{
-    Mutex as StdMutex,
-    atomic::{AtomicBool, Ordering},
-};
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::{
-    sync::Mutex,
     task::spawn_blocking,
     time::{Duration, timeout},
 };
@@ -17,6 +15,8 @@ use tokio::{
 use super::AppState;
 use crate::error::DaemonError;
 
+#[cfg(not(test))]
+const SPEECH_SECRET_KEY: &str = "speech.openrouter-api-key";
 #[cfg(not(test))]
 const KEYRING_SERVICE: &str = "com.falcondeck.daemon.speech";
 #[cfg(not(test))]
@@ -27,11 +27,10 @@ const OPENROUTER_MODELS_URL: &str =
 // Base64 audio is encrypted and base64-encoded again by the relay protocol.
 // Eight MiB keeps the outer WebSocket message below the relay's 16 MiB cap.
 const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
-// Keychain calls normally return in milliseconds; the only slow path is
-// securityd holding the call for a user-authorization decision. Stay under
-// the phone's 8-second speech.status deadline so the caller sees the
-// actionable wedge error instead of a generic relay timeout.
-const KEYCHAIN_OP_TIMEOUT: Duration = Duration::from_secs(5);
+const SPEECH_STORAGE: &str = "daemon_secret_store";
+// Stay under the phone's 8-second speech.status deadline so a parked
+// one-shot Keychain migration surfaces the daemon error, not a relay timeout.
+const SPEECH_SECRET_TIMEOUT: Duration = Duration::from_secs(5);
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(70);
 const FALLBACK_MODELS: [&str; 4] = [
     "openai/gpt-transcribe",
@@ -72,34 +71,11 @@ pub struct SpeechModel {
     pub name: String,
 }
 
-/// In-process cache and wedge tracking for the OpenRouter credential.
-///
-/// macOS parks a keychain read inside securityd while it waits for the user
-/// to approve access — which it wants whenever the running binary no longer
-/// matches the item's ACL (every ad-hoc rebuild changes the code hash). That
-/// parked call never returns on its own, and every later keychain call in
-/// this process queues behind it on an item mutex, so each retry would wedge
-/// another blocking-pool thread forever. Cache the key after any successful
-/// read or save, run at most one keychain operation at a time, and fail fast
-/// with an actionable message while an abandoned operation is still parked.
+/// In-process cache for the OpenRouter credential so status and transcribe
+/// do not re-read the host secret store on every call.
 #[derive(Default)]
 pub(super) struct SpeechCredentialCache {
     key: StdMutex<Option<String>>,
-    /// Serializes keychain operations so concurrent callers wait for the
-    /// in-flight result (normally milliseconds) instead of stacking threads.
-    flight: Mutex<()>,
-    /// True while an operation abandoned by its timeout is still parked in
-    /// securityd; cleared by the watcher task when it finally resolves.
-    wedged: AtomicBool,
-}
-
-fn keychain_authorization_pending() -> DaemonError {
-    DaemonError::Process(
-        "The Mac is waiting for keychain permission before it can read the OpenRouter key. \
-         Approve the keychain prompt on the desktop (choose \"Always Allow\"), or restart \
-         FalconDeck and re-save the key in Settings, then retry."
-            .to_string(),
-    )
 }
 
 impl AppState {
@@ -145,13 +121,10 @@ impl AppState {
     }
 
     pub async fn speech_credential_status(&self) -> Result<SpeechCredentialStatus, DaemonError> {
-        // Reading the key (not just its attributes) deliberately surfaces the
-        // keychain authorization prompt at status time — before a recording
-        // exists that would otherwise be transcribed into a wedged daemon.
         let configured = self.openrouter_key_cached().await?.is_some();
         Ok(SpeechCredentialStatus {
             configured,
-            storage: "os_credential_store",
+            storage: SPEECH_STORAGE,
         })
     }
 
@@ -166,20 +139,11 @@ impl AppState {
             ));
         }
         let cached = api_key.clone();
-        let written = api_key.clone();
-        self.run_keychain_op(
-            move || save_openrouter_key(&api_key),
-            // A save that outlives its timeout still wrote the key once the
-            // parked call resolves, so it may seed the cache late.
-            move |state, ()| {
-                *state.inner.speech_credentials.key.lock().unwrap() = Some(written);
-            },
-        )
-        .await?;
+        run_secret_store_op(move || save_openrouter_key(&api_key)).await?;
         *self.inner.speech_credentials.key.lock().unwrap() = Some(cached);
         Ok(SpeechCredentialStatus {
             configured: true,
-            storage: "os_credential_store",
+            storage: SPEECH_STORAGE,
         })
     }
 
@@ -187,76 +151,24 @@ impl AppState {
         // Drop the cache first so a failed delete can only under-report, never
         // serve a key the user asked to remove.
         *self.inner.speech_credentials.key.lock().unwrap() = None;
-        self.run_keychain_op(delete_openrouter_key, |_, ()| {}).await?;
+        run_secret_store_op(delete_openrouter_key).await?;
         Ok(SpeechCredentialStatus {
             configured: false,
-            storage: "os_credential_store",
+            storage: SPEECH_STORAGE,
         })
     }
 
-    /// The OpenRouter key, from cache when possible, from the OS credential
-    /// store otherwise. See [`SpeechCredentialCache`] for why the keychain is
-    /// treated as hostile.
+    /// The OpenRouter key, from cache when possible, from the host secret
+    /// store otherwise.
     async fn openrouter_key_cached(&self) -> Result<Option<String>, DaemonError> {
         if let Some(key) = self.inner.speech_credentials.key.lock().unwrap().clone() {
             return Ok(Some(key));
         }
-        let key = self
-            .run_keychain_op(load_openrouter_key, |state, key| {
-                // The user approved the prompt after the caller had already
-                // given up: seed the cache so their retry succeeds instantly.
-                if let Some(key) = key {
-                    *state.inner.speech_credentials.key.lock().unwrap() = Some(key);
-                }
-            })
-            .await?;
+        let key = run_secret_store_op(load_openrouter_key).await?;
         if let Some(key) = &key {
             *self.inner.speech_credentials.key.lock().unwrap() = Some(key.clone());
         }
         Ok(key)
-    }
-
-    /// Runs one keychain operation on the blocking pool, failing fast while a
-    /// previously abandoned operation is still parked in securityd. On
-    /// timeout the task is not lost: a watcher awaits its eventual result,
-    /// clears the wedge, and hands a late success to `on_late_completion`.
-    async fn run_keychain_op<T: Send + 'static>(
-        &self,
-        operation: impl FnOnce() -> Result<T, DaemonError> + Send + 'static,
-        on_late_completion: impl FnOnce(&AppState, T) + Send + 'static,
-    ) -> Result<T, DaemonError> {
-        let _flight = self.inner.speech_credentials.flight.lock().await;
-        if self.inner.speech_credentials.wedged.load(Ordering::Acquire) {
-            return Err(keychain_authorization_pending());
-        }
-        let mut task = spawn_blocking(operation);
-        match timeout(KEYCHAIN_OP_TIMEOUT, &mut task).await {
-            Ok(joined) => joined.map_err(|error| {
-                DaemonError::Process(format!("credential store task failed: {error}"))
-            })?,
-            Err(_) => {
-                tracing::warn!(
-                    "keychain access is blocked, likely awaiting user authorization on the desktop"
-                );
-                self.inner
-                    .speech_credentials
-                    .wedged
-                    .store(true, Ordering::Release);
-                let state = self.clone();
-                tokio::spawn(async move {
-                    let outcome = task.await;
-                    state
-                        .inner
-                        .speech_credentials
-                        .wedged
-                        .store(false, Ordering::Release);
-                    if let Ok(Ok(value)) = outcome {
-                        on_late_completion(&state, value);
-                    }
-                });
-                Err(keychain_authorization_pending())
-            }
-        }
     }
 
     pub async fn transcribe_speech(
@@ -338,6 +250,23 @@ impl AppState {
     }
 }
 
+async fn run_secret_store_op<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, DaemonError> + Send + 'static,
+) -> Result<T, DaemonError> {
+    timeout(SPEECH_SECRET_TIMEOUT, spawn_blocking(operation))
+        .await
+        .map_err(|_| {
+            DaemonError::Process(
+                "Timed out reading the speech credential. If a keychain prompt is open, \
+                 choose Always Allow, or re-save the OpenRouter key in Settings."
+                    .to_string(),
+            )
+        })?
+        .map_err(|error| {
+            DaemonError::Process(format!("speech credential store task failed: {error}"))
+        })?
+}
+
 fn validate_audio_format(format: &str) -> Result<(), DaemonError> {
     if matches!(
         format,
@@ -378,7 +307,10 @@ fn fallback_models(preferred: &str) -> Vec<String> {
 }
 
 fn should_try_fallback(status: u16) -> bool {
-    matches!(status, 404 | 408 | 409 | 429) || status >= 500
+    // A transcription provider can reject a model/format pairing with 400.
+    // Trying the remaining STT models is safe because rejected requests are
+    // not billed and often support a different set of audio containers.
+    matches!(status, 400 | 404 | 408 | 409 | 429) || status >= 500
 }
 
 fn transcription_error(status: u16, body: &Value) -> String {
@@ -386,13 +318,31 @@ fn transcription_error(status: u16, body: &Value) -> String {
         401 => "The OpenRouter API key was rejected".to_string(),
         402 => "The OpenRouter account needs credit before it can transcribe audio".to_string(),
         429 => "OpenRouter is rate limited; the recording is still safe on the phone".to_string(),
-        _ => body
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .map(str::to_string)
+        _ => openrouter_error_message(body)
             .unwrap_or_else(|| format!("OpenRouter transcription failed ({status})")),
     }
 }
+
+fn openrouter_error_message(body: &Value) -> Option<String> {
+    if let Some(message) = body.pointer("/error/message").and_then(Value::as_str) {
+        return Some(message.to_string());
+    }
+    let raw = body
+        .pointer("/error/metadata/raw")
+        .and_then(Value::as_str)?;
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|value| {
+            value
+                .pointer("/error/message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| Some(raw.to_string()))
+}
+
+#[cfg(not(test))]
+static KEYCHAIN_MIGRATION_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(not(test))]
 fn credential_entry() -> Result<keyring::Entry, DaemonError> {
@@ -402,7 +352,7 @@ fn credential_entry() -> Result<keyring::Entry, DaemonError> {
 }
 
 #[cfg(not(test))]
-fn load_openrouter_key() -> Result<Option<String>, DaemonError> {
+fn load_from_keychain() -> Result<Option<String>, DaemonError> {
     match credential_entry()?.get_password() {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -413,7 +363,68 @@ fn load_openrouter_key() -> Result<Option<String>, DaemonError> {
 }
 
 #[cfg(not(test))]
+fn delete_from_keychain() -> Result<(), DaemonError> {
+    match credential_entry()?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(DaemonError::Process(format!(
+            "failed to delete OS credential: {error}"
+        ))),
+    }
+}
+
+#[cfg(not(test))]
+fn load_openrouter_key() -> Result<Option<String>, DaemonError> {
+    let Some(file) = super::storage::read_secret_file_entry(SPEECH_SECRET_KEY) else {
+        return load_from_keychain();
+    };
+    match file? {
+        Some(key) if !key.is_empty() => Ok(Some(key)),
+        // Empty value is a delete tombstone: do not restore from Keychain.
+        Some(_) => Ok(None),
+        None => Ok(migrate_legacy_keychain_key()),
+    }
+}
+
+/// One-shot copy of a pre-migration Keychain item into the file store.
+/// A later retry in this process must not call Keychain again: a parked
+/// `securityd` prompt would otherwise wedge another blocking-pool thread.
+#[cfg(not(test))]
+fn migrate_legacy_keychain_key() -> Option<String> {
+    if KEYCHAIN_MIGRATION_ATTEMPTED.swap(true, Ordering::AcqRel) {
+        return None;
+    }
+    let Ok(Some(key)) = load_from_keychain() else {
+        return None;
+    };
+    // A Settings save or delete can land in the file store while Keychain is
+    // still prompting. Prefer that newer state. Never delete the Keychain
+    // copy until the file store holds the replacement.
+    match super::storage::read_secret_file_entry(SPEECH_SECRET_KEY) {
+        Some(Ok(Some(existing))) if !existing.is_empty() => {
+            let _ = delete_from_keychain();
+            return Some(existing);
+        }
+        Some(Ok(Some(_))) => {
+            let _ = delete_from_keychain();
+            return None;
+        }
+        Some(Ok(None)) | None => {}
+        Some(Err(_)) => return Some(key),
+    }
+    match super::storage::write_secret_file_entry(SPEECH_SECRET_KEY, &key) {
+        Some(Ok(())) => {
+            let _ = delete_from_keychain();
+            Some(key)
+        }
+        _ => Some(key),
+    }
+}
+
+#[cfg(not(test))]
 fn save_openrouter_key(api_key: &str) -> Result<(), DaemonError> {
+    if let Some(result) = super::storage::write_secret_file_entry(SPEECH_SECRET_KEY, api_key) {
+        return result;
+    }
     credential_entry()?.set_password(api_key).map_err(|error| {
         DaemonError::Process(format!("failed to write OS credential store: {error}"))
     })
@@ -421,12 +432,12 @@ fn save_openrouter_key(api_key: &str) -> Result<(), DaemonError> {
 
 #[cfg(not(test))]
 fn delete_openrouter_key() -> Result<(), DaemonError> {
-    match credential_entry()?.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(DaemonError::Process(format!(
-            "failed to delete OS credential: {error}"
-        ))),
+    // Persist an empty tombstone so a later process does not migrate a leftover
+    // Keychain copy back into the file store.
+    if let Some(result) = super::storage::write_secret_file_entry(SPEECH_SECRET_KEY, "") {
+        return result;
     }
+    delete_from_keychain()
 }
 
 #[cfg(test)]
@@ -460,8 +471,11 @@ mod tests {
 
     /// Serializes the tests that mutate the process-global test credential.
     async fn credential_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-        static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-        GUARD.get_or_init(|| Mutex::new(())).lock().await
+        static GUARD: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        GUARD
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
     }
 
     #[test]
@@ -472,6 +486,23 @@ mod tests {
     #[test]
     fn decoded_base64_len_rejects_malformed_audio() {
         assert!(decoded_base64_len("not base64").is_err());
+    }
+
+    #[test]
+    fn bad_request_tries_another_transcription_model() {
+        assert!(should_try_fallback(400));
+    }
+
+    #[test]
+    fn transcription_error_reads_nested_provider_message() {
+        let body = json!({
+            "error": {
+                "metadata": {
+                    "raw": "{\"error\":{\"message\":\"Unsupported audio format\"}}"
+                }
+            }
+        });
+        assert_eq!(transcription_error(400, &body), "Unsupported audio format");
     }
 
     #[tokio::test]
@@ -497,9 +528,10 @@ mod tests {
         app.save_speech_credential("secret-value".to_string())
             .await
             .unwrap();
-        let serialized =
-            serde_json::to_string(&app.speech_credential_status().await.unwrap()).unwrap();
+        let status = app.speech_credential_status().await.unwrap();
+        let serialized = serde_json::to_string(&status).unwrap();
         assert!(!serialized.contains("secret-value"));
+        assert_eq!(status.storage, "daemon_secret_store");
         app.delete_speech_credential().await.unwrap();
     }
 }

@@ -1,8 +1,12 @@
 import { StyleSheet } from 'react-native-unistyles'
 
-import { buildTheme, readAppearance } from './appearance'
+import { applyNativeColorScheme, buildTheme, readAppearance } from './appearance'
 
 const appearance = readAppearance()
+
+// Before first render, so the launch header and status bar already match the
+// saved mode rather than flashing the phone's system appearance.
+applyNativeColorScheme(appearance.themeMode)
 
 const darkTheme = buildTheme('dark', appearance.fontScale, appearance.darkColorTheme)
 const lightTheme = buildTheme('light', appearance.fontScale, appearance.lightColorTheme)

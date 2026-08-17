@@ -1,12 +1,11 @@
 import { memo, useCallback, useState } from 'react'
-import { KeyboardAvoidingView, Modal, Platform, Pressable, View } from 'react-native'
-import { useSafeAreaInsets } from 'react-native-safe-area-context'
+import { View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Pause, Play, X } from 'lucide-react-native'
 
 import type { AgentProvider, ThreadGoal } from '@falcondeck/client-core'
 
-import { Button, Input, Text } from '@/components/ui'
+import { Button, Input, NativeSheet, Text } from '@/components/ui'
 
 import {
   goalCanPause,
@@ -37,7 +36,6 @@ export const GoalSheet = memo(function GoalSheet({
   onClose,
 }: GoalSheetProps) {
   const { theme } = useUnistyles()
-  const insets = useSafeAreaInsets()
   const [objective, setObjective] = useState('')
   const [budget, setBudget] = useState('')
   const [isPending, setIsPending] = useState(false)
@@ -65,104 +63,92 @@ export const GoalSheet = memo(function GoalSheet({
   const canSubmit = objective.trim().length > 0 && !isPending
 
   return (
-    <Modal transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable
-        style={styles.backdrop}
-        onPress={onClose}
-        accessibilityRole="button"
-        accessibilityLabel="Close"
-      />
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={[styles.sheet, { paddingBottom: insets.bottom + theme.spacing[4] }]}>
-          <View style={styles.handle} />
-
-          {goal ? (
-            <View style={styles.body}>
-              <View style={styles.headerRow}>
-                <Text variant="label" color="primary" weight="semibold" style={styles.headerTitle}>
-                  Goal
-                </Text>
-                <StatusPill status={goal.status} />
-              </View>
-              <Text color="primary">{goal.objective}</Text>
-              {goalUsageLine(goal) ? (
-                <Text variant="caption" size="xs" color="muted">
-                  {goalUsageLine(goal)}
-                </Text>
-              ) : null}
-
-              <View style={styles.actions}>
-                {goalCanPause(goal, provider) ? (
-                  <Button
-                    variant="secondary"
-                    label={goal.status === 'paused' ? 'Resume' : 'Pause'}
-                    disabled={isPending}
-                    icon={
-                      goal.status === 'paused' ? (
-                        <Play size={theme.iconSize.sm} color={theme.colors.fg.primary} />
-                      ) : (
-                        <Pause size={theme.iconSize.sm} color={theme.colors.fg.primary} />
-                      )
-                    }
-                    onPress={() =>
-                      run(onSetGoalStatus(goal.status === 'paused' ? 'active' : 'paused'))
-                    }
-                  />
-                ) : null}
-                <Button
-                  variant="outline"
-                  label="Clear goal"
-                  disabled={isPending}
-                  icon={<X size={theme.iconSize.sm} color={theme.colors.danger.default} />}
-                  onPress={() => run(onClearGoal())}
-                />
-              </View>
-            </View>
-          ) : (
-            <View style={styles.body}>
-              <Text variant="label" color="primary" weight="semibold">
-                Set a goal
-              </Text>
-              <Text variant="caption" size="xs" color="muted">
-                The agent keeps working turns until the objective is met.
-              </Text>
-              <Input
-                style={styles.objectiveInput}
-                value={objective}
-                onChangeText={setObjective}
-                placeholder="e.g. All tests pass and lint is clean"
-                accessibilityLabel="Objective"
-                multiline
-                autoFocus
-                editable={!isPending}
-              />
-              {supportsBudget ? (
-                <Input
-                  value={budget}
-                  onChangeText={(next) => setBudget(next.replace(/[^0-9]/g, ''))}
-                  placeholder="Token budget (optional)"
-                  accessibilityLabel="Token budget"
-                  keyboardType="number-pad"
-                  editable={!isPending}
-                />
-              ) : null}
-              <Button
-                label={isPending ? 'Setting…' : 'Set goal'}
-                disabled={!canSubmit}
-                loading={isPending}
-                onPress={() => run(onSetGoal(objective.trim(), parseTokenBudget(budget)))}
-              />
-            </View>
-          )}
-
-          {error ? (
-            <Text variant="caption" size="xs" color="danger" style={styles.error}>
-              {error}
+    <NativeSheet onClose={onClose} accessibilityLabel="Close goal" contentStyle={styles.sheet}>
+      {goal ? (
+        <View style={styles.body}>
+          <View style={styles.headerRow}>
+            <Text variant="label" color="primary" weight="semibold" style={styles.headerTitle}>
+              Goal
+            </Text>
+            <StatusPill status={goal.status} />
+          </View>
+          <Text color="primary">{goal.objective}</Text>
+          {goalUsageLine(goal) ? (
+            <Text variant="caption" size="xs" color="muted">
+              {goalUsageLine(goal)}
             </Text>
           ) : null}
+
+          <View style={styles.actions}>
+            {goalCanPause(goal, provider) ? (
+              <Button
+                variant="secondary"
+                label={goal.status === 'paused' ? 'Resume' : 'Pause'}
+                disabled={isPending}
+                icon={
+                  goal.status === 'paused' ? (
+                    <Play size={theme.iconSize.sm} color={theme.colors.fg.primary} />
+                  ) : (
+                    <Pause size={theme.iconSize.sm} color={theme.colors.fg.primary} />
+                  )
+                }
+                onPress={() =>
+                  run(onSetGoalStatus(goal.status === 'paused' ? 'active' : 'paused'))
+                }
+              />
+            ) : null}
+            <Button
+              variant="outline"
+              label="Clear goal"
+              disabled={isPending}
+              icon={<X size={theme.iconSize.sm} color={theme.colors.danger.default} />}
+              onPress={() => run(onClearGoal())}
+            />
+          </View>
         </View>
-      </KeyboardAvoidingView>
-    </Modal>
+      ) : (
+        <View style={styles.body}>
+          <Text variant="label" color="primary" weight="semibold">
+            Set a goal
+          </Text>
+          <Text variant="caption" size="xs" color="muted">
+            The agent keeps working turns until the objective is met.
+          </Text>
+          <Input
+            style={styles.objectiveInput}
+            value={objective}
+            onChangeText={setObjective}
+            placeholder="e.g. All tests pass and lint is clean"
+            accessibilityLabel="Objective"
+            multiline
+            autoFocus
+            editable={!isPending}
+          />
+          {supportsBudget ? (
+            <Input
+              value={budget}
+              onChangeText={(next) => setBudget(next.replace(/[^0-9]/g, ''))}
+              placeholder="Token budget (optional)"
+              accessibilityLabel="Token budget"
+              keyboardType="number-pad"
+              editable={!isPending}
+            />
+          ) : null}
+          <Button
+            label={isPending ? 'Setting…' : 'Set goal'}
+            disabled={!canSubmit}
+            loading={isPending}
+            onPress={() => run(onSetGoal(objective.trim(), parseTokenBudget(budget)))}
+          />
+        </View>
+      )}
+
+      {error ? (
+        <Text variant="caption" size="xs" color="danger" style={styles.error}>
+          {error}
+        </Text>
+      ) : null}
+    </NativeSheet>
   )
 })
 
@@ -183,25 +169,8 @@ const StatusPill = memo(function StatusPill({ status }: { status: string }) {
 })
 
 const styles = StyleSheet.create((theme) => ({
-  backdrop: {
-    flex: 1,
-    backgroundColor: theme.colors.overlay,
-  },
   sheet: {
-    backgroundColor: theme.colors.surface[1],
-    borderTopLeftRadius: theme.radius['2xl'],
-    borderTopRightRadius: theme.radius['2xl'],
-    borderCurve: 'continuous',
     paddingHorizontal: theme.spacing[4],
-  },
-  handle: {
-    width: theme.spacing[8] + theme.spacing[1],
-    height: theme.spacing[1],
-    borderRadius: theme.radius.full,
-    backgroundColor: theme.colors.border.emphasis,
-    alignSelf: 'center',
-    marginTop: theme.spacing[2],
-    marginBottom: theme.spacing[3],
   },
   body: {
     gap: theme.spacing[2],

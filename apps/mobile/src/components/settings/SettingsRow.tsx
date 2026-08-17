@@ -1,9 +1,10 @@
 import { memo, type ReactNode } from 'react'
 import { Pressable, View } from 'react-native'
-import { ChevronRight } from 'lucide-react-native'
+import { Check, ChevronRight, Copy } from 'lucide-react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import { Text } from '@/components/ui'
+import { useClipboardCopy } from '@/hooks/useClipboardCopy'
 
 type SettingsRowProps = {
   label: string
@@ -13,6 +14,9 @@ type SettingsRowProps = {
   onPress?: () => void
   destructive?: boolean
   accessibilityHint?: string
+  /** Tapping copies `value` instead of navigating — for ids you may need to
+   *  quote when something goes wrong and cannot otherwise select. */
+  copyable?: boolean
 }
 
 export const SettingsRow = memo(function SettingsRow({
@@ -23,8 +27,17 @@ export const SettingsRow = memo(function SettingsRow({
   onPress,
   destructive = false,
   accessibilityHint,
+  copyable = false,
 }: SettingsRowProps) {
   const { theme } = useUnistyles()
+  const { copy, result } = useClipboardCopy(
+    value ?? '',
+    `${label} copied`,
+    `Could not copy ${label}`,
+  )
+  const isCopyRow = copyable && Boolean(value)
+  const navigates = Boolean(onPress) && !isCopyRow
+
   const content = (
     <>
       {icon ? <View style={styles.icon}>{icon}</View> : null}
@@ -39,23 +52,44 @@ export const SettingsRow = memo(function SettingsRow({
         ) : null}
       </View>
       {value ? (
-        <Text variant="body" color="tertiary" numberOfLines={1} style={styles.value}>
+        <Text
+          variant="body"
+          color={result === 'copied' ? 'accent' : 'tertiary'}
+          numberOfLines={2}
+          ellipsizeMode={navigates ? 'tail' : 'middle'}
+          style={[styles.value, navigates ? styles.valueCompact : undefined]}
+        >
+          {/* The value stays put on copy — swapping in "Copied" reflowed the
+              row from two lines to one and shoved the rest of the list. The
+              check, the accent colour, and the VoiceOver announcement carry
+              the confirmation instead. */}
           {value}
         </Text>
       ) : null}
-      {onPress ? <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.faint} /> : null}
+      {isCopyRow ? (
+        result === 'copied' ? (
+          <Check size={theme.iconSize.sm} color={theme.colors.accent.default} />
+        ) : (
+          <Copy size={theme.iconSize.sm} color={theme.colors.fg.faint} />
+        )
+      ) : null}
+      {navigates ? (
+        <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.faint} />
+      ) : null}
     </>
   )
 
-  if (!onPress) return <View style={styles.row}>{content}</View>
+  if (!onPress && !isCopyRow) return <View style={styles.row}>{content}</View>
 
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed ? styles.pressed : undefined]}
-      onPress={onPress}
+      onPress={isCopyRow ? () => void copy() : onPress}
       accessibilityRole="button"
       accessibilityLabel={value ? `${label}, ${value}` : label}
-      accessibilityHint={accessibilityHint}
+      accessibilityHint={
+        isCopyRow ? accessibilityHint ?? 'Copies to the clipboard' : accessibilityHint
+      }
     >
       {content}
     </Pressable>
@@ -70,8 +104,6 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[3],
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[3],
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border.subtle,
   },
   pressed: { backgroundColor: theme.colors.surface[2] },
   icon: {
@@ -80,5 +112,8 @@ const styles = StyleSheet.create((theme) => ({
   },
   copy: { flex: 1 },
   detail: { marginTop: theme.spacing[1] },
-  value: { maxWidth: '42%', textAlign: 'right' },
+  // Read-only rows are label + value, so the value gets the room it needs;
+  // rows that navigate keep the label dominant and let the value shrink.
+  value: { flexShrink: 1, maxWidth: '60%', textAlign: 'right' },
+  valueCompact: { maxWidth: '45%' },
 }))

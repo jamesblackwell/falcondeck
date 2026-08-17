@@ -6,6 +6,7 @@ export {
   useSelectedWorkspace,
   useSelectedThread,
   useSelectedThreadHistory,
+  useSelectedThreadDetailError,
   useConversationItems,
   useApprovals,
   useInteractiveRequests,

@@ -1,4 +1,5 @@
 export { Text } from './Text'
+export { ProviderIcon } from './ProviderIcon'
 export { Button } from './Button'
 export { Badge } from './Badge'
 export { Card, CardHeader, CardContent } from './Card'

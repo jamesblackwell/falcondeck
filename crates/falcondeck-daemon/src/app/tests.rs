@@ -1527,7 +1527,8 @@ fn extracts_nested_claude_tool_use_and_result_events() {
 fn every_harness_titles_the_same_tool_the_same_way() {
     // Claude spells the key `file_path`, OpenCode `filePath` — one title.
     assert_eq!(
-        synthesize_tool_title("Edit", Some(&json!({ "file_path": "/repo/a.php" })), None).as_deref(),
+        synthesize_tool_title("Edit", Some(&json!({ "file_path": "/repo/a.php" })), None)
+            .as_deref(),
         Some("Edit /repo/a.php")
     );
     assert_eq!(
@@ -1547,8 +1548,12 @@ fn every_harness_titles_the_same_tool_the_same_way() {
     );
     // A blank argument falls through to the next key, then to the bare verb.
     assert_eq!(
-        synthesize_tool_title("grep", Some(&json!({ "pattern": "", "query": "todo" })), None)
-            .as_deref(),
+        synthesize_tool_title(
+            "grep",
+            Some(&json!({ "pattern": "", "query": "todo" })),
+            None
+        )
+        .as_deref(),
         Some("Search todo")
     );
     assert_eq!(
@@ -1561,7 +1566,10 @@ fn every_harness_titles_the_same_tool_the_same_way() {
     assert_eq!(long.chars().count(), 120);
     assert!(long.ends_with('…'));
     // An unknown tool keeps its own name, whatever the harness calls it.
-    assert_eq!(synthesize_tool_title("question", Some(&json!({})), None), None);
+    assert_eq!(
+        synthesize_tool_title("question", Some(&json!({})), None),
+        None
+    );
 }
 
 #[test]
@@ -1570,13 +1578,20 @@ fn tools_that_are_not_file_work_still_say_what_they_did() {
 
     // A sub-agent's errand, not the word "Agent".
     assert_eq!(
-        title("Agent", json!({ "description": "Reuse review", "subagent_type": "Explore" }))
-            .as_deref(),
+        title(
+            "Agent",
+            json!({ "description": "Reuse review", "subagent_type": "Explore" })
+        )
+        .as_deref(),
         Some("Agent: Reuse review")
     );
     // A script is pasted in whole; only its first line can fit a header.
     assert_eq!(
-        title("Bash", json!({ "command": "python3 - <<'PY'\nprint(1)\nPY" })).as_deref(),
+        title(
+            "Bash",
+            json!({ "command": "python3 - <<'PY'\nprint(1)\nPY" })
+        )
+        .as_deref(),
         Some("python3 - <<'PY' …")
     );
     assert_eq!(
@@ -1584,7 +1599,10 @@ fn tools_that_are_not_file_work_still_say_what_they_did() {
         Some("git status --short")
     );
     // Bookkeeping tools say what they are rather than spelling their wire name.
-    assert_eq!(title("TodoWrite", json!({})).as_deref(), Some("Update plan"));
+    assert_eq!(
+        title("TodoWrite", json!({})).as_deref(),
+        Some("Update plan")
+    );
     assert_eq!(
         title("WebSearch", json!({ "query": "react streaming" })).as_deref(),
         Some("Search web: react streaming")
@@ -1604,7 +1622,10 @@ fn tools_that_are_not_file_work_still_say_what_they_did() {
     // A todo update is plan bookkeeping, so it must not earn the bordered card
     // that says a file changed.
     let display = tool_display_metadata("Update plan", "TodoWrite", "completed", None, None);
-    assert_eq!(display.activity_kind, falcondeck_core::ToolActivityKind::Context);
+    assert_eq!(
+        display.activity_kind,
+        falcondeck_core::ToolActivityKind::Context
+    );
     assert!(display.is_read_only);
 }
 
@@ -1627,7 +1648,10 @@ fn file_editing_tools_name_the_file_they_touch() {
     };
 
     assert_eq!(
-        title("Edit", json!({ "file_path": "/repo/app/Console/Kernel.php" })),
+        title(
+            "Edit",
+            json!({ "file_path": "/repo/app/Console/Kernel.php" })
+        ),
         Some("Edit /repo/app/Console/Kernel.php".to_string())
     );
     assert_eq!(
@@ -1639,7 +1663,10 @@ fn file_editing_tools_name_the_file_they_touch() {
         Some("Edit /repo/src/app.tsx".to_string())
     );
     assert_eq!(
-        title("NotebookEdit", json!({ "notebook_path": "/repo/analysis.ipynb" })),
+        title(
+            "NotebookEdit",
+            json!({ "notebook_path": "/repo/analysis.ipynb" })
+        ),
         Some("Edit notebook /repo/analysis.ipynb".to_string())
     );
     // An edit whose input has not streamed yet still labels the action.

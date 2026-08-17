@@ -18,11 +18,13 @@ turn-lifecycle, and service/error events. A future calm attention screen can
 consume those same primitives and retain richer history; push payloads should
 remain small and generic.
 
-The packaged macOS desktop app delivers these attention events through the
-Tauri native notification plugin, so FalconDeck is registered with macOS
-Notification Center under its app bundle identity. Desktop delivery follows
-the same daemon-owned notification preferences as mobile; browser previews do
-not attempt native delivery.
+The packaged macOS desktop app delivers these attention events through
+`UNUserNotificationCenter`, so FalconDeck requests real system authorization,
+registers with Notification Center under its app bundle identity, and only
+deduplicates a notification after macOS accepts it. Other desktop platforms
+use the Tauri notification plugin. Desktop delivery follows the same
+daemon-owned notification preferences as mobile; browser previews do not
+attempt native delivery.
 
 ## Current flow
 

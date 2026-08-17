@@ -82,17 +82,21 @@ export default function SpeechSettingsScreen() {
     >
       <SettingsSection
         title="Transcription"
-        footer="You can change this at any time. On-device recognition requires a speech model supported by your phone."
+        footer={
+          settings.provider
+            ? 'You can change this at any time.'
+            : 'Not set yet — FalconDeck asks the first time you record.'
+        }
       >
         <ChoiceRow
           label="On-device"
-          description="Keep speech on this phone and work offline."
+          description="Keep speech on this phone. Works offline."
           selected={settings.provider === 'on-device'}
           onPress={() => selectProvider('on-device')}
         />
         <ChoiceRow
           label="OpenRouter"
-          description="Encrypt audio to your paired desktop for transcription."
+          description="Send audio to your desktop, encrypted end to end."
           selected={settings.provider === 'openrouter'}
           onPress={() => selectProvider('openrouter')}
         />
@@ -101,13 +105,13 @@ export default function SpeechSettingsScreen() {
       {settings.provider === 'openrouter' ? (
         <SettingsSection
           title="OpenRouter"
-          footer="Add or remove the API key in FalconDeck desktop settings. The key never reaches this phone or FalconDeck's relay. Failed recordings remain local for retry."
+          footer="Manage the API key in FalconDeck desktop settings; it never reaches this phone or the relay. A recording that fails to send stays on this phone so you can retry."
         >
           <SettingsRow
-            label="Desktop credential"
+            label="API key"
             detail={
               desktopStatus === 'configured'
-                ? 'Stored in the desktop OS credential store'
+                ? 'Stored on the paired desktop'
                 : desktopStatus === 'missing'
                   ? 'Not configured — open FalconDeck settings on your desktop'
                   : desktopStatus === 'offline'
@@ -121,7 +125,13 @@ export default function SpeechSettingsScreen() {
                   ? 'Retry'
                   : undefined
             }
-            onPress={() => setRefreshKey((current) => current + 1)}
+            // Only offer the tap when there is something to retry — a chevron
+            // on a row that is already Ready promises a screen that isn't there.
+            onPress={
+              desktopStatus === 'configured'
+                ? undefined
+                : () => setRefreshKey((current) => current + 1)
+            }
             accessibilityHint="Check the paired desktop again"
           />
           <SettingsRow
@@ -129,7 +139,7 @@ export default function SpeechSettingsScreen() {
             detail={
               modelsError ??
               (models.length
-                ? `${models.length} transcription models available`
+                ? `${models.length} ${models.length === 1 ? 'model' : 'models'} available`
                 : 'Loading available models…')
             }
             value={settings.model.split('/').pop()}

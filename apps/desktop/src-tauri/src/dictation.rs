@@ -49,6 +49,14 @@ pub enum DictationProvider {
     OpenRouter,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DictationPermission {
+    Microphone,
+    SpeechRecognition,
+    Accessibility,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DictationConfiguration {
@@ -121,7 +129,9 @@ unsafe extern "C" {
     );
     fn fd_dictation_audio_devices_json() -> *mut std::ffi::c_char;
     fn fd_dictation_free_string(value: *mut std::ffi::c_char);
-    fn fd_dictation_request_permissions(include_speech: bool);
+    fn fd_dictation_request_microphone_permission();
+    fn fd_dictation_request_speech_permission();
+    fn fd_dictation_request_accessibility_permission();
     fn fd_dictation_microphone_permission() -> i32;
     fn fd_dictation_speech_permission() -> i32;
     fn fd_dictation_accessibility_permission() -> bool;
@@ -150,7 +160,7 @@ pub fn create_overlay_window(app: &AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("dictation-window.html".into()),
     )
     .title("FalconDeck Dictation")
-    .inner_size(440.0, 108.0)
+    .inner_size(460.0, 156.0)
     .resizable(false)
     .maximizable(false)
     .minimizable(false)
@@ -290,15 +300,19 @@ pub fn dictation_permission_status() -> DictationPermissionStatus {
 }
 
 #[tauri::command]
-pub fn request_dictation_permissions(include_speech: bool) -> Result<(), String> {
+pub fn request_dictation_permission(permission: DictationPermission) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     unsafe {
-        fd_dictation_request_permissions(include_speech);
+        match permission {
+            DictationPermission::Microphone => fd_dictation_request_microphone_permission(),
+            DictationPermission::SpeechRecognition => fd_dictation_request_speech_permission(),
+            DictationPermission::Accessibility => fd_dictation_request_accessibility_permission(),
+        }
         Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = include_speech;
+        let _ = permission;
         Err("System-wide dictation is currently available on macOS only.".to_string())
     }
 }

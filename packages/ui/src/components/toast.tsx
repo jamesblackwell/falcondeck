@@ -23,9 +23,9 @@ const toastVariants = cva(
     variants: {
       variant: {
         default: 'border-border-default bg-surface-2 text-fg-primary',
-        success: 'border-success/20 bg-success-muted text-success',
-        warning: 'border-warning/20 bg-warning-muted text-warning',
-        danger: 'border-danger/20 bg-danger-muted text-danger',
+        success: 'border-success/20 bg-surface-2 [background-image:linear-gradient(var(--fd-success-muted),var(--fd-success-muted))] text-success',
+        warning: 'border-warning/20 bg-surface-2 [background-image:linear-gradient(var(--fd-warning-muted),var(--fd-warning-muted))] text-warning',
+        danger: 'border-danger/20 bg-surface-2 [background-image:linear-gradient(var(--fd-danger-muted),var(--fd-danger-muted))] text-danger',
       },
     },
     defaultVariants: {

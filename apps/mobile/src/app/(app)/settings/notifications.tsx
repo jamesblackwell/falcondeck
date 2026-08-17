@@ -55,10 +55,10 @@ export default function NotificationSettingsScreen() {
       contentInsetAdjustmentBehavior="automatic"
     >
       {error ? <Text variant="caption" color="danger" style={settingsPageStyles.error}>{error}</Text> : null}
-      <SettingsSection footer="Notification event preferences are stored by the connected daemon. iOS or Android may also require notification permission in system settings.">
+      <SettingsSection footer="Your phone's system settings must allow notifications from FalconDeck as well.">
         <PreferenceSwitch
           label="Push notifications"
-          description="Allow this phone to receive agent attention alerts."
+          description="Let agents get your attention on this phone."
           value={masterEnabled}
           disabled={isUpdating}
           onValueChange={(value) => {
@@ -68,7 +68,10 @@ export default function NotificationSettingsScreen() {
         />
       </SettingsSection>
 
-      <SettingsSection title="Notify me about">
+      <SettingsSection
+        title="Notify me about"
+        footer="Stored on your desktop, so these apply to every device you pair."
+      >
         <PreferenceSwitch
           label="Completed turns"
           value={current.notify_on_turn_complete}

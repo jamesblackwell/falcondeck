@@ -9,7 +9,7 @@ describe("createDaemonApiClient sendTurn", () => {
     const fetchMock = vi.fn<typeof fetch>(
       async () =>
         new Response(
-          JSON.stringify({ configured: true, storage: "os_credential_store" }),
+          JSON.stringify({ configured: true, storage: "daemon_secret_store" }),
           { headers: { "content-type": "application/json" } },
         ),
     );
@@ -22,7 +22,7 @@ describe("createDaemonApiClient sendTurn", () => {
 
     expect(result).toEqual({
       configured: true,
-      storage: "os_credential_store",
+      storage: "daemon_secret_store",
     });
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://daemon.test/api/speech/openrouter-key",

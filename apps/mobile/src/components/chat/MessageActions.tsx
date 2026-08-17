@@ -3,7 +3,7 @@ import { Check, CircleX, Copy } from 'lucide-react-native'
 import { useUnistyles } from 'react-native-unistyles'
 
 import { Button } from '@/components/ui'
-import { useClipboardCopy } from './useClipboardCopy'
+import { useClipboardCopy } from '@/hooks/useClipboardCopy'
 
 function copyTarget(accessibilityLabel: string) {
   const target = accessibilityLabel.replace(/^copy\s+/i, '').trim()

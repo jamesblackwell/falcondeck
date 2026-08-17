@@ -19,7 +19,9 @@ export const PreferenceSwitch = memo(function PreferenceSwitch({
 }) {
   const { theme } = useUnistyles()
   return (
-    <View style={styles.row}>
+    // Dim the whole row while it is off-limits: a disabled iOS switch alone is
+    // a subtle cue, and these rows go dead as a group when push is turned off.
+    <View style={[styles.row, disabled ? styles.disabled : undefined]}>
       <View style={styles.copy}>
         <Text variant="label" color="primary">{label}</Text>
         {description ? (
@@ -32,7 +34,10 @@ export const PreferenceSwitch = memo(function PreferenceSwitch({
         disabled={disabled}
         accessibilityRole="switch"
         accessibilityLabel={label}
+        accessibilityHint={description}
         trackColor={{ false: theme.colors.surface[3], true: theme.colors.accent.default }}
+        // iOS draws the off-track from this rather than trackColor.false.
+        ios_backgroundColor={theme.colors.surface[3]}
         thumbColor={theme.colors.white}
       />
     </View>
@@ -47,9 +52,8 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[4],
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[3],
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border.subtle,
   },
+  disabled: { opacity: 0.45 },
   copy: { flex: 1 },
   description: { marginTop: theme.spacing[1] },
 }))

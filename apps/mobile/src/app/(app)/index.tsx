@@ -48,6 +48,7 @@ import {
   useRelayStore,
   useSessionStore,
   useSelectedThread,
+  useSelectedThreadDetailError,
   useSelectedThreadHistory,
   useConversationItems,
   useSelectedWorkspace,
@@ -120,6 +121,7 @@ export default function HomeScreen() {
   const activeInteractiveRequest = interactiveQueue[0] ?? null;
   const selectedThread = useSelectedThread();
   const selectedThreadHistory = useSelectedThreadHistory();
+  const selectedThreadDetailError = useSelectedThreadDetailError();
   const conversationItems = useConversationItems();
   const workspace = useSelectedWorkspace();
   const selectedThreadId = useSessionStore((s) => s.selectedThreadId);
@@ -159,6 +161,7 @@ export default function HomeScreen() {
     connectionStatus,
     error,
     isEncrypted,
+    hasSyncedOnce,
     machinePresence,
     relayUrl,
     sessionId,
@@ -167,6 +170,7 @@ export default function HomeScreen() {
       connectionStatus: s.connectionStatus,
       error: s.error,
       isEncrypted: s.isEncrypted,
+      hasSyncedOnce: s.hasSyncedOnce,
       machinePresence: s.machinePresence,
       relayUrl: s.relayUrl,
       sessionId: s.sessionId,
@@ -216,6 +220,7 @@ export default function HomeScreen() {
     respondApproval,
     respondInteractive,
     loadThreadDetail,
+    prefetchRecentThreadDetails,
     retryResponse,
   } = useSessionActions();
   const interruptTurn = useInterruptTurn();
@@ -881,6 +886,16 @@ export default function HomeScreen() {
     selectedWorkspaceId,
   ]);
 
+  const handleRetryThreadLoad = useCallback(() => {
+    if (!selectedWorkspaceId || !selectedThreadId) return;
+    setDetailLoadingThreadId(selectedThreadId);
+    void loadThreadDetail(selectedWorkspaceId, selectedThreadId).finally(() => {
+      setDetailLoadingThreadId((current) =>
+        current === selectedThreadId ? null : current,
+      );
+    });
+  }, [loadThreadDetail, selectedThreadId, selectedWorkspaceId]);
+
   const appendImageAttachments = useCallback(
     (
       conversationKey: string,
@@ -1029,6 +1044,14 @@ export default function HomeScreen() {
     selectedThreadId,
     selectedWorkspaceId,
   ]);
+
+  // Warm the handful of most recently updated threads in the background once
+  // the session is encrypted and synced, so tapping between them renders from
+  // cache instantly instead of "Loading thread…".
+  useEffect(() => {
+    if (!isEncrypted || !hasSyncedOnce) return;
+    void prefetchRecentThreadDetails();
+  }, [hasSyncedOnce, isEncrypted, prefetchRecentThreadDetails]);
 
   // Opening a thread starts at the bottom of the cached items via the list's
   // startRenderingFromBottom (the detail-load effect snaps past any newer
@@ -1233,6 +1256,24 @@ export default function HomeScreen() {
             <Text variant="caption" color="muted">
               Loading thread…
             </Text>
+          </View>
+        ) : blocks.length === 0 &&
+          liveActivityGroups.length === 0 &&
+          !isThreadRunning &&
+          selectedThreadDetailError ? (
+          <View style={styles.syncState}>
+            <Text variant="label" color="secondary" weight="semibold">
+              Couldn&apos;t sync this conversation
+            </Text>
+            <Text variant="caption" color="muted" style={styles.syncErrorText}>
+              {selectedThreadDetailError}
+            </Text>
+            <Button
+              variant="ghost"
+              size="sm"
+              label="Try again"
+              onPress={handleRetryThreadLoad}
+            />
           </View>
         ) : blocks.length === 0 &&
           liveActivityGroups.length === 0 &&
@@ -1448,6 +1489,10 @@ const styles = StyleSheet.create((theme) => ({
     alignItems: "center",
     justifyContent: "center",
     gap: theme.spacing[3],
+  },
+  syncErrorText: {
+    textAlign: "center",
+    maxWidth: 260,
   },
   newThreadState: {
     flex: 1,

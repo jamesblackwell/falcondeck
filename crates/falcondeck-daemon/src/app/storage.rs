@@ -561,7 +561,7 @@ pub(super) async fn delete_remote_secrets_async(
 }
 
 /// macOS Keychain access can block indefinitely when the app signature or ACL
-/// changes between builds. Remote connectivity must not depend on an
+/// changes between builds. Pairing and speech must not depend on an
 /// interactive credential-store prompt, so the desktop defaults to an atomic
 /// owner-only file beside the daemon state. Headless hosts can opt into the
 /// same backend with `FALCONDECK_SECRET_FILE`.
@@ -663,17 +663,47 @@ fn write_secret_file(
     Ok(())
 }
 
+/// `None` means this host still uses the OS keyring. `Some` is the file-store
+/// result; a missing key is `Ok(None)`, not an error.
+#[cfg(not(test))]
+pub(super) fn read_secret_file_entry(key: &str) -> Option<Result<Option<String>, DaemonError>> {
+    let path = secret_file_path()?;
+    let _transaction = lock_secret_file_transaction();
+    Some(read_secret_file(&path).map(|entries| entries.get(key).cloned()))
+}
+
+#[cfg(not(test))]
+pub(super) fn write_secret_file_entry(key: &str, value: &str) -> Option<Result<(), DaemonError>> {
+    let path = secret_file_path()?;
+    let _transaction = lock_secret_file_transaction();
+    Some((|| {
+        let mut entries = read_secret_file(&path)?;
+        entries.insert(key.to_string(), value.to_string());
+        write_secret_file(&path, &entries)
+    })())
+}
+
+#[cfg(not(test))]
+pub(super) fn delete_secret_file_entry(key: &str) -> Option<Result<(), DaemonError>> {
+    let path = secret_file_path()?;
+    let _transaction = lock_secret_file_transaction();
+    Some((|| {
+        let mut entries = read_secret_file(&path)?;
+        if entries.remove(key).is_some() {
+            write_secret_file(&path, &entries)?;
+        }
+        Ok(())
+    })())
+}
+
 #[cfg(not(test))]
 pub(super) fn save_remote_secrets_to_secure_storage(
     secure_storage_key: &str,
     secrets: &PersistedRemoteSecrets,
 ) -> Result<(), DaemonError> {
     let payload = serde_json::to_string(secrets)?;
-    if let Some(path) = secret_file_path() {
-        let _transaction = lock_secret_file_transaction();
-        let mut entries = read_secret_file(&path)?;
-        entries.insert(secure_storage_key.to_string(), payload);
-        return write_secret_file(&path, &entries);
+    if let Some(result) = write_secret_file_entry(secure_storage_key, &payload) {
+        return result;
     }
     let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
         .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;
@@ -700,13 +730,10 @@ pub(super) fn save_remote_secrets_to_secure_storage(
 pub(super) fn load_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<PersistedRemoteSecrets, DaemonError> {
-    if let Some(path) = secret_file_path() {
-        let _transaction = lock_secret_file_transaction();
-        let entries = read_secret_file(&path)?;
-        let payload = entries
-            .get(secure_storage_key)
+    if let Some(result) = read_secret_file_entry(secure_storage_key) {
+        let payload = result?
             .ok_or_else(|| DaemonError::NotFound("no persisted remote secrets".to_string()))?;
-        return serde_json::from_str::<PersistedRemoteSecrets>(payload).map_err(|error| {
+        return serde_json::from_str::<PersistedRemoteSecrets>(&payload).map_err(|error| {
             DaemonError::BadRequest(format!("invalid secret file payload: {error}"))
         });
     }
@@ -724,13 +751,8 @@ pub(super) fn load_remote_secrets_from_secure_storage(
 pub(super) fn delete_remote_secrets_from_secure_storage(
     secure_storage_key: &str,
 ) -> Result<(), DaemonError> {
-    if let Some(path) = secret_file_path() {
-        let _transaction = lock_secret_file_transaction();
-        let mut entries = read_secret_file(&path)?;
-        if entries.remove(secure_storage_key).is_some() {
-            write_secret_file(&path, &entries)?;
-        }
-        return Ok(());
+    if let Some(result) = delete_secret_file_entry(secure_storage_key) {
+        return result;
     }
     let entry = keyring::Entry::new("com.falcondeck.daemon.remote", secure_storage_key)
         .map_err(|error| DaemonError::Process(format!("failed to open secure storage: {error}")))?;

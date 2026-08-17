@@ -31,9 +31,9 @@ type BackgroundModelsCardProps = {
 }
 
 /**
- * Thread titles and handoff briefs run on a cheap model out of band. Most
- * users have only one agent CLI installed, so the chain matters more than any
- * single choice — the first provider that is installed and signed in wins.
+ * Thread titles run on a cheap model out of band. Most users have only one
+ * agent CLI installed, so the chain matters more than any single choice —
+ * the first provider that is installed and signed in wins.
  */
 export function BackgroundModelsCard({
   workspace,
@@ -79,7 +79,7 @@ export function BackgroundModelsCard({
           <div className="space-y-1">
             <CardTitle>Background Models</CardTitle>
             <CardDescription>
-              FalconDeck runs its own short, tool-free jobs — thread titles and handoff briefs —
+              FalconDeck runs its own short, tool-free jobs — currently thread titles —
               on the first provider below that is installed and signed in. Pick each provider&apos;s
               cheapest model; leave a model blank to use that CLI&apos;s own default.
             </CardDescription>

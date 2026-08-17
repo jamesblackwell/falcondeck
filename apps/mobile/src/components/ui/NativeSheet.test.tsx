@@ -44,6 +44,18 @@ describe('NativeSheet', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
+  it('offers a close button so the escape hatch does not depend on a gesture', () => {
+    const { renderer, onClose } = renderSheet()
+    const buttons = renderer.root
+      .findAllByType('Pressable' as never)
+      .filter((node) => node.props.accessibilityLabel === 'Close options')
+
+    // Backdrop plus an explicit button.
+    expect(buttons).toHaveLength(2)
+    buttons[1]!.props.onPress()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
   it('closes from a decisive drag down on the grabber and springs back otherwise', () => {
     const { renderer, onClose } = renderSheet()
     const grabberZone = renderer.root

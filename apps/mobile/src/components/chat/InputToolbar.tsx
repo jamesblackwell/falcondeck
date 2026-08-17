@@ -15,7 +15,7 @@ import {
   type ProviderOption,
 } from '@falcondeck/client-core'
 
-import { OptionSheet, Text, type OptionSheetItem } from '@/components/ui'
+import { OptionSheet, ProviderIcon, Text, type OptionSheetItem } from '@/components/ui'
 
 import {
   SANDBOX_DEFAULT_VALUE,
@@ -90,6 +90,7 @@ export const InputToolbar = memo(function InputToolbar({
   onSelectSandboxMode,
   showModePickers = true,
 }: InputToolbarProps) {
+  const { theme } = useUnistyles()
   const [sheet, setSheet] = useState<SheetConfig>(null)
 
   useEffect(() => {
@@ -217,6 +218,11 @@ export const InputToolbar = memo(function InputToolbar({
                     }
                   }}
                 >
+                  <ProviderIcon
+                    provider={p.provider}
+                    size={theme.iconSize.xs}
+                    color={active ? theme.colors.fg.primary : theme.colors.fg.muted}
+                  />
                   <Text
                     variant="caption"
                     color={active ? 'primary' : 'muted'}
@@ -382,6 +388,9 @@ const styles = StyleSheet.create((theme) => ({
     padding: theme.spacing[0.5],
   },
   providerSegment: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[1.5],
     paddingHorizontal: theme.spacing[3],
     paddingVertical: theme.spacing[1.5],
     borderRadius: theme.radius.full,

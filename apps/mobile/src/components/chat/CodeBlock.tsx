@@ -4,7 +4,7 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Check, ChevronDown, ChevronUp, CircleX, Copy } from 'lucide-react-native'
 
 import { Text, Button } from '@/components/ui'
-import { useClipboardCopy } from './useClipboardCopy'
+import { useClipboardCopy } from '@/hooks/useClipboardCopy'
 
 interface CodeBlockProps {
   code: string

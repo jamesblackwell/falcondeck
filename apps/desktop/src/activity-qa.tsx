@@ -146,6 +146,18 @@ const groups: ProjectGroup[] = [
         attention: runningAttention,
       }),
       thread("ws-falcondeck", {
+        id: "t-done-1",
+        title: "Wire the relay reconnect backoff",
+        updated_at: ago(24),
+        attention: { ...unread, unread: false, last_read_seq: 2 },
+      }),
+      thread("ws-falcondeck", {
+        id: "finished-earlier",
+        title: "Bump Expo SDK and re-run the export",
+        updated_at: ago(95),
+        attention: { ...unread, unread: false, last_read_seq: 2 },
+      }),
+      thread("ws-falcondeck", {
         id: "t-run-4",
         title: "why does this happen?",
         status: "running",

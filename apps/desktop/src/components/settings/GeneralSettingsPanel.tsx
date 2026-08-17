@@ -29,6 +29,8 @@ type GeneralSettingsPanelProps = {
   onCheckForUpdates: () => void
   onDownloadUpdate: () => void
   onRestartToInstallUpdate: () => void
+  /** Settings → General rerun control: clears the device-local onboarding flag so the wizard replays on next launch. */
+  onShowOnboardingAtNextLaunch: () => void
 }
 
 export function GeneralSettingsPanel({
@@ -40,6 +42,7 @@ export function GeneralSettingsPanel({
   onCheckForUpdates,
   onDownloadUpdate,
   onRestartToInstallUpdate,
+  onShowOnboardingAtNextLaunch,
 }: GeneralSettingsPanelProps) {
   const current = normalizePreferences(preferences)
   const isChecking = updater.status === 'checking'
@@ -424,6 +427,21 @@ export function GeneralSettingsPanel({
             </div>
           </CardContent>
         ) : null}
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>First-Run Onboarding</CardTitle>
+          <CardDescription>
+            Replay the welcome wizard as a new install would see it. Only the device-local
+            onboarding flag is reset — projects, conversations, keys, and daemon state are untouched.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button type="button" variant="ghost" onClick={onShowOnboardingAtNextLaunch}>
+            Show onboarding at next launch
+          </Button>
+        </CardContent>
       </Card>
     </div>
   )

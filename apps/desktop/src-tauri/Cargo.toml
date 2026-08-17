@@ -26,5 +26,8 @@ tauri-plugin-notification = "2.3.3"
 tauri-plugin-updater = "2.10.1"
 tokio.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mac-usernotifications = "0.3.1"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]

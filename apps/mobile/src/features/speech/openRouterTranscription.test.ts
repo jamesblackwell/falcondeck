@@ -51,11 +51,11 @@ describe('OpenRouter transcription', () => {
   it('reads credential presence without receiving the key', async () => {
     const rpc = vi
       .fn()
-      .mockResolvedValue({ configured: true, storage: 'os_credential_store' })
+      .mockResolvedValue({ configured: true, storage: 'daemon_secret_store' })
     useRelayStore.getState()._callRpc = rpc as typeof originalCallRpc
     await expect(getDesktopSpeechStatus()).resolves.toEqual({
       configured: true,
-      storage: 'os_credential_store',
+      storage: 'daemon_secret_store',
     })
     expect(rpc).toHaveBeenCalledWith('speech.status', {}, { timeoutMs: 8_000 })
   })

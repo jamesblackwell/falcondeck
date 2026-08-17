@@ -53,7 +53,7 @@ export default function SettingsScreen() {
       <SettingsSection>
         <SettingsRow
           label="Connections"
-          detail="Pairing, relay status, and encryption"
+          detail="Pairing and encryption"
           value={connectionLabel(
             connectionStatus,
             isEncrypted,
@@ -69,20 +69,20 @@ export default function SettingsScreen() {
       <SettingsSection title="Preferences">
         <SettingsRow
           label="Appearance"
-          detail="Light and dark themes, and text size"
+          detail="Themes and text size"
           value={appearanceValue}
           icon={<Palette size={theme.iconSize.sm} color={theme.colors.accent.default} />}
           onPress={() => router.push('/(app)/settings/appearance')}
         />
         <SettingsRow
           label="Conversation"
-          detail="Tool activity, thinking, and expansion rules"
+          detail="How much of the agent's work you see"
           icon={<MessageSquareText size={theme.iconSize.sm} color={theme.colors.warning.default} />}
           onPress={() => router.push('/(app)/settings/conversation')}
         />
         <SettingsRow
           label="Notifications"
-          detail="Choose which agent events alert this phone"
+          detail="Which agent events alert this phone"
           value={notificationValue}
           icon={<Bell size={theme.iconSize.sm} color={theme.colors.danger.default} />}
           onPress={() => router.push('/(app)/settings/notifications')}
@@ -98,7 +98,7 @@ export default function SettingsScreen() {
       <SettingsSection>
         <SettingsRow
           label="About FalconDeck"
-          detail="Version and mobile connection model"
+          detail="Version and build"
           icon={<Info size={theme.iconSize.sm} color={theme.colors.fg.muted} />}
           onPress={() => router.push('/(app)/settings/about')}
         />

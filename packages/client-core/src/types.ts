@@ -1692,5 +1692,5 @@ export type RelayClientMessage =
 
 export type SpeechCredentialStatus = {
   configured: boolean;
-  storage: "os_credential_store";
+  storage: "daemon_secret_store";
 };

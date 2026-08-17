@@ -60,20 +60,24 @@ character happens to land on the column edge.
 
 ## Measure
 
-Desktop caps **prose** at `--fd-measure` while code blocks, diffs, and tables
-keep the full transcript column. The mixed measure is deliberate — it is what
-good technical publishing does, and the 3xl transcript column runs to roughly
-90 characters per line if sentences are left unconstrained.
+Desktop prose fills the transcript column: `--fd-measure` is `none`.
 
-The measure is `calc(35 * var(--fd-text-md))` — about 70 characters, since
-average character width in running text is roughly half the font size. It is
-deliberately *not* written in `ch`: that unit resolves against each element's
-own font size, so headings would end up with a wider measure than the
-paragraphs below them, and `1ch` (the width of "0") is wider than the average
-character, so `70ch` would have produced a line of roughly 85.
+A narrower measure was tried first (`calc(35 * var(--fd-text-md))`, about 70
+characters) on the reasoning that the 3xl column runs to roughly 90 characters
+per line. It was reverted because the column and the composer are both
+`max-w-3xl` with the same padding, so capping prose left its right edge short
+of the input box directly below it — which reads as a bug, not as typography.
+Alignment with the composer won over line length.
 
-Mobile has no equivalent: the screen is already inside a comfortable measure,
-and the user bubble is capped at 80% width.
+To reinstate a book measure, set `--fd-measure` to a length; code blocks,
+diffs, and tables are already exempt and keep the full column either way.
+Express it as a length rather than in `ch`: that unit resolves against each
+element's own font size, so headings would get a wider measure than the
+paragraphs below them, and `1ch` (the width of "0") exceeds the average
+character, so `70ch` yields a line of roughly 85.
+
+Mobile has no measure: the screen is already inside a comfortable one, and the
+user bubble is capped at 80% width.
 
 ## Fonts
 
@@ -108,7 +112,8 @@ Mobile does not tokenize; its code blocks are plain monospace text.
 ## Intentional divergences
 
 - Mobile's size ramp sits one step above web's (see above).
-- Desktop constrains prose measure; mobile does not.
+- Neither platform constrains prose measure: desktop prose aligns with the
+  composer, mobile fits the screen.
 - Desktop balances heading wraps and uses `text-wrap: pretty` on prose; React
   Native has no equivalent.
 - Mobile draws its task-list checkbox and tick natively; desktop restyles the

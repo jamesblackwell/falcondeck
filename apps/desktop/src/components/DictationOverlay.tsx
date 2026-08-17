@@ -5,11 +5,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Check, Mic, RotateCcw, Trash2, X } from "lucide-react";
 
 type DictationState =
-  | "recording"
-  | "transcribing"
-  | "completed"
-  | "failed"
-  | "cancelled";
+  "recording" | "transcribing" | "completed" | "failed" | "cancelled";
 
 type DictationEvent = {
   state: DictationState;
@@ -79,33 +75,42 @@ export function DictationOverlay() {
         aria-live="polite"
       >
         {failed ? (
-          <div className="flex items-start gap-3">
-            <span className="mt-0.5 rounded-full bg-danger-muted p-1.5 text-danger">
-              <X aria-hidden="true" className="h-4 w-4" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
-                {label}
-              </p>
-              <p className="mt-0.5 line-clamp-2 text-[length:var(--fd-text-xs)] text-fg-muted">
-                {event.error}
-              </p>
+          <>
+            <div className="flex items-start gap-3">
+              <span className="mt-0.5 rounded-full bg-danger-muted p-1.5 text-danger">
+                <X aria-hidden="true" className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                  {label}
+                </p>
+                <p className="mt-0.5 line-clamp-2 text-[length:var(--fd-text-xs)] text-fg-muted">
+                  {event.error}
+                </p>
+                {event.retainedAudio ? (
+                  <p className="mt-1 text-[length:var(--fd-text-xs)] text-fg-tertiary">
+                    Your recording is safe until you retry or discard it.
+                  </p>
+                ) : null}
+              </div>
             </div>
-            <div className="flex shrink-0 gap-1">
+            <div className="mt-3 flex justify-end gap-2">
               {event.retainedAudio ? (
                 <button
                   type="button"
-                  className="fd-focus rounded-[var(--fd-radius-md)] p-2 text-fg-secondary hover:bg-surface-3 hover:text-fg-primary"
-                  aria-label="Retry transcription"
+                  className="fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] bg-accent px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-on-accent hover:bg-accent-hover"
                   onClick={() => void invoke("retry_dictation")}
                 >
                   <RotateCcw aria-hidden="true" className="h-4 w-4" />
+                  Retry transcription
                 </button>
               ) : null}
               <button
                 type="button"
-                className="fd-focus rounded-[var(--fd-radius-md)] p-2 text-fg-secondary hover:bg-surface-3 hover:text-danger"
-                aria-label={event.retainedAudio ? "Discard recording" : "Dismiss"}
+                className="fd-focus inline-flex items-center gap-2 rounded-[var(--fd-radius-md)] px-3 py-2 text-[length:var(--fd-text-xs)] font-medium text-fg-secondary hover:bg-surface-3 hover:text-danger"
+                aria-label={
+                  event.retainedAudio ? "Discard recording" : "Dismiss"
+                }
                 onClick={() => void invoke("discard_dictation")}
               >
                 {event.retainedAudio ? (
@@ -113,9 +118,10 @@ export function DictationOverlay() {
                 ) : (
                   <X aria-hidden="true" className="h-4 w-4" />
                 )}
+                {event.retainedAudio ? "Discard recording" : "Dismiss"}
               </button>
             </div>
-          </div>
+          </>
         ) : (
           <>
             <span className="flex h-8 w-8 items-center justify-center rounded-full bg-surface-3 text-fg-primary">

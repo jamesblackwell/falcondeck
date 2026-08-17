@@ -197,13 +197,17 @@ vi.mock("./components/DesktopShell", () => ({
     sidebar,
     main,
     rail,
+    sidebarVisible,
   }: {
     sidebar: React.ReactNode;
     main: React.ReactNode;
     rail?: React.ReactNode;
+    sidebarVisible?: boolean;
   }) => (
     <div>
-      <aside>{sidebar}</aside>
+      <aside data-testid="sidebar" data-visible={String(sidebarVisible)}>
+        {sidebar}
+      </aside>
       <main>{main}</main>
       {rail ? <div data-testid="rail">{rail}</div> : null}
     </div>
@@ -243,6 +247,26 @@ describe("Activity takeover wiring", () => {
     });
     expect(screen.getByText("Conversation pane")).toBeInTheDocument();
     expect(await screen.findByText("Diff rail")).toBeInTheDocument();
+  });
+
+  it("gives settings the whole window and restores the sidebar on close", async () => {
+    render(<App />);
+    expect(screen.getByTestId("sidebar")).toHaveAttribute("data-visible", "true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByText("Back to app")).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar")).toHaveAttribute(
+      "data-visible",
+      "false",
+    );
+
+    fireEvent.click(screen.getByText("Back to app"));
+    await waitFor(() => {
+      expect(screen.getByTestId("sidebar")).toHaveAttribute(
+        "data-visible",
+        "true",
+      );
+    });
   });
 
   it("opens declarative extension panels through the main-view registry", async () => {

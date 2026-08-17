@@ -13,18 +13,18 @@ import { Text } from '@/components/ui'
 import { useRelayStore, useSessionStore } from '@/store'
 
 const TOOL_DETAIL_OPTIONS: Array<{ value: ToolDetailsMode; label: string; description: string }> = [
-  { value: 'collapsed', label: 'Hidden', description: 'Fold tool activity behind compact work summaries.' },
-  { value: 'auto', label: 'Auto', description: 'Open high-signal activity and collapse repetitive inspection.' },
-  { value: 'compact', label: 'Compact', description: 'Prefer grouped summaries while keeping artifacts visible.' },
-  { value: 'expanded', label: 'Expanded', description: 'Keep raw tool output open for dense debugging.' },
-  { value: 'hide_read_only_details', label: 'Hide read-only details', description: 'Summarize inspection without rendering raw output.' },
+  { value: 'collapsed', label: 'Hidden', description: 'Fold every tool call into a short work summary.' },
+  { value: 'auto', label: 'Auto', description: 'Open what matters; fold routine reads and searches.' },
+  { value: 'compact', label: 'Compact', description: 'Group the routine work, keep diffs and results in view.' },
+  { value: 'expanded', label: 'Expanded', description: 'Keep every tool call open, output and all.' },
+  { value: 'hide_read_only_details', label: 'Hide read-only details', description: 'Say what was read without showing the contents.' },
 ]
 
 const THINKING_OPTIONS: Array<{ value: ThinkingDisplay; label: string; description: string }> = [
   { value: 'auto', label: 'Auto', description: 'Expand while streaming, then collapse when complete.' },
   { value: 'preview', label: 'Preview', description: 'Keep a short faded reasoning preview visible.' },
-  { value: 'always_expanded', label: 'Always expanded', description: 'Show reasoning in full.' },
-  { value: 'always_collapsed', label: 'Always collapsed', description: 'Keep reasoning closed until you open it.' },
+  { value: 'always_expanded', label: 'Always expanded', description: 'Show the full reasoning, always.' },
+  { value: 'always_collapsed', label: 'Always collapsed', description: 'Keep reasoning closed until you tap it.' },
 ]
 
 export default function ConversationSettingsScreen() {
@@ -55,7 +55,7 @@ export default function ConversationSettingsScreen() {
       contentInsetAdjustmentBehavior="automatic"
     >
       {error ? <Text variant="caption" color="danger" style={settingsPageStyles.error}>{error}</Text> : null}
-      <SettingsSection title="Tool activity" footer="These preferences are stored by the connected daemon and shared with its other clients.">
+      <SettingsSection title="Tool activity" footer="Stored on your desktop, so this applies everywhere you use FalconDeck.">
         {TOOL_DETAIL_OPTIONS.map((option) => (
           <ChoiceRow
             key={option.value}
@@ -83,21 +83,22 @@ export default function ConversationSettingsScreen() {
 
       <SettingsSection title="Transcript behavior">
         <PreferenceSwitch
-          label="Group read-only tool bursts"
-          description="Combine consecutive searches and file reads into compact summaries."
+          label="Group repeated lookups"
+          description="Combine back-to-back searches and file reads into one summary."
           value={current.group_read_only_tools}
           disabled={isUpdating}
           onValueChange={(value) => void update({ group_read_only_tools: value })}
         />
         <PreferenceSwitch
           label="Auto-open errors"
-          description="Applies to the summarizing views; the collapsed view always folds failed calls in with the rest of the tool activity."
+          description="Expand failed tool calls. Hidden keeps them folded away."
           value={current.auto_expand.errors}
           disabled={isUpdating}
           onValueChange={(value) => void update({ auto_expand: { errors: value } })}
         />
         <PreferenceSwitch
           label="Auto-open failed tests"
+          description="Expand a test run as soon as something fails."
           value={current.auto_expand.failed_tests}
           disabled={isUpdating}
           onValueChange={(value) => void update({ auto_expand: { failed_tests: value } })}

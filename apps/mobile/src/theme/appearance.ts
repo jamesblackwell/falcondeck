@@ -3,6 +3,7 @@
  * Persisted in MMKV so unistyles can be configured synchronously at boot
  * (before first render), then updated live from the settings screen.
  */
+import { Appearance } from 'react-native'
 import { UnistylesRuntime } from 'react-native-unistyles'
 import { create } from 'zustand'
 
@@ -260,6 +261,16 @@ function persist(next: MobileAppearance) {
   setJson(STORAGE_KEY, next)
 }
 
+/**
+ * Point the platform's own trait collection at the chosen mode. Native chrome
+ * we do not draw — the stack header, alerts, the keyboard, the status bar —
+ * follows the OS appearance, not our theme, so picking Dark inside a phone set
+ * to Light used to leave a white nav bar above a black screen.
+ */
+export function applyNativeColorScheme(mode: ThemeModeSetting) {
+  Appearance.setColorScheme(mode === 'system' ? null : mode)
+}
+
 export const useAppearanceStore = create<AppearanceStore>((set, get) => ({
   ...readAppearance(),
 
@@ -273,6 +284,7 @@ export const useAppearanceStore = create<AppearanceStore>((set, get) => ({
       UnistylesRuntime.setAdaptiveThemes(false)
       UnistylesRuntime.setTheme(next.themeMode)
     }
+    applyNativeColorScheme(next.themeMode)
   },
 
   setLightColorTheme: (lightColorTheme) => {

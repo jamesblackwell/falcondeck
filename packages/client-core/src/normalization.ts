@@ -2137,7 +2137,7 @@ export function normalizePreferences(value: unknown): FalconDeckPreferences {
 
 /** Older daemons omit utility models entirely, so an absent or malformed
  * section falls back to the shipped chain rather than disabling background
- * titles and handoff briefs. */
+ * titles. */
 function normalizeUtilityModelPreferences(
   value: unknown,
 ): UtilityModelPreferences {

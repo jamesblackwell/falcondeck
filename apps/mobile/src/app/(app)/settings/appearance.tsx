@@ -101,9 +101,6 @@ export default function AppearanceSettingsScreen() {
             />
           </View>
         </SettingsSection>
-        <Text variant="meta">
-          FalconDeck keeps its mobile font choices intentionally native and readable rather than copying desktop font controls.
-        </Text>
       </ScrollView>
       {pickingTheme ? (
         <OptionSheet

@@ -3832,6 +3832,32 @@ pub(super) async fn mark_thread_unread(
     Ok(thread)
 }
 
+pub(crate) fn queued_attachment_preview_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"BM") {
+        Some("image/bmp")
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        Some("image/tiff")
+    } else if bytes.len() >= 12
+        && &bytes[4..8] == b"ftyp"
+        && matches!(
+            &bytes[8..12],
+            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1"
+        )
+    {
+        Some("image/heic")
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -4085,7 +4111,10 @@ mod tests {
                 stale.summary.last_error = Some(SHUTDOWN_INTERRUPTED_TURN_ERROR.to_string());
                 stale
             }),
-            ("idle".to_string(), managed_thread("idle", ThreadStatus::Idle)),
+            (
+                "idle".to_string(),
+                managed_thread("idle", ThreadStatus::Idle),
+            ),
         ]);
         let previous = HashMap::from([
             (
@@ -4977,31 +5006,5 @@ mod tests {
             Some("image/jpeg")
         );
         assert_eq!(queued_attachment_preview_mime_type(b"not an image"), None);
-    }
-}
-
-pub(crate) fn queued_attachment_preview_mime_type(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        Some("image/png")
-    } else if bytes.starts_with(b"\xff\xd8\xff") {
-        Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
-    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
-        Some("image/webp")
-    } else if bytes.starts_with(b"BM") {
-        Some("image/bmp")
-    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
-        Some("image/tiff")
-    } else if bytes.len() >= 12
-        && &bytes[4..8] == b"ftyp"
-        && matches!(
-            &bytes[8..12],
-            b"heic" | b"heix" | b"hevc" | b"hevx" | b"mif1"
-        )
-    {
-        Some("image/heic")
-    } else {
-        None
     }
 }

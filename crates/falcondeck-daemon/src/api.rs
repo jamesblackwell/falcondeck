@@ -16,7 +16,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ApprovalResponseRequest, ClientActivityRequest, ConnectWorkspaceRequest,
-    CreateScheduledTaskRequest, ForkThreadRequest, HandoffBriefRequest, InteractiveResponseRequest,
+    CreateScheduledTaskRequest, ForkThreadRequest, InteractiveResponseRequest,
     InvokeExtensionActionRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
     SnapshotRequest, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
     ThreadDetailMode, ThreadDetailRequest, UnifiedEvent, UpdateExtensionRequest,
@@ -200,10 +200,6 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/threads/{thread_id}/review",
             post(start_review),
-        )
-        .route(
-            "/api/workspaces/{workspace_id}/threads/{thread_id}/handoff-brief",
-            post(handoff_brief),
         )
         .route(
             "/api/workspaces/{workspace_id}/interactive-requests/{request_id}/respond",
@@ -487,16 +483,6 @@ async fn connect_workspace(
     Json(request): Json<ConnectWorkspaceRequest>,
 ) -> Result<Json<falcondeck_core::WorkspaceSummary>, DaemonError> {
     Ok(Json(state.connect_workspace(request).await?))
-}
-
-async fn handoff_brief(
-    State(state): State<AppState>,
-    Path((workspace_id, thread_id)): Path<(String, String)>,
-    Json(mut request): Json<HandoffBriefRequest>,
-) -> Result<Json<falcondeck_core::HandoffBriefResponse>, DaemonError> {
-    request.workspace_id = workspace_id;
-    request.thread_id = thread_id;
-    Ok(Json(state.handoff_brief(request).await?))
 }
 
 async fn collaboration_modes(

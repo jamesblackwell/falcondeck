@@ -217,15 +217,16 @@
      vertically, so prose leading leaves a block looking loose. */
   --fd-leading-code: 1.55;
 
-  /* Comfortable reading measure for prose: ~70 characters, the length books
-     settle on. Derived from the body step rather than expressed in `ch` so it
-     is one absolute width for every prose element — `ch` resolves against each
-     element's own font size, which would hand headings a wider measure than
-     the paragraphs beneath them. Average character width in running text is
-     about half the font size, so 35 body-steps ≈ 70 characters.
-     The transcript column stays wider than this on purpose: code, diffs, and
-     tables use its full width while sentences stay inside the measure. */
-  --fd-measure: calc(35 * var(--fd-text-md));
+  /* Prose fills the transcript column so its right edge lines up with the
+     composer below it — both are max-w-3xl with the same padding, and prose
+     stopping short of the input box read as a mistake rather than as a
+     reading measure.
+     Set this to a length (e.g. `calc(35 * var(--fd-text-md))`, roughly 70
+     characters) to reinstate a book measure for prose while code, diffs, and
+     tables keep the full column. Expressed as a length, not `ch`: that unit
+     resolves against each element's own font size, which would hand headings
+     a wider measure than the paragraphs beneath them. */
+  --fd-measure: none;
 
   --fd-tracking-tight: -0.01em;
   --fd-tracking-normal: 0;
@@ -1244,6 +1245,27 @@ body {
   50% {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+/* === Voice recording waveform === */
+@keyframes fd-voice-bar {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.fd-voice-bar {
+  animation: fd-voice-bar 1s ease-in-out infinite;
+  transform-origin: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .fd-voice-bar {
+    animation: none;
+    transform: scaleY(0.6);
   }
 }
 

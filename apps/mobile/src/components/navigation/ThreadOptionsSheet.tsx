@@ -172,7 +172,6 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
                 {thread.is_pinned ? 'Unpin' : 'Pin'}
               </Text>
             </View>
-            <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
           </Pressable>
           <Pressable
             style={styles.item}
@@ -184,6 +183,8 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
               <Pencil size={theme.iconSize.sm} color={theme.colors.fg.secondary} />
               <Text variant="label" color="primary">Rename</Text>
             </View>
+            {/* The only row that opens something rather than acting on the
+                thread, so it is the only one that earns a chevron. */}
             <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
           </Pressable>
           {canMarkUnread ? (
@@ -198,7 +199,6 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
                 <View style={styles.unreadDot} />
                 <Text variant="label" color="primary">Mark as unread</Text>
               </View>
-              <ChevronRight size={theme.iconSize.xs} color={theme.colors.fg.muted} />
             </Pressable>
           ) : null}
           <Pressable
@@ -212,7 +212,6 @@ export const ThreadOptionsSheet = memo(function ThreadOptionsSheet({
               <Archive size={theme.iconSize.sm} color={theme.colors.danger.default} />
               <Text variant="label" color="danger">Archive</Text>
             </View>
-            <ChevronRight size={theme.iconSize.xs} color={theme.colors.danger.default} />
           </Pressable>
           {actionError ? (
             <Text variant="caption" color="danger" style={styles.errorText}>

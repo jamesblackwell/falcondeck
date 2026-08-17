@@ -82,6 +82,24 @@ describe('DesktopShell panel collapse', () => {
     await waitFor(() => expect(shell?.hasAttribute('data-animating')).toBe(false))
   })
 
+  it('keeps the rail panel in the group when a takeover view supplies no rail', () => {
+    const { container, rerender } = renderShell({ sidebarVisible: false, railVisible: true })
+    expect(container.querySelector('[data-panel]#rail')).not.toBeNull()
+
+    // A takeover view (settings, activity) drops the rail. If the panel left
+    // the group, the group would re-normalise and pop the sidebar back open.
+    rerender(
+      <DesktopShell
+        sidebar={<div>sidebar content</div>}
+        main={<div>main content</div>}
+        sidebarVisible={false}
+        railVisible
+      />,
+    )
+    expect(container.querySelector('[data-panel]#rail')).not.toBeNull()
+    expect(screen.queryByText('rail content')).not.toBeInTheDocument()
+  })
+
   it('tears the rail contents down once its close animation finishes', async () => {
     const { rerender } = renderShell({ sidebarVisible: true, railVisible: true })
     expect(screen.getByText('rail content')).toBeInTheDocument()

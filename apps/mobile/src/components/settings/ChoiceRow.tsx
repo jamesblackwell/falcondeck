@@ -21,7 +21,11 @@ export const ChoiceRow = memo(function ChoiceRow({
   const { theme } = useUnistyles()
   return (
     <Pressable
-      style={({ pressed }) => [styles.row, pressed ? styles.pressed : undefined]}
+      style={({ pressed }) => [
+        styles.row,
+        pressed ? styles.pressed : undefined,
+        disabled ? styles.disabled : undefined,
+      ]}
       onPress={onPress}
       disabled={disabled}
       accessibilityRole="radio"
@@ -47,10 +51,9 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[4],
     paddingHorizontal: theme.spacing[4],
     paddingVertical: theme.spacing[3],
-    borderBottomWidth: 1,
-    borderBottomColor: theme.colors.border.subtle,
   },
   pressed: { backgroundColor: theme.colors.surface[2] },
+  disabled: { opacity: 0.45 },
   copy: { flex: 1 },
   description: { marginTop: theme.spacing[1] },
 }))

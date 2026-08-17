@@ -23,6 +23,7 @@ export {
 export * from "./components/goal-control";
 export * from "./components/composer-context-bar";
 export * from "./components/model-selector";
+export * from "./components/provider-icon";
 export * from "./components/new-thread-state";
 export * from "./components/prompt-input";
 export * from "./components/plan-bar";

@@ -81,22 +81,21 @@ export function DesktopShell({
       <ResizablePanel minSize="400px" id="main">
         {main}
       </ResizablePanel>
-      {rail ? (
-        <>
-          <ResizeHandle collapsed={!railOpen} />
-          <ResizableSidePanel
-            id="rail"
-            side="right"
-            open={railOpen}
-            defaultSize="25%"
-            minSize="280px"
-            contentWidth="280px"
-            onCollapsedByDrag={onRailCollapsedByDrag}
-          >
-            {railMounted ? rail : null}
-          </ResizableSidePanel>
-        </>
-      ) : null}
+      {/* The rail panel stays in the group even with no rail to show. Taking
+          it out re-normalises the group's sizes, which springs a collapsed
+          sidebar back open the moment a takeover view hides the rail. */}
+      <ResizeHandle collapsed={!railOpen} />
+      <ResizableSidePanel
+        id="rail"
+        side="right"
+        open={railOpen}
+        defaultSize="25%"
+        minSize="280px"
+        contentWidth="280px"
+        onCollapsedByDrag={onRailCollapsedByDrag}
+      >
+        {rail && railMounted ? rail : null}
+      </ResizableSidePanel>
     </ResizableShell>
   )
 }

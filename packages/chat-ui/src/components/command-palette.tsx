@@ -144,6 +144,39 @@ function normalizeSearchFields(search: PaletteSearchFields): PaletteSearchFields
   }
 }
 
+type CachedThreadSearchFields = {
+  title: string
+  secondary: string
+  keywords: string
+  fields: PaletteSearchFields
+}
+
+/**
+ * Thread search fields survive every snapshot update while a thread streams,
+ * and NFKD normalization is not free at scale. Cache the normalized result per
+ * thread id and only redo it when a raw input actually changed.
+ */
+function cachedThreadSearchFields(
+  cache: Map<string, CachedThreadSearchFields>,
+  threadId: string,
+  title: string,
+  secondary: string,
+  keywords: string,
+): PaletteSearchFields {
+  const cached = cache.get(threadId)
+  if (
+    cached &&
+    cached.title === title &&
+    cached.secondary === secondary &&
+    cached.keywords === keywords
+  ) {
+    return cached.fields
+  }
+  const fields = normalizeSearchFields({ primary: title, secondary, keywords })
+  cache.set(threadId, { title, secondary, keywords, fields })
+  return fields
+}
+
 function fieldScore(query: string, target: string): number | null {
   if (!target) return null
   if (target === query) return 0
@@ -259,6 +292,7 @@ export const CommandPalette = memo(function CommandPalette({
   const listRef = useRef<HTMLDivElement | null>(null)
   const returnFocusRef = useRef<HTMLElement | null>(null)
   const consumedOpenRequestKeyRef = useRef<number | undefined>(undefined)
+  const searchFieldsCacheRef = useRef(new Map<string, CachedThreadSearchFields>())
   const listId = useId()
   const appearance = useAppearance()
 
@@ -312,6 +346,7 @@ export const CommandPalette = memo(function CommandPalette({
   const items = useMemo<PaletteItem[]>(() => {
     if (!open) return []
     const result: PaletteItem[] = []
+    const searchCache = searchFieldsCacheRef.current
 
     // Unread threads get their own section, then the remaining threads are
     // ordered by actionable/running status. The running bucket stays stable
@@ -334,6 +369,11 @@ export const CommandPalette = memo(function CommandPalette({
       })
       .sort((a, b) => PRIORITY_THREAD_COMPARATOR(a.thread, b.thread))
 
+    const liveThreadIds = new Set(threads.map(({ thread }) => thread.id))
+    for (const id of searchCache.keys()) {
+      if (!liveThreadIds.has(id)) searchCache.delete(id)
+    }
+
     for (const { group, thread, projectLabel: label, unread, status } of threads) {
       if (!unread) continue
 
@@ -345,11 +385,13 @@ export const CommandPalette = memo(function CommandPalette({
         sublabel: label,
         icon: threadPaletteIcon(status),
         status,
-        search: normalizeSearchFields({
-          primary: thread.title,
-          secondary: `${label} ${group.workspace.path}`,
-          keywords: `unread chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
-        }),
+        search: cachedThreadSearchFields(
+          searchCache,
+          thread.id,
+          thread.title,
+          `${label} ${group.workspace.path}`,
+          `unread chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
+        ),
         unread: true,
         run: () => onSelectThread(group.workspace.id, thread.id),
       })
@@ -366,11 +408,13 @@ export const CommandPalette = memo(function CommandPalette({
         sublabel: label,
         icon: threadPaletteIcon(status),
         status,
-        search: normalizeSearchFields({
-          primary: thread.title,
-          secondary: `${label} ${group.workspace.path}`,
-          keywords: `chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
-        }),
+        search: cachedThreadSearchFields(
+          searchCache,
+          thread.id,
+          thread.title,
+          `${label} ${group.workspace.path}`,
+          `chat conversation thread ${status.label} ${thread.provider} ${thread.status} ${thread.variant?.branch ?? ''} ${thread.id} ${thread.native_session_id ?? ''}`,
+        ),
         run: () => onSelectThread(group.workspace.id, thread.id),
       })
     }
@@ -575,6 +619,7 @@ export const CommandPalette = memo(function CommandPalette({
   if (!open || typeof document === 'undefined') return null
 
   let lastSection: PaletteItem['section'] | null = null
+  const isSearching = query.trim().length > 0
 
   return createPortal(
     <div
@@ -588,7 +633,7 @@ export const CommandPalette = memo(function CommandPalette({
         aria-modal="true"
         aria-label="Command palette"
         onKeyDown={handleKeyDown}
-        className="mx-auto mt-[12vh] w-full max-w-lg overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-xl)]"
+        className="mx-auto mt-[12vh] w-full max-w-xl overflow-hidden rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 shadow-[var(--fd-shadow-xl)]"
       >
         <div className="flex items-center gap-2 border-b border-border-subtle px-3 py-2.5">
           <Search aria-hidden="true" className="h-4 w-4 shrink-0 text-fg-muted" />
@@ -611,14 +656,17 @@ export const CommandPalette = memo(function CommandPalette({
         <span className="sr-only" role="status" aria-live="polite">
           {filtered.length} {filtered.length === 1 ? 'result' : 'results'}
         </span>
-        <div id={listId} role="listbox" ref={listRef} className="max-h-[46vh] overflow-y-auto p-1.5">
+        <div id={listId} role="listbox" ref={listRef} className="max-h-[52vh] overflow-y-auto p-1.5">
           {filtered.length === 0 ? (
             <p className="px-2.5 py-6 text-center text-[length:var(--fd-text-sm)] text-fg-muted">
               No matches
             </p>
           ) : null}
           {filtered.map((item, index) => {
-            const showHeader = item.section !== lastSection
+            // While searching the list is pure relevance order, so section
+            // headers would only repeat and push results apart. Sections stay
+            // for the unfiltered browse view.
+            const showHeader = !isSearching && item.section !== lastSection
             lastSection = item.section
             return (
               <React.Fragment key={item.id}>

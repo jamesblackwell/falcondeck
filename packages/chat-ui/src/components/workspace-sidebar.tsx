@@ -147,6 +147,11 @@ type PriorityQueueState = {
   order: number;
 };
 
+type StableRecencyState = {
+  key: string;
+  wasRunning: boolean;
+};
+
 const summaryKey = (thread: ThreadSummary) => thread.id;
 const summaryThread = (thread: ThreadSummary) => thread;
 
@@ -233,6 +238,55 @@ function useStablePriorityOrder<Item>(
   }, [active, items, keyFor, selectedThreadId, threadFor]);
 }
 
+/**
+ * A running thread's updated_at bumps with every streamed event, which would
+ * otherwise make Last updated rows constantly swap places mid-list. Freeze the
+ * sort key while a thread stays running — it keeps the recency slot it had
+ * when the turn started — and let it settle to its final position once done.
+ * Idle threads still rise immediately on real activity.
+ */
+function useStableRecencyOrder<Item>(
+  items: Item[],
+  active: boolean,
+  keyFor: (item: Item) => string,
+  threadFor: (item: Item) => ThreadSummary,
+) {
+  const keyStateRef = useRef(new Map<string, StableRecencyState>());
+
+  return useMemo(() => {
+    if (!active) return items;
+
+    const liveIds = new Set(items.map(keyFor));
+    for (const id of keyStateRef.current.keys()) {
+      if (!liveIds.has(id)) keyStateRef.current.delete(id);
+    }
+
+    for (const item of items) {
+      const id = keyFor(item);
+      const thread = threadFor(item);
+      const running = thread.status === "running";
+      const previous = keyStateRef.current.get(id);
+      // Only freeze a key that was captured while running; the first running
+      // snapshot (turn start) and the settling one (turn end) both count as
+      // real movement.
+      if (previous && running && previous.wasRunning) continue;
+      keyStateRef.current.set(id, {
+        key: thread.updated_at,
+        wasRunning: running,
+      });
+    }
+
+    return [...items].sort((left, right) => {
+      const leftKey = keyStateRef.current.get(keyFor(left))?.key ?? "";
+      const rightKey = keyStateRef.current.get(keyFor(right))?.key ?? "";
+      return (
+        (rightKey < leftKey ? -1 : rightKey > leftKey ? 1 : 0) ||
+        keyFor(left).localeCompare(keyFor(right))
+      );
+    });
+  }, [active, items, keyFor, threadFor]);
+}
+
 const ThreadList = memo(function ThreadList({
   group,
   sortMode,
@@ -269,12 +323,20 @@ const ThreadList = memo(function ThreadList({
     summaryKey,
     summaryThread,
   );
+  const stableRecencyThreads = useStableRecencyOrder(
+    unpinned,
+    sortMode === "last_updated",
+    summaryKey,
+    summaryThread,
+  );
   const unpinnedThreads = useMemo(
     () =>
       sortMode === "priority"
         ? stablePriorityThreads
-        : [...unpinned].sort(compareThreads(sortMode)),
-    [sortMode, stablePriorityThreads, unpinned],
+        : sortMode === "last_updated"
+          ? stableRecencyThreads
+          : [...unpinned].sort(compareThreads(sortMode)),
+    [sortMode, stablePriorityThreads, stableRecencyThreads, unpinned],
   );
 
   const visible = unpinnedThreads.slice(0, visibleCount);
@@ -1163,13 +1225,20 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     pinnedEntryKey,
     pinnedEntryThread,
   );
+  const stablePinnedRecency = useStableRecencyOrder(
+    pinnedCandidates,
+    threadSort === "last_updated",
+    pinnedEntryKey,
+    pinnedEntryThread,
+  );
   const pinnedThreads = useMemo(() => {
     if (threadSort === "priority") return stablePinnedThreads;
+    if (threadSort === "last_updated") return stablePinnedRecency;
     const compare = compareThreads(threadSort);
     return [...pinnedCandidates].sort((left, right) =>
       compare(left.thread, right.thread),
     );
-  }, [pinnedCandidates, stablePinnedThreads, threadSort]);
+  }, [pinnedCandidates, stablePinnedRecency, stablePinnedThreads, threadSort]);
 
   // Starting a thread should never depend on first picking a project: the
   // selected one is the obvious target, and the top of the list stands in

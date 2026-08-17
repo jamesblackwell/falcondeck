@@ -5,6 +5,15 @@
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true
 
+// React Native provides this; Node does not. Components that defer work by a
+// frame (scrolling a freshly laid-out list into view) would otherwise throw.
+if (typeof globalThis.requestAnimationFrame !== 'function') {
+  globalThis.requestAnimationFrame = ((callback: FrameRequestCallback) =>
+    setTimeout(() => callback(0), 0) as unknown as number) as typeof requestAnimationFrame
+  globalThis.cancelAnimationFrame = ((handle: number) =>
+    clearTimeout(handle)) as typeof cancelAnimationFrame
+}
+
 // React Native 0.81's supported renderer still delegates to
 // react-test-renderer, which emits this deprecation notice on every create().
 // Suppress only that exact upstream notice so real console errors and act

@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { Appearance } from 'react-native'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
+  applyNativeColorScheme,
   COLOR_THEME_COLORS,
   COLOR_THEME_OPTIONS,
   DARK_COLOR_THEME_OPTIONS,
@@ -100,6 +102,22 @@ describe('mobile color palettes', () => {
   it('keeps Matrix dark-only', () => {
     expect(DARK_COLOR_THEME_OPTIONS.some((option) => option.value === 'matrix')).toBe(true)
     expect(LIGHT_COLOR_THEME_OPTIONS.some((option) => option.palette === 'matrix')).toBe(false)
+  })
+
+  it('forces the platform trait collection to match an explicit theme mode', () => {
+    // Native chrome we do not draw (stack header, alerts, keyboard) follows
+    // the OS appearance, so an explicit Dark had to reach it too.
+    const setColorScheme = vi.spyOn(Appearance, 'setColorScheme').mockImplementation(() => {})
+
+    applyNativeColorScheme('dark')
+    expect(setColorScheme).toHaveBeenLastCalledWith('dark')
+    applyNativeColorScheme('light')
+    expect(setColorScheme).toHaveBeenLastCalledWith('light')
+    // 'system' hands control back to the phone.
+    applyNativeColorScheme('system')
+    expect(setColorScheme).toHaveBeenLastCalledWith(null)
+
+    setColorScheme.mockRestore()
   })
 
   it('migrates a legacy palette into independent light and dark preferences', () => {

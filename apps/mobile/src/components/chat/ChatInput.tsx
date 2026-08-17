@@ -818,6 +818,10 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    // A chip row longer than the space scrolls, and its clipped edge landed
+    // flush against the send button — which read as a chip jammed underneath
+    // rather than as more chips to scroll to.
+    gap: theme.spacing[2],
     paddingHorizontal: theme.spacing[2],
     paddingBottom: theme.spacing[2],
   },

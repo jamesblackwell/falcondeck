@@ -101,13 +101,37 @@ export function ResizableSidePanel({
   // changing defaultSize would fight those calls.
   const initialSize = React.useRef(open ? defaultSize : '0%').current
 
+  // Mounting at zero width is not the same as being collapsed as far as the
+  // group is concerned, and an uncollapsed zero-width panel is handed space
+  // again whenever the group re-normalises — which is how a hidden sidebar
+  // reappeared the moment a takeover view dropped the rail. Runs after paint
+  // because the imperative handle is not usable until the group registers it.
+  React.useEffect(() => {
+    const panel = panelRef.current
+    if (!panel || openRef.current || panel.isCollapsed()) return
+    panel.collapse()
+    // Mount only: later changes are driven by the layout effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   React.useLayoutEffect(() => {
     const panel = panelRef.current
     if (!panel || mountedOpen.current === open) return
     mountedOpen.current = open
     if (open) {
+      // `resize` is ignored while the panel sits at its collapsed size, so a
+      // panel closed through `collapse()` has to be expanded before it can be
+      // put back at the width the user last dragged it to.
+      if (panel.isCollapsed()) panel.expand()
       panel.resize(openSize.current ?? '20%')
     } else {
+      // Remember the width here rather than from `onResize`: the collapse
+      // reports a stream of shrinking sizes, and the last one before zero
+      // would otherwise become the width to restore.
+      const current = panel.getSize()
+      if (current.asPercentage > 0) {
+        openSize.current = `${current.asPercentage}%`
+      }
       panel.collapse()
     }
   }, [open])
@@ -124,13 +148,12 @@ export function ResizableSidePanel({
       // Panel applies its own inline `overflow: auto`, so clipping the
       // sliding content has to be set here rather than via a class.
       style={{ overflow: 'hidden' }}
-      onResize={(size) => {
-        // Percentage comes from the layout model; pixels read the live
-        // element, which lags behind during the collapse transition.
-        if (size.asPercentage > 0) {
-          openSize.current = `${size.asPercentage}%`
-          return
-        }
+      onResize={(size, _id, previousSize) => {
+        if (size.asPercentage > 0) return
+        // The group reports an initial size with no previous one, and it can
+        // report zero before the shell has been measured. Only a transition
+        // from a real width is the user dragging the panel shut.
+        if (!previousSize || previousSize.asPercentage === 0) return
         // A drag past the collapse threshold is the user closing the panel;
         // tell the owner so the toggle button and shortcut stay in sync.
         if (openRef.current) onCollapsedByDrag?.()

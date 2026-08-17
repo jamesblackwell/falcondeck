@@ -13,6 +13,7 @@ import { EmptyState } from './EmptyState'
 import { StatusIndicator } from './StatusIndicator'
 import { SegmentedControl } from './SegmentedControl'
 import { OptionSheet } from './OptionSheet'
+import { ProviderIcon } from './ProviderIcon'
 
 afterEach(cleanup)
 
@@ -208,6 +209,39 @@ describe('OptionSheet', () => {
     ).toBe('1 option')
   })
 
+  it('scrolls the current selection into view instead of opening at the top', () => {
+    const scrollTo = vi.fn()
+    const renderer = renderComponent(
+      <OptionSheet
+        title="Model"
+        items={Array.from({ length: 20 }, (_, index) => ({
+          value: `model-${index}`,
+          label: `Model ${index}`,
+        }))}
+        selected="model-15"
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />,
+      { ScrollView: { scrollTo } },
+    )
+
+    const list = renderer.root.findByType('ScrollView' as never)
+    const selectedRow = renderer.root
+      .findAllByType('Pressable' as never)
+      .find((node) => node.props.onLayout)
+    expect(selectedRow).toBeDefined()
+
+    act(() => {
+      selectedRow!.props.onLayout({ nativeEvent: { layout: { y: 720 } } })
+    })
+    act(() => list.props.onContentSizeChange())
+
+    expect(scrollTo).toHaveBeenCalledWith({ y: 656, animated: false })
+    // Once only — a later re-layout must not yank the list back.
+    act(() => list.props.onContentSizeChange())
+    expect(scrollTo).toHaveBeenCalledTimes(1)
+  })
+
   it('shows an accessible empty result and keeps short lists quiet', () => {
     const longRenderer = renderComponent(
       <OptionSheet
@@ -238,5 +272,19 @@ describe('OptionSheet', () => {
     expect(
       shortRenderer.root.findAllByProps({ accessibilityLabel: 'Search agent' }),
     ).toHaveLength(0)
+  })
+})
+
+describe('ProviderIcon', () => {
+  it('renders a known harness mark', () => {
+    expect(
+      renderComponent(<ProviderIcon provider="codex" color="#111" />),
+    ).toBeTruthy()
+  })
+
+  it('falls back for an unknown harness', () => {
+    expect(
+      renderComponent(<ProviderIcon provider="unknown-agent" color="#111" />),
+    ).toBeTruthy()
   })
 })

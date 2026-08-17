@@ -2,11 +2,11 @@ use std::{collections::HashMap, sync::atomic::Ordering};
 
 use chrono::Utc;
 use falcondeck_core::{
-    DaemonSnapshot, EncryptedEnvelope, EventEnvelope, ForkThreadRequest, HandoffBriefRequest,
-    PairingPublicKeyBundle, RelayClientMessage, RelayServerMessage, RelayUpdateBody,
-    RelayWebSocketTicketResponse, RemoteConnectionStatus, SendTurnRequest, SessionKeyMaterial,
-    SnapshotRequest, StartThreadRequest, TextDeltaTarget, ThreadDetailMode, ThreadDetailRequest,
-    UnifiedEvent, UpdatePreferencesRequest, UpdateThreadRequest,
+    DaemonSnapshot, EncryptedEnvelope, EventEnvelope, ForkThreadRequest, PairingPublicKeyBundle,
+    RelayClientMessage, RelayServerMessage, RelayUpdateBody, RelayWebSocketTicketResponse,
+    RemoteConnectionStatus, SendTurnRequest, SessionKeyMaterial, SnapshotRequest,
+    StartThreadRequest, TextDeltaTarget, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
+    UpdatePreferencesRequest, UpdateThreadRequest,
     crypto::{
         LocalIdentityKeyPair, decrypt_json, encrypt_json, sign_session_key_material,
         verify_pairing_public_key_bundle,
@@ -50,7 +50,6 @@ pub(super) const REMOTE_RPC_METHODS: &[&str] = &[
     "approval.respond",
     "thread.start",
     "thread.fork",
-    "thread.handoff_brief",
     "thread.detail",
     "thread.update",
     "thread.archive",
@@ -953,21 +952,6 @@ impl AppState {
                     self.fork_thread(request)
                         .await
                         .and_then(|handle| serde_json::to_value(handle).map_err(DaemonError::from))
-                        .map_err(|error| error.to_string())
-                }
-                "thread.handoff_brief" => {
-                    let request = HandoffBriefRequest {
-                        workspace_id: required(&["workspaceId", "workspace_id"])?,
-                        thread_id: required(&["threadId", "thread_id"])?,
-                        transcript: required(&["transcript"])?,
-                        source_provider_label: extract_string(
-                            &params,
-                            &["sourceProviderLabel", "source_provider_label"],
-                        ),
-                    };
-                    self.handoff_brief(request)
-                        .await
-                        .and_then(|brief| serde_json::to_value(brief).map_err(DaemonError::from))
                         .map_err(|error| error.to_string())
                 }
                 "thread.detail" => {

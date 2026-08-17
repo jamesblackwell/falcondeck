@@ -75,8 +75,8 @@ impl Default for FalconDeckPreferences {
     }
 }
 
-/// Models used for FalconDeck's own background work — thread titles and
-/// handoff briefs — rather than for user turns. These runs are short, tool-free
+/// Models used for FalconDeck's own background work — currently thread
+/// titles — rather than for user turns. These runs are short, tool-free
 /// and frequent, so they default to the cheapest model each provider offers and
 /// fall back across providers because most users have only one CLI installed.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1604,39 +1604,6 @@ pub struct ThreadHandoffSource {
     pub thread_id: String,
     /// Provider that owns the source thread.
     pub provider: AgentProvider,
-}
-
-/// Request payload for compacting a source transcript into a handoff brief.
-/// The transcript is rendered by the client that already holds the full
-/// conversation, so the daemon never re-hydrates a thread it may have dropped.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HandoffBriefRequest {
-    /// Workspace whose working directory the utility model runs in.
-    pub workspace_id: String,
-    /// Source thread the transcript came from.
-    pub thread_id: String,
-    /// Rendered markdown transcript of the source thread.
-    pub transcript: String,
-    /// Human-readable label of the provider handing the work over.
-    #[serde(default)]
-    pub source_provider_label: Option<String>,
-}
-
-/// A background-generated handoff brief plus how it was produced.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HandoffBriefResponse {
-    /// Compacted brief to seed the destination thread with.
-    pub brief: String,
-    /// Provider that produced the brief.
-    pub provider: AgentProvider,
-    /// Model the provider ran, when a specific one was requested.
-    #[serde(default)]
-    pub model_id: Option<String>,
-    /// Transcript segments summarized before merging.
-    pub segments: usize,
-    /// Whether the oldest middle segments were dropped to bound the work.
-    #[serde(default)]
-    pub truncated: bool,
 }
 
 /// Request payload used to fork a provider-owned thread at a completed turn.

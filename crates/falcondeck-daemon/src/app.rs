@@ -52,7 +52,6 @@ pub(crate) mod conversation_helpers;
 mod extension_events;
 mod extension_host;
 mod extensions;
-mod handoff;
 pub(crate) mod harness_manager;
 pub(crate) mod host_provisioning;
 mod notifications;
@@ -152,7 +151,7 @@ struct InnerState {
     extension_hosts: Mutex<extension_host::ExtensionHostPool>,
     /// Bounded, independent lifecycle-event queue for each enabled extension.
     extension_event_queues: extension_events::ExtensionEventQueues,
-    /// Cached OpenRouter speech credential plus keychain wedge tracking.
+    /// Cached OpenRouter speech credential from the daemon secret store.
     speech_credentials: speech::SpeechCredentialCache,
     remote: Mutex<RemoteBridgeState>,
     /// SSH provisioning jobs keyed by job id. Progress lives only in memory:

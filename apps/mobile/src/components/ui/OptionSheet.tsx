@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, ScrollView, TextInput, View } from 'react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 import { Check } from 'lucide-react-native'
@@ -12,6 +12,9 @@ import {
 import { NativeSheet } from './NativeSheet'
 import { PaletteSwatch, type PaletteSwatchColors } from './PaletteSwatch'
 import { Text } from './Text'
+
+/** Leaves a row of context above the revealed selection. */
+const SELECTED_REVEAL_INSET = 64
 
 export type OptionSheetItem = {
   value: string
@@ -61,6 +64,21 @@ export const OptionSheet = memo(function OptionSheet({
 
   useEffect(() => setQuery(''), [title])
 
+  // A long list (the transcription models, the model picker) opens at the top,
+  // which hides the option you are actually on. Scroll it into view once, off
+  // the row's own layout so rows with and without a description both land right.
+  const listRef = useRef<ScrollView>(null)
+  const selectedOffset = useRef<number | null>(null)
+  const hasRevealed = useRef(false)
+  const revealSelected = useCallback(() => {
+    if (hasRevealed.current || selectedOffset.current === null) return
+    hasRevealed.current = true
+    listRef.current?.scrollTo({
+      y: Math.max(0, selectedOffset.current - SELECTED_REVEAL_INSET),
+      animated: false,
+    })
+  }, [])
+
   return (
     <NativeSheet onClose={onClose} accessibilityLabel="Close options" contentStyle={styles.content}>
       <Text variant="label" color="primary" weight="semibold" style={styles.title}>
@@ -83,9 +101,11 @@ export const OptionSheet = memo(function OptionSheet({
         />
       ) : null}
       <ScrollView
+        ref={listRef}
         style={styles.list}
         bounces={false}
         keyboardShouldPersistTaps="handled"
+        onContentSizeChange={revealSelected}
       >
         {visibleItems.map((item) => {
           const isSelected = selected !== undefined && item.value === selected
@@ -95,6 +115,16 @@ export const OptionSheet = memo(function OptionSheet({
             <Pressable
               key={item.value}
               style={[styles.item, isSelected ? styles.itemSelected : null]}
+              onLayout={
+                isSelected
+                  ? (event) => {
+                      selectedOffset.current = event.nativeEvent.layout.y
+                      // A frame later the scroll view knows its content size,
+                      // so the scroll is not clamped back to the top.
+                      requestAnimationFrame(revealSelected)
+                    }
+                  : undefined
+              }
               disabled={item.disabled}
               accessibilityRole="button"
               // Without this VoiceOver reads the label and the description as

@@ -259,8 +259,8 @@ describe('mobile app screens', () => {
     const renderer = renderComponent(<ConnectionsSettingsScreen />)
     expect(textOf(renderer)).toContain('https://relay.test')
     expect(textOf(renderer)).toContain('End-to-end encrypted')
-    expect(textOf(renderer)).toContain('Snapshot sync')
-    expect(textOf(renderer)).toContain('Replace Connection')
+    expect(textOf(renderer)).toContain('Data sync')
+    expect(textOf(renderer)).toContain('Replace connection')
   })
 
   it('surfaces a connected daemon whose snapshot service is repairing', () => {
@@ -281,7 +281,7 @@ describe('mobile app screens', () => {
 
     const details = renderComponent(<ConnectionsSettingsScreen />)
     expect(textOf(details)).toContain('Repairing sync…')
-    expect(textOf(details)).toContain('Re-registering')
+    expect(textOf(details)).toContain('Reconnecting…')
   })
 
   it('uses the native stack header for settings', () => {
@@ -294,9 +294,21 @@ describe('mobile app screens', () => {
       }),
     )
     const screens = renderer.root.findAllByType('StackScreen' as any)
-    expect(screens.find((screen) => screen.props.name === 'index')?.props.options).toEqual(
-      expect.objectContaining({ title: 'Settings', headerLargeTitleEnabled: true }),
+    const indexOptions = screens.find((screen) => screen.props.name === 'index')?.props
+      .options
+    expect(indexOptions).toEqual(
+      expect.objectContaining({ title: 'Settings', headerRight: expect.any(Function) }),
     )
+    // iOS 26 reserved the large-title row but never painted the label, which
+    // left the root looking headerless next to a lone close button.
+    expect(indexOptions.headerLargeTitleEnabled).toBeUndefined()
+    expect(indexOptions.headerLargeTitle).toBeUndefined()
+
+    // Every child screen must keep a native back button.
+    for (const screen of screens) {
+      if (screen.props.name === 'index') continue
+      expect(screen.props.options?.headerShown).not.toBe(false)
+    }
   })
 
   it('toggles push notifications and syncs the relay registration', async () => {

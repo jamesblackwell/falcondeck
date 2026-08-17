@@ -106,15 +106,15 @@ Status: Decided. These decisions are based on competitive research and source co
 - PolyScope (closed source) likely does the same thing
 - This is a UI feature, not an architectural requirement
 
-**Refinement (Aug 2026)**: the transcript is compacted *before* it reaches the destination, by a
-cheap background model, rather than being pasted in whole for the destination to summarize itself.
-Pasting the raw transcript spent an expensive first turn and overflowed the destination context on
-long threads. The daemon splits the exported transcript at item boundaries, summarizes each segment
-on a utility model, and merges the notes into one brief (`app/handoff.rs`). Which model runs is a
-preference, not a hardcode: `utility_models` holds a provider fallback chain (Claude → Codex →
-OpenCode → Grok by default) plus a per-provider model id, and background thread titles run on the
-same chain. If no provider is installed and signed in, the destination compacts the transcript
-itself — the old behaviour, kept as the fallback path.
+**Refinement (Aug 2026)**: the handoff carries the exported transcript **verbatim** — no
+summarization pass runs anywhere. A background utility model used to compact the transcript into a
+brief first, but a summary is a lossy rewrite of evidence the destination can read perfectly well
+itself, made by the cheapest model in the system, and it made handoffs depend on having a provider
+signed in for a background job. Destination models hold a few hundred thousand tokens, so the
+client hands over the full transcript (bounded at 480k characters, `client-core/handoff.ts`).
+When a thread exceeds that, the head (objective, constraints, early decisions) and the tail
+(current state) are kept verbatim and the middle is dropped with an explicit marker stating
+exactly how many characters were omitted and that the original thread retains everything.
 
 ## Decision 9: Mobile / Relay Authentication
 
@@ -199,7 +199,9 @@ itself — the old behaviour, kept as the fallback path.
 
 **Decision**: Cloud speech credentials remain on the paired daemon host.
 
-- API keys are stored in the host OS credential store, never FalconDeck configuration or relay storage.
+- API keys are stored in the daemon host secret store (an owner-only file on
+  macOS and when `FALCONDECK_SECRET_FILE` is set; OS keyring elsewhere), never
+  FalconDeck configuration or relay storage.
 - Mobile audio travels to the daemon through the existing E2E-encrypted, non-durable RPC channel.
 - The daemon, not the mobile app or relay, authenticates to the transcription provider.
 - Direct-from-phone API-key storage is unsupported; upgrades delete the retired mobile credential.

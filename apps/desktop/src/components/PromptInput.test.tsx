@@ -105,6 +105,60 @@ describe("PromptInput", () => {
     elsewhere.remove();
   });
 
+  it("replaces the composer with an inline recorder while voice is active", () => {
+    const onStop = vi.fn();
+    const voice = {
+      state: "recording" as const,
+      seconds: 2,
+      configured: true,
+      hasPending: false,
+      onStop,
+      onRetry: vi.fn(),
+      onDiscard: vi.fn(),
+      onDismiss: vi.fn(),
+    };
+    render(
+      <PromptInput {...promptInputProps} onVoiceInput={noop} voice={voice} />,
+    );
+
+    expect(
+      screen.queryByRole("textbox", { name: "Message composer" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Record voice input" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+    expect(onStop).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole("button", { name: "Send message" }),
+    ).toBeDisabled();
+  });
+
+  it("offers retry and discard when a voice recording fails", () => {
+    const onRetry = vi.fn();
+    const onDiscard = vi.fn();
+    const voice = {
+      state: "failed" as const,
+      seconds: 0,
+      error: "Transcription failed. Your recording is safe.",
+      configured: true,
+      hasPending: true,
+      onStop: vi.fn(),
+      onRetry,
+      onDiscard,
+      onDismiss: vi.fn(),
+    };
+    render(<PromptInput {...promptInputProps} voice={voice} />);
+
+    expect(
+      screen.getByText("Transcription failed. Your recording is safe."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+    expect(onDiscard).toHaveBeenCalledOnce();
+  });
+
   it("uses voice input as the empty composer action and restores Send after typing", () => {
     const onVoiceInput = vi.fn();
     const { rerender } = render(

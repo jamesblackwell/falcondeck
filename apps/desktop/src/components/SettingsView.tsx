@@ -55,6 +55,7 @@ export type SettingsViewProps = {
   onCheckForUpdates: () => void;
   onDownloadUpdate: () => void;
   onRestartToInstallUpdate: () => void;
+  onShowOnboardingAtNextLaunch: () => void;
   onClose: () => void;
   extensions: ExtensionSnapshot;
   onSetExtensionEnabled: (
@@ -140,6 +141,7 @@ export function SettingsView(props: SettingsViewProps) {
               onCheckForUpdates={props.onCheckForUpdates}
               onDownloadUpdate={props.onDownloadUpdate}
               onRestartToInstallUpdate={props.onRestartToInstallUpdate}
+              onShowOnboardingAtNextLaunch={props.onShowOnboardingAtNextLaunch}
             />
           ) : (
             <RemoteAccessPanel

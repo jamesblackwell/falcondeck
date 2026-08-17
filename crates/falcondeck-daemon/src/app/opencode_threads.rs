@@ -296,10 +296,9 @@ pub(super) async fn start_opencode_turn(
     // assistant record, so refuse it before admission with the actual reason.
     let runner_providers = runtime.runner_providers().await?;
     let session_provider = runtime.session_model_provider(&session_id).await?;
-    if let Some(reason) = crate::opencode::native_model_block_reason(
-        session_provider.as_deref(),
-        &runner_providers,
-    ) {
+    if let Some(reason) =
+        crate::opencode::native_model_block_reason(session_provider.as_deref(), &runner_providers)
+    {
         return Err(DaemonError::BadRequest(format!(
             "{reason}; switch this thread to a natively available model, or start a new \
              thread to use this model over ACP"
