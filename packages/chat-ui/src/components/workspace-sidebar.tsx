@@ -12,6 +12,7 @@ import {
 import {
   compareThreads,
   filterProjectGroupsByExtensions,
+  THREAD_TAGS_EXTENSION_ID,
   threadModelLabel,
   threadPriorityRank,
 } from "@falcondeck/client-core";
@@ -36,9 +37,10 @@ import {
 
 import { AttentionInbox } from "./attention-inbox";
 import { ExtensionSidebarFilters } from "./extension-sidebar-filters";
-import { ThreadColorFilterMenu } from "./thread-color-filter-menu";
+import { ThreadStageFilterMenu } from "./thread-stage-filter-menu";
 import { ThreadSortMenu } from "./thread-sort-menu";
 import {
+  AddThreadStageDialog,
   DeleteThreadDialog,
   RemoveWorkspaceDialog,
   RenameThreadDialog,
@@ -130,12 +132,17 @@ export type WorkspaceSidebarProps = {
   contentClassName?: string;
   threadTagsById?: Record<string, ThreadTag[]>;
   threadTagOptions?: ThreadTag[];
-  onSetThreadColor?: (
+  onSetThreadStage?: (
     workspaceId: string,
     thread: ThreadSummary,
-    color: ThreadTag | null,
+    stage: ThreadTag | null,
   ) => Promise<void> | void;
-  canSetThreadColor?: (workspaceId: string) => boolean;
+  canSetThreadStage?: (workspaceId: string) => boolean;
+  onCreateThreadStage?: (
+    workspaceId: string,
+    thread: ThreadSummary,
+    label: string,
+  ) => Promise<void> | void;
   /** Generic manifest-declared sidebar filters rendered from extension UI v1. */
   extensionSidebarFilters?: ExtensionSidebarFilterDefinition[];
   /** Synchronized projections inspected by declarative filter bindings. */
@@ -540,8 +547,9 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   contentClassName,
   threadTagsById,
   threadTagOptions = [],
-  onSetThreadColor,
-  canSetThreadColor,
+  onSetThreadStage,
+  canSetThreadStage,
+  onCreateThreadStage,
   extensionSidebarFilters = [],
   extensionSnapshot,
 }: WorkspaceSidebarProps) {
@@ -584,6 +592,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   } | null>(null);
   const [removeError, setRemoveError] = useState<string | null>(null);
   const [isRemovingWorkspace, setIsRemovingWorkspace] = useState(false);
+  const [createStageTarget, setCreateStageTarget] = useState<{
+    workspaceId: string;
+    thread: ThreadSummary;
+  } | null>(null);
+  const [createStageValue, setCreateStageValue] = useState("");
+  const [createStageError, setCreateStageError] = useState<string | null>(null);
+  const [isCreatingStage, setIsCreatingStage] = useState(false);
   const threadContextMenuRef = useRef<HTMLDivElement | null>(null);
   const workspaceContextMenuRef = useRef<HTMLDivElement | null>(null);
   const [draggingWorkspaceId, setDraggingWorkspaceId] = useState<string | null>(
@@ -641,6 +656,16 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     () => setSelectedTagIds(new Set()),
     [],
   );
+  const dedicatedStageFilter = threadTagOptions.length > 0;
+  const genericSidebarFilters = useMemo(
+    () =>
+      dedicatedStageFilter
+        ? extensionSidebarFilters.filter(
+            (filter) => filter.extensionId !== THREAD_TAGS_EXTENSION_ID,
+          )
+        : extensionSidebarFilters,
+    [dedicatedStageFilter, extensionSidebarFilters],
+  );
   const legacyDisplayGroups = useMemo(() => {
     if (activeTagIds.size === 0) return groups;
     return groups.flatMap((group) => {
@@ -654,26 +679,24 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   }, [activeTagIds, groups, threadTagsById]);
   const activeExtensionFilters = useMemo(
     () =>
-      extensionSidebarFilters.flatMap(
-        (filter): ActiveExtensionThreadFilter[] => {
-          const root = filter.document?.root;
-          if (!root || root.type !== "select") return [];
-          return [
-            {
-              key: filter.key,
-              extensionId: filter.extensionId,
-              binding: root.binding,
-              selectedValues:
-                selectedExtensionFilterValues.get(filter.key) ?? new Set(),
-            },
-          ];
-        },
-      ),
-    [extensionSidebarFilters, selectedExtensionFilterValues],
+      genericSidebarFilters.flatMap((filter): ActiveExtensionThreadFilter[] => {
+        const root = filter.document?.root;
+        if (!root || root.type !== "select") return [];
+        return [
+          {
+            key: filter.key,
+            extensionId: filter.extensionId,
+            binding: root.binding,
+            selectedValues:
+              selectedExtensionFilterValues.get(filter.key) ?? new Set(),
+          },
+        ];
+      }),
+    [genericSidebarFilters, selectedExtensionFilterValues],
   );
   const displayGroups = useMemo(
     () =>
-      extensionSidebarFilters.length > 0
+      genericSidebarFilters.length > 0
         ? filterProjectGroupsByExtensions(
             legacyDisplayGroups,
             extensionSnapshot,
@@ -682,7 +705,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         : legacyDisplayGroups,
     [
       activeExtensionFilters,
-      extensionSidebarFilters.length,
+      genericSidebarFilters.length,
       extensionSnapshot,
       legacyDisplayGroups,
     ],
@@ -1029,7 +1052,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         !onTogglePinThread &&
         !onMarkThreadRead &&
         !onMarkThreadUnread &&
-        !onSetThreadColor
+        !onSetThreadStage
       ) {
         return;
       }
@@ -1041,7 +1064,7 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       onMarkThreadRead,
       onMarkThreadUnread,
       onRenameThread,
-      onSetThreadColor,
+      onSetThreadStage,
       onTogglePinThread,
     ],
   );
@@ -1134,21 +1157,67 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
     );
   }, [onMarkThreadUnread, threadContextMenu]);
 
-  const handleSetColorFromContextMenu = useCallback(
-    (color: ThreadTag | null) => {
+  const handleSetStageFromContextMenu = useCallback(
+    (stage: ThreadTag | null) => {
       if (
         !threadContextMenu ||
-        !onSetThreadColor ||
-        (canSetThreadColor && !canSetThreadColor(threadContextMenu.workspaceId))
+        !onSetThreadStage ||
+        (canSetThreadStage && !canSetThreadStage(threadContextMenu.workspaceId))
       )
         return;
       const { workspaceId, thread } = threadContextMenu;
       setThreadContextMenu(null);
-      void Promise.resolve(onSetThreadColor(workspaceId, thread, color)).catch(
+      void Promise.resolve(onSetThreadStage(workspaceId, thread, stage)).catch(
         () => {},
       );
     },
-    [canSetThreadColor, onSetThreadColor, threadContextMenu],
+    [canSetThreadStage, onSetThreadStage, threadContextMenu],
+  );
+
+  const openCreateStageDialog = useCallback(() => {
+    if (!threadContextMenu || !onCreateThreadStage) return;
+    const { workspaceId, thread } = threadContextMenu;
+    setThreadContextMenu(null);
+    setCreateStageTarget({ workspaceId, thread });
+    setCreateStageValue("");
+    setCreateStageError(null);
+  }, [onCreateThreadStage, threadContextMenu]);
+
+  const closeCreateStageDialog = useCallback(() => {
+    if (isCreatingStage) return;
+    setCreateStageTarget(null);
+    setCreateStageValue("");
+    setCreateStageError(null);
+  }, [isCreatingStage]);
+
+  const handleConfirmCreateStage = useCallback(
+    async (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      if (!createStageTarget || !onCreateThreadStage) return;
+      const label = createStageValue.trim();
+      if (!label) {
+        setCreateStageError("Stage name cannot be empty");
+        return;
+      }
+      setIsCreatingStage(true);
+      setCreateStageError(null);
+      try {
+        await onCreateThreadStage(
+          createStageTarget.workspaceId,
+          createStageTarget.thread,
+          label,
+        );
+        setCreateStageTarget(null);
+        setCreateStageValue("");
+      } catch (error) {
+        setCreateStageError(
+          error instanceof Error ? error.message : "Failed to add stage",
+        );
+      } finally {
+        setIsCreatingStage(false);
+      }
+    },
+    [createStageTarget, createStageValue, onCreateThreadStage],
   );
 
   const handleOpenWorkspaceContextMenu = useCallback(
@@ -1322,7 +1391,13 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       setThreadContextMenu(null);
     };
 
-    const handleViewportChange = () => {
+    const handleViewportChange = (event: Event) => {
+      if (
+        event.target instanceof Node &&
+        threadContextMenuRef.current?.contains(event.target)
+      ) {
+        return;
+      }
       setThreadContextMenu(null);
     };
 
@@ -1413,6 +1488,20 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [isRemovingWorkspace, removeTarget]);
+
+  useEffect(() => {
+    if (!createStageTarget) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || isCreatingStage) return;
+      closeCreateStageDialog();
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [closeCreateStageDialog, createStageTarget, isCreatingStage]);
 
   return (
     <SidebarShell className={className}>
@@ -1510,18 +1599,19 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
               </button>
             </h2>
             <div className="flex items-center gap-1">
-              {extensionSidebarFilters.length > 0 ? (
-                <ExtensionSidebarFilters
-                  definitions={extensionSidebarFilters}
-                  selections={selectedExtensionFilterValues}
-                  onChange={handleExtensionFilterChange}
-                />
-              ) : threadTagOptions.length > 0 ? (
-                <ThreadColorFilterMenu
+              {dedicatedStageFilter ? (
+                <ThreadStageFilterMenu
                   options={threadTagOptions}
                   selectedIds={activeTagIds}
                   onToggle={handleToggleTagFilter}
                   onClear={handleClearTagFilters}
+                />
+              ) : null}
+              {genericSidebarFilters.length > 0 ? (
+                <ExtensionSidebarFilters
+                  definitions={genericSidebarFilters}
+                  selections={selectedExtensionFilterValues}
+                  onChange={handleExtensionFilterChange}
                 />
               ) : null}
               {onThreadSortChange ? (
@@ -1680,14 +1770,15 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         canPin={Boolean(onTogglePinThread)}
         canMarkRead={Boolean(onMarkThreadRead)}
         canMarkUnread={Boolean(onMarkThreadUnread)}
-        colorOptions={
-          onSetThreadColor &&
+        stageOptions={
+          onSetThreadStage &&
           threadContextMenu &&
-          (!canSetThreadColor || canSetThreadColor(threadContextMenu.workspaceId))
+          (!canSetThreadStage ||
+            canSetThreadStage(threadContextMenu.workspaceId))
             ? threadTagOptions
             : []
         }
-        selectedColor={
+        selectedStage={
           threadContextMenu
             ? (threadTagsById?.[threadContextMenu.thread.id]?.[0] ?? null)
             : null
@@ -1699,7 +1790,17 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
         onTogglePin={handleTogglePinFromContextMenu}
         onMarkRead={handleMarkReadFromContextMenu}
         onMarkUnread={handleMarkUnreadFromContextMenu}
-        onSetColor={handleSetColorFromContextMenu}
+        onSetStage={handleSetStageFromContextMenu}
+        onCreateStage={onCreateThreadStage ? openCreateStageDialog : undefined}
+      />
+      <AddThreadStageDialog
+        target={createStageTarget}
+        value={createStageValue}
+        error={createStageError}
+        pending={isCreatingStage}
+        onChange={setCreateStageValue}
+        onClose={closeCreateStageDialog}
+        onSubmit={handleConfirmCreateStage}
       />
       <DeleteThreadDialog
         target={deleteTarget}

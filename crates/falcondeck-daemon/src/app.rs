@@ -2328,6 +2328,71 @@ impl AppState {
         crate::git::git_diff(&self.git_root(workspace_id, thread_id).await?, path, status).await
     }
 
+    pub async fn git_commit(
+        &self,
+        request: &falcondeck_core::GitCommitRequest,
+    ) -> Result<falcondeck_core::GitCommitResponse, DaemonError> {
+        let (checkout, title) = self
+            .isolated_checkout(&request.workspace_id, &request.thread_id)
+            .await?;
+        let message = request
+            .message
+            .as_deref()
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or(&title);
+        crate::ship::commit_checkout(&checkout, message).await
+    }
+
+    pub async fn ship_thread(
+        &self,
+        request: &falcondeck_core::ShipThreadRequest,
+    ) -> Result<falcondeck_core::ShipThreadResponse, DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(&request.workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(&request.thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        let variant = thread.summary.variant.clone().ok_or_else(|| {
+            DaemonError::BadRequest(
+                "only isolated threads can be merged or opened as a pull request".to_string(),
+            )
+        })?;
+        let title = thread.summary.title.clone();
+        let project_path = workspace.summary.path.clone();
+        drop(workspaces);
+        crate::ship::ship_variant(&project_path, &variant, &title, request.mode).await
+    }
+
+    async fn isolated_checkout(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<(String, String), DaemonError> {
+        let workspaces = self.inner.workspaces.lock().await;
+        let workspace = workspaces
+            .get(workspace_id)
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(thread_id)
+            .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
+        if thread.summary.variant.is_none() {
+            return Err(DaemonError::BadRequest(
+                "only isolated threads can be committed from this control".to_string(),
+            ));
+        }
+        Ok((
+            thread
+                .summary
+                .working_directory(&workspace.summary.path)
+                .to_string(),
+            thread.summary.title.clone(),
+        ))
+    }
+
     pub async fn workspace_files(
         &self,
         workspace_id: &str,

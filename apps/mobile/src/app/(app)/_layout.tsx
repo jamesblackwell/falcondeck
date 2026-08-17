@@ -92,6 +92,7 @@ export default function AppLayout() {
         onOpenSettings={handleOpenSettings}
         onClose={() => navigation.dispatch(DrawerActions.closeDrawer())}
         threadTagsById={threadTags.byThreadId}
+        threadTagOptions={threadTags.tags}
         extensionSnapshot={snapshot?.extensions}
         extensionSidebarFilters={extensionSidebarFilters}
         extensionPanelCount={extensionPanelCount}
@@ -108,6 +109,7 @@ export default function AppLayout() {
       selectedThreadId,
       selectedWorkspaceId,
       threadTags.byThreadId,
+      threadTags.tags,
     ],
   );
 

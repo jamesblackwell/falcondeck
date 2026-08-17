@@ -653,6 +653,10 @@ export function normalizeThreadSummary(
             path: thread.variant.path,
             branch: thread.variant.branch ?? "",
             kind: thread.variant.kind === "worktree" ? "worktree" : "clone",
+            base_branch:
+              typeof thread.variant.base_branch === "string"
+                ? thread.variant.base_branch
+                : null,
           }
         : null,
   };

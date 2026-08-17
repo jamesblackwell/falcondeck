@@ -1690,6 +1690,7 @@ mod tests {
                 path: "/tmp/project-copy".to_string(),
                 branch: "falcondeck/copy-1".to_string(),
                 kind: falcondeck_core::ThreadVariantKind::Clone,
+                base_branch: Some("main".to_string()),
             }),
         })
     }

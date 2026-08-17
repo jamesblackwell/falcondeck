@@ -95,6 +95,7 @@ import {
   type EncryptedEnvelope,
   type EventEnvelope,
   type ExtensionUiActionBinding,
+  type GitStatusResponse,
   type ImageInput,
   type InteractiveResponsePayload,
   type MachinePresence,
@@ -110,13 +111,15 @@ import {
   type RelayWebSocketTicketResponse,
   type RelayUpdate,
   type SessionCryptoState,
+  type ShipThreadMode,
+  type ShipThreadResponse,
   type ThreadDetail,
   type ThreadHandle,
   type ThreadSortMode,
   type ThreadSummary,
   type ThreadTag,
   type UpdatePreferencesPayload,
-  optimisticallySetThreadColor,
+  optimisticallySetThreadStage,
   encryptedDaemonEventEnvelope,
 } from "@falcondeck/client-core";
 import {
@@ -127,11 +130,13 @@ import {
   PromptInput,
   QueuedTurns,
   SessionHeader,
+  ShipMenu,
   OperationalNotice,
   ExtensionPanel,
   ExtensionPanelNavigation,
   WorkspaceSidebar,
   realtimeAudioPlayer,
+  useShipThread,
 } from "@falcondeck/chat-ui";
 import {
   ActivityDiamond,
@@ -2384,21 +2389,54 @@ function RemoteApp() {
     [toast],
   );
 
-  const handleSetThreadColor = useCallback(
+  // Isolated-thread shipping runs entirely in the daemon, so remote web only
+  // needs the two RPCs; the control and its toasts are shared with desktop.
+  const shipApi = useMemo(
+    () => ({
+      gitStatus: (workspaceId: string, threadId?: string | null) =>
+        callRpc<GitStatusResponse>("git.status", {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+        }),
+      shipThread: (workspaceId: string, threadId: string, mode: ShipThreadMode) =>
+        callRpc<ShipThreadResponse>("thread.ship", {
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          mode,
+        }),
+    }),
+    [callRpc],
+  );
+  const {
+    ship: shipThread,
+    pending: isShipPending,
+    projectFolderDirty,
+  } = useShipThread({
+    api: isEncrypted ? shipApi : null,
+    workspaceId: selectedWorkspace?.id ?? null,
+    thread: selectedThread,
+    toast,
+    // Remote web runs in a real browser, so a new tab is the system browser.
+    openUrl: async (url) => {
+      window.open(url, "_blank", "noopener,noreferrer");
+    },
+  });
+
+  const handleSetThreadStage = useCallback(
     async (
       _workspaceId: string,
       thread: ThreadSummary,
-      color: ThreadTag | null,
+      stage: ThreadTag | null,
     ) => {
       try {
         setSnapshot((current) =>
           current
             ? {
                 ...current,
-                extensions: optimisticallySetThreadColor(
+                extensions: optimisticallySetThreadStage(
                   current.extensions,
                   thread.id,
-                  color?.color ?? null,
+                  stage?.id ?? null,
                 ),
               }
             : current,
@@ -2407,16 +2445,35 @@ function RemoteApp() {
           extensionId: THREAD_TAGS_EXTENSION_ID,
           actionId: THREAD_TAGS_ACTION_ID,
           target: { kind: "thread", id: thread.id },
-          input: { operation: "set_thread_color", color: color?.color ?? null },
+          input: {
+            operation: "set_thread_stage",
+            stageId: stage?.id ?? null,
+          },
         });
       } catch (error) {
         void callRpc<DaemonSnapshot>("snapshot.current", {})
           .then(setSnapshot)
           .catch(() => {});
-        reportError(error, "Failed to set thread colour");
+        reportError(error, "Failed to set thread stage");
       }
     },
     [callRpc, reportError],
+  );
+
+  const handleCreateThreadStage = useCallback(
+    async (
+      _workspaceId: string,
+      thread: ThreadSummary,
+      label: string,
+    ) => {
+      await callRpc("extensions.action.invoke", {
+        extensionId: THREAD_TAGS_EXTENSION_ID,
+        actionId: THREAD_TAGS_ACTION_ID,
+        target: { kind: "thread", id: thread.id },
+        input: { operation: "create_stage", label },
+      });
+    },
+    [callRpc],
   );
 
   const handleExtensionPanelAction = useCallback(
@@ -4057,6 +4114,14 @@ function RemoteApp() {
         workspace={selectedWorkspace}
         thread={selectedThread}
         onNewThread={selectedThread ? handleNewThreadFromCurrent : undefined}
+        leadingActions={
+          <ShipMenu
+            thread={selectedThread}
+            onShip={shipThread}
+            pending={isShipPending}
+            projectFolderDirty={projectFolderDirty}
+          />
+        }
         className="border-b border-border-subtle pt-3"
         navigation={
           <button
@@ -4204,8 +4269,11 @@ function RemoteApp() {
                 threadTagOptions={threadTags.tags}
                 extensionSidebarFilters={extensionSidebarFilters}
                 extensionSnapshot={snapshot?.extensions}
-                onSetThreadColor={
-                  threadTagsEnabled ? handleSetThreadColor : undefined
+                onSetThreadStage={
+                  threadTagsEnabled ? handleSetThreadStage : undefined
+                }
+                onCreateThreadStage={
+                  threadTagsEnabled ? handleCreateThreadStage : undefined
                 }
                 emptyState={{
                   title: "Waiting for projects",
@@ -4258,8 +4326,11 @@ function RemoteApp() {
           threadTagOptions={threadTags.tags}
           extensionSidebarFilters={extensionSidebarFilters}
           extensionSnapshot={snapshot?.extensions}
-          onSetThreadColor={
-            threadTagsEnabled ? handleSetThreadColor : undefined
+          onSetThreadStage={
+            threadTagsEnabled ? handleSetThreadStage : undefined
+          }
+          onCreateThreadStage={
+            threadTagsEnabled ? handleCreateThreadStage : undefined
           }
           emptyState={{
             title: "Waiting for projects",

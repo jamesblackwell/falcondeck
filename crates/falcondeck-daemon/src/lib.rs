@@ -20,6 +20,7 @@ pub mod harness_conformance;
 pub mod logging;
 pub(crate) mod opencode;
 pub mod opencode_conformance;
+mod ship;
 mod skills;
 mod ssh_config;
 mod variant;

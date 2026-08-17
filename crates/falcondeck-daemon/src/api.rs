@@ -16,11 +16,12 @@ use tower_http::cors::{Any, CorsLayer};
 
 use falcondeck_core::{
     ApprovalResponseRequest, ClientActivityRequest, ConnectWorkspaceRequest,
-    CreateScheduledTaskRequest, ForkThreadRequest, InteractiveResponseRequest,
+    CreateScheduledTaskRequest, ForkThreadRequest, GitCommitRequest, InteractiveResponseRequest,
     InvokeExtensionActionRequest, MarkThreadReadRequest, SendTurnRequest, SetThreadGoalRequest,
-    SnapshotRequest, StartRemotePairingRequest, StartReviewRequest, StartThreadRequest,
-    ThreadDetailMode, ThreadDetailRequest, UnifiedEvent, UpdateExtensionRequest,
-    UpdatePreferencesRequest, UpdateScheduledTaskRequest, UpdateThreadRequest,
+    ShipThreadRequest, SnapshotRequest, StartRemotePairingRequest, StartReviewRequest,
+    StartThreadRequest, ThreadDetailMode, ThreadDetailRequest, UnifiedEvent,
+    UpdateExtensionRequest, UpdatePreferencesRequest, UpdateScheduledTaskRequest,
+    UpdateThreadRequest,
 };
 
 use crate::{
@@ -247,6 +248,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/workspaces/{workspace_id}/git/status", get(git_status))
         .route("/api/workspaces/{workspace_id}/git/diff", get(git_diff))
+        .route(
+            "/api/workspaces/{workspace_id}/git/commit",
+            post(git_commit),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/threads/{thread_id}/ship",
+            post(ship_thread),
+        )
         .route("/api/workspaces/{workspace_id}/files", get(workspace_files))
         .route(
             "/api/workspaces/{workspace_id}/files/content",
@@ -906,6 +915,50 @@ struct GitDiffQuery {
     path: Option<String>,
     status: Option<falcondeck_core::GitFileStatus>,
     thread_id: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct GitCommitBody {
+    thread_id: String,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+async fn git_commit(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<GitCommitBody>,
+) -> Result<Json<falcondeck_core::GitCommitResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .git_commit(&GitCommitRequest {
+                workspace_id,
+                thread_id: body.thread_id,
+                message: body.message,
+            })
+            .await?,
+    ))
+}
+
+#[derive(serde::Deserialize)]
+struct ShipThreadBody {
+    mode: falcondeck_core::ShipThreadMode,
+}
+
+async fn ship_thread(
+    State(state): State<AppState>,
+    Path((workspace_id, thread_id)): Path<(String, String)>,
+    Json(body): Json<ShipThreadBody>,
+) -> Result<Json<falcondeck_core::ShipThreadResponse>, DaemonError> {
+    Ok(Json(
+        state
+            .ship_thread(&ShipThreadRequest {
+                workspace_id,
+                thread_id,
+                mode: body.mode,
+            })
+            .await?,
+    ))
 }
 
 async fn git_diff(

@@ -79,20 +79,30 @@ daemon-side, like goals): `setup` after variant creation (`npm ci`, migrations)
 and `cleanup` before deletion. A future `FALCONDECK_VARIANT=<slug>` environment
 variable will let scripts choose ports.
 
-### 3. Merge-back: extend the existing diff panel
+### 3. Merge-back: one split button in the session header
 
-The diff panel already shows working-tree changes per workspace. For a
-variant it grows a header:
+The control lives in the session header's trailing group, before New — not
+in the diff panel, which keeps one obvious place to land work. It is hidden
+unless the thread has a variant; same-folder threads have no branch of their
+own to land.
 
 ```
-falcondeck/fix-login-flow · 4 files · +182 −40
-[Commit…] [Merge into main] [Open PR] [Discard copy]
+[⑃ Merge ▾]   Create pull request · Draft pull request · Merge and push
 ```
 
-- **Merge into main** = commit (if dirty) → merge into the base branch of
-  the project folder (fast-forward preferred; on conflict, tell the agent
-  to resolve — it's already sitting in the variant with full context).
-- **Open PR** = push branch + `gh pr create` (capability-gated on `gh`).
+- **Create pull request** is the default click, *not* merge. FalconDeck's
+  project folder is usually dirty, so a primary "merge now" would stomp
+  live work. Commits leftover variant changes if needed, pushes the branch,
+  then `gh pr create` into the recorded base branch.
+- **Draft pull request** = the same, with `--draft`.
+- **Merge and push** = commit (if dirty) → merge into the base branch in
+  the project folder → push. It **refuses when the project folder has
+  uncommitted changes**, or when that folder is not on the base branch; the
+  menu disables it up front and says why. On conflict, tell the agent to
+  resolve — it's already sitting in the variant with full context.
+- `gh` is required for the PR modes and reported clearly when missing.
+  Merge mode does not need it.
+- The variant and its branch always survive a ship. Nothing is force-pushed.
 - Archiving the thread offers variant cleanup; a merged, clean variant is
   deleted silently (Claude Code's "auto-removed if unchanged" rule,
   extended to "removed if merged").
@@ -113,15 +123,19 @@ falcondeck/fix-login-flow · 4 files · +182 −40
 
 ## Implementation status
 
-- `falcondeck-core`: isolation choice and `ThreadVariant` metadata are shipped.
+- `falcondeck-core`: isolation choice and `ThreadVariant` metadata are shipped,
+  including `base_branch`, recorded from the project `HEAD` when the checkout is
+  created. Variants made before that field falls back to `main`, then `master`.
 - Daemon: worktree creation, env-file allowlist copying, provider cwd override,
   and checkout deletion are shipped.
+- Daemon: `git.commit` and `thread.ship` (pr / draft_pr / merge) are shipped on
+  the local HTTP API and the relay bridge, so remote web ships the same button.
 - Desktop/remote-web/mobile: isolation selection and thread indicators are
-  shipped.
-- Merge, PR, setup/cleanup scripts, configurable allowlists, and pinned copies
-  remain follow-up work.
+  shipped. Desktop and remote web both mount the shared Merge split button;
+  mobile stays read-only on shipping.
+- Setup/cleanup scripts, configurable allowlists, and pinned copies remain
+  follow-up work.
 - Remote hosts require no extra plumbing because the daemon creates their
   worktrees locally; the `.env` allowlist matters most on those hosts.
 
-Remaining order: diff-panel merge actions → setup scripts + allowlist UI →
-pinned variants.
+Remaining order: setup scripts + allowlist UI → pinned variants.

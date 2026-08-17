@@ -1099,23 +1099,31 @@ describe("DesktopSidebar", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("sets a thread colour directly from the context menu", async () => {
-    const onSetThreadColor = vi.fn().mockResolvedValue(undefined);
-    const red = { id: "red", label: "Red", color: "red" };
+  it("sets a thread stage from the context-menu submenu", async () => {
+    const onSetThreadStage = vi.fn().mockResolvedValue(undefined);
+    const inProgress = {
+      id: "in_progress",
+      label: "In progress",
+      color: "yellow",
+      icon: "in_progress",
+    };
     renderSidebar({
-      threadTagOptions: [red],
-      threadTagsById: { "thread-1": [red] },
-      onSetThreadColor,
+      threadTagOptions: [inProgress],
+      threadTagsById: { "thread-1": [inProgress] },
+      onSetThreadStage,
     });
 
     fireEvent.contextMenu(screen.getByText("Main thread"));
-    const redChoice = await screen.findByRole("menuitemradio", { name: "Red" });
-    expect(redChoice).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Set stage" }));
+    const current = await screen.findByRole("menuitemradio", {
+      name: "In progress",
+    });
+    expect(current).toHaveAttribute("aria-checked", "true");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("menuitemradio", { name: "No colour" }));
+    fireEvent.click(screen.getByRole("menuitemradio", { name: "No stage" }));
     await waitFor(() => {
-      expect(onSetThreadColor).toHaveBeenCalledWith(
+      expect(onSetThreadStage).toHaveBeenCalledWith(
         "workspace-1",
         expect.objectContaining({ id: "thread-1" }),
         null,
@@ -1123,31 +1131,102 @@ describe("DesktopSidebar", () => {
     });
   });
 
-  it("hides thread colours when the owning daemon disables the extension", () => {
-    const red = { id: "red", label: "Red", color: "red" };
+  it("creates a custom stage from the context-menu submenu", async () => {
+    const onCreateThreadStage = vi.fn().mockResolvedValue(undefined);
+    const backlog = {
+      id: "backlog",
+      label: "Backlog",
+      color: "gray",
+      icon: "backlog",
+    };
     renderSidebar({
-      threadTagOptions: [red],
-      onSetThreadColor: vi.fn(),
-      canSetThreadColor: (workspaceId) => workspaceId !== "workspace-1",
+      threadTagOptions: [backlog],
+      onSetThreadStage: vi.fn(),
+      onCreateThreadStage,
+    });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Set stage" }));
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Add stage…" }),
+    );
+
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent("Add stage");
+    fireEvent.change(screen.getByLabelText("Stage name"), {
+      target: { value: "Blocked" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add" }));
+
+    await waitFor(() => {
+      expect(onCreateThreadStage).toHaveBeenCalledWith(
+        "workspace-1",
+        expect.objectContaining({ id: "thread-1" }),
+        "Blocked",
+      );
+    });
+  });
+
+  it("keeps the context menu open while scrolling stage options", async () => {
+    renderSidebar({
+      threadTagOptions: [
+        {
+          id: "in_progress",
+          label: "In progress",
+          color: "yellow",
+          icon: "in_progress",
+        },
+      ],
+      onSetThreadStage: vi.fn(),
+    });
+
+    fireEvent.contextMenu(screen.getByText("Main thread"));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Set stage" }));
+    const stageMenu = await screen.findByRole("menu", { name: "Set stage" });
+
+    fireEvent.scroll(stageMenu);
+
+    expect(stageMenu).toBeInTheDocument();
+    expect(
+      screen.getByRole("menuitemradio", { name: "In progress" }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides thread stages when the owning daemon disables the extension", () => {
+    const inProgress = {
+      id: "in_progress",
+      label: "In progress",
+      color: "yellow",
+      icon: "in_progress",
+    };
+    renderSidebar({
+      threadTagOptions: [inProgress],
+      onSetThreadStage: vi.fn(),
+      canSetThreadStage: (workspaceId) => workspaceId !== "workspace-1",
     });
 
     fireEvent.contextMenu(screen.getByText("Main thread"));
 
     expect(
-      screen.queryByRole("menuitemradio", { name: "Red" }),
+      screen.queryByRole("menuitem", { name: "Set stage" }),
     ).not.toBeInTheDocument();
   });
 
-  it("keeps colour filters in the Projects filter menu", async () => {
-    const red = { id: "red", label: "Red", color: "red" };
-    const blue = { id: "blue", label: "Blue", color: "blue" };
+  it("keeps stage filters in the Projects filter menu", async () => {
+    const inProgress = {
+      id: "in_progress",
+      label: "In progress",
+      color: "yellow",
+      icon: "in_progress",
+    };
+    const done = { id: "done", label: "Done", color: "orange", icon: "done" };
     renderSidebar({
       groups: [
         {
           workspace: workspace(),
           threads: [
-            thread({ id: "red-thread", title: "Red thread" }),
-            thread({ id: "blue-thread", title: "Blue thread" }),
+            thread({ id: "progress-thread", title: "Progress thread" }),
+            thread({ id: "done-thread", title: "Done thread" }),
           ],
         },
         {
@@ -1157,44 +1236,44 @@ describe("DesktopSidebar", () => {
           }),
           threads: [
             thread({
-              id: "untagged-thread",
+              id: "unstaged-thread",
               workspace_id: "workspace-2",
-              title: "Untagged thread",
+              title: "Unstaged thread",
             }),
           ],
         },
       ],
-      threadTagOptions: [red, blue],
+      threadTagOptions: [inProgress, done],
       threadTagsById: {
-        "red-thread": [red],
-        "blue-thread": [blue],
+        "progress-thread": [inProgress],
+        "done-thread": [done],
       },
     });
 
     expect(
-      screen.queryByRole("menuitemcheckbox", { name: "Red" }),
+      screen.queryByRole("menuitemcheckbox", { name: "In progress" }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText("Red thread")).toBeInTheDocument();
-    expect(screen.getByText("Blue thread")).toBeInTheDocument();
+    expect(screen.getByText("Progress thread")).toBeInTheDocument();
+    expect(screen.getByText("Done thread")).toBeInTheDocument();
     expect(screen.getByText("empty-project")).toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Filter chats by colour" }),
+      screen.getByRole("button", { name: "Filter chats by stage" }),
     );
     fireEvent.click(
-      await screen.findByRole("menuitemcheckbox", { name: "Red" }),
+      await screen.findByRole("menuitemcheckbox", { name: "In progress" }),
     );
 
-    expect(screen.getByText("Red thread")).toBeInTheDocument();
-    expect(screen.queryByText("Blue thread")).not.toBeInTheDocument();
+    expect(screen.getByText("Progress thread")).toBeInTheDocument();
+    expect(screen.queryByText("Done thread")).not.toBeInTheDocument();
     expect(screen.queryByText("empty-project")).not.toBeInTheDocument();
     expect(screen.queryByText("No threads yet")).not.toBeInTheDocument();
     expect(
-      screen.getByTitle("Filter chats by colour (1 active)"),
+      screen.getByTitle("Filter chats by stage (1 active)"),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("menuitem", { name: "Clear" }));
-    expect(screen.getByText("Blue thread")).toBeInTheDocument();
+    expect(screen.getByText("Done thread")).toBeInTheDocument();
     expect(screen.getByText("empty-project")).toBeInTheDocument();
   });
 
@@ -1271,9 +1350,14 @@ describe("DesktopSidebar", () => {
     expect(screen.queryByText("Plain thread")).not.toBeInTheDocument();
   });
 
-  it("composes colour and extension sidebar filters", async () => {
-    const red = { id: "red", label: "Red", color: "red" };
-    const blue = { id: "blue", label: "Blue", color: "blue" };
+  it("composes stage and extension sidebar filters", async () => {
+    const inProgress = {
+      id: "in_progress",
+      label: "In progress",
+      color: "yellow",
+      icon: "in_progress",
+    };
+    const done = { id: "done", label: "Done", color: "orange", icon: "done" };
     const extensions: ExtensionSnapshot = {
       catalog: [
         {
@@ -1341,19 +1425,19 @@ describe("DesktopSidebar", () => {
           ],
         },
       ],
-      threadTagOptions: [red, blue],
+      threadTagOptions: [inProgress, done],
       threadTagsById: {
-        "red-hot": [red],
-        "red-plain": [red],
-        "blue-hot": [blue],
+        "red-hot": [inProgress],
+        "red-plain": [inProgress],
+        "blue-hot": [done],
       },
     });
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Filter chats by colour" }),
+      screen.getByRole("button", { name: "Filter chats by stage" }),
     );
     fireEvent.click(
-      await screen.findByRole("menuitemcheckbox", { name: "Red" }),
+      await screen.findByRole("menuitemcheckbox", { name: "In progress" }),
     );
 
     rerenderSidebar({

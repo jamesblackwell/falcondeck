@@ -6,19 +6,10 @@ import { Check, ListFilter } from 'lucide-react'
 import type { ThreadTag } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
-const THREAD_COLOR_VALUES: Record<string, string> = {
-  gray: '#94a3b8',
-  red: '#ef4444',
-  orange: '#f97316',
-  yellow: '#eab308',
-  green: '#22c55e',
-  blue: '#3b82f6',
-  purple: '#a855f7',
-  pink: '#ec4899',
-}
+import { ThreadStageIcon } from './thread-stage-icon'
 
-/** Compact colour filter kept beside the Projects sort control. */
-export const ThreadColorFilterMenu = memo(function ThreadColorFilterMenu({
+/** Compact stage filter kept beside the Projects sort control. */
+export const ThreadStageFilterMenu = memo(function ThreadStageFilterMenu({
   options,
   selectedIds,
   onToggle,
@@ -69,10 +60,10 @@ export const ThreadColorFilterMenu = memo(function ThreadColorFilterMenu({
           type="button"
           title={
             active
-              ? `Filter chats by colour (${selectedIds.size} active)`
-              : 'Filter chats by colour'
+              ? `Filter chats by stage (${selectedIds.size} active)`
+              : 'Filter chats by stage'
           }
-          aria-label="Filter chats by colour"
+          aria-label="Filter chats by stage"
           className={cn(
             'fd-focus relative -my-0.5 shrink-0 rounded-[var(--fd-radius-sm)] p-0.5 transition-colors duration-[var(--fd-duration-fast)] hover:bg-surface-3 hover:text-fg-secondary',
             open || active ? 'bg-surface-3 text-fg-secondary' : 'text-fg-muted',
@@ -95,12 +86,12 @@ export const ThreadColorFilterMenu = memo(function ThreadColorFilterMenu({
         >
           <div
             role="menu"
-            aria-label="Filter chats by colour"
+            aria-label="Filter chats by stage"
             onKeyDown={handleMenuKeyDown}
           >
             <div className="mx-1 mb-1 flex h-9 items-center justify-between gap-3 border-b border-border-subtle px-1.5">
               <p className="whitespace-nowrap text-[length:var(--fd-text-2xs)] font-medium uppercase tracking-[0.08em] text-fg-muted">
-                Filter by colour
+                Filter by stage
               </p>
               {active ? (
                 <button
@@ -124,15 +115,7 @@ export const ThreadColorFilterMenu = memo(function ThreadColorFilterMenu({
                   onClick={() => onToggle(option.id)}
                   className="fd-focus-fill flex h-8 w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
                 >
-                  <span
-                    aria-hidden="true"
-                    className="h-2.5 w-2.5 shrink-0 rounded-full"
-                    style={{
-                      backgroundColor:
-                        THREAD_COLOR_VALUES[option.color] ??
-                        THREAD_COLOR_VALUES.gray,
-                    }}
-                  />
+                  <ThreadStageIcon stage={option} />
                   <span className="min-w-0 flex-1 truncate">
                     {option.label}
                   </span>

@@ -8,11 +8,14 @@ import type {
   ExtensionSnapshot,
   ExtensionSummary,
   GitBranchesResponse,
+  GitCommitResponse,
   GitDiffResponse,
   GitFileStatus,
   GitStatusResponse,
   HarnessesOverview,
   HarnessUpgradeJob,
+  ShipThreadMode,
+  ShipThreadResponse,
   WorkspaceFileResponse,
   WorkspaceFilesResponse,
   WriteWorkspaceFilePayload,
@@ -708,6 +711,39 @@ export function createDaemonApiClient(baseUrl: string) {
       return parseJson<GitDiffResponse>(
         await fetch(
           `${baseUrl}/api/workspaces/${workspaceId}/git/diff${params}`,
+        ),
+      );
+    },
+    // Commits leftover work in an isolated thread's own checkout. The project
+    // folder is never touched, so a dirty project stays untouched.
+    async gitCommit(
+      workspaceId: string,
+      threadId: string,
+      message?: string | null,
+    ) {
+      return parseJson<GitCommitResponse>(
+        await fetch(`${baseUrl}/api/workspaces/${workspaceId}/git/commit`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ thread_id: threadId, message }),
+        }),
+      );
+    },
+    // Lands an isolated thread: commit leftovers, then open a pull request or
+    // merge into the base branch recorded when the checkout was created.
+    async shipThread(
+      workspaceId: string,
+      threadId: string,
+      mode: ShipThreadMode,
+    ) {
+      return parseJson<ShipThreadResponse>(
+        await fetch(
+          `${baseUrl}/api/workspaces/${workspaceId}/threads/${threadId}/ship`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ mode }),
+          },
         ),
       );
     },

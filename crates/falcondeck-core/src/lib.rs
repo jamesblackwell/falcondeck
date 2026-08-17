@@ -1651,6 +1651,10 @@ pub struct ThreadVariant {
     pub branch: String,
     /// Mechanism used to create it.
     pub kind: ThreadVariantKind,
+    /// Project branch HEAD pointed at when the checkout was created.
+    /// Absent on older threads; ship falls back to `main`, then `master`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
 }
 
 /// Request payload used to update thread-level agent settings.
@@ -4537,6 +4541,70 @@ pub struct GitDiffResponse {
     pub diff: String,
     /// Full file contents when no unified diff is available.
     pub content: Option<String>,
+}
+
+/// How an isolated thread should land on the project base branch.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShipThreadMode {
+    /// Push the variant branch and open a pull request.
+    Pr,
+    /// Push the variant branch and open a draft pull request.
+    DraftPr,
+    /// Merge the variant branch into the base branch and push.
+    Merge,
+}
+
+/// Request payload used to commit leftover isolated-checkout changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitCommitRequest {
+    /// Workspace identifier that owns the thread.
+    pub workspace_id: String,
+    /// Isolated thread whose checkout should be committed.
+    pub thread_id: String,
+    /// Commit message. When absent, the daemon uses the thread title.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Result of committing leftover isolated-checkout changes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GitCommitResponse {
+    /// Whether a new commit was created. False when the checkout was already clean.
+    pub committed: bool,
+    /// Message used when a commit was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Request payload used to land an isolated thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShipThreadRequest {
+    /// Workspace identifier that owns the thread.
+    pub workspace_id: String,
+    /// Isolated thread to land.
+    pub thread_id: String,
+    /// How the branch should land.
+    pub mode: ShipThreadMode,
+}
+
+/// Result of landing an isolated thread.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShipThreadResponse {
+    /// Mode that ran.
+    pub mode: ShipThreadMode,
+    /// Variant branch that was shipped.
+    pub branch: String,
+    /// Base branch the work targeted.
+    pub base: String,
+    /// Whether a leftover dirty tree was committed first.
+    pub committed: bool,
+    /// Whether the branch reached `origin`. A merge lands locally even when the
+    /// push fails, so clients must not promise a push that did not happen.
+    pub pushed: bool,
+    /// Pull request URL when one was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Workspace-relative files available to the code-review browser.
