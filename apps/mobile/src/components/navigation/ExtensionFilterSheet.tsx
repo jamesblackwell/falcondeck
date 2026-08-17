@@ -4,12 +4,17 @@ import { Check } from "lucide-react-native";
 import * as Haptics from "expo-haptics";
 import { StyleSheet, useUnistyles } from "react-native-unistyles";
 
+import {
+  isThreadStageId,
+  THREAD_TAGS_EXTENSION_ID,
+} from "@falcondeck/client-core";
 import type {
   ExtensionSidebarFilterDefinition,
   ExtensionUiTone,
 } from "@falcondeck/client-core";
 
 import { NativeSheet, Text } from "@/components/ui";
+import { stageColor, ThreadStageMark } from "@/components/chat/ThreadStageMark";
 
 const TONE_COLORS: Partial<Record<ExtensionUiTone, string>> = {
   gray: "#94a3b8",
@@ -114,10 +119,29 @@ export const ExtensionFilterSheet = memo(function ExtensionFilterSheet({
                     }}
                   >
                     <View style={styles.optionLabel}>
-                      {toneColor ? (
+                      {definition.extensionId === THREAD_TAGS_EXTENSION_ID ? (
                         <View
                           accessibilityElementsHidden
-                          style={[styles.swatch, { backgroundColor: toneColor }]}
+                          importantForAccessibility="no-hide-descendants"
+                        >
+                          <ThreadStageMark
+                            stage={{
+                              id: option.value,
+                              label: option.label,
+                              icon: isThreadStageId(option.value)
+                                ? option.value
+                                : "custom",
+                            }}
+                            color={stageColor(option.tone ?? "gray", theme)}
+                          />
+                        </View>
+                      ) : toneColor ? (
+                        <View
+                          accessibilityElementsHidden
+                          style={[
+                            styles.swatch,
+                            { backgroundColor: toneColor },
+                          ]}
                         />
                       ) : null}
                       <Text variant="label" color="primary">

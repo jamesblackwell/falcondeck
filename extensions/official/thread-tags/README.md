@@ -1,18 +1,18 @@
-# Thread Colours
+# Thread Stages
 
 FalconDeck's first official extension and the reference vertical slice for the
 v0 public extension contract. It is bundled and enabled on new installations.
 
-The extension gives each thread one optional Finder-style colour, selected
-without naming or creating tags. It owns assignments in namespaced private
-storage, then publishes the fixed non-secret colour palette and entity-scoped
-`thread-tags` views. Desktop and remote web provide an immediate context-menu
-picker and render the manifest's declarative colour filter; mobile renders the
-same projection read-only and visibly points users to desktop/web for filtering.
+The extension gives each thread one optional named stage — Backlog, In
+progress, In review, Done, Canceled, or a custom stage you add. It owns
+assignments in namespaced private storage, then publishes the stage catalog
+and entity-scoped `thread-tags` views. Desktop and remote web provide a
+context-menu stage picker and a sidebar filter; mobile renders the same
+projection read-only.
 
 The durable extension id remains `falcondeck.thread-tags` for compatibility
-with v0.1 data. On first use, old named multi-tag assignments migrate to the
-colour of their first assigned tag.
+with earlier colour-label data. Colour assignments are not migrated; they are
+dropped on first use because a colour is not a workflow stage.
 
 Validate and type-check it from the monorepo root:
 

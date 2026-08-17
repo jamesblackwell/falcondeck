@@ -511,13 +511,15 @@ mod tests {
                 None,
             )
             .await
-            .expect("legacy tags should migrate");
+            .expect("legacy colour labels should be dropped");
         assert_eq!(
-            migrated.storage.get("threadColors"),
-            Some(&serde_json::json!({ "thread-1": "red" }))
+            migrated.storage.get("threadStages"),
+            Some(&serde_json::json!({}))
         );
+        assert!(migrated.storage.contains_key("stages"));
         assert!(!migrated.storage.contains_key("tags"));
         assert!(!migrated.storage.contains_key("assignments"));
+        assert!(!migrated.storage.contains_key("threadColors"));
         let result = host
             .invoke(
                 &package,
@@ -527,18 +529,18 @@ mod tests {
                     id: "thread-1".to_string(),
                 }),
                 &serde_json::json!({
-                    "operation": "set_thread_color",
-                    "color": "red"
+                    "operation": "set_thread_stage",
+                    "stageId": "in_progress"
                 }),
                 &migrated.storage,
                 None,
             )
             .await
-            .expect("thread tags action should run");
+            .expect("thread stages action should run");
         host.stop().await;
         assert_eq!(
-            result.storage.get("threadColors"),
-            Some(&serde_json::json!({ "thread-1": "red" }))
+            result.storage.get("threadStages"),
+            Some(&serde_json::json!({ "thread-1": "in_progress" }))
         );
         assert!(
             result
@@ -720,7 +722,7 @@ export default defineExtension({
     }
 
     #[tokio::test]
-    async fn concurrent_colour_actions_preserve_both_thread_updates() {
+    async fn concurrent_stage_actions_preserve_both_thread_updates() {
         let deno = resolve_agent_binary("deno", "deno").executable;
         if Command::new(deno).arg("--version").output().await.is_err() {
             return;
@@ -735,7 +737,7 @@ export default defineExtension({
             .await
             .expect("extension registry should restore");
 
-        let assign = |thread_id: &str, color: &str| {
+        let assign = |thread_id: &str, stage_id: &str| {
             app.invoke_extension_action(
                 "falcondeck.thread-tags",
                 "manage-tags",
@@ -745,15 +747,18 @@ export default defineExtension({
                         id: thread_id.to_string(),
                     }),
                     input: serde_json::json!({
-                        "operation": "set_thread_color",
-                        "color": color,
+                        "operation": "set_thread_stage",
+                        "stageId": stage_id,
                     }),
                 },
             )
         };
-        let (first, second) = tokio::join!(assign("thread-1", "red"), assign("thread-2", "blue"));
-        first.expect("first colour should save");
-        second.expect("second colour should save");
+        let (first, second) = tokio::join!(
+            assign("thread-1", "in_progress"),
+            assign("thread-2", "done")
+        );
+        first.expect("first stage should save");
+        second.expect("second stage should save");
 
         let snapshot = app.extension_snapshot().await;
         for thread_id in ["thread-1", "thread-2"] {

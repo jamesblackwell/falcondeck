@@ -119,7 +119,7 @@ import {
   type ThreadSummary,
   type ThreadTag,
   type UpdatePreferencesPayload,
-  optimisticallySetThreadColor,
+  optimisticallySetThreadStage,
   encryptedDaemonEventEnvelope,
 } from "@falcondeck/client-core";
 import {
@@ -2422,21 +2422,21 @@ function RemoteApp() {
     },
   });
 
-  const handleSetThreadColor = useCallback(
+  const handleSetThreadStage = useCallback(
     async (
       _workspaceId: string,
       thread: ThreadSummary,
-      color: ThreadTag | null,
+      stage: ThreadTag | null,
     ) => {
       try {
         setSnapshot((current) =>
           current
             ? {
                 ...current,
-                extensions: optimisticallySetThreadColor(
+                extensions: optimisticallySetThreadStage(
                   current.extensions,
                   thread.id,
-                  color?.color ?? null,
+                  stage?.id ?? null,
                 ),
               }
             : current,
@@ -2445,16 +2445,35 @@ function RemoteApp() {
           extensionId: THREAD_TAGS_EXTENSION_ID,
           actionId: THREAD_TAGS_ACTION_ID,
           target: { kind: "thread", id: thread.id },
-          input: { operation: "set_thread_color", color: color?.color ?? null },
+          input: {
+            operation: "set_thread_stage",
+            stageId: stage?.id ?? null,
+          },
         });
       } catch (error) {
         void callRpc<DaemonSnapshot>("snapshot.current", {})
           .then(setSnapshot)
           .catch(() => {});
-        reportError(error, "Failed to set thread colour");
+        reportError(error, "Failed to set thread stage");
       }
     },
     [callRpc, reportError],
+  );
+
+  const handleCreateThreadStage = useCallback(
+    async (
+      _workspaceId: string,
+      thread: ThreadSummary,
+      label: string,
+    ) => {
+      await callRpc("extensions.action.invoke", {
+        extensionId: THREAD_TAGS_EXTENSION_ID,
+        actionId: THREAD_TAGS_ACTION_ID,
+        target: { kind: "thread", id: thread.id },
+        input: { operation: "create_stage", label },
+      });
+    },
+    [callRpc],
   );
 
   const handleExtensionPanelAction = useCallback(
@@ -4250,8 +4269,11 @@ function RemoteApp() {
                 threadTagOptions={threadTags.tags}
                 extensionSidebarFilters={extensionSidebarFilters}
                 extensionSnapshot={snapshot?.extensions}
-                onSetThreadColor={
-                  threadTagsEnabled ? handleSetThreadColor : undefined
+                onSetThreadStage={
+                  threadTagsEnabled ? handleSetThreadStage : undefined
+                }
+                onCreateThreadStage={
+                  threadTagsEnabled ? handleCreateThreadStage : undefined
                 }
                 emptyState={{
                   title: "Waiting for projects",
@@ -4304,8 +4326,11 @@ function RemoteApp() {
           threadTagOptions={threadTags.tags}
           extensionSidebarFilters={extensionSidebarFilters}
           extensionSnapshot={snapshot?.extensions}
-          onSetThreadColor={
-            threadTagsEnabled ? handleSetThreadColor : undefined
+          onSetThreadStage={
+            threadTagsEnabled ? handleSetThreadStage : undefined
+          }
+          onCreateThreadStage={
+            threadTagsEnabled ? handleCreateThreadStage : undefined
           }
           emptyState={{
             title: "Waiting for projects",

@@ -38,7 +38,7 @@ The platform is solid **below** the UI line and a stub **above** it:
 - Exactly three contribution kinds exist in the schema and Rust types
   (`threadMenuActions`, `threadDecorations`, `sidebarFilters`). They are
   transported end-to-end but **no client has a generic renderer for any of
-  them** — the one shipped extension (Thread Colours) is hand-wired by its
+  them** — the one shipped extension (Thread Stages) is hand-wired by its
   hardcoded id (`falcondeck.thread-tags`) into desktop, remote-web, and mobile
   via `packages/client-core/src/extension-views.ts`. There is even a
   `falcondeck.thread-tags` literal in `extensions.rs`.
@@ -69,7 +69,7 @@ slice, and get it reviewed. Suggested sequence:
    `packages/chat-ui`, with the generic unsupported-contribution fallback.
    Include a generic renderer for at least one *existing* contribution kind
    (`sidebarFilters` is the smallest) to retire one piece of the hardcoded
-   Thread Colours wiring and prove the renderer against real data.
+   Thread Stages wiring and prove the renderer against real data.
 2. **`panels` contribution kind**: a named full-screen main-area surface.
    Daemon: schema + `ExtensionContributions` in `crates/falcondeck-core`,
    limits, view-state plumbing (it already generalizes). Desktop: refactor the
