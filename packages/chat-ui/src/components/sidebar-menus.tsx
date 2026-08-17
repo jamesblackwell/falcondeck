@@ -1,19 +1,23 @@
 import * as React from 'react'
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   Archive,
   Check,
+  ChevronRight,
+  CircleDashed,
   Copy,
   Pin,
   PinOff,
+  Plus,
   SquarePen,
   Trash2,
-  X,
 } from 'lucide-react'
 
 import type { ThreadSummary, ThreadTag } from '@falcondeck/client-core'
 import { Button, Input, cn } from '@falcondeck/ui'
+
+import { ThreadStageIcon } from './thread-stage-icon'
 
 // Must match the rendered menu width below (`w-60`), or the viewport clamp
 // lets the menu overflow the right edge.
@@ -21,17 +25,10 @@ const THREAD_MENU_WIDTH_PX = 240
 const THREAD_MENU_VIEWPORT_PADDING_PX = 8
 const THREAD_MENU_ROW_HEIGHT_PX = 36
 const THREAD_MENU_SEPARATOR_HEIGHT_PX = 9
-const THREAD_MENU_COLOR_ROW_HEIGHT_PX = 34
-const THREAD_COLOR_VALUES: Record<string, string> = {
-  gray: '#94a3b8',
-  red: '#ef4444',
-  orange: '#f97316',
-  yellow: '#eab308',
-  green: '#22c55e',
-  blue: '#3b82f6',
-  purple: '#a855f7',
-  pink: '#ec4899',
-}
+const THREAD_STAGE_SUBMENU_WIDTH_PX = 200
+const THREAD_STAGE_SUBMENU_ITEM_HEIGHT_PX = 32
+const THREAD_STAGE_SUBMENU_SEPARATOR_HEIGHT_PX = 9
+const THREAD_STAGE_SUBMENU_PADDING_PX = 8
 
 export type ThreadContextMenuState = {
   workspaceId: string
@@ -103,8 +100,8 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canPin,
   canMarkRead,
   canMarkUnread,
-  colorOptions,
-  selectedColor,
+  stageOptions,
+  selectedStage,
   onClose,
   onRename,
   onArchive,
@@ -112,7 +109,8 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onTogglePin,
   onMarkRead,
   onMarkUnread,
-  onSetColor,
+  onSetStage,
+  onCreateStage,
   menuRef,
 }: {
   target: ThreadContextMenuState | null
@@ -123,8 +121,8 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   canPin: boolean
   canMarkRead: boolean
   canMarkUnread: boolean
-  colorOptions: ThreadTag[]
-  selectedColor: ThreadTag | null
+  stageOptions: ThreadTag[]
+  selectedStage: ThreadTag | null
   onClose: () => void
   onRename: () => void
   onArchive: () => void
@@ -132,15 +130,68 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   onTogglePin: () => void
   onMarkRead: () => void
   onMarkUnread: () => void
-  onSetColor: (color: ThreadTag | null) => void
+  onSetStage: (stage: ThreadTag | null) => void
+  onCreateStage?: () => void
   menuRef: React.RefObject<HTMLDivElement | null>
 }) {
   const [copiedField, setCopiedField] = useState<'path' | 'session' | null>(
     null,
   )
+  const [stageMenuOpen, setStageMenuOpen] = useState(false)
+  const [stageMenuSide, setStageMenuSide] = useState<'right' | 'left'>('right')
+  const [stageMenuOffsetTop, setStageMenuOffsetTop] = useState(4)
+  const [stageMenuMaxHeight, setStageMenuMaxHeight] = useState<number | null>(
+    null,
+  )
+  const stageTriggerRef = useRef<HTMLButtonElement | null>(null)
+  const stageMenuRef = useRef<HTMLDivElement | null>(null)
+
+  const positionStageMenu = () => {
+    const trigger = stageTriggerRef.current
+    const parent = menuRef.current
+    if (!trigger || !parent) return
+    const parentRect = parent.getBoundingClientRect()
+    const spaceRight = window.innerWidth - parentRect.right
+    setStageMenuSide(
+      spaceRight < THREAD_STAGE_SUBMENU_WIDTH_PX + 8 ? 'left' : 'right',
+    )
+    const itemCount =
+      stageOptions.length + 1 + (onCreateStage ? 1 : 0)
+    const separatorCount = onCreateStage ? 1 : 0
+    const naturalHeight =
+      THREAD_STAGE_SUBMENU_PADDING_PX +
+      THREAD_STAGE_SUBMENU_ITEM_HEIGHT_PX * itemCount +
+      THREAD_STAGE_SUBMENU_SEPARATOR_HEIGHT_PX * separatorCount
+    const availableBelow =
+      window.innerHeight -
+      (parentRect.top + trigger.offsetTop) -
+      THREAD_MENU_VIEWPORT_PADDING_PX
+    const availableAbove =
+      parentRect.top + trigger.offsetTop + trigger.offsetHeight -
+      THREAD_MENU_VIEWPORT_PADDING_PX
+    if (naturalHeight <= availableBelow) {
+      setStageMenuOffsetTop(trigger.offsetTop)
+      setStageMenuMaxHeight(null)
+      return
+    }
+    if (availableBelow >= availableAbove) {
+      setStageMenuOffsetTop(trigger.offsetTop)
+      setStageMenuMaxHeight(Math.max(availableBelow, THREAD_STAGE_SUBMENU_ITEM_HEIGHT_PX * 4))
+      return
+    }
+    const maxHeight = Math.min(naturalHeight, availableAbove)
+    setStageMenuMaxHeight(maxHeight)
+    setStageMenuOffsetTop(
+      Math.max(
+        THREAD_MENU_VIEWPORT_PADDING_PX - parentRect.top,
+        trigger.offsetTop + trigger.offsetHeight - maxHeight,
+      ),
+    )
+  }
 
   useEffect(() => {
     setCopiedField(null)
+    setStageMenuOpen(false)
   }, [target])
 
   // Focus the first item once per opening. A callback ref would re-run on
@@ -148,9 +199,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   useEffect(() => {
     if (!target) return
     menuRef.current
-      ?.querySelector<HTMLButtonElement>(
-        '[role="menuitem"], [role="menuitemradio"]',
-      )
+      ?.querySelector<HTMLButtonElement>(':scope > [role="menuitem"]')
       ?.focus()
   }, [menuRef, target])
 
@@ -168,17 +217,19 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
     target.thread.attention.last_agent_activity_seq > 0
   const sessionId = target.thread.native_session_id
   const iconClassName = 'h-3.5 w-3.5 text-fg-muted'
+  const canSetStage = stageOptions.length > 0
   const rowCount =
     Number(canPin) +
     Number(canRename) +
     Number(showMarkRead) +
     Number(showMarkUnread) +
+    Number(canSetStage) +
     Number(Boolean(workspacePath)) +
     Number(Boolean(sessionId)) +
     Number(canArchive) +
     Number(canDelete)
 
-  if (rowCount === 0 && colorOptions.length === 0) {
+  if (rowCount === 0) {
     return null
   }
 
@@ -188,7 +239,6 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
   const menuHeight =
     THREAD_MENU_VIEWPORT_PADDING_PX * 2 +
     THREAD_MENU_ROW_HEIGHT_PX * rowCount +
-    (colorOptions.length > 0 ? THREAD_MENU_COLOR_ROW_HEIGHT_PX : 0) +
     THREAD_MENU_SEPARATOR_HEIGHT_PX * separatorCount
   const left = Math.max(
     THREAD_MENU_VIEWPORT_PADDING_PX,
@@ -232,7 +282,7 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
     }
     const items = Array.from(
       event.currentTarget.querySelectorAll<HTMLButtonElement>(
-        '[role="menuitem"], [role="menuitemradio"]',
+        ':scope > [role="menuitem"]',
       ),
     )
     if (items.length === 0) return
@@ -302,50 +352,160 @@ export const ThreadContextMenu = memo(function ThreadContextMenu({
           onClick={onMarkUnread}
         />
       ) : null}
-      {colorOptions.length > 0 ? (
+      {canSetStage ? (
+        <button
+          ref={stageTriggerRef}
+          type="button"
+          role="menuitem"
+          aria-haspopup="menu"
+          aria-expanded={stageMenuOpen}
+          onClick={() => {
+            positionStageMenu()
+            setStageMenuOpen((open) => !open)
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'ArrowRight' && event.key !== 'Enter') return
+            event.preventDefault()
+            event.stopPropagation()
+            positionStageMenu()
+            setStageMenuOpen(true)
+            window.requestAnimationFrame(() => {
+              stageMenuRef.current
+                ?.querySelector<HTMLButtonElement>('[role="menuitemradio"]')
+                ?.focus()
+            })
+          }}
+          className="fd-focus-fill flex h-9 w-full items-center gap-2 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
+        >
+          <span aria-hidden="true" className="flex shrink-0 items-center">
+            {selectedStage ? (
+              <ThreadStageIcon stage={selectedStage} />
+            ) : (
+              <CircleDashed className={iconClassName} />
+            )}
+          </span>
+          <span className="min-w-0 flex-1 truncate">Set stage</span>
+          <ChevronRight
+            aria-hidden="true"
+            className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+          />
+        </button>
+      ) : null}
+      {canSetStage && stageMenuOpen ? (
         <div
-          className="flex h-[34px] items-center justify-between gap-1 px-2"
-          role="group"
-          aria-label="Thread colour"
+          ref={stageMenuRef}
+          role="menu"
+          aria-label="Set stage"
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft' || event.key === 'Escape') {
+              event.preventDefault()
+              event.stopPropagation()
+              setStageMenuOpen(false)
+              stageTriggerRef.current?.focus()
+              return
+            }
+            if (
+              event.key !== 'ArrowDown' &&
+              event.key !== 'ArrowUp' &&
+              event.key !== 'Home' &&
+              event.key !== 'End'
+            ) {
+              return
+            }
+            const items = Array.from(
+              event.currentTarget.querySelectorAll<HTMLButtonElement>(
+                '[role="menuitemradio"], [role="menuitem"]',
+              ),
+            )
+            if (items.length === 0) return
+            event.preventDefault()
+            event.stopPropagation()
+            const currentIndex = items.indexOf(
+              document.activeElement as HTMLButtonElement,
+            )
+            const nextIndex =
+              event.key === 'Home'
+                ? 0
+                : event.key === 'End'
+                  ? items.length - 1
+                  : event.key === 'ArrowDown'
+                    ? (currentIndex + 1 + items.length) % items.length
+                    : (currentIndex - 1 + items.length) % items.length
+            items[nextIndex]?.focus()
+          }}
+          className="absolute z-10 w-[200px] overflow-y-auto rounded-[var(--fd-radius-lg)] border border-border-subtle bg-surface-1 p-1 shadow-[var(--fd-shadow-lg)]"
+          style={{
+            top: stageMenuOffsetTop,
+            maxHeight: stageMenuMaxHeight ?? undefined,
+            left: stageMenuSide === 'right' ? '100%' : undefined,
+            right: stageMenuSide === 'left' ? '100%' : undefined,
+            marginLeft: stageMenuSide === 'right' ? 4 : undefined,
+            marginRight: stageMenuSide === 'left' ? 4 : undefined,
+          }}
         >
           <button
             type="button"
             role="menuitemradio"
-            aria-checked={selectedColor == null}
-            aria-label="No colour"
-            title="No colour"
-            onClick={() => onSetColor(null)}
-            className="fd-focus-fill flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border border-border-strong text-fg-muted hover:bg-surface-3 focus-visible:bg-surface-3"
+            aria-checked={selectedStage == null}
+            onClick={() => onSetStage(null)}
+            className="fd-focus-fill flex h-8 w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
           >
-            <X aria-hidden="true" className="h-2.5 w-2.5" />
+            <CircleDashed
+              aria-hidden="true"
+              className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+            />
+            <span className="min-w-0 flex-1 truncate">No stage</span>
+            <Check
+              aria-hidden="true"
+              className={cn(
+                'h-3.5 w-3.5 shrink-0',
+                selectedStage == null ? 'text-fg-primary' : 'invisible',
+              )}
+            />
           </button>
-          {colorOptions.map((color) => {
-            const selected = selectedColor?.id === color.id
+          {stageOptions.map((stage) => {
+            const selected = selectedStage?.id === stage.id
             return (
               <button
-                key={color.id}
+                key={stage.id}
                 type="button"
                 role="menuitemradio"
                 aria-checked={selected}
-                aria-label={color.label}
-                title={color.label}
-                onClick={() => onSetColor(color)}
-                className="fd-focus-fill flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full transition-transform hover:scale-110 focus-visible:scale-110"
-                style={{
-                  backgroundColor:
-                    THREAD_COLOR_VALUES[color.color] ??
-                    THREAD_COLOR_VALUES.gray,
-                }}
+                onClick={() => onSetStage(stage)}
+                className="fd-focus-fill flex h-8 w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
               >
-                {selected ? (
-                  <Check
-                    aria-hidden="true"
-                    className="h-2.5 w-2.5 text-white drop-shadow"
-                  />
-                ) : null}
+                <ThreadStageIcon stage={stage} />
+                <span className="min-w-0 flex-1 truncate">{stage.label}</span>
+                <Check
+                  aria-hidden="true"
+                  className={cn(
+                    'h-3.5 w-3.5 shrink-0',
+                    selected ? 'text-fg-primary' : 'invisible',
+                  )}
+                />
               </button>
             )
           })}
+          {onCreateStage ? (
+            <>
+              <div
+                role="separator"
+                className="mx-2 my-1 border-t border-border-subtle"
+              />
+              <button
+                type="button"
+                role="menuitem"
+                onClick={onCreateStage}
+                className="fd-focus-fill flex h-8 w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
+              >
+                <Plus
+                  aria-hidden="true"
+                  className="h-3.5 w-3.5 shrink-0 text-fg-muted"
+                />
+                <span className="min-w-0 flex-1 truncate">Add stage…</span>
+              </button>
+            </>
+          ) : null}
         </div>
       ) : null}
       {workspacePath || sessionId ? (
@@ -710,6 +870,89 @@ export const RenameThreadDialog = memo(function RenameThreadDialog({
           </Button>
           <Button type="submit" disabled={!value.trim()} aria-busy={pending}>
             {pending ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </form>
+    </div>,
+    document.body,
+  )
+})
+
+export const AddThreadStageDialog = memo(function AddThreadStageDialog({
+  target,
+  value,
+  error,
+  pending,
+  onChange,
+  onClose,
+  onSubmit,
+}: {
+  target: { workspaceId: string; thread: ThreadSummary } | null
+  value: string
+  error: string | null
+  pending: boolean
+  onChange: (value: string) => void
+  onClose: () => void
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void
+}) {
+  if (!target || typeof document === 'undefined') {
+    return null
+  }
+
+  return createPortal(
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--fd-overlay)] p-4"
+      onMouseDown={(event) => {
+        if (event.target !== event.currentTarget) return
+        onClose()
+      }}
+    >
+      <form
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fd-add-stage-title"
+        onSubmit={onSubmit}
+        className="w-full max-w-sm rounded-[var(--fd-radius-xl)] border border-border-default bg-surface-1 p-5 shadow-[var(--fd-shadow-lg)]"
+      >
+        <div className="space-y-1">
+          <h2
+            id="fd-add-stage-title"
+            className="text-[length:var(--fd-text-lg)] font-semibold text-fg-primary"
+          >
+            Add stage
+          </h2>
+          <p className="truncate text-[length:var(--fd-text-sm)] text-fg-muted">
+            {target.thread.title || 'New thread'}
+          </p>
+        </div>
+
+        <div className="mt-4 space-y-2">
+          <Input
+            aria-label="Stage name"
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            autoFocus
+            placeholder="Blocked"
+            disabled={pending}
+          />
+          {error ? (
+            <p className="text-[length:var(--fd-text-xs)] text-danger">
+              {error}
+            </p>
+          ) : null}
+        </div>
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onClose}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+          <Button type="submit" disabled={!value.trim()} aria-busy={pending}>
+            {pending ? 'Adding…' : 'Add'}
           </Button>
         </div>
       </form>

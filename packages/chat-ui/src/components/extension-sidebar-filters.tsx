@@ -3,6 +3,10 @@ import { memo, useState } from "react";
 import * as Popover from "@radix-ui/react-popover";
 import { AlertTriangle, Check, ListFilter } from "lucide-react";
 
+import {
+  isThreadStageId,
+  THREAD_TAGS_EXTENSION_ID,
+} from "@falcondeck/client-core";
 import type {
   ExtensionSidebarFilterDefinition,
   ExtensionUiSelectOption,
@@ -10,13 +14,28 @@ import type {
 import { cn } from "@falcondeck/ui";
 
 import { EXTENSION_SWATCH_CLASSES } from "./extension-ui-renderer";
+import { ThreadStageIcon } from "./thread-stage-icon";
 
 const EMPTY_SELECTION = new Set<string>();
 
-function FilterOptionLabel({ option }: { option: ExtensionUiSelectOption }) {
+function FilterOptionLabel({
+  option,
+  isThreadStagesFilter,
+}: {
+  option: ExtensionUiSelectOption;
+  isThreadStagesFilter: boolean;
+}) {
   return (
     <>
-      {option.tone ? (
+      {isThreadStagesFilter && isThreadStageId(option.value) ? (
+        <ThreadStageIcon
+          stage={{
+            id: option.value,
+            color: option.tone ?? "gray",
+            icon: option.value,
+          }}
+        />
+      ) : option.tone ? (
         <span
           aria-hidden="true"
           className={cn(
@@ -145,7 +164,12 @@ const ExtensionSidebarFilterMenu = memo(function ExtensionSidebarFilterMenu({
                     onClick={() => toggle(option.value)}
                     className="fd-focus-fill flex h-8 w-full items-center gap-2.5 rounded-[var(--fd-radius-md)] px-2.5 text-left text-[length:var(--fd-text-sm)] text-fg-primary hover:bg-surface-3 focus-visible:bg-surface-3"
                   >
-                    <FilterOptionLabel option={option} />
+                    <FilterOptionLabel
+                      option={option}
+                      isThreadStagesFilter={
+                        definition.extensionId === THREAD_TAGS_EXTENSION_ID
+                      }
+                    />
                     <Check
                       aria-hidden="true"
                       className={cn(

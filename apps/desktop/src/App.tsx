@@ -35,7 +35,7 @@ import {
   operationalConditionDismissalKey,
   workspaceOperationalConditions,
   mergeThreadDetailPage,
-  optimisticallySetThreadColor,
+  optimisticallySetThreadStage,
   removeConversationItem,
   mergeFailedComposerAttachments,
   mergeFailedComposerDraft,
@@ -382,11 +382,11 @@ function AppInner() {
   const [isStopping, setIsStopping] = useState(false);
   const [revokingDeviceId, setRevokingDeviceId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const handleSetThreadColor = useCallback(
+  const handleSetThreadStage = useCallback(
     async (
       workspaceId: string,
       thread: ThreadSummary,
-      color: ThreadTag | null,
+      stage: ThreadTag | null,
     ) => {
       const host = remoteHosts.hostForWorkspace(workspaceId);
       const actionApi = host ? host.api() : api;
@@ -401,10 +401,10 @@ function AppInner() {
             current
               ? {
                   ...current,
-                  extensions: optimisticallySetThreadColor(
+                  extensions: optimisticallySetThreadStage(
                     current.extensions,
                     thread.id,
-                    color?.color ?? null,
+                    stage?.id ?? null,
                   ),
                 }
               : current,
@@ -416,8 +416,8 @@ function AppInner() {
           {
             target: { kind: "thread", id: thread.id },
             input: {
-              operation: "set_thread_color",
-              color: color?.color ?? null,
+              operation: "set_thread_stage",
+              stageId: stage?.id ?? null,
             },
           },
         );
@@ -433,16 +433,39 @@ function AppInner() {
         const message =
           error instanceof Error
             ? error.message
-            : "Failed to set thread colour";
+            : "Failed to set thread stage";
         setActionError(message);
         toast({
-          title: "Couldn’t set thread colour",
+          title: "Couldn’t set thread stage",
           description: message,
           variant: "danger",
         });
       }
     },
     [api, remoteHosts, setSnapshot, toast],
+  );
+
+  const handleCreateThreadStage = useCallback(
+    async (
+      workspaceId: string,
+      thread: ThreadSummary,
+      label: string,
+    ) => {
+      const host = remoteHosts.hostForWorkspace(workspaceId);
+      const actionApi = host ? host.api() : api;
+      if (!actionApi) {
+        throw new Error("The FalconDeck daemon is not connected");
+      }
+      await actionApi.invokeExtensionAction(
+        THREAD_TAGS_EXTENSION_ID,
+        THREAD_TAGS_ACTION_ID,
+        {
+          target: { kind: "thread", id: thread.id },
+          input: { operation: "create_stage", label },
+        },
+      );
+    },
+    [api, remoteHosts],
   );
 
   const handleSetExtensionEnabled = useCallback(
@@ -769,7 +792,7 @@ function AppInner() {
     }
     return badges;
   }, [workspaceHostIndex]);
-  const canSetThreadColor = useCallback(
+  const canSetThreadStage = useCallback(
     (workspaceId: string) => {
       const hostSnapshot = workspaceHostIndex.get(workspaceId)?.snapshot;
       const extensions = hostSnapshot?.extensions ?? snapshot?.extensions;
@@ -4813,10 +4836,13 @@ function AppInner() {
             threadTagOptions={threadTags.tags}
             extensionSidebarFilters={extensionSidebarFilters}
             extensionSnapshot={viewSnapshot?.extensions}
-            onSetThreadColor={
-              threadTagsEnabled ? handleSetThreadColor : undefined
+            onSetThreadStage={
+              threadTagsEnabled ? handleSetThreadStage : undefined
             }
-            canSetThreadColor={canSetThreadColor}
+            canSetThreadStage={canSetThreadStage}
+            onCreateThreadStage={
+              threadTagsEnabled ? handleCreateThreadStage : undefined
+            }
             extensionPanels={extensionPanels}
             activeExtensionPanelKey={activeExtensionPanelKey}
             onOpenExtensionPanel={handleOpenExtensionPanel}

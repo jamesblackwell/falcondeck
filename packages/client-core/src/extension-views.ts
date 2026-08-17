@@ -3,10 +3,19 @@ import type { ExtensionSnapshot, ExtensionView } from './types'
 export const THREAD_TAGS_EXTENSION_ID = 'falcondeck.thread-tags'
 export const THREAD_TAGS_ACTION_ID = 'manage-tags'
 
+export type ThreadStageIcon =
+  | 'backlog'
+  | 'in_progress'
+  | 'in_review'
+  | 'done'
+  | 'canceled'
+  | 'custom'
+
 export type ThreadTag = {
   id: string
   label: string
   color: string
+  icon?: ThreadStageIcon | string
 }
 
 export type ThreadTagsProjection = {
@@ -14,18 +23,30 @@ export type ThreadTagsProjection = {
   byThreadId: Record<string, ThreadTag[]>
 }
 
-const THREAD_COLOR_PALETTE: ThreadTag[] = [
+export const DEFAULT_THREAD_STAGES: ThreadTag[] = [
+  { id: 'backlog', label: 'Backlog', color: 'gray', icon: 'backlog' },
+  { id: 'in_progress', label: 'In progress', color: 'yellow', icon: 'in_progress' },
+  { id: 'in_review', label: 'In review', color: 'green', icon: 'in_review' },
+  { id: 'done', label: 'Done', color: 'orange', icon: 'done' },
+  { id: 'canceled', label: 'Canceled', color: 'gray', icon: 'canceled' },
+]
+
+export function isThreadStageId(id: string): boolean {
+  return DEFAULT_THREAD_STAGES.some(stage => stage.id === id)
+}
+
+const LEGACY_COLOR_IDS = new Set([
   'gray', 'red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink',
-].map(color => ({
-  id: color,
-  label: color[0]!.toUpperCase() + color.slice(1),
-  color,
-}))
+])
 
 function isThreadTag(value: unknown): value is ThreadTag {
   if (!value || typeof value !== 'object') return false
   const tag = value as Partial<ThreadTag>
   return typeof tag.id === 'string' && typeof tag.label === 'string' && typeof tag.color === 'string'
+}
+
+function looksLikeLegacyColorPalette(tags: ThreadTag[]): boolean {
+  return tags.length === LEGACY_COLOR_IDS.size && tags.every(tag => LEGACY_COLOR_IDS.has(tag.id))
 }
 
 function viewValue(view: ExtensionView | undefined): Record<string, unknown> {
@@ -35,7 +56,7 @@ function viewValue(view: ExtensionView | undefined): Record<string, unknown> {
 }
 
 /**
- * Adapts the official Thread Colours extension's public projections for clients.
+ * Adapts the official Thread Stages extension's public projections for clients.
  * It intentionally consumes only ExtensionSnapshot, so desktop, web, and mobile
  * share the same compatibility and malformed-data behaviour.
  */
@@ -50,10 +71,9 @@ export function deriveThreadTags(extensions: ExtensionSnapshot | null | undefine
   )
   const rawTags = viewValue(tagIndex).tags
   const publishedTags = Array.isArray(rawTags) ? rawTags.filter(isThreadTag) : []
-  const tags = publishedTags.length === THREAD_COLOR_PALETTE.length &&
-    publishedTags.every(tag => THREAD_COLOR_PALETTE.some(color => color.id === tag.id))
+  const tags = publishedTags.length > 0 && !looksLikeLegacyColorPalette(publishedTags)
     ? publishedTags
-    : THREAD_COLOR_PALETTE
+    : DEFAULT_THREAD_STAGES
   const tagsById = new Map(tags.map(tag => [tag.id, tag]))
   const byThreadId: Record<string, ThreadTag[]> = {}
 
@@ -74,23 +94,23 @@ export function deriveThreadTags(extensions: ExtensionSnapshot | null | undefine
   return { tags, byThreadId }
 }
 
-/** Applies the immediate local result of a Thread Colours selection. */
-export function optimisticallySetThreadColor(
+/** Applies the immediate local result of a Thread Stages selection. */
+export function optimisticallySetThreadStage(
   extensions: ExtensionSnapshot,
   threadId: string,
-  color: string | null,
+  stageId: string | null,
 ): ExtensionSnapshot {
-  const matchesThreadColor = (view: ExtensionView) =>
+  const matchesThreadStage = (view: ExtensionView) =>
     view.extension_id === THREAD_TAGS_EXTENSION_ID &&
     view.view_id === 'thread-tags' &&
     view.scope?.kind === 'thread' &&
     view.scope.id === threadId
-  const views = extensions.views.filter(view => !matchesThreadColor(view))
+  const views = extensions.views.filter(view => !matchesThreadStage(view))
   views.push({
     extension_id: THREAD_TAGS_EXTENSION_ID,
     view_id: 'thread-tags',
     scope: { kind: 'thread', id: threadId },
-    value: { tagIds: color ? [color] : [] },
+    value: { tagIds: stageId ? [stageId] : [] },
     updated_at: new Date().toISOString(),
   })
   return { ...extensions, views }

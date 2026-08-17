@@ -20,7 +20,7 @@ function validate(target) {
   };
 }
 
-test("official Thread Colours declarative UI validates", () => {
+test("official Thread Stages declarative UI validates", () => {
   const result = validate(
     resolve(repositoryRoot, "extensions/official/thread-tags"),
   );

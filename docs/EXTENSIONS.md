@@ -1,10 +1,10 @@
 # FalconDeck Extensions
 
 Status: canonical architecture and implementation plan. The v0 foundation and
-Thread Colours vertical slice, the scoped declarative UI v1 foundation,
+Thread Stages vertical slice, the scoped declarative UI v1 foundation,
 standalone panels, bounded lifecycle events, and permission-gated summary
 reads are implemented; later capabilities are explicitly tracked below. Last
-reconciled with the code on 2026-08-13.
+reconciled with the code on 2026-08-17.
 
 This document is the source of truth for code that extends FalconDeck itself.
 If implementation conflicts with it, update this document and record the
@@ -13,7 +13,7 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 
 ### Implemented baseline
 
-- bundled catalog and manifest discovery, with Thread Colours enabled by default;
+- bundled catalog and manifest discovery, with Thread Stages enabled by default;
 - checked-in manifest schema and machine-readable validation diagnostics;
 - daemon-owned enablement, namespaced JSON storage, bounded view projections,
   generic action routing, snapshot fields, sequenced events, HTTP, and relay RPC;
@@ -21,9 +21,9 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   supervised, read-only TypeScript host process per active extension;
 - Extensions settings in desktop, plus synchronized projection rendering in
   desktop, remote web, and mobile;
-- one-click Thread Colours context-menu selection, colour markers, optimistic
-  updates, and sidebar filtering on desktop
-  and remote web, with read-only colour markers on mobile;
+- one-click Thread Stages context-menu selection, stage icons, optimistic
+  updates, custom stage creation, and sidebar filtering on desktop
+  and remote web, with read-only stage markers on mobile;
 - a bounded declarative UI v1 schema, public SDK types/builder, defensive client
   normalizer, shared web renderer, generic sidebar-filter host, and visible
   unsupported-contribution fallback;
@@ -179,15 +179,15 @@ Every package contains `falcondeck.extension.json`, validated before code loads:
 {
   "$schema": "https://falcondeck.com/schemas/extension-manifest-v1.json",
   "id": "falcondeck.thread-tags",
-  "name": "Thread Colours",
-  "version": "0.2.0",
+  "name": "Thread Stages",
+  "version": "0.3.0",
   "engines": { "falcondeck": "^0.1" },
   "entrypoint": "server.ts",
   "contributes": {
-    "threadMenuActions": [{ "id": "manage-tags", "title": "Set colour" }],
+    "threadMenuActions": [{ "id": "manage-tags", "title": "Set stage" }],
     "threadDecorations": [{ "id": "tag-chips", "view": "thread-tags" }],
     "sidebarFilters": [
-      { "id": "tags", "title": "Colours", "view": "tag-index" }
+      { "id": "tags", "title": "Stages", "view": "tag-index" }
     ]
   },
   "permissions": []
@@ -321,8 +321,8 @@ The first API provides named contribution points:
 - conversation cards;
 - standalone panels.
 
-Thread Colours uses the first three; its fixed palette is rendered directly in
-the context menu and does not open a modal.
+Thread Stages uses the first three; its named stages are rendered in a
+context-menu submenu and do not open a modal to assign an existing stage.
 
 Contributions bind manifest declarations to view state and actions. The scoped
 implemented v1 vocabulary is stack, row, text, badge, divider, button, list,
@@ -338,8 +338,9 @@ document rules as other view contributions. Static manifest UI lets a lazy
 extension render on first paint; a synchronized global projection with the
 contribution's view id may replace that document later. Desktop registers core
 Activity and Settings takeovers plus extension panels by stable view id;
-remote web renders the same panel/navigation primitives. Thread Colours uses
-the generic filter path, while its thread menu action and row decoration remain
+remote web renders the same panel/navigation primitives. Thread Stages uses a dedicated
+stage filter so custom stages stay in sync, while other extensions still use
+the generic filter path. Its thread menu action and row decoration remain
 on their existing shared compatibility adapter. Header/composer actions,
 forms, modal hosts, colour picker, Markdown, icons, and the full mobile
 vocabulary remain planned rather than silently treated as implemented. Mobile
@@ -483,36 +484,37 @@ Canonical starter prompt:
 > contribution on supported clients, and list requested permissions before
 > enabling it.
 
-## 13. First official extension: Thread Colours
+## 13. First official extension: Thread Stages
 
-Thread Colours is bundled and enabled by default. Its durable package id stays
+Thread Stages is bundled and enabled by default. Its durable package id stays
 `falcondeck.thread-tags` so existing installations keep their data. A thread
-with no colour produces no UI clutter. It is both useful and the acceptance
+with no stage produces no UI clutter. It is both useful and the acceptance
 test for the architecture.
 
 Initial behaviour:
 
-- Assign one optional colour from a fixed Finder-style palette without typing.
-- Remove a colour from the same thread context-menu picker.
-- Show one compact coloured indicator in thread rows.
-- Filter the sidebar by one or more colours.
+- Assign one optional named stage from a default workflow set (Backlog, In
+  progress, In review, Done, Canceled).
+- Add a custom named stage from the same picker and assign it immediately.
+- Remove a stage from the same thread context-menu picker.
+- Show one compact stage icon in thread rows.
+- Filter the sidebar by one or more stages.
 - Preserve assignments across restart.
 - Keep desktop, remote web, and mobile consistent through daemon snapshots and
   sequenced updates.
-- Render tags read-only when a client cannot edit them.
+- Render stages read-only when a client cannot edit them.
 
-Assignments live in private storage. The fixed filter palette is static
-declarative manifest UI; per-thread colour assignments are synchronized view
-state, and the action retains the global `tag-index` projection for older
-clients. v0.1 named, multi-tag data migrates by retaining the
-first assigned tag's colour for each thread.
+Assignments live in private storage. Default filter options are static
+declarative manifest UI for first paint; per-thread stage assignments and the
+full catalog (including custom stages) are synchronized view state. Finder-style
+colour assignments are dropped on first use rather than mapped onto stages.
 
 Required contributions:
 
 - `threadMenuActions.manage-tags`
 - `threadDecorations.tag-chips`
 - `sidebarFilters.tags`
-- the shared system-colour context-menu renderer
+- the shared stage context-menu renderer
 
 Acceptance gate:
 
@@ -538,7 +540,7 @@ Deliver:
 - manifest v1 Rust/TypeScript types and generated JSON Schema;
 - `packages/extension-sdk` identity and lifecycle types;
 - `packages/extension-testing` skeleton;
-- Thread Colours scaffold and official catalog entry;
+- Thread Stages scaffold and official catalog entry;
 - compatibility and diagnostic-code conventions.
 
 Gate:
@@ -607,13 +609,13 @@ Gate:
 Progress (2026-08-13): the panel-prerequisite subset is implemented: UI v1
 wire/schema/SDK contracts, bounded validation, defensive normalization, the
 shared web renderer, generic unsupported fallback, fake-host package, and the
-generic `sidebarFilters` host proven by Thread Colours. The additive `panels`
+generic `sidebarFilters` host proven by Thread Stages. The additive `panels`
 contribution, desktop main-view registry, desktop/remote hosts, mobile fallback,
 and event-driven Mini Zen proof are also implemented. Mobile vocabulary,
 thread action/decoration generic hosts, forms/modals, and local-path install
 remain open, so Phase 3 as originally scoped is not marked complete.
 
-### Phase 4 — Thread Colours vertical slice
+### Phase 4 — Thread Stages vertical slice
 
 Deliver section 13 using only public SDK facets, enabled by default in the
 official catalog.
@@ -632,7 +634,7 @@ Deliver:
 - `create|validate|test|dev|pack` CLI commands;
 - stable JSON diagnostics and repairs;
 - generated public SDK reference;
-- a minimal example distinct from Thread Colours;
+- a minimal example distinct from Thread Stages;
 - an end-to-end fresh-scaffold test;
 - public starter prompt and contribution checklist.
 
@@ -695,7 +697,7 @@ state; Mini Zen proves both granted and denied paths using only public APIs.
 
 Do not begin marketplace, signing, arbitrary webviews, whole-region UI
 replacement, extension dependencies, or cross-extension calls until local
-packages and Thread Colours exercise compatibility in real use.
+packages and Thread Stages exercise compatibility in real use.
 
 ## 15. Required test layers
 

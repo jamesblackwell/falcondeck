@@ -87,6 +87,88 @@ describe("ExtensionSidebarFilters", () => {
     expect(document.activeElement).toBe(blue);
   });
 
+  it("renders official stage options with stage names", () => {
+    render(
+      <ExtensionSidebarFilters
+        definitions={[
+          {
+            key: "falcondeck.thread-tags:tags",
+            extensionId: "falcondeck.thread-tags",
+            extensionName: "Thread Stages",
+            contributionId: "tags",
+            title: "Stages",
+            document: {
+              version: 1,
+              root: {
+                type: "select",
+                id: "stages",
+                label: "Filter by stage",
+                multiple: true,
+                options: [
+                  { value: "backlog", label: "Backlog", tone: "gray" },
+                  {
+                    value: "in_progress",
+                    label: "In progress",
+                    tone: "yellow",
+                  },
+                ],
+                binding: {
+                  view: "thread-tags",
+                  path: ["tagIds"],
+                  operator: "includes_any",
+                },
+              },
+            },
+            unsupportedReason: null,
+          },
+        ]}
+        selections={new Map()}
+        onChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Filter by stage" }));
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "Backlog" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "In progress" }),
+    ).toBeTruthy();
+  });
+
+  it("does not treat another extension's matching value as a thread stage", () => {
+    render(
+      <ExtensionSidebarFilters
+        definitions={[
+          {
+            ...definition,
+            document: {
+              version: 1,
+              root: {
+                type: "select",
+                id: "status",
+                label: "Filter by status",
+                multiple: true,
+                options: [{ value: "done", label: "Done", tone: "green" }],
+                binding: {
+                  view: "thread-status",
+                  path: ["status"],
+                  operator: "includes_any",
+                },
+              },
+            },
+          },
+        ]}
+        selections={new Map()}
+        onChange={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Filter by status" }));
+    const option = screen.getByRole("menuitemcheckbox", { name: "Done" });
+    expect(option.querySelector('span[aria-hidden="true"] svg')).toBeNull();
+  });
+
   it("keeps malformed or newer filter documents inspectable", () => {
     render(
       <ExtensionSidebarFilters
