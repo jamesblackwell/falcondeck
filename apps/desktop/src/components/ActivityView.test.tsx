@@ -704,6 +704,39 @@ describe("ActivityView", () => {
       ).toHaveAttribute("aria-expanded", "true");
     });
 
+    it("navigates down to the recent toggle and activates it with Enter", () => {
+      render(<ActivityView {...props({ groups: finished(7) })} />);
+
+      for (const [index, element] of Array.from(
+        document.querySelectorAll<HTMLElement>("[data-activity-key]"),
+      ).entries()) {
+        const top = index * 100;
+        element.getBoundingClientRect = vi.fn(() => ({
+          left: 0,
+          top,
+          width: 800,
+          height: 60,
+          right: 800,
+          bottom: top + 60,
+          x: 0,
+          y: top,
+          toJSON: () => ({}),
+        }));
+      }
+
+      for (let index = 0; index < 5; index += 1) {
+        fireEvent.keyDown(window, { key: "ArrowDown" });
+      }
+      const showMore = screen.getByRole("button", { name: "Show 2 more" });
+      expect(showMore).toHaveAttribute("data-selected", "true");
+
+      fireEvent.keyDown(window, { key: "Enter" });
+      expect(screen.getByText("finished-7")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Show fewer" }),
+      ).toHaveAttribute("data-selected", "true");
+    });
+
     it("expands recent threads with T and opens the newly revealed rows", () => {
       const onOpenThread = vi.fn();
       render(

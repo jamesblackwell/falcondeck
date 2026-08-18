@@ -27,6 +27,7 @@ import { InteractiveRequestCard } from "./interactive-request-card";
 const RELATIVE_TIME_TICK_MS = 60_000;
 const RESOLVED_HOLD_MS = 1_500;
 const RECENT_PREVIEW_LIMIT = 5;
+const RECENT_TOGGLE_KEY = "recent:toggle";
 const SECTION_ORDER: readonly ActivitySection[] = [
   "blocked",
   "failed",
@@ -672,8 +673,13 @@ const RecentTrail = memo(function RecentTrail({
             type="button"
             size="sm"
             variant="ghost"
+            data-activity-key={RECENT_TOGGLE_KEY}
+            data-selected={
+              selectedKey === RECENT_TOGGLE_KEY ? "true" : undefined
+            }
             aria-expanded={expanded}
             aria-controls="activity-recent-list"
+            className="fd-reticle relative"
             onClick={onToggle}
           >
             {expanded ? "Show fewer" : `Show ${hiddenCount} more`}
@@ -802,6 +808,7 @@ export const ActivityView = memo(function ActivityView({
       section?: ActivitySection;
       entry?: ActivityEntry;
       recent?: RecentEntry;
+      action?: "toggle-recent";
     }[] = [];
     for (const section of SECTION_ORDER) {
       for (const entry of sections.get(section) ?? []) {
@@ -811,8 +818,11 @@ export const ActivityView = memo(function ActivityView({
     for (const recent of visibleRecentEntries) {
       rows.push({ key: recentKey(recent), recent });
     }
+    if (recentEntries.length > RECENT_PREVIEW_LIMIT) {
+      rows.push({ key: RECENT_TOGGLE_KEY, action: "toggle-recent" });
+    }
     return rows;
-  }, [sections, visibleRecentEntries]);
+  }, [recentEntries.length, sections, visibleRecentEntries]);
 
   // Arrive keyboard-ready with the same reticle used after navigation. Keep
   // Escape meaningful by doing this only once, rather than restoring a
@@ -840,7 +850,7 @@ export const ActivityView = memo(function ActivityView({
     if (row instanceof HTMLElement && typeof row.scrollIntoView === "function") {
       row.scrollIntoView({ block: "nearest" });
     }
-  }, [selectedKey]);
+  }, [recentExpanded, selectedKey]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -886,6 +896,11 @@ export const ActivityView = memo(function ActivityView({
           if (isActivatableTarget(event.target)) return;
         }
         const row = selectable.find((entry) => entry.key === selectedKey);
+        if (row?.action === "toggle-recent") {
+          event.preventDefault();
+          setRecentExpanded((current) => !current);
+          return;
+        }
         const target = row?.entry ?? row?.recent;
         if (!target) return;
         event.preventDefault();
