@@ -326,42 +326,78 @@ pub(super) async fn start_opencode_turn(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
 ) -> Result<(), DaemonError> {
-    let (session_id, model_id, agent_id, prompt, files) = {
+    let (session_id, model_id, variant, agent_id, prompt, files) = {
         let workspaces = app.inner.workspaces.lock().await;
-        let thread = workspaces
+        let workspace = workspaces
             .get(workspace_id)
-            .and_then(|workspace| workspace.threads.get(thread_id))
+            .ok_or_else(|| DaemonError::NotFound("workspace not found".to_string()))?;
+        let thread = workspace
+            .threads
+            .get(thread_id)
             .ok_or_else(|| DaemonError::NotFound("thread not found".to_string()))?;
         let session_id = thread.summary.native_session_id.clone().ok_or_else(|| {
             DaemonError::BadRequest("native OpenCode thread has no session id".to_string())
         })?;
+        let model_id = thread.summary.agent.model_id.clone();
+        // Only a variant the catalog lists for this model may ride along:
+        // OpenCode rejects an unknown one, and a thread keeps its effort when
+        // the model changes underneath it.
+        let variant = thread
+            .summary
+            .agent
+            .reasoning_effort
+            .clone()
+            .filter(|effort| {
+                model_id.as_deref().is_some_and(|model_id| {
+                    catalog_model(workspace, model_id).is_some_and(|model| {
+                        model
+                            .supported_reasoning_efforts
+                            .iter()
+                            .any(|candidate| candidate.reasoning_effort == *effort)
+                    })
+                })
+            });
         let (prompt, files) = opencode_prompt_from_inputs(inputs, selected_skills);
         (
             session_id,
-            thread.summary.agent.model_id.clone(),
+            model_id,
+            variant,
             thread.summary.agent.collaboration_mode_id.clone(),
             prompt,
             files,
         )
     };
     let runtime = app.opencode_runtime_for(workspace_id).await?;
+    let runner_models = runtime.runner_models().await?;
+    // The workspace catalog comes from OpenCode's v1 provider config, which
+    // advertises variants the v2 runner does not implement (openrouter models
+    // list low/medium/high there and none in the runner registry). Such a
+    // variant is accepted by `set_model` and then kills the turn after
+    // admission with `VariantUnavailableError`, so drop it and let the model
+    // run at its own default rather than losing the turn.
+    let variant = crate::opencode::runner_variant(
+        variant.as_deref(),
+        model_id
+            .as_deref()
+            .and_then(|model_id| runner_models.get(model_id)),
+    );
     if let Some(agent_id) = agent_id.as_deref() {
         runtime.set_agent(&session_id, agent_id).await?;
     }
     if let Some(model_id) = model_id.as_deref() {
         // An agent can carry its own model. Apply the thread's explicit model
         // last so changing Build/Plan does not silently replace that choice.
-        runtime.set_model(&session_id, model_id).await?;
+        runtime.set_model(&session_id, model_id, variant).await?;
     }
     // A thread stays pinned to the native transport, but its model can change
     // mid-thread to one the v2 runner cannot resolve (the picker lists every
-    // configured provider; the runner executes only its own registry). Such a
-    // turn would be admitted and then die with no session event and no
-    // assistant record, so refuse it before admission with the actual reason.
-    let runner_providers = runtime.runner_providers().await?;
-    let session_provider = runtime.session_model_provider(&session_id).await?;
+    // configured provider and every model it offers; the runner executes a
+    // subset). Such a turn would be admitted and then die with no session
+    // event and no assistant record, so refuse it before admission with the
+    // actual reason.
+    let session_model = runtime.session_model_ref(&session_id).await?;
     if let Some(reason) =
-        crate::opencode::native_model_block_reason(session_provider.as_deref(), &runner_providers)
+        crate::opencode::native_model_block_reason(session_model.as_deref(), &runner_models)
     {
         return Err(DaemonError::BadRequest(format!(
             "{reason}; switch this thread to a natively available model, or start a new \

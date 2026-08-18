@@ -239,20 +239,40 @@ An OpenCode entry can declare a transport:
 `auto` tries the native server for each new thread and falls back to ACP if
 startup, session creation, or the read/permission/question compatibility probe
 fails — or if the thread's model cannot execute natively. OpenCode 1.18's v2
-runner resolves models only against its own provider registry
-(`GET /api/provider`), which is a strict subset of the configured providers:
-API-key providers (deepinfra, openrouter, OpenCode Zen) appear there, while
-OAuth and coding-plan credentials (`zai-coding-plan`, ChatGPT, the Gemini
-plugin) are v1-only. A model from an unlisted provider is admitted by
-`/api/session/{id}/prompt` and then dies in `SessionRunnerModel.resolve` with
-no session event and no assistant record — only a server log line — so
-FalconDeck checks the session's effective model provider against the registry
-before pinning a thread to the native transport, and again before every native
-prompt admission (the model can change mid-thread). The registry loads
-asynchronously for roughly a second after server startup and reads as empty
-until then, so an empty answer is retried before it is believed. A session
-without an explicit model always passes the gate: the v2 runner resolves its
-default inside its own registry. `native` surfaces the gate's reason as the
+runner resolves models only against its own registry (`GET /api/model`), which
+is a strict subset of the configured catalog in two independent ways
+(both verified live on 1.18.18):
+
+* **Providers.** API-key providers (deepinfra, openrouter, OpenCode Zen) are
+  registered; OAuth and coding-plan credentials (`zai-coding-plan`, ChatGPT,
+  the Gemini plugin) are v1-only and never appear.
+* **Model APIs.** Among the registered models the runner implements only
+  `aisdk:@ai-sdk/openai-compatible` and `aisdk:@ai-sdk/anthropic` — in
+  practice, OpenCode Zen's models. Everything else, including every openrouter
+  model (`@openrouter/ai-sdk-provider`) and every deepinfra model
+  (`@ai-sdk/deepinfra`), fails with `SessionRunnerModel.UnsupportedApiError`.
+  Nothing OpenCode serves enumerates this set, so `RUNNER_MODEL_APIS` in
+  `crates/falcondeck-daemon/src/opencode.rs` is an allowlist; it fails toward
+  ACP, which runs everything the v1 catalog lists.
+
+A model the runner cannot resolve is admitted by `/api/session/{id}/prompt` and
+then dies in `SessionRunnerModel.resolve` with no session event and no
+assistant record — only a server log line — so FalconDeck checks the session's
+effective model against the registry before pinning a thread to the native
+transport, and again before every native prompt admission (the model can change
+mid-thread). The registry loads asynchronously for roughly a second after
+server startup and reads as empty until then, so an empty answer is retried
+before it is believed. A session without an explicit model always passes the
+gate: the v2 runner resolves its default inside its own registry.
+
+The same registry settles reasoning efforts. OpenCode calls them *variants* and
+the two catalogs disagree: `/config/providers` advertises low/medium/high for
+`openrouter/google/gemini-3.7-flash` while `/api/model` lists none for it, and
+sending a variant the runner does not know kills the turn after admission with
+`SessionRunnerModel.VariantUnavailableError`. A native turn therefore sends an
+effort only when the runner registry lists it, and otherwise lets the model run
+at its own default; the picker keeps offering the v1 catalog's efforts because
+the ACP transport does honour them. `native` surfaces the gate's reason as the
 thread-creation error instead of falling back; `acp` always uses the generic
 adapter. A thread is pinned to the transport that created it: FalconDeck never
 switches an active turn, and never blindly resends an input after an ambiguous
@@ -296,7 +316,7 @@ validates the endpoints and prompt request fields against the server's own
 `/doc` OpenAPI document, so a build that rejects any part of the native request
 shape falls back to ACP before a thread is pinned to the native transport.
 A turn that reaches the runner with a model the registry cannot resolve is the
-one failure mode neither check can catch after admission; the provider-registry
+one failure mode neither check can catch after admission; the runner-registry
 gate above exists to make that state unreachable, and the turn error still
 carries the server's own logged cause if it ever occurs.
 
@@ -338,9 +358,11 @@ upstream change should cost native features, never correctness: every request
 shape the native transport sends is declared in the `CONTRACT_*` tables in
 `crates/falcondeck-daemon/src/opencode.rs`, validated at attach against the
 server's own `/doc`, and any mismatch routes new threads to ACP. The
-provider-registry gate is likewise dynamic — it reads `/api/provider` live, so
-the day OpenCode's v2 runner learns to execute OAuth or coding-plan
-credentials, those models start running natively with no FalconDeck change.
+runner-registry gate is dynamic where OpenCode allows it — membership comes
+from `/api/model` live, so the day the v2 runner learns to execute OAuth or
+coding-plan credentials, those models start running natively with no FalconDeck
+change. The model-API allowlist is the one part that cannot be read from the
+server; a release that implements a new API needs that constant extended.
 
 When a new OpenCode version lands, run this checklist before trusting it:
 
@@ -357,8 +379,9 @@ When a new OpenCode version lands, run this checklist before trusting it:
 
 Opportunities to watch for in that diff, each currently worked around:
 `session.wait` returning something other than 503 (replaces active-map
-polling), a v2 session delete (replaces the v1 route), and OAuth providers
-appearing in `/api/provider` (retires the ACP-only restriction for those
-models). When adding a new request field or endpoint to the transport, add it
+polling), a v2 session delete (replaces the v1 route), OAuth providers
+appearing in `/api/model` (retires the ACP-only restriction for those models),
+and the runner accepting further model APIs (widen `RUNNER_MODEL_APIS`; probe
+by prompting one model per API and reading the server error log). When adding a new request field or endpoint to the transport, add it
 to the `CONTRACT_*` tables in the same change — an assumption that is not in
 those tables is one the attach-time check cannot defend.

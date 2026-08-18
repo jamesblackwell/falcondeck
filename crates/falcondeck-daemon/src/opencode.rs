@@ -38,13 +38,13 @@ const MAX_RETAINED_SERVER_ERRORS: usize = 16;
 const ACTIVITY_STALL: Duration = Duration::from_secs(120);
 const LISTENING_PREFIX: &str = "opencode server listening on http://127.0.0.1:";
 const MAX_MESSAGE_PAGE_SIZE: usize = 200;
-/// The v2 provider registry loads asynchronously after the server reports its
-/// port: `/api/provider` returns an empty list for roughly the first second
-/// even when providers are connected. Retried long enough to outlast a slow
+/// The v2 runner's registry loads asynchronously after the server reports its
+/// port: `/api/model` returns an empty list for roughly the first second even
+/// when providers are connected. Retried long enough to outlast a slow
 /// registry load without stalling thread creation when the list is genuinely
 /// empty.
-const RUNNER_PROVIDERS_ATTEMPTS: u32 = 10;
-const RUNNER_PROVIDERS_RETRY: Duration = Duration::from_millis(500);
+const RUNNER_REGISTRY_ATTEMPTS: u32 = 10;
+const RUNNER_REGISTRY_RETRY: Duration = Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delivery {
@@ -133,12 +133,12 @@ pub struct OpenCodeRuntime {
     /// a control-flow decision, so a change to OpenCode's log format costs a
     /// diagnostic detail rather than correctness.
     server_errors: Mutex<Vec<String>>,
-    /// Settled `/api/provider` result. The v2 runner resolves models only
-    /// against this registry — a strict subset of `/config/providers`, since
-    /// OAuth and coding-plan credentials are v1-only in OpenCode 1.18 — so the
-    /// answer gates which models may run natively. Cached because the registry
-    /// only changes with a credential change, which restarts this runtime.
-    runner_providers: Mutex<Option<Vec<String>>>,
+    /// Settled `/api/model` registry, keyed by `provider/model`. This is the
+    /// list the v2 runner resolves a turn against, and it disagrees with the
+    /// v1 `/config/providers` catalog on both which models can run and which
+    /// reasoning variants they accept. Cached because it only changes with a
+    /// credential change, which restarts this runtime.
+    runner_models: Mutex<Option<HashMap<String, RunnerModel>>>,
 }
 
 impl OpenCodeRuntime {
@@ -215,7 +215,7 @@ impl OpenCodeRuntime {
                 })?,
             child: Mutex::new(child),
             server_errors: Mutex::new(Vec::new()),
-            runner_providers: Mutex::new(None),
+            runner_models: Mutex::new(None),
         });
         // Keep draining stderr so a noisy server cannot block.  Diagnostics
         // remain in the daemon log rather than being silently discarded, and
@@ -295,44 +295,50 @@ impl OpenCodeRuntime {
             .await
     }
 
-    /// Provider ids the v2 runner can actually execute.
+    /// The models the v2 runner can resolve, keyed by `provider/model`.
     ///
-    /// `/config/providers` answers "which providers is this user connected
-    /// to", but the v2 runner resolves models against its own registry, which
-    /// omits OAuth and coding-plan credentials entirely: a model from an
-    /// unlisted provider is admitted, then dies in `SessionRunnerModel.resolve`
-    /// with no session event and no assistant record. An empty registry read
-    /// is retried because the registry loads asynchronously for roughly a
-    /// second after startup; the settled answer is cached for the runtime's
-    /// life since credential changes restart the runtime.
-    pub async fn runner_providers(&self) -> Result<Vec<String>, DaemonError> {
-        if let Some(cached) = self.runner_providers.lock().await.clone() {
-            return Ok(cached);
+    /// `/config/providers` (v1) and `/api/model` (the runner's registry)
+    /// disagree in two ways that both end a turn after admission, with no
+    /// assistant record and nothing on the session event stream:
+    ///
+    /// * variants — v1 claims `openrouter/google/gemini-3.7-flash` takes
+    ///   low/medium/high; the runner lists none and fails the turn with
+    ///   `SessionRunnerModel.VariantUnavailableError`.
+    /// * APIs — v1 lists every model of every API-key provider; the runner
+    ///   implements only some model APIs and fails the rest with
+    ///   `SessionRunnerModel.UnsupportedApiError`.
+    ///
+    /// The v1 catalog still drives the model picker, because the ACP transport
+    /// runs everything it lists, variants included.
+    ///
+    /// An empty read shortly after startup means "not loaded yet", so it is
+    /// retried; the settled answer is cached for the runtime's life, since a
+    /// credential change restarts the runtime.
+    pub async fn runner_models(&self) -> Result<HashMap<String, RunnerModel>, DaemonError> {
+        if let Some(cached) = self.runner_models.lock().await.as_ref() {
+            return Ok(cached.clone());
         }
-        let mut providers = Vec::new();
-        for attempt in 0..RUNNER_PROVIDERS_ATTEMPTS {
+        let mut models = HashMap::new();
+        for attempt in 0..RUNNER_REGISTRY_ATTEMPTS {
             if attempt > 0 {
-                tokio::time::sleep(RUNNER_PROVIDERS_RETRY).await;
+                tokio::time::sleep(RUNNER_REGISTRY_RETRY).await;
             }
             let value = self
-                .request(reqwest::Method::GET, "/api/provider", None)
+                .request(reqwest::Method::GET, "/api/model", None)
                 .await?;
-            providers = runner_provider_ids(&value)?;
-            if !providers.is_empty() {
+            models = runner_models(&value)?;
+            if !models.is_empty() {
                 break;
             }
         }
-        *self.runner_providers.lock().await = Some(providers.clone());
-        Ok(providers)
+        *self.runner_models.lock().await = Some(models.clone());
+        Ok(models)
     }
 
-    /// The session's effective model provider, or `None` when the session
-    /// defers to OpenCode's own default — which the v2 runner resolves inside
-    /// its own registry, so an absent model never needs gating.
-    pub async fn session_model_provider(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>, DaemonError> {
+    /// The session's effective model as `provider/model`, or `None` when the
+    /// session defers to OpenCode's own default — which the v2 runner resolves
+    /// inside its own registry, so an absent model never needs gating.
+    pub async fn session_model_ref(&self, session_id: &str) -> Result<Option<String>, DaemonError> {
         let session = self
             .request(
                 reqwest::Method::GET,
@@ -340,10 +346,13 @@ impl OpenCodeRuntime {
                 None,
             )
             .await?;
-        Ok(session
+        let provider_id = session
             .pointer("/data/model/providerID")
-            .and_then(Value::as_str)
-            .map(str::to_owned))
+            .and_then(Value::as_str);
+        let model_id = session.pointer("/data/model/id").and_then(Value::as_str);
+        Ok(provider_id
+            .zip(model_id)
+            .map(|(provider_id, model_id)| format!("{provider_id}/{model_id}")))
     }
 
     pub async fn agents(&self) -> Result<Vec<Value>, DaemonError> {
@@ -353,12 +362,24 @@ impl OpenCodeRuntime {
         response_data_array(value, "agents")
     }
 
-    pub async fn set_model(&self, session_id: &str, model: &str) -> Result<(), DaemonError> {
-        let Some(model) = model_ref(model) else {
+    /// Points the session at a model, optionally at one of that model's
+    /// reasoning variants (OpenCode's name for an effort level).
+    pub async fn set_model(
+        &self,
+        session_id: &str,
+        model: &str,
+        variant: Option<&str>,
+    ) -> Result<(), DaemonError> {
+        let Some(mut model) = model_ref(model) else {
             // The synthetic `default` catalog entry deliberately preserves
             // OpenCode's own configured model.
             return Ok(());
         };
+        if let Some(variant) = variant
+            && let Some(object) = model.as_object_mut()
+        {
+            object.insert("variant".to_string(), json!(variant));
+        }
         self.request(
             reqwest::Method::POST,
             &format!("/api/session/{session_id}/model"),
@@ -1043,46 +1064,122 @@ fn model_ref(model: &str) -> Option<Value> {
         .then(|| json!({ "providerID": provider_id, "id": id }))
 }
 
-fn runner_provider_ids(value: &Value) -> Result<Vec<String>, DaemonError> {
-    let providers = value.get("data").and_then(Value::as_array).ok_or_else(|| {
+/// One entry of the v2 runner's model registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerModel {
+    /// Reasoning variant ids the runner accepts alongside this model.
+    pub variants: Vec<String>,
+    /// The model's API as the runner names it in its own error message:
+    /// `aisdk:<package>` or `native`.
+    pub api: String,
+}
+
+/// Model APIs the v2 runner implements, verified live on OpenCode 1.18.18 by
+/// prompting one model of each and reading the server error log.
+///
+/// Every other API — `@openrouter/ai-sdk-provider` and `@ai-sdk/deepinfra`
+/// among them — is admitted by the v2 route and then dies in
+/// `SessionRunnerModel.resolve` with `UnsupportedApiError`. An allowlist is
+/// unavoidable here: nothing OpenCode serves enumerates the runner's supported
+/// APIs. It fails in the safe direction — an API added by a later release is
+/// treated as native-incapable, and the thread runs over ACP, which executes
+/// every model the v1 catalog lists.
+const RUNNER_MODEL_APIS: &[&str] = &["aisdk:@ai-sdk/openai-compatible", "aisdk:@ai-sdk/anthropic"];
+
+/// `provider/model` → what the runner will accept for it.
+///
+/// Variants are published as an array; entries are tolerated as bare ids or as
+/// objects carrying one, since only the empty case is observable on OpenCode
+/// 1.18.18 and a future release naming them differently should degrade to
+/// "no variant" rather than to a failed turn.
+fn runner_models(value: &Value) -> Result<HashMap<String, RunnerModel>, DaemonError> {
+    let models = value.get("data").and_then(Value::as_array).ok_or_else(|| {
         DaemonError::Rpc(
-            "OpenCode native provider registry response did not contain a data array".to_string(),
+            "OpenCode native model registry response did not contain a data array".to_string(),
         )
     })?;
-    Ok(providers
+    Ok(models
         .iter()
-        .filter_map(|provider| provider.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
+        .filter_map(|model| {
+            let id = model.get("id").and_then(Value::as_str)?;
+            let provider_id = model.get("providerID").and_then(Value::as_str)?;
+            let variants = model
+                .get("variants")
+                .and_then(Value::as_array)
+                .map(|variants| {
+                    variants
+                        .iter()
+                        .filter_map(|variant| {
+                            variant
+                                .as_str()
+                                .or_else(|| variant.get("id").and_then(Value::as_str))
+                                .map(str::to_owned)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let api_type = model
+                .pointer("/api/type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let api = match model.pointer("/api/package").and_then(Value::as_str) {
+                Some(package) => format!("{api_type}:{package}"),
+                None => api_type.to_string(),
+            };
+            Some((format!("{provider_id}/{id}"), RunnerModel { variants, api }))
+        })
         .collect())
+}
+
+/// The variant to send with a model, given what the runner accepts: the
+/// requested effort, or `None` when the runner would reject it.
+pub fn runner_variant<'a>(effort: Option<&'a str>, model: Option<&RunnerModel>) -> Option<&'a str> {
+    let effort = effort?;
+    // A model the registry does not describe is blocked separately; leaving
+    // its effort alone keeps this function from silently changing a request
+    // the caller is about to refuse anyway.
+    let Some(model) = model else {
+        return Some(effort);
+    };
+    model
+        .variants
+        .iter()
+        .any(|variant| variant == effort)
+        .then_some(effort)
 }
 
 /// Why the v2 runner cannot execute the session's model, or `None` when it
 /// can. A session without an explicit model passes: the runner resolves its
 /// default from its own registry.
 ///
-/// This gate is deliberately dynamic rather than a hardcoded provider list:
-/// if a future OpenCode release teaches its v2 runner to execute OAuth or
-/// coding-plan credentials, `/api/provider` will list them and these models
-/// start running natively without a FalconDeck change.
+/// Both halves are dynamic where OpenCode lets them be: membership comes from
+/// the runner's own registry, so a release that teaches the v2 runner to
+/// execute OAuth or coding-plan credentials needs no FalconDeck change.
 pub fn native_model_block_reason(
-    session_provider: Option<&str>,
-    runner_providers: &[String],
+    session_model: Option<&str>,
+    runner_models: &HashMap<String, RunnerModel>,
 ) -> Option<String> {
-    if runner_providers.is_empty() {
+    if runner_models.is_empty() {
         return Some(
-            "OpenCode's native runner has no connected providers, so no model can execute \
+            "OpenCode's native runner has no models registered, so no model can execute \
              natively"
                 .to_string(),
         );
     }
-    let provider = session_provider?;
-    if runner_providers.iter().any(|id| id == provider) {
+    let model_id = session_model?;
+    let Some(model) = runner_models.get(model_id) else {
+        return Some(format!(
+            "OpenCode's native runner does not list the model '{model_id}' \
+             (OAuth and coding-plan providers only run over ACP)"
+        ));
+    };
+    if RUNNER_MODEL_APIS.iter().any(|api| *api == model.api) {
         return None;
     }
     Some(format!(
-        "OpenCode's native runner cannot execute models from the '{provider}' provider \
-         (natively available: {}); OAuth and coding-plan providers only run over ACP",
-        runner_providers.join(", ")
+        "OpenCode's native runner cannot execute '{model_id}': its API ({}) is not one the \
+         runner implements",
+        model.api
     ))
 }
 
@@ -1096,7 +1193,7 @@ pub fn native_model_block_reason(
 /// be added here in the same change; see "Keeping up with OpenCode releases"
 /// in docs/ADAPTERS.md for the per-release checklist.
 const CONTRACT_PATHS: &[&str] = &[
-    "/api/provider",
+    "/api/model",
     "/api/session",
     "/api/session/active",
     "/api/session/{sessionID}",
@@ -1309,6 +1406,47 @@ fn session_create_body(cwd: &str, model: Option<&str>, agent: Option<&str>) -> V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_native_turn_only_sends_variants_the_runner_accepts() {
+        let registry = runner_models(&json!({
+            "data": [
+                {
+                    "id": "google/gemini-3.7-flash",
+                    "providerID": "openrouter",
+                    "api": { "type": "aisdk", "package": "@openrouter/ai-sdk-provider" },
+                    "variants": []
+                },
+                {
+                    "id": "gpt-5.2",
+                    "providerID": "opencode",
+                    "api": { "type": "aisdk", "package": "@ai-sdk/openai-compatible" },
+                    "variants": ["low", { "id": "high" }]
+                },
+                {
+                    "id": "no-variants-field",
+                    "providerID": "opencode",
+                    "api": { "type": "aisdk", "package": "@ai-sdk/openai-compatible" }
+                }
+            ]
+        }))
+        .unwrap();
+
+        let gemini = registry.get("openrouter/google/gemini-3.7-flash");
+        let gpt = registry.get("opencode/gpt-5.2");
+        // The v1 catalog advertises low/medium/high for this model and the
+        // runner accepts none, which is the disagreement that kills a turn.
+        assert_eq!(runner_variant(Some("medium"), gemini), None);
+        assert_eq!(runner_variant(Some("high"), gpt), Some("high"));
+        assert_eq!(runner_variant(Some("max"), gpt), None);
+        assert_eq!(runner_variant(None, gpt), None);
+        assert_eq!(
+            runner_variant(Some("low"), registry.get("opencode/no-variants-field")),
+            None
+        );
+        // An unregistered model is refused by the gate, not silently retuned.
+        assert_eq!(runner_variant(Some("medium"), None), Some("medium"));
+    }
 
     #[test]
     fn session_events_classify_liveness_and_failure() {
@@ -1819,45 +1957,53 @@ mod tests {
     }
 
     #[test]
-    fn runner_registry_parses_provider_ids_and_rejects_changed_shapes() {
-        // Shape observed live on OpenCode 1.18.18: only API-key providers
-        // appear; OAuth and coding-plan providers are absent even when
-        // `/config/providers` lists them as connected.
-        let ids = runner_provider_ids(&json!({
+    fn native_gate_blocks_models_the_runner_cannot_resolve() {
+        // Shape observed live on OpenCode 1.18.18: the runner registry lists
+        // every API-key provider's models (OAuth and coding-plan providers are
+        // absent even when `/config/providers` calls them connected), but
+        // implements only some of their APIs.
+        let registry = runner_models(&json!({
             "location": { "directory": "/work" },
             "data": [
-                { "id": "deepinfra", "name": "Deep Infra" },
-                { "id": "openrouter", "name": "OpenRouter" },
-                { "id": "opencode", "name": "OpenCode Zen" }
+                {
+                    "id": "grok-code",
+                    "providerID": "opencode",
+                    "api": { "type": "aisdk", "package": "@ai-sdk/openai-compatible" },
+                    "variants": []
+                },
+                {
+                    "id": "google/gemini-3.7-flash",
+                    "providerID": "openrouter",
+                    "api": { "type": "aisdk", "package": "@openrouter/ai-sdk-provider" },
+                    "variants": []
+                }
             ]
         }))
         .unwrap();
-        assert_eq!(ids, vec!["deepinfra", "openrouter", "opencode"]);
-        assert_eq!(
-            runner_provider_ids(&json!({ "data": [] })).unwrap(),
-            Vec::<String>::new()
-        );
-        assert!(runner_provider_ids(&json!({ "providers": [] })).is_err());
-    }
 
-    #[test]
-    fn native_gate_blocks_only_models_the_runner_cannot_resolve() {
-        let runner = vec!["openrouter".to_string(), "opencode".to_string()];
-        // Runner-registry providers execute natively.
-        assert_eq!(native_model_block_reason(Some("openrouter"), &runner), None);
+        assert_eq!(
+            native_model_block_reason(Some("opencode/grok-code"), &registry),
+            None
+        );
         // No explicit model: the runner resolves its default from its own
         // registry, so there is nothing to gate.
-        assert_eq!(native_model_block_reason(None, &runner), None);
-        // A provider connected only over v1 (OAuth or a coding plan) would be
-        // admitted and then die in SessionRunnerModel.resolve; it must be
-        // blocked before admission with a reason that names both sides.
-        let reason = native_model_block_reason(Some("zai-coding-plan"), &runner)
-            .expect("v1-only provider must be blocked");
-        assert!(reason.contains("zai-coding-plan"), "{reason}");
-        assert!(reason.contains("openrouter, opencode"), "{reason}");
+        assert_eq!(native_model_block_reason(None, &registry), None);
+        // A registered model whose API the runner does not implement is
+        // admitted and then dies in SessionRunnerModel.resolve; it must be
+        // blocked before admission with a reason that names the API.
+        let reason =
+            native_model_block_reason(Some("openrouter/google/gemini-3.7-flash"), &registry)
+                .expect("an unimplemented model API must be blocked");
+        assert!(reason.contains("google/gemini-3.7-flash"), "{reason}");
+        assert!(reason.contains("@openrouter/ai-sdk-provider"), "{reason}");
+        // A v1-only provider never reaches the registry at all.
+        let reason = native_model_block_reason(Some("zai-coding-plan/glm-5.3"), &registry)
+            .expect("a v1-only provider must be blocked");
+        assert!(reason.contains("zai-coding-plan/glm-5.3"), "{reason}");
         // An empty registry means nothing can resolve, explicit model or not.
-        assert!(native_model_block_reason(None, &[]).is_some());
-        assert!(native_model_block_reason(Some("openrouter"), &[]).is_some());
+        assert!(native_model_block_reason(None, &HashMap::new()).is_some());
+        assert!(native_model_block_reason(Some("opencode/grok-code"), &HashMap::new()).is_some());
+        assert!(runner_models(&json!({ "providers": [] })).is_err());
     }
 
     #[test]

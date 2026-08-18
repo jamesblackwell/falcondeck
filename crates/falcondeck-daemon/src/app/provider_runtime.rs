@@ -191,22 +191,24 @@ impl ProviderRuntime {
                                         // is pinned to this transport.
                                         runtime.validate_contract().await?;
                                         // The v2 runner resolves models only
-                                        // against its own provider registry, a
-                                        // strict subset of the configured
-                                        // providers (OAuth and coding-plan
-                                        // credentials are v1-only). A model
-                                        // from an unlisted provider would be
+                                        // against its own registry, a strict
+                                        // subset of the configured catalog:
+                                        // OAuth and coding-plan credentials
+                                        // are v1-only, and even among the
+                                        // registered models the runner
+                                        // implements only some model APIs. A
+                                        // model it cannot resolve would be
                                         // admitted and then die without a
                                         // session event or assistant record,
                                         // so the thread must not pin to the
                                         // native transport at all.
-                                        let providers = runtime.runner_providers().await?;
-                                        let session_provider =
-                                            runtime.session_model_provider(&session_id).await?;
+                                        let runner_models = runtime.runner_models().await?;
+                                        let session_model =
+                                            runtime.session_model_ref(&session_id).await?;
                                         if let Some(reason) =
                                             crate::opencode::native_model_block_reason(
-                                                session_provider.as_deref(),
-                                                &providers,
+                                                session_model.as_deref(),
+                                                &runner_models,
                                             )
                                         {
                                             return Err(DaemonError::BadRequest(reason));
