@@ -401,16 +401,14 @@ pub(crate) fn terminal_assistant_receipt_with_error(
     let current_turn = latest_user_index
         .map(|index| &turn_items[index..])
         .unwrap_or(turn_items);
-    let has_answer = current_turn.iter().any(|item| {
-        matches!(
-            item,
-            ConversationItem::AssistantMessage {
-                phase: None | Some(AssistantMessagePhase::FinalAnswer),
-                ..
-            } | ConversationItem::CodeReview { .. }
-        )
+    let has_terminal_answer = current_turn.iter().any(|item| match item {
+        ConversationItem::AssistantMessage {
+            phase, lifecycle, ..
+        } => !matches!(phase, Some(AssistantMessagePhase::Commentary)) && *lifecycle == terminal,
+        ConversationItem::CodeReview { lifecycle, .. } => *lifecycle == terminal,
+        _ => false,
     });
-    if has_answer {
+    if has_terminal_answer {
         return None;
     }
 
@@ -466,7 +464,7 @@ pub(crate) fn codex_assistant_conversation_item(
         return None;
     }
     let (phase, memory_citation) = codex_assistant_message_metadata(item);
-    let lifecycle = settled_assistant_lifecycle(phase.as_ref(), lifecycle);
+    let lifecycle = settled_progress_lifecycle(lifecycle);
     Some(ConversationItem::AssistantMessage {
         id,
         text: item
@@ -483,13 +481,13 @@ pub(crate) fn codex_assistant_conversation_item(
     })
 }
 
-fn settled_assistant_lifecycle(
-    phase: Option<&AssistantMessagePhase>,
-    lifecycle: ContentLifecycle,
-) -> ContentLifecycle {
-    if matches!(phase, Some(AssistantMessagePhase::Commentary))
-        && lifecycle == ContentLifecycle::Interrupted
-    {
+fn settled_progress_lifecycle(lifecycle: ContentLifecycle) -> ContentLifecycle {
+    // Interruption belongs to the turn, not to every progress message Codex
+    // happened to leave open. Preserve the text as completed content and let
+    // `terminal_assistant_receipt` add one stable interruption marker after
+    // the turn. This also covers older providers that omitted `phase` from
+    // commentary messages.
+    if lifecycle == ContentLifecycle::Interrupted {
         ContentLifecycle::Complete
     } else {
         lifecycle
@@ -1397,9 +1395,9 @@ pub(super) fn settle_content_items(
     for item in items {
         let lifecycle = match item {
             ConversationItem::AssistantMessage {
-                phase, lifecycle, ..
+                lifecycle, ..
             } => {
-                let settled = settled_assistant_lifecycle(phase.as_ref(), terminal);
+                let settled = settled_progress_lifecycle(terminal);
                 if matches!(
                     lifecycle,
                     ContentLifecycle::Pending | ContentLifecycle::Streaming
@@ -1417,8 +1415,31 @@ pub(super) fn settle_content_items(
                 }
                 continue;
             }
-            ConversationItem::Reasoning { lifecycle, .. }
-            | ConversationItem::CodeReview { lifecycle, .. }
+            ConversationItem::Reasoning { lifecycle, .. } => {
+                if matches!(
+                    lifecycle,
+                    ContentLifecycle::Pending | ContentLifecycle::Streaming
+                ) {
+                    // A turn-level receipt communicates the stop once. A
+                    // reasoning block is retained work, not a separate failed
+                    // response, and Codex can omit its item/completed event.
+                    *lifecycle = settled_progress_lifecycle(terminal);
+                    if terminal != ContentLifecycle::Interrupted
+                        && let ConversationItem::Reasoning {
+                            duration_ms,
+                            created_at,
+                            ..
+                        } = item
+                        && duration_ms.is_none()
+                    {
+                        *duration_ms =
+                            u64::try_from((settled_at - *created_at).num_milliseconds()).ok();
+                    }
+                    updated.push(item.clone());
+                }
+                continue;
+            }
+            ConversationItem::CodeReview { lifecycle, .. }
             | ConversationItem::Artifact { lifecycle, .. }
             | ConversationItem::Unsupported { lifecycle, .. }
             | ConversationItem::Image { lifecycle, .. }
@@ -1430,15 +1451,6 @@ pub(super) fn settle_content_items(
             ContentLifecycle::Pending | ContentLifecycle::Streaming
         ) {
             *lifecycle = terminal;
-            if let ConversationItem::Reasoning {
-                duration_ms,
-                created_at,
-                ..
-            } = item
-                && duration_ms.is_none()
-            {
-                *duration_ms = u64::try_from((settled_at - *created_at).num_milliseconds()).ok();
-            }
             updated.push(item.clone());
         }
     }
@@ -2053,14 +2065,19 @@ pub(crate) fn codex_reasoning_conversation_item(
                 .filter(|duration| *duration <= MAX_REASONING_DURATION_MS)
         });
 
+    let lifecycle = content_lifecycle_for_status(
+        extract_string(item, &["status"]).as_deref(),
+        fallback_lifecycle,
+    );
+
     Some(ConversationItem::Reasoning {
         id: extract_string(item, &["id", "itemId", "item_id"])?,
         summary: provider_text(item.get("summary")),
         content: provider_text(item.get("content")).unwrap_or_default(),
-        lifecycle: content_lifecycle_for_status(
-            extract_string(item, &["status"]).as_deref(),
-            fallback_lifecycle,
-        ),
+        // A stopped turn gets one terminal assistant receipt. Keeping each
+        // retained thought "complete" prevents the same interruption from
+        // being repeated throughout hydrated history.
+        lifecycle: settled_progress_lifecycle(lifecycle),
         duration_ms,
         created_at,
     })
@@ -3603,15 +3620,24 @@ mod content_settlement_tests {
                 ..
             }
         ));
-        assert!(items[1..].iter().all(|item| matches!(
-            item,
+        assert!(matches!(
+            &items[1],
             ConversationItem::AssistantMessage {
-                lifecycle: ContentLifecycle::Interrupted,
+                lifecycle: ContentLifecycle::Complete,
                 ..
-            } | ConversationItem::Reasoning {
-                lifecycle: ContentLifecycle::Interrupted,
+            }
+        ));
+        assert!(matches!(
+            &items[2],
+            ConversationItem::Reasoning {
+                lifecycle: ContentLifecycle::Complete,
+                duration_ms: None,
                 ..
-            } | ConversationItem::Unsupported {
+            }
+        ));
+        assert!(items[3..].iter().all(|item| matches!(
+            item,
+            ConversationItem::Unsupported {
                 lifecycle: ContentLifecycle::Interrupted,
                 ..
             } | ConversationItem::CodeReview {
@@ -3619,6 +3645,66 @@ mod content_settlement_tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn interrupted_turn_keeps_progress_complete_and_adds_one_terminal_receipt() {
+        let created_at = Utc::now();
+        let mut items = vec![
+            ConversationItem::UserMessage {
+                id: "user-1".to_string(),
+                text: "Keep working".to_string(),
+                attachments: Vec::new(),
+                turn_id: Some("turn-1".to_string()),
+                previous_turn_id: None,
+                created_at,
+            },
+            assistant("progress-1", ContentLifecycle::Streaming),
+            ConversationItem::Reasoning {
+                id: "reasoning-1".to_string(),
+                summary: Some("Checking".to_string()),
+                content: "Partial thought".to_string(),
+                lifecycle: ContentLifecycle::Streaming,
+                duration_ms: None,
+                created_at,
+            },
+            assistant("progress-2", ContentLifecycle::Streaming),
+        ];
+
+        settle_content_items(&mut items, ContentLifecycle::Interrupted, created_at, None);
+        let receipt = terminal_assistant_receipt(
+            &items,
+            ContentLifecycle::Interrupted,
+            created_at,
+            Some("turn-1"),
+        )
+        .expect("interrupted turn receipt");
+        items.push(receipt);
+
+        assert!(items[1..4].iter().all(|item| matches!(
+            item,
+            ConversationItem::AssistantMessage {
+                lifecycle: ContentLifecycle::Complete,
+                ..
+            } | ConversationItem::Reasoning {
+                lifecycle: ContentLifecycle::Complete,
+                duration_ms: None,
+                ..
+            }
+        )));
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationItem::AssistantMessage {
+                        lifecycle: ContentLifecycle::Interrupted,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
     }
 
     #[test]

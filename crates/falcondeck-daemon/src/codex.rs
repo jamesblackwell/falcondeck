@@ -2541,14 +2541,21 @@ mod tests {
             }
         }));
 
-        assert_eq!(items.len(), 2);
         assert!(matches!(
-            &items[1],
-            ConversationItem::AssistantMessage {
-                text,
-                lifecycle: ContentLifecycle::Interrupted,
-                ..
-            } if text == "Partial answer"
+            items.as_slice(),
+            [
+                ConversationItem::UserMessage { .. },
+                ConversationItem::AssistantMessage {
+                    text,
+                    lifecycle: ContentLifecycle::Complete,
+                    ..
+                },
+                ConversationItem::AssistantMessage {
+                    text: receipt,
+                    lifecycle: ContentLifecycle::Interrupted,
+                    ..
+                }
+            ] if text == "Partial answer" && receipt.is_empty()
         ));
     }
 
@@ -2595,6 +2602,78 @@ mod tests {
                 }
             ]
         ));
+    }
+
+    #[test]
+    fn interrupted_turn_hydrates_many_thoughts_with_one_interrupt_marker() {
+        let items = hydrate_thread_items(&json!({
+            "thread": {
+                "turns": [{
+                    "id": "turn-stopped",
+                    "status": "canceled",
+                    "completedAt": "2026-08-09T12:00:04Z",
+                    "items": [
+                        {
+                            "id": "user-stopped",
+                            "type": "userMessage",
+                            "createdAt": "2026-08-09T12:00:00Z",
+                            "content": [{"type": "text", "text": "Start this"}]
+                        },
+                        {
+                            "id": "reasoning-1",
+                            "type": "reasoning",
+                            "createdAt": "2026-08-09T12:00:01Z",
+                            "summary": ["First thought"]
+                        },
+                        {
+                            "id": "progress-without-phase",
+                            "type": "agentMessage",
+                            "createdAt": "2026-08-09T12:00:02Z",
+                            "text": "Now checking the next step"
+                        },
+                        {
+                            "id": "reasoning-2",
+                            "type": "reasoning",
+                            "createdAt": "2026-08-09T12:00:03Z",
+                            "summary": ["Second thought"]
+                        }
+                    ]
+                }]
+            }
+        }));
+
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| matches!(
+                    item,
+                    ConversationItem::AssistantMessage {
+                        lifecycle: ContentLifecycle::Interrupted,
+                        ..
+                    }
+                ))
+                .count(),
+            1
+        );
+        assert!(
+            items
+                .iter()
+                .filter(|item| match item {
+                    ConversationItem::Reasoning { .. } => true,
+                    ConversationItem::AssistantMessage { text, .. } => !text.is_empty(),
+                    _ => false,
+                })
+                .all(|item| matches!(
+                    item,
+                    ConversationItem::Reasoning {
+                        lifecycle: ContentLifecycle::Complete,
+                        ..
+                    } | ConversationItem::AssistantMessage {
+                        lifecycle: ContentLifecycle::Complete,
+                        ..
+                    }
+                ))
+        );
     }
 
     #[test]
