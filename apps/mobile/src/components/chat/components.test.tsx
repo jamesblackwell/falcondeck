@@ -10,6 +10,7 @@ import {
 } from '../../features/speech/speechSettings'
 import { ApprovalBanner, approvalDetail } from './ApprovalBanner'
 import { ChatInput } from './ChatInput'
+import { InlineVoiceRecorder } from './InlineVoiceRecorder'
 import { CodeBlock } from './CodeBlock'
 import { SessionListItem } from './SessionListItem'
 import { approval, thread } from '../../test/factories'
@@ -203,6 +204,76 @@ describe('ChatInput component', () => {
     )
     expect(r.toJSON()).toBeTruthy()
     expect(r.root.findByProps({ accessibilityLabel: 'Send message' })).toBeDefined()
+  })
+
+  it('keeps the mic beside Send so dictation can extend a draft', () => {
+    const r = renderComponent(
+      <ChatInput value="Hello" {...chatInputDefaults} />,
+    )
+
+    expect(
+      r.root.findByProps({ accessibilityLabel: 'Record voice message' }),
+    ).toBeDefined()
+    expect(
+      r.root.findByProps({ accessibilityLabel: 'Send message' }),
+    ).toBeDefined()
+  })
+
+  it('splices a transcript into the draft instead of replacing it', () => {
+    updateSpeechSettings({ provider: 'on-device' })
+    try {
+      const onChangeText = vi.fn()
+      const onSubmit = vi.fn()
+      const props = { ...chatInputDefaults, onChangeText, onSubmit }
+      const r = renderComponent(<ChatInput value="Fix the" {...props} />)
+      act(() => {
+        r.root
+          .findByProps({ accessibilityLabel: 'Record voice message' })
+          .props.onPress()
+      })
+      act(() => {
+        r.root.findByType(InlineVoiceRecorder).props.onTranscript('parser bug')
+      })
+
+      expect(onChangeText).toHaveBeenCalledWith('Fix the parser bug')
+      expect(onSubmit).not.toHaveBeenCalled()
+
+      act(() => {
+        r.update(<ChatInput value="Fix the parser bug" {...props} />)
+      })
+      expect(onSubmit).not.toHaveBeenCalled()
+    } finally {
+      resetSpeechSettings()
+    }
+  })
+
+  it('sends a dictated draft once the host owns the transcript', () => {
+    updateSpeechSettings({ provider: 'on-device' })
+    try {
+      const onChangeText = vi.fn()
+      const onSubmit = vi.fn()
+      const props = { ...chatInputDefaults, onChangeText, onSubmit }
+      const r = renderComponent(<ChatInput value="" {...props} />)
+      act(() => {
+        r.root
+          .findByProps({ accessibilityLabel: 'Record voice message' })
+          .props.onPress()
+      })
+      act(() => {
+        r.root
+          .findByType(InlineVoiceRecorder)
+          .props.onTranscript('ship it', { submit: true })
+      })
+
+      // The send waits for the echo: submitting here would read a stale draft.
+      expect(onSubmit).not.toHaveBeenCalled()
+      act(() => {
+        r.update(<ChatInput value="ship it" {...props} />)
+      })
+      expect(onSubmit).toHaveBeenCalledTimes(1)
+    } finally {
+      resetSpeechSettings()
+    }
   })
 
   it('asks for a speech provider on first mic use', () => {

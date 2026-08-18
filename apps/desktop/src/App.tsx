@@ -30,6 +30,7 @@ import {
   filesToImageInputs,
   generateUserItemId,
   imageAttachmentSendBlockReason,
+  insertTranscript,
   operationalConditionDismissalKey,
   workspaceOperationalConditions,
   mergeThreadDetailPage,
@@ -662,7 +663,27 @@ function AppInner() {
     [conversationKey, setDraftForConversation],
   );
 
-  const voiceRecorder = useVoiceRecorder({ baseUrl, onTranscript: setDraft });
+  // A dictated draft that should send itself once React owns the text.
+  const [pendingVoiceSubmit, setPendingVoiceSubmit] = useState<string | null>(
+    null,
+  );
+  const handleVoiceTranscript = useCallback(
+    (text: string, { submit }: { submit: boolean }) => {
+      const { value } = insertTranscript(
+        draftsRef.current[conversationKey]?.text ?? "",
+        text,
+      );
+      setDraft(value);
+      // Sending here would read the pre-transcript draft; the effect below
+      // fires once the composer state carries the dictated text.
+      setPendingVoiceSubmit(submit ? value : null);
+    },
+    [conversationKey, setDraft],
+  );
+  const voiceRecorder = useVoiceRecorder({
+    baseUrl,
+    onTranscript: handleVoiceTranscript,
+  });
   const openSpeechSettings = useCallback(() => {
     setSettingsSection("speech");
     setSettingsRequestKey((current) => current + 1);
@@ -3008,6 +3029,16 @@ function AppInner() {
     selectedIsolation,
   ]);
 
+  // Dictation that asked to send waits for the composer to actually hold the
+  // transcript; anything else the user does to the draft cancels it.
+  useEffect(() => {
+    if (pendingVoiceSubmit === null) return;
+    setPendingVoiceSubmit(null);
+    if (draft !== pendingVoiceSubmit) return;
+    handleSubmitCallback();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft, pendingVoiceSubmit]);
+
   const handleContinueInterruptedTurn = useCallback(() => {
     // Retire the interruption as part of continuing. Without this the thread
     // keeps its stopped marker in persisted state, and the next reconnect
@@ -5089,7 +5120,10 @@ function AppInner() {
                         error: voiceRecorder.error,
                         configured: voiceRecorder.configured === true,
                         hasPending: voiceRecorder.hasPending,
-                        onStop: voiceRecorder.stop,
+                        onStop: () => voiceRecorder.stop(),
+                        onStopAndSend: () =>
+                          voiceRecorder.stop({ submit: true }),
+                        onCancel: voiceRecorder.cancel,
                         onRetry: () => void voiceRecorder.retry(),
                         onDiscard: () => void voiceRecorder.discard(),
                         onDismiss: voiceRecorder.dismiss,

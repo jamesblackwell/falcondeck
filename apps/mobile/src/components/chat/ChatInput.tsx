@@ -15,6 +15,7 @@ import * as Haptics from 'expo-haptics'
 import {
   activeSlashQuery,
   canonicalSkillAlias,
+  insertTranscript,
   NO_AGENT_CAPABILITIES,
   providerSupportsSkill,
   type ActiveSlashQuery,
@@ -140,7 +141,13 @@ export const ChatInput = memo(function ChatInput({
 }: ChatInputProps) {
   const { theme } = useUnistyles()
   const [caretIndex, setCaretIndex] = useState(value.length)
-  const [pendingSelection, setPendingSelection] = useState<{
+  // Where the caret should land once the host echoes back a value we wrote
+  // (a transcript, a skill alias). Keyed by that value so it is applied to
+  // the render that actually contains the text, and only once — a `selection`
+  // prop left standing re-pins the caret on every later keystroke, which is
+  // what made a transcribed draft impossible to edit.
+  const pendingCaretRef = useRef<{
+    value: string
     start: number
     end: number
   } | null>(null)
@@ -152,9 +159,21 @@ export const ChatInput = memo(function ChatInput({
     'more' | 'provider' | 'permission' | 'sandbox' | 'voice-provider' | null
   >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
+  // A dictated draft that should send as soon as the host owns the text.
+  const pendingSubmitRef = useRef<string | null>(null)
+  const inputRef = useRef<TextInput | null>(null)
+  const attachInput = useCallback(
+    (node: TextInput | null) => {
+      inputRef.current = node
+      if (textInputRef) textInputRef.current = node
+    },
+    [textInputRef],
+  )
   const hasContent = value.trim().length > 0 || attachments.length > 0
+  // Stop-generating only takes the primary slot while there is nothing to
+  // send; the mic keeps its own slot beside it so dictation can extend a
+  // draft instead of being the thing an empty composer does instead of Send.
   const showStop = Boolean(onStop) && isRunning && !hasContent
-  const showMic = !showStop && !hasContent
 
   const filteredSkills = useMemo(() => {
     const query = slashQuery?.query.trim().toLowerCase() ?? ''
@@ -221,16 +240,26 @@ export const ChatInput = memo(function ChatInput({
       return
     }
 
-    if (
-      pendingSelection &&
-      (pendingSelection.start > value.length ||
-        pendingSelection.end > value.length)
-    ) {
-      setPendingSelection(null)
-    }
-
     updateSlashQuery(value, boundedCaretIndex)
-  }, [caretIndex, pendingSelection, updateSlashQuery, value])
+  }, [caretIndex, updateSlashQuery, value])
+
+  useEffect(() => {
+    const pending = pendingCaretRef.current
+    if (!pending || pending.value !== value) return
+    pendingCaretRef.current = null
+    selectionRangeRef.current = { start: pending.start, end: pending.end }
+    setCaretIndex(pending.start)
+    inputRef.current?.setSelection?.(pending.start, pending.end)
+  }, [value])
+
+  useEffect(() => {
+    if (pendingSubmitRef.current === null || pendingSubmitRef.current !== value)
+      return
+    pendingSubmitRef.current = null
+    if (disabled || sendDisabled) return
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+    onSubmit()
+  }, [disabled, onSubmit, sendDisabled, value])
 
   const handleSubmit = useCallback(() => {
     if ((!value.trim() && attachments.length === 0) || disabled || sendDisabled)
@@ -264,6 +293,9 @@ export const ChatInput = memo(function ChatInput({
 
   const handleMicPress = useCallback(() => {
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
+    // The input is only hidden while recording, not unmounted, so an open
+    // keyboard would stay up over the waveform until the transcript lands.
+    inputRef.current?.blur()
     // A saved recording knows its provider; otherwise reuse the configured
     // one and only ask on true first use.
     const provider =
@@ -276,14 +308,21 @@ export const ChatInput = memo(function ChatInput({
   }, [])
 
   const handleVoiceTranscript = useCallback(
-    (transcript: string) => {
-      const nextCaret = transcript.length
-      selectionRangeRef.current = { start: nextCaret, end: nextCaret }
-      setCaretIndex(nextCaret)
-      setPendingSelection({ start: nextCaret, end: nextCaret })
-      onChangeText(transcript)
+    (transcript: string, options?: { submit?: boolean }) => {
+      const { value: nextValue, caret } = insertTranscript(
+        value,
+        transcript,
+        selectionRangeRef.current,
+      )
+      if (nextValue === value) return
+      pendingCaretRef.current = { value: nextValue, start: caret, end: caret }
+      // The composer's own effect fires the send once the host has echoed the
+      // dictated text back as `value`; submitting here would race the store.
+      if (options?.submit) pendingSubmitRef.current = nextValue
+      onChangeText(nextValue)
+      if (!options?.submit) inputRef.current?.focus()
     },
-    [onChangeText],
+    [onChangeText, value],
   )
 
   const handleInsertSkill = useCallback(
@@ -293,10 +332,8 @@ export const ChatInput = memo(function ChatInput({
       const nextValue = `${value.slice(0, slashQuery.rangeStart)}${alias} ${value.slice(slashQuery.rangeEnd)}`
       const nextCaret = slashQuery.rangeStart + alias.length + 1
 
+      pendingCaretRef.current = { value: nextValue, start: nextCaret, end: nextCaret }
       onChangeText(nextValue)
-      selectionRangeRef.current = { start: nextCaret, end: nextCaret }
-      setCaretIndex(nextCaret)
-      setPendingSelection({ start: nextCaret, end: nextCaret })
       setSlashQuery(null)
     },
     [onChangeText, slashQuery, value],
@@ -306,10 +343,8 @@ export const ChatInput = memo(function ChatInput({
     if (!slashQuery || !onGoalCommand) return
     const nextValue = `${value.slice(0, slashQuery.rangeStart)}${value.slice(slashQuery.rangeEnd)}`
     const nextCaret = slashQuery.rangeStart
+    pendingCaretRef.current = { value: nextValue, start: nextCaret, end: nextCaret }
     onChangeText(nextValue)
-    selectionRangeRef.current = { start: nextCaret, end: nextCaret }
-    setCaretIndex(nextCaret)
-    setPendingSelection({ start: nextCaret, end: nextCaret })
     setSlashQuery(null)
     onGoalCommand()
   }, [onChangeText, onGoalCommand, slashQuery, value])
@@ -424,7 +459,7 @@ export const ChatInput = memo(function ChatInput({
           />
         ) : null}
         <TextInput
-          ref={textInputRef}
+          ref={attachInput}
           style={[styles.input, voiceProvider ? styles.inputHidden : null]}
           value={value}
           onChangeText={handleChangeText}
@@ -432,15 +467,7 @@ export const ChatInput = memo(function ChatInput({
             const nextSelection = event.nativeEvent.selection
             selectionRangeRef.current = nextSelection
             setCaretIndex(nextSelection.start)
-            if (
-              pendingSelection &&
-              nextSelection.start === pendingSelection.start &&
-              nextSelection.end === pendingSelection.end
-            ) {
-              setPendingSelection(null)
-            }
           }}
-          selection={pendingSelection ?? undefined}
           placeholder={placeholder}
           placeholderTextColor={theme.colors.fg.muted}
           selectionColor={theme.colors.accent.default}
@@ -591,65 +618,70 @@ export const ChatInput = memo(function ChatInput({
               showModePickers={false}
             />
           </View>
-          <Pressable
-            style={[
-              styles.sendButton,
-              showStop
-                ? canStop
-                  ? styles.sendActive
-                  : styles.sendInactive
-                : showMic
-                  ? disabled
-                    ? styles.sendInactive
-                    : styles.sendActive
-                  : canSend
-                  ? styles.sendActive
-                  : styles.sendInactive,
-            ]}
-            onPress={
-              showStop ? handleStop : showMic ? handleMicPress : handleSubmit
-            }
-            disabled={showStop ? !canStop : showMic ? Boolean(disabled) : !canSend}
-            accessibilityRole="button"
-            accessibilityLabel={
-              showStop
-                ? isStopping
-                  ? 'Stopping'
-                  : 'Stop generating'
-                : showMic
-                  ? 'Record voice message'
-                  : 'Send message'
-            }
-            accessibilityHint={
-              showMic ? 'Starts voice recording in the composer' : sendDisabled ? sendDisabledReason : undefined
-            }
-            accessibilityState={{
-              disabled: showStop ? !canStop : showMic ? Boolean(disabled) : !canSend,
-            }}
-            hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
-          >
-            {showStop ? (
-              <Square
-                size={theme.iconSize.md - 4}
-                color={
-                  canStop ? theme.colors.surface[0] : theme.colors.fg.faint
-                }
-                fill={canStop ? theme.colors.surface[0] : theme.colors.fg.faint}
-              />
-            ) : showMic ? (
+          <View style={styles.footerActions}>
+            <Pressable
+              style={[
+                styles.micButton,
+                disabled ? styles.micButtonDisabled : null,
+              ]}
+              onPress={handleMicPress}
+              disabled={Boolean(disabled)}
+              accessibilityRole="button"
+              accessibilityLabel="Record voice message"
+              accessibilityHint="Dictates into the composer at the cursor"
+              accessibilityState={{ disabled: Boolean(disabled) }}
+              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+            >
               <Mic
                 size={theme.iconSize.md}
-                color={disabled ? theme.colors.fg.faint : theme.colors.surface[0]}
-              />
-            ) : (
-              <Send
-                size={theme.iconSize.md}
                 color={
-                  canSend ? theme.colors.surface[0] : theme.colors.fg.faint
+                  disabled ? theme.colors.fg.faint : theme.colors.fg.secondary
                 }
               />
-            )}
-          </Pressable>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.sendButton,
+                (showStop ? canStop : canSend)
+                  ? styles.sendActive
+                  : styles.sendInactive,
+              ]}
+              onPress={showStop ? handleStop : handleSubmit}
+              disabled={showStop ? !canStop : !canSend}
+              accessibilityRole="button"
+              accessibilityLabel={
+                showStop
+                  ? isStopping
+                    ? 'Stopping'
+                    : 'Stop generating'
+                  : 'Send message'
+              }
+              accessibilityHint={sendDisabled ? sendDisabledReason : undefined}
+              accessibilityState={{
+                disabled: showStop ? !canStop : !canSend,
+              }}
+              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+            >
+              {showStop ? (
+                <Square
+                  size={theme.iconSize.md - 4}
+                  color={
+                    canStop ? theme.colors.surface[0] : theme.colors.fg.faint
+                  }
+                  fill={
+                    canStop ? theme.colors.surface[0] : theme.colors.fg.faint
+                  }
+                />
+              ) : (
+                <Send
+                  size={theme.iconSize.md}
+                  color={
+                    canSend ? theme.colors.surface[0] : theme.colors.fg.faint
+                  }
+                />
+              )}
+            </Pressable>
+          </View>
         </View>
         )}
       </View>
@@ -824,6 +856,21 @@ const styles = StyleSheet.create((theme) => ({
     gap: theme.spacing[2],
     paddingHorizontal: theme.spacing[2],
     paddingBottom: theme.spacing[2],
+  },
+  footerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: theme.spacing[1],
+  },
+  micButton: {
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  micButtonDisabled: {
+    opacity: 0.6,
   },
   footerControls: {
     flexDirection: 'row',

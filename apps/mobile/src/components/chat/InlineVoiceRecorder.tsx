@@ -13,7 +13,7 @@ import {
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition'
 import { useRouter, type Href } from 'expo-router'
-import { ArrowUp, RotateCcw, Settings, Trash2, X } from 'lucide-react-native'
+import { ArrowUp, RotateCcw, Settings, Square, Trash2, X } from 'lucide-react-native'
 import { StyleSheet, useUnistyles } from 'react-native-unistyles'
 
 import { ActivityDiamond, Text } from '@/components/ui'
@@ -80,9 +80,10 @@ function volumeToLevel(value: number): number {
 
 /**
  * In-composer voice recording session: cancel, live waveform and duration,
- * one confirm action that stops and transcribes into the draft. Replaces the
- * composer's input and footer rows while active; failures stay inline with
- * retry/discard so the recording is never silently lost.
+ * then the same stop/send pair the composer footer shows — stop drops the
+ * transcript into the draft to edit, send fires it off as soon as it lands.
+ * Replaces the composer's input and footer rows while active; failures stay
+ * inline with retry/discard so the recording is never silently lost.
  */
 export function InlineVoiceRecorder({
   provider: initialProvider,
@@ -90,7 +91,7 @@ export function InlineVoiceRecorder({
   onClose,
 }: {
   provider: SpeechProvider
-  onTranscript: (text: string) => void
+  onTranscript: (text: string, options?: { submit?: boolean }) => void
   onClose: () => void
 }) {
   const { theme } = useUnistyles()
@@ -116,6 +117,9 @@ export function InlineVoiceRecorder({
   const transcriptRef = useRef('')
   const finalizedTranscriptRef = useRef('')
   const cancelledRef = useRef(false)
+  // Which control ended the recording. Transcription finishes asynchronously
+  // (and, on device, via a module event), so the intent has to outlive the tap.
+  const submitOnFinishRef = useRef(false)
   const localErrorRef = useRef(false)
   const startedRef = useRef(false)
   const recorder = useAudioRecorder({
@@ -164,7 +168,7 @@ export function InlineVoiceRecorder({
           null,
       )
       clearPendingVoiceRecording()
-      onTranscript(cleaned)
+      onTranscript(cleaned, { submit: submitOnFinishRef.current })
       onClose()
     },
     [onClose, onTranscript, recordingUri],
@@ -357,7 +361,8 @@ export function InlineVoiceRecorder({
     finishWithTranscript(transcriptRef.current)
   })
 
-  const stopRecording = useCallback(async () => {
+  const stopRecording = useCallback(async (submit: boolean) => {
+    submitOnFinishRef.current = submit
     if (provider === 'on-device') {
       ExpoSpeechRecognitionModule.stop()
       setState('transcribing')
@@ -404,6 +409,7 @@ export function InlineVoiceRecorder({
   }, [onClose, provider, recorder, state])
 
   const retry = useCallback(async () => {
+    submitOnFinishRef.current = false
     if (recordingUri) {
       if (recordingProvider === 'on-device') {
         setProvider('on-device')
@@ -552,23 +558,44 @@ export function InlineVoiceRecorder({
               <ActivityDiamond color={theme.colors.fg.muted} />
             </View>
           ) : (
-            <Pressable
-              style={[
-                styles.confirmButton,
-                state !== 'recording' && styles.confirmIdle,
-              ]}
-              onPress={() => void stopRecording()}
-              disabled={state !== 'recording'}
-              accessibilityRole="button"
-              accessibilityLabel="Stop and transcribe"
-              accessibilityState={{ disabled: state !== 'recording' }}
-              hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
-            >
-              <ArrowUp
-                size={theme.iconSize.md}
-                color={theme.colors.surface[0]}
-              />
-            </Pressable>
+            <>
+              <Pressable
+                style={[
+                  styles.stopButton,
+                  state !== 'recording' && styles.confirmIdle,
+                ]}
+                onPress={() => void stopRecording(false)}
+                disabled={state !== 'recording'}
+                accessibilityRole="button"
+                accessibilityLabel="Stop and transcribe"
+                accessibilityHint="Puts the transcript in the composer to edit"
+                accessibilityState={{ disabled: state !== 'recording' }}
+                hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+              >
+                <Square
+                  size={theme.iconSize.md - 6}
+                  color={theme.colors.fg.primary}
+                  fill={theme.colors.fg.primary}
+                />
+              </Pressable>
+              <Pressable
+                style={[
+                  styles.confirmButton,
+                  state !== 'recording' && styles.confirmIdle,
+                ]}
+                onPress={() => void stopRecording(true)}
+                disabled={state !== 'recording'}
+                accessibilityRole="button"
+                accessibilityLabel="Transcribe and send"
+                accessibilityState={{ disabled: state !== 'recording' }}
+                hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
+              >
+                <ArrowUp
+                  size={theme.iconSize.md}
+                  color={theme.colors.surface[0]}
+                />
+              </Pressable>
+            </>
           )}
         </>
       )}
@@ -581,7 +608,7 @@ const styles = StyleSheet.create((theme) => ({
     minHeight: MIN_ROW_HEIGHT,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: theme.spacing[3],
+    gap: theme.spacing[2],
     paddingHorizontal: theme.spacing[2],
     paddingTop: theme.spacing[1],
     paddingBottom: theme.spacing[2],
@@ -600,6 +627,14 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  stopButton: {
+    width: CONTROL_SIZE,
+    height: CONTROL_SIZE,
+    borderRadius: theme.radius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: theme.colors.surface[3],
   },
   confirmButton: {
     width: CONTROL_SIZE,

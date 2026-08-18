@@ -62,6 +62,66 @@ describe('InlineVoiceRecorder', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('marks the arrow control as a send and the square as an edit', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    useRelayStore.getState()._callRpc = vi.fn(async (method: string) =>
+      method === 'speech.status'
+        ? { configured: true, storage: 'daemon_secret_store' }
+        : { text: 'ship it', model: 'whisper' },
+    ) as unknown as typeof originalCallRpc
+    const onTranscript = vi.fn()
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={onTranscript}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      await r.root
+        .findByProps({ accessibilityLabel: 'Transcribe and send' })
+        .props.onPress()
+    })
+
+    expect(onTranscript).toHaveBeenCalledWith('ship it', { submit: true })
+  })
+
+  it('keeps a stopped recording in the composer to edit', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    useRelayStore.getState()._callRpc = vi.fn(async (method: string) =>
+      method === 'speech.status'
+        ? { configured: true, storage: 'daemon_secret_store' }
+        : { text: 'ship it', model: 'whisper' },
+    ) as unknown as typeof originalCallRpc
+    const onTranscript = vi.fn()
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={onTranscript}
+        onClose={vi.fn()}
+      />,
+    )
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    await act(async () => {
+      await r.root
+        .findByProps({ accessibilityLabel: 'Stop and transcribe' })
+        .props.onPress()
+    })
+
+    expect(onTranscript).toHaveBeenCalledWith('ship it', { submit: false })
+  })
+
   it('retries an on-device recording locally without requesting microphone access', async () => {
     updateSpeechSettings({ provider: 'on-device' })
     setPendingVoiceRecording('file:///saved-voice.wav', 'on-device')

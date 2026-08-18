@@ -71,7 +71,12 @@ export type VoiceComposerActive = {
   error?: string | null;
   configured: boolean;
   hasPending: boolean;
+  /** Stops the recording and drops the transcript into the draft to edit. */
   onStop: () => void;
+  /** Stops the recording and sends as soon as the transcript lands. */
+  onStopAndSend: () => void;
+  /** Abandons the recording without transcribing it. */
+  onCancel: () => void;
   onRetry: () => void;
   onDiscard: () => void;
   onDismiss: () => void;
@@ -99,7 +104,7 @@ export type PromptInputProps = {
   ) => "submit" | "alternate-submit" | "newline" | null;
   /** Interrupt the active turn. When set and the thread is running with an empty draft, the primary button becomes Stop. */
   onStop?: () => void;
-  /** Starts an inline voice recording inside the composer when it is empty. */
+  /** Starts an inline voice recording inside the composer. */
   onVoiceInput?: () => void;
   /** Active inline voice session; replaces the composer body while present. */
   voice?: VoiceComposerActive;
@@ -809,7 +814,43 @@ export const PromptInput = memo(function PromptInput({
                 <span role="status" aria-live="polite" className="sr-only">
                   Recording voice input
                 </span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={voice.onCancel}
+                  aria-label="Cancel voice input"
+                  title="Cancel voice input"
+                  className="h-9 w-9 shrink-0 rounded-full p-0"
+                >
+                  <X className="h-4 w-4" />
+                </Button>
                 <VoiceWaveform className="min-w-0 flex-1" />
+                <span
+                  aria-hidden="true"
+                  className="shrink-0 font-mono text-[length:var(--fd-text-sm)] tabular-nums text-fg-secondary"
+                >
+                  {formatVoiceDuration(voice.seconds)}
+                </span>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={voice.onStop}
+                  aria-label="Stop recording"
+                  title="Stop and put the transcript in the composer"
+                  className="h-9 w-9 shrink-0 rounded-full p-0"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </Button>
+                <Button
+                  type="button"
+                  onClick={voice.onStopAndSend}
+                  disabled={sendDisabled}
+                  aria-label="Transcribe and send"
+                  title="Transcribe and send"
+                  className="h-9 w-9 shrink-0 rounded-full p-0"
+                >
+                  <Send className="h-4 w-4" />
+                </Button>
               </>
             ) : null}
             {voice.state === "transcribing" ? (
@@ -1006,7 +1047,9 @@ export const PromptInput = memo(function PromptInput({
           </p>
         ) : null}
 
-        {/* Footer: tools + send */}
+        {/* Footer: tools + send. A voice session owns the whole card — its
+            own row carries every control it needs. */}
+        {voice ? null : (
         <div className="flex items-center gap-1.5 px-3 pb-3">
           <input
             ref={fileInputRef}
@@ -1246,46 +1289,23 @@ export const PromptInput = memo(function PromptInput({
           ) : null}
 
           <div className="ml-auto flex items-center gap-2">
-            {voice?.state === "recording" ? (
-              <>
-                <span
-                  aria-hidden="true"
-                  className="font-mono text-[length:var(--fd-text-sm)] tabular-nums text-fg-secondary"
-                >
-                  {formatVoiceDuration(voice.seconds)}
-                </span>
-                <Button
-                  type="button"
-                  onClick={voice.onStop}
-                  aria-label="Stop recording"
-                  title="Stop and transcribe"
-                  className="h-9 w-9 rounded-full p-0 text-danger"
-                >
-                  <Square className="h-3.5 w-3.5 fill-current" />
-                </Button>
-                {showStop ? (
-                  <Button
-                    type="button"
-                    onClick={onStop}
-                    disabled={disabled || isStopping}
-                    aria-label={isStopping ? "Stopping" : "Stop generating"}
-                    title={isStopping ? "Stopping…" : "Stop"}
-                    className="h-9 w-9 rounded-full p-0"
-                  >
-                    <Square className="h-3.5 w-3.5 fill-current" />
-                  </Button>
-                ) : (
-                  <Button
-                    type="button"
-                    disabled
-                    aria-label="Send message"
-                    className="h-9 w-9 rounded-full p-0"
-                  >
-                    <Send className="h-4 w-4" />
-                  </Button>
-                )}
-              </>
-            ) : showStop ? (
+            {/* Dictation keeps its own slot rather than standing in for Send
+                on an empty composer: speaking into a half-written prompt is
+                as common as speaking a whole one. */}
+            {onVoiceInput && !voice ? (
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={onVoiceInput}
+                disabled={disabled}
+                aria-label="Record voice input"
+                title="Record voice input"
+                className="h-9 w-9 rounded-full p-0"
+              >
+                <Mic className="h-4 w-4" />
+              </Button>
+            ) : null}
+            {showStop ? (
               <Button
                 type="button"
                 onClick={onStop}
@@ -1295,17 +1315,6 @@ export const PromptInput = memo(function PromptInput({
                 className="h-9 w-9 rounded-full p-0"
               >
                 <Square className="h-3.5 w-3.5 fill-current" />
-              </Button>
-            ) : onVoiceInput && !hasContent && !voice ? (
-              <Button
-                type="button"
-                onClick={onVoiceInput}
-                disabled={disabled}
-                aria-label="Record voice input"
-                title="Record voice input"
-                className="h-9 w-9 rounded-full p-0"
-              >
-                <Mic className="h-4 w-4" />
               </Button>
             ) : (
               <Button
@@ -1331,6 +1340,7 @@ export const PromptInput = memo(function PromptInput({
             )}
           </div>
         </div>
+        )}
       </div>
     </div>
   );

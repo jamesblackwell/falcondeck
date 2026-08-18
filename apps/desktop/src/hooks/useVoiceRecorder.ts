@@ -99,7 +99,7 @@ export function useVoiceRecorder({
   onTranscript,
 }: {
   baseUrl: string | null;
-  onTranscript: (text: string) => void;
+  onTranscript: (text: string, options: { submit: boolean }) => void;
 }) {
   const [state, setState] = useState<VoiceRecorderState>("idle");
   const [configured, setConfigured] = useState<boolean | null>(null);
@@ -109,6 +109,10 @@ export function useVoiceRecorder({
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const chunksRef = useRef<Blob[]>([]);
+  // Which control ended the recording. Transcription resolves long after the
+  // click, so the intent has to outlive it.
+  const submitOnFinishRef = useRef(false);
+  const cancelledRef = useRef(false);
   const baseUrlRef = useRef(baseUrl);
 
   useEffect(() => {
@@ -215,7 +219,7 @@ export function useVoiceRecorder({
           );
         await writePendingRecording(null);
         setPending(null);
-        onTranscript(text);
+        onTranscript(text, { submit: submitOnFinishRef.current });
         setState("idle");
       } catch (cause) {
         setError(
@@ -258,6 +262,7 @@ export function useVoiceRecorder({
       streamRef.current = stream;
       recorderRef.current = recorder;
       chunksRef.current = [];
+      cancelledRef.current = false;
       setSeconds(0);
       setError(null);
       recorder.ondataavailable = (event) => {
@@ -265,6 +270,14 @@ export function useVoiceRecorder({
       };
       recorder.onstop = () => {
         stopTracks();
+        // A cancelled take is thrown away deliberately: persisting it would
+        // block the next recording behind a "pending recording" prompt for
+        // audio the user just said they did not want.
+        if (cancelledRef.current) {
+          chunksRef.current = [];
+          setState("idle");
+          return;
+        }
         const blob = new Blob(chunksRef.current, { type: recorder.mimeType });
         const recording = {
           blob,
@@ -294,7 +307,23 @@ export function useVoiceRecorder({
     }
   }, [configured, pending, refreshConfigured, stopTracks, transcribe]);
 
-  const stop = useCallback(() => recorderRef.current?.stop(), []);
+  const stop = useCallback((options?: { submit?: boolean }) => {
+    submitOnFinishRef.current = options?.submit === true;
+    recorderRef.current?.stop();
+  }, []);
+
+  const cancel = useCallback(() => {
+    cancelledRef.current = true;
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      // onstop releases the microphone and drops the chunks.
+      recorder.stop();
+    } else {
+      stopTracks();
+      setState("idle");
+    }
+    setError(null);
+  }, [stopTracks]);
 
   const discard = useCallback(async () => {
     await writePendingRecording(null);
@@ -304,6 +333,7 @@ export function useVoiceRecorder({
   }, []);
 
   const retry = useCallback(async () => {
+    submitOnFinishRef.current = false;
     const recording = pending
       ? { ...pending, model: readDictationSettings().model }
       : null;
@@ -326,6 +356,7 @@ export function useVoiceRecorder({
     hasPending: pending !== null,
     start,
     stop,
+    cancel,
     discard,
     retry,
     dismiss,

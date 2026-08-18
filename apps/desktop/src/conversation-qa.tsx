@@ -1548,6 +1548,9 @@ function longThread(tailText: string): ConversationItem[] {
 function ConversationQa() {
   const showComposer =
     new URLSearchParams(window.location.search).get("composer") === "1";
+  // ?voice=recording|transcribing|failed paints the inline dictation session
+  // without a microphone or a daemon behind it.
+  const qaVoiceState = new URLSearchParams(window.location.search).get("voice");
   const actionsUnavailable =
     new URLSearchParams(window.location.search).get("unavailableActions") ===
     "1";
@@ -1947,6 +1950,26 @@ function ConversationQa() {
             value={qaDraft}
             onValueChange={setQaDraft}
             onSubmit={() => setQaDraft("")}
+            onVoiceInput={() => {}}
+            voice={
+              qaVoiceState === "recording" ||
+              qaVoiceState === "transcribing" ||
+              qaVoiceState === "failed"
+                ? {
+                    state: qaVoiceState,
+                    seconds: 7,
+                    error: "Transcription failed. Your recording is safe.",
+                    configured: true,
+                    hasPending: qaVoiceState === "failed",
+                    onStop: () => {},
+                    onStopAndSend: () => {},
+                    onCancel: () => {},
+                    onRetry: () => {},
+                    onDiscard: () => {},
+                    onDismiss: () => {},
+                  }
+                : undefined
+            }
             onPickImages={handleQaPickImages}
             onRemoveAttachment={(attachmentId) =>
               setQaAttachments((current) =>

@@ -105,14 +105,18 @@ describe("PromptInput", () => {
     elsewhere.remove();
   });
 
-  it("replaces the composer with an inline recorder while voice is active", () => {
+  it("offers stop and send while a recording is active", () => {
     const onStop = vi.fn();
+    const onStopAndSend = vi.fn();
+    const onCancel = vi.fn();
     const voice = {
       state: "recording" as const,
       seconds: 2,
       configured: true,
       hasPending: false,
       onStop,
+      onStopAndSend,
+      onCancel,
       onRetry: vi.fn(),
       onDiscard: vi.fn(),
       onDismiss: vi.fn(),
@@ -128,10 +132,11 @@ describe("PromptInput", () => {
       screen.queryByRole("button", { name: "Record voice input" }),
     ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Stop recording" }));
+    fireEvent.click(screen.getByRole("button", { name: "Transcribe and send" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel voice input" }));
     expect(onStop).toHaveBeenCalledOnce();
-    expect(
-      screen.getByRole("button", { name: "Send message" }),
-    ).toBeDisabled();
+    expect(onStopAndSend).toHaveBeenCalledOnce();
+    expect(onCancel).toHaveBeenCalledOnce();
   });
 
   it("offers retry and discard when a voice recording fails", () => {
@@ -144,6 +149,8 @@ describe("PromptInput", () => {
       configured: true,
       hasPending: true,
       onStop: vi.fn(),
+      onStopAndSend: vi.fn(),
+      onCancel: vi.fn(),
       onRetry,
       onDiscard,
       onDismiss: vi.fn(),
@@ -159,7 +166,7 @@ describe("PromptInput", () => {
     expect(onDiscard).toHaveBeenCalledOnce();
   });
 
-  it("uses voice input as the empty composer action and restores Send after typing", () => {
+  it("keeps voice input beside Send whether or not the composer has text", () => {
     const onVoiceInput = vi.fn();
     const { rerender } = render(
       <PromptInput {...promptInputProps} onVoiceInput={onVoiceInput} />,
@@ -168,8 +175,8 @@ describe("PromptInput", () => {
     fireEvent.click(screen.getByRole("button", { name: "Record voice input" }));
     expect(onVoiceInput).toHaveBeenCalledOnce();
     expect(
-      screen.queryByRole("button", { name: "Send message" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Send message" }),
+    ).toBeDisabled();
 
     rerender(
       <PromptInput
@@ -180,10 +187,11 @@ describe("PromptInput", () => {
     );
     expect(
       screen.getByRole("button", { name: "Send message" }),
-    ).toBeInTheDocument();
+    ).toBeEnabled();
+    // Dictation stays available so it can extend the draft in place.
     expect(
-      screen.queryByRole("button", { name: "Record voice input" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "Record voice input" }),
+    ).toBeInTheDocument();
   });
 
   it("shows removable quoted excerpts and allows sending without a comment", () => {
