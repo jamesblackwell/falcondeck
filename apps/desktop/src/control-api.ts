@@ -65,6 +65,7 @@ export async function updateSettings(
     providers: Record<string, { enabled: boolean }>;
     default_timezone: string;
     allow_elevated_automations: boolean;
+    inject_agent_context: boolean;
     confirmation_policy: { destructive_operations: boolean; sensitive_operations: boolean };
   }>,
 ): Promise<AgentControlSettings> {

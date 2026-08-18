@@ -376,13 +376,13 @@ fn tool_definition(name: &str, _compatibility: &CompatibilityState) -> Value {
 fn tool_description(name: &str) -> &'static str {
     match name {
         "falcondeck_search" => {
-            "Discover FalconDeck control capabilities: operation ids, schemas, constraints and related operations."
+            "Discover FalconDeck control capabilities before acting: returns operation ids, domains, schemas, constraints and related operations. Call this first with a natural-language query such as \"automation create\", then again with operation and detail=full to see the complete schema and worked examples before executing through falcondeck_execute."
         }
         "falcondeck_get" => {
-            "Read FalconDeck control state: settings, automations, run history and recent control changes."
+            "Read FalconDeck control state: agent-control settings, automations (list or single by id), automation run history and recent control changes. Read a single automation before mutating it — mutations executed through falcondeck_execute require the revision you read (expected_revision), and stale revisions fail with revision_conflict."
         }
         "falcondeck_execute" => {
-            "Execute one registered FalconDeck control operation such as automation.create with validated arguments."
+            "Execute one registered FalconDeck control operation discovered via falcondeck_search, such as automation.create, automation.update or automation.run_now. Arguments are validated against the operation schema. Definition mutations require expected_revision from a prior falcondeck_get; automation.run_now never does. Pass an idempotency_key (8-128 chars) so identical retries replay the original result instead of duplicating the effect."
         }
         _ => "FalconDeck control tool.",
     }

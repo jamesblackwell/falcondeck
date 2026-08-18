@@ -1587,6 +1587,7 @@ async fn run_acp_turn_startup(
     let builtin_control = app
         .builtin_control_spec(provider, &cwd, Some(thread_id))
         .await;
+    let agent_context = app.agent_context_instructions(provider).await;
     let first_start = runtime
         .ensure_session(
             thread_id,
@@ -1594,6 +1595,7 @@ async fn run_acp_turn_startup(
             &cwd,
             requested_permission_mode.as_deref(),
             builtin_control.as_ref(),
+            agent_context.as_deref(),
         )
         .await;
     let session_id = match first_start {
@@ -1639,6 +1641,7 @@ async fn run_acp_turn_startup(
                     &cwd,
                     requested_permission_mode.as_deref(),
                     builtin_control.as_ref(),
+                    agent_context.as_deref(),
                 )
                 .await
             {

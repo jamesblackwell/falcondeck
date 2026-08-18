@@ -35,6 +35,11 @@ pub struct AgentControlSettings {
     /// allowed.
     pub allow_elevated_automations: bool,
 
+    /// Whether the short FalconDeck context append and bundled control
+    /// skill are injected into spawned agents.
+    #[serde(default = "default_inject_agent_context")]
+    pub inject_agent_context: bool,
+
     /// Client-facing confirmation preferences.
     pub confirmation_policy: ConfirmationPolicy,
 }
@@ -73,9 +78,17 @@ impl Default for AgentControlSettings {
             providers: BTreeMap::new(),
             default_timezone: "Europe/London".to_string(),
             allow_elevated_automations: false,
+            inject_agent_context: default_inject_agent_context(),
             confirmation_policy: ConfirmationPolicy::default(),
         }
     }
+}
+
+/// Serde default for [`AgentControlSettings::inject_agent_context`]; kept as
+/// a named function so previously persisted settings without the field
+/// deserialize with agent context on.
+fn default_inject_agent_context() -> bool {
+    true
 }
 
 /// Durable definition that causes an agent instruction to run on a schedule.

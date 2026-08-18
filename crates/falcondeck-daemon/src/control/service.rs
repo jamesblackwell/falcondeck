@@ -707,7 +707,7 @@ impl ControlService {
             )
             .with_field(
                 "arguments",
-                "Supply enabled, providers, default_timezone, allow_elevated_automations or confirmation_policy.",
+                "Supply enabled, providers, default_timezone, allow_elevated_automations, inject_agent_context or confirmation_policy.",
             ));
         }
         if let Some(timezone) = &args.default_timezone {
@@ -734,6 +734,9 @@ impl ControlService {
             }
             if let Some(allow) = args.allow_elevated_automations {
                 state.settings.allow_elevated_automations = allow;
+            }
+            if let Some(inject) = args.inject_agent_context {
+                state.settings.inject_agent_context = inject;
             }
             if let Some(policy) = &args.confirmation_policy {
                 state.settings.confirmation_policy = policy.clone();

@@ -311,6 +311,22 @@ impl CodexSession {
                 .await?;
             session.send_notification("initialized", json!({})).await?;
 
+            // Register staged bundled skills (the falcondeck-control skill)
+            // as a Codex extra skill root. Experimental and absent from some
+            // older app-server releases, so failure must not make the
+            // otherwise-stable bootstrap fail.
+            if let Some(skill_root) = state.agent_skill_root(&AgentProvider::CODEX).await {
+                if let Err(error) = session
+                    .send_control_request(
+                        "skills/extraRoots/set",
+                        json!({ "extraRoots": [skill_root] }),
+                    )
+                    .await
+                {
+                    warn!("Codex skill roots unavailable: {error}");
+                }
+            }
+
             let account_value = session
                 .send_control_request("account/read", json!({}))
                 .await?;
@@ -561,11 +577,15 @@ impl CodexSession {
     }
 
     pub async fn resume_thread(&self, thread_id: &str, cwd: &str) -> Result<Value, DaemonError> {
-        self.send_control_request(
-            "thread/resume",
-            json!({ "threadId": thread_id, "cwd": cwd }),
-        )
-        .await
+        let mut params = json!({ "threadId": thread_id, "cwd": cwd });
+        if let Some(instructions) = self
+            .state
+            .agent_context_instructions(&AgentProvider::CODEX)
+            .await
+        {
+            params["developerInstructions"] = json!(instructions);
+        }
+        self.send_control_request("thread/resume", params).await
     }
 
     pub async fn respond_to_request(

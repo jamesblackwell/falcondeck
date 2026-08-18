@@ -196,6 +196,10 @@ pub struct UpdateSettingsArgs {
     /// Whether elevated-permission automations may be created.
     #[serde(default)]
     pub allow_elevated_automations: Option<bool>,
+    /// Whether the FalconDeck context append and bundled control skill are
+    /// injected into spawned agents.
+    #[serde(default)]
+    pub inject_agent_context: Option<bool>,
     /// Client-facing confirmation preferences.
     #[serde(default)]
     pub confirmation_policy: Option<ConfirmationPolicy>,
@@ -208,6 +212,7 @@ impl UpdateSettingsArgs {
             && self.providers.is_none()
             && self.default_timezone.is_none()
             && self.allow_elevated_automations.is_none()
+            && self.inject_agent_context.is_none()
             && self.confirmation_policy.is_none()
     }
 }

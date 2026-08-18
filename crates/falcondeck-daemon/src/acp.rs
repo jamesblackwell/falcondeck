@@ -1617,6 +1617,7 @@ impl AcpRuntime {
         cwd: &str,
         permission_mode: Option<&str>,
         builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        agent_context: Option<&str>,
     ) -> Result<String, DaemonError> {
         let gate = self.session_gate(thread_id).await;
         let _guard = gate.lock().await;
@@ -1652,6 +1653,13 @@ impl AcpRuntime {
         }
 
         let mut params = json!({ "cwd": cwd, "mcpServers": mcp_servers });
+        // Session instructions carry the FalconDeck agent context. Sent only
+        // when present so agents that predate the field are unaffected, and
+        // only on session/new: a loaded session already carries the
+        // instructions from its original creation.
+        if let Some(instructions) = agent_context.map(str::trim).filter(|text| !text.is_empty()) {
+            params["instructions"] = json!(instructions);
+        }
         if self.provider.as_str().eq_ignore_ascii_case("grok") {
             match permission_mode {
                 Some(mode) if is_blanket_approval_mode(mode) => {
@@ -3149,7 +3157,7 @@ mod tests {
     async fn a_steer_cancels_the_prompt_and_continues_the_same_turn() {
         let (runtime, mut events) = steer_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
             .await
             .expect("fixture session should start");
         let prompt_runtime = Arc::clone(&runtime);
@@ -3204,7 +3212,7 @@ mod tests {
     async fn a_steer_without_an_active_turn_is_stale() {
         let (runtime, _events) = steer_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
             .await
             .expect("fixture session should start");
 
@@ -3221,7 +3229,7 @@ mod tests {
     async fn an_interrupt_ends_a_steered_turn_instead_of_continuing_it() {
         let (runtime, mut events) = steer_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .ensure_session("thread-steer", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
             .await
             .expect("fixture session should start");
         let prompt_runtime = Arc::clone(&runtime);
@@ -3298,7 +3306,7 @@ mod tests {
     async fn grok_plan_mode_reverse_request_is_approved_without_cancelling_the_turn() {
         let (runtime, mut events) = plan_approval_fixture_runtime().await;
         let session_id = runtime
-            .ensure_session("thread-1", None, env!("CARGO_MANIFEST_DIR"), None, None)
+            .ensure_session("thread-1", None, env!("CARGO_MANIFEST_DIR"), None, None, None)
             .await
             .expect("fixture session should start");
         let prompt_runtime = Arc::clone(&runtime);

@@ -845,6 +845,32 @@ async fn settings_update_validates_the_timezone() {
 }
 
 #[tokio::test]
+async fn settings_update_toggles_agent_context_injection() {
+    let (_dir, service) = service().await;
+    // Default settings inject the agent context.
+    let initial = service.settings_snapshot().await;
+    assert!(initial.inject_agent_context);
+
+    let (response, _) = service
+        .execute(
+            execute_request(
+                registry::ops::SETTINGS_UPDATE,
+                json!({ "inject_agent_context": false }),
+                None,
+            ),
+            &desktop(),
+            &ControlDeps::none(),
+        )
+        .await;
+    assert!(response.ok);
+    assert_eq!(
+        response.data.unwrap()["inject_agent_context"],
+        json!(false)
+    );
+    assert!(!service.settings_snapshot().await.inject_agent_context);
+}
+
+#[tokio::test]
 async fn audit_trails_record_success_and_failure() {
     let (_dir, service) = service().await;
     create_valid_automation(&service).await;

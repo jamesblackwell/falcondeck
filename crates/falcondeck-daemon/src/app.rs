@@ -21,7 +21,7 @@ use falcondeck_core::{
     ThreadSummary, ThreadTokenUsage, UnifiedEvent, UpdatePreferencesRequest,
     UpdateScheduledTaskRequest, UpdateThreadRequest, WorkspaceAgentSummary, WorkspaceStatus,
     WorkspaceSummary,
-    control::{ControlGetRequest, ControlSearchRequest, ControlStateChanged},
+    control::{AgentControlSettings, ControlGetRequest, ControlSearchRequest, ControlStateChanged},
     crypto::LocalBoxKeyPair,
 };
 use serde_json::{Value, json};
@@ -687,6 +687,52 @@ impl AppState {
             workspace_path: workspace_path.to_string(),
             thread_id: thread_id.map(str::to_string),
         })
+    }
+
+    /// Whether the FalconDeck agent context (short instruction append plus
+    /// bundled control skill) is enabled for this provider right now.
+    /// Evaluated at every spawn boundary alongside
+    /// [`Self::builtin_control_spec`] so setting changes apply on the next
+    /// turn (Claude) or next process start (Codex, ACP).
+    async fn agent_context_enabled(&self, provider: &AgentProvider) -> Option<AgentControlSettings> {
+        let settings = self.inner.control.settings_snapshot().await;
+        self.inner
+            .control
+            .ensure_mcp_enabled(&settings, Some(provider))
+            .ok()?;
+        if !settings.inject_agent_context {
+            return None;
+        }
+        Some(settings)
+    }
+
+    /// The short always-on instruction append for one provider spawn, or
+    /// `None` when agent context injection is disabled.
+    pub async fn agent_context_instructions(
+        &self,
+        provider: &AgentProvider,
+    ) -> Option<String> {
+        self.agent_context_enabled(provider).await?;
+        let staged = crate::agent_context::stage_skill(&self.inner.state_path);
+        if let Err(error) = &staged {
+            tracing::warn!(%error, "failed to stage falcondeck-control skill");
+        }
+        Some(crate::agent_context::append_instructions(
+            staged.as_deref().ok(),
+        ))
+    }
+
+    /// Root directory of staged bundled skills, for providers that accept
+    /// skill directories natively (Codex `skills/extraRoots`).
+    pub async fn agent_skill_root(&self, provider: &AgentProvider) -> Option<std::path::PathBuf> {
+        self.agent_context_enabled(provider).await?;
+        match crate::agent_context::stage_skill(&self.inner.state_path) {
+            Ok(_) => Some(crate::agent_context::skills_root(&self.inner.state_path)),
+            Err(error) => {
+                tracing::warn!(%error, "failed to stage falcondeck-control skill");
+                None
+            }
+        }
     }
 
     /// Resolves the connected workspace whose canonical path matches, or

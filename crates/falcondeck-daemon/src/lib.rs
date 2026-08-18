@@ -8,6 +8,7 @@ pub mod acp;
 pub mod acp_conformance;
 pub mod acp_protocol;
 mod agent_binary;
+mod agent_context;
 mod api;
 mod app;
 mod claude;

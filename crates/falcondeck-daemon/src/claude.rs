@@ -218,6 +218,7 @@ impl ClaudeRuntime {
         settings_dir: &Path,
         cwd: &str,
         builtin_control: Option<&crate::connectors::BuiltinControlSpec>,
+        agent_context: Option<&str>,
     ) -> Result<ClaudeTurnSpawn, DaemonError> {
         // Serialize the whole remove-kill-spawn-insert sequence per thread so
         // concurrent spawns cannot run two CLI processes on one session.
@@ -299,6 +300,9 @@ impl ClaudeRuntime {
         }
         if let Some(mcp_config_path) = self.write_mcp_config_file(settings_dir, builtin_control) {
             command.arg("--mcp-config").arg(mcp_config_path);
+        }
+        if let Some(instructions) = agent_context.map(str::trim).filter(|text| !text.is_empty()) {
+            command.arg("--append-system-prompt").arg(instructions);
         }
 
         let mut child = command

@@ -140,17 +140,19 @@ impl ProviderRuntime {
         match self {
             Self::Codex => {
                 let session = app.session_for(spec.workspace_id).await?;
-                let result = session
-                    .send_request(
-                        "thread/start",
-                        json!({
-                            "cwd": spec.cwd,
-                            "model": spec.model_id,
-                            "sandbox": spec.sandbox_mode,
-                            "approvalPolicy": spec.approval_policy
-                        }),
-                    )
-                    .await?;
+                let mut params = json!({
+                    "cwd": spec.cwd,
+                    "model": spec.model_id,
+                    "sandbox": spec.sandbox_mode,
+                    "approvalPolicy": spec.approval_policy
+                });
+                if let Some(instructions) = app
+                    .agent_context_instructions(&AgentProvider::CODEX)
+                    .await
+                {
+                    params["developerInstructions"] = json!(instructions);
+                }
+                let result = session.send_request("thread/start", params).await?;
                 Ok(StartedThread {
                     thread_id: extract_thread_id(&result).ok_or_else(|| {
                         DaemonError::Rpc("thread/start did not return a thread id".to_string())
@@ -359,6 +361,9 @@ impl ProviderRuntime {
                         Some(spec.thread_id),
                     )
                     .await;
+                let agent_context = app
+                    .agent_context_instructions(&AgentProvider::CLAUDE)
+                    .await;
                 let spawn = runtime
                     .spawn_turn(
                         spec.thread_id,
@@ -372,6 +377,7 @@ impl ProviderRuntime {
                         &settings_dir,
                         spec.thread.working_directory(runtime.workspace_path()),
                         builtin_control.as_ref(),
+                        agent_context.as_deref(),
                     )
                     .await?;
                 app.with_thread_mut(spec.workspace_id, spec.thread_id, |thread| {

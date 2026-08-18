@@ -202,6 +202,32 @@ export function AgentControlPanel({ baseUrl, onToast }: AgentControlPanelProps) 
                   </div>
                 );
               })}
+
+              <div className="flex items-center gap-3 rounded-[var(--fd-radius-lg)] border border-border-subtle px-4 py-3">
+                <div className="min-w-0 flex-1">
+                  <span className="text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                    Inject FalconDeck agent context
+                  </span>
+                  <p className="text-[length:var(--fd-text-xs)] text-fg-muted">
+                    Adds a short FalconDeck note and bundled control guide to agent
+                    instructions. Applies on the next turn (Claude) or next agent
+                    process start (Codex, ACP).
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant={settings.inject_agent_context ? "secondary" : "default"}
+                  aria-pressed={settings.inject_agent_context}
+                  disabled={busyField === "agent-context"}
+                  onClick={() =>
+                    void save("agent-context", {
+                      inject_agent_context: !settings.inject_agent_context,
+                    })
+                  }
+                >
+                  {settings.inject_agent_context ? "Injected" : "Off"}
+                </Button>
+              </div>
             </CardContent>
           </Card>
 

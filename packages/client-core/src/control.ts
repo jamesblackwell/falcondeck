@@ -11,6 +11,7 @@ export type AgentControlSettings = {
   providers: Record<string, ProviderControlSettings>;
   default_timezone: string;
   allow_elevated_automations: boolean;
+  inject_agent_context: boolean;
   confirmation_policy: ConfirmationPolicy;
 };
 
@@ -408,7 +409,9 @@ export function normalizeAgentControlSettings(
     !isRecord(settings.confirmation_policy) ||
     typeof settings.confirmation_policy.destructive_operations !==
       "boolean" ||
-    typeof settings.confirmation_policy.sensitive_operations !== "boolean"
+    typeof settings.confirmation_policy.sensitive_operations !== "boolean" ||
+    (settings.inject_agent_context !== undefined &&
+      typeof settings.inject_agent_context !== "boolean")
   ) {
     return null;
   }
@@ -425,6 +428,8 @@ export function normalizeAgentControlSettings(
     providers,
     default_timezone: settings.default_timezone,
     allow_elevated_automations: settings.allow_elevated_automations,
+    // Older daemons predate the field; it defaults to on there too.
+    inject_agent_context: settings.inject_agent_context ?? true,
     confirmation_policy: {
       destructive_operations:
         settings.confirmation_policy.destructive_operations,
