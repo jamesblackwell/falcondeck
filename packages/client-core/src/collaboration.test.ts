@@ -25,7 +25,10 @@ describe('thread transport capabilities', () => {
     ],
   } as any
 
-  it('offers steering only on native OpenCode threads', () => {
+  it('offers steering on every OpenCode transport', () => {
+    // Native threads steer via delivery:"steer"; ACP threads steer via the
+    // daemon's cancel-and-re-prompt loop. Both honor the workspace agent's
+    // advertised capability.
     expect(
       threadAgentCapabilities(workspace, 'opencode', {
         provider: 'opencode',
@@ -37,7 +40,7 @@ describe('thread transport capabilities', () => {
         provider: 'opencode',
         provider_transport: 'acp',
       } as any).supports_steering,
-    ).toBe(false)
+    ).toBe(true)
   })
 })
 

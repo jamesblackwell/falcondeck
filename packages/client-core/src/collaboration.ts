@@ -71,20 +71,20 @@ export function workspaceAgentCapabilities(
   );
 }
 
-/** Capabilities that depend on the transport pinned to an existing thread. */
+/**
+ * Capabilities for an existing thread. Historically this stripped steering
+ * from non-native OpenCode threads; since the daemon steers every ACP thread
+ * by cancelling the in-flight prompt and re-prompting on the same session,
+ * the workspace agent's advertised capabilities are the truth for every
+ * transport. The seam stays so future transport-pinned differences have a
+ * home.
+ */
 export function threadAgentCapabilities(
   workspace: WorkspaceSummary | null | undefined,
   provider: AgentProvider,
-  thread: ThreadSummary | null | undefined,
+  _thread: ThreadSummary | null | undefined,
 ): AgentCapabilitySummary {
-  const capabilities = workspaceAgentCapabilities(workspace, provider);
-  if (provider !== "opencode" || thread?.provider !== "opencode") {
-    return capabilities;
-  }
-  return {
-    ...capabilities,
-    supports_steering: thread.provider_transport === "native",
-  };
+  return workspaceAgentCapabilities(workspace, provider);
 }
 
 /**

@@ -426,6 +426,11 @@ impl ProviderRuntime {
         app: &AppState,
         spec: TurnSpec<'_>,
     ) -> Result<(), DaemonError> {
+        tracing::info!(
+            thread = %spec.thread_id,
+            transport = spec.thread.provider_transport.as_deref().unwrap_or("-"),
+            "steering the running turn"
+        );
         match self {
             Self::Codex => {
                 let turn_id = spec.thread.latest_turn_id.as_deref().ok_or_else(|| {
