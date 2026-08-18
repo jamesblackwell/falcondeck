@@ -6,6 +6,8 @@ import { ChevronDown, GitMerge, GitPullRequest, GitPullRequestDraft, Loader2 } f
 import type { ShipThreadMode, ThreadSummary } from '@falcondeck/client-core'
 import { cn } from '@falcondeck/ui'
 
+import { MergeFailureDialog } from './merge-failure-dialog'
+
 /**
  * The default click. FalconDeck's project folder is usually dirty, so the
  * primary action opens a pull request rather than merging over live work.
@@ -51,6 +53,9 @@ export type ShipMenuProps = {
    * makes "Merge and push" refuse server-side. Disables it up front instead.
    */
   projectFolderDirty?: boolean
+  /** Raw daemon failure rendered in the dedicated merge-recovery dialog. */
+  mergeFailure?: string | null
+  onDismissMergeFailure?: () => void
   className?: string
 }
 
@@ -63,6 +68,8 @@ export const ShipMenu = memo(function ShipMenu({
   onShip,
   pending = false,
   projectFolderDirty = false,
+  mergeFailure = null,
+  onDismissMergeFailure,
   className,
 }: ShipMenuProps) {
   const [open, setOpen] = useState(false)
@@ -194,6 +201,14 @@ export const ShipMenu = memo(function ShipMenu({
           </Popover.Content>
         </Popover.Portal>
       </Popover.Root>
+      {mergeFailure && onDismissMergeFailure ? (
+        <MergeFailureDialog
+          message={mergeFailure}
+          branch={variant.branch}
+          baseBranch={baseBranch}
+          onDismiss={onDismissMergeFailure}
+        />
+      ) : null}
     </div>
   )
 })

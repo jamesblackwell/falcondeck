@@ -144,7 +144,7 @@ describe("useShipThread", () => {
     );
   });
 
-  it("surfaces the daemon's refusal instead of a generic failure", async () => {
+  it("keeps merge failures for the dedicated dialog instead of a toast", async () => {
     const api = {
       gitStatus: vi.fn().mockResolvedValue(cleanStatus()),
       shipThread: vi
@@ -157,11 +157,13 @@ describe("useShipThread", () => {
       await result.current?.ship("merge");
     });
 
-    expect(toast).toHaveBeenCalledWith({
-      variant: "danger",
-      title: "Could not merge",
-      description: "the project folder has uncommitted changes",
+    expect(toast).not.toHaveBeenCalled();
+    expect(result.current?.mergeFailure).toBe("the project folder has uncommitted changes");
+
+    act(() => {
+      result.current?.dismissMergeFailure();
     });
+    expect(result.current?.mergeFailure).toBeNull();
   });
 
   it("asks about the project folder, not the isolated checkout", async () => {

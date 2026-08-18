@@ -2411,6 +2411,8 @@ function RemoteApp() {
     ship: shipThread,
     pending: isShipPending,
     projectFolderDirty,
+    mergeFailure,
+    dismissMergeFailure,
   } = useShipThread({
     api: isEncrypted ? shipApi : null,
     workspaceId: selectedWorkspace?.id ?? null,
@@ -4120,6 +4122,8 @@ function RemoteApp() {
             onShip={shipThread}
             pending={isShipPending}
             projectFolderDirty={projectFolderDirty}
+            mergeFailure={mergeFailure}
+            onDismissMergeFailure={dismissMergeFailure}
           />
         }
         className="border-b border-border-subtle pt-3"

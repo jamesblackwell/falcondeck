@@ -1042,6 +1042,8 @@ function AppInner() {
     ship: shipThread,
     pending: isShipPending,
     projectFolderDirty,
+    mergeFailure,
+    dismissMergeFailure,
   } = useShipThread({
     api: apiFor(selectedWorkspaceId),
     workspaceId: selectedWorkspaceId,
@@ -5297,6 +5299,8 @@ function AppInner() {
                   onShip={shipThread}
                   pending={isShipPending}
                   projectFolderDirty={projectFolderDirty}
+                  mergeFailure={mergeFailure}
+                  onDismissMergeFailure={dismissMergeFailure}
                 />
               }
               headerControls={

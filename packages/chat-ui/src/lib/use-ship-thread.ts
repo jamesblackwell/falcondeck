@@ -66,10 +66,15 @@ export function useShipThread({
 }: UseShipThreadOptions) {
   const [pending, setPending] = useState(false)
   const [projectFolderDirty, setProjectFolderDirty] = useState(false)
+  const [mergeFailure, setMergeFailure] = useState<string | null>(null)
   const isIsolated = Boolean(thread?.variant)
   // A slow reply for a thread we have since left must not disable the menu for
   // whatever is on screen now.
   const generationRef = useRef(0)
+
+  useEffect(() => {
+    setMergeFailure(null)
+  }, [thread?.id, workspaceId])
 
   useEffect(() => {
     if (!api || !workspaceId || !isIsolated) {
@@ -96,6 +101,7 @@ export function useShipThread({
     async (mode: ShipThreadMode) => {
       if (!api || !workspaceId || !thread) return
       setPending(true)
+      if (mode === 'merge') setMergeFailure(null)
       try {
         const result = await api.shipThread(workspaceId, thread.id, mode)
         const incomplete = result.mode === 'merge' && !result.pushed
@@ -107,12 +113,17 @@ export function useShipThread({
         if (result.url) await openUrl(result.url)
         onShipped?.()
       } catch (error) {
-        toast({
-          variant: 'danger',
-          title: mode === 'merge' ? 'Could not merge' : 'Could not create a pull request',
-          description:
-            error instanceof Error ? error.message : 'The daemon did not say why this failed.',
-        })
+        const message =
+          error instanceof Error ? error.message : 'The daemon did not say why this failed.'
+        if (mode === 'merge') {
+          setMergeFailure(message)
+        } else {
+          toast({
+            variant: 'danger',
+            title: 'Could not create a pull request',
+            description: message,
+          })
+        }
       } finally {
         setPending(false)
       }
@@ -120,5 +131,7 @@ export function useShipThread({
     [api, onShipped, openUrl, thread, toast, workspaceId],
   )
 
-  return { ship, pending, projectFolderDirty }
+  const dismissMergeFailure = useCallback(() => setMergeFailure(null), [])
+
+  return { ship, pending, projectFolderDirty, mergeFailure, dismissMergeFailure }
 }
