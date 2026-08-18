@@ -44,7 +44,9 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
   fd_dictation_emit((int32_t)kind, (payload ?: @"").UTF8String);
 }
 
-@interface FDDictationController : NSObject <AVCaptureFileOutputRecordingDelegate>
+@interface FDDictationController : NSObject <AVCaptureFileOutputRecordingDelegate> {
+  AXUIElementRef _pasteTargetElement;
+}
 @property(nonatomic) BOOL enabled;
 @property(nonatomic) BOOL modifierDown;
 @property(nonatomic) BOOL modifierUsedInChord;
@@ -53,6 +55,7 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 @property(nonatomic) BOOL stopping;
 @property(nonatomic) NSUInteger modifierGeneration;
 @property(nonatomic) NSUInteger speechGeneration;
+@property(nonatomic) pid_t pasteTargetProcessIdentifier;
 @property(nonatomic) FDShortcut shortcut;
 @property(nonatomic) FDShortcut recordingShortcut;
 @property(nonatomic) FDActivationMode activationMode;
@@ -74,6 +77,7 @@ static void FDEmit(FDEventKind kind, NSString *payload) {
 - (void)transcribeSystemRecording:(NSURL *)url API_AVAILABLE(macos(10.15));
 - (void)startAudioLevelMeter;
 - (void)stopAudioLevelMeter;
+- (void)capturePasteTarget;
 @end
 
 static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
@@ -126,6 +130,10 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
              name:NSApplicationDidBecomeActiveNotification
            object:nil];
   return self;
+}
+
+- (void)dealloc {
+  if (_pasteTargetElement) CFRelease(_pasteTargetElement);
 }
 
 - (void)applicationDidBecomeActive:(NSNotification *)notification {
@@ -285,6 +293,28 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
   }
 }
 
+- (void)capturePasteTarget {
+  if (_pasteTargetElement) {
+    CFRelease(_pasteTargetElement);
+    _pasteTargetElement = NULL;
+  }
+  AXUIElementRef systemWideElement = AXUIElementCreateSystemWide();
+  if (systemWideElement) {
+    CFTypeRef focusedElement = NULL;
+    if (AXUIElementCopyAttributeValue(systemWideElement,
+                                      kAXFocusedUIElementAttribute,
+                                      &focusedElement) == kAXErrorSuccess &&
+        focusedElement) {
+      _pasteTargetElement = (AXUIElementRef)focusedElement;
+    } else if (focusedElement) {
+      CFRelease(focusedElement);
+    }
+    CFRelease(systemWideElement);
+  }
+  self.pasteTargetProcessIdentifier =
+      NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier;
+}
+
 - (void)startRecording {
   if (!self.enabled || self.recording || self.stopping) return;
   if (self.recordingURL &&
@@ -323,6 +353,11 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
            @"Accessibility access is required to paste dictation into other apps.");
     return;
   }
+
+  // Keep the insertion target stable while transcription runs. In particular,
+  // the dictation overlay must not cause a later paste to be routed back
+  // through FalconDeck's global event stream or into a newly focused app.
+  [self capturePasteTarget];
 
   NSString *name = [NSString stringWithFormat:@"falcondeck-dictation-%@.m4a",
                                              NSUUID.UUID.UUIDString];
@@ -499,6 +534,26 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 
 - (BOOL)pasteText:(NSString *)text {
   if (!AXIsProcessTrusted() || text.length == 0) return NO;
+  pid_t targetProcessIdentifier = self.pasteTargetProcessIdentifier;
+  if (targetProcessIdentifier <= 0) return NO;
+
+  // Most editable controls, including WebKit textareas, support replacing the
+  // selected text through Accessibility. This is the safest insertion path:
+  // no clipboard mutation and no synthetic global keyboard events.
+  if (_pasteTargetElement) {
+    Boolean selectedTextIsSettable = false;
+    AXError settableError = AXUIElementIsAttributeSettable(
+        _pasteTargetElement, kAXSelectedTextAttribute,
+        &selectedTextIsSettable);
+    if (settableError == kAXErrorSuccess && selectedTextIsSettable &&
+        AXUIElementSetAttributeValue(_pasteTargetElement,
+                                     kAXSelectedTextAttribute,
+                                     (__bridge CFTypeRef)text) ==
+            kAXErrorSuccess) {
+      return YES;
+    }
+  }
+
   NSPasteboard *pasteboard = NSPasteboard.generalPasteboard;
   NSMutableArray<NSPasteboardItem *> *previousItems = [NSMutableArray array];
   // Pasteboard items are lazy views into the current pasteboard. Keeping those
@@ -542,29 +597,21 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
     restorePreviousClipboard();
     return NO;
   }
-  CGEventRef commandDown = CGEventCreateKeyboardEvent(source, (CGKeyCode)55, true);
   CGEventRef pasteDown = CGEventCreateKeyboardEvent(source, (CGKeyCode)9, true);
   CGEventRef pasteUp = CGEventCreateKeyboardEvent(source, (CGKeyCode)9, false);
-  CGEventRef commandUp = CGEventCreateKeyboardEvent(source, (CGKeyCode)55, false);
-  if (!commandDown || !pasteDown || !pasteUp || !commandUp) {
-    if (commandDown) CFRelease(commandDown);
+  if (!pasteDown || !pasteUp) {
     if (pasteDown) CFRelease(pasteDown);
     if (pasteUp) CFRelease(pasteUp);
-    if (commandUp) CFRelease(commandUp);
     CFRelease(source);
     restorePreviousClipboard();
     return NO;
   }
   CGEventSetFlags(pasteDown, kCGEventFlagMaskCommand);
   CGEventSetFlags(pasteUp, kCGEventFlagMaskCommand);
-  CGEventPost(kCGHIDEventTap, commandDown);
-  CGEventPost(kCGHIDEventTap, pasteDown);
-  CGEventPost(kCGHIDEventTap, pasteUp);
-  CGEventPost(kCGHIDEventTap, commandUp);
-  CFRelease(commandDown);
+  CGEventPostToPid(targetProcessIdentifier, pasteDown);
+  CGEventPostToPid(targetProcessIdentifier, pasteUp);
   CFRelease(pasteDown);
   CFRelease(pasteUp);
-  CFRelease(commandUp);
   CFRelease(source);
 
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 700 * NSEC_PER_MSEC),
@@ -576,6 +623,9 @@ static CGEventRef FDEventTapCallback(CGEventTapProxy proxy, CGEventType type,
 }
 
 - (void)retryLastRecording {
+  if (self.pasteTargetProcessIdentifier <= 0) {
+    [self capturePasteTarget];
+  }
   NSURL *url = self.recordingURL;
   if (!url || ![[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
     FDEmit(FDEventFailed, @"There is no retained recording to retry.");
