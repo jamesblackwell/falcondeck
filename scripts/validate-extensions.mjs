@@ -14,6 +14,7 @@ const allowedTopLevelKeys = new Set([
   "version",
   "engines",
   "entrypoint",
+  "frontend",
   "contributes",
   "permissions",
 ]);
@@ -346,6 +347,40 @@ if (manifest) {
       }
     } catch {
       report("FDX1005", "entrypoint does not exist", "/entrypoint");
+    }
+  }
+  if (manifest.frontend !== undefined) {
+    const rawFrontend = manifest.frontend;
+    if (typeof rawFrontend !== "string" || !rawFrontend) {
+      report(
+        "FDX1022",
+        "frontend must stay inside the extension package",
+        "/frontend",
+      );
+    } else {
+      const frontend = resolve(root, rawFrontend);
+      const frontendRelative = relative(root, frontend);
+      if (
+        frontendRelative.startsWith(`..${sep}`) ||
+        frontendRelative === ".." ||
+        /^[A-Za-z]:[\\/]/.test(rawFrontend) ||
+        rawFrontend.startsWith("\\\\")
+      ) {
+        report(
+          "FDX1022",
+          "frontend must stay inside the extension package",
+          "/frontend",
+        );
+      } else {
+        try {
+          const frontendStat = await stat(frontend);
+          if (!frontendStat.isFile()) {
+            report("FDX1023", "frontend is not a file", "/frontend");
+          }
+        } catch {
+          report("FDX1023", "frontend does not exist", "/frontend");
+        }
+      }
     }
   }
   if (

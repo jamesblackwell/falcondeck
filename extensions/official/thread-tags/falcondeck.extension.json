@@ -1,12 +1,13 @@
 {
   "$schema": "../../../schemas/extension-manifest.schema.json",
   "id": "falcondeck.thread-tags",
-  "name": "Thread Stages",
-  "version": "0.3.0",
+  "name": "Kanban",
+  "version": "0.4.0",
   "engines": {
     "falcondeck": "^0.1"
   },
   "entrypoint": "server.ts",
+  "frontend": "app.tsx",
   "contributes": {
     "threadMenuActions": [
       {
@@ -34,7 +35,11 @@
             "multiple": true,
             "options": [
               { "value": "backlog", "label": "Backlog", "tone": "gray" },
-              { "value": "in_progress", "label": "In progress", "tone": "yellow" },
+              {
+                "value": "in_progress",
+                "label": "In progress",
+                "tone": "yellow"
+              },
               { "value": "in_review", "label": "In review", "tone": "green" },
               { "value": "done", "label": "Done", "tone": "orange" },
               { "value": "canceled", "label": "Canceled", "tone": "gray" }
@@ -47,7 +52,14 @@
           }
         }
       }
+    ],
+    "panels": [
+      {
+        "id": "board",
+        "title": "Kanban",
+        "view": "kanban-board"
+      }
     ]
   },
-  "permissions": []
+  "permissions": ["threads:read"]
 }

@@ -1,4 +1,5 @@
 import { PanelsTopLeft, X } from "lucide-react";
+import type { ReactNode } from "react";
 
 import type {
   ExtensionPanelDefinition,
@@ -19,6 +20,7 @@ export type ExtensionPanelProps = {
   ) => Promise<unknown> | unknown;
   onClose?: () => void;
   className?: string;
+  children?: ReactNode;
 };
 
 export function ExtensionPanel({
@@ -26,6 +28,7 @@ export function ExtensionPanel({
   onAction,
   onClose,
   className,
+  children,
 }: ExtensionPanelProps) {
   return (
     <section
@@ -57,23 +60,29 @@ export function ExtensionPanel({
           </Button>
         ) : null}
       </header>
-      <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
-        <div className="mx-auto w-full max-w-4xl">
-          {panel.document ? (
-            <ExtensionUiRenderer
-              extensionId={panel.extensionId}
-              document={panel.document}
-              onAction={onAction}
-            />
-          ) : (
-            <ExtensionUiFallback
-              extensionName={panel.extensionName}
-              contributionKind="panel"
-              reason={panel.unsupportedReason ?? "Panel content is unavailable"}
-            />
-          )}
+      {children ? (
+        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-6">
+          <div className="mx-auto w-full max-w-4xl">
+            {panel.document ? (
+              <ExtensionUiRenderer
+                extensionId={panel.extensionId}
+                document={panel.document}
+                onAction={onAction}
+              />
+            ) : (
+              <ExtensionUiFallback
+                extensionName={panel.extensionName}
+                contributionKind="panel"
+                reason={
+                  panel.unsupportedReason ?? "Panel content is unavailable"
+                }
+              />
+            )}
+          </div>
         </div>
-      </div>
+      )}
     </section>
   );
 }

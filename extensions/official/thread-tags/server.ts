@@ -223,6 +223,7 @@ export default defineExtension({
 
         return {
           stages,
+          threadStages,
           selectedStageId: target?.kind === "thread"
             ? threadStages[target.id] ?? null
             : null,

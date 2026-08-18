@@ -14,11 +14,14 @@
     "extension-runtime:prepare": "node ./scripts/prepare-extension-runtime.mjs",
     "extension:validate": "node ./scripts/validate-extensions.mjs",
     "extension:validate:test": "node --test ./scripts/validate-extensions.test.mjs",
+    "extension:frontend:typecheck": "tsc -p tsconfig.extension-frontends.json",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present"
   },
   "devDependencies": {
+    "@types/react": "^19.2.18",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "typescript": "~5.9.3"
   }
 }

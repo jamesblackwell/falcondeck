@@ -4,7 +4,7 @@ import threadTags from "../../../extensions/official/thread-tags/server";
 
 import { createExtensionTestHost } from "./index";
 
-describe("Thread Stages public SDK contract", () => {
+describe("Kanban public backend SDK contract", () => {
   it("persists a stage and publishes only manifest-declared projections", async () => {
     const host = await createExtensionTestHost(threadTags, {
       extensionId: "falcondeck.thread-tags",
@@ -29,7 +29,10 @@ describe("Thread Stages public SDK contract", () => {
           viewId: "tag-index",
           value: expect.objectContaining({
             tags: expect.arrayContaining([
-              expect.objectContaining({ id: "in_progress", label: "In progress" }),
+              expect.objectContaining({
+                id: "in_progress",
+                label: "In progress",
+              }),
             ]),
           }),
         }),
@@ -70,6 +73,33 @@ describe("Thread Stages public SDK contract", () => {
           }),
         }),
       ]),
+    );
+  });
+
+  it("returns the complete assignment index for the trusted board frontend", async () => {
+    const host = await createExtensionTestHost(threadTags, {
+      extensionId: "falcondeck.thread-tags",
+      declaredActions: ["manage-tags"],
+      declaredViews: ["tag-index", "thread-tags", "kanban-board"],
+      storage: {
+        threadStages: {
+          "thread-1": "backlog",
+          "thread-2": "in_review",
+        },
+      },
+    });
+
+    const result = await host.invokeAction("manage-tags", {
+      input: { operation: "read" },
+    });
+
+    expect(result.result).toEqual(
+      expect.objectContaining({
+        threadStages: {
+          "thread-1": "backlog",
+          "thread-2": "in_review",
+        },
+      }),
     );
   });
 });

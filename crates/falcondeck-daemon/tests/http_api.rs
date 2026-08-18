@@ -206,7 +206,7 @@ async fn extension_permission_grants_are_explicit_and_persisted() {
             daemon.base_url()
         ))
         .json(&serde_json::json!({
-            "permission": "threads:read",
+            "permission": "workspace:read",
             "granted": true
         }))
         .send()

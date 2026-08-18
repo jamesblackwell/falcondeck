@@ -94,6 +94,7 @@ import {
   type DaemonSnapshot,
   type EncryptedEnvelope,
   type EventEnvelope,
+  type ExtensionActionResponse,
   type ExtensionUiActionBinding,
   type GitStatusResponse,
   type ImageInput,
@@ -133,11 +134,14 @@ import {
   ShipMenu,
   OperationalNotice,
   ExtensionPanel,
+  ExtensionAppPanel,
   ExtensionPanelNavigation,
   WorkspaceSidebar,
   realtimeAudioPlayer,
   useShipThread,
 } from "@falcondeck/chat-ui";
+import { useExtensionApps } from "@falcondeck/extension-sdk/app-host";
+import type { ExtensionAppViewScope } from "@falcondeck/extension-sdk/app";
 import {
   ActivityDiamond,
   Badge,
@@ -199,6 +203,7 @@ import {
   waitForPollInterval,
   type NotificationPreference,
 } from "./lib/remoteAppUtils";
+import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends";
 
 import {
   readPersistedComposerState,
@@ -337,6 +342,12 @@ function RemoteApp() {
     () => deriveExtensionPanels(snapshot?.extensions),
     [snapshot?.extensions],
   );
+  const extensionApps = useExtensionApps(
+    snapshot?.extensions.catalog
+      .filter((extension) => extension.enabled)
+      .map((extension) => extension.id) ?? [],
+    extensionFrontendLoaders,
+  );
   const threadTagsEnabled =
     snapshot?.extensions.catalog.some(
       (extension) =>
@@ -363,6 +374,18 @@ function RemoteApp() {
       null,
     [activeExtensionPanelKey, extensionPanels],
   );
+  const activeExtension = activeExtensionPanel
+    ? (snapshot?.extensions.catalog.find(
+        (extension) => extension.id === activeExtensionPanel.extensionId,
+      ) ?? null)
+    : null;
+  const activeExtensionRegistration = activeExtensionPanel
+    ? (extensionApps
+        .get(activeExtensionPanel.extensionId)
+        ?.panels.find(
+          (panel) => panel.id === activeExtensionPanel.contributionId,
+        ) ?? null)
+    : null;
   useEffect(() => {
     if (activeExtensionPanelKey && !activeExtensionPanel) {
       setActiveExtensionPanelKey(null);
@@ -2478,21 +2501,41 @@ function RemoteApp() {
     [callRpc],
   );
 
-  const handleExtensionPanelAction = useCallback(
-    async (extensionId: string, action: ExtensionUiActionBinding) => {
-      await callRpc("extensions.action.invoke", {
-        extensionId,
-        actionId: action.actionId,
-        target: action.target,
-        input: action.input ?? null,
-      });
+  const invokeExtensionAppAction = useCallback(
+    async (
+      extensionId: string,
+      actionId: string,
+      input?: unknown,
+      target?: ExtensionAppViewScope | null,
+    ) => {
+      const response = await callRpc<ExtensionActionResponse>(
+        "extensions.action.invoke",
+        {
+          extensionId,
+          actionId,
+          target,
+          input: input ?? null,
+        },
+      );
       setSnapshot(
         normalizeDaemonSnapshot(
           await callRpc<DaemonSnapshot>("snapshot.current", {}),
         ),
       );
+      return response;
     },
     [callRpc],
+  );
+  const handleExtensionPanelAction = useCallback(
+    async (extensionId: string, action: ExtensionUiActionBinding) => {
+      await invokeExtensionAppAction(
+        extensionId,
+        action.actionId,
+        action.input,
+        action.target,
+      );
+    },
+    [invokeExtensionAppAction],
   );
 
   const submitQueuedAction = useCallback(
@@ -4346,7 +4389,28 @@ function RemoteApp() {
         />
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          {activeExtensionPanel ? (
+          {activeExtensionPanel &&
+          activeExtension &&
+          activeExtensionRegistration &&
+          snapshot ? (
+            <ExtensionAppPanel
+              panel={activeExtensionPanel}
+              registration={activeExtensionRegistration}
+              extension={activeExtension}
+              threads={snapshot.threads}
+              views={snapshot.extensions.views}
+              onInvokeAction={(panel, actionId, input, target) =>
+                invokeExtensionAppAction(
+                  panel.extensionId,
+                  actionId,
+                  input,
+                  target,
+                )
+              }
+              onOpenThread={handleSelectThread}
+              onClose={() => setActiveExtensionPanelKey(null)}
+            />
+          ) : activeExtensionPanel ? (
             <ExtensionPanel
               panel={activeExtensionPanel}
               onAction={handleExtensionPanelAction}

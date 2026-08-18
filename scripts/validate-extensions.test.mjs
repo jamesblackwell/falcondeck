@@ -20,7 +20,7 @@ function validate(target) {
   };
 }
 
-test("official Thread Stages declarative UI validates", () => {
+test("official Kanban frontend and declarative UI validate", () => {
   const result = validate(
     resolve(repositoryRoot, "extensions/official/thread-tags"),
   );
@@ -36,6 +36,35 @@ test("official Mini Zen panel declarative UI validates", () => {
 
   assert.equal(result.status, 0);
   assert.deepEqual(result.output, { ok: true, diagnostics: [] });
+});
+
+test("trusted frontend paths cannot escape the extension package", () => {
+  const directory = mkdtempSync(
+    resolve(tmpdir(), "falcondeck-extension-validator-"),
+  );
+  try {
+    writeFileSync(resolve(directory, "server.ts"), "export default {}\n");
+    writeFileSync(
+      resolve(directory, "falcondeck.extension.json"),
+      JSON.stringify({
+        id: "example.frontend",
+        name: "Example",
+        version: "1.0.0",
+        engines: { falcondeck: "^0.1" },
+        entrypoint: "server.ts",
+        frontend: "../app.tsx",
+        contributes: {},
+        permissions: [],
+      }),
+    );
+
+    const result = validate(directory);
+
+    assert.equal(result.status, 1);
+    assert.equal(result.output.diagnostics[0]?.code, "FDX1022");
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("newer declarative UI versions fail with a stable diagnostic", () => {

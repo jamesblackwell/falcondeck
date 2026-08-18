@@ -56,7 +56,7 @@ function viewValue(view: ExtensionView | undefined): Record<string, unknown> {
 }
 
 /**
- * Adapts the official Thread Stages extension's public projections for clients.
+ * Adapts the official Kanban extension's public stage projections for clients.
  * It intentionally consumes only ExtensionSnapshot, so desktop, web, and mobile
  * share the same compatibility and malformed-data behaviour.
  */
@@ -94,7 +94,7 @@ export function deriveThreadTags(extensions: ExtensionSnapshot | null | undefine
   return { tags, byThreadId }
 }
 
-/** Applies the immediate local result of a Thread Stages selection. */
+/** Applies the immediate local result of a Kanban stage selection. */
 export function optimisticallySetThreadStage(
   extensions: ExtensionSnapshot,
   threadId: string,

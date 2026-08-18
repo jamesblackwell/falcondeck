@@ -84,6 +84,7 @@ import {
 import {
   ComposerContextBar,
   ExtensionPanel,
+  ExtensionAppPanel,
   NewThreadState,
   ShipMenu,
   useShipThread,
@@ -92,6 +93,8 @@ import {
   type ComposerMenuRequest,
   type QuotedSelection,
 } from "@falcondeck/chat-ui";
+import { useExtensionApps } from "@falcondeck/extension-sdk/app-host";
+import type { ExtensionAppViewScope } from "@falcondeck/extension-sdk/app";
 import {
   ActivityDiamond,
   Button,
@@ -180,6 +183,7 @@ import {
 import { sendDesktopAttentionNotification } from "./desktop-notifications";
 import { useDesktopDictation } from "./dictation";
 import { resolveMainView } from "./main-view-registry";
+import { extensionFrontendLoaders } from "virtual:falcondeck-extension-frontends";
 
 // Stable empty array so conversations without attachments don't bust the
 // memoized PromptInput on every render.
@@ -834,6 +838,12 @@ function AppInner() {
     );
     return [...localPanels, ...remotePanels];
   }, [remoteHosts.hosts, snapshot?.extensions]);
+  const extensionApps = useExtensionApps(
+    viewSnapshot?.extensions.catalog
+      .filter((extension) => extension.enabled)
+      .map((extension) => extension.id) ?? [],
+    extensionFrontendLoaders,
+  );
   useEffect(() => {
     if (
       activeExtensionPanelKey &&
@@ -896,11 +906,12 @@ function AppInner() {
     },
     [api, remoteHosts],
   );
-  const invokeExtensionPanelAction = useCallback(
+  const invokeExtensionAppAction = useCallback(
     async (
       panel: DesktopExtensionPanel,
-      extensionId: string,
-      action: ExtensionUiActionBinding,
+      actionId: string,
+      input?: unknown,
+      target?: ExtensionAppViewScope | null,
     ) => {
       const host = panel.ownerHostId
         ? remoteHosts.hosts.find(
@@ -911,13 +922,38 @@ function AppInner() {
         ? (remoteHosts.manager.connection(host.id)?.api() ?? null)
         : api;
       if (!actionApi) throw new Error("The FalconDeck daemon is not connected");
-      await actionApi.invokeExtensionAction(extensionId, action.actionId, {
-        target: action.target,
-        input: action.input ?? null,
-      });
+      const response = await actionApi.invokeExtensionAction(
+        panel.extensionId,
+        actionId,
+        {
+          target,
+          input: input ?? null,
+        },
+      );
       if (!host && api) setSnapshot(await api.snapshot());
+      return response;
     },
     [api, remoteHosts.hosts, remoteHosts.manager, setSnapshot],
+  );
+  const invokeExtensionPanelAction = useCallback(
+    async (
+      panel: DesktopExtensionPanel,
+      extensionId: string,
+      action: ExtensionUiActionBinding,
+    ) => {
+      if (extensionId !== panel.extensionId) {
+        throw new Error(
+          "Extension panel action owner does not match its panel",
+        );
+      }
+      await invokeExtensionAppAction(
+        panel,
+        action.actionId,
+        action.input,
+        action.target,
+      );
+    },
+    [invokeExtensionAppAction],
   );
   const selectedWorkspace = useMemo(
     () =>
@@ -5058,17 +5094,58 @@ function AppInner() {
                 </Suspense>
               ),
               ...Object.fromEntries(
-                extensionPanels.map((panel) => [
-                  panel.key,
-                  <ExtensionPanel
-                    key={panel.key}
-                    panel={panel}
-                    onClose={() => setActiveExtensionPanelKey(null)}
-                    onAction={(extensionId, action) =>
-                      invokeExtensionPanelAction(panel, extensionId, action)
-                    }
-                  />,
-                ]),
+                extensionPanels.map((panel) => {
+                  const ownerSnapshot = panel.ownerHostId
+                    ? remoteHosts.hosts.find(
+                        (host) => host.id === panel.ownerHostId,
+                      )?.snapshot
+                    : snapshot;
+                  const extension = ownerSnapshot?.extensions.catalog.find(
+                    (candidate) => candidate.id === panel.extensionId,
+                  );
+                  const registration = extensionApps
+                    .get(panel.extensionId)
+                    ?.panels.find(
+                      (candidate) => candidate.id === panel.contributionId,
+                    );
+                  return [
+                    panel.key,
+                    registration && extension && ownerSnapshot ? (
+                      <ExtensionAppPanel
+                        key={panel.key}
+                        panel={panel}
+                        registration={registration}
+                        extension={extension}
+                        threads={ownerSnapshot.threads}
+                        views={ownerSnapshot.extensions.views}
+                        onClose={() => setActiveExtensionPanelKey(null)}
+                        onOpenThread={handleSelectThread}
+                        onInvokeAction={(
+                          _registeredPanel,
+                          actionId,
+                          input,
+                          target,
+                        ) =>
+                          invokeExtensionAppAction(
+                            panel,
+                            actionId,
+                            input,
+                            target,
+                          )
+                        }
+                      />
+                    ) : (
+                      <ExtensionPanel
+                        key={panel.key}
+                        panel={panel}
+                        onClose={() => setActiveExtensionPanelKey(null)}
+                        onAction={(extensionId, action) =>
+                          invokeExtensionPanelAction(panel, extensionId, action)
+                        }
+                      />
+                    ),
+                  ];
+                }),
               ),
             },
             activeMainViewId,

@@ -1,10 +1,11 @@
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { extensionFrontends } from '../../scripts/vite-extension-frontends.mjs'
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [extensionFrontends(), react(), tailwindcss()],
   build: {
     rollupOptions: {
       // The detached Activity window is a second Tauri window, so its entry has

@@ -14,6 +14,7 @@
   "dependencies": {
     "@falcondeck/chat-ui": "file:../../packages/chat-ui",
     "@falcondeck/client-core": "file:../../packages/client-core",
+    "@falcondeck/extension-sdk": "file:../../packages/extension-sdk",
     "@falcondeck/ui": "file:../../packages/ui",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

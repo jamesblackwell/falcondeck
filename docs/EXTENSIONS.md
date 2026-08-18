@@ -1,10 +1,10 @@
 # FalconDeck Extensions
 
 Status: canonical architecture and implementation plan. The v0 foundation and
-Thread Stages vertical slice, the scoped declarative UI v1 foundation,
-standalone panels, bounded lifecycle events, and permission-gated summary
-reads are implemented; later capabilities are explicitly tracked below. Last
-reconciled with the code on 2026-08-17.
+Kanban vertical slice, scoped declarative UI v1, trusted official React
+frontends, standalone panels, bounded lifecycle events, and permission-gated
+summary reads are implemented; later capabilities are explicitly tracked
+below. Last reconciled with the code on 2026-08-18.
 
 This document is the source of truth for code that extends FalconDeck itself.
 If implementation conflicts with it, update this document and record the
@@ -13,7 +13,7 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
 
 ### Implemented baseline
 
-- bundled catalog and manifest discovery, with Thread Stages enabled by default;
+- bundled catalog and manifest discovery, with Kanban enabled by default;
 - checked-in manifest schema and machine-readable validation diagnostics;
 - daemon-owned enablement, namespaced JSON storage, bounded view projections,
   generic action routing, snapshot fields, sequenced events, HTTP, and relay RPC;
@@ -21,7 +21,7 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   supervised, read-only TypeScript host process per active extension;
 - Extensions settings in desktop, plus synchronized projection rendering in
   desktop, remote web, and mobile;
-- one-click Thread Stages context-menu selection, stage icons, optimistic
+- one-click Kanban stage selection, stage icons, optimistic
   updates, custom stage creation, and sidebar filtering on desktop
   and remote web, with read-only stage markers on mobile;
 - a bounded declarative UI v1 schema, public SDK types/builder, defensive client
@@ -29,6 +29,10 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   unsupported-contribution fallback;
 - named `panels` contributions rendered through the desktop main-view registry
   and remote web, with an explicit mobile fallback;
+- optional trusted React frontend entries for bundled official extensions,
+  built as lazy desktop/remote-web chunks with typed panel registrations,
+  action routing, thread navigation, permission-reduced props, and per-panel
+  crash containment;
 - bounded, identifier-only lifecycle events delivered to disposable public-SDK
   subscriptions through independently supervised per-extension queues;
 - daemon-owned, denied-by-default `threads:read` grants, summary-only thread
@@ -42,6 +46,7 @@ the research behind this design lives in `docs/BB-ANALYSIS.md`.
   projection tests.
 
 The following planned parts are not yet public API: user/local-path install,
+third-party trusted-frontend building or loading,
 permissions beyond summary-only `threads:read`, the remaining declarative form
 primitives and mobile renderer,
 migrations/transactions beyond atomic
@@ -97,8 +102,9 @@ agent connectors and framework plugins such as Tauri or Expo plugins.
    a versioned Deno host over JSON-RPC on stdio.
 3. **Official extensions use only the public SDK.** Bundling can change source
    and default enablement, but never grants private APIs.
-4. **No extension code runs in mobile.** Desktop, web, and mobile initially
-   render declarative contributions and synchronized view state.
+4. **Trusted frontend code is explicit and client-specific.** Bundled official
+   React frontends run only in desktop and remote web. Mobile renders
+   declarative contributions or an attributed unsupported fallback.
 5. **Permissions are denied by default and enforced by the daemon.** Runtime
    sandboxing is defence in depth, not the product permission boundary.
 6. **Extension state never becomes an ad hoc core field.** Use namespaced
@@ -141,6 +147,7 @@ An authored extension is deliberately small:
 thread-tags/
   falcondeck.extension.json
   server.ts
+  app.tsx                         # optional trusted React frontend
   ui.ts                          # optional declarative helpers
   README.md
   tests/
@@ -155,6 +162,10 @@ Entrypoints import the SDK by its stable bare specifier:
 ```ts
 import { defineExtension } from "@falcondeck/extension-sdk";
 ```
+
+Trusted frontends import only `@falcondeck/extension-sdk/app`. They register
+typed slots and receive permission-reduced data, action invocation, and host
+navigation as props. They do not import application stores or private source.
 
 FalconDeck supplies the import map at runtime. Repository checks use
 `--import-map=extensions/import-map.json`; authored packages must not depend on
@@ -179,24 +190,28 @@ Every package contains `falcondeck.extension.json`, validated before code loads:
 {
   "$schema": "https://falcondeck.com/schemas/extension-manifest-v1.json",
   "id": "falcondeck.thread-tags",
-  "name": "Thread Stages",
-  "version": "0.3.0",
+  "name": "Kanban",
+  "version": "0.4.0",
   "engines": { "falcondeck": "^0.1" },
   "entrypoint": "server.ts",
+  "frontend": "app.tsx",
   "contributes": {
     "threadMenuActions": [{ "id": "manage-tags", "title": "Set stage" }],
     "threadDecorations": [{ "id": "tag-chips", "view": "thread-tags" }],
     "sidebarFilters": [
       { "id": "tags", "title": "Stages", "view": "tag-index" }
-    ]
+    ],
+    "panels": [{ "id": "board", "title": "Kanban", "view": "kanban-board" }]
   },
-  "permissions": []
+  "permissions": ["threads:read"]
 }
 ```
 
 Required properties are a globally unique reverse-domain-style id, name,
 semantic version, supported extension API range, backend entrypoint, declared
-contributions, and a permissions array. The v0.1 validator accepts at most 16
+contributions, and a permissions array. `frontend` is optional and currently
+accepted only as a build input for bundled official packages. The v0.1
+validator accepts at most 16
 unique permissions and currently recognizes only `threads:read`; unknown or
 duplicate permissions are rejected rather than run without enforcement.
 
@@ -321,8 +336,9 @@ The first API provides named contribution points:
 - conversation cards;
 - standalone panels.
 
-Thread Stages uses the first three; its named stages are rendered in a
-context-menu submenu and do not open a modal to assign an existing stage.
+Kanban uses thread actions, decorations, filtering, and a standalone panel;
+its named stages are rendered in a context-menu submenu and do not open a
+modal to assign an existing stage.
 
 Contributions bind manifest declarations to view state and actions. The scoped
 implemented v1 vocabulary is stack, row, text, badge, divider, button, list,
@@ -338,7 +354,7 @@ document rules as other view contributions. Static manifest UI lets a lazy
 extension render on first paint; a synchronized global projection with the
 contribution's view id may replace that document later. Desktop registers core
 Activity and Settings takeovers plus extension panels by stable view id;
-remote web renders the same panel/navigation primitives. Thread Stages uses a dedicated
+remote web renders the same panel/navigation primitives. Kanban uses a dedicated
 stage filter so custom stages stay in sync, while other extensions still use
 the generic filter path. Its thread menu action and row decoration remain
 on their existing shared compatibility adapter. Header/composer actions,
@@ -357,8 +373,35 @@ kinds are listed by name in desktop Extensions settings even when that client
 has no renderer for their surface.
 
 Sandboxed webviews are a later desktop/web escape hatch. Mobile always needs a
-useful declarative or generic fallback. Whole-region replacement, same-origin
-scripts, arbitrary CSS, and direct store access are out of scope for v1.
+useful declarative or generic fallback. Arbitrary content scripts, unscoped
+third-party CSS, and direct store access remain out of scope.
+
+### Trusted React frontends
+
+An optional manifest `frontend` entry gives a bundled official extension a
+trusted React surface when declarative UI is too limited. The Vite extension
+frontend plugin reads the official catalog at build time and emits one lazy
+chunk per frontend. A frontend exports `defineExtensionApp(extensionId,
+setup)` from `@falcondeck/extension-sdk/app` and registers components only for
+manifest-declared slots. The host mounts a matching panel registration inside
+the ordinary panel route and sidebar lifecycle.
+
+The host owns React, routing, enablement, and daemon transport. Panel props
+contain the extension's synchronized views, summary-only thread fields when
+`threads:read` is granted, a typed action invoker, and a thread-navigation
+request. Frontends do not receive message content, filesystem paths, daemon
+credentials, or application stores through the SDK. Imports are built into
+the host application, so React remains a singleton and a failed import or
+panel render is contained to that extension surface.
+
+This is a trust tier, not a security sandbox. Frontend JavaScript executes in
+the application's page and can use browser globals. For that reason the
+current implementation only builds repository-owned official frontends.
+Third-party trusted frontend installation needs explicit full-trust consent,
+SDK compatibility checks, automatic CSS scoping, bundle integrity metadata,
+and update/reload lifecycle work before it can ship. Sandboxed HTML remains a
+separate future capability for lower-trust custom UI. Mobile does not execute
+React DOM frontends and continues to show the declared panel fallback.
 
 ## 9. Runtime and lifecycle
 
@@ -484,9 +527,9 @@ Canonical starter prompt:
 > contribution on supported clients, and list requested permissions before
 > enabling it.
 
-## 13. First official extension: Thread Stages
+## 13. First official extension: Kanban
 
-Thread Stages is bundled and enabled by default. Its durable package id stays
+Kanban is bundled and enabled by default. Its durable package id stays
 `falcondeck.thread-tags` so existing installations keep their data. A thread
 with no stage produces no UI clutter. It is both useful and the acceptance
 test for the architecture.
@@ -499,6 +542,9 @@ Initial behaviour:
 - Remove a stage from the same thread context-menu picker.
 - Show one compact stage icon in thread rows.
 - Filter the sidebar by one or more stages.
+- Open a full Kanban board from the sidebar on desktop and remote web.
+- Move threads between columns with drag and drop and open a thread from its
+  card.
 - Preserve assignments across restart.
 - Keep desktop, remote web, and mobile consistent through daemon snapshots and
   sequenced updates.
@@ -540,7 +586,7 @@ Deliver:
 - manifest v1 Rust/TypeScript types and generated JSON Schema;
 - `packages/extension-sdk` identity and lifecycle types;
 - `packages/extension-testing` skeleton;
-- Thread Stages scaffold and official catalog entry;
+- Kanban scaffold and official catalog entry;
 - compatibility and diagnostic-code conventions.
 
 Gate:
@@ -609,13 +655,19 @@ Gate:
 Progress (2026-08-13): the panel-prerequisite subset is implemented: UI v1
 wire/schema/SDK contracts, bounded validation, defensive normalization, the
 shared web renderer, generic unsupported fallback, fake-host package, and the
-generic `sidebarFilters` host proven by Thread Stages. The additive `panels`
+generic `sidebarFilters` host proven by Kanban. The additive `panels`
 contribution, desktop main-view registry, desktop/remote hosts, mobile fallback,
 and event-driven Mini Zen proof are also implemented. Mobile vocabulary,
 thread action/decoration generic hosts, forms/modals, and local-path install
 remain open, so Phase 3 as originally scoped is not marked complete.
 
-### Phase 4 — Thread Stages vertical slice
+Progress (2026-08-18): bundled official packages may additionally declare a
+trusted React frontend. Desktop and remote web build those entries as lazy
+chunks and mount typed panel registrations; Kanban is the first proof. This
+does not complete local-path installation or authorize third-party frontend
+execution.
+
+### Phase 4 — Kanban vertical slice
 
 Deliver section 13 using only public SDK facets, enabled by default in the
 official catalog.
@@ -634,7 +686,7 @@ Deliver:
 - `create|validate|test|dev|pack` CLI commands;
 - stable JSON diagnostics and repairs;
 - generated public SDK reference;
-- a minimal example distinct from Thread Stages;
+- a minimal example distinct from Kanban;
 - an end-to-end fresh-scaffold test;
 - public starter prompt and contribution checklist.
 
@@ -695,9 +747,9 @@ the additive grant field as optional; disabling stops callbacks and summary
 access without deleting the grant; host failure cannot widen access or erase
 state; Mini Zen proves both granted and denied paths using only public APIs.
 
-Do not begin marketplace, signing, arbitrary webviews, whole-region UI
-replacement, extension dependencies, or cross-extension calls until local
-packages and Thread Stages exercise compatibility in real use.
+Do not begin marketplace, signing, arbitrary webviews, unreviewed third-party
+trusted frontends, extension dependencies, or cross-extension calls until
+local packages and Kanban exercise compatibility in real use.
 
 ## 15. Required test layers
 

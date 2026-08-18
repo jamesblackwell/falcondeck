@@ -75,6 +75,8 @@ struct ExtensionManifest {
     version: String,
     engines: ExtensionEngines,
     entrypoint: String,
+    #[serde(default)]
+    frontend: Option<String>,
     contributes: ExtensionContributions,
     permissions: Vec<String>,
 }
@@ -175,6 +177,10 @@ impl ExtensionRegistry {
                     include_str!("../../../../extensions/official/thread-tags/server.ts"),
                 ),
                 (
+                    self.root.join("official/thread-tags/app.tsx"),
+                    include_str!("../../../../extensions/official/thread-tags/app.tsx"),
+                ),
+                (
                     self.root
                         .join("official/mini-zen/falcondeck.extension.json"),
                     include_str!(
@@ -264,6 +270,17 @@ impl ExtensionRegistry {
                     "extension entrypoint is not a file: {}",
                     entrypoint.display()
                 )));
+            }
+            if let Some(frontend) = manifest.frontend.as_deref() {
+                let frontend =
+                    resolve_existing_package_path(&package_root, frontend, "extension frontend")
+                        .await?;
+                if !frontend.is_file() {
+                    return Err(DaemonError::BadRequest(format!(
+                        "extension frontend is not a file: {}",
+                        frontend.display()
+                    )));
+                }
             }
             let enabled = self
                 .persisted
@@ -1159,6 +1176,7 @@ mod tests {
                 falcondeck: "^0.1".to_string(),
             },
             entrypoint: "server.ts".to_string(),
+            frontend: None,
             contributes: ExtensionContributions::default(),
             permissions: Vec::new(),
         }
@@ -1420,13 +1438,16 @@ mod tests {
             .expect("bundled catalog should load");
 
         let snapshot = registry.snapshot();
-        let thread_tags = snapshot
+        let kanban = snapshot
             .catalog
             .iter()
             .find(|extension| extension.id == "falcondeck.thread-tags")
-            .expect("Thread Tags should be bundled");
-        assert!(thread_tags.enabled);
-        assert_eq!(thread_tags.status, ExtensionStatus::Active);
+            .expect("Kanban should be bundled");
+        assert!(kanban.enabled);
+        assert_eq!(kanban.name, "Kanban");
+        assert_eq!(kanban.status, ExtensionStatus::Active);
+        assert_eq!(kanban.contributes.panels.len(), 1);
+        assert_eq!(kanban.permissions, [THREADS_READ_PERMISSION]);
 
         let mini_zen = snapshot
             .catalog
@@ -1477,7 +1498,7 @@ mod tests {
         assert!(registry.has_grant("falcondeck.mini-zen", THREADS_READ_PERMISSION));
         assert!(
             registry
-                .update_permission("falcondeck.thread-tags", THREADS_READ_PERMISSION, true,)
+                .update_permission("falcondeck.thread-tags", "workspace:read", true,)
                 .await
                 .is_err()
         );
