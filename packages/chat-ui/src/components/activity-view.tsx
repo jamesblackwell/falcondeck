@@ -15,6 +15,8 @@ import {
   collectRecentEntries,
   type ActivityEntry,
   type ActivitySection,
+  type ActivityTail,
+  type ActivityTailLine,
   type InteractiveRequest,
   type InteractiveResponsePayload,
   type ProjectGroup,
@@ -48,6 +50,21 @@ export type ActivityViewProps = {
     workspaceId: string,
     threadId: string,
   ) => Promise<void> | void;
+  /**
+   * The last few lines of each thread, keyed `workspaceId:threadId`. Absent
+   * keys fall back to the one-line preview the snapshot already carries, so
+   * the cards render before any tail has been fetched.
+   */
+  threadTails?: Record<string, ActivityTail>;
+  /**
+   * Send into a thread from its card. Omitted where Activity cannot reach a
+   * daemon, which hides every composer rather than offering a dead one.
+   */
+  onSendMessage?: (
+    workspaceId: string,
+    threadId: string,
+    text: string,
+  ) => Promise<void>;
   /** Omitted when Activity owns its window — the frame closes it instead. */
   onClose?: () => void;
   onNewThread?: () => void;
@@ -176,6 +193,13 @@ const KEY_HINTS: readonly {
     compact: true,
   },
   { key: "1–4", label: "lane", description: "Jump to a lane", compact: true },
+  {
+    key: "F",
+    alt: "/",
+    label: "talk",
+    description: "Type into the selected thread",
+    compact: true,
+  },
   { key: "J / K", label: "scan", description: "Scan the queue in order" },
   { key: "T", label: "recent", description: "Expand recent threads" },
   { key: "?", alt: "H", label: "keys", description: "Show this list" },
@@ -384,9 +408,11 @@ type ActivityRowProps = {
   host?: { name: string; connected: boolean };
   nowMs: number;
   selected: boolean;
+  tail?: ActivityTail;
   resolvedRequest?: InteractiveRequest;
   onOpenThread: ActivityViewProps["onOpenThread"];
   onMarkThreadRead: ActivityViewProps["onMarkThreadRead"];
+  onSendMessage?: ActivityViewProps["onSendMessage"];
   onRespond: (
     entry: ActivityEntry,
     request: InteractiveRequest,
@@ -394,40 +420,233 @@ type ActivityRowProps = {
   ) => Promise<void>;
 };
 
+/** Sigils, not labels. A terminal tells you who spoke in one column. */
+const TAIL_ROLE: Record<
+  ActivityTailLine["role"],
+  { sigil: string; sigilClass: string; textClass: string }
+> = {
+  user: { sigil: "❯", sigilClass: "text-accent", textClass: "text-fg-secondary" },
+  agent: { sigil: " ", sigilClass: "", textClass: "text-fg-secondary" },
+  thinking: { sigil: "~", sigilClass: "text-fg-faint", textClass: "text-fg-muted" },
+  tool: { sigil: "$", sigilClass: "text-fg-faint", textClass: "text-fg-muted" },
+  error: { sigil: "✗", sigilClass: "text-danger", textClass: "text-fg-secondary" },
+  note: { sigil: "·", sigilClass: "text-fg-faint", textClass: "text-fg-muted" },
+};
+
+/**
+ * The readout. A dozen of these are on screen at once, so it renders plain
+ * lines — no markdown, no syntax highlighting, no per-line components — and
+ * pins itself to the newest line the way `tail -f` does, unless the reader
+ * has scrolled back to look at something.
+ */
+function TailReadout({
+  lines,
+  fallback,
+}: {
+  lines: ActivityTailLine[];
+  fallback: string | null;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const pinnedRef = useRef(true);
+
+  const lastLine = lines.at(-1);
+  useEffect(() => {
+    const node = scrollRef.current;
+    // jsdom and headless webviews report no layout; there is nothing to pin.
+    if (!node || !pinnedRef.current || node.scrollHeight === 0) return;
+    node.scrollTop = node.scrollHeight;
+  }, [lines.length, lastLine?.text]);
+
+  return (
+    <div
+      ref={scrollRef}
+      onScroll={(event) => {
+        const node = event.currentTarget;
+        pinnedRef.current =
+          node.scrollHeight - node.scrollTop - node.clientHeight < 24;
+      }}
+      className="fd-scrollbar-thin min-h-0 flex-1 overflow-y-auto rounded-[var(--fd-radius-sm)] border border-border-subtle bg-surface-0 px-2.5 py-1.5"
+    >
+      {/* Fills from the bottom, like a terminal: a short tail sits on the
+          prompt with the void above it, not stranded under one. The inner
+          min-h-full keeps `justify-end` clear of the WebKit bug where a
+          bottom-justified scroll container cannot reach its own overflow. */}
+      <div className="flex min-h-full flex-col justify-end">
+      {lines.length === 0 ? (
+        <p className="font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-faint">
+          {fallback ?? "No output yet"}
+        </p>
+      ) : (
+        lines.map((line) => {
+          const role = TAIL_ROLE[line.role];
+          return (
+            <p
+              key={line.id}
+              className="flex gap-1.5 font-mono text-[length:var(--fd-text-xs)] leading-relaxed"
+            >
+              <span
+                aria-hidden="true"
+                className={cn("shrink-0 select-none", role.sigilClass)}
+              >
+                {role.sigil}
+              </span>
+              <span
+                className={cn("min-w-0 flex-1 break-words", role.textClass)}
+              >
+                {line.text}
+                {line.streaming ? (
+                  <span aria-hidden="true" className="fd-caret" />
+                ) : null}
+              </span>
+            </p>
+          );
+        })
+      )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Send into a thread without opening it — the reason the cards grew. Modelled
+ * on a shell prompt rather than the app's composer: one line, Enter sends,
+ * and no model pickers or attachment affordances, because a card is where you
+ * say "carry on" or "run the tests too", not where you start real work.
+ */
+function CardComposer({
+  entry,
+  disabled,
+  onSendMessage,
+}: {
+  entry: ActivityEntry;
+  disabled: boolean;
+  onSendMessage: NonNullable<ActivityViewProps["onSendMessage"]>;
+}) {
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  const submit = async () => {
+    const text = draft.trim();
+    if (!text || sending || disabled) return;
+    setSending(true);
+    setError(null);
+    // Clear first: a send into a busy thread queues, and a composer that
+    // stays full until the queue drains reads as a failure.
+    setDraft("");
+    try {
+      await onSendMessage(entry.workspaceId, entry.thread.id, text);
+    } catch (cause) {
+      setDraft(text);
+      setError(cause instanceof Error ? cause.message : "Could not send");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div className="shrink-0">
+      <div
+        className={cn(
+          "flex items-start gap-1.5 rounded-[var(--fd-radius-sm)] border border-border-subtle bg-surface-0 px-2.5 py-1.5 transition-colors",
+          "focus-within:border-[color:color-mix(in_srgb,var(--fd-accent)_45%,transparent)]",
+          disabled && "opacity-50",
+        )}
+      >
+        <span
+          aria-hidden="true"
+          className="shrink-0 select-none py-px font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-accent"
+        >
+          ❯
+        </span>
+        <textarea
+          ref={inputRef}
+          rows={1}
+          value={draft}
+          disabled={disabled || sending}
+          data-activity-composer="true"
+          aria-label={`Message ${entry.thread.title}`}
+          placeholder={
+            disabled
+              ? "Host offline"
+              : sending
+                ? "Sending…"
+                : "Message this thread"
+          }
+          onChange={(event) => {
+            setDraft(event.target.value);
+            // Grow to three lines, then scroll. The card holds its height and
+            // the readout above gives up the space, so a grid of cards never
+            // reflows because someone is typing in one of them.
+            const node = event.target;
+            node.style.height = "auto";
+            node.style.height = `${Math.min(node.scrollHeight, 60)}px`;
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void submit();
+              return;
+            }
+            if (event.key === "Escape") {
+              event.preventDefault();
+              inputRef.current?.blur();
+            }
+          }}
+          className="min-w-0 flex-1 resize-none bg-transparent font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-primary outline-none placeholder:text-fg-faint"
+        />
+      </div>
+      {error ? (
+        <p className="mt-1 font-mono text-[length:var(--fd-text-2xs)] text-danger">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 const ActivityRow = memo(
   function ActivityRow({
     entry,
     host,
     nowMs,
     selected,
+    tail,
     resolvedRequest,
     onOpenThread,
     onMarkThreadRead,
+    onSendMessage,
     onRespond,
   }: ActivityRowProps) {
     const offline = host?.connected === false;
     const request = resolvedRequest ?? entry.requests[0];
-    const reason =
+    const meta = SECTION_META[entry.section];
+    const isBlocked = entry.section === "blocked";
+    // What the summary knows, shown until the tail has anything of its own.
+    const fallback =
       entry.section === "failed"
         ? (entry.thread.last_error ?? "The run failed")
         : entry.section === "ready"
           ? (entry.thread.last_message_preview ?? "Turn finished")
-          : entry.section === "running"
-            ? (entry.thread.last_tool ??
-              entry.thread.last_message_preview ??
-              "Working…")
-            : null;
-
-    const meta = SECTION_META[entry.section];
+          : (entry.thread.last_tool ??
+            entry.thread.last_message_preview ??
+            "Working…");
+    const queued = entry.thread.queued_turns.length;
 
     return (
       <article
         style={{ "--fd-tone": meta.toneVar } as CSSProperties}
         className={cn(
           "fd-tone-edge fd-terminal-card fd-reticle group flex flex-col rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1",
-          // Taller on wide screens, where the extra room buys readout lines
-          // rather than empty card.
-          entry.section !== "blocked" && "h-36 overflow-hidden xl:h-40",
+          // A terminal you can actually read. Running threads get the taller
+          // frame because they are the ones still producing lines; a finished
+          // run has said what it is going to say, and matching its height to
+          // the live cards would only buy it void.
+          !isBlocked && "overflow-hidden",
+          entry.section === "running" && "h-64 2xl:h-72",
+          (entry.section === "failed" || entry.section === "ready") &&
+            "h-52 2xl:h-56",
           offline && "opacity-60",
           selected &&
             "border-[color:color-mix(in_srgb,var(--fd-accent)_50%,transparent)]",
@@ -442,6 +661,14 @@ const ActivityRow = memo(
           <span className="fd-readout min-w-0 flex-1 truncate text-fg-muted">
             {entry.projectLabel}
           </span>
+          {queued > 0 ? (
+            <span
+              className="fd-readout shrink-0 text-accent"
+              title={`${queued} message${queued === 1 ? "" : "s"} queued`}
+            >
+              +{queued}
+            </span>
+          ) : null}
           {host ? (
             <Badge
               variant={offline ? "danger" : "default"}
@@ -480,41 +707,20 @@ const ActivityRow = memo(
         <button
           type="button"
           onClick={() => onOpenThread(entry.workspaceId, entry.thread.id)}
-          className={cn(
-            "fd-focus-inset flex min-h-0 flex-col items-start gap-2 px-3.5 py-2.5 text-left",
-            entry.section !== "blocked" && "flex-1",
-          )}
+          className="fd-focus-inset shrink-0 px-3.5 pb-1.5 pt-2.5 text-left"
         >
-          <span className="w-full truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
+          <span className="block w-full truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
             {entry.thread.title}
           </span>
-          {reason ? (
-            /* Recessed screen: the fixed card height reads as terminal void
-               rather than dead space, however short the last line was. */
-            <span className="flex min-h-0 w-full flex-1 items-start gap-2 overflow-hidden rounded-[var(--fd-radius-sm)] border border-border-subtle bg-surface-0 px-2.5 py-1.5">
-              <span
-                aria-hidden="true"
-                className="shrink-0 font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-[color:var(--fd-tone)]"
-              >
-                {meta.glyph}
-              </span>
-              <span className="line-clamp-3 min-w-0 break-words whitespace-pre-wrap font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-secondary xl:line-clamp-4">
-                {reason}
-              </span>
-            </span>
-          ) : null}
         </button>
 
-        {entry.section === "blocked" ? (
+        {isBlocked ? (
           <div
             className="px-3.5 pb-3.5"
             title={offline ? "Host offline" : undefined}
           >
             {request ? (
-              <fieldset
-                disabled={offline}
-                className="m-0 min-w-0 border-0 p-0"
-              >
+              <fieldset disabled={offline} className="m-0 min-w-0 border-0 p-0">
                 <InteractiveRequestCard
                   key={request.request_id}
                   request={request}
@@ -533,7 +739,18 @@ const ActivityRow = memo(
               </div>
             )}
           </div>
-        ) : null}
+        ) : (
+          <div className="flex min-h-0 flex-1 flex-col gap-1.5 px-3.5 pb-3">
+            <TailReadout lines={tail?.lines ?? []} fallback={fallback} />
+            {onSendMessage ? (
+              <CardComposer
+                entry={entry}
+                disabled={offline}
+                onSendMessage={onSendMessage}
+              />
+            ) : null}
+          </div>
+        )}
       </article>
     );
   },
@@ -548,14 +765,18 @@ const ActivityRow = memo(
     previous.entry.thread.last_tool === next.entry.thread.last_tool &&
     previous.entry.thread.last_message_preview ===
       next.entry.thread.last_message_preview &&
+    previous.entry.thread.queued_turns.length ===
+      next.entry.thread.queued_turns.length &&
     requestsEqual(previous.entry.requests, next.entry.requests) &&
     previous.host?.name === next.host?.name &&
     previous.host?.connected === next.host?.connected &&
     previous.nowMs === next.nowMs &&
     previous.selected === next.selected &&
+    previous.tail === next.tail &&
     previous.resolvedRequest?.request_id === next.resolvedRequest?.request_id &&
     previous.onOpenThread === next.onOpenThread &&
     previous.onMarkThreadRead === next.onMarkThreadRead &&
+    previous.onSendMessage === next.onSendMessage &&
     previous.onRespond === next.onRespond,
 );
 
@@ -697,6 +918,8 @@ export const ActivityView = memo(function ActivityView({
   onOpenThread,
   onInteractiveResponse,
   onMarkThreadRead,
+  threadTails,
+  onSendMessage,
   onClose,
   onNewThread,
   onPopOut,
@@ -907,6 +1130,22 @@ export const ActivityView = memo(function ActivityView({
         onOpenThread(target.workspaceId, target.thread.id);
       };
 
+      /**
+       * Hand the keyboard to the selected card's prompt. Swallowed either way
+       * once a card is selected — a card whose host is offline has a prompt
+       * that cannot take focus, and leaking the keystroke elsewhere would be
+       * a stranger outcome than nothing happening.
+       */
+      const focusComposer = () => {
+        if (!selectedKey) return;
+        event.preventDefault();
+        scrollRef.current
+          ?.querySelector<HTMLTextAreaElement>(
+            `[data-activity-key="${CSS.escape(selectedKey)}"] [data-activity-composer]:not([disabled])`,
+          )
+          ?.focus();
+      };
+
       const markSelectedRead = () => {
         const row = selectable.find((entry) => entry.key === selectedKey);
         if (!row?.entry) return;
@@ -952,6 +1191,10 @@ export const ActivityView = memo(function ActivityView({
         case "r":
         case "R":
           return markSelectedRead();
+        case "f":
+        case "F":
+        case "/":
+          return focusComposer();
         case "t":
         case "T":
           if (recentEntries.length <= RECENT_PREVIEW_LIMIT) return;
@@ -1044,7 +1287,7 @@ export const ActivityView = memo(function ActivityView({
         ref={scrollRef}
         className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-5 py-5"
       >
-        <div className="mx-auto w-full max-w-[1440px] space-y-8">
+        <div className="mx-auto w-full max-w-[2200px] space-y-8">
           <section
             aria-label="Activity summary"
             style={
@@ -1174,8 +1417,12 @@ export const ActivityView = memo(function ActivityView({
                   <div
                     data-activity-grid={section}
                     className={cn(
-                      "grid items-start gap-3 lg:grid-cols-2",
-                      section !== "blocked" && "2xl:grid-cols-3",
+                      // Cards are terminals now, so they get a floor on
+                      // width: columns are added as the screen earns them,
+                      // never by dividing a narrow one further.
+                      "grid items-start gap-3 min-[900px]:grid-cols-2",
+                      section !== "blocked" &&
+                        "min-[1500px]:grid-cols-3 min-[2000px]:grid-cols-4",
                     )}
                   >
                     {sectionEntries.map((entry) => (
@@ -1185,6 +1432,8 @@ export const ActivityView = memo(function ActivityView({
                         host={workspaceHosts[entry.workspaceId]}
                         nowMs={nowMs}
                         selected={selectedKey === entryKey(entry)}
+                        tail={threadTails?.[entryKey(entry)]}
+                        onSendMessage={onSendMessage}
                         resolvedRequest={resolvedRequestForEntry(
                           entry,
                           resolvedEntries[entryKey(entry)],

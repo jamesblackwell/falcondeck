@@ -9,6 +9,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  ActivityTailLine,
   InteractiveRequest,
   ProjectGroup,
   ThreadSummary,
@@ -107,6 +108,33 @@ afterEach(() => {
 });
 
 describe("ActivityView", () => {
+  const queue = () =>
+    groups([
+      thread({
+        id: "first",
+        last_message_preview: "One",
+        attention: {
+          ...thread({ id: "base" }).attention,
+          level: "unread",
+          unread: true,
+        },
+      }),
+      thread({
+        id: "second",
+        last_message_preview: "Two",
+        attention: {
+          ...thread({ id: "base" }).attention,
+          level: "unread",
+          unread: true,
+        },
+      }),
+    ]);
+
+  const selectedThreadId = () =>
+    document
+      .querySelector("[data-selected='true']")
+      ?.getAttribute("data-activity-thread");
+
   it("renders all populated sections and their row details", () => {
     render(
       <ActivityView
@@ -158,20 +186,20 @@ describe("ActivityView", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Process exited 1")).toBeInTheDocument();
     expect(screen.getByText("Implementation complete")).toBeInTheDocument();
-    expect(screen.getByText("Running tests")).toHaveClass("line-clamp-3");
+    expect(screen.getByText("Running tests")).toBeInTheDocument();
     expect(
       document.querySelector('[data-activity-thread="running"]'),
-    ).toHaveClass("h-36", "overflow-hidden");
+    ).toHaveClass("h-64", "overflow-hidden");
     expect(
       document.querySelector('[data-activity-thread="blocked"]'),
-    ).not.toHaveClass("h-36");
+    ).not.toHaveClass("h-64");
     expect(screen.getByLabelText("Activity summary")).toHaveTextContent(
       "3 need attention",
     );
     expect(screen.getByText("Needs response")).toBeInTheDocument();
     expect(
       document.querySelector('[data-activity-grid="running"]'),
-    ).toHaveClass("lg:grid-cols-2", "2xl:grid-cols-3");
+    ).toHaveClass("min-[900px]:grid-cols-2", "min-[1500px]:grid-cols-3");
     expect(
       document.querySelector('[data-activity-grid="blocked"]'),
     ).not.toHaveClass("2xl:grid-cols-3");
@@ -419,33 +447,6 @@ describe("ActivityView", () => {
   });
 
   describe("keyboard", () => {
-    const queue = () =>
-      groups([
-        thread({
-          id: "first",
-          last_message_preview: "One",
-          attention: {
-            ...thread({ id: "base" }).attention,
-            level: "unread",
-            unread: true,
-          },
-        }),
-        thread({
-          id: "second",
-          last_message_preview: "Two",
-          attention: {
-            ...thread({ id: "base" }).attention,
-            level: "unread",
-            unread: true,
-          },
-        }),
-      ]);
-
-    const selectedThreadId = () =>
-      document
-        .querySelector("[data-selected='true']")
-        ?.getAttribute("data-activity-thread");
-
     it("moves through the queue with j/k and opens with Enter", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: queue(), onOpenThread })} />);
@@ -637,6 +638,171 @@ describe("ActivityView", () => {
         <ActivityView {...props({ groups: queue() })} windowFocused={false} />,
       );
       expect(screen.getByText("Click to focus")).toBeInTheDocument();
+    });
+  });
+
+  describe("thread terminals", () => {
+    const running = () =>
+      groups([
+        thread({
+          id: "busy",
+          status: "running",
+          attention: {
+            ...thread({ id: "base" }).attention,
+            level: "running",
+          },
+        }),
+      ]);
+
+    const tails = (lines: ActivityTailLine[]) => ({
+      [`${workspace.id}:busy`]: { lines, seeded: true },
+    });
+
+    it("renders the tail in order with a cursor on the streaming line", () => {
+      render(
+        <ActivityView
+          {...props({ groups: running() })}
+          threadTails={tails([
+            { id: "a", role: "user", text: "run the tests", streaming: false },
+            { id: "b", role: "tool", text: "npm test", streaming: false },
+            { id: "c", role: "agent", text: "Three failed", streaming: true },
+          ])}
+        />,
+      );
+
+      expect(screen.getByText("run the tests")).toBeInTheDocument();
+      expect(screen.getByText("npm test")).toBeInTheDocument();
+      const streaming = screen.getByText("Three failed");
+      expect(streaming.querySelector(".fd-caret")).not.toBeNull();
+      expect(
+        screen.getByText("npm test").parentElement?.querySelector(".fd-caret"),
+      ).toBeNull();
+    });
+
+    it("falls back to the summary preview until a tail arrives", () => {
+      const withPreview = running();
+      withPreview[0]!.threads[0]!.last_tool = "rg -n shortcut";
+      render(<ActivityView {...props({ groups: withPreview })} />);
+
+      expect(screen.getByText("rg -n shortcut")).toBeInTheDocument();
+    });
+
+    it("sends from the card and clears the prompt", async () => {
+      const onSendMessage = vi.fn().mockResolvedValue(undefined);
+      render(
+        <ActivityView
+          {...props({ groups: running() })}
+          onSendMessage={onSendMessage}
+        />,
+      );
+
+      const prompt = screen.getByRole("textbox", { name: "Message busy" });
+      fireEvent.change(prompt, { target: { value: "also run the linter" } });
+      fireEvent.keyDown(prompt, { key: "Enter" });
+
+      await waitFor(() =>
+        expect(onSendMessage).toHaveBeenCalledWith(
+          workspace.id,
+          "busy",
+          "also run the linter",
+        ),
+      );
+      await waitFor(() => expect(prompt).toHaveValue(""));
+    });
+
+    it("keeps Shift-Enter for a newline", () => {
+      const onSendMessage = vi.fn().mockResolvedValue(undefined);
+      render(
+        <ActivityView
+          {...props({ groups: running() })}
+          onSendMessage={onSendMessage}
+        />,
+      );
+
+      const prompt = screen.getByRole("textbox", { name: "Message busy" });
+      fireEvent.change(prompt, { target: { value: "first line" } });
+      fireEvent.keyDown(prompt, { key: "Enter", shiftKey: true });
+
+      expect(onSendMessage).not.toHaveBeenCalled();
+    });
+
+    it("restores the draft and reports a failed send", async () => {
+      const onSendMessage = vi.fn().mockRejectedValue(new Error("Host offline"));
+      render(
+        <ActivityView
+          {...props({ groups: running() })}
+          onSendMessage={onSendMessage}
+        />,
+      );
+
+      const prompt = screen.getByRole("textbox", { name: "Message busy" });
+      fireEvent.change(prompt, { target: { value: "carry on" } });
+      fireEvent.keyDown(prompt, { key: "Enter" });
+
+      expect(await screen.findByText("Host offline")).toBeInTheDocument();
+      expect(prompt).toHaveValue("carry on");
+    });
+
+    it("hides the prompt when Activity cannot send", () => {
+      render(<ActivityView {...props({ groups: running() })} />);
+      expect(
+        screen.queryByRole("textbox", { name: "Message busy" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("hands the keyboard to the selected card on F", () => {
+      render(
+        <ActivityView
+          {...props({ groups: running() })}
+          onSendMessage={vi.fn().mockResolvedValue(undefined)}
+        />,
+      );
+
+      fireEvent.keyDown(window, { key: "4" });
+      fireEvent.keyDown(window, { key: "f" });
+      expect(screen.getByRole("textbox", { name: "Message busy" })).toHaveFocus();
+    });
+
+    it("says why an offline host's prompt is dead, and keeps F harmless", () => {
+      render(
+        <ActivityView
+          {...props({ groups: running() })}
+          workspaceHosts={{
+            [workspace.id]: { name: "studio-mac", connected: false },
+          }}
+          onSendMessage={vi.fn().mockResolvedValue(undefined)}
+        />,
+      );
+
+      const prompt = screen.getByRole("textbox", { name: "Message busy" });
+      expect(prompt).toBeDisabled();
+      expect(prompt).toHaveAttribute("placeholder", "Host offline");
+
+      fireEvent.keyDown(window, { key: "4" });
+      fireEvent.keyDown(window, { key: "f" });
+      expect(prompt).not.toHaveFocus();
+    });
+
+    it("leaves the view shortcuts alone while typing into a card", () => {
+      const onMarkThreadRead = vi.fn();
+      render(
+        <ActivityView
+          {...props({ groups: queue(), onMarkThreadRead })}
+          onSendMessage={vi.fn().mockResolvedValue(undefined)}
+        />,
+      );
+
+      fireEvent.keyDown(window, { key: "3" });
+      expect(selectedThreadId()).toBe("first");
+
+      // "q" clears a thread and "d" moves right — inside the prompt they are
+      // just letters, or the composer would be unusable.
+      const prompt = screen.getByRole("textbox", { name: "Message first" });
+      fireEvent.keyDown(prompt, { key: "q" });
+      fireEvent.keyDown(prompt, { key: "d" });
+
+      expect(onMarkThreadRead).not.toHaveBeenCalled();
+      expect(selectedThreadId()).toBe("first");
     });
   });
 

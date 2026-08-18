@@ -7,6 +7,7 @@ import { Pin, PinOff, X } from "lucide-react";
 import { ActivityView } from "@falcondeck/chat-ui/activity-view";
 import { PromptInput } from "@falcondeck/chat-ui";
 import type {
+  ActivityTail,
   InteractiveRequest,
   InteractiveResponsePayload,
 } from "@falcondeck/client-core";
@@ -15,6 +16,7 @@ import { Button, EmptyState, cn } from "@falcondeck/ui";
 import {
   ACTIVITY_WINDOW_EVENTS,
   type ActivityRespondResult,
+  type ActivitySendMessageResult,
   type ActivityStartTaskResult,
   type ActivityWindowState,
 } from "./activity-window-bridge";
@@ -79,6 +81,7 @@ export function ActivityWindow() {
   const [pinned, setPinned] = useState(readAlwaysOnTop);
   const [focused, setFocused] = useState(true);
   const callSeqRef = useRef(0);
+  const [tails, setTails] = useState<Record<string, ActivityTail>>({});
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerDraft, setComposerDraft] = useState("");
   const [composerWorkspaceId, setComposerWorkspaceId] = useState("");
@@ -103,6 +106,11 @@ export function ActivityWindow() {
       ACTIVITY_WINDOW_EVENTS.state,
       (event) => setState(event.payload),
     );
+    // Tails arrive on their own channel, at their own pace.
+    const unlistenTails = listen<Record<string, ActivityTail>>(
+      ACTIVITY_WINDOW_EVENTS.tails,
+      (event) => setTails(event.payload),
+    );
     // Announce after subscribing, so the reply cannot land in the gap. Also
     // re-syncs on reload, when the main window has no idea we restarted.
     void emit(ACTIVITY_WINDOW_EVENTS.ready);
@@ -120,6 +128,7 @@ export function ActivityWindow() {
 
     return () => {
       void unlisten.then((off) => off());
+      void unlistenTails.then((off) => off());
       void closing.then((off) => off());
       void focus.then((off) => off());
     };
@@ -233,6 +242,49 @@ export function ActivityWindow() {
     void invoke("focus_main_window").catch(() => {});
   }, []);
 
+  /** Same round-trip as `respond`: the card reports its own failure. */
+  const handleSendMessage = useCallback(
+    async (workspaceId: string, threadId: string, text: string) => {
+      callSeqRef.current += 1;
+      const callId = `${threadId}:send:${callSeqRef.current}`;
+
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        let timeout = 0;
+        const unlisten = listen<ActivitySendMessageResult>(
+          ACTIVITY_WINDOW_EVENTS.sendMessageResult,
+          (event) => {
+            if (event.payload.callId !== callId || settled) return;
+            settled = true;
+            window.clearTimeout(timeout);
+            void unlisten.then((off) => off());
+            if (event.payload.error) reject(new Error(event.payload.error));
+            else resolve();
+          },
+        );
+
+        timeout = window.setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          void unlisten.then((off) => off());
+          reject(
+            new Error("FalconDeck's main window did not answer. Is it open?"),
+          );
+        }, RESPOND_TIMEOUT_MS);
+
+        void unlisten.then(() =>
+          emit(ACTIVITY_WINDOW_EVENTS.sendMessage, {
+            callId,
+            workspaceId,
+            threadId,
+            text,
+          }),
+        );
+      });
+    },
+    [],
+  );
+
   /** Round-trips the answer so the card can still report its own failure. */
   const handleInteractiveResponse = useCallback(
     async (
@@ -298,6 +350,8 @@ export function ActivityWindow() {
         onOpenThread={handleOpenThread}
         onInteractiveResponse={handleInteractiveResponse}
         onMarkThreadRead={handleMarkThreadRead}
+        threadTails={tails}
+        onSendMessage={handleSendMessage}
         onNewThread={state.canStartThread ? handleNewThread : undefined}
         trafficLightInset
         onReturnFocus={handleReturnFocus}

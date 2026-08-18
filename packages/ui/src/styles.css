@@ -1418,6 +1418,48 @@ body {
   opacity: 1;
 }
 
+/* Streaming cursor for a card's tail readout. A block that blinks where the
+   next token will land — the one piece of motion in Activity, and the only
+   honest way to tell "still writing" from "stopped mid-sentence". */
+.fd-caret {
+  display: inline-block;
+  width: 0.45em;
+  height: 0.95em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--fd-accent);
+  opacity: 0.75;
+  animation: fd-caret-blink 1.1s steps(1, end) infinite;
+}
+@keyframes fd-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .fd-caret {
+    animation: none;
+  }
+}
+
+/* Hairline scrollbar for the tail readouts. A dozen cards each showing a
+   default scrollbar turns the grid into gutters. */
+.fd-scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--fd-border-2) transparent;
+}
+.fd-scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.fd-scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.fd-scrollbar-thin::-webkit-scrollbar-thumb {
+  border-radius: var(--fd-radius-full);
+  background: var(--fd-border-2);
+}
+
 /* Older blocks in long transcripts should not pay layout and paint costs while
    offscreen. Conversation keeps its newest context eager for streaming and
    bottom anchoring. Browsers without content-visibility ignore this safely. */

@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import { ActivityView } from "@falcondeck/chat-ui/activity-view";
 import type {
+  ActivityTail,
   InteractiveRequest,
   ProjectGroup,
   ThreadSummary,
@@ -194,6 +195,44 @@ if (qaTheme) document.documentElement.dataset.theme = qaTheme;
 const qaPalette = new URLSearchParams(window.location.search).get("palette");
 if (qaPalette) document.documentElement.dataset.palette = qaPalette;
 
+
+/** A believable terminal readout per card, including one mid-stream. */
+const tails: Record<string, ActivityTail> = {
+  "ws-lucidpic:t-run-1": {
+    seeded: true,
+    lines: [
+      { id: "u1", role: "user", text: "fix the collision on approve", streaming: false },
+      { id: "t1", role: "tool", text: "rg -n 'auto-reject' src/", streaming: false },
+      { id: "r1", role: "thinking", text: "two tests assert the old behaviour", streaming: false },
+      { id: "t2", role: "tool", text: "npm test -- collision", streaming: false },
+      { id: "a1", role: "agent", text: "Collision cleared. Expanding both tests to cover the new guard before re-run", streaming: true },
+    ],
+  },
+  "ws-lucidpic:t-run-2": {
+    seeded: true,
+    lines: [
+      { id: "u2", role: "user", text: "check the quota guards", streaming: false },
+      { id: "t3", role: "tool", text: "npm test -- quota", streaming: false },
+      { id: "e1", role: "error", text: "1 failed — doubled quota path", streaming: false },
+      { id: "a2", role: "agent", text: "Restored. Verifying the other high-risk guards fail too", streaming: false },
+    ],
+  },
+  "ws-falcondeck:t-run-3": {
+    seeded: true,
+    lines: [
+      { id: "u3", role: "user", text: "add shortcut badges to the menus", streaming: false },
+      { id: "t4", role: "tool", text: "sed -n '1,80p' src/components/Menu.tsx", streaming: true },
+    ],
+  },
+  "ws-lucidpic:t-failed": {
+    seeded: true,
+    lines: [
+      { id: "t5", role: "tool", text: "npx vitest run", streaming: false },
+      { id: "e2", role: "error", text: "Process exited 1 — vitest: 3 failed, 118 passed", streaming: false },
+    ],
+  },
+};
+
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <div className="h-screen w-screen">
@@ -207,6 +246,8 @@ createRoot(document.getElementById("root")!).render(
         onOpenThread={() => {}}
         onInteractiveResponse={async () => {}}
         onMarkThreadRead={() => {}}
+        threadTails={tails}
+        onSendMessage={async () => {}}
         onClose={() => {}}
         onNewThread={() => {}}
       />

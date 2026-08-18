@@ -178,7 +178,10 @@ describe("ActivityWindow", () => {
     deliver(ACTIVITY_WINDOW_EVENTS.state, state());
 
     fireEvent.keyDown(window, { key: "n", metaKey: true });
-    const input = await screen.findByRole("textbox");
+    // Cards carry their own prompts now, so name the quick composer.
+    const input = await screen.findByRole("textbox", {
+      name: "Message composer",
+    });
     fireEvent.change(input, { target: { value: "Triage the flaky tests" } });
     fireEvent.click(screen.getByRole("button", { name: "Send message" }));
 

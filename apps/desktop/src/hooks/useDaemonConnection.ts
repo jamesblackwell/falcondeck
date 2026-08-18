@@ -14,6 +14,7 @@ import {
 } from '@falcondeck/client-core'
 import { realtimeAudioPlayer } from '@falcondeck/chat-ui'
 
+import { activityTailStore } from '../activity-tails'
 import { detectApiBaseUrl } from '../api'
 import { performanceTracingEnabled, recordPerformance } from '../performance'
 
@@ -123,6 +124,10 @@ export function useDaemonConnection(options: DaemonConnectionOptions = {}) {
     const events = pendingEventsRef.current
     if (events.length === 0) return
     pendingEventsRef.current = []
+
+    // Activity buffers a short tail per visible thread straight off the wire,
+    // rather than standing up a conversation model for each card.
+    activityTailStore.ingest(events)
 
     // WebSocket frames can arrive much faster than the display can paint.
     // Applying one React update per frame made streaming cost scale with token

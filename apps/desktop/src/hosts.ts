@@ -55,6 +55,8 @@ import {
 } from '@falcondeck/client-core'
 import { realtimeAudioPlayer } from '@falcondeck/chat-ui'
 
+import { activityTailStore } from './activity-tails'
+
 const HOSTS_STORAGE_KEY = 'falcondeck.desktop.hosts.v1'
 
 export type StoredHost = {
@@ -302,6 +304,9 @@ export class HostConnection {
   }
 
   private applyEvents(events: EventEnvelope[]) {
+    // Activity's tails are host-agnostic: a remote thread's card streams from
+    // this socket exactly as a local one streams from the daemon's.
+    activityTailStore.ingest(events)
     for (const event of events) {
       realtimeAudioPlayer.handleEvent(event)
       this.snapshot = applySnapshotEvent(this.snapshot, event)

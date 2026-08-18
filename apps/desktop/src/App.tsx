@@ -18,6 +18,7 @@ import {
   composerProviderFor,
   composerSelectionFor,
   countAwaitingResponseThreads,
+  collectActivityEntries,
   countActivityEntries,
   conversationItemsForSelection,
   deriveExtensionPanels,
@@ -114,12 +115,14 @@ import {
   workspaceSendBlockReason,
 } from "./app-utils";
 import { isTauriDesktop, openActivityWindow, openExternalUrl } from "./api";
+import { activityTailStore, threadTailKey } from "./activity-tails";
 import {
   ACTIVITY_WINDOW_EVENTS,
   ACTIVITY_WINDOW_LABEL,
   activityStateChanged,
   projectActivityWindowState,
   type ActivityRespondMessage,
+  type ActivitySendMessageMessage,
   type ActivityStartTaskMessage,
   type ActivityThreadRef,
   type ActivityWindowState,
@@ -163,6 +166,7 @@ import { ResumeStoppedThreadsDialog } from "./components/ResumeStoppedThreadsDia
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import type { SettingsSectionId } from "./components/settings/settings-utils";
 import { useAppUpdater } from "./hooks/useAppUpdater";
+import { useActivityTailTracking } from "./hooks/useActivityTails";
 import { useDaemonConnection } from "./hooks/useDaemonConnection";
 import { useGitBranches } from "./hooks/useGitBranches";
 import { usePanelVisibility } from "./hooks/usePanelVisibility";
@@ -214,6 +218,9 @@ function lastAgentItemId(items: ConversationItem[]) {
   return null;
 }
 
+/** Trailing window for pushing streaming tails to the detached window. */
+const ACTIVITY_TAIL_PUSH_MS = 200;
+
 const SettingsView = lazy(() =>
   import("./components/SettingsView").then((module) => ({
     default: module.SettingsView,
@@ -224,9 +231,9 @@ const ScheduledTasksView = lazy(() =>
     default: module.ScheduledTasksView,
   })),
 );
-const ActivityView = lazy(() =>
-  import("@falcondeck/chat-ui/activity-view").then((module) => ({
-    default: module.ActivityView,
+const ActivityPane = lazy(() =>
+  import("./components/ActivityPane").then((module) => ({
+    default: module.ActivityPane,
   })),
 );
 const DiffPanel = lazy(() =>
@@ -4125,6 +4132,60 @@ function AppInner() {
     ],
   );
 
+  /**
+   * Send into a thread straight from its Activity card. The thread already
+   * carries its provider, model, and policies, so this only supplies the
+   * text — and never steers, because an unattended card is the wrong place
+   * to interrupt a turn that is mid-flight. A busy thread queues it.
+   */
+  const handleActivitySendMessage = useCallback(
+    async (workspaceId: string, threadId: string, text: string) => {
+      const client = apiFor(workspaceId);
+      if (!client) throw new Error("The FalconDeck daemon is not connected");
+      const workspace = groups.find(
+        (group) => group.workspace.id === workspaceId,
+      )?.workspace;
+      const userItemId = generateUserItemId();
+      activityTailStore.appendOptimistic(
+        threadTailKey(workspaceId, threadId),
+        userItemId,
+        text,
+      );
+      const response = await client.sendTurn({
+        workspace_id: workspaceId,
+        thread_id: threadId,
+        inputs: [{ type: "text", text }],
+        selected_skills: selectedSkillsFromText(text, workspace?.skills ?? []),
+        steer: false,
+        user_item_id: userItemId,
+      });
+      if (response?.ok === false) {
+        throw new Error(response.message ?? "The daemon rejected the message");
+      }
+    },
+    [apiFor, groups],
+  );
+
+  // Only the threads Activity is showing get a buffered tail; the store drops
+  // the rest. Recent entries are included so the trail can grow a readout too.
+  const activityTailKeys = useMemo(() => {
+    if (!isActivityOpen && !activityWindowOpen) return [];
+    const requests = viewSnapshot?.interactive_requests ?? [];
+    return collectActivityEntries(groups, requests).map((entry) =>
+      threadTailKey(entry.workspaceId, entry.thread.id),
+    );
+  }, [
+    activityWindowOpen,
+    groups,
+    isActivityOpen,
+    viewSnapshot?.interactive_requests,
+  ]);
+  useActivityTailTracking(
+    activityTailKeys,
+    apiFor,
+    isActivityOpen || activityWindowOpen,
+  );
+
   const handleActivityStartTask = useCallback(
     async ({
       workspaceId,
@@ -4310,6 +4371,26 @@ function AppInner() {
         ),
       );
       track(
+        listen<ActivitySendMessageMessage>(
+          ACTIVITY_WINDOW_EVENTS.sendMessage,
+          (event) => {
+            const { callId, workspaceId, threadId, text } = event.payload;
+            void handleActivitySendMessage(workspaceId, threadId, text).then(
+              () =>
+                emit(ACTIVITY_WINDOW_EVENTS.sendMessageResult, { callId }),
+              (error: unknown) =>
+                emit(ACTIVITY_WINDOW_EVENTS.sendMessageResult, {
+                  callId,
+                  error:
+                    error instanceof Error
+                      ? error.message
+                      : "Failed to send the message",
+                }),
+            );
+          },
+        ),
+      );
+      track(
         listen<ActivityRespondMessage>(
           ACTIVITY_WINDOW_EVENTS.respond,
           (event) => {
@@ -4338,6 +4419,7 @@ function AppInner() {
     };
   }, [
     handleInteractiveResponseCallback,
+    handleActivitySendMessage,
     handleActivityStartTask,
     handleMarkThreadRead,
     handleNewThread,
@@ -4363,6 +4445,32 @@ function AppInner() {
       disposed = true;
     };
   }, []);
+
+  // Tails stream at token rate, so they get their own channel and their own
+  // pace. Subscribed here rather than rendered: pulling token-rate state
+  // through App's render would re-run the largest component in the app once
+  // a frame for a window that is not even this one.
+  useEffect(() => {
+    if (!activityWindowOpen || !isTauriDesktop()) return;
+    let timer = 0;
+    const push = () => {
+      void import("@tauri-apps/api/event").then(({ emit }) =>
+        emit(ACTIVITY_WINDOW_EVENTS.tails, activityTailStore.snapshot()),
+      );
+    };
+    const unsubscribe = activityTailStore.subscribe(() => {
+      if (timer) return;
+      timer = window.setTimeout(() => {
+        timer = 0;
+        push();
+      }, ACTIVITY_TAIL_PUSH_MS);
+    });
+    push();
+    return () => {
+      unsubscribe();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [activityWindowOpen]);
 
   useEffect(() => {
     if (!activityWindowOpen || !isTauriDesktop()) return;
@@ -4995,7 +5103,7 @@ function AppInner() {
             {
               "core.activity": (
                 <Suspense fallback={loadingThreadState}>
-                  <ActivityView
+                  <ActivityPane
                     groups={groups}
                     interactiveRequests={
                       viewSnapshot?.interactive_requests ?? []
@@ -5004,6 +5112,7 @@ function AppInner() {
                     onOpenThread={handleSelectThread}
                     onInteractiveResponse={handleInteractiveResponseCallback}
                     onMarkThreadRead={handleMarkThreadRead}
+                    onSendMessage={handleActivitySendMessage}
                     onClose={() => setIsActivityOpen(false)}
                     onNewThread={
                       selectedWorkspaceId
