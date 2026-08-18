@@ -211,6 +211,18 @@ struct ManagedThread {
     /// a real title, so the titler needs this flag to know it may replace it.
     title_is_provider_preview: bool,
     requires_resume: bool,
+    /// Whether the daemon's transcript for a native OpenCode thread is known
+    /// to match the agent's session storage. False after a restore (items are
+    /// not persisted) and after a turn whose end-of-turn projection failed,
+    /// because both leave a prefix that the `items.is_empty()`-only hydration
+    /// guard would otherwise never repair.
+    native_transcript_synced: bool,
+    /// True only while a native OpenCode turn's monitor task is live, from
+    /// admission to the terminal projection. `WaitingForInput` is set from
+    /// inside that monitor, but the status is also persisted and restored
+    /// verbatim after an ungraceful daemon death — so hydration eligibility
+    /// must key off this flag, not the status, for waiting threads.
+    opencode_turn_in_flight: bool,
     /// Full requests behind `summary.queued_turns`, same order, matched by
     /// the summary entry's id. Persisted before an enqueue is acknowledged.
     queued_requests: Vec<QueuedTurnRequest>,

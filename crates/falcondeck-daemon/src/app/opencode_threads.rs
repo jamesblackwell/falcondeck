@@ -6,8 +6,8 @@ use chrono::Utc;
 use falcondeck_core::{
     AccountStatus, AgentCapabilitySummary, ApprovalDecision, CollaborationModeSummary,
     ContentLifecycle, ConversationItem, InteractiveQuestion, InteractiveQuestionOption,
-    InteractiveRequest, InteractiveRequestKind, ModelSummary, ServiceLevel, ThreadStatus,
-    TurnInputItem, UnifiedEvent,
+    InteractiveRequest, InteractiveRequestKind, ModelSummary, ReasoningEffortSummary, ServiceLevel,
+    ThreadStatus, TurnInputItem, UnifiedEvent,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     AppState, PendingServerRequest,
-    agent_helpers::ResolvedSelectedSkill,
+    agent_helpers::{ResolvedSelectedSkill, replace_selected_skill_aliases},
     conversation_helpers::{ToolSettlement, synthesize_tool_title, tool_display_metadata},
 };
 
@@ -230,7 +230,7 @@ impl AppState {
         let workspace_id = workspace_id.to_string();
         let thread_id = thread_id.to_string();
         tokio::spawn(async move {
-            let result = async {
+            let result: Result<(), DaemonError> = async {
                 let session_id = app
                     .thread_summary(&workspace_id, &thread_id)
                     .await?
@@ -245,14 +245,78 @@ impl AppState {
                     .await?
                     .messages(&session_id)
                     .await?;
-                project_messages(&app, &workspace_id, &thread_id, &messages).await
+                // A message-level provider error inside the stored history is
+                // turn content, not a sync failure: the transcript itself was
+                // fully fetched, so it still counts as synced. Any other
+                // projection failure (e.g. an internal error after a partial
+                // walk) must leave the thread eligible for retry on the next
+                // open.
+                let projection_synced = match project_messages(
+                    &app,
+                    &workspace_id,
+                    &thread_id,
+                    &messages,
+                )
+                .await
+                {
+                    Ok(()) => true,
+                    Err(error) => {
+                        tracing::debug!(%error, %thread_id, "native OpenCode hydration projected a provider error");
+                        matches!(error, DaemonError::Rpc(_))
+                    }
+                };
+                if projection_synced {
+                    Ok(())
+                } else {
+                    Err(DaemonError::Rpc(
+                        "OpenCode transcript projection failed mid-hydration".to_string(),
+                    ))
+                }
             }
             .await;
-            if let Err(error) = result {
-                tracing::info!(%error, %thread_id, "native OpenCode hydration failed");
+            match result {
+                Ok(()) => {
+                    // Mark the transcript synced and bump `updated_at` so
+                    // clients holding a cached partial detail refetch instead
+                    // of treating their prefix as complete.
+                    let marked = app
+                        .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
+                            thread.native_transcript_synced = true;
+                            thread.summary.updated_at = Utc::now();
+                        })
+                        .await;
+                    if marked.is_ok()
+                        && let Ok(thread) = app.thread_summary(&workspace_id, &thread_id).await
+                    {
+                        app.emit(
+                            Some(workspace_id.clone()),
+                            Some(thread_id.clone()),
+                            UnifiedEvent::ThreadUpdated { thread },
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::info!(%error, %thread_id, "native OpenCode hydration failed");
+                }
             }
         });
     }
+}
+
+/// The workspace catalog entry for one OpenCode model id, which carries the
+/// variants the model accepts as reasoning efforts.
+fn catalog_model<'a>(
+    workspace: &'a super::ManagedWorkspace,
+    model_id: &str,
+) -> Option<&'a ModelSummary> {
+    workspace
+        .summary
+        .agents
+        .iter()
+        .find(|agent| agent.provider.as_str().eq_ignore_ascii_case("opencode"))?
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
 }
 
 pub(super) async fn start_opencode_turn(
@@ -310,6 +374,11 @@ pub(super) async fn start_opencode_turn(
     let admission = runtime
         .prompt(&session_id, &message_id, &prompt, &files, Delivery::Queue)
         .await?;
+    let _ = app
+        .with_managed_thread_mut(workspace_id, thread_id, |thread| {
+            thread.opencode_turn_in_flight = true;
+        })
+        .await;
     // The admission's sequence number scopes the event stream to this turn;
     // without it the stream replays prior turns' failures.
     let after_seq = admission
@@ -364,6 +433,7 @@ pub(super) async fn start_opencode_turn(
                 ToolSettlement::Failed,
             ),
         };
+        let transcript_synced = error.is_none();
         let settled_at = Utc::now();
         app.settle_turn_items_with_error(
             &workspace_id,
@@ -381,6 +451,15 @@ pub(super) async fn start_opencode_turn(
             })
             .await
         {
+            let _ = app
+                .with_managed_thread_mut(&workspace_id, &thread_id, |thread| {
+                    // A failed end-of-turn projection leaves a partial
+                    // transcript that must stay eligible for rehydration on
+                    // the next open.
+                    thread.native_transcript_synced = transcript_synced;
+                    thread.opencode_turn_in_flight = false;
+                })
+                .await;
             app.emit(
                 Some(workspace_id.clone()),
                 Some(thread_id.clone()),
@@ -423,6 +502,53 @@ pub(super) fn native_default_model() -> ModelSummary {
     }
 }
 
+/// Order the effort ids weakest-first. OpenCode's own catalog order is lost
+/// when the JSON object is parsed into a sorted map, and an alphabetical
+/// picker ("high, low, max") reads as noise.
+fn effort_rank(effort: &str) -> usize {
+    const ORDER: [&str; 8] = [
+        "off", "none", "minimal", "low", "medium", "high", "xhigh", "max",
+    ];
+    ORDER
+        .iter()
+        .position(|known| known.eq_ignore_ascii_case(effort))
+        .unwrap_or(ORDER.len())
+}
+
+/// Reasoning efforts a catalog model advertises. OpenCode calls these
+/// *variants*: named request presets whose ids are the effort levels
+/// ("low"/"high"/"max" on GLM, "none".."xhigh" on GPT). Its own ACP adapter
+/// publishes exactly these as the `thought_level` config option, so the
+/// catalog is an equivalent source that does not need a session first.
+pub(super) fn variant_efforts(model: &Value) -> Vec<ReasoningEffortSummary> {
+    let Some(variants) = model.get("variants").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut efforts = variants
+        .keys()
+        .map(|id| ReasoningEffortSummary {
+            reasoning_effort: id.clone(),
+            description: String::new(),
+        })
+        .collect::<Vec<_>>();
+    efforts.sort_by(|left, right| {
+        effort_rank(&left.reasoning_effort)
+            .cmp(&effort_rank(&right.reasoning_effort))
+            .then_with(|| left.reasoning_effort.cmp(&right.reasoning_effort))
+    });
+    efforts
+}
+
+/// The variant OpenCode itself falls back to: an explicit `default`, else the
+/// first one it lists.
+fn default_variant(efforts: &[ReasoningEffortSummary]) -> Option<String> {
+    efforts
+        .iter()
+        .find(|effort| effort.reasoning_effort == "default")
+        .or_else(|| efforts.first())
+        .map(|effort| effort.reasoning_effort.clone())
+}
+
 fn parse_native_models(catalog: &Value) -> Result<Vec<ModelSummary>, DaemonError> {
     let providers = catalog
         .get("providers")
@@ -452,14 +578,13 @@ fn parse_native_models(catalog: &Value) -> Result<Vec<ModelSummary>, DaemonError
                 .get("name")
                 .and_then(Value::as_str)
                 .unwrap_or(model_id);
+            let supported_reasoning_efforts = variant_efforts(model);
             models.push(ModelSummary {
                 id: format!("{provider_id}/{model_id}"),
                 label: format!("{model_label} · {provider_label}"),
                 is_default: false,
-                // OpenCode variants are prompt-time options rather than the
-                // session model setting currently used by FalconDeck.
-                default_reasoning_effort: None,
-                supported_reasoning_efforts: Vec::new(),
+                default_reasoning_effort: default_variant(&supported_reasoning_efforts),
+                supported_reasoning_efforts,
                 service_tiers: Vec::new(),
                 default_service_tier: None,
             });
@@ -847,6 +972,25 @@ pub(super) async fn steer_opencode_turn(
     result.map(|_| ())
 }
 
+/// OpenCode expands inline `$name` mentions itself by loading the skill's
+/// SKILL.md, so FalconDeck never inlines skill bodies — it just has to hand
+/// over the native mention. The mention is path-derived (see
+/// `skills::parse_markdown_skill`), not the FalconDeck alias.
+fn opencode_skill_mention(skill: &ResolvedSelectedSkill) -> String {
+    let native_name = skill
+        .summary
+        .provider_translations
+        .opencode
+        .as_ref()
+        .and_then(|translation| translation.native_name.clone())
+        .unwrap_or_else(|| {
+            crate::skills::canonical_skill_alias(&skill.alias)
+                .trim_start_matches('/')
+                .to_string()
+        });
+    format!("${native_name}")
+}
+
 fn opencode_prompt_from_inputs(
     inputs: &[TurnInputItem],
     selected_skills: &[ResolvedSelectedSkill],
@@ -859,12 +1003,15 @@ fn opencode_prompt_from_inputs(
         })
         .collect::<Vec<_>>()
         .join("\n\n");
-    // OpenCode owns its own skill expansion. Preserve authored aliases and
-    // only synthesize them when the selection arrived without prompt text.
+    // Translate authored `/alias` tokens to OpenCode's `$name` mention;
+    // text the user already wrote with `$name` is preserved as-is.
+    text = replace_selected_skill_aliases(&text, selected_skills, |skill| {
+        Some(opencode_skill_mention(skill))
+    });
     if text.trim().is_empty() && !selected_skills.is_empty() {
         text = selected_skills
             .iter()
-            .map(|skill| format!("${}", skill.alias))
+            .map(opencode_skill_mention)
             .collect::<Vec<_>>()
             .join("\n");
     }
@@ -1096,9 +1243,77 @@ pub(super) fn requested_native_transport(config: &AcpProviderConfig) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use falcondeck_core::ImageInput;
+    use falcondeck_core::{ImageInput, SkillProviderTranslations, SkillSummary};
 
     use super::*;
+
+    fn resolved_skill(alias: &str, native_name: Option<&str>) -> ResolvedSelectedSkill {
+        ResolvedSelectedSkill {
+            alias: alias.to_string(),
+            summary: SkillSummary {
+                id: format!("skill:{}", alias.trim_start_matches('/')),
+                label: alias.trim_start_matches('/').to_string(),
+                alias: alias.to_string(),
+                availability: falcondeck_core::SkillAvailability::Both,
+                providers: vec![
+                    falcondeck_core::AgentProvider::CODEX,
+                    falcondeck_core::AgentProvider::CLAUDE,
+                    falcondeck_core::AgentProvider::OPENCODE,
+                ],
+                source_kind: falcondeck_core::SkillSourceKind::ProjectFile,
+                source_path: None,
+                description: None,
+                provider_translations: SkillProviderTranslations {
+                    opencode: native_name.map(|name| falcondeck_core::OpenCodeSkillTranslation {
+                        native_name: Some(name.to_string()),
+                    }),
+                    ..SkillProviderTranslations::default()
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn native_prompt_translates_alias_to_dollar_mention() {
+        let inputs = vec![TurnInputItem::Text {
+            id: None,
+            text: "/autore-view please review my changes".to_string(),
+        }];
+        let skills = vec![resolved_skill("/autore-view", Some("autoreview"))];
+
+        let (text, files) = opencode_prompt_from_inputs(&inputs, &skills);
+        assert_eq!(text, "$autoreview please review my changes");
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn native_prompt_preserves_authored_dollar_mentions() {
+        let inputs = vec![TurnInputItem::Text {
+            id: None,
+            text: "$autoreview review please".to_string(),
+        }];
+        let skills = vec![resolved_skill("/autore-view", Some("autoreview"))];
+
+        let (text, _) = opencode_prompt_from_inputs(&inputs, &skills);
+        assert_eq!(text, "$autoreview review please");
+    }
+
+    #[test]
+    fn native_prompt_synthesizes_mentions_without_text() {
+        let inputs = vec![TurnInputItem::Image(ImageInput {
+            id: "image-1".to_string(),
+            name: None,
+            mime_type: None,
+            url: "https://example.test/a.png".to_string(),
+            local_path: None,
+        })];
+        let skills = vec![resolved_skill("/autore-view", None)];
+
+        let (text, files) = opencode_prompt_from_inputs(&inputs, &skills);
+        // No translation available: fall back to the canonical alias.
+        assert_eq!(text, "$autore-view");
+        assert_eq!(files.len(), 1);
+    }
 
     #[test]
     fn native_prompt_preserves_text_and_forwards_image_uris() {
@@ -1142,12 +1357,49 @@ mod tests {
         assert!(models.iter().any(|model| {
             model.id == "openrouter/x-ai/grok-4.6" && model.label == "Grok 4.6 · OpenRouter"
         }));
-        assert!(
-            models
+    }
+
+    #[test]
+    fn native_catalog_publishes_model_variants_as_reasoning_efforts() {
+        let models = parse_native_models(&serde_json::json!({
+            "providers": [{
+                "id": "zai-coding-plan",
+                "name": "Z.ai",
+                "models": {
+                    "glm": {
+                        "id": "glm-5.3",
+                        "name": "GLM-5.3",
+                        // Parsing sorts the object, so the catalog's own order
+                        // is gone by the time this is read.
+                        "variants": { "max": {}, "low": {}, "high": {} }
+                    },
+                    "plain": { "id": "plain", "name": "Plain" }
+                }
+            }]
+        }))
+        .expect("catalog parses");
+
+        let glm = models
+            .iter()
+            .find(|model| model.id == "zai-coding-plan/glm-5.3")
+            .expect("glm listed");
+        assert_eq!(
+            glm.supported_reasoning_efforts
                 .iter()
-                .skip(1)
-                .all(|model| model.supported_reasoning_efforts.is_empty())
+                .map(|effort| effort.reasoning_effort.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "high", "max"]
         );
+        // OpenCode itself falls back to the first variant it lists.
+        assert_eq!(glm.default_reasoning_effort.as_deref(), Some("low"));
+
+        // A model without variants offers no effort picker at all.
+        let plain = models
+            .iter()
+            .find(|model| model.id == "zai-coding-plan/plain")
+            .expect("plain listed");
+        assert!(plain.supported_reasoning_efforts.is_empty());
+        assert!(plain.default_reasoning_effort.is_none());
     }
 
     #[test]

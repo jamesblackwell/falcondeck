@@ -769,6 +769,13 @@ impl AppState {
                                     .push_conversation_item(&workspace_id, &thread_id, item, true)
                                     .await;
                             }
+                            // The task_notification has its own handler; nothing
+                            // downstream applies. Without this continue, the bare
+                            // `status` ("stopped", "killed", "interrupted") would
+                            // slip through `extract_claude_service_message` and
+                            // re-surface as an "stopped" diagnostic notice on every
+                            // interrupted background task.
+                            continue;
                         }
                         // Sub-agent traffic is tagged with the id of the tool
                         // call that spawned it. It must stay out of the main
@@ -1346,6 +1353,8 @@ impl ManagedThread {
             ai_title_attempts: 0,
             title_is_provider_preview: false,
             requires_resume: false,
+            native_transcript_synced: false,
+            opencode_turn_in_flight: false,
             queued_requests: Vec::new(),
             dispatching_request: None,
             pending_opencode_steer: None,
@@ -2012,5 +2021,29 @@ mod tests {
                 summary: Some("Inspection finished".to_string()),
             }
         );
+    }
+
+    /// A task_notification's bare `status` ("stopped", "killed", "interrupted")
+    /// must not slip through `extract_claude_service_message` and surface as a
+    /// bogus "stopped" diagnostic. The monitor handles the event in
+    /// `claude_task_finished` and must `continue` so the rest of the chain
+    /// never sees the line.
+    #[test]
+    fn task_notification_status_is_not_a_service_message() {
+        for raw_status in ["stopped", "killed", "interrupted"] {
+            let event = json!({
+                "type": "system",
+                "subtype": "task_notification",
+                "task_id": "agent-1",
+                "tool_use_id": "toolu_agent",
+                "status": raw_status,
+                "summary": "The user cancelled this task"
+            });
+            assert_eq!(
+                extract_claude_service_message(&event),
+                None,
+                "task_notification status '{raw_status}' must not become a service message"
+            );
+        }
     }
 }

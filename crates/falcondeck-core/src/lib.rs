@@ -2125,6 +2125,14 @@ pub struct ClaudeSkillTranslation {
     pub prompt_reference_path: Option<String>,
 }
 
+/// Provider-specific OpenCode translation metadata for a skill.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct OpenCodeSkillTranslation {
+    /// Inline `$name` mention OpenCode expands by loading the skill's
+    /// SKILL.md itself. Path-derived, not the frontmatter name.
+    pub native_name: Option<String>,
+}
+
 /// Provider-specific skill translation metadata.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct SkillProviderTranslations {
@@ -2132,6 +2140,9 @@ pub struct SkillProviderTranslations {
     pub codex: Option<CodexSkillTranslation>,
     /// Claude translation details, when available.
     pub claude: Option<ClaudeSkillTranslation>,
+    /// OpenCode translation details, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opencode: Option<OpenCodeSkillTranslation>,
 }
 
 /// Normalized skill summary exposed to FalconDeck clients.
@@ -2262,6 +2273,8 @@ impl AgentProvider {
     pub const CODEX: Self = Self(std::borrow::Cow::Borrowed("codex"));
     /// Claude CLI-backed agent sessions.
     pub const CLAUDE: Self = Self(std::borrow::Cow::Borrowed("claude"));
+    /// OpenCode-backed agent sessions (native runner or ACP).
+    pub const OPENCODE: Self = Self(std::borrow::Cow::Borrowed("opencode"));
 
     /// Creates a provider id from an arbitrary string.
     pub fn new(id: impl Into<String>) -> Self {
@@ -2904,6 +2917,84 @@ pub enum AccountStatus {
     Ready,
     /// The provider requires user authentication.
     NeedsAuth,
+}
+
+/// One usage window in a provider subscription snapshot, e.g. the rolling
+/// five-hour session limit or the weekly limit.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderUsageWindow {
+    /// Display label, e.g. `"Current session"` or `"Weekly limit"`.
+    pub label: String,
+    /// Used share of the window, normalized to 0-100.
+    pub used_percent: u32,
+    /// ISO-8601 timestamp when the window resets, when the provider reports
+    /// one.
+    #[serde(default)]
+    pub resets_at: Option<String>,
+    /// Optional spend figures for usage-metered plans (USD cents).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ProviderUsageCost>,
+}
+
+/// USD-cent spend figures for a usage-metered plan window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderUsageCost {
+    /// Amount consumed in this window, in whole US cents.
+    pub used_usd_cents: u64,
+    /// Spending cap for this window, in whole US cents.
+    pub limit_usd_cents: u64,
+}
+
+/// Live usage snapshot for one provider subscription. Discriminated on
+/// `status` so clients can render the windows, a sign-in hint, or an error
+/// without inventing placeholder numbers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ProviderUsage {
+    /// Usage was read. `account_email` and `plan_label` are null when the
+    /// provider's local auth state does not expose them; `windows` may be
+    /// empty when the plan reports none.
+    Ok {
+        /// Signed-in account email, when the provider exposes it locally.
+        #[serde(default)]
+        account_email: Option<String>,
+        /// Subscription tier label, e.g. `"Pro"` or `"Max (5x)"`.
+        #[serde(default)]
+        plan_label: Option<String>,
+        /// Usage windows reported for the plan.
+        #[serde(default)]
+        windows: Vec<ProviderUsageWindow>,
+    },
+    /// The harness CLI is not installed on this host.
+    NotInstalled,
+    /// No local credentials: the harness CLI is not signed in.
+    Unauthenticated,
+    /// Credentials exist but the token expired; the harness CLI owns the
+    /// refresh and must be run to renew it.
+    Expired,
+    /// Network/HTTP/parse failure with a user-facing message. Plan and
+    /// account are carried when they were known locally before the call.
+    Error {
+        /// User-facing explanation of the failure.
+        message: String,
+        /// Plan label known from local auth state before the call, if any.
+        #[serde(default)]
+        plan_label: Option<String>,
+        /// Account email known from local auth state before the call, if any.
+        #[serde(default)]
+        account_email: Option<String>,
+    },
+}
+
+/// Response for `GET /api/provider-usage` and the `providers.usage` remote
+/// RPC. Each provider resolves independently so one failing never blanks the
+/// others.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderUsageOverview {
+    /// Codex (ChatGPT subscription) usage.
+    pub codex: ProviderUsage,
+    /// Claude Code (Anthropic subscription) usage.
+    pub claude_code: ProviderUsage,
 }
 
 /// Summary of a single thread within a workspace.

@@ -5,8 +5,8 @@ use std::{
 };
 
 use falcondeck_core::{
-    AgentProvider, ClaudeSkillTranslation, CodexSkillTranslation, SkillProviderTranslations,
-    SkillSourceKind, SkillSummary, skill_availability_from_providers,
+    AgentProvider, ClaudeSkillTranslation, CodexSkillTranslation, OpenCodeSkillTranslation,
+    SkillProviderTranslations, SkillSourceKind, SkillSummary, skill_availability_from_providers,
 };
 use serde_json::Value;
 
@@ -44,20 +44,31 @@ pub fn canonical_skill_alias(raw: &str) -> String {
 }
 
 /// File-backed skill locations, per provider. `.agents/skills` is the shared
-/// convention every provider reads; the others are provider-native dirs.
-/// Extending a provider's skill surface means adding a row here, not code.
+/// convention every provider reads (OpenCode scans it natively too); the
+/// others are provider-native dirs. Extending a provider's skill surface
+/// means adding a row here, not code.
 fn skill_scan_roots(root: &Path, source_kind: SkillSourceKind) -> Vec<SkillScanRoot> {
     vec![
         SkillScanRoot {
             dir: root.join(".agents/skills"),
             source_kind: source_kind.clone(),
-            providers: vec![AgentProvider::CODEX, AgentProvider::CLAUDE],
+            providers: vec![
+                AgentProvider::CODEX,
+                AgentProvider::CLAUDE,
+                AgentProvider::OPENCODE,
+            ],
             layout: SkillDirLayout::AgentsSkills,
         },
         SkillScanRoot {
             dir: root.join(".codex/skills"),
             source_kind: source_kind.clone(),
             providers: vec![AgentProvider::CODEX],
+            layout: SkillDirLayout::AgentsSkills,
+        },
+        SkillScanRoot {
+            dir: root.join(".opencode/skills"),
+            source_kind: source_kind.clone(),
+            providers: vec![AgentProvider::OPENCODE],
             layout: SkillDirLayout::AgentsSkills,
         },
         SkillScanRoot {
@@ -89,6 +100,12 @@ pub fn discover_file_backed_skills(workspace_path: &str) -> Vec<SkillSummary> {
     let mut roots = skill_scan_roots(Path::new(workspace_path), SkillSourceKind::ProjectFile);
     if let Some(home) = home_dir() {
         roots.extend(skill_scan_roots(&home, SkillSourceKind::HomeFile));
+        roots.push(SkillScanRoot {
+            dir: home.join(".config/opencode/skills"),
+            source_kind: SkillSourceKind::HomeFile,
+            providers: vec![AgentProvider::OPENCODE],
+            layout: SkillDirLayout::AgentsSkills,
+        });
     }
     for root in roots {
         match root.layout {
@@ -137,6 +154,7 @@ pub fn parse_codex_provider_skills(value: &Value) -> Vec<SkillSummary> {
                         native_name: Some(canonical_name),
                     }),
                     claude: None,
+                    opencode: None,
                 },
             })
         })
@@ -177,6 +195,10 @@ pub fn merge_skills(skills: Vec<SkillSummary>) -> Vec<SkillSummary> {
         }
         if existing.provider_translations.claude.is_none() {
             existing.provider_translations.claude = incoming.provider_translations.claude.clone();
+        }
+        if existing.provider_translations.opencode.is_none() {
+            existing.provider_translations.opencode =
+                incoming.provider_translations.opencode.clone();
         }
     }
 
@@ -255,6 +277,7 @@ fn scan_claude_command_dir(dir: &Path, source_kind: SkillSourceKind) -> Vec<Skil
                     command_name: Some(skill.alias.trim_start_matches('/').to_string()),
                     prompt_reference_path: skill.source_path.clone(),
                 }),
+                opencode: None,
             },
             ..skill
         });
@@ -281,6 +304,21 @@ fn parse_markdown_skill(
         })?;
     let alias = canonical_skill_alias(&raw_name);
     let source_path = Some(path.to_string_lossy().to_string());
+    // OpenCode resolves skills by their path-derived id (directory name for
+    // `<dir>/SKILL.md`, file stem for root-level `.md`), not the frontmatter
+    // name, so the `$name` mention must come from the path.
+    let path_name = explicit_name
+        .map(str::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .map(|name| {
+            canonical_skill_alias(&name)
+                .trim_start_matches('/')
+                .to_string()
+        });
     let provider_translations = SkillProviderTranslations {
         codex: providers
             .contains(&AgentProvider::CODEX)
@@ -293,6 +331,11 @@ fn parse_markdown_skill(
             .then(|| ClaudeSkillTranslation {
                 command_name: None,
                 prompt_reference_path: source_path.clone(),
+            }),
+        opencode: providers
+            .contains(&AgentProvider::OPENCODE)
+            .then(|| OpenCodeSkillTranslation {
+                native_name: path_name,
             }),
     };
 
@@ -478,6 +521,7 @@ mod tests {
                         native_name: Some("search-web".to_string()),
                     }),
                     claude: None,
+                    opencode: None,
                 },
             },
         ]);
@@ -552,5 +596,80 @@ description: >
             metadata.description.as_deref(),
             Some("Guide for writing idiomatic Rust code based on established best practices.")
         );
+    }
+
+    fn write_skill(dir: &Path, name: &str, frontmatter_name: Option<&str>) -> PathBuf {
+        let skill_dir = dir.join(name);
+        fs::create_dir_all(&skill_dir).expect("create skill dir");
+        let frontmatter_name = frontmatter_name.unwrap_or(name);
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {frontmatter_name}\ndescription: Test skill\n---\nBody\n"),
+        )
+        .expect("write SKILL.md");
+        skill_dir
+    }
+
+    /// Skills discovered under `root`, ignoring anything picked up from the
+    /// user's real home directory.
+    fn skills_under(root: &Path, workspace: &Path) -> Vec<SkillSummary> {
+        discover_file_backed_skills(&workspace.to_string_lossy())
+            .into_iter()
+            .filter(|skill| {
+                skill
+                    .source_path
+                    .as_deref()
+                    .map(|path| Path::new(path).starts_with(root))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn agents_skills_root_supports_opencode_with_path_derived_mention() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write_skill(
+            &root.join(".agents/skills"),
+            "autoreview",
+            Some("Autore View"),
+        );
+
+        let skills = skills_under(root, root);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.alias == "/autore-view")
+            .expect("skill discovered");
+
+        assert!(skill.supports_provider(&AgentProvider::CODEX));
+        assert!(skill.supports_provider(&AgentProvider::CLAUDE));
+        assert!(skill.supports_provider(&AgentProvider::OPENCODE));
+        // The `$name` mention OpenCode expands is path-derived, not the
+        // frontmatter name.
+        assert_eq!(
+            skill
+                .provider_translations
+                .opencode
+                .as_ref()
+                .and_then(|translation| translation.native_name.as_deref()),
+            Some("autoreview")
+        );
+    }
+
+    #[test]
+    fn opencode_native_skill_root_is_scanned() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        write_skill(&root.join(".opencode/skills"), "release-notes", None);
+
+        let skills = skills_under(root, root);
+        let skill = skills
+            .iter()
+            .find(|skill| skill.alias == "/release-notes")
+            .expect("skill discovered");
+
+        assert!(skill.supports_provider(&AgentProvider::OPENCODE));
+        assert!(!skill.supports_provider(&AgentProvider::CODEX));
+        assert!(!skill.supports_provider(&AgentProvider::CLAUDE));
     }
 }

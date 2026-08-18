@@ -276,7 +276,7 @@ fn translate_claude_text_input(text: &str, selected_skills: &[ResolvedSelectedSk
     }
 }
 
-fn replace_selected_skill_aliases<F>(
+pub(super) fn replace_selected_skill_aliases<F>(
     text: &str,
     selected_skills: &[ResolvedSelectedSkill],
     replacement_for_skill: F,
@@ -820,12 +820,22 @@ pub(crate) fn claude_tool_result_image_items(
 pub(super) fn extract_claude_service_message(value: &Value) -> Option<String> {
     let event_type = extract_string(claude_event_value(value), &["type", "event"])
         .or_else(|| extract_string(value, &["type"]))?;
-    if matches!(event_type.as_str(), "system" | "status" | "result") {
-        return extract_string(claude_event_value(value), &["message", "status", "summary"])
-            .or_else(|| extract_string(value, &["message", "status", "summary"]))
-            .filter(|message| !is_low_signal_service_message(message));
+    if !matches!(event_type.as_str(), "system" | "status" | "result") {
+        return None;
     }
-    None
+    // `task_notification` events carry a bare `status` word ("stopped", "killed",
+    // "interrupted") and a long `summary`. The monitor settles the spawning
+    // tool card in `claude_task_finished`; surfacing the status here would
+    // re-emit it as a free-floating "stopped" diagnostic on every interrupted
+    // background task.
+    if value.get("type").and_then(Value::as_str) == Some("system")
+        && value.get("subtype").and_then(Value::as_str) == Some("task_notification")
+    {
+        return None;
+    }
+    extract_string(claude_event_value(value), &["message", "status", "summary"])
+        .or_else(|| extract_string(value, &["message", "status", "summary"]))
+        .filter(|message| !is_low_signal_service_message(message))
 }
 
 /// Bare lifecycle words the stream emits around hooks and turn results
