@@ -59,7 +59,10 @@ const snapshot = {
   ],
 } as unknown as DaemonSnapshot;
 
-function setup(apiOverrides: Partial<HostScopedApi> = {}) {
+function setup(
+  apiOverrides: Partial<HostScopedApi> = {},
+  onCreateWithAgent: ReturnType<typeof vi.fn> | null = vi.fn(),
+) {
   const runScheduledTask = vi.fn().mockResolvedValue({});
   const scheduledTask = vi.fn().mockResolvedValue({
     ...snapshot.scheduled_tasks?.[0],
@@ -85,11 +88,17 @@ function setup(apiOverrides: Partial<HostScopedApi> = {}) {
       hosts={[]}
       manager={{ connection: () => null } as unknown as HostManager}
       onRefreshLocal={onRefreshLocal}
+      onCreateWithAgent={onCreateWithAgent ?? undefined}
       onOpenThread={vi.fn()}
       onToast={vi.fn()}
     />,
   );
-  return { runScheduledTask, onRefreshLocal, scheduledTask };
+  return {
+    runScheduledTask,
+    onRefreshLocal,
+    scheduledTask,
+    onCreateWithAgent,
+  };
 }
 
 describe("ScheduledTasksView", () => {
@@ -134,9 +143,22 @@ describe("ScheduledTasksView", () => {
     expect(onRefreshLocal).toHaveBeenCalledOnce();
   });
 
-  it("opens the task creation sheet from the primary action", () => {
-    setup();
+  it("opens a new agent conversation from the primary action", () => {
+    const { onCreateWithAgent } = setup();
     fireEvent.click(screen.getByRole("button", { name: "New task" }));
+    expect(onCreateWithAgent).toHaveBeenCalledOnce();
+    expect(
+      screen.queryByRole("heading", { name: "New scheduled task" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the manual creation sheet in the task options menu", () => {
+    setup();
+    fireEvent.click(screen.getByRole("button", { name: "New task options" }));
+    expect(
+      screen.getByRole("menuitem", { name: "Create with agent" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("menuitem", { name: "Set up manually" }));
     expect(
       screen.getByRole("heading", { name: "New scheduled task" }),
     ).toBeInTheDocument();
@@ -149,6 +171,17 @@ describe("ScheduledTasksView", () => {
     fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
     expect(screen.getByLabelText("Timezone")).toBeInTheDocument();
     expect(screen.getByLabelText("Checkout")).toBeInTheDocument();
+  });
+
+  it("focuses the enabled manual option when agent creation is unavailable", () => {
+    setup({}, null);
+    fireEvent.click(screen.getByRole("button", { name: "New task options" }));
+
+    expect(
+      screen.getByRole("menuitem", { name: "Set up manually" }),
+    ).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("menu"), { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
   it("searches prompt previews and exposes a keyboard-accessible action menu", () => {

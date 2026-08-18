@@ -1,5 +1,6 @@
 import {
   type KeyboardEvent as ReactKeyboardEvent,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -9,8 +10,10 @@ import {
   ChevronDown,
   CircleAlert,
   Clock3,
+  MessageCircle,
   MoreHorizontal,
   Pause,
+  Pencil,
   Play,
   Plus,
   Search,
@@ -824,6 +827,7 @@ export function ScheduledTasksView({
   hosts,
   manager,
   onRefreshLocal,
+  onCreateWithAgent,
   onOpenThread,
   onToast,
 }: {
@@ -832,6 +836,7 @@ export function ScheduledTasksView({
   hosts: HostView[];
   manager: HostManager;
   onRefreshLocal: () => Promise<void>;
+  onCreateWithAgent?: () => void;
   onOpenThread: (workspaceId: string, threadId: string) => void;
   onToast: Toast;
 }) {
@@ -845,10 +850,24 @@ export function ScheduledTasksView({
     [],
   );
   const [editor, setEditor] = useState<EditorState>(null);
+  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [menuKey, setMenuKey] = useState<string | null>(null);
+  const createMenuRef = useRef<HTMLDivElement>(null);
   const detailRequest = useRef(0);
   const editorRequest = useRef(0);
+
+  useEffect(() => {
+    if (!createMenuOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!createMenuRef.current?.contains(event.target as Node)) {
+        setCreateMenuOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    return () =>
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+  }, [createMenuOpen]);
 
   const closeDetail = () => {
     detailRequest.current += 1;
@@ -1029,16 +1048,69 @@ export function ScheduledTasksView({
               Run recurring agent work on this Mac or an enrolled server.
             </p>
           </div>
-          <Button
-            onClick={() => {
-              editorRequest.current += 1;
-              setEditor({ kind: "create" });
-            }}
-            disabled={!canCreate}
-          >
-            <Plus className="mr-2 h-4 w-4" />
-            New task
-          </Button>
+          <div ref={createMenuRef} className="relative flex">
+            <Button
+              className="rounded-r-none"
+              onClick={() => {
+                setCreateMenuOpen(false);
+                onCreateWithAgent?.();
+              }}
+              disabled={!onCreateWithAgent}
+            >
+              <Plus aria-hidden="true" className="h-4 w-4" />
+              New task
+            </Button>
+            <Button
+              className="rounded-l-none border-l border-surface-0 px-2"
+              aria-haspopup="menu"
+              aria-expanded={createMenuOpen}
+              aria-label="New task options"
+              onClick={() => setCreateMenuOpen((current) => !current)}
+              disabled={!onCreateWithAgent && !canCreate}
+            >
+              <ChevronDown aria-hidden="true" className="h-4 w-4" />
+            </Button>
+            {createMenuOpen ? (
+              <div
+                role="menu"
+                aria-label="New task options"
+                onKeyDown={(event) =>
+                  handleMenuKeyDown(event, () => setCreateMenuOpen(false))
+                }
+                className="absolute right-0 top-11 z-20 min-w-52 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-1 shadow-[var(--fd-shadow-md)]"
+              >
+                <button
+                  type="button"
+                  role="menuitem"
+                  autoFocus={Boolean(onCreateWithAgent)}
+                  disabled={!onCreateWithAgent}
+                  className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
+                  onClick={() => {
+                    setCreateMenuOpen(false);
+                    onCreateWithAgent?.();
+                  }}
+                >
+                  <MessageCircle aria-hidden="true" className="h-4 w-4" />
+                  Create with agent
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  autoFocus={!onCreateWithAgent && canCreate}
+                  disabled={!canCreate}
+                  className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
+                  onClick={() => {
+                    setCreateMenuOpen(false);
+                    editorRequest.current += 1;
+                    setEditor({ kind: "create" });
+                  }}
+                >
+                  <Pencil aria-hidden="true" className="h-4 w-4" />
+                  Set up manually
+                </button>
+              </div>
+            ) : null}
+          </div>
         </div>
         <label className="relative mt-8 block">
           <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-fg-muted" />

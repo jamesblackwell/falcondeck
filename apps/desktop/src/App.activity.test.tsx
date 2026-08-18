@@ -6,7 +6,7 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const testSnapshot = vi.hoisted(() => ({
   daemon: {
@@ -215,7 +215,16 @@ vi.mock("./components/DesktopShell", () => ({
 }));
 
 vi.mock("./components/DesktopConversationPane", () => ({
-  DesktopConversationPane: () => <div>Conversation pane</div>,
+  DesktopConversationPane: ({
+    promptInputProps,
+  }: {
+    promptInputProps?: { value?: string };
+  }) => (
+    <div>
+      Conversation pane
+      <span data-testid="composer-draft">{promptInputProps?.value}</span>
+    </div>
+  ),
 }));
 
 vi.mock("./components/DiffPanel", () => ({
@@ -225,6 +234,8 @@ vi.mock("./components/DiffPanel", () => ({
 import App from "./App";
 
 describe("Activity takeover wiring", () => {
+  beforeEach(() => window.localStorage.clear());
+
   it("suppresses the rail and closes the takeover when a thread is selected", async () => {
     render(<App />);
     expect(await screen.findByText("Diff rail")).toBeInTheDocument();
@@ -281,5 +292,39 @@ describe("Activity takeover wiring", () => {
     fireEvent.click(screen.getByRole("button", { name: "Close Mini Zen" }));
     expect(await screen.findByText("Conversation pane")).toBeInTheDocument();
     expect(await screen.findByText("Diff rail")).toBeInTheDocument();
+  });
+
+  it("opens a new thread with the scheduled-task setup prompt", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Scheduled" }));
+    expect(
+      await screen.findByRole("heading", { name: "Scheduled tasks" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "New task" }));
+
+    expect(await screen.findByText("Conversation pane")).toBeInTheDocument();
+    expect(screen.getByTestId("composer-draft")).toHaveTextContent(
+      "use the FalconDeck MCP server to create the automation",
+    );
+  });
+
+  it("preserves an existing new-thread draft as scheduling notes", async () => {
+    window.localStorage.setItem(
+      "falcondeck.desktop.composer-drafts.v1",
+      JSON.stringify({
+        "workspace-1:new": { text: "Keep this draft", updatedAt: 1 },
+      }),
+    );
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Scheduled" }));
+    await screen.findByRole("heading", { name: "Scheduled tasks" });
+    fireEvent.click(screen.getByRole("button", { name: "New task" }));
+
+    expect(screen.getByTestId("composer-draft")).toHaveTextContent(
+      /Current notes:\s*Keep this draft/,
+    );
   });
 });
