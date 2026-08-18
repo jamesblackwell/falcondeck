@@ -293,26 +293,10 @@ export function InlineVoiceRecorder({
       setProvider(nextProvider)
       settingsRef.current = updateSpeechSettings({ provider: nextProvider })
       if (nextProvider === 'openrouter') {
-        try {
-          const status = await getDesktopSpeechStatus()
-          if (cancelledRef.current) return
-          if (!status.configured) {
-            setError(
-              'Add your OpenRouter API key in FalconDeck desktop settings first.',
-            )
-            setState('failed')
-            return
-          }
-          await startCloud()
-        } catch (cause) {
-          if (cancelledRef.current) return
-          setError(
-            cause instanceof Error
-              ? cause.message
-              : 'Could not reach the paired desktop.',
-          )
-          setState('failed')
-        }
+        // Recording is entirely local, so it must not wait for a desktop RPC.
+        // If the desktop or OpenRouter key is unavailable, transcription will
+        // fail after stop and the persisted recording remains retryable.
+        await startCloud()
       } else {
         await startOnDevice()
       }

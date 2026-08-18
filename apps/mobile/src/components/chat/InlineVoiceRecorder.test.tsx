@@ -62,6 +62,38 @@ describe('InlineVoiceRecorder', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('starts cloud recording without waiting for the desktop', async () => {
+    updateSpeechSettings({ provider: 'openrouter' })
+    useRelayStore.getState()._callRpc = vi.fn(
+      () => new Promise(() => {}),
+    ) as unknown as typeof originalCallRpc
+
+    const r = renderComponent(
+      <InlineVoiceRecorder
+        provider="openrouter"
+        onTranscript={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    )
+
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(useRelayStore.getState()._callRpc).not.toHaveBeenCalled()
+    expect(requestRecordingPermissionsAsync).toHaveBeenCalledTimes(1)
+    expect(setAudioModeAsync).toHaveBeenCalledWith({
+      allowsRecording: true,
+      playsInSilentMode: true,
+    })
+    expect(
+      r.root.findByProps({ accessibilityLabel: 'Stop and transcribe' }).props
+        .accessibilityState,
+    ).toEqual({ disabled: false })
+  })
+
   it('marks the arrow control as a send and the square as an edit', async () => {
     updateSpeechSettings({ provider: 'openrouter' })
     useRelayStore.getState()._callRpc = vi.fn(async (method: string) =>
