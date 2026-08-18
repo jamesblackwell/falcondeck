@@ -368,8 +368,8 @@ export function ActivityWindow() {
           <section className="w-full max-w-2xl rounded-[var(--fd-radius-lg)] border border-border-strong bg-surface-1 p-4">
             <div className="mb-3 flex items-start justify-between gap-4">
               <div>
-                <p className="fd-microlabel text-accent">Quick launch</p>
-                <h2 className="mt-1 text-[length:var(--fd-text-lg)] font-semibold text-fg-primary">
+                <p className="fd-type-eyebrow fd-type-eyebrow--sm text-accent">Quick launch</p>
+                <h2 className="mt-1 text-lg font-semibold text-fg-primary">
                   Start a task without leaving Activity
                 </h2>
               </div>
@@ -384,7 +384,7 @@ export function ActivityWindow() {
               </Button>
             </div>
             <label className="mb-3 block">
-              <span className="fd-microlabel mb-1.5 block text-fg-muted">
+              <span className="fd-type-eyebrow fd-type-eyebrow--sm mb-1.5 block text-fg-muted">
                 Project
               </span>
               <select

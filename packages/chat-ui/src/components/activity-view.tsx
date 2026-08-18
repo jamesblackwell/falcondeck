@@ -22,7 +22,7 @@ import {
   type ProjectGroup,
   type RecentEntry,
 } from "@falcondeck/client-core";
-import { Badge, Button, EmptyState, cn } from "@falcondeck/ui";
+import { Badge, Button, EmptyState, Kbd, cn } from "@falcondeck/ui";
 
 import { InteractiveRequestCard } from "./interactive-request-card";
 
@@ -473,7 +473,7 @@ function TailReadout({
           bottom-justified scroll container cannot reach its own overflow. */}
       <div className="flex min-h-full flex-col justify-end">
       {lines.length === 0 ? (
-        <p className="font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-faint">
+        <p className="fd-type-mono text-xs leading-relaxed text-fg-faint">
           {fallback ?? "No output yet"}
         </p>
       ) : (
@@ -482,7 +482,7 @@ function TailReadout({
           return (
             <p
               key={line.id}
-              className="flex gap-1.5 font-mono text-[length:var(--fd-text-xs)] leading-relaxed"
+              className="fd-type-mono flex gap-1.5 text-xs leading-relaxed"
             >
               <span
                 aria-hidden="true"
@@ -556,7 +556,7 @@ function CardComposer({
       >
         <span
           aria-hidden="true"
-          className="shrink-0 select-none py-px font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-accent"
+          className="fd-type-mono shrink-0 select-none py-px text-xs leading-relaxed text-accent"
         >
           ❯
         </span>
@@ -567,12 +567,10 @@ function CardComposer({
           disabled={disabled || sending}
           data-activity-composer="true"
           aria-label={`Message ${entry.thread.title}`}
+          // Short on purpose: the ❯ already says what this is, and a long
+          // placeholder is the loudest thing in an otherwise quiet card.
           placeholder={
-            disabled
-              ? "Host offline"
-              : sending
-                ? "Sending…"
-                : "Message this thread"
+            disabled ? "Host offline" : sending ? "Sending…" : "Message…"
           }
           onChange={(event) => {
             setDraft(event.target.value);
@@ -594,11 +592,11 @@ function CardComposer({
               inputRef.current?.blur();
             }
           }}
-          className="min-w-0 flex-1 resize-none bg-transparent font-mono text-[length:var(--fd-text-xs)] leading-relaxed text-fg-primary outline-none placeholder:text-fg-faint"
+          className="min-w-0 flex-1 resize-none bg-transparent text-sm leading-relaxed text-fg-primary outline-none placeholder:text-fg-faint"
         />
       </div>
       {error ? (
-        <p className="mt-1 font-mono text-[length:var(--fd-text-2xs)] text-danger">
+        <p className="mt-1 text-2xs text-danger">
           {error}
         </p>
       ) : null}
@@ -658,12 +656,12 @@ const ActivityRow = memo(
         {/* Terminal chrome: origin, host, and age — never the payload. */}
         <div className="fd-chrome-fill flex shrink-0 items-center gap-2.5 rounded-t-[var(--fd-radius-md)] border-b border-border-subtle px-3.5 py-1.5">
           <span aria-hidden="true" className="fd-led shrink-0" />
-          <span className="fd-readout min-w-0 flex-1 truncate text-fg-muted">
+          <span className="min-w-0 flex-1 truncate text-xs text-fg-muted">
             {entry.projectLabel}
           </span>
           {queued > 0 ? (
             <span
-              className="fd-readout shrink-0 text-accent"
+              className="shrink-0 text-xs tabular-nums text-accent"
               title={`${queued} message${queued === 1 ? "" : "s"} queued`}
             >
               +{queued}
@@ -672,13 +670,13 @@ const ActivityRow = memo(
           {host ? (
             <Badge
               variant={offline ? "danger" : "default"}
-              className="fd-readout max-w-[45%] shrink truncate rounded-[var(--fd-radius-sm)] px-1.5"
+              className="max-w-[45%] shrink truncate rounded-[var(--fd-radius-sm)] px-1.5 text-2xs"
             >
               {host.name}
               {offline ? " · Offline" : ""}
             </Badge>
           ) : null}
-          <span className="fd-readout shrink-0 tabular-nums text-fg-muted">
+          <span className="shrink-0 text-xs tabular-nums text-fg-muted">
             {timeAgo(entry.thread.updated_at, nowMs)}
           </span>
           {entry.section === "failed" || entry.section === "ready" ? (
@@ -709,7 +707,7 @@ const ActivityRow = memo(
           onClick={() => onOpenThread(entry.workspaceId, entry.thread.id)}
           className="fd-focus-inset shrink-0 px-3.5 pb-1.5 pt-2.5 text-left"
         >
-          <span className="block w-full truncate text-[length:var(--fd-text-base)] font-medium text-fg-primary">
+          <span className="block w-full truncate text-base font-medium text-fg-primary">
             {entry.thread.title}
           </span>
         </button>
@@ -734,7 +732,7 @@ const ActivityRow = memo(
                 />
               </fieldset>
             ) : (
-              <div className="rounded-[var(--fd-radius-md)] border border-warning/20 bg-warning-muted px-4 py-3 text-[length:var(--fd-text-sm)] text-warning">
+              <div className="rounded-[var(--fd-radius-md)] border border-warning/20 bg-warning-muted px-4 py-3 text-sm text-warning">
                 Loading request…
               </div>
             )}
@@ -818,18 +816,18 @@ const RecentTrail = memo(function RecentTrail({
       <div className="mb-2.5 flex items-center gap-2.5">
         <h2
           id="activity-recent"
-          className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
+          className="fd-type-eyebrow shrink-0 text-fg-primary"
         >
           Recent
         </h2>
-        <span className="hidden truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block">
+        <span className="hidden truncate text-xs text-fg-muted sm:block">
           Finished in the last few hours
         </span>
         <span
           aria-hidden="true"
           className="h-px min-w-6 flex-1 bg-[linear-gradient(90deg,color-mix(in_srgb,var(--fd-tone)_28%,transparent),transparent)]"
         />
-        <span className="fd-microlabel shrink-0 tabular-nums text-fg-muted">
+        <span className="fd-type-eyebrow fd-type-eyebrow--sm shrink-0 tabular-nums text-fg-muted">
           {padCount(entries.length)}
         </span>
       </div>
@@ -863,12 +861,12 @@ const RecentTrail = memo(function RecentTrail({
                   aria-hidden="true"
                   className="h-3 w-3 shrink-0 text-fg-faint"
                 />
-                <span className="min-w-0 max-w-[42%] truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
+                <span className="min-w-0 max-w-[42%] truncate text-sm text-fg-secondary">
                   {entry.thread.title}
                 </span>
                 {entry.thread.last_message_preview ? (
                   <span
-                    className="hidden min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block"
+                    className="hidden min-w-0 flex-1 truncate text-xs text-fg-muted sm:block"
                     title={entry.thread.last_message_preview}
                   >
                     {entry.thread.last_message_preview}
@@ -876,10 +874,10 @@ const RecentTrail = memo(function RecentTrail({
                 ) : (
                   <span className="min-w-0 flex-1" />
                 )}
-                <span className="fd-readout shrink-0 truncate text-fg-muted">
+                <span className="shrink-0 truncate text-xs text-fg-muted">
                   {entry.projectLabel}
                 </span>
-                <span className="fd-readout w-8 shrink-0 text-right tabular-nums text-fg-muted">
+                <span className="w-8 shrink-0 text-right text-xs tabular-nums text-fg-muted">
                   {timeAgo(entry.thread.updated_at, nowMs)}
                 </span>
               </button>
@@ -1247,10 +1245,10 @@ export const ActivityView = memo(function ActivityView({
         )}
       >
         <div className="flex min-w-0 items-baseline gap-2.5">
-          <h1 className="shrink-0 text-[length:var(--fd-text-md)] font-semibold tracking-[var(--fd-tracking-tight)] text-fg-primary">
+          <h1 className="shrink-0 text-md font-semibold tracking-[var(--fd-tracking-tight)] text-fg-primary">
             Activity
           </h1>
-          <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+          <p className="truncate text-xs text-fg-muted">
             Across all projects and hosts
           </p>
         </div>
@@ -1302,12 +1300,12 @@ export const ActivityView = memo(function ActivityView({
             <div className="flex min-w-0 items-center gap-2.5 md:w-52 md:shrink-0">
               <span aria-hidden="true" className="fd-led shrink-0" />
               <div className="min-w-0">
-                <p className="truncate text-[length:var(--fd-text-sm)] font-medium text-fg-primary">
+                <p className="truncate text-sm font-medium text-fg-primary">
                   {attentionCount === 0
                     ? "All caught up"
                     : `${attentionCount} need${attentionCount === 1 ? "s" : ""} attention`}
                 </p>
-                <p className="truncate text-[length:var(--fd-text-xs)] text-fg-muted">
+                <p className="truncate text-xs text-fg-muted">
                   {runningCount > 0
                     ? `${runningCount} running quietly`
                     : "No active runs"}
@@ -1329,16 +1327,16 @@ export const ActivityView = memo(function ActivityView({
                     className="relative flex min-w-0 items-baseline justify-between gap-2 bg-surface-0 px-3 py-2 sm:block"
                   >
                     <dt className="flex min-w-0 items-center gap-1.5">
-                      <span aria-hidden="true" className="fd-keycap shrink-0">
+                      <Kbd aria-hidden="true" className="min-w-[1.125rem] justify-center px-1 shrink-0">
                         {meta.lane}
-                      </span>
-                      <span className="fd-microlabel truncate text-fg-muted">
+                      </Kbd>
+                      <span className="fd-type-eyebrow fd-type-eyebrow--sm truncate text-fg-muted">
                         {stat.label}
                       </span>
                     </dt>
                     <dd
                       className={cn(
-                        "mt-1 font-mono text-[length:var(--fd-text-lg)] font-semibold leading-none tabular-nums",
+                        "mt-1 text-lg font-semibold leading-none tabular-nums",
                         count > 0 ? meta.tone : "text-fg-faint",
                       )}
                     >
@@ -1391,26 +1389,26 @@ export const ActivityView = memo(function ActivityView({
                   {/* Channel divider: lane digit, label, hairline run-out,
                       count. The digit is the key that jumps here. */}
                   <div className="mb-2.5 flex items-center gap-2.5">
-                    <span
+                    <Kbd
                       aria-hidden="true"
-                      className="fd-keycap shrink-0 border-[color:color-mix(in_srgb,var(--fd-tone)_35%,transparent)] text-[color:var(--fd-tone)]"
+                      className="min-w-[1.125rem] justify-center px-1 shrink-0 border-[color:color-mix(in_srgb,var(--fd-tone)_35%,transparent)] bg-transparent text-[color:var(--fd-tone)]"
                     >
                       {meta.lane}
-                    </span>
+                    </Kbd>
                     <h2
                       id={`activity-${section}`}
-                      className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
+                      className="fd-type-eyebrow shrink-0 text-fg-primary"
                     >
                       {meta.title}
                     </h2>
-                    <p className="hidden min-w-0 truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block">
+                    <p className="hidden min-w-0 truncate text-xs text-fg-muted sm:block">
                       {meta.description}
                     </p>
                     <span
                       aria-hidden="true"
                       className="h-px min-w-6 flex-1 bg-[linear-gradient(90deg,color-mix(in_srgb,var(--fd-tone)_32%,transparent),transparent)]"
                     />
-                    <span className="fd-microlabel shrink-0 tabular-nums text-fg-muted">
+                    <span className="fd-type-eyebrow fd-type-eyebrow--sm shrink-0 tabular-nums text-fg-muted">
                       {padCount(sectionEntries.length)}
                     </span>
                   </div>
@@ -1478,7 +1476,7 @@ export const ActivityView = memo(function ActivityView({
           }
           className="fd-led shrink-0"
         />
-        <span className="fd-microlabel shrink-0 text-fg-muted">
+        <span className="fd-type-eyebrow fd-type-eyebrow--sm shrink-0 text-fg-muted">
           {windowFocused === false ? "Click to focus" : "Keyboard ready"}
         </span>
         <span
@@ -1488,13 +1486,13 @@ export const ActivityView = memo(function ActivityView({
         <ul className="flex shrink-0 items-center gap-3">
           {KEY_HINTS.filter((hint) => hint.compact).map((hint) => (
             <li key={hint.key} className="hidden items-center gap-1.5 md:flex">
-              <kbd className="fd-keycap">{hint.key}</kbd>
-              <span className="fd-microlabel text-fg-muted">{hint.label}</span>
+              <Kbd>{hint.key}</Kbd>
+              <span className="fd-type-eyebrow fd-type-eyebrow--sm text-fg-muted">{hint.label}</span>
             </li>
           ))}
           <li className="flex items-center gap-1.5">
-            <kbd className="fd-keycap">?</kbd>
-            <span className="fd-microlabel text-fg-muted">keys</span>
+            <Kbd>?</Kbd>
+            <span className="fd-type-eyebrow fd-type-eyebrow--sm text-fg-muted">keys</span>
           </li>
         </ul>
       </footer>
@@ -1507,7 +1505,7 @@ export const ActivityView = memo(function ActivityView({
           onClick={() => setShowKeys(false)}
         >
           <div className="w-full max-w-sm rounded-[var(--fd-radius-md)] border border-border-default bg-surface-1 p-4 shadow-[var(--fd-shadow-lg)]">
-            <p className="fd-microlabel fd-microlabel--md mb-3 font-semibold text-fg-primary">
+            <p className="fd-type-eyebrow mb-3 text-fg-primary">
               Keyboard
             </p>
             <dl className="space-y-2">
@@ -1518,17 +1516,17 @@ export const ActivityView = memo(function ActivityView({
                   key={hint.key}
                   className="flex items-center justify-between gap-4"
                 >
-                  <dt className="text-[length:var(--fd-text-sm)] text-fg-secondary">
+                  <dt className="text-sm text-fg-secondary">
                     {hint.key === "esc" && onReturnFocus
                       ? "Back to the main app"
                       : hint.description}
                   </dt>
                   <dd className="flex shrink-0 items-center gap-1.5">
-                    <kbd className="fd-keycap">{hint.key}</kbd>
+                    <Kbd>{hint.key}</Kbd>
                     {hint.alt ? (
                       <>
-                        <span className="fd-microlabel text-fg-faint">or</span>
-                        <kbd className="fd-keycap">{hint.alt}</kbd>
+                        <span className="fd-type-eyebrow fd-type-eyebrow--sm text-fg-faint">or</span>
+                        <Kbd>{hint.alt}</Kbd>
                       </>
                     ) : null}
                   </dd>
