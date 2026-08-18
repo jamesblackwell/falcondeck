@@ -463,6 +463,8 @@ export function InlineVoiceRecorder({
     router.push('/(app)/settings/speech' as Href)
   }, [onClose, router])
 
+  // Startup and transcription both park the stop/send pair.
+  const notRecording = state !== 'recording'
   const displaySeconds =
     provider === 'openrouter'
       ? Math.floor(recorderState.durationMillis / 1000)
@@ -471,7 +473,7 @@ export function InlineVoiceRecorder({
   return (
     <View style={styles.row}>
       <Pressable
-        style={styles.dismissButton}
+        style={styles.neutralButton}
         onPress={cancel}
         accessibilityRole="button"
         accessibilityLabel="Cancel voice input"
@@ -560,16 +562,13 @@ export function InlineVoiceRecorder({
           ) : (
             <>
               <Pressable
-                style={[
-                  styles.stopButton,
-                  state !== 'recording' && styles.confirmIdle,
-                ]}
+                style={[styles.neutralButton, notRecording && styles.confirmIdle]}
                 onPress={() => void stopRecording(false)}
-                disabled={state !== 'recording'}
+                disabled={notRecording}
                 accessibilityRole="button"
                 accessibilityLabel="Stop and transcribe"
                 accessibilityHint="Puts the transcript in the composer to edit"
-                accessibilityState={{ disabled: state !== 'recording' }}
+                accessibilityState={{ disabled: notRecording }}
                 hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
               >
                 <Square
@@ -579,15 +578,12 @@ export function InlineVoiceRecorder({
                 />
               </Pressable>
               <Pressable
-                style={[
-                  styles.confirmButton,
-                  state !== 'recording' && styles.confirmIdle,
-                ]}
+                style={[styles.confirmButton, notRecording && styles.confirmIdle]}
                 onPress={() => void stopRecording(true)}
-                disabled={state !== 'recording'}
+                disabled={notRecording}
                 accessibilityRole="button"
                 accessibilityLabel="Transcribe and send"
-                accessibilityState={{ disabled: state !== 'recording' }}
+                accessibilityState={{ disabled: notRecording }}
                 hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
               >
                 <ArrowUp
@@ -613,7 +609,7 @@ const styles = StyleSheet.create((theme) => ({
     paddingTop: theme.spacing[1],
     paddingBottom: theme.spacing[2],
   },
-  dismissButton: {
+  neutralButton: {
     width: CONTROL_SIZE,
     height: CONTROL_SIZE,
     borderRadius: theme.radius.full,
@@ -627,14 +623,6 @@ const styles = StyleSheet.create((theme) => ({
     borderRadius: theme.radius.full,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  stopButton: {
-    width: CONTROL_SIZE,
-    height: CONTROL_SIZE,
-    borderRadius: theme.radius.full,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: theme.colors.surface[3],
   },
   confirmButton: {
     width: CONTROL_SIZE,

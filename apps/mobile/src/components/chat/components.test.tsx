@@ -309,6 +309,37 @@ describe('ChatInput component', () => {
     }
   })
 
+  it('drops a dictated send that a different draft superseded', () => {
+    updateSpeechSettings({ provider: 'on-device' })
+    try {
+      const onSubmit = vi.fn()
+      const props = { ...chatInputDefaults, onChangeText: vi.fn(), onSubmit }
+      const r = renderComponent(<ChatInput value="" {...props} />)
+      act(() => {
+        r.root
+          .findByProps({ accessibilityLabel: 'Record voice message' })
+          .props.onPress()
+      })
+      act(() => {
+        r.root
+          .findByType(InlineVoiceRecorder)
+          .props.onTranscript('ship it', { submit: true })
+      })
+      act(() => {
+        r.update(<ChatInput value="something else entirely" {...props} />)
+      })
+
+      expect(onSubmit).not.toHaveBeenCalled()
+      // The intent must not stay armed for whenever that text reappears.
+      act(() => {
+        r.update(<ChatInput value="ship it" {...props} />)
+      })
+      expect(onSubmit).not.toHaveBeenCalled()
+    } finally {
+      resetSpeechSettings()
+    }
+  })
+
   it('renders disabled', () => {
     const r = renderComponent(
       <ChatInput value="" {...chatInputDefaults} disabled />,

@@ -567,6 +567,8 @@ function AppInner() {
   const announcedUpdateVersionRef = useRef<string | null>(null);
   const announcedDownloadedVersionRef = useRef<string | null>(null);
   const draftsRef = useRef(drafts);
+  // Last known composer caret, so dictation splices where the writer left off.
+  const composerCaretRef = useRef<{ start: number; end: number } | null>(null);
   // Submitted text leaves the visible composer immediately, but remains
   // overlaid onto durable draft storage until the daemon accepts the turn.
   // This preserves crash recovery without making the controlled input linger.
@@ -597,6 +599,8 @@ function AppInner() {
 
   useLayoutEffect(() => {
     conversationKeyRef.current = conversationKey;
+    // Another conversation's caret says nothing about this draft.
+    composerCaretRef.current = null;
   }, [conversationKey]);
 
   useEffect(() => {
@@ -672,11 +676,17 @@ function AppInner() {
       const { value } = insertTranscript(
         draftsRef.current[conversationKey]?.text ?? "",
         text,
+        composerCaretRef.current,
       );
       setDraft(value);
-      // Sending here would read the pre-transcript draft; the effect below
-      // fires once the composer state carries the dictated text.
-      setPendingVoiceSubmit(submit ? value : null);
+      if (submit) {
+        // Sending here would read the pre-transcript draft; the effect below
+        // fires once the composer state carries the dictated text.
+        setPendingVoiceSubmit(value);
+      } else {
+        // Put the writer back in the composer to edit what they just said.
+        setComposerFocusRequestKey((key) => key + 1);
+      }
     },
     [conversationKey, setDraft],
   );
@@ -5105,6 +5115,9 @@ function AppInner() {
               promptInputProps={{
                 value: draft,
                 onValueChange: setDraft,
+                onCaretChange: (selection) => {
+                  composerCaretRef.current = selection;
+                },
                 // Opening a conversation is a writing action: land the caret
                 // in its composer whether it is a new or existing thread.
                 autoFocusKey: conversationKey,

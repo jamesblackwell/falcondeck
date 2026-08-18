@@ -141,15 +141,18 @@ export const ChatInput = memo(function ChatInput({
 }: ChatInputProps) {
   const { theme } = useUnistyles()
   const [caretIndex, setCaretIndex] = useState(value.length)
-  // Where the caret should land once the host echoes back a value we wrote
-  // (a transcript, a skill alias). Keyed by that value so it is applied to
-  // the render that actually contains the text, and only once — a `selection`
-  // prop left standing re-pins the caret on every later keystroke, which is
-  // what made a transcribed draft impossible to edit.
-  const pendingCaretRef = useRef<{
+  // An edit we handed to the host: where to put the caret once it echoes the
+  // value back, and whether to send it. Keyed by that value so it lands on the
+  // render that actually carries the text, and consumed on the first value
+  // change either way — a `selection` prop left standing re-pins the caret on
+  // every later keystroke, which is what made a transcribed draft impossible
+  // to edit, and a send left armed would fire on some unrelated later draft.
+  const pendingEditRef = useRef<{
+    from: string
     value: string
     start: number
     end: number
+    submit: boolean
   } | null>(null)
   const [slashQuery, setSlashQuery] = useState<ActiveSlashQuery | null>(null)
   const [voiceProvider, setVoiceProvider] = useState<SpeechProvider | null>(
@@ -159,8 +162,6 @@ export const ChatInput = memo(function ChatInput({
     'more' | 'provider' | 'permission' | 'sandbox' | 'voice-provider' | null
   >(null)
   const selectionRangeRef = useRef({ start: value.length, end: value.length })
-  // A dictated draft that should send as soon as the host owns the text.
-  const pendingSubmitRef = useRef<string | null>(null)
   const inputRef = useRef<TextInput | null>(null)
   const attachInput = useCallback(
     (node: TextInput | null) => {
@@ -243,30 +244,24 @@ export const ChatInput = memo(function ChatInput({
     updateSlashQuery(value, boundedCaretIndex)
   }, [caretIndex, updateSlashQuery, value])
 
-  useEffect(() => {
-    const pending = pendingCaretRef.current
-    if (!pending || pending.value !== value) return
-    pendingCaretRef.current = null
-    selectionRangeRef.current = { start: pending.start, end: pending.end }
-    setCaretIndex(pending.start)
-    inputRef.current?.setSelection?.(pending.start, pending.end)
-  }, [value])
-
-  useEffect(() => {
-    if (pendingSubmitRef.current === null || pendingSubmitRef.current !== value)
-      return
-    pendingSubmitRef.current = null
-    if (disabled || sendDisabled) return
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
-    onSubmit()
-  }, [disabled, onSubmit, sendDisabled, value])
-
   const handleSubmit = useCallback(() => {
     if ((!value.trim() && attachments.length === 0) || disabled || sendDisabled)
       return
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light)
     onSubmit()
   }, [attachments.length, value, disabled, onSubmit, sendDisabled])
+
+  useEffect(() => {
+    const pending = pendingEditRef.current
+    // Still the pre-edit text: the host has not echoed our write yet.
+    if (!pending || value === pending.from) return
+    pendingEditRef.current = null
+    if (pending.value !== value) return
+    selectionRangeRef.current = { start: pending.start, end: pending.end }
+    setCaretIndex(pending.start)
+    inputRef.current?.setSelection?.(pending.start, pending.end)
+    if (pending.submit) handleSubmit()
+  }, [handleSubmit, value])
 
   const handleStop = useCallback(() => {
     if (disabled || sendDisabled || isStopping || !onStop) return
@@ -315,10 +310,15 @@ export const ChatInput = memo(function ChatInput({
         selectionRangeRef.current,
       )
       if (nextValue === value) return
-      pendingCaretRef.current = { value: nextValue, start: caret, end: caret }
-      // The composer's own effect fires the send once the host has echoed the
-      // dictated text back as `value`; submitting here would race the store.
-      if (options?.submit) pendingSubmitRef.current = nextValue
+      // The effect above fires the send once the host has echoed the dictated
+      // text back as `value`; submitting here would race the host's state.
+      pendingEditRef.current = {
+        from: value,
+        value: nextValue,
+        start: caret,
+        end: caret,
+        submit: options?.submit === true,
+      }
       onChangeText(nextValue)
       if (!options?.submit) inputRef.current?.focus()
     },
@@ -332,7 +332,13 @@ export const ChatInput = memo(function ChatInput({
       const nextValue = `${value.slice(0, slashQuery.rangeStart)}${alias} ${value.slice(slashQuery.rangeEnd)}`
       const nextCaret = slashQuery.rangeStart + alias.length + 1
 
-      pendingCaretRef.current = { value: nextValue, start: nextCaret, end: nextCaret }
+      pendingEditRef.current = {
+        from: value,
+        value: nextValue,
+        start: nextCaret,
+        end: nextCaret,
+        submit: false,
+      }
       onChangeText(nextValue)
       setSlashQuery(null)
     },
@@ -343,7 +349,13 @@ export const ChatInput = memo(function ChatInput({
     if (!slashQuery || !onGoalCommand) return
     const nextValue = `${value.slice(0, slashQuery.rangeStart)}${value.slice(slashQuery.rangeEnd)}`
     const nextCaret = slashQuery.rangeStart
-    pendingCaretRef.current = { value: nextValue, start: nextCaret, end: nextCaret }
+    pendingEditRef.current = {
+      from: value,
+      value: nextValue,
+      start: nextCaret,
+      end: nextCaret,
+      submit: false,
+    }
     onChangeText(nextValue)
     setSlashQuery(null)
     onGoalCommand()
@@ -351,6 +363,7 @@ export const ChatInput = memo(function ChatInput({
 
   const canSend = hasContent && !disabled && !sendDisabled
   const canStop = showStop && !disabled && !sendDisabled && !isStopping
+  const canUsePrimary = showStop ? canStop : canSend
   const providerOptions = providers ?? DEFAULT_PROVIDER_OPTIONS
   const moreItems = useMemo<OptionSheetItem[]>(() => {
     const items: OptionSheetItem[] = []
@@ -621,7 +634,7 @@ export const ChatInput = memo(function ChatInput({
           <View style={styles.footerActions}>
             <Pressable
               style={[
-                styles.micButton,
+                styles.sendButton,
                 disabled ? styles.micButtonDisabled : null,
               ]}
               onPress={handleMicPress}
@@ -642,12 +655,10 @@ export const ChatInput = memo(function ChatInput({
             <Pressable
               style={[
                 styles.sendButton,
-                (showStop ? canStop : canSend)
-                  ? styles.sendActive
-                  : styles.sendInactive,
+                canUsePrimary ? styles.sendActive : styles.sendInactive,
               ]}
               onPress={showStop ? handleStop : handleSubmit}
-              disabled={showStop ? !canStop : !canSend}
+              disabled={!canUsePrimary}
               accessibilityRole="button"
               accessibilityLabel={
                 showStop
@@ -657,9 +668,7 @@ export const ChatInput = memo(function ChatInput({
                   : 'Send message'
               }
               accessibilityHint={sendDisabled ? sendDisabledReason : undefined}
-              accessibilityState={{
-                disabled: showStop ? !canStop : !canSend,
-              }}
+              accessibilityState={{ disabled: !canUsePrimary }}
               hitSlop={(theme.minTouchTarget - CONTROL_SIZE) / 2}
             >
               {showStop ? (
@@ -861,13 +870,6 @@ const styles = StyleSheet.create((theme) => ({
     flexDirection: 'row',
     alignItems: 'center',
     gap: theme.spacing[1],
-  },
-  micButton: {
-    width: CONTROL_SIZE,
-    height: CONTROL_SIZE,
-    borderRadius: theme.radius.full,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
   micButtonDisabled: {
     opacity: 0.6,

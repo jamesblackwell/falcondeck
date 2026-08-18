@@ -95,6 +95,13 @@ export type ComposerMenuRequest = {
 export type PromptInputProps = {
   value: string;
   onValueChange: (value: string) => void;
+  /**
+   * Reports the composer caret as it moves. The host needs it to splice text
+   * in at the right place — dictation lands where the writer left off, not at
+   * the end of the draft — and a textarea keeps its selection after blur, so
+   * the last reported position is still right once the mic takes focus.
+   */
+  onCaretChange?: (selection: { start: number; end: number }) => void;
   onSubmit: () => void;
   /** Sends with the opposite running follow-up behavior (Queue vs Steer). */
   onAlternateSubmit?: () => void;
@@ -223,6 +230,7 @@ const noopModeChange = () => {};
 export const PromptInput = memo(function PromptInput({
   value,
   onValueChange,
+  onCaretChange,
   onSubmit,
   onAlternateSubmit,
   resolveComposerShortcut,
@@ -655,15 +663,32 @@ export const PromptInput = memo(function PromptInput({
     acceptPastedOrDroppedFiles(event.dataTransfer.files);
   }
 
+  const reportCaret = useCallback(
+    (textarea: HTMLTextAreaElement | null) => {
+      if (!textarea) return;
+      onCaretChange?.({
+        start: textarea.selectionStart,
+        end: textarea.selectionEnd,
+      });
+    },
+    [onCaretChange],
+  );
+
   const handleChange = useCallback(
     (event: React.ChangeEvent<HTMLTextAreaElement>) => {
       const nextValue = event.target.value;
       onValueChange(nextValue);
       updateSlashQuery(nextValue, event.target.selectionStart);
+      reportCaret(event.target);
       syncTextareaHeight(event.target);
     },
-    [onValueChange, syncTextareaHeight, updateSlashQuery],
+    [onValueChange, reportCaret, syncTextareaHeight, updateSlashQuery],
   );
+
+  const handleCaretMove = useCallback(() => {
+    updateSlashQuery(value);
+    reportCaret(textareaRef.current);
+  }, [reportCaret, updateSlashQuery, value]);
 
   const insertSkillAlias = useCallback(
     (alias: string) => {
@@ -922,8 +947,8 @@ export const PromptInput = memo(function PromptInput({
               aria-label="Message composer"
               onChange={handleChange}
               onKeyDown={handleKeyDown}
-              onClick={() => updateSlashQuery(value)}
-              onKeyUp={() => updateSlashQuery(value)}
+              onClick={handleCaretMove}
+              onKeyUp={handleCaretMove}
               onPaste={handlePaste}
               placeholder={
                 disabled ? "Add a project to get started..." : "Ask anything"
@@ -1198,9 +1223,8 @@ export const PromptInput = memo(function PromptInput({
           </Popover.Root>
 
           {/* Capability → mode → model → effort → switches. Permission scope
-              leads because it is the toggle with consequences. Hidden while a
-              voice session owns the composer. */}
-          {!compact && !voice ? (
+              leads because it is the toggle with consequences. */}
+          {!compact ? (
             <>
               {showProviderSelector ? (
                 <ProviderSelector
@@ -1271,7 +1295,7 @@ export const PromptInput = memo(function PromptInput({
             </>
           ) : null}
 
-          {!compact && !voice && connectorCount > 0 ? (
+          {!compact && connectorCount > 0 ? (
             <button
               type="button"
               onClick={onConnectorsClick}
@@ -1292,7 +1316,7 @@ export const PromptInput = memo(function PromptInput({
             {/* Dictation keeps its own slot rather than standing in for Send
                 on an empty composer: speaking into a half-written prompt is
                 as common as speaking a whole one. */}
-            {onVoiceInput && !voice ? (
+            {onVoiceInput ? (
               <Button
                 type="button"
                 variant="ghost"

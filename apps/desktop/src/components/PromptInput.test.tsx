@@ -105,6 +105,25 @@ describe("PromptInput", () => {
     elsewhere.remove();
   });
 
+  it("reports the caret so the host can splice text in place", () => {
+    const onCaretChange = vi.fn();
+    render(
+      <PromptInput
+        {...promptInputProps}
+        value="Fix the parser"
+        onCaretChange={onCaretChange}
+      />,
+    );
+    const composer = screen.getByRole("textbox", {
+      name: "Message composer",
+    }) as HTMLTextAreaElement;
+
+    composer.setSelectionRange(8, 8);
+    fireEvent.click(composer);
+
+    expect(onCaretChange).toHaveBeenLastCalledWith({ start: 8, end: 8 });
+  });
+
   it("offers stop and send while a recording is active", () => {
     const onStop = vi.fn();
     const onStopAndSend = vi.fn();

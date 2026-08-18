@@ -11,8 +11,8 @@ function clamp(value: number, min: number, max: number): number {
  * half-written prompt must extend it rather than replace it, and a selection
  * is treated the same as typing — the transcript takes its place.
  *
- * Callers with no caret to offer (a composer that was never focused) get an
- * append, which is what an unfocused input means anyway.
+ * Callers with no caret to offer (a composer that has never been touched in
+ * this conversation) get an append.
  */
 export function insertTranscript(
   value: string,
