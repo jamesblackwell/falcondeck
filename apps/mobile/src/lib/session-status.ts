@@ -85,7 +85,9 @@ export function resolveSessionSyncStatus(input: SessionSyncInput): SessionSyncSt
     if (connectionStatus === 'connecting' || connectionStatus === 'disconnected') {
       return busy(
         'connecting',
-        'Reconnecting to your Mac…',
+        // Not "to your Mac": the phone connects to the relay, and the Mac may
+        // be perfectly online while this socket is down.
+        'Reconnecting…',
         hasSnapshot ? 'Showing your last synced threads.' : '',
       )
     }
@@ -130,7 +132,7 @@ export function sessionSendBlockReason(status: SessionSyncStatus): string | null
     case 'pairing':
       return 'Pairing this device…'
     case 'connecting':
-      return 'Reconnecting to your Mac…'
+      return 'Reconnecting…'
     case 'securing':
       return 'Securing session…'
     case 'syncing':

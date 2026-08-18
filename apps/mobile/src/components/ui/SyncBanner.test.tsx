@@ -49,6 +49,73 @@ describe('SyncBanner', () => {
     }
   })
 
+  it('rides out a short reconnect in silence, then names it', () => {
+    vi.useFakeTimers()
+    try {
+      const connecting = resolveSessionSyncStatus({
+        ...base,
+        connectionStatus: 'connecting',
+        isEncrypted: false,
+      })
+      const r = renderComponent(<SyncBanner status={connecting} />)
+
+      expect(r.toJSON()).toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(5_999)
+      })
+      expect(r.toJSON()).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+      const text = textOf(r)
+      expect(text).toContain('Reconnecting…')
+      expect(text).not.toContain('your Mac')
+      cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps one clock across connecting and securing so a stall still surfaces', () => {
+    vi.useFakeTimers()
+    try {
+      const r = renderComponent(
+        <SyncBanner
+          status={resolveSessionSyncStatus({
+            ...base,
+            connectionStatus: 'connecting',
+            isEncrypted: false,
+          })}
+        />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(4_000)
+      })
+
+      act(() => {
+        r.update(
+          <SyncBanner
+            status={resolveSessionSyncStatus({
+              ...base,
+              connectionStatus: 'connected',
+              isEncrypted: false,
+            })}
+          />,
+        )
+      })
+      expect(r.toJSON()).toBeNull()
+
+      act(() => {
+        vi.advanceTimersByTime(2_000)
+      })
+      expect(textOf(r)).toContain('Securing session…')
+      cleanup()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('announces itself politely to VoiceOver', () => {
     const now = Date.now()
     const r = renderComponent(

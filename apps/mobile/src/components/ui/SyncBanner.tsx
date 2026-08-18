@@ -13,6 +13,13 @@ interface SyncBannerProps {
 }
 
 const SYNC_GRACE_PERIOD_MS = 7_000
+/**
+ * An ordinary launch reconnects the socket and exchanges the key in well under
+ * a second. Announcing the wait immediately makes every cold open flash a
+ * banner it then retracts, so hold the whole pre-encryption phase back and only
+ * speak up once the wait is long enough to be worth explaining.
+ */
+const CONNECT_GRACE_PERIOD_MS = 6_000
 
 /**
  * The launch/reconnect wait, made visible. Until the relay is secured and the
@@ -27,8 +34,26 @@ export const SyncBanner = memo(function SyncBanner({ status }: SyncBannerProps) 
     return <DelayedSyncBanner status={status} />
   }
 
+  if (status.stage === 'connecting' || status.stage === 'securing') {
+    // One key across both stages: the clock starts when the phase does, so
+    // connecting → securing does not restart the countdown and a stall in
+    // either stage still surfaces on time.
+    return <DeferredBanner key="link" status={status} delayMs={CONNECT_GRACE_PERIOD_MS} />
+  }
+
   return <SyncBannerContent status={status} />
 })
+
+function DeferredBanner({ status, delayMs }: SyncBannerProps & { delayMs: number }) {
+  const [isVisible, setIsVisible] = useState(false)
+
+  useEffect(() => {
+    const timer = setTimeout(() => setIsVisible(true), delayMs)
+    return () => clearTimeout(timer)
+  }, [delayMs])
+
+  return isVisible ? <SyncBannerContent status={status} /> : null
+}
 
 function DelayedSyncBanner({ status }: SyncBannerProps) {
   const [isVisible, setIsVisible] = useState(false)

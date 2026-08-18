@@ -34,6 +34,10 @@ describe('resolveSessionSyncStatus', () => {
     for (const connectionStatus of ['connecting', 'disconnected']) {
       const status = resolveSessionSyncStatus({ ...ready, connectionStatus, isEncrypted: false })
       expect(status.stage).toBe('connecting')
+      // The phone's socket is to the relay, not the Mac — so the headline does
+      // not blame a Mac that may well be online.
+      expect(status.label).toBe('Reconnecting…')
+      expect(sessionSendBlockReason(status)).toBe('Reconnecting…')
     }
   })
 
