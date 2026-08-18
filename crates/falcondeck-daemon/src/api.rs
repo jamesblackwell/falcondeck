@@ -215,6 +215,7 @@ pub fn router(state: AppState) -> Router {
             get(read_connectors).put(update_connectors),
         )
         .route("/api/providers", get(read_providers).put(update_providers))
+        .route("/api/provider-usage", get(read_provider_usage))
         .route("/api/harnesses", get(read_harnesses))
         .route("/api/harnesses/refresh", post(refresh_harnesses))
         .route("/api/harnesses/upgrade", post(upgrade_harness))
@@ -863,6 +864,12 @@ async fn read_harnesses(
     State(state): State<AppState>,
 ) -> Result<Json<falcondeck_core::HarnessesOverview>, DaemonError> {
     Ok(Json(state.harnesses_overview().await))
+}
+
+async fn read_provider_usage(
+    State(state): State<AppState>,
+) -> Result<Json<falcondeck_core::ProviderUsageOverview>, DaemonError> {
+    Ok(Json(state.provider_usage_overview().await))
 }
 
 async fn refresh_harnesses(
