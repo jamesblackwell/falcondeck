@@ -79,6 +79,7 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
             updates: Vec::new(),
             next_seq: response.next_seq,
             history_truncated: true,
+            presence: response.presence,
         }];
     }
 
@@ -88,6 +89,7 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
             updates: Vec::new(),
             next_seq: response.next_seq,
             history_truncated: response.cursor.history_truncated,
+            presence: response.presence,
         }];
     }
 
@@ -97,6 +99,7 @@ fn sync_messages(response: RelayUpdatesResponse) -> Vec<RelayServerMessage> {
             updates,
             next_seq: response.next_seq,
             history_truncated: false,
+            presence: response.presence.clone(),
         })
         .collect()
 }

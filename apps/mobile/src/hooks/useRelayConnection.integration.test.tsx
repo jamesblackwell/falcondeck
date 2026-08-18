@@ -492,6 +492,23 @@ describe('useRelayConnection session rotation', () => {
     act(() => {
       socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
     })
+    expect(callRpc).not.toHaveBeenCalled()
+    act(() => {
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          updates: [],
+          next_seq: 1,
+          history_truncated: false,
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: null,
+          },
+        }),
+      })
+    })
     await vi.waitFor(() => expect(callRpc).toHaveBeenCalledTimes(1))
 
     act(() => {
@@ -589,6 +606,12 @@ describe('useRelayConnection session rotation', () => {
           updates: [],
           next_seq: 42,
           history_truncated: true,
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: null,
+          },
         }),
       })
       await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
@@ -608,6 +631,86 @@ describe('useRelayConnection session rotation', () => {
     expect(useSessionStore.getState().snapshot).not.toBeNull()
     expect(useRelayStore.getState().hasSyncedOnce).toBe(true)
     expect(useRelayStore.getState().isSyncing).toBe(false)
+  })
+
+  it('keeps sync presence when replay contains an older offline state', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.endsWith('/v1/pairings/challenge')) {
+        return {
+          ok: true,
+          json: async () => ({ challenge: 'dGVzdC1jaGFsbGVuZ2U=' }),
+        } as Response
+      }
+      if (url.endsWith('/v1/pairings/claim')) {
+        return { ok: true, json: async () => claimResponse(1) } as Response
+      }
+      if (url.includes('/ws-ticket')) {
+        return { ok: true, json: async () => ({ ticket: 'presence-ticket' }) } as Response
+      }
+      if (url.endsWith('/push-token')) {
+        return { ok: true } as Response
+      }
+      throw new Error(`Unexpected request: ${url}`)
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const queuedFrames: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => {
+      queuedFrames.push(callback)
+      return queuedFrames.length
+    }))
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+
+    useRelayStore.getState().setPairingCode('PRESENCE')
+    await act(async () => {
+      await useRelayStore.getState().claimPairing()
+    })
+    useRelayStore.getState()._setSessionCrypto({ dataKey: new Uint8Array(32), material: null })
+    useRelayStore.getState()._callRpc = vi.fn().mockResolvedValue(snapshot()) as typeof originalCallRpc
+
+    renderRelayConnection()
+    await vi.waitFor(() => expect(TestWebSocket.instances).toHaveLength(1))
+
+    const socket = TestWebSocket.instances[0]!
+    socket.readyState = TestWebSocket.OPEN
+    await act(async () => {
+      socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          next_seq: 7,
+          history_truncated: false,
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: '2026-08-18T21:38:00Z',
+          },
+          updates: [{
+            id: 'stale-offline-presence',
+            seq: 6,
+            created_at: '2026-08-18T21:37:00Z',
+            body: {
+              t: 'presence',
+              presence: {
+                session_id: 'session-1',
+                daemon_connected: false,
+                daemon_rpc_ready: false,
+                last_seen_at: '2026-08-18T21:37:00Z',
+              },
+            },
+          }],
+        }),
+      })
+      queuedFrames.shift()?.(performance.now())
+      await Promise.resolve()
+    })
+
+    expect(useRelayStore.getState().machinePresence).toMatchObject({
+      daemon_connected: true,
+      daemon_rpc_ready: true,
+    })
   })
 
   it('still fetches a snapshot when the offline cache already hydrated one', async () => {
@@ -657,6 +760,20 @@ describe('useRelayConnection session rotation', () => {
     socket.readyState = TestWebSocket.OPEN
     await act(async () => {
       socket.onmessage?.({ data: JSON.stringify({ type: 'ready' }) })
+      socket.onmessage?.({
+        data: JSON.stringify({
+          type: 'sync',
+          updates: [],
+          next_seq: 1,
+          history_truncated: false,
+          presence: {
+            session_id: 'session-1',
+            daemon_connected: true,
+            daemon_rpc_ready: true,
+            last_seen_at: null,
+          },
+        }),
+      })
       await vi.waitFor(() => expect(callRpc).toHaveBeenCalledWith(
         'snapshot.current',
         expect.anything(),

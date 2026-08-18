@@ -1657,6 +1657,11 @@ export type RelayServerMessage =
       updates: RelayUpdate[];
       next_seq: number;
       history_truncated?: boolean;
+      /**
+       * Authoritative daemon presence at the relay's sync cursor. Optional
+       * while rolling out to relays that predate this field.
+       */
+      presence?: MachinePresence;
     }
   | { type: "update"; update: RelayUpdate }
   | {

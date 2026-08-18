@@ -1735,6 +1735,7 @@ async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
         updates,
         next_seq,
         history_truncated,
+        presence,
     } = recv_server_message(&mut client_ws).await
     else {
         panic!("expected truncated sync response");
@@ -1747,6 +1748,8 @@ async fn truncated_websocket_replay_yields_to_snapshot_recovery() {
     assert!(history_truncated);
     assert!(updates.is_empty());
     assert!(next_seq >= 5);
+    assert!(presence.daemon_connected);
+    assert!(presence.daemon_rpc_ready);
 
     send_client_message(
         &mut client_ws,

@@ -4508,6 +4508,9 @@ pub enum RelayServerMessage {
         /// Whether older replay history has been truncated.
         #[serde(default)]
         history_truncated: bool,
+        /// Daemon presence at the replay cursor. It supersedes presence
+        /// updates contained in this response's replay window.
+        presence: MachinePresence,
     },
     /// Single replay update pushed by the relay.
     Update {

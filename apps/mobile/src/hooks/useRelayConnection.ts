@@ -154,6 +154,10 @@ export function useRelayConnection() {
   const pendingEncrypted = useRef<RelayUpdate[]>([])
   const evictedWhileParked = useRef(false)
   const pendingTruncationNextSeq = useRef<number | null>(null)
+  // A sync response carries the relay's current presence separately from its
+  // replay window. Presence updates already in that window predate next_seq,
+  // so they must not overwrite the authoritative value after a reconnect.
+  const syncedPresenceFloor = useRef<number | null>(null)
   const pendingRelayUpdates = useRef<RelayUpdate[]>([])
   const ephemeralAudioChain = useRef<Promise<void>>(Promise.resolve())
   const relayFlushFrame = useRef<number | null>(null)
@@ -202,6 +206,11 @@ export function useRelayConnection() {
   const requestSnapshot = useCallback(async () => {
     const relay = useRelayStore.getState()
     if (!relay._getSessionCrypto() || snapshotRequestInFlight.current) return
+    const presence = relay.machinePresence
+    if (!presence?.daemon_connected || presence.daemon_rpc_ready === false) {
+      relay._setSyncing(true)
+      return
+    }
 
     const requestGeneration = snapshotRequestGeneration.current + 1
     snapshotRequestGeneration.current = requestGeneration
@@ -394,7 +403,15 @@ export function useRelayConnection() {
           }
 
           if (update.body.t === 'presence') {
-            nextPresence = update.body.presence
+            // The sync response's presence is a later, authoritative view of
+            // every replayed update. A subsequent live update has a sequence
+            // at or above the sync response's next_seq and may replace it.
+            if (
+              syncedPresenceFloor.current === null ||
+              update.seq >= syncedPresenceFloor.current
+            ) {
+              nextPresence = update.body.presence
+            }
             advanceCursor(update.seq)
             continue
           }
@@ -573,6 +590,7 @@ export function useRelayConnection() {
     pendingEncrypted.current = []
     evictedWhileParked.current = false
     pendingTruncationNextSeq.current = null
+    syncedPresenceFloor.current = null
     pendingRelayUpdates.current = []
     relayFlushGeneration.current += 1
     snapshotRequestGeneration.current += 1
@@ -651,6 +669,7 @@ export function useRelayConnection() {
       pendingEncrypted.current = []
       evictedWhileParked.current = false
       pendingTruncationNextSeq.current = null
+      syncedPresenceFloor.current = null
       pendingRelayUpdates.current = []
       relayFlushGeneration.current += 1
       snapshotRequestGeneration.current += 1
@@ -782,9 +801,6 @@ export function useRelayConnection() {
             case 'ready':
               if (relay._getSessionCrypto()) {
                 relay._setConnectionStatus('encrypted')
-                if (needsAuthoritativeSnapshot()) {
-                  void requestSnapshot()
-                }
               }
               break
             case 'sync':
@@ -797,6 +813,10 @@ export function useRelayConnection() {
                 console.warn('Remote event backlog exceeded the safe limit; reconnecting for snapshot recovery')
                 socket.close()
                 return
+              }
+              if (payload.presence) {
+                syncedPresenceFloor.current = payload.next_seq
+                relay._setMachinePresence(payload.presence)
               }
               if (payload.history_truncated) {
                 // Updates were lost server-side; recover derived state from a
@@ -822,6 +842,9 @@ export function useRelayConnection() {
               }
               pendingRelayUpdates.current.push(...payload.updates)
               scheduleRelayFlush()
+              if (relay._getSessionCrypto() && needsAuthoritativeSnapshot()) {
+                void requestSnapshot()
+              }
               break
             case 'update':
               if (relayBacklogWouldOverflow(pendingRelayUpdates.current.length, 1)) {
@@ -890,6 +913,9 @@ export function useRelayConnection() {
               break
             case 'presence':
               relay._setMachinePresence(payload.presence)
+              if (relay._getSessionCrypto() && needsAuthoritativeSnapshot()) {
+                void requestSnapshot()
+              }
               break
             case 'error':
               relay._setError(payload.message)
