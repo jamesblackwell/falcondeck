@@ -1,6 +1,5 @@
 import {
   type KeyboardEvent as ReactKeyboardEvent,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -32,7 +31,7 @@ import type {
   WorkspaceSummary,
 } from "@falcondeck/client-core";
 import { approvalPolicyForProvider } from "@falcondeck/client-core";
-import { Button, cn } from "@falcondeck/ui";
+import { Button, Popover, cn } from "@falcondeck/ui";
 
 import type { HostManager, HostScopedApi, HostView } from "../hosts";
 import { utcToWallTime, wallTimeToUtc } from "../scheduled-time";
@@ -63,11 +62,13 @@ function taskEntryKey(entry: TaskEntry) {
 
 function handleMenuKeyDown(
   event: ReactKeyboardEvent<HTMLDivElement>,
-  onClose: () => void,
+  onClose?: () => void,
 ) {
   if (event.key === "Escape") {
-    event.preventDefault();
-    onClose();
+    if (onClose) {
+      event.preventDefault();
+      onClose();
+    }
     return;
   }
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
@@ -850,24 +851,10 @@ export function ScheduledTasksView({
     [],
   );
   const [editor, setEditor] = useState<EditorState>(null);
-  const [createMenuOpen, setCreateMenuOpen] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [menuKey, setMenuKey] = useState<string | null>(null);
-  const createMenuRef = useRef<HTMLDivElement>(null);
   const detailRequest = useRef(0);
   const editorRequest = useRef(0);
-
-  useEffect(() => {
-    if (!createMenuOpen) return;
-    const closeOnOutsidePointer = (event: PointerEvent) => {
-      if (!createMenuRef.current?.contains(event.target as Node)) {
-        setCreateMenuOpen(false);
-      }
-    };
-    document.addEventListener("pointerdown", closeOnOutsidePointer);
-    return () =>
-      document.removeEventListener("pointerdown", closeOnOutsidePointer);
-  }, [createMenuOpen]);
 
   const closeDetail = () => {
     detailRequest.current += 1;
@@ -879,6 +866,11 @@ export function ScheduledTasksView({
   const closeEditor = () => {
     editorRequest.current += 1;
     setEditor(null);
+  };
+
+  const openCreateEditor = () => {
+    editorRequest.current += 1;
+    setEditor({ kind: "create" });
   };
 
   const entries = useMemo(() => {
@@ -1048,68 +1040,62 @@ export function ScheduledTasksView({
               Run recurring agent work on this Mac or an enrolled server.
             </p>
           </div>
-          <div ref={createMenuRef} className="relative flex">
+          <div className="flex">
             <Button
               className="rounded-r-none"
-              onClick={() => {
-                setCreateMenuOpen(false);
-                onCreateWithAgent?.();
-              }}
+              onClick={onCreateWithAgent}
               disabled={!onCreateWithAgent}
             >
               <Plus aria-hidden="true" className="h-4 w-4" />
               New task
             </Button>
-            <Button
-              className="rounded-l-none border-l border-surface-0 px-2"
-              aria-haspopup="menu"
-              aria-expanded={createMenuOpen}
-              aria-label="New task options"
-              onClick={() => setCreateMenuOpen((current) => !current)}
-              disabled={!onCreateWithAgent && !canCreate}
-            >
-              <ChevronDown aria-hidden="true" className="h-4 w-4" />
-            </Button>
-            {createMenuOpen ? (
-              <div
-                role="menu"
-                aria-label="New task options"
-                onKeyDown={(event) =>
-                  handleMenuKeyDown(event, () => setCreateMenuOpen(false))
-                }
-                className="absolute right-0 top-11 z-20 min-w-52 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-1 shadow-[var(--fd-shadow-md)]"
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  autoFocus={Boolean(onCreateWithAgent)}
-                  disabled={!onCreateWithAgent}
-                  className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
-                  onClick={() => {
-                    setCreateMenuOpen(false);
-                    onCreateWithAgent?.();
-                  }}
+            <Popover.Root>
+              <Popover.Trigger asChild>
+                <Button
+                  className="rounded-l-none border-l border-surface-0 px-2"
+                  aria-haspopup="menu"
+                  aria-label="New task options"
+                  disabled={!onCreateWithAgent && !canCreate}
                 >
-                  <MessageCircle aria-hidden="true" className="h-4 w-4" />
-                  Create with agent
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  autoFocus={!onCreateWithAgent && canCreate}
-                  disabled={!canCreate}
-                  className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
-                  onClick={() => {
-                    setCreateMenuOpen(false);
-                    editorRequest.current += 1;
-                    setEditor({ kind: "create" });
-                  }}
+                  <ChevronDown aria-hidden="true" className="h-4 w-4" />
+                </Button>
+              </Popover.Trigger>
+              <Popover.Portal>
+                <Popover.Content
+                  align="end"
+                  sideOffset={8}
+                  role="menu"
+                  aria-label="New task options"
+                  onKeyDown={handleMenuKeyDown}
+                  className="z-50 min-w-52 rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-2 p-1 shadow-[var(--fd-shadow-md)]"
                 >
-                  <Pencil aria-hidden="true" className="h-4 w-4" />
-                  Set up manually
-                </button>
-              </div>
-            ) : null}
+                  <Popover.Close asChild>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={!onCreateWithAgent}
+                      className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
+                      onClick={onCreateWithAgent}
+                    >
+                      <MessageCircle aria-hidden="true" className="h-4 w-4" />
+                      Create with agent
+                    </button>
+                  </Popover.Close>
+                  <Popover.Close asChild>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={!canCreate}
+                      className="fd-focus flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-primary hover:bg-surface-3 disabled:opacity-40"
+                      onClick={openCreateEditor}
+                    >
+                      <Pencil aria-hidden="true" className="h-4 w-4" />
+                      Set up manually
+                    </button>
+                  </Popover.Close>
+                </Popover.Content>
+              </Popover.Portal>
+            </Popover.Root>
           </div>
         </div>
         <label className="relative mt-8 block">

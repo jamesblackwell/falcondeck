@@ -189,11 +189,13 @@ const SCHEDULED_TASK_CREATION_PROMPT =
   "Let’s set up a scheduled task together. First, explain how scheduled tasks work in FalconDeck. Then interview me to figure out what I need scheduled and when it should run. Once we’ve agreed on the details, use the FalconDeck MCP server to create the automation.";
 
 function scheduledTaskCreationDraft(existingDraft: string) {
-  if (!existingDraft.trim()) return SCHEDULED_TASK_CREATION_PROMPT;
   if (existingDraft.startsWith(SCHEDULED_TASK_CREATION_PROMPT)) {
     return existingDraft;
   }
-  return `${SCHEDULED_TASK_CREATION_PROMPT}\n\nCurrent notes:\n${existingDraft}`;
+  return mergeFailedComposerDraft(
+    SCHEDULED_TASK_CREATION_PROMPT,
+    existingDraft.trim() ? `Current notes:\n${existingDraft}` : "",
+  );
 }
 
 type DesktopExtensionPanel = ExtensionPanelDefinition & {
@@ -2946,26 +2948,12 @@ function AppInner() {
   const handleCreateScheduledTaskWithAgent = useCallback(() => {
     if (!selectedWorkspaceId) return;
     const key = draftKeyFor(selectedWorkspaceId, null);
-    if (isSending && sendingConversationKeyRef.current === key) {
-      toast({
-        variant: "default",
-        title: "New thread is still starting",
-        description: "Try creating the scheduled task again in a moment.",
-      });
-      return;
-    }
     setDraftForConversation(
       key,
       scheduledTaskCreationDraft(draftsRef.current[key]?.text ?? ""),
     );
     handleNewThread(selectedWorkspaceId);
-  }, [
-    handleNewThread,
-    isSending,
-    selectedWorkspaceId,
-    setDraftForConversation,
-    toast,
-  ]);
+  }, [handleNewThread, selectedWorkspaceId, setDraftForConversation]);
 
   const handleNewThreadProjectChange = useCallback(
     (workspaceId: string) => {

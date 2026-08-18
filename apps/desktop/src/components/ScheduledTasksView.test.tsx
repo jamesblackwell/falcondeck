@@ -154,7 +154,9 @@ describe("ScheduledTasksView", () => {
 
   it("keeps the manual creation sheet in the task options menu", () => {
     setup();
-    fireEvent.click(screen.getByRole("button", { name: "New task options" }));
+    const options = screen.getByRole("button", { name: "New task options" });
+    expect(options).toHaveAttribute("aria-haspopup", "menu");
+    fireEvent.click(options);
     expect(
       screen.getByRole("menuitem", { name: "Create with agent" }),
     ).toBeInTheDocument();
