@@ -113,7 +113,7 @@ describe('Priority chat queue', () => {
       .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 
-  it('promotes immediately and defers selected-thread demotion until navigation', () => {
+  it('promotes immediately without reordering when selection changes', () => {
     const blocked = thread('Blocked', {
       attention: {
         ...thread('base').attention,
@@ -135,6 +135,7 @@ describe('Priority chat queue', () => {
     expect(precedes('Quiet', 'Running')).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
 
     rerender(sidebar(changed, running.id))
-    expect(precedes('Running', 'Blocked')).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(precedes('Blocked', 'Quiet')).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+    expect(precedes('Quiet', 'Running')).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
   })
 })

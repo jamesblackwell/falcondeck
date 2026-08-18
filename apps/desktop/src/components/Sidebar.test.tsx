@@ -443,7 +443,7 @@ describe("DesktopSidebar", () => {
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 
-  it("promotes attention immediately but defers selected-row demotion until navigation", () => {
+  it("promotes attention immediately without reordering when selection changes", () => {
     const quiet = thread({ id: "quiet", title: "Quiet" });
     const active = thread({ id: "active", title: "Active", status: "running" });
     const selectedBlocked = thread({
@@ -526,8 +526,13 @@ describe("DesktopSidebar", () => {
     );
     expect(
       within(projects)
-        .getByText("Active")
-        .compareDocumentPosition(within(projects).getByText("Selected")),
+        .getByText("Selected")
+        .compareDocumentPosition(within(projects).getByText("Quiet")),
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(
+      within(projects)
+        .getByText("Quiet")
+        .compareDocumentPosition(within(projects).getByText("Active")),
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
   });
 

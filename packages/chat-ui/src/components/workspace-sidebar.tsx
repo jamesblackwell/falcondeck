@@ -164,18 +164,17 @@ const summaryThread = (thread: ThreadSummary) => thread;
 
 /**
  * Keeps Priority useful as a work queue instead of a live activity sort.
- * Promotions apply immediately; demotions wait for the next navigation so a
- * selected row cannot jump when opening it marks it read.
+ * Promotions apply immediately, but demotions wait until Priority mode is
+ * re-entered. Selecting a row commonly marks it read, so letting selection
+ * release deferred demotions would make the list jump under the pointer.
  */
 function useStablePriorityOrder<Item>(
   items: Item[],
-  selectedThreadId: string | null,
   active: boolean,
   keyFor: (item: Item) => string,
   threadFor: (item: Item) => ThreadSummary,
 ) {
   const queueRef = useRef(new Map<string, PriorityQueueState>());
-  const previousSelectionRef = useRef(selectedThreadId);
   const wasActiveRef = useRef(false);
   const nextFrontOrderRef = useRef(-1);
 
@@ -186,9 +185,7 @@ function useStablePriorityOrder<Item>(
     }
 
     const enteringPriority = !wasActiveRef.current;
-    const navigated = previousSelectionRef.current !== selectedThreadId;
     wasActiveRef.current = true;
-    previousSelectionRef.current = selectedThreadId;
 
     const liveIds = new Set(items.map(keyFor));
     for (const id of queueRef.current.keys()) {
@@ -225,7 +222,7 @@ function useStablePriorityOrder<Item>(
       for (const item of items) {
         const desiredBucket = threadPriorityRank(threadFor(item));
         const current = queueRef.current.get(keyFor(item));
-        if (current && (desiredBucket < current.bucket || navigated)) {
+        if (current && desiredBucket < current.bucket) {
           current.bucket = desiredBucket;
         }
       }
@@ -242,7 +239,7 @@ function useStablePriorityOrder<Item>(
         leftKey.localeCompare(rightKey)
       );
     });
-  }, [active, items, keyFor, selectedThreadId, threadFor]);
+  }, [active, items, keyFor, threadFor]);
 }
 
 /**
@@ -325,7 +322,6 @@ const ThreadList = memo(function ThreadList({
   );
   const stablePriorityThreads = useStablePriorityOrder(
     unpinned,
-    selectedThreadId,
     sortMode === "priority",
     summaryKey,
     summaryThread,
@@ -1289,7 +1285,6 @@ export const WorkspaceSidebar = memo(function WorkspaceSidebar({
   );
   const stablePinnedThreads = useStablePriorityOrder(
     pinnedCandidates,
-    visualSelectedThreadId,
     threadSort === "priority",
     pinnedEntryKey,
     pinnedEntryThread,
