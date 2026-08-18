@@ -8,7 +8,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { Check, ChevronRight, PanelsTopLeft, Plus, X } from "lucide-react";
+import { Check, PanelsTopLeft, Plus, X } from "lucide-react";
 
 import {
   collectActivityEntries,
@@ -26,6 +26,7 @@ import { InteractiveRequestCard } from "./interactive-request-card";
 
 const RELATIVE_TIME_TICK_MS = 60_000;
 const RESOLVED_HOLD_MS = 1_500;
+const RECENT_PREVIEW_LIMIT = 5;
 const SECTION_ORDER: readonly ActivitySection[] = [
   "blocked",
   "failed",
@@ -175,7 +176,7 @@ const KEY_HINTS: readonly {
   },
   { key: "1–4", label: "lane", description: "Jump to a lane", compact: true },
   { key: "J / K", label: "scan", description: "Scan the queue in order" },
-  { key: "T", label: "recent", description: "Show what finished recently" },
+  { key: "T", label: "recent", description: "Expand recent threads" },
   { key: "?", alt: "H", label: "keys", description: "Show this list" },
   { key: "esc", label: "back", description: "Clear the selection" },
 ];
@@ -560,7 +561,7 @@ const ActivityRow = memo(
 
 type RecentTrailProps = {
   entries: RecentEntry[];
-  open: boolean;
+  expanded: boolean;
   nowMs: number;
   selectedKey: string | null;
   onToggle: () => void;
@@ -568,19 +569,24 @@ type RecentTrailProps = {
 };
 
 /**
- * The trail behind the queue. Collapsed by default — it is reference, not
- * work — and a dense list rather than cards, because the question it answers
- * is "what did I just finish?", not "what does it say?".
+ * The trail behind the queue. The first five stay visible for quick recall;
+ * the remainder expands on demand. It is a dense list rather than cards,
+ * because the question it answers is "what did I just finish?", not "what
+ * does it say?".
  */
 const RecentTrail = memo(function RecentTrail({
   entries,
-  open,
+  expanded,
   nowMs,
   selectedKey,
   onToggle,
   onOpenThread,
 }: RecentTrailProps) {
   if (entries.length === 0) return null;
+  const visibleEntries = expanded
+    ? entries
+    : entries.slice(0, RECENT_PREVIEW_LIMIT);
+  const hiddenCount = entries.length - visibleEntries.length;
 
   return (
     <section
@@ -588,30 +594,15 @@ const RecentTrail = memo(function RecentTrail({
       style={{ "--fd-tone": "var(--fd-fg-3)" } as CSSProperties}
     >
       <div className="mb-2.5 flex items-center gap-2.5">
-        <button
-          type="button"
-          onClick={onToggle}
-          aria-expanded={open}
-          aria-controls="activity-recent-list"
-          className="fd-focus flex min-w-0 items-center gap-2 rounded-[var(--fd-radius-sm)] text-fg-muted transition-colors hover:text-fg-primary"
+        <h2
+          id="activity-recent"
+          className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
         >
-          <ChevronRight
-            aria-hidden="true"
-            className={cn(
-              "h-3.5 w-3.5 shrink-0 transition-transform duration-[var(--fd-duration-fast)]",
-              open && "rotate-90",
-            )}
-          />
-          <h2
-            id="activity-recent"
-            className="fd-microlabel fd-microlabel--md shrink-0 font-semibold text-fg-primary"
-          >
-            Recent
-          </h2>
-          <span className="hidden truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block">
-            Finished in the last few hours
-          </span>
-        </button>
+          Recent
+        </h2>
+        <span className="hidden truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block">
+          Finished in the last few hours
+        </span>
         <span
           aria-hidden="true"
           className="h-px min-w-6 flex-1 bg-[linear-gradient(90deg,color-mix(in_srgb,var(--fd-tone)_28%,transparent),transparent)]"
@@ -621,60 +612,73 @@ const RecentTrail = memo(function RecentTrail({
         </span>
       </div>
 
-      {open ? (
-        <ul
-          id="activity-recent-list"
-          className="overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1"
-        >
-          {entries.map((entry) => {
-            const key = recentKey(entry);
-            return (
-              <li
-                key={key}
-                data-activity-key={key}
-                data-selected={selectedKey === key ? "true" : undefined}
-                className={cn(
-                  "border-b border-l-2 border-l-transparent border-border-subtle last:border-b-0",
-                  // Same accent cursor the cards wear, at list scale.
-                  selectedKey === key &&
-                    "border-l-accent bg-[color:var(--fd-interactive-hover)]",
-                )}
+      <ul
+        id="activity-recent-list"
+        className="overflow-hidden rounded-[var(--fd-radius-md)] border border-border-subtle bg-surface-1"
+      >
+        {visibleEntries.map((entry) => {
+          const key = recentKey(entry);
+          return (
+            <li
+              key={key}
+              data-activity-key={key}
+              data-selected={selectedKey === key ? "true" : undefined}
+              className={cn(
+                "border-b border-l-2 border-l-transparent border-border-subtle last:border-b-0",
+                // Same accent cursor the cards wear, at list scale.
+                selectedKey === key &&
+                  "border-l-accent bg-[color:var(--fd-interactive-hover)]",
+              )}
+            >
+              <button
+                type="button"
+                onClick={() =>
+                  onOpenThread(entry.workspaceId, entry.thread.id)
+                }
+                className="fd-focus-inset flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors hover:bg-[color:var(--fd-interactive-hover)]"
               >
-                <button
-                  type="button"
-                  onClick={() =>
-                    onOpenThread(entry.workspaceId, entry.thread.id)
-                  }
-                  className="fd-focus-inset flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors hover:bg-[color:var(--fd-interactive-hover)]"
-                >
-                  <Check
-                    aria-hidden="true"
-                    className="h-3 w-3 shrink-0 text-fg-faint"
-                  />
-                  <span className="min-w-0 max-w-[42%] truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
-                    {entry.thread.title}
+                <Check
+                  aria-hidden="true"
+                  className="h-3 w-3 shrink-0 text-fg-faint"
+                />
+                <span className="min-w-0 max-w-[42%] truncate text-[length:var(--fd-text-sm)] text-fg-secondary">
+                  {entry.thread.title}
+                </span>
+                {entry.thread.last_message_preview ? (
+                  <span
+                    className="hidden min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block"
+                    title={entry.thread.last_message_preview}
+                  >
+                    {entry.thread.last_message_preview}
                   </span>
-                  {entry.thread.last_message_preview ? (
-                    <span
-                      className="hidden min-w-0 flex-1 truncate text-[length:var(--fd-text-xs)] text-fg-muted sm:block"
-                      title={entry.thread.last_message_preview}
-                    >
-                      {entry.thread.last_message_preview}
-                    </span>
-                  ) : (
-                    <span className="min-w-0 flex-1" />
-                  )}
-                  <span className="fd-readout shrink-0 truncate text-fg-muted">
-                    {entry.projectLabel}
-                  </span>
-                  <span className="fd-readout w-8 shrink-0 text-right tabular-nums text-fg-muted">
-                    {timeAgo(entry.thread.updated_at, nowMs)}
-                  </span>
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+                ) : (
+                  <span className="min-w-0 flex-1" />
+                )}
+                <span className="fd-readout shrink-0 truncate text-fg-muted">
+                  {entry.projectLabel}
+                </span>
+                <span className="fd-readout w-8 shrink-0 text-right tabular-nums text-fg-muted">
+                  {timeAgo(entry.thread.updated_at, nowMs)}
+                </span>
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+
+      {entries.length > RECENT_PREVIEW_LIMIT ? (
+        <div className="mt-3 flex justify-center">
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            aria-expanded={expanded}
+            aria-controls="activity-recent-list"
+            onClick={onToggle}
+          >
+            {expanded ? "Show fewer" : `Show ${hiddenCount} more`}
+          </Button>
+        </div>
       ) : null}
     </section>
   );
@@ -696,8 +700,9 @@ export const ActivityView = memo(function ActivityView({
   windowFocused,
 }: ActivityViewProps) {
   const [nowMs, setNowMs] = useState(Date.now);
-  const [recentOpen, setRecentOpen] = useState(false);
+  const [recentExpanded, setRecentExpanded] = useState(false);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const initializedSelectionRef = useRef(false);
   const [showKeys, setShowKeys] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [resolvedEntries, setResolvedEntries] = useState<
@@ -773,6 +778,13 @@ export const ActivityView = memo(function ActivityView({
     () => collectRecentEntries(groups, interactiveRequests, { nowMs }),
     [groups, interactiveRequests, nowMs],
   );
+  const visibleRecentEntries = useMemo(
+    () =>
+      recentExpanded
+        ? recentEntries
+        : recentEntries.slice(0, RECENT_PREVIEW_LIMIT),
+    [recentEntries, recentExpanded],
+  );
 
   /* ================================================================
      Keyboard model.
@@ -796,13 +808,20 @@ export const ActivityView = memo(function ActivityView({
         rows.push({ key: entryKey(entry), section, entry });
       }
     }
-    if (recentOpen) {
-      for (const recent of recentEntries) {
-        rows.push({ key: recentKey(recent), recent });
-      }
+    for (const recent of visibleRecentEntries) {
+      rows.push({ key: recentKey(recent), recent });
     }
     return rows;
-  }, [recentEntries, recentOpen, sections]);
+  }, [sections, visibleRecentEntries]);
+
+  // Arrive keyboard-ready with the same reticle used after navigation. Keep
+  // Escape meaningful by doing this only once, rather than restoring a
+  // selection every time it is deliberately cleared.
+  useEffect(() => {
+    if (initializedSelectionRef.current || selectable.length === 0) return;
+    initializedSelectionRef.current = true;
+    setSelectedKey(selectable[0]?.key ?? null);
+  }, [selectable]);
 
   // A selection that scrolled out of the queue (answered, marked read) must
   // not linger as a highlight on nothing.
@@ -920,8 +939,9 @@ export const ActivityView = memo(function ActivityView({
           return markSelectedRead();
         case "t":
         case "T":
+          if (recentEntries.length <= RECENT_PREVIEW_LIMIT) return;
           event.preventDefault();
-          return setRecentOpen((current) => !current);
+          return setRecentExpanded((current) => !current);
         case "1":
         case "2":
         case "3":
@@ -951,6 +971,7 @@ export const ActivityView = memo(function ActivityView({
     onMarkThreadRead,
     onOpenThread,
     onReturnFocus,
+    recentEntries.length,
     selectable,
     selectedKey,
     showKeys,
@@ -1008,7 +1029,7 @@ export const ActivityView = memo(function ActivityView({
         ref={scrollRef}
         className="relative z-[1] min-h-0 flex-1 overflow-y-auto px-5 py-5"
       >
-        <div className="mx-auto w-full max-w-[1440px] space-y-6">
+        <div className="mx-auto w-full max-w-[1440px] space-y-8">
           <section
             aria-label="Activity summary"
             style={
@@ -1166,10 +1187,10 @@ export const ActivityView = memo(function ActivityView({
 
           <RecentTrail
             entries={recentEntries}
-            open={recentOpen}
+            expanded={recentExpanded}
             nowMs={nowMs}
             selectedKey={selectedKey}
-            onToggle={() => setRecentOpen((current) => !current)}
+            onToggle={() => setRecentExpanded((current) => !current)}
             onOpenThread={onOpenThread}
           />
         </div>

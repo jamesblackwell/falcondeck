@@ -450,7 +450,6 @@ describe("ActivityView", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: queue(), onOpenThread })} />);
 
-      fireEvent.keyDown(window, { key: "j" });
       expect(selectedThreadId()).toBe("first");
       fireEvent.keyDown(window, { key: "j" });
       expect(selectedThreadId()).toBe("second");
@@ -486,7 +485,6 @@ describe("ActivityView", () => {
         }));
       }
 
-      fireEvent.keyDown(window, { key: "ArrowRight" });
       expect(selectedThreadId()).toBe("a");
       fireEvent.keyDown(window, { key: "ArrowRight" });
       expect(selectedThreadId()).toBe("b");
@@ -521,7 +519,6 @@ describe("ActivityView", () => {
         }));
       }
 
-      fireEvent.keyDown(window, { key: "d" });
       expect(selectedThreadId()).toBe("a");
       fireEvent.keyDown(window, { key: "d" });
       expect(selectedThreadId()).toBe("b");
@@ -537,7 +534,6 @@ describe("ActivityView", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: queue(), onOpenThread })} />);
 
-      fireEvent.keyDown(window, { key: "s" });
       fireEvent.keyDown(window, { key: "e" });
       expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "first");
     });
@@ -569,7 +565,6 @@ describe("ActivityView", () => {
         <ActivityView {...props({ groups: queue(), onMarkThreadRead })} />,
       );
 
-      fireEvent.keyDown(window, { key: "ArrowDown" });
       fireEvent.keyDown(window, { key });
       expect(onMarkThreadRead).toHaveBeenCalledWith(workspace.id, "first");
     });
@@ -581,18 +576,18 @@ describe("ActivityView", () => {
       const input = document.createElement("input");
       document.body.appendChild(input);
       fireEvent.keyDown(input, { key: "j" });
-      expect(selectedThreadId()).toBeUndefined();
+      expect(selectedThreadId()).toBe("first");
       input.remove();
 
       fireEvent.keyDown(window, { key: "j", metaKey: true });
-      expect(selectedThreadId()).toBeUndefined();
+      expect(selectedThreadId()).toBe("first");
     });
 
     it("steps Escape back through selection before closing", () => {
       const onClose = vi.fn();
       render(<ActivityView {...props({ groups: queue(), onClose })} />);
 
-      fireEvent.keyDown(window, { key: "j" });
+      expect(selectedThreadId()).toBe("first");
       fireEvent.keyDown(window, { key: "Escape" });
       expect(selectedThreadId()).toBeUndefined();
       expect(onClose).not.toHaveBeenCalled();
@@ -611,6 +606,8 @@ describe("ActivityView", () => {
         />,
       );
 
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(onReturnFocus).not.toHaveBeenCalled();
       fireEvent.keyDown(window, { key: "Escape" });
       expect(onReturnFocus).toHaveBeenCalledOnce();
       expect(onClose).not.toHaveBeenCalled();
@@ -644,29 +641,27 @@ describe("ActivityView", () => {
   });
 
   describe("recent trail", () => {
-    const finished = () =>
+    const finished = (count = 1) =>
       groups([
-        thread({
-          id: "finished",
-          updated_at: new Date(Date.now() - 120_000).toISOString(),
-          attention: {
-            ...thread({ id: "base" }).attention,
-            last_agent_activity_seq: 3,
-            last_read_seq: 3,
-          },
-        }),
+        ...Array.from({ length: count }, (_, index) =>
+          thread({
+            id: index === 0 ? "finished" : `finished-${index + 1}`,
+            updated_at: new Date(
+              Date.now() - 120_000 - index * 60_000,
+            ).toISOString(),
+            attention: {
+              ...thread({ id: "base" }).attention,
+              last_agent_activity_seq: 3,
+              last_read_seq: 3,
+            },
+          }),
+        ),
       ]);
 
-    it("keeps the trail collapsed until asked, then opens the thread", () => {
+    it("shows recent finished threads by default and opens one", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: finished(), onOpenThread })} />);
 
-      const toggle = screen.getByRole("button", { name: /Recent/ });
-      expect(toggle).toHaveAttribute("aria-expanded", "false");
-      expect(screen.queryByText("finished")).not.toBeInTheDocument();
-
-      fireEvent.click(toggle);
-      expect(toggle).toHaveAttribute("aria-expanded", "true");
       fireEvent.click(screen.getByRole("button", { name: /finished/ }));
       expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "finished");
     });
@@ -677,24 +672,51 @@ describe("ActivityView", () => {
       recent[0]!.threads[0]!.last_message_preview = preview;
       render(<ActivityView {...props({ groups: recent })} />);
 
-      fireEvent.click(screen.getByRole("button", { name: /Recent/ }));
       expect(screen.getByText(preview)).toHaveClass("truncate");
       expect(screen.getByText(preview)).toHaveAttribute("title", preview);
     });
 
-    it("toggles the trail from the keyboard and takes selection into it", () => {
+    it("selects and opens a recent thread from the keyboard", () => {
       const onOpenThread = vi.fn();
       render(<ActivityView {...props({ groups: finished(), onOpenThread })} />);
 
-      fireEvent.keyDown(window, { key: "t" });
-      expect(screen.getByRole("button", { name: /Recent/ })).toHaveAttribute(
-        "aria-expanded",
-        "true",
-      );
-
-      fireEvent.keyDown(window, { key: "j" });
+      expect(
+        document.querySelector(
+          '[data-activity-key="recent:workspace-1:finished"]',
+        ),
+      ).toHaveAttribute("data-selected", "true");
       fireEvent.keyDown(window, { key: "Enter" });
       expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "finished");
+    });
+
+    it("shows five recent threads before expanding the rest", () => {
+      render(<ActivityView {...props({ groups: finished(7) })} />);
+
+      expect(screen.getByText("finished-5")).toBeInTheDocument();
+      expect(screen.queryByText("finished-6")).not.toBeInTheDocument();
+      const showMore = screen.getByRole("button", { name: "Show 2 more" });
+      expect(showMore).toHaveAttribute("aria-expanded", "false");
+
+      fireEvent.click(showMore);
+      expect(screen.getByText("finished-7")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Show fewer" }),
+      ).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("expands recent threads with T and opens the newly revealed rows", () => {
+      const onOpenThread = vi.fn();
+      render(
+        <ActivityView {...props({ groups: finished(7), onOpenThread })} />,
+      );
+
+      fireEvent.keyDown(window, { key: "t" });
+      expect(screen.getByText("finished-6")).toBeInTheDocument();
+      for (let index = 0; index < 5; index += 1) {
+        fireEvent.keyDown(window, { key: "j" });
+      }
+      fireEvent.keyDown(window, { key: "Enter" });
+      expect(onOpenThread).toHaveBeenCalledWith(workspace.id, "finished-6");
     });
 
     it("never lists a thread that is still in the queue", () => {
