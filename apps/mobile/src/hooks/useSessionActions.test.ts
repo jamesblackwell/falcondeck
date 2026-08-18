@@ -531,6 +531,12 @@ describe("submitTurn guards", () => {
 
       useUIStore.getState().setDraft("New draft");
       useUIStore.getState().setAttachments([newerImage]);
+      // The send yields a paint before its RPC, so let those ticks pass
+      // before failing it — rejecting earlier would race the call itself.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
       pendingRpc.reject(new Error("offline"));
       await act(async () => submission);
 

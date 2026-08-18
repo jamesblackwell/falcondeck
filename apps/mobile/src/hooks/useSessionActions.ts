@@ -27,6 +27,19 @@ import { useRelayStore, useSessionStore, useUIStore } from "@/store";
 
 const RECENT_THREAD_PREFETCH_LIMIT = 5;
 
+// Lets React paint once before send-side payload work continues. Image
+// attachments travel as base64 data URLs; encrypting and serialising those
+// megabytes occupies the JS thread, and without this yield the composer's
+// on-tap clear visibly lags the send by the length of that work.
+const nextPaint = () =>
+  new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => setTimeout(resolve, 0));
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+
 export function useSessionActions() {
   const detailRequestVersion = useRef(0);
 
@@ -170,6 +183,9 @@ export function useSessionActions() {
           .upsertLocalThreadItem(activeThreadId, optimisticItem);
         ui.clearPendingNewThreadItem(userItemId);
       }
+      // Paint the emptied composer before the (potentially multi-megabyte)
+      // turn payload is encrypted and serialised below.
+      await nextPaint();
       const sendResponse = await relay._callRpc<{
         ok: boolean;
         message?: string | null;
