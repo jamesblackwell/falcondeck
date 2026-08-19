@@ -87,6 +87,7 @@ Semantic colors:
 Rules:
 
 - Prefer token aliases like `bg-surface-1`, `text-fg-primary`, and `border-border-subtle` on web.
+- Categorical colors (`--fd-cat-1` … `--fd-cat-12`, aliased as `bg-cat-1` / `text-cat-1`) are the non-semantic scale for project folders, charts, and similar labels. Store the token id, not a hex — each palette retints the same twelve slots.
 - Use `bg-interactive-hover`, `bg-interactive-selected`, and `bg-interactive-active` for list and menu row states. These are derived from the active palette so custom themes retain clear interaction contrast.
 - On mobile, mirror the same meaning through `colors.surface`, `colors.fg`, `colors.border`, and `colors.accent`.
 - Do not introduce new brand colors without updating both token systems.
@@ -225,6 +226,11 @@ Every interactive element must show a visible keyboard focus indicator.
 - Never use `outline-none` without providing a replacement indicator.
 - An action that is only revealed on hover must also reveal itself on `focus-visible`, or keyboard users can tab to an invisible control.
 - Icon-only controls need an `aria-label` on web and an `accessibilityLabel` plus `accessibilityRole="button"` on mobile. A `title` alone is not sufficient.
+
+### Shortcut tooltips
+
+Icon buttons and composer chips that a keyboard shortcut also drives use the shared `Tooltip` from `@falcondeck/ui`: a short label plus keycap tokens (`⌘`, `↵`), portalled so overflow parents cannot clip them. Do not use the native `title` attribute for those hints — it fights the custom tooltip and does not match the chrome. Truncated paths, overflow text, and status dots may still use `title`. The accessible name stays on `aria-label`; the tooltip is visual discoverability.
+
 - Decorative icons sitting next to a text label should be `aria-hidden`.
 
 ### Touch targets

@@ -79,6 +79,19 @@
   --color-danger-muted: var(--fd-danger-muted);
   --color-info: var(--fd-info);
   --color-info-muted: var(--fd-info-muted);
+
+  --color-cat-1: var(--fd-cat-1);
+  --color-cat-2: var(--fd-cat-2);
+  --color-cat-3: var(--fd-cat-3);
+  --color-cat-4: var(--fd-cat-4);
+  --color-cat-5: var(--fd-cat-5);
+  --color-cat-6: var(--fd-cat-6);
+  --color-cat-7: var(--fd-cat-7);
+  --color-cat-8: var(--fd-cat-8);
+  --color-cat-9: var(--fd-cat-9);
+  --color-cat-10: var(--fd-cat-10);
+  --color-cat-11: var(--fd-cat-11);
+  --color-cat-12: var(--fd-cat-12);
 }
 
 :root {
@@ -164,6 +177,21 @@
   --fd-danger-muted: rgba(248, 113, 113, 0.12);
   --fd-info: #60a5fa;
   --fd-info-muted: rgba(96, 165, 250, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #f87171;
+  --fd-cat-2: #fb923c;
+  --fd-cat-3: #fbbf24;
+  --fd-cat-4: #a3e635;
+  --fd-cat-5: #34d399;
+  --fd-cat-6: #2dd4bf;
+  --fd-cat-7: #22d3ee;
+  --fd-cat-8: #60a5fa;
+  --fd-cat-9: #818cf8;
+  --fd-cat-10: #a78bfa;
+  --fd-cat-11: #e879f9;
+  --fd-cat-12: #f472b6;
 
   /* === Border Radius Scale === */
   --fd-radius-sm: 6px;
@@ -311,6 +339,21 @@
   --fd-danger-muted: rgba(220, 38, 38, 0.08);
   --fd-info: #2563eb;
   --fd-info-muted: rgba(37, 99, 235, 0.08);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #dc2626;
+  --fd-cat-2: #ea580c;
+  --fd-cat-3: #b45309;
+  --fd-cat-4: #65a30d;
+  --fd-cat-5: #059669;
+  --fd-cat-6: #0f766e;
+  --fd-cat-7: #0891b2;
+  --fd-cat-8: #2563eb;
+  --fd-cat-9: #4f46e5;
+  --fd-cat-10: #7c3aed;
+  --fd-cat-11: #c026d3;
+  --fd-cat-12: #db2777;
 
   --fd-shadow-sm: 0 1px 2px rgba(23, 23, 28, 0.08);
   --fd-shadow-md: 0 4px 12px rgba(23, 23, 28, 0.1);
@@ -360,6 +403,21 @@
   --fd-danger-muted: rgba(251, 73, 52, 0.12);
   --fd-info: #83a598;
   --fd-info-muted: rgba(131, 165, 152, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #fb4934;
+  --fd-cat-2: #fe8019;
+  --fd-cat-3: #fabd2f;
+  --fd-cat-4: #b8bb26;
+  --fd-cat-5: #8ec07c;
+  --fd-cat-6: #83a598;
+  --fd-cat-7: #458588;
+  --fd-cat-8: #d3869b;
+  --fd-cat-9: #b16286;
+  --fd-cat-10: #8f3f71;
+  --fd-cat-11: #d65d0e;
+  --fd-cat-12: #689d6a;
 
   --fd-focus-ring-color: var(--fd-accent);
   --fd-shadow-glow: 0 0 24px rgba(142, 192, 124, 0.06);
@@ -396,6 +454,21 @@
   --fd-danger-muted: rgba(204, 36, 29, 0.1);
   --fd-info: #076678;
   --fd-info-muted: rgba(7, 102, 120, 0.1);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #cc241d;
+  --fd-cat-2: #d65d0e;
+  --fd-cat-3: #b57614;
+  --fd-cat-4: #79740e;
+  --fd-cat-5: #427b58;
+  --fd-cat-6: #076678;
+  --fd-cat-7: #458588;
+  --fd-cat-8: #b16286;
+  --fd-cat-9: #8f3f71;
+  --fd-cat-10: #9d0006;
+  --fd-cat-11: #af3a03;
+  --fd-cat-12: #689d6a;
 
   --fd-shadow-glow: 0 0 24px rgba(66, 123, 88, 0.08);
 }
@@ -435,6 +508,21 @@
   --fd-danger-muted: rgba(255, 115, 115, 0.12);
   --fd-info: #59bff5;
   --fd-info-muted: rgba(89, 191, 245, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #ff7373;
+  --fd-cat-2: #ffb070;
+  --fd-cat-3: #e0dd72;
+  --fd-cat-4: #35f477;
+  --fd-cat-5: #55d982;
+  --fd-cat-6: #7dffb0;
+  --fd-cat-7: #59bff5;
+  --fd-cat-8: #7ec8ff;
+  --fd-cat-9: #b4a7ff;
+  --fd-cat-10: #e0aaff;
+  --fd-cat-11: #ff8ad4;
+  --fd-cat-12: #a3e635;
 
   --fd-shadow-glow: 0 0 24px rgba(53, 244, 119, 0.07);
 }
@@ -471,6 +559,21 @@
   --fd-danger-muted: rgba(247, 118, 142, 0.12);
   --fd-info: #7dcfff;
   --fd-info-muted: rgba(125, 207, 255, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #f7768e;
+  --fd-cat-2: #ff9e64;
+  --fd-cat-3: #e0af68;
+  --fd-cat-4: #9ece6a;
+  --fd-cat-5: #73daca;
+  --fd-cat-6: #2ac3de;
+  --fd-cat-7: #7dcfff;
+  --fd-cat-8: #7aa2f7;
+  --fd-cat-9: #bb9af7;
+  --fd-cat-10: #c0caf5;
+  --fd-cat-11: #ff007c;
+  --fd-cat-12: #9d7cd8;
 
   --fd-focus-ring-color: var(--fd-accent);
   --fd-shadow-glow: 0 0 24px rgba(122, 162, 247, 0.06);
@@ -507,6 +610,21 @@
   --fd-danger-muted: rgba(197, 57, 99, 0.1);
   --fd-info: #007197;
   --fd-info-muted: rgba(0, 113, 151, 0.1);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #c53963;
+  --fd-cat-2: #d15a00;
+  --fd-cat-3: #8f5e15;
+  --fd-cat-4: #587539;
+  --fd-cat-5: #387268;
+  --fd-cat-6: #007197;
+  --fd-cat-7: #2e7de9;
+  --fd-cat-8: #2450b0;
+  --fd-cat-9: #7847bd;
+  --fd-cat-10: #5a30c2;
+  --fd-cat-11: #b8336a;
+  --fd-cat-12: #8c6c3e;
 
   --fd-shadow-glow: 0 0 24px rgba(46, 125, 233, 0.08);
 }
@@ -546,6 +664,21 @@
   --fd-danger-muted: rgba(243, 139, 168, 0.12);
   --fd-info: #89dceb;
   --fd-info-muted: rgba(137, 220, 235, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #f5e0dc;
+  --fd-cat-2: #f2cdcd;
+  --fd-cat-3: #f5c2e7;
+  --fd-cat-4: #cba6f7;
+  --fd-cat-5: #f38ba8;
+  --fd-cat-6: #eba0ac;
+  --fd-cat-7: #fab387;
+  --fd-cat-8: #f9e2af;
+  --fd-cat-9: #a6e3a1;
+  --fd-cat-10: #94e2d5;
+  --fd-cat-11: #89dceb;
+  --fd-cat-12: #74c7ec;
 
   --fd-shadow-glow: 0 0 24px rgba(203, 166, 247, 0.06);
 }
@@ -584,6 +717,21 @@
   --fd-danger-muted: rgba(210, 15, 57, 0.11);
   --fd-info: #0c7a8f;
   --fd-info-muted: rgba(12, 122, 143, 0.11);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #dc8a78;
+  --fd-cat-2: #dd7878;
+  --fd-cat-3: #ea76cb;
+  --fd-cat-4: #8839ef;
+  --fd-cat-5: #d20f39;
+  --fd-cat-6: #e64553;
+  --fd-cat-7: #fe640b;
+  --fd-cat-8: #df8e1d;
+  --fd-cat-9: #40a02b;
+  --fd-cat-10: #179299;
+  --fd-cat-11: #04a5e5;
+  --fd-cat-12: #209fb5;
 
   --fd-shadow-glow: 0 0 24px rgba(136, 57, 239, 0.08);
 }
@@ -623,6 +771,21 @@
   --fd-danger-muted: rgba(203, 127, 136, 0.12);
   --fd-info: #81a1c1;
   --fd-info-muted: rgba(129, 161, 193, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #bf616a;
+  --fd-cat-2: #d08770;
+  --fd-cat-3: #ebcb8b;
+  --fd-cat-4: #a3be8c;
+  --fd-cat-5: #8fbcbb;
+  --fd-cat-6: #88c0d0;
+  --fd-cat-7: #81a1c1;
+  --fd-cat-8: #5e81ac;
+  --fd-cat-9: #b48ead;
+  --fd-cat-10: #eceff4;
+  --fd-cat-11: #d8dee9;
+  --fd-cat-12: #e5e9f0;
 
   --fd-shadow-glow: 0 0 24px rgba(136, 192, 208, 0.06);
 }
@@ -661,6 +824,21 @@
   --fd-danger-muted: rgba(163, 56, 63, 0.11);
   --fd-info: #3d6a86;
   --fd-info-muted: rgba(61, 106, 134, 0.11);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #a3383f;
+  --fd-cat-2: #b56a46;
+  --fd-cat-3: #8a6414;
+  --fd-cat-4: #55702f;
+  --fd-cat-5: #3d6a86;
+  --fd-cat-6: #4c6f96;
+  --fd-cat-7: #5e81ac;
+  --fd-cat-8: #3b4252;
+  --fd-cat-9: #8f6f97;
+  --fd-cat-10: #2e3440;
+  --fd-cat-11: #434c5e;
+  --fd-cat-12: #4c566a;
 
   --fd-shadow-glow: 0 0 24px rgba(76, 111, 150, 0.08);
 }
@@ -700,6 +878,21 @@
   --fd-danger-muted: rgba(255, 85, 85, 0.12);
   --fd-info: #8be9fd;
   --fd-info-muted: rgba(139, 233, 253, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #ff5555;
+  --fd-cat-2: #ffb86c;
+  --fd-cat-3: #f1fa8c;
+  --fd-cat-4: #50fa7b;
+  --fd-cat-5: #8be9fd;
+  --fd-cat-6: #bd93f9;
+  --fd-cat-7: #ff79c6;
+  --fd-cat-8: #6272a4;
+  --fd-cat-9: #ff6e6e;
+  --fd-cat-10: #a4ffff;
+  --fd-cat-11: #caa9fa;
+  --fd-cat-12: #f8f8f2;
 
   --fd-shadow-glow: 0 0 24px rgba(189, 147, 249, 0.06);
 }
@@ -738,6 +931,21 @@
   --fd-danger-muted: rgba(203, 58, 42, 0.11);
   --fd-info: #036a96;
   --fd-info-muted: rgba(3, 106, 150, 0.11);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #cb3a2a;
+  --fd-cat-2: #a34d14;
+  --fd-cat-3: #8a6800;
+  --fd-cat-4: #14710a;
+  --fd-cat-5: #036a96;
+  --fd-cat-6: #644ac9;
+  --fd-cat-7: #c41c7a;
+  --fd-cat-8: #4a4e6a;
+  --fd-cat-9: #b42318;
+  --fd-cat-10: #0f6f8a;
+  --fd-cat-11: #4f39a8;
+  --fd-cat-12: #1f1f1f;
 
   --fd-shadow-glow: 0 0 24px rgba(100, 74, 201, 0.08);
 }
@@ -777,6 +985,21 @@
   --fd-danger-muted: rgba(229, 83, 78, 0.12);
   --fd-info: #2aa198;
   --fd-info-muted: rgba(42, 161, 152, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #dc322f;
+  --fd-cat-2: #cb4b16;
+  --fd-cat-3: #b58900;
+  --fd-cat-4: #859900;
+  --fd-cat-5: #2aa198;
+  --fd-cat-6: #268bd2;
+  --fd-cat-7: #6c71c4;
+  --fd-cat-8: #d33682;
+  --fd-cat-9: #93a1a1;
+  --fd-cat-10: #eee8d5;
+  --fd-cat-11: #fdf6e3;
+  --fd-cat-12: #2aa198;
 
   --fd-shadow-glow: 0 0 24px rgba(38, 139, 210, 0.06);
 }
@@ -815,6 +1038,21 @@
   --fd-danger-muted: rgba(198, 45, 42, 0.11);
   --fd-info: #1f7d76;
   --fd-info-muted: rgba(31, 125, 118, 0.11);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #c62d2a;
+  --fd-cat-2: #cb4b16;
+  --fd-cat-3: #8a6800;
+  --fd-cat-4: #5f6f00;
+  --fd-cat-5: #1f7d76;
+  --fd-cat-6: #1a6c9c;
+  --fd-cat-7: #6c71c4;
+  --fd-cat-8: #d33682;
+  --fd-cat-9: #5b7176;
+  --fd-cat-10: #002b36;
+  --fd-cat-11: #073642;
+  --fd-cat-12: #268bd2;
 
   --fd-shadow-glow: 0 0 24px rgba(26, 108, 156, 0.08);
 }
@@ -854,6 +1092,21 @@
   --fd-danger-muted: rgba(224, 108, 117, 0.12);
   --fd-info: #56b6c2;
   --fd-info-muted: rgba(86, 182, 194, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #e06c75;
+  --fd-cat-2: #d19a66;
+  --fd-cat-3: #e5c07b;
+  --fd-cat-4: #98c379;
+  --fd-cat-5: #56b6c2;
+  --fd-cat-6: #61afef;
+  --fd-cat-7: #c678dd;
+  --fd-cat-8: #be5046;
+  --fd-cat-9: #abb2bf;
+  --fd-cat-10: #c24038;
+  --fd-cat-11: #528bff;
+  --fd-cat-12: #a9a1e1;
 
   --fd-shadow-glow: 0 0 24px rgba(97, 175, 239, 0.06);
 }
@@ -892,6 +1145,21 @@
   --fd-danger-muted: rgba(202, 18, 67, 0.11);
   --fd-info: #0169a0;
   --fd-info-muted: rgba(1, 105, 160, 0.11);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #ca1243;
+  --fd-cat-2: #c18401;
+  --fd-cat-3: #9a6700;
+  --fd-cat-4: #3f7f3e;
+  --fd-cat-5: #0169a0;
+  --fd-cat-6: #3568d4;
+  --fd-cat-7: #a626a4;
+  --fd-cat-8: #e45649;
+  --fd-cat-9: #383a42;
+  --fd-cat-10: #a626a4;
+  --fd-cat-11: #2450b0;
+  --fd-cat-12: #0184bc;
 
   --fd-shadow-glow: 0 0 24px rgba(53, 104, 212, 0.08);
 }
@@ -931,6 +1199,21 @@
   --fd-danger-muted: rgba(235, 111, 146, 0.12);
   --fd-info: #7fb4cd;
   --fd-info-muted: rgba(127, 180, 205, 0.12);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #eb6f92;
+  --fd-cat-2: #f6c177;
+  --fd-cat-3: #ebbcba;
+  --fd-cat-4: #31748f;
+  --fd-cat-5: #9ccfd8;
+  --fd-cat-6: #c4a7e7;
+  --fd-cat-7: #e0def4;
+  --fd-cat-8: #908caa;
+  --fd-cat-9: #ea9a97;
+  --fd-cat-10: #3e8fb0;
+  --fd-cat-11: #b4637a;
+  --fd-cat-12: #fad9a1;
 
   --fd-shadow-glow: 0 0 24px rgba(196, 167, 231, 0.06);
 }
@@ -969,6 +1252,21 @@
   --fd-danger-muted: rgba(180, 99, 122, 0.11);
   --fd-info: #286983;
   --fd-info-muted: rgba(40, 105, 131, 0.11);
+  /* Categorical — 12 hues for charts, project folders, and other
+     non-semantic labels. Stored as cat-1…cat-12 so they retint with
+     the palette instead of locking a hex. */
+  --fd-cat-1: #b4637a;
+  --fd-cat-2: #a3711a;
+  --fd-cat-3: #d7827e;
+  --fd-cat-4: #286983;
+  --fd-cat-5: #56949f;
+  --fd-cat-6: #907aa9;
+  --fd-cat-7: #575279;
+  --fd-cat-8: #6e6a86;
+  --fd-cat-9: #c17a7e;
+  --fd-cat-10: #3e8fb0;
+  --fd-cat-11: #907aa9;
+  --fd-cat-12: #ea9d34;
 
   --fd-shadow-glow: 0 0 24px rgba(144, 122, 169, 0.08);
 }
@@ -1250,6 +1548,39 @@ body {
     opacity: 0;
     transform: translateX(100%);
   }
+}
+
+/* === Menu pop ===
+   Shared entrance/exit for floating menus (selects, composer popovers).
+   Radix reports the trigger side via data-side, so the panel scales out of
+   the anchor: translateY direction and transform-origin follow the side.
+   Radix Presence waits for animationend, which is what keeps the exit frame
+   on screen while the menu unmounts. */
+@keyframes fd-menu-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(calc(var(--fd-menu-dir, -1) * 0.25rem)) scale(0.985);
+  }
+}
+@keyframes fd-menu-pop-out {
+  to {
+    opacity: 0;
+    transform: translateY(calc(var(--fd-menu-dir, -1) * 0.125rem)) scale(0.99);
+  }
+}
+.fd-menu-pop[data-side='top'] {
+  --fd-menu-dir: 1;
+  transform-origin: bottom;
+}
+.fd-menu-pop[data-side='bottom'] {
+  --fd-menu-dir: -1;
+  transform-origin: top;
+}
+.fd-menu-pop[data-state='open'] {
+  animation: fd-menu-pop-in var(--fd-duration-normal) var(--fd-ease-default);
+}
+.fd-menu-pop[data-state='closed'] {
+  animation: fd-menu-pop-out var(--fd-duration-fast) var(--fd-ease-default) forwards;
 }
 
 @keyframes fd-diamond-pulse {

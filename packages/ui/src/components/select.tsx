@@ -2,6 +2,7 @@ import * as React from 'react'
 import * as SelectPrimitive from '@radix-ui/react-select'
 import { Check, ChevronDown } from 'lucide-react'
 
+import { MenuHeader } from './menu-header'
 import { cn } from '../lib/utils'
 
 export const Select = SelectPrimitive.Root
@@ -29,7 +30,7 @@ export const SelectTrigger = React.forwardRef<
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      'fd-focus inline-flex max-w-full items-center text-[length:var(--fd-text-xs)] transition-colors duration-[var(--fd-duration-fast)] disabled:cursor-not-allowed disabled:opacity-50',
+      'group fd-focus inline-flex max-w-full items-center text-[length:var(--fd-text-xs)] transition-colors duration-[var(--fd-duration-fast)] disabled:cursor-not-allowed disabled:opacity-50',
       SELECT_TRIGGER_VARIANTS[variant],
       className,
     )}
@@ -37,7 +38,7 @@ export const SelectTrigger = React.forwardRef<
   >
     {children}
     <SelectPrimitive.Icon asChild>
-      <ChevronDown className="h-3 w-3 shrink-0 text-fg-muted" />
+      <ChevronDown className="h-3 w-3 shrink-0 text-fg-muted transition-transform duration-[var(--fd-duration-fast)] group-data-[state=open]:rotate-180" />
     </SelectPrimitive.Icon>
   </SelectPrimitive.Trigger>
 ))
@@ -48,8 +49,12 @@ export const SelectContent = React.forwardRef<
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content> & {
     /** Raises the default list height, for option rows that carry a second line. */
     viewportClassName?: string
+    /** Title rendered above the options; pinned outside the scrolling viewport. */
+    label?: string
+    /** Binding tokens ("⌃", "⇧", "M") shown as keycaps beside the label. */
+    shortcutHint?: string[]
   }
->(({ className, children, position = 'popper', sideOffset = 6, collisionPadding = 8, viewportClassName, ...props }, ref) => (
+>(({ className, children, position = 'popper', sideOffset = 6, collisionPadding = 8, viewportClassName, label, shortcutHint, ...props }, ref) => (
   <SelectPrimitive.Portal>
     <SelectPrimitive.Content
       ref={ref}
@@ -57,11 +62,19 @@ export const SelectContent = React.forwardRef<
       sideOffset={sideOffset}
       collisionPadding={collisionPadding}
       className={cn(
-        'z-50 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-emphasis bg-surface-2 text-fg-primary shadow-[var(--fd-shadow-lg)]',
+        'fd-menu-pop z-50 overflow-hidden rounded-[var(--fd-radius-lg)] border border-border-emphasis bg-surface-2 text-fg-primary shadow-[var(--fd-shadow-lg)]',
         className,
       )}
       {...props}
     >
+      {label !== undefined || shortcutHint?.length ? (
+        <MenuHeader
+          aria-hidden="true"
+          label={label ?? ''}
+          shortcut={shortcutHint}
+          className="px-[1.125rem] pb-1 pt-1.5"
+        />
+      ) : null}
       {/* Popper positioning with a natively scrolling viewport. Radix's default
           "item-aligned" mode overlays the trigger and repositions the popup on
           every wheel tick, which flickers on trackpads — same reason there are

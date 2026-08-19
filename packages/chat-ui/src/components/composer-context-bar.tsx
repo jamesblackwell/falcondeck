@@ -17,7 +17,7 @@ import {
   type ThreadIsolation,
   type WorkspaceSummary,
 } from '@falcondeck/client-core'
-import { ActivityDiamond, Select, SelectContent, SelectItem, SelectTrigger, cn } from '@falcondeck/ui'
+import { ActivityDiamond, Select, SelectContent, SelectItem, SelectTrigger, Tooltip, cn } from '@falcondeck/ui'
 
 import { OptionFilterField } from './option-filter-field'
 import type { WorkspaceHostBadge } from './workspace-group'
@@ -35,8 +35,8 @@ export type ComposerContextBarProps = {
   onSelectWorkspace: (workspaceId: string) => void
   /** Increment to open the project picker from a host-level keyboard shortcut. */
   projectMenuRequestKey?: number
-  /** Human-readable shortcut rendered in the project chip tooltip. */
-  projectShortcutLabel?: string
+  /** Binding tokens ("⌃", "⇧", "L") rendered as keycaps in the project chip tooltip. */
+  projectShortcut?: string[]
   selectedIsolation: ThreadIsolation
   onIsolationChange: (value: ThreadIsolation) => void
   /** Branch state of the project folder; null hides the chip (remote host, not a repo). */
@@ -85,7 +85,7 @@ export const ComposerContextBar = memo(function ComposerContextBar({
   selectedWorkspace,
   onSelectWorkspace,
   projectMenuRequestKey = 0,
-  projectShortcutLabel,
+  projectShortcut,
   selectedIsolation,
   onIsolationChange,
   branches = null,
@@ -117,7 +117,7 @@ export const ComposerContextBar = memo(function ComposerContextBar({
         remoteHosts={remoteHosts}
         onSelectWorkspace={onSelectWorkspace}
         openRequestKey={projectMenuRequestKey}
-        shortcutLabel={projectShortcutLabel}
+        shortcut={projectShortcut}
         onAddLocalProject={onAddLocalProject}
         onAddRemoteProject={onAddRemoteProject}
         isAddingProject={isAddingProject}
@@ -200,7 +200,7 @@ function ProjectMenu({
   remoteHosts,
   onSelectWorkspace,
   openRequestKey,
-  shortcutLabel,
+  shortcut,
   onAddLocalProject,
   onAddRemoteProject,
   isAddingProject,
@@ -214,7 +214,7 @@ function ProjectMenu({
   remoteHosts: ComposerRemoteHostOption[]
   onSelectWorkspace: (workspaceId: string) => void
   openRequestKey: number
-  shortcutLabel?: string
+  shortcut?: string[]
   onAddLocalProject?: () => void | Promise<void>
   onAddRemoteProject?: (hostId: string, path: string) => void | Promise<void>
   isAddingProject: boolean
@@ -301,20 +301,21 @@ function ProjectMenu({
 
   return (
     <Popover.Root open={open} onOpenChange={handleOpenChange}>
-      <Popover.Trigger asChild>
-        <button
-          type="button"
-          aria-label="Project"
-          aria-haspopup="menu"
-          aria-expanded={open}
-          title={shortcutLabel ? `Change project (${shortcutLabel})` : 'Change project'}
-          disabled={menuDisabled}
-          className={CHIP_CLASS}
-        >
-          <ProjectIcon aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
-          <span className="truncate">{projectLabel}</span>
-        </button>
-      </Popover.Trigger>
+      <Tooltip label="Change project" shortcut={shortcut}>
+        <Popover.Trigger asChild>
+          <button
+            type="button"
+            aria-label="Project"
+            aria-haspopup="menu"
+            aria-expanded={open}
+            disabled={menuDisabled}
+            className={CHIP_CLASS}
+          >
+            <ProjectIcon aria-hidden="true" className="h-3.5 w-3.5 shrink-0 text-fg-muted" />
+            <span className="truncate">{projectLabel}</span>
+          </button>
+        </Popover.Trigger>
+      </Tooltip>
       <Popover.Portal>
         <Popover.Content
           align="start"

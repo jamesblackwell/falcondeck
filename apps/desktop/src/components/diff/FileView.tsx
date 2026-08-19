@@ -3,7 +3,7 @@ import { ArrowLeft, Check, Pencil, RotateCcw, Save, X } from 'lucide-react'
 
 import { HighlightedFileLine, languageFromPath, useShikiTokens } from '@falcondeck/chat-ui'
 import type { WorkspaceFileResponse } from '@falcondeck/client-core'
-import { ActivityDiamond, Button } from '@falcondeck/ui'
+import { ActivityDiamond, Button, Tooltip } from '@falcondeck/ui'
 
 import { FileTypeIcon } from './FileTypeIcon'
 
@@ -71,25 +71,27 @@ export const FileView = memo(function FileView({
         {file?.content != null && !file.truncated && !file.is_binary ? (
           isEditing ? (
             <>
-              <button
-                type="button"
-                onClick={() => {
-                  setDraft(file.content ?? '')
-                  setIsEditing(false)
-                }}
-                aria-label="Cancel editing"
-                className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
-              >
-                <X aria-hidden="true" className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => void save()}
-                disabled={isSaving || !isDirty}
-                aria-label="Save file"
-                title="Save file (⌘S)"
-                className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-accent hover:bg-accent-muted disabled:text-fg-faint"
-              >
+              <Tooltip label="Cancel">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft(file.content ?? '')
+                    setIsEditing(false)
+                  }}
+                  aria-label="Cancel editing"
+                  className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
+                >
+                  <X aria-hidden="true" className="h-3.5 w-3.5" />
+                </button>
+              </Tooltip>
+              <Tooltip label="Save file" shortcut={['⌘', 'S']}>
+                <button
+                  type="button"
+                  onClick={() => void save()}
+                  disabled={isSaving || !isDirty}
+                  aria-label="Save file"
+                  className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-accent hover:bg-accent-muted disabled:text-fg-faint"
+                >
                 {isSaving ? (
                   <ActivityDiamond tone="current" />
                 ) : isDirty ? (
@@ -97,17 +99,20 @@ export const FileView = memo(function FileView({
                 ) : (
                   <Check aria-hidden="true" className="h-3.5 w-3.5" />
                 )}
-              </button>
+                </button>
+              </Tooltip>
             </>
           ) : (
-            <button
-              type="button"
-              onClick={() => setIsEditing(true)}
-              aria-label="Edit file"
-              className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
-            >
-              <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
-            </button>
+            <Tooltip label="Edit file">
+              <button
+                type="button"
+                onClick={() => setIsEditing(true)}
+                aria-label="Edit file"
+                className="fd-focus rounded-[var(--fd-radius-sm)] p-1 text-fg-muted hover:bg-surface-3 hover:text-fg-secondary"
+              >
+                <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
+              </button>
+            </Tooltip>
           )
         ) : null}
         <button

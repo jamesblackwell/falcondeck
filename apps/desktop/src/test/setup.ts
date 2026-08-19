@@ -9,3 +9,8 @@ class ResizeObserverStub {
 }
 
 globalThis.ResizeObserver ??= ResizeObserverStub as unknown as typeof ResizeObserver
+
+Element.prototype.hasPointerCapture ??= (() => false) as typeof Element.prototype.hasPointerCapture
+Element.prototype.setPointerCapture ??= (() => {}) as typeof Element.prototype.setPointerCapture
+Element.prototype.releasePointerCapture ??= (() => {}) as typeof Element.prototype.releasePointerCapture
+Element.prototype.scrollIntoView ??= (() => {}) as typeof Element.prototype.scrollIntoView

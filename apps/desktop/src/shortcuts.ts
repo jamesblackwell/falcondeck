@@ -301,9 +301,8 @@ export function shortcutHintTokens(
 }
 
 /**
- * Tooltip text for a control that a shortcut also drives. Discoverability
- * lives on the control itself, so the hint is appended rather than replacing
- * the accessible name — screen readers keep reading the plain label.
+ * Plain-text hint for lists and other non-chrome surfaces. Icon buttons and
+ * composer chips use `<Tooltip>` with `shortcutHintTokens` instead.
  */
 export function shortcutTitle(label: string, commandId: ShortcutCommandId, settings = current): string {
   const hint = shortcutHint(commandId, settings)
