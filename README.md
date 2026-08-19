@@ -1,5 +1,8 @@
 <div align="center">
-  <img src="assets/brand/logomark-mark-light.svg" alt="FalconDeck" width="72" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logomark-mark-light.svg" />
+    <img src="assets/brand/logomark-mark-dark.svg" alt="FalconDeck" width="72" />
+  </picture>
   <h1>FalconDeck</h1>
   <p><strong>The control plane for AI-first companies.</strong></p>
   <p>Start with Codex and Claude close to your code. Run agents from your Mac, browser, or iPhone, and keep the work in one place as more of the company runs in the background.</p>
@@ -12,7 +15,7 @@
 </div>
 
 <p align="center">
-  <img src="apps/site/public/falcondeck-preview.png" width="1200" alt="FalconDeck desktop app showing a live Claude thread with code, agent controls, and a prompt composer" />
+  <img src="assets/readme-hero.png" width="1200" alt="FalconDeck desktop app showing a live Claude thread with code, agent controls, and a prompt composer" />
 </p>
 
 FalconDeck is open-source infrastructure for companies that run with AI. It starts with coding agents and gives you one place to see workspaces, follow live turns, review diffs, answer questions, and approve actions. The same context stays available when you step away from your desk.
