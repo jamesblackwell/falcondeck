@@ -33,10 +33,10 @@ const SPEECH_STORAGE: &str = "daemon_secret_store";
 const SPEECH_SECRET_TIMEOUT: Duration = Duration::from_secs(5);
 const TRANSCRIPTION_TIMEOUT: Duration = Duration::from_secs(70);
 const FALLBACK_MODELS: [&str; 4] = [
-    "openai/gpt-transcribe",
-    "openai/gpt-4o-transcribe",
+    "openai/whisper-large-v3-turbo",
     "deepgram/nova-3",
-    "openai/whisper-large-v3",
+    "openai/gpt-transcribe",
+    "openai/gpt-4o-mini-transcribe",
 ];
 
 #[derive(Debug, Deserialize)]
@@ -480,7 +480,10 @@ mod tests {
 
     #[test]
     fn fallback_models_deduplicates_the_preferred_model() {
-        assert_eq!(fallback_models("openai/gpt-transcribe").len(), 4);
+        assert_eq!(
+            fallback_models("openai/whisper-large-v3-turbo").len(),
+            4
+        );
     }
 
     #[test]

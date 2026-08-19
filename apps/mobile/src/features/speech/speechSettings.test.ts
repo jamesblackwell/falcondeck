@@ -32,6 +32,16 @@ describe('speech settings', () => {
     })
   })
 
+  it('migrates the original high-accuracy default to the faster model', () => {
+    setJson('fd.speechSettings.v1', {
+      provider: 'openrouter',
+      model: 'openai/gpt-transcribe',
+      language: null,
+    })
+
+    expect(getSpeechSettings().model).toBe(DEFAULT_OPENROUTER_STT_MODEL)
+  })
+
   it('keeps a failed recording available for a later retry', () => {
     const pending = setPendingVoiceRecording('file:///voice.m4a', 'openrouter')
     expect(getPendingVoiceRecording()).toEqual(pending)

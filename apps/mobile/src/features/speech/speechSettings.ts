@@ -3,7 +3,9 @@ import { getJson, removeKey, setJson } from '@/storage/mmkv'
 const SPEECH_SETTINGS_KEY = 'fd.speechSettings.v1'
 const PENDING_RECORDING_KEY = 'fd.pendingVoiceRecording.v1'
 
-export const DEFAULT_OPENROUTER_STT_MODEL = 'openai/gpt-transcribe'
+export const DEFAULT_OPENROUTER_STT_MODEL =
+  'openai/whisper-large-v3-turbo'
+const LEGACY_OPENROUTER_STT_MODEL = 'openai/gpt-transcribe'
 
 export type SpeechProvider = 'on-device' | 'openrouter'
 
@@ -34,7 +36,9 @@ export function getSpeechSettings(): SpeechSettings {
         ? stored.provider
         : null,
     model:
-      typeof stored.model === 'string' && stored.model.trim()
+      typeof stored.model === 'string' &&
+      stored.model.trim() &&
+      stored.model.trim() !== LEGACY_OPENROUTER_STT_MODEL
         ? stored.model.trim()
         : DEFAULT_OPENROUTER_STT_MODEL,
     language:
